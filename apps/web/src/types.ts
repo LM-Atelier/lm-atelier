@@ -6,6 +6,8 @@ export interface Project {
   description: string;
   instructions: string;
   archived: boolean;
+  image_workflow_revision_id: string | null;
+  video_workflow_revision_id: string | null;
   created_at: string;
   updated_at: string;
 }

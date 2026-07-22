@@ -131,6 +131,7 @@ describe("App", () => {
     vi.mocked(api.workers).mockResolvedValue([]);
     vi.mocked(api.models).mockResolvedValue([]);
     vi.mocked(api.catalog).mockResolvedValue({ items: [], next_cursor: null });
+    vi.mocked(api.workflows).mockResolvedValue([]);
   });
   afterEach(cleanup);
 
@@ -149,7 +150,7 @@ describe("App", () => {
 
   it("searches and manages chats from the workspace sidebar", async () => {
     const stamp = "2026-07-22T00:00:00Z";
-    vi.mocked(api.projects).mockResolvedValue([{ id: "project-1", name: "Research", description: "", instructions: "", archived: false, created_at: stamp, updated_at: stamp }]);
+    vi.mocked(api.projects).mockResolvedValue([{ id: "project-1", name: "Research", description: "", instructions: "", archived: false, image_workflow_revision_id: null, video_workflow_revision_id: null, created_at: stamp, updated_at: stamp }]);
     const chat = { id: "chat-1", project_id: "project-1", title: "Model notes", archived: false, routing_mode: "auto" as const, confirm_uncertain_media: false, active_chat_profile_id: null, active_image_profile_id: null, active_video_profile_id: null, active_head_message_id: null, created_at: stamp, updated_at: stamp };
     vi.mocked(api.chats).mockResolvedValue([chat]);
     vi.mocked(api.chat).mockResolvedValue({ ...chat, messages: [] });
@@ -173,7 +174,7 @@ describe("App", () => {
 
   it("imports portable project archives from the workspace sidebar", async () => {
     const stamp = "2026-07-22T00:00:00Z";
-    vi.mocked(api.importProject).mockResolvedValue({ id: "project-imported", name: "Imported", description: "", instructions: "", archived: false, created_at: stamp, updated_at: stamp });
+    vi.mocked(api.importProject).mockResolvedValue({ id: "project-imported", name: "Imported", description: "", instructions: "", archived: false, image_workflow_revision_id: null, video_workflow_revision_id: null, created_at: stamp, updated_at: stamp });
     const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
     const { container } = render(
       <QueryClientProvider client={client}>
@@ -190,7 +191,7 @@ describe("App", () => {
   it("exports projects with or without embedded media", async () => {
     const click = vi.spyOn(HTMLAnchorElement.prototype, "click").mockImplementation(() => undefined);
     const stamp = "2026-07-22T00:00:00Z";
-    vi.mocked(api.projects).mockResolvedValue([{ id: "project-1", name: "Portable", description: "", instructions: "", archived: false, created_at: stamp, updated_at: stamp }]);
+    vi.mocked(api.projects).mockResolvedValue([{ id: "project-1", name: "Portable", description: "", instructions: "", archived: false, image_workflow_revision_id: null, video_workflow_revision_id: null, created_at: stamp, updated_at: stamp }]);
     vi.mocked(api.exportProject).mockResolvedValue({ url: "/api/artifacts/export/content" });
     const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
     render(
