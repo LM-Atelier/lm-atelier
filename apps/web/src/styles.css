@@ -276,6 +276,7 @@ h1, h2, h3 { margin: 0; }
 .jobs-panel > header { display: flex; align-items: center; gap: 7px; color: #c4cbd5; font-size: 12px; padding: 2px 3px 9px; }
 .job-row { display: grid; grid-template-columns: 1fr auto; gap: 8px; align-items: center; padding: 8px; border-radius: 8px; background: #20252d; margin-top: 5px; }
 .job-row > div { min-width: 0; }.job-row strong, .job-row small { display: block; font-size: 11px; text-transform: capitalize; }.job-row small { color: #7c8592; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.job-actions { display: flex; align-items: center; gap: 2px; }
 .toast { position: fixed; top: 18px; right: 18px; z-index: 40; display: flex; align-items: center; gap: 8px; max-width: 420px; border-radius: 10px; padding: 11px 14px; box-shadow: 0 16px 40px #0008; }
 .toast.error { background: #3b2025; border: 1px solid #75414a; color: #ffbbc0; }
 .muted { color: var(--muted); }

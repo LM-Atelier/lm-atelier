@@ -198,6 +198,10 @@ stored in SQLite or returned by diagnostics.
 - Incomplete downloads: `data/downloads`
 - Verified backups: `data/backups`
 
+Model downloads can be paused, resumed, or cancelled from the live jobs panel.
+Transfers use partial directories, preserve resumable files while paused, and
+automatically requeue jobs interrupted by an orderly or unexpected shutdown.
+
 Database restore is staged rather than performed underneath a running API. Use
 the backup endpoint/UI to select a verified snapshot, then restart LM Atelier.
 Project exports are ordinary ZIP files with a versioned JSON manifest and

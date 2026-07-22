@@ -112,6 +112,10 @@ export const api = {
     request<Job>(`/api/chats/${chatId}/cancel`, { method: "POST" }),
   jobs: () => request<Job[]>("/api/jobs"),
   cancelJob: (id: string) => request<Job>(`/api/jobs/${id}/cancel`, { method: "POST" }),
+  pauseDownload: (id: string) =>
+    request<Job>(`/api/downloads/${id}/pause`, { method: "POST" }),
+  resumeDownload: (id: string) =>
+    request<Job>(`/api/downloads/${id}/resume`, { method: "POST" }),
   engines: () => request<EngineCapabilities[]>("/api/engines"),
   probeChatTools: () =>
     request<ToolCapabilityProbe>("/api/engines/chat/tool-probe", { method: "POST" }),

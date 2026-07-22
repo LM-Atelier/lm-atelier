@@ -18,6 +18,8 @@ vi.mock("./api", () => ({
     cancelChat: vi.fn(),
     jobs: vi.fn().mockResolvedValue([]),
     cancelJob: vi.fn(),
+    pauseDownload: vi.fn(),
+    resumeDownload: vi.fn(),
     engines: vi.fn().mockResolvedValue([
       {
         engine: "mock",
@@ -124,6 +126,39 @@ describe("App", () => {
     expect(await screen.findByText("Start a local conversation")).toBeInTheDocument();
     expect(screen.getByText("Model library")).toBeInTheDocument();
     expect(screen.getByText("Local service connected")).toBeInTheDocument();
+  });
+
+  it("resumes a paused model download from the job panel", async () => {
+    const stamp = "2026-07-22T00:00:00Z";
+    const pausedJob = {
+      id: "download-1",
+      kind: "download",
+      status: "paused",
+      run_id: null,
+      progress: 0.42,
+      phase: "paused",
+      payload_json: {},
+      result_json: {},
+      error: null,
+      attempt: 1,
+      cancellable: true,
+      created_at: stamp,
+      updated_at: stamp,
+    };
+    vi.mocked(api.jobs).mockResolvedValue([pausedJob]);
+    vi.mocked(api.resumeDownload).mockResolvedValue({
+      ...pausedJob,
+      status: "queued",
+      phase: "resume queued",
+    });
+    const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+    render(
+      <QueryClientProvider client={client}>
+        <App />
+      </QueryClientProvider>,
+    );
+    fireEvent.click(await screen.findByRole("button", { name: "Resume download" }));
+    await waitFor(() => expect(vi.mocked(api.resumeDownload).mock.calls[0]?.[0]).toBe("download-1"));
   });
 
   it("shows the current machine against the approved platform matrix", async () => {
