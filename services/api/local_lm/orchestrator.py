@@ -227,7 +227,9 @@ class ConversationOrchestrator:
             defaults(fields), profile.request_settings_json if profile else None, request.settings
         )
         effective_settings = validate_settings(effective_settings, fields)
-        workflow_revision = self._workflow_for_operation(session, plan.operation)
+        workflow_revision = self._workflow_for_operation(
+            session, plan.operation, project_id=chat.project_id
+        )
         model_provenance: dict[str, Any] | None = None
         if profile and profile.model_install_id:
             install = session.get(ModelInstall, profile.model_install_id)
@@ -982,9 +984,27 @@ class ConversationOrchestrator:
         return JobKind.IMAGE
 
     @staticmethod
-    def _workflow_for_operation(session: Session, operation: Operation) -> WorkflowRevision | None:
+    def _workflow_for_operation(
+        session: Session, operation: Operation, *, project_id: str | None = None
+    ) -> WorkflowRevision | None:
         if operation == Operation.TEXT:
             return None
+        if project_id:
+            project = session.get(Project, project_id)
+            revision_id = None
+            if project:
+                revision_id = (
+                    project.video_workflow_revision_id
+                    if "video" in operation.value
+                    else project.image_workflow_revision_id
+                )
+            if revision_id:
+                revision = session.get(WorkflowRevision, revision_id)
+                definition = (
+                    session.get(WorkflowDefinition, revision.workflow_id) if revision else None
+                )
+                if revision and definition and definition.operation == operation.value:
+                    return revision
         definition = session.scalar(
             select(WorkflowDefinition)
             .where(WorkflowDefinition.operation == operation.value)

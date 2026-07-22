@@ -16,6 +16,8 @@ class ProjectCreate(ApiModel):
     name: str = Field(min_length=1, max_length=200)
     description: str = Field(default="", max_length=10_000)
     instructions: str = Field(default="", max_length=100_000)
+    image_workflow_revision_id: str | None = None
+    video_workflow_revision_id: str | None = None
 
 
 class ProjectUpdate(ApiModel):
@@ -23,6 +25,8 @@ class ProjectUpdate(ApiModel):
     description: str | None = Field(default=None, max_length=10_000)
     instructions: str | None = Field(default=None, max_length=100_000)
     archived: bool | None = None
+    image_workflow_revision_id: str | None = None
+    video_workflow_revision_id: str | None = None
 
 
 class ProjectOut(ApiModel):
@@ -31,6 +35,8 @@ class ProjectOut(ApiModel):
     description: str
     instructions: str
     archived: bool
+    image_workflow_revision_id: str | None
+    video_workflow_revision_id: str | None
     created_at: datetime
     updated_at: datetime
 

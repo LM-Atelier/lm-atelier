@@ -49,6 +49,12 @@ class Project(TimestampMixin, Base):
     description: Mapped[str] = mapped_column(Text, default="")
     instructions: Mapped[str] = mapped_column(Text, default="")
     archived: Mapped[bool] = mapped_column(Boolean, default=False, index=True)
+    image_workflow_revision_id: Mapped[str | None] = mapped_column(
+        ForeignKey("workflow_revisions.id", ondelete="SET NULL"), nullable=True
+    )
+    video_workflow_revision_id: Mapped[str | None] = mapped_column(
+        ForeignKey("workflow_revisions.id", ondelete="SET NULL"), nullable=True
+    )
 
     chats: Mapped[list[Chat]] = relationship(back_populates="project")
 

@@ -277,9 +277,34 @@ async def list_projects(
     return list(session.scalars(statement).all())
 
 
+def _validate_project_workflow_pins(session: Session, values: dict[str, Any]) -> None:
+    expected = {
+        "image_workflow_revision_id": {
+            Operation.TEXT_TO_IMAGE.value,
+            Operation.IMAGE_TO_IMAGE.value,
+        },
+        "video_workflow_revision_id": {
+            Operation.TEXT_TO_VIDEO.value,
+            Operation.IMAGE_TO_VIDEO.value,
+        },
+    }
+    for field, operations in expected.items():
+        revision_id = values.get(field)
+        if revision_id is None:
+            continue
+        revision = session.get(WorkflowRevision, revision_id)
+        definition = session.get(WorkflowDefinition, revision.workflow_id) if revision else None
+        if not revision or not definition:
+            raise HTTPException(422, f"{field} does not identify a workflow revision")
+        if definition.operation not in operations:
+            raise HTTPException(422, f"{field} has an incompatible workflow operation")
+
+
 @router.post("/projects", response_model=ProjectOut, status_code=201)
 async def create_project(payload: ProjectCreate, session: SessionDep) -> Project:
-    project = Project(**payload.model_dump())
+    values = payload.model_dump()
+    _validate_project_workflow_pins(session, values)
+    project = Project(**values)
     session.add(project)
     session.commit()
     session.refresh(project)
@@ -312,7 +337,9 @@ async def update_project(project_id: str, payload: ProjectUpdate, session: Sessi
     project = session.get(Project, project_id)
     if not project:
         raise HTTPException(404, "project not found")
-    for key, value in payload.model_dump(exclude_unset=True).items():
+    values = payload.model_dump(exclude_unset=True)
+    _validate_project_workflow_pins(session, values)
+    for key, value in values.items():
         setattr(project, key, value)
     session.commit()
     session.refresh(project)
