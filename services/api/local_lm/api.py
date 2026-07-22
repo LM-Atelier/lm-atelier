@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import shutil
+from contextlib import suppress
 from pathlib import Path
 from typing import Annotated, Any, Literal, cast
 from urllib.parse import quote
@@ -62,6 +63,7 @@ from .schemas import (
     ModelProfileCreate,
     ModelProfileOut,
     ModelProfileUpdate,
+    ModelStorageInfo,
     PlatformMatrixEntry,
     PresetBundle,
     PresetClone,
@@ -74,6 +76,7 @@ from .schemas import (
     ReferenceRecipe,
     RegenerateRequest,
     RunOut,
+    StorageCleanupResult,
     SystemInfo,
     ToolCapabilityProbe,
     TurnAccepted,
@@ -686,6 +689,12 @@ async def create_download(payload: DownloadRequest, request: Request, session: S
         raise HTTPException(422, str(exc)) from exc
 
 
+@router.post("/downloads/cleanup", response_model=StorageCleanupResult)
+async def cleanup_partial_downloads(request: Request, session: SessionDep) -> StorageCleanupResult:
+    removed_count, reclaimed_bytes = _services(request).downloads.cleanup_partials(session)
+    return StorageCleanupResult(removed_count=removed_count, reclaimed_bytes=reclaimed_bytes)
+
+
 @router.get("/recipes", response_model=list[ReferenceRecipe])
 async def list_recipes() -> list[ReferenceRecipe]:
     return list_reference_recipes()
@@ -715,6 +724,19 @@ async def install_recipe(recipe_id: str, request: Request, session: SessionDep) 
 async def list_models(session: SessionDep) -> list[ModelInstall]:
     return list(
         session.scalars(select(ModelInstall).order_by(ModelInstall.updated_at.desc())).all()
+    )
+
+
+@router.get("/models/storage", response_model=ModelStorageInfo)
+async def model_storage(request: Request, session: SessionDep) -> ModelStorageInfo:
+    settings = _services(request).settings
+    partials = list(settings.download_dir.glob("*.partial"))
+    return ModelStorageInfo(
+        installed_bytes=_path_size(settings.model_dir),
+        partial_download_bytes=sum(_path_size(path) for path in partials),
+        catalog_cache_bytes=_path_size(settings.catalog_cache_dir),
+        installed_count=session.scalar(select(func.count(ModelInstall.id))) or 0,
+        partial_download_count=len(partials),
     )
 
 
@@ -749,16 +771,52 @@ async def delete_model(model_id: str, request: Request, session: SessionDep) -> 
     install = session.get(ModelInstall, model_id)
     if not install:
         raise HTTPException(404, "model not found")
+    if session.scalar(
+        select(func.count(ModelProfile.id)).where(ModelProfile.model_install_id == install.id)
+    ):
+        raise HTTPException(409, "delete profiles that use this model before deleting it")
     model_root = _services(request).settings.model_dir.resolve()
     path = Path(install.local_path).resolve()
-    if model_root in path.parents:
-        if path.is_dir():
-            shutil.rmtree(path)
-        elif path.exists():
-            path.unlink()
+    siblings = session.scalars(
+        select(ModelInstall).where(
+            ModelInstall.id != install.id,
+            ModelInstall.local_path == install.local_path,
+        )
+    ).all()
+    if model_root in path.parents and path != model_root:
+        if siblings and path.is_dir():
+            retained_files = {
+                str(filename)
+                for sibling in siblings
+                for filename in sibling.manifest_json.get("files", [])
+            }
+            for filename in install.manifest_json.get("files", []):
+                if str(filename) in retained_files:
+                    continue
+                candidate = (path / str(filename)).resolve()
+                if path in candidate.parents and candidate.is_file():
+                    candidate.unlink()
+            for directory in sorted(
+                (item for item in path.rglob("*") if item.is_dir()), reverse=True
+            ):
+                with suppress(OSError):
+                    directory.rmdir()
+        elif not siblings:
+            if path.is_dir():
+                shutil.rmtree(path)
+            elif path.exists():
+                path.unlink()
     session.delete(install)
     session.commit()
     return Response(status_code=204)
+
+
+def _path_size(path: Path) -> int:
+    if not path.exists():
+        return 0
+    if path.is_file():
+        return path.stat().st_size
+    return sum(item.stat().st_size for item in path.rglob("*") if item.is_file())
 
 
 @router.get("/profiles", response_model=list[ModelProfileOut])
@@ -840,6 +898,21 @@ async def update_profile(
     session.commit()
     session.refresh(profile)
     return profile
+
+
+@router.delete("/profiles/{profile_id}", status_code=204)
+async def delete_profile(profile_id: str, request: Request, session: SessionDep) -> Response:
+    profile = session.get(ModelProfile, profile_id)
+    if not profile:
+        raise HTTPException(404, "profile not found")
+    if any(
+        worker.running and worker.profile_id == profile.id
+        for worker in _services(request).processes.statuses()
+    ):
+        raise HTTPException(409, "unload the active worker before deleting its profile")
+    session.delete(profile)
+    session.commit()
+    return Response(status_code=204)
 
 
 @router.post("/profiles/{profile_id}/clone", response_model=ModelProfileOut, status_code=201)

@@ -10,6 +10,7 @@ import type {
   GenerationPresetBundle,
   Job,
   ModelInstall,
+  ModelStorageInfo,
   ModelProfile,
   ModelProfileBundle,
   PlatformMatrixEntry,
@@ -117,6 +118,12 @@ export const api = {
   system: () => request<SystemInfo>("/api/system"),
   platforms: () => request<PlatformMatrixEntry[]>("/api/platforms"),
   models: () => request<ModelInstall[]>("/api/models"),
+  modelStorage: () => request<ModelStorageInfo>("/api/models/storage"),
+  deleteModel: (id: string) => request<void>(`/api/models/${id}`, { method: "DELETE" }),
+  cleanupDownloads: () =>
+    request<{ removed_count: number; reclaimed_bytes: number }>("/api/downloads/cleanup", {
+      method: "POST",
+    }),
   profiles: () => request<ModelProfile[]>("/api/profiles"),
   createProfile: (model: ModelInstall) =>
     request<ModelProfile>("/api/profiles", {
@@ -147,6 +154,7 @@ export const api = {
     }),
   resetProfile: (id: string) =>
     request<ModelProfile>(`/api/profiles/${id}/reset`, { method: "POST" }),
+  deleteProfile: (id: string) => request<void>(`/api/profiles/${id}`, { method: "DELETE" }),
   exportProfile: (id: string) => request<ModelProfileBundle>(`/api/profiles/${id}/export`),
   importProfile: (bundle: ModelProfileBundle) =>
     request<ModelProfile>("/api/profiles/import", { method: "POST", body: JSON.stringify(bundle) }),

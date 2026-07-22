@@ -62,10 +62,14 @@ vi.mock("./api", () => ({
     }),
     platforms: vi.fn().mockResolvedValue([]),
     models: vi.fn(),
+    modelStorage: vi.fn().mockResolvedValue({ installed_bytes: 0, partial_download_bytes: 0, catalog_cache_bytes: 0, installed_count: 0, partial_download_count: 0 }),
+    deleteModel: vi.fn(),
+    cleanupDownloads: vi.fn(),
     profiles: vi.fn().mockResolvedValue([]),
     updateProfile: vi.fn(),
     cloneProfile: vi.fn(),
     resetProfile: vi.fn(),
+    deleteProfile: vi.fn(),
     exportProfile: vi.fn(),
     importProfile: vi.fn(),
     presets: vi.fn().mockResolvedValue([]),
@@ -103,6 +107,8 @@ describe("App", () => {
     vi.mocked(api.profiles).mockResolvedValue([]);
     vi.mocked(api.chats).mockResolvedValue([]);
     vi.mocked(api.workers).mockResolvedValue([]);
+    vi.mocked(api.models).mockResolvedValue([]);
+    vi.mocked(api.catalog).mockResolvedValue({ items: [], next_cursor: null });
   });
   afterEach(cleanup);
 
@@ -257,5 +263,43 @@ describe("App", () => {
     fireEvent.click(await screen.findByText("Settings"));
     fireEvent.click(await screen.findByText("Test structured tools"));
     expect(await screen.findByText("Structured tool schema passed on mock 1.")).toBeInTheDocument();
+  });
+
+  it("shows installed-model storage and partial cleanup controls", async () => {
+    vi.mocked(api.models).mockResolvedValue([
+      {
+        id: "model-1",
+        source_id: null,
+        name: "Local GGUF",
+        role: "chat",
+        engine: "llama.cpp",
+        local_path: "/models/local.gguf",
+        size_bytes: 2048,
+        compatibility: "advanced_import",
+        manifest_json: {},
+        active: true,
+        created_at: "2026-07-22T00:00:00Z",
+        updated_at: "2026-07-22T00:00:00Z",
+      },
+    ]);
+    vi.mocked(api.modelStorage).mockResolvedValue({
+      installed_bytes: 2048,
+      partial_download_bytes: 512,
+      catalog_cache_bytes: 128,
+      installed_count: 1,
+      partial_download_count: 2,
+    });
+    vi.mocked(api.cleanupDownloads).mockResolvedValue({ removed_count: 2, reclaimed_bytes: 512 });
+    const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+    render(
+      <QueryClientProvider client={client}>
+        <App />
+      </QueryClientProvider>,
+    );
+    fireEvent.click(await screen.findByText("Model library"));
+    expect(await screen.findByText("1 installed · 2.0 KB")).toBeInTheDocument();
+    expect(screen.getByText("Clean 2 partial")).toBeEnabled();
+    expect(await screen.findByText("Local GGUF")).toBeInTheDocument();
+    expect(screen.getByTitle("Delete installed model")).toBeEnabled();
   });
 });

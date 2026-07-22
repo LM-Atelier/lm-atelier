@@ -199,6 +199,19 @@ class ModelInstallOut(ApiModel):
     updated_at: datetime
 
 
+class ModelStorageInfo(ApiModel):
+    installed_bytes: int
+    partial_download_bytes: int
+    catalog_cache_bytes: int
+    installed_count: int
+    partial_download_count: int
+
+
+class StorageCleanupResult(ApiModel):
+    removed_count: int
+    reclaimed_bytes: int
+
+
 class ModelImport(ApiModel):
     name: str = Field(min_length=1, max_length=300)
     role: Literal["chat", "image", "video"]

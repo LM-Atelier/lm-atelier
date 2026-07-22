@@ -501,6 +501,7 @@ function ModelsView() {
   const detail = useQuery({ queryKey: ["catalog-detail", detailModel?.remote_id], queryFn: () => api.catalogDetail(detailModel!.remote_id), enabled: Boolean(detailModel) });
   const recipes = useQuery({ queryKey: ["recipes"], queryFn: api.recipes });
   const installed = useQuery({ queryKey: ["models"], queryFn: api.models });
+  const storage = useQuery({ queryKey: ["model-storage"], queryFn: api.modelStorage });
   const profiles = useQuery({ queryKey: ["profiles"], queryFn: api.profiles });
   const download = useMutation({
     mutationFn: ({ remoteId, files }: { remoteId: string; files: string[] }) => api.download(remoteId, role, role === "chat" ? "llama.cpp" : "comfyui", files),
@@ -514,9 +515,20 @@ function ModelsView() {
     mutationFn: api.createProfile,
     onSuccess: () => void client.invalidateQueries({ queryKey: ["profiles"] }),
   });
+  const deleteModel = useMutation({
+    mutationFn: api.deleteModel,
+    onSuccess: () => {
+      void client.invalidateQueries({ queryKey: ["models"] });
+      void client.invalidateQueries({ queryKey: ["model-storage"] });
+    },
+  });
+  const cleanupDownloads = useMutation({
+    mutationFn: api.cleanupDownloads,
+    onSuccess: () => void client.invalidateQueries({ queryKey: ["model-storage"] }),
+  });
   return (
     <div className="page-view">
-      <header className="page-header"><div><small>Model library</small><h1>Find the right local model</h1><p>Search Hugging Face, inspect compatibility, and manage downloads without leaving the app.</p></div><div className="storage-pill"><HardDrive size={17} />{installed.data?.length ?? 0} installed</div></header>
+      <header className="page-header"><div><small>Model library</small><h1>Find the right local model</h1><p>Search Hugging Face, inspect compatibility, and manage downloads without leaving the app.</p></div><div className="storage-actions"><div className="storage-pill"><HardDrive size={17} />{storage.data?.installed_count ?? installed.data?.length ?? 0} installed · {formatBytes(storage.data?.installed_bytes)}</div><button className="secondary compact-button" disabled={!storage.data?.partial_download_count || cleanupDownloads.isPending} onClick={() => cleanupDownloads.mutate()}>Clean {storage.data?.partial_download_count ?? 0} partial</button></div></header>
       <section className="recipe-section">
         <div className="section-heading"><div><small>Curated starting points</small><h2>Reference recipes</h2></div><p>Immutable revisions, exact safe files, conservative defaults, and hardware guidance. Certification follows real-device validation.</p></div>
         {recipes.isLoading && <div className="loading-line" />}
@@ -529,7 +541,8 @@ function ModelsView() {
         <select value={role} onChange={(event) => setRole(event.target.value)}><option value="chat">Chat</option><option value="image">Image</option><option value="video">Video</option></select>
         <select value={sort} onChange={(event) => setSort(event.target.value)}><option value="trending">Trending</option><option value="downloads">Downloads</option><option value="likes">Likes</option><option value="newest">Newest</option><option value="updated">Recently updated</option></select>
       </div>
-      {(installed.data?.length ?? 0) > 0 && <section><h2>Installed models</h2><div className="profile-table">{installed.data?.map((model) => <div key={model.id}><span className="badge">{model.role}</span><strong>{model.name}</strong><span>{formatBytes(model.size_bytes)}</span><button className="secondary compact-button" disabled={profiles.data?.some((profile) => profile.model_install_id === model.id) || createProfile.isPending} onClick={() => createProfile.mutate(model)}>{profiles.data?.some((profile) => profile.model_install_id === model.id) ? "Profile ready" : "Create profile"}</button></div>)}</div></section>}
+      {(installed.data?.length ?? 0) > 0 && <section><h2>Installed models</h2><div className="profile-table model-installs">{installed.data?.map((model) => { const bound = profiles.data?.some((profile) => profile.model_install_id === model.id) ?? false; return <div key={model.id}><span className="badge">{model.role}</span><strong>{model.name}</strong><span>{formatBytes(model.size_bytes)}</span><span className="row-actions"><button className="secondary compact-button" disabled={bound || createProfile.isPending} onClick={() => createProfile.mutate(model)}>{bound ? "Profile ready" : "Create profile"}</button><button className="secondary compact-button danger" disabled={bound || deleteModel.isPending} title={bound ? "Delete the model profile first" : "Delete installed model"} onClick={() => { if (window.confirm(`Delete ${model.name} from local storage?`)) deleteModel.mutate(model.id); }}>Delete</button></span></div>; })}</div></section>}
+      {(deleteModel.error || cleanupDownloads.error) && <div className="callout error">{deleteModel.error?.message || cleanupDownloads.error?.message}</div>}
       {catalog.isLoading && <div className="loading-line" />}
       {catalog.error && <div className="callout error">{catalog.error.message}</div>}
       <div className="model-grid">{catalog.data?.items.map((model) => <ModelCard key={model.remote_id} model={model} role={role} pending={download.isPending && download.variables?.remoteId === model.remote_id} onDownload={() => { setDetailModel(model); setSelectedFiles([]); }} />)}</div>
@@ -602,6 +615,10 @@ function ProfileEditor({
       refresh();
     },
   });
+  const remove = useMutation({
+    mutationFn: () => api.deleteProfile(profile.id),
+    onSuccess: () => { refresh(); onClose(); },
+  });
   const exportBundle = useMutation({
     mutationFn: () => api.exportProfile(profile.id),
     onSuccess: (bundle) => downloadJson(bundle, `${profile.name.replaceAll(/[^a-z0-9]+/gi, "-").toLowerCase()}.lm-atelier-profile.json`),
@@ -611,7 +628,7 @@ function ProfileEditor({
   const fields = (engine?.settings ?? []).filter(
     (field) => visibilityRank[field.visibility] <= visibilityRank[visibility] && field.available,
   );
-  const error = save.error ?? clone.error ?? reset.error ?? exportBundle.error;
+  const error = save.error ?? clone.error ?? reset.error ?? remove.error ?? exportBundle.error;
   return (
     <div className="modal-backdrop">
       <div className="modal settings-editor">
@@ -629,7 +646,7 @@ function ProfileEditor({
           {!engine && <p className="muted">No capability schema is available for this profile engine.</p>}
         </div>
         {error && <div className="callout error">{error.message}</div>}
-        <footer className="editor-actions"><button className="secondary danger" onClick={() => reset.mutate()} disabled={reset.isPending}>Reset settings</button><button className="secondary" onClick={() => exportBundle.mutate()}>Export</button><button className="secondary" onClick={() => clone.mutate()}>Clone</button><button className="primary" onClick={() => save.mutate()} disabled={!name.trim() || save.isPending}>Save profile</button></footer>
+        <footer className="editor-actions"><button className="secondary danger" onClick={() => remove.mutate()} disabled={remove.isPending}>Delete profile</button><button className="secondary" onClick={() => reset.mutate()} disabled={reset.isPending}>Reset settings</button><button className="secondary" onClick={() => exportBundle.mutate()}>Export</button><button className="secondary" onClick={() => clone.mutate()}>Clone</button><button className="primary" onClick={() => save.mutate()} disabled={!name.trim() || save.isPending}>Save profile</button></footer>
       </div>
     </div>
   );

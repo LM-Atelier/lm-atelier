@@ -152,6 +152,7 @@ h1, h2, h3 { margin: 0; }
 .page-header h1 { font-size: clamp(25px, 3vw, 34px); letter-spacing: -.035em; margin: 4px 0 8px; }
 .page-header p { color: #8d96a4; max-width: 650px; margin: 0; line-height: 1.55; }
 .storage-pill { display: flex; align-items: center; gap: 7px; border: 1px solid var(--border); color: #b4bcc8; border-radius: 10px; background: #151920; padding: 9px 12px; white-space: nowrap; }
+.storage-actions { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; justify-content: flex-end; }
 .toolbar { display: grid; grid-template-columns: minmax(240px, 1fr) 140px 175px; gap: 10px; margin-bottom: 20px; }
 .search-box { display: flex; align-items: center; gap: 9px; border: 1px solid #333a45; background: #14181f; border-radius: 10px; padding: 0 12px; }
 .search-box svg { color: #747d8a; }
@@ -249,6 +250,8 @@ h1, h2, h3 { margin: 0; }
 .profile-table > div:last-child { border: 0; }.profile-table strong { color: #e6e9ef; }
 .profile-table.interactive > div { grid-template-columns: 75px minmax(150px, 1fr) minmax(110px, 1fr) auto; }
 .row-actions { display: flex; justify-content: flex-end; gap: 6px; }
+.row-actions .danger { margin-right: 0; }
+.profile-table.model-installs > div { grid-template-columns: 75px minmax(140px, 1fr) 100px auto; }
 .preset-create { display: grid; grid-template-columns: minmax(180px, 1fr) 120px auto; gap: 9px; margin-bottom: 11px; }
 .preset-create input, .preset-create select { color: #e8ebef; border: 1px solid #343b47; border-radius: 8px; background: #1a1f27; padding: 9px; outline: 0; }
 .settings-editor { width: min(780px, 96vw); }

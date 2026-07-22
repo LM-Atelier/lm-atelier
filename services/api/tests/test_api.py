@@ -6,6 +6,8 @@ import zipfile
 
 from httpx2 import AsyncClient
 
+from local_lm.config import Settings
+
 
 async def wait_for_assistant(client: AsyncClient, chat_id: str, expected_type: str) -> dict:  # type: ignore[type-arg]
     deadline = asyncio.get_running_loop().time() + 5
@@ -366,3 +368,51 @@ async def test_preset_lifecycle_and_portable_bundle(client: AsyncClient) -> None
 
     deleted = await client.delete(f"/api/presets/{cloned.json()['id']}")
     assert deleted.status_code == 204
+
+
+async def test_model_storage_cleanup_and_shared_path_deletion(
+    client: AsyncClient, settings: Settings
+) -> None:
+    shared = settings.model_dir / "shared-revision"
+    shared.mkdir(parents=True)
+    (shared / "model.gguf").write_bytes(b"shared-model")
+    payload = {
+        "name": "Shared model",
+        "role": "chat",
+        "engine": "llama.cpp",
+        "local_path": str(shared),
+    }
+    first = await client.post("/api/models/import", json=payload)
+    second = await client.post("/api/models/import", json={**payload, "name": "Second selection"})
+    assert first.status_code == 201
+    assert second.status_code == 201
+
+    profile = await client.post(
+        "/api/profiles",
+        json={
+            "name": "Bound profile",
+            "role": "chat",
+            "engine": "llama.cpp",
+            "model_install_id": first.json()["id"],
+        },
+    )
+    assert profile.status_code == 201
+    assert (await client.delete(f"/api/models/{first.json()['id']}")).status_code == 409
+    assert (await client.delete(f"/api/profiles/{profile.json()['id']}")).status_code == 204
+
+    assert (await client.delete(f"/api/models/{first.json()['id']}")).status_code == 204
+    assert (shared / "model.gguf").is_file()
+    assert (await client.delete(f"/api/models/{second.json()['id']}")).status_code == 204
+    assert not shared.exists()
+
+    partial = settings.download_dir / "orphan.partial"
+    partial.mkdir(parents=True)
+    (partial / "chunk").write_bytes(b"incomplete")
+    storage = await client.get("/api/models/storage")
+    assert storage.status_code == 200
+    assert storage.json()["partial_download_count"] == 1
+    assert storage.json()["partial_download_bytes"] == len(b"incomplete")
+    cleaned = await client.post("/api/downloads/cleanup")
+    assert cleaned.status_code == 200
+    assert cleaned.json() == {"removed_count": 1, "reclaimed_bytes": len(b"incomplete")}
+    assert not partial.exists()
