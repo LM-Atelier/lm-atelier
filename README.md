@@ -194,8 +194,8 @@ Copy `.env.example` to `.env`. Important settings include:
 | `LOCAL_LM_DATA_DIR` | `./data` | Database, artifacts, models, logs, exports, backups |
 | `LOCAL_LM_HOST` | `127.0.0.1` | Bind address |
 | `LOCAL_LM_ALLOW_LAN` | `false` | Required before a non-loopback bind is accepted |
-| `LOCAL_LM_CHAT_ENGINE` | `mock` | `mock` or `llama.cpp` |
-| `LOCAL_LM_MEDIA_ENGINE` | `mock` | `mock` or `comfyui` |
+| `LOCAL_LM_CHAT_ENGINE` | `mock` | `mock`, `llama.cpp`, or an installed adapter entry point |
+| `LOCAL_LM_MEDIA_ENGINE` | `mock` | `mock`, `comfyui`, or an installed adapter entry point |
 | `LOCAL_LM_HF_TOKEN` | unset | Optional process-only fallback for gated/private Hub access |
 | `LOCAL_LM_ARTIFACT_RETENTION_DAYS` | `30` | Recovery window for unreferenced artifacts |
 | `LOCAL_LM_TEMPORARY_RETENTION_HOURS` | `24` | Lifetime of temporary/intermediate media |
@@ -254,6 +254,10 @@ Development flows through descriptively named work branches into `develop`,
 then from `develop` into `main` for releases. Feature branch names never use a
 `feature/`, `feature-`, or `feat/` prefix. See
 [CONTRIBUTING.md](CONTRIBUTING.md).
+
+Third-party runtime packages can integrate through the versioned
+[adapter contract](docs/ADAPTERS.md) and run the same conformance probes as the
+built-in mock adapters.
 
 LM Atelier is licensed under the [Apache License 2.0](LICENSE). Optional runtimes,
 models, workflows, and custom nodes retain their own licenses. ComfyUI is a
