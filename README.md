@@ -121,6 +121,12 @@ window, it preserves project instructions and the newest request while omitting
 the oldest turns until the prompt fits. The response shows context usage and
 any omission count, and the complete policy is retained in run provenance.
 
+Assistant text streams as Markdown with tables, task lists, links, and fenced
+code. The composer becomes a stop control while a run is active. Editing a user
+message creates a new branch from that point, preserves the source run's
+modality and settings, and displays only the newly selected branch while keeping
+the prior branch in local history.
+
 ## Real images and video with ComfyUI
 
 1. Install ComfyUI separately and prepare API-format workflows whose tunable
