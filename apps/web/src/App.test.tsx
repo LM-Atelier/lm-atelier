@@ -73,6 +73,9 @@ vi.mock("./api", () => ({
     }),
     platforms: vi.fn().mockResolvedValue([]),
     createDiagnostics: vi.fn(),
+    credentialStatus: vi.fn().mockResolvedValue({ provider: "huggingface", configured: false, source: "none", vault_available: true }),
+    setHuggingFaceToken: vi.fn(),
+    deleteHuggingFaceToken: vi.fn(),
     models: vi.fn(),
     modelStorage: vi.fn().mockResolvedValue({ installed_bytes: 0, partial_download_bytes: 0, catalog_cache_bytes: 0, installed_count: 0, partial_download_count: 0 }),
     deleteModel: vi.fn(),
@@ -262,6 +265,29 @@ describe("App", () => {
     expect(await screen.findByText("Platform support")).toBeInTheDocument();
     expect(await screen.findByText("Ubuntu 24.04 LTS x64 target")).toBeInTheDocument();
     expect(screen.getByText("hardware pending")).toBeInTheDocument();
+  });
+
+  it("stores a Hugging Face token without echoing it back", async () => {
+    vi.mocked(api.setHuggingFaceToken).mockResolvedValue({
+      provider: "huggingface",
+      configured: true,
+      source: "credential_vault",
+      vault_available: true,
+    });
+    const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+    render(
+      <QueryClientProvider client={client}>
+        <App />
+      </QueryClientProvider>,
+    );
+    fireEvent.click(await screen.findByText("Settings"));
+    const input = await screen.findByLabelText("Hugging Face access token");
+    fireEvent.change(input, { target: { value: "temporary-token" } });
+    fireEvent.click(screen.getByText("Save token"));
+    await waitFor(() => expect(api.setHuggingFaceToken).toHaveBeenCalledWith("temporary-token"));
+    await waitFor(() => expect(input).toHaveValue(""));
+    expect(screen.queryByDisplayValue("temporary-token")).not.toBeInTheDocument();
+    expect(await screen.findByText("Configured · credential vault")).toBeInTheDocument();
   });
 
   it("opens a model profile in the schema-driven settings editor", async () => {

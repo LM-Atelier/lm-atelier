@@ -196,15 +196,17 @@ Copy `.env.example` to `.env`. Important settings include:
 | `LOCAL_LM_ALLOW_LAN` | `false` | Required before a non-loopback bind is accepted |
 | `LOCAL_LM_CHAT_ENGINE` | `mock` | `mock` or `llama.cpp` |
 | `LOCAL_LM_MEDIA_ENGINE` | `mock` | `mock` or `comfyui` |
-| `LOCAL_LM_HF_TOKEN` | unset | Optional gated/private Hub access token |
+| `LOCAL_LM_HF_TOKEN` | unset | Optional process-only fallback for gated/private Hub access |
 | `LOCAL_LM_ARTIFACT_RETENTION_DAYS` | `30` | Recovery window for unreferenced artifacts |
 | `LOCAL_LM_TEMPORARY_RETENTION_HOURS` | `24` | Lifetime of temporary/intermediate media |
 | `LOCAL_LM_BACKUP_DAILY_COUNT` | `7` | Daily state snapshots to retain |
 | `LOCAL_LM_BACKUP_WEEKLY_COUNT` | `4` | Older weekly state snapshots to retain |
 
-For regular use, keep credentials out of `.env` and launch LM Atelier with the
-token supplied by the operating system's credential facility. Tokens are not
-stored in SQLite or returned by diagnostics.
+For regular use, save the Hugging Face token from Settings. LM Atelier stores it
+in the operating system credential vault, never echoes it back to the browser,
+and excludes it from SQLite, logs, exports, backups, and diagnostics. The
+`LOCAL_LM_HF_TOKEN` environment variable is a process-only fallback and takes
+precedence while set.
 
 ## Data and recovery
 

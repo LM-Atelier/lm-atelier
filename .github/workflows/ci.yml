@@ -47,6 +47,7 @@ jobs:
       - run: ruff format --check services/api
       - run: ruff check services/api
       - run: mypy services/api/local_lm
+      - run: bandit -q -lll -r services/api/local_lm
       - run: pytest services/api/tests -q
         env:
           LOCAL_LM_DATA_DIR: ${{ runner.temp }}/local-lm-tests

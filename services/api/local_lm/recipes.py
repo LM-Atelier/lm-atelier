@@ -85,6 +85,50 @@ REFERENCE_RECIPES: tuple[ReferenceRecipe, ...] = (
         notes=["A native checkpoint workflow must be selected or imported before generation."],
     ),
     ReferenceRecipe(
+        id="sd35-medium-fp8",
+        version=1,
+        name="Stable Diffusion 3.5 Medium FP8",
+        summary="A flexible 1024px image model packaged as a single ComfyUI checkpoint.",
+        role="image",
+        engine="comfyui",
+        operations=["text_to_image", "image_to_image"],
+        license_id="stabilityai-ai-community",
+        status="reference-candidate",
+        certified=False,
+        remote_id="Comfy-Org/stable-diffusion-3.5-fp8",
+        revision="30c81ae3f16f4271e29824eda47f1de31b4d8422",
+        files=[
+            RecipeFile(
+                path="sd3.5_medium_incl_clips_t5xxlfp8scaled.safetensors",
+                size_bytes=11_638_004_202,
+                sha256="1778e8857679042c176c21cd8a0da7b29bded68be018557477f84419df79bacf",
+            )
+        ],
+        total_size_bytes=11_638_004_202,
+        hardware=RecipeHardware(
+            tier="midrange-gpu",
+            minimum_ram_gb=24,
+            recommended_ram_gb=32,
+            minimum_vram_gb=12,
+            recommended_vram_gb=16,
+            guidance=(
+                "Use model offload on lower-memory GPUs; 1024px generation is the target path."
+            ),
+        ),
+        default_settings={
+            "width": 1024,
+            "height": 1024,
+            "steps": 28,
+            "cfg": 4.5,
+            "sampler": "euler",
+            "scheduler": "normal",
+        },
+        node_policy="ComfyUI core nodes only",
+        notes=[
+            "Review the Stability AI Community License before downloading or distributing outputs."
+        ],
+    ),
+    ReferenceRecipe(
         id="wan21-t2v-13b",
         version=1,
         name="Wan 2.1 T2V 1.3B",
@@ -216,7 +260,7 @@ def get_reference_recipe(recipe_id: str) -> ReferenceRecipe | None:
 
 def recipe_download_request(recipe: ReferenceRecipe) -> DownloadRequest:
     comfy_paths: dict[str, str] = {}
-    if recipe.id == "flux1-schnell-fp8":
+    if recipe.id in {"flux1-schnell-fp8", "sd35-medium-fp8"}:
         comfy_paths = {"checkpoints": "."}
     elif recipe.id.startswith("wan21-"):
         comfy_paths = {

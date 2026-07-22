@@ -37,6 +37,12 @@ class HuggingFaceCatalog:
         )
         self._cache_dir = settings.catalog_cache_dir
 
+    def set_token(self, token: str | None) -> None:
+        if token:
+            self._client.headers["authorization"] = f"Bearer {token}"
+        else:
+            self._client.headers.pop("authorization", None)
+
     async def search(
         self,
         *,

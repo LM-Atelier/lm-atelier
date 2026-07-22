@@ -433,6 +433,13 @@ export interface SystemInfo {
   }>;
 }
 
+export interface CredentialStatus {
+  provider: "huggingface";
+  configured: boolean;
+  source: "none" | "environment" | "credential_vault";
+  vault_available: boolean;
+}
+
 export interface PlatformAssessment {
   platform_status: "target" | "experimental" | "unsupported";
   platform_label: string;

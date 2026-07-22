@@ -898,6 +898,7 @@ function PresetEditor({
 
 function SettingsView({ engines }: { engines: EngineCapabilities[] }) {
   const client = useQueryClient();
+  const [hfToken, setHfToken] = useState("");
   const [selectedProfile, setSelectedProfile] = useState<ModelProfile | null>(null);
   const [selectedPreset, setSelectedPreset] = useState<GenerationPreset | null>(null);
   const [presetName, setPresetName] = useState("");
@@ -911,6 +912,18 @@ function SettingsView({ engines }: { engines: EngineCapabilities[] }) {
   const presets = useQuery({ queryKey: ["presets"], queryFn: api.presets });
   const workers = useQuery({ queryKey: ["workers"], queryFn: api.workers, refetchInterval: 3_000 });
   const backups = useQuery({ queryKey: ["backups"], queryFn: api.backups });
+  const credential = useQuery({ queryKey: ["credential", "huggingface"], queryFn: api.credentialStatus });
+  const saveCredential = useMutation({
+    mutationFn: () => api.setHuggingFaceToken(hfToken),
+    onSuccess: (value) => {
+      setHfToken("");
+      client.setQueryData(["credential", "huggingface"], value);
+    },
+  });
+  const removeCredential = useMutation({
+    mutationFn: api.deleteHuggingFaceToken,
+    onSuccess: (value) => client.setQueryData(["credential", "huggingface"], value),
+  });
   const refreshWorkers = () => void client.invalidateQueries({ queryKey: ["workers"] });
   const loadChat = useMutation({ mutationFn: api.loadChatWorker, onSuccess: refreshWorkers });
   const startMedia = useMutation({ mutationFn: api.startMediaWorker, onSuccess: refreshWorkers });
@@ -955,6 +968,17 @@ function SettingsView({ engines }: { engines: EngineCapabilities[] }) {
     <div className="page-view settings-page">
       <header className="page-header"><div><small>System</small><h1>Runtime and diagnostics</h1><p>Capabilities are reported by each engine, so unsupported controls are never silently accepted.</p></div><button className="secondary" onClick={() => diagnostics.mutate()} disabled={diagnostics.isPending}>{diagnostics.isPending ? "Collecting…" : "Download redacted diagnostics"}</button></header>
       {diagnostics.error && <div className="callout error">{diagnostics.error.message}</div>}
+      <section>
+        <div className="detail-title"><div><h2>Hugging Face access</h2><p>Private and gated model access is stored in your operating system credential vault. The token is never displayed after saving.</p></div><span className={`badge ${credential.data?.configured ? "tested" : ""}`}>{credential.data?.configured ? `Configured · ${credential.data.source.replace("credential_vault", "credential vault")}` : "Not configured"}</span></div>
+        <div className="preset-create">
+          <input aria-label="Hugging Face access token" type="password" autoComplete="off" placeholder="hf_…" value={hfToken} onChange={(event) => setHfToken(event.target.value)} disabled={credential.data?.source === "environment"} />
+          <button className="primary" disabled={!hfToken.trim() || saveCredential.isPending || credential.data?.source === "environment" || credential.data?.vault_available === false} onClick={() => saveCredential.mutate()}>{saveCredential.isPending ? "Saving…" : "Save token"}</button>
+          {credential.data?.configured && <button className="secondary danger" disabled={removeCredential.isPending || credential.data.source === "environment"} onClick={() => removeCredential.mutate()}>{removeCredential.isPending ? "Removing…" : "Remove"}</button>}
+        </div>
+        {credential.data?.source === "environment" && <p className="muted runtime-note">The LOCAL_LM_HF_TOKEN environment variable currently takes precedence. Unset it before managing the token here.</p>}
+        {credential.data && !credential.data.vault_available && <div className="callout error">No supported operating-system credential vault is available. Configure one or use LOCAL_LM_HF_TOKEN for this process.</div>}
+        {(credential.error || saveCredential.error || removeCredential.error) && <div className="callout error">{(credential.error || saveCredential.error || removeCredential.error)?.message}</div>}
+      </section>
       <section><h2>Engines</h2><div className="engine-grid">{engines.map((engine) => <article className="engine-card" key={`${engine.engine}:${engine.roles.join()}`}><header><div className="model-icon"><Cpu /></div><div><h3>{engine.engine}</h3><p>{engine.roles.join(" · ")} · {engine.version}</p></div><StatusDot healthy={engine.healthy} /></header><div className="capability-list"><span>{engine.streaming ? "Streaming" : "Queued"}</span><span>{engine.tool_calling ? "Tool routing advertised" : "Workflow execution"}</span><span>{engine.settings.length} controls</span>{engine.roles.includes("chat") && <button className="secondary compact-button" onClick={() => toolProbe.mutate()} disabled={toolProbe.isPending}>{toolProbe.isPending ? "Testing…" : "Test structured tools"}</button>}</div></article>)}</div>{toolProbe.data && <div className={`callout ${toolProbe.data.passed ? "success" : "error"}`}>{toolProbe.data.passed ? `Structured tool schema passed on ${toolProbe.data.engine} ${toolProbe.data.version}.` : `Structured tool schema failed: ${toolProbe.data.error || "unknown response"}`}</div>}{toolProbe.error && <div className="callout error">{toolProbe.error.message}</div>}</section>
       <section><h2>Machine</h2>{system.data && <div className="metric-grid"><div><Cpu /><span><strong>{system.data.cpu_count}</strong> logical CPUs</span></div><div><Gauge /><span><strong>{formatBytes(system.data.memory_available_bytes)}</strong> memory free</span></div><div><HardDrive /><span><strong>{formatBytes(system.data.disk_free_bytes)}</strong> disk free</span></div><div><Film /><span><strong>{system.data.ffmpeg_available ? "Ready" : "Missing"}</strong> FFmpeg</span></div></div>}<div className="device-list">{system.data?.devices.map((device) => <div key={device.id}><span className="device-icon"><Cpu size={18} /></span><span><strong>{device.name}</strong><small>{device.backend} · {formatBytes(device.available_memory_bytes)} available</small></span></div>)}</div></section>
       <section>
