@@ -132,6 +132,16 @@ export interface EngineCapabilities {
   details: Record<string, unknown>;
 }
 
+export interface ToolCapabilityProbe {
+  engine: string;
+  version: string;
+  advertised: boolean;
+  passed: boolean;
+  tool_name: string | null;
+  arguments: Record<string, unknown> | null;
+  error: string | null;
+}
+
 export interface ModelProfile {
   id: string;
   model_install_id: string | null;

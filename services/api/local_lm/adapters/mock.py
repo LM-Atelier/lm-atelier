@@ -41,6 +41,25 @@ class MockChatAdapter:
         return estimate_chat_tokens(messages)
 
     async def stream(self, request: ChatRequest):  # type: ignore[no-untyped-def]
+        if request.tools:
+            yield ChatEvent(
+                type="tool_delta",
+                data={
+                    "tool_calls": [
+                        {
+                            "index": 0,
+                            "id": "mock-route",
+                            "type": "function",
+                            "function": {
+                                "name": "choose_route",
+                                "arguments": '{"mode":"image","confidence":1}',
+                            },
+                        }
+                    ]
+                },
+            )
+            yield ChatEvent(type="complete", data={"finish_reason": "tool_calls"})
+            return
         prompt = next(
             (
                 str(message.get("content", ""))
