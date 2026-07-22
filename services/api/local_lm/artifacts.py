@@ -1,19 +1,21 @@
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import mimetypes
 import os
 import shutil
 import tempfile
+from contextlib import suppress
 from pathlib import Path
 from typing import IO
 
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
 from .config import Settings
 from .domain import ArtifactKind
-from .models import Artifact
+from .models import Artifact, MessagePart
 
 
 class ArtifactStore:
@@ -102,6 +104,14 @@ class ArtifactStore:
             sha256 = digest.hexdigest()
             existing = session.scalar(select(Artifact).where(Artifact.sha256 == sha256))
             if existing:
+                if existing.metadata_json.get("temporary_preview") and not (metadata or {}).get(
+                    "temporary_preview"
+                ):
+                    existing.kind = kind.value
+                    existing.media_type = media_type or existing.media_type
+                    existing.original_name = original_name or existing.original_name
+                    existing.metadata_json = metadata or {}
+                    session.flush()
                 return existing
 
             destination_path = self._destination(sha256)
@@ -130,3 +140,54 @@ class ArtifactStore:
         destination.parent.mkdir(parents=True, exist_ok=True)
         shutil.copy2(source, destination)
         return destination
+
+    async def video_poster(self, artifact: Artifact) -> bytes | None:
+        executable = shutil.which("ffmpeg")
+        if not executable or not artifact.media_type.startswith("video/"):
+            return None
+        try:
+            process = await asyncio.create_subprocess_exec(
+                executable,
+                "-hide_banner",
+                "-loglevel",
+                "error",
+                "-i",
+                str(self.resolve(artifact)),
+                "-frames:v",
+                "1",
+                "-f",
+                "image2pipe",
+                "-vcodec",
+                "mjpeg",
+                "pipe:1",
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
+            )
+            stdout, _stderr = await asyncio.wait_for(process.communicate(), timeout=30)
+        except (OSError, TimeoutError):
+            if "process" in locals() and process.returncode is None:
+                process.kill()
+                await process.wait()
+            return None
+        return stdout if process.returncode == 0 and stdout else None
+
+    def delete_temporary_preview(self, session: Session, artifact_id: str) -> bool:
+        artifact = session.get(Artifact, artifact_id)
+        if not artifact or not artifact.metadata_json.get("temporary_preview"):
+            return False
+        references = (
+            session.scalar(
+                select(func.count(MessagePart.id)).where(MessagePart.artifact_id == artifact_id)
+            )
+            or 0
+        )
+        if references:
+            return False
+        path = self.resolve(artifact)
+        session.delete(artifact)
+        session.flush()
+        path.unlink(missing_ok=True)
+        for parent in (path.parent, path.parent.parent):
+            with suppress(OSError):
+                parent.rmdir()
+        return True
