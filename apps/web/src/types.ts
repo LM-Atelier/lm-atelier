@@ -172,12 +172,18 @@ export interface GenerationPresetBundle {
 
 export interface WorkerStatus {
   name: "chat" | "media";
+  state: "stopped" | "starting" | "ready" | "exited";
   managed: boolean;
   running: boolean;
   pid: number | null;
   profile_id: string | null;
   command: string[];
   exit_code: number | null;
+  estimated_memory_bytes: number | null;
+  current_memory_bytes: number | null;
+  peak_memory_bytes: number | null;
+  active_jobs: number;
+  queued_jobs: number;
 }
 
 export interface BackupInfo {

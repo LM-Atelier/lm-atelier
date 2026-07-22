@@ -101,6 +101,7 @@ describe("App", () => {
     localStorage.clear();
     vi.mocked(api.profiles).mockResolvedValue([]);
     vi.mocked(api.chats).mockResolvedValue([]);
+    vi.mocked(api.workers).mockResolvedValue([]);
   });
   afterEach(cleanup);
 
@@ -203,5 +204,36 @@ describe("App", () => {
     expect(screen.queryByText("Old branch")).not.toBeInTheDocument();
     fireEvent.click(screen.getAllByText("Edit and branch").at(-1)!);
     expect(screen.getByDisplayValue("Edited question")).toBeInTheDocument();
+  });
+
+  it("shows managed worker queue and memory telemetry", async () => {
+    vi.mocked(api.workers).mockResolvedValue([
+      {
+        name: "chat",
+        state: "ready",
+        managed: true,
+        running: true,
+        pid: 123,
+        profile_id: "profile-1",
+        command: ["llama-server"],
+        exit_code: null,
+        estimated_memory_bytes: 6 * 1024 ** 3,
+        current_memory_bytes: 5 * 1024 ** 3,
+        peak_memory_bytes: 5.5 * 1024 ** 3,
+        active_jobs: 2,
+        queued_jobs: 1,
+      },
+    ]);
+    const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+    render(
+      <QueryClientProvider client={client}>
+        <App />
+      </QueryClientProvider>,
+    );
+    fireEvent.click(await screen.findByText("Settings"));
+    expect(await screen.findByText("Ready · PID 123")).toBeInTheDocument();
+    expect(screen.getByText("current RAM")).toBeInTheDocument();
+    expect(screen.getByText("measured peak")).toBeInTheDocument();
+    expect(screen.getByText("estimated load")).toBeInTheDocument();
   });
 });

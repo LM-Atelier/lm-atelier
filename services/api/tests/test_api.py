@@ -126,6 +126,9 @@ async def test_worker_management_reports_missing_local_binaries(client: AsyncCli
     workers = await client.get("/api/workers")
     assert workers.status_code == 200
     assert {item["name"] for item in workers.json()} == {"chat", "media"}
+    assert all(item["state"] == "stopped" for item in workers.json())
+    assert all(item["active_jobs"] == 0 and item["queued_jobs"] == 0 for item in workers.json())
+    assert all(item["current_memory_bytes"] is None for item in workers.json())
     media = await client.post("/api/workers/media/start")
     assert media.status_code == 422
 

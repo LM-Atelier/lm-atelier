@@ -174,8 +174,32 @@ async def engine_capabilities(request: Request) -> list[EngineCapabilities]:
 
 
 @router.get("/workers", response_model=list[WorkerStatus])
-async def worker_status(request: Request) -> list[WorkerStatus]:
-    return _services(request).processes.statuses()
+async def worker_status(request: Request, session: SessionDep) -> list[WorkerStatus]:
+    statuses = _services(request).processes.statuses()
+    for index, status in enumerate(statuses):
+        kinds = (
+            [JobKind.CHAT.value]
+            if status.name == "chat"
+            else [JobKind.IMAGE.value, JobKind.VIDEO.value]
+        )
+        active_jobs = (
+            session.scalar(
+                select(func.count(Job.id)).where(Job.kind.in_(kinds), Job.status == "running")
+            )
+            or 0
+        )
+        queued_jobs = (
+            session.scalar(
+                select(func.count(Job.id)).where(
+                    Job.kind.in_(kinds), Job.status.in_(["queued", "paused"])
+                )
+            )
+            or 0
+        )
+        statuses[index] = status.model_copy(
+            update={"active_jobs": active_jobs, "queued_jobs": queued_jobs}
+        )
+    return statuses
 
 
 @router.post("/workers/chat/load/{profile_id}", response_model=WorkerStatus)
