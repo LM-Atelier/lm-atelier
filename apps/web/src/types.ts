@@ -378,6 +378,20 @@ export interface Workflow {
   revisions: WorkflowRevision[];
 }
 
+export interface CustomNodeInstall {
+  id: string;
+  name: string;
+  source_url: string;
+  revision: string;
+  previous_revision: string | null;
+  tree_hash: string;
+  trusted: boolean;
+  active: boolean;
+  security_json: Record<string, unknown>;
+  created_at: string;
+  updated_at: string;
+}
+
 export interface WorkflowBundle {
   format: "lm-atelier-workflow";
   version: 1;

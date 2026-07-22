@@ -412,6 +412,40 @@ class WorkflowOut(ApiModel):
     updated_at: datetime
 
 
+class WorkflowOpenTarget(ApiModel):
+    url: str
+    filename: str
+    ui_graph: dict[str, Any]
+
+
+class CustomNodeInstallRequest(ApiModel):
+    name: str = Field(min_length=1, max_length=240)
+    source_url: str = Field(min_length=1, max_length=1000)
+    revision: str = Field(min_length=40, max_length=40)
+
+
+class CustomNodeUpdateRequest(ApiModel):
+    revision: str = Field(min_length=40, max_length=40)
+
+
+class CustomNodeTrustRequest(ApiModel):
+    trusted: bool
+
+
+class CustomNodeOut(ApiModel):
+    id: str
+    name: str
+    source_url: str
+    revision: str
+    previous_revision: str | None
+    tree_hash: str
+    trusted: bool
+    active: bool
+    security_json: dict[str, Any]
+    created_at: datetime
+    updated_at: datetime
+
+
 class CatalogModel(ApiModel):
     provider: str = "huggingface"
     remote_id: str

@@ -12,6 +12,7 @@ from sqlalchemy.orm import Session, object_session, selectinload
 
 from .adapters.base import ChatRequest, MediaRequest
 from .artifacts import ArtifactStore
+from .custom_nodes import custom_node_dependency_errors
 from .db import SessionLocal
 from .domain import (
     ArtifactKind,
@@ -602,6 +603,11 @@ class ConversationOrchestrator:
                             "The selected ComfyUI workflow is not trusted. Review its nodes and "
                             "create a trusted revision before execution."
                         )
+                    dependency_errors = custom_node_dependency_errors(
+                        session, revision.dependencies_json.get("custom_nodes")
+                    )
+                    if dependency_errors:
+                        raise RuntimeError("; ".join(dependency_errors))
                     workflow = revision.api_graph_json
             request = MediaRequest(
                 run_id=run.id,
