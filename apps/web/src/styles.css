@@ -228,6 +228,18 @@ h1, h2, h3 { margin: 0; }
 .profile-table { border: 1px solid var(--border); border-radius: 11px; overflow: hidden; }
 .profile-table > div { display: grid; grid-template-columns: 75px 1fr 1fr 80px; align-items: center; gap: 12px; padding: 11px 13px; background: #11151b; border-bottom: 1px solid var(--border); font-size: 12px; color: #8f98a5; }
 .profile-table > div:last-child { border: 0; }.profile-table strong { color: #e6e9ef; }
+.profile-table.interactive > div { grid-template-columns: 75px minmax(150px, 1fr) minmax(110px, 1fr) auto; }
+.row-actions { display: flex; justify-content: flex-end; gap: 6px; }
+.preset-create { display: grid; grid-template-columns: minmax(180px, 1fr) 120px auto; gap: 9px; margin-bottom: 11px; }
+.preset-create input, .preset-create select { color: #e8ebef; border: 1px solid #343b47; border-radius: 8px; background: #1a1f27; padding: 9px; outline: 0; }
+.settings-editor { width: min(780px, 96vw); }
+.settings-editor .segmented.compact { margin: 16px 0 0; }
+.settings-list.embedded { max-height: 48vh; margin-top: 10px; padding: 0 4px 8px 0; }
+.scoped-setting { position: relative; padding-top: 12px; }
+.scope-label { color: #8479e8; font-size: 9px; font-weight: 700; letter-spacing: .09em; text-transform: uppercase; }
+.scoped-setting .setting-row { padding-top: 7px; }
+.modal footer.editor-actions { flex-wrap: wrap; justify-content: flex-end; }
+.secondary.danger { color: #ffadb5; border-color: #693b42; margin-right: auto; }
 .model-files { width: min(760px, calc(100vw - 32px)); }
 .file-picker { max-height: 45vh; overflow: auto; display: grid; gap: 6px; margin: 14px 0; padding: 2px; }
 .file-picker label { display: flex; gap: 10px; align-items: center; padding: 9px 10px; background: #11151b; border: 1px solid var(--border); border-radius: 8px; }
@@ -253,6 +265,9 @@ h1, h2, h3 { margin: 0; }
 @media (max-width: 680px) {
   .app-shell { grid-template-columns: 1fr; }
   .sidebar { display: none; }
+  .profile-table.interactive > div { grid-template-columns: 65px 1fr auto; }
+  .profile-table.interactive > div > span:nth-child(3) { display: none; }
+  .preset-create { grid-template-columns: 1fr; }
   .messages { padding-inline: 16px; }
   .composer-wrap { padding-inline: 12px; }
   .page-view { padding-inline: 18px; }

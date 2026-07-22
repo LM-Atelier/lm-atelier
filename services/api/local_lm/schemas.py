@@ -223,6 +223,21 @@ class ModelProfileUpdate(ApiModel):
     is_default: bool | None = None
 
 
+class ModelProfileClone(ApiModel):
+    name: str | None = Field(default=None, min_length=1, max_length=200)
+
+
+class ModelProfileBundle(ApiModel):
+    format: Literal["lm-atelier-profile"] = "lm-atelier-profile"
+    version: Literal[1] = 1
+    name: str = Field(min_length=1, max_length=200)
+    role: Literal["chat", "image", "video"]
+    engine: str = Field(min_length=1, max_length=32)
+    model_install_id: str | None = None
+    load_settings: dict[str, Any] = Field(default_factory=dict)
+    request_settings: dict[str, Any] = Field(default_factory=dict)
+
+
 class ModelProfileOut(ApiModel):
     id: str
     model_install_id: str | None
@@ -247,6 +262,18 @@ class PresetUpdate(ApiModel):
     name: str | None = Field(default=None, min_length=1, max_length=200)
     settings: dict[str, Any] | None = None
     is_default: bool | None = None
+
+
+class PresetClone(ApiModel):
+    name: str | None = Field(default=None, min_length=1, max_length=200)
+
+
+class PresetBundle(ApiModel):
+    format: Literal["lm-atelier-preset"] = "lm-atelier-preset"
+    version: Literal[1] = 1
+    name: str = Field(min_length=1, max_length=200)
+    role: Literal["chat", "image", "video"]
+    settings: dict[str, Any] = Field(default_factory=dict)
 
 
 class PresetOut(ApiModel):

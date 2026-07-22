@@ -34,9 +34,12 @@ import type {
   Chat,
   ChatDetail,
   EngineCapabilities,
+  GenerationPreset,
+  GenerationPresetBundle,
   Message,
   MessagePart,
   ModelProfile,
+  ModelProfileBundle,
   Project,
   ReferenceRecipe,
   RoutingMode,
@@ -59,6 +62,15 @@ function formatBytes(value?: number | null): string {
     index += 1;
   }
   return `${size >= 10 || index === 0 ? size.toFixed(0) : size.toFixed(1)} ${units[index]}`;
+}
+
+function downloadJson(value: unknown, filename: string): void {
+  const url = URL.createObjectURL(new Blob([JSON.stringify(value, null, 2)], { type: "application/json" }));
+  const anchor = document.createElement("a");
+  anchor.href = url;
+  anchor.download = filename;
+  anchor.click();
+  URL.revokeObjectURL(url);
 }
 
 function EmptyState({ icon, title, body }: { icon: React.ReactNode; title: string; body: string }) {
@@ -517,11 +529,127 @@ function WorkflowsView() {
   );
 }
 
+function ProfileEditor({
+  profile,
+  engines,
+  onClose,
+}: {
+  profile: ModelProfile;
+  engines: EngineCapabilities[];
+  onClose: () => void;
+}) {
+  const client = useQueryClient();
+  const [name, setName] = useState(profile.name);
+  const [isDefault, setIsDefault] = useState(profile.is_default);
+  const [loadSettings, setLoadSettings] = useState(profile.load_settings_json);
+  const [requestSettings, setRequestSettings] = useState(profile.request_settings_json);
+  const [visibility, setVisibility] = useState<Visibility>("basic");
+  const refresh = () => void client.invalidateQueries({ queryKey: ["profiles"] });
+  const save = useMutation({
+    mutationFn: () => api.updateProfile(profile.id, {
+      name,
+      is_default: isDefault,
+      load_settings: loadSettings,
+      request_settings: requestSettings,
+    }),
+    onSuccess: () => { refresh(); onClose(); },
+  });
+  const clone = useMutation({
+    mutationFn: () => api.cloneProfile(profile.id),
+    onSuccess: () => { refresh(); onClose(); },
+  });
+  const reset = useMutation({
+    mutationFn: () => api.resetProfile(profile.id),
+    onSuccess: (value) => {
+      setLoadSettings(value.load_settings_json);
+      setRequestSettings(value.request_settings_json);
+      refresh();
+    },
+  });
+  const exportBundle = useMutation({
+    mutationFn: () => api.exportProfile(profile.id),
+    onSuccess: (bundle) => downloadJson(bundle, `${profile.name.replaceAll(/[^a-z0-9]+/gi, "-").toLowerCase()}.lm-atelier-profile.json`),
+  });
+  const engine = engines.find((item) => item.engine === profile.engine && item.roles.includes(profile.role))
+    ?? engines.find((item) => item.roles.includes(profile.role));
+  const fields = (engine?.settings ?? []).filter(
+    (field) => visibilityRank[field.visibility] <= visibilityRank[visibility] && field.available,
+  );
+  const error = save.error ?? clone.error ?? reset.error ?? exportBundle.error;
+  return (
+    <div className="modal-backdrop">
+      <div className="modal settings-editor">
+        <header><div><small>{profile.role} profile · {profile.engine}</small><h2>Edit profile</h2></div><button className="icon-button" onClick={onClose} aria-label="Close profile editor"><X /></button></header>
+        <label>Profile name<input value={name} onChange={(event) => setName(event.target.value)} /></label>
+        <label className="toggle-row"><span><strong>Default {profile.role} profile</strong><small>Use this profile when a chat does not select another one.</small></span><input type="checkbox" checked={isDefault} onChange={(event) => setIsDefault(event.target.checked)} /></label>
+        <div className="segmented compact">
+          {(["basic", "advanced", "expert"] as Visibility[]).map((level) => <button key={level} className={visibility === level ? "active" : ""} onClick={() => setVisibility(level)}>{level}</button>)}
+        </div>
+        <div className="settings-list embedded">
+          {fields.map((field) => {
+            const target = field.scope === "load" ? loadSettings : requestSettings;
+            return <div className="scoped-setting" key={`${field.scope}:${field.key}:${JSON.stringify(target[field.key])}`}><span className="scope-label">{field.scope}{field.restart_required ? " · restart required" : ""}</span><SettingControl field={field} value={target[field.key] ?? field.default} onChange={(value) => field.scope === "load" ? setLoadSettings({ ...loadSettings, [field.key]: value }) : setRequestSettings({ ...requestSettings, [field.key]: value })} /></div>;
+          })}
+          {!engine && <p className="muted">No capability schema is available for this profile engine.</p>}
+        </div>
+        {error && <div className="callout error">{error.message}</div>}
+        <footer className="editor-actions"><button className="secondary danger" onClick={() => reset.mutate()} disabled={reset.isPending}>Reset settings</button><button className="secondary" onClick={() => exportBundle.mutate()}>Export</button><button className="secondary" onClick={() => clone.mutate()}>Clone</button><button className="primary" onClick={() => save.mutate()} disabled={!name.trim() || save.isPending}>Save profile</button></footer>
+      </div>
+    </div>
+  );
+}
+
+function PresetEditor({
+  preset,
+  engines,
+  onClose,
+}: {
+  preset: GenerationPreset;
+  engines: EngineCapabilities[];
+  onClose: () => void;
+}) {
+  const client = useQueryClient();
+  const [name, setName] = useState(preset.name);
+  const [isDefault, setIsDefault] = useState(preset.is_default);
+  const [settings, setSettings] = useState(preset.settings_json);
+  const [visibility, setVisibility] = useState<Visibility>("basic");
+  const refresh = () => void client.invalidateQueries({ queryKey: ["presets"] });
+  const save = useMutation({ mutationFn: () => api.updatePreset(preset.id, { name, is_default: isDefault, settings }), onSuccess: () => { refresh(); onClose(); } });
+  const clone = useMutation({ mutationFn: () => api.clonePreset(preset.id), onSuccess: () => { refresh(); onClose(); } });
+  const reset = useMutation({ mutationFn: () => api.resetPreset(preset.id), onSuccess: (value) => { setSettings(value.settings_json); refresh(); } });
+  const remove = useMutation({ mutationFn: () => api.deletePreset(preset.id), onSuccess: () => { refresh(); onClose(); } });
+  const exportBundle = useMutation({ mutationFn: () => api.exportPreset(preset.id), onSuccess: (bundle) => downloadJson(bundle, `${preset.name.replaceAll(/[^a-z0-9]+/gi, "-").toLowerCase()}.lm-atelier-preset.json`) });
+  const engine = engines.find((item) => item.roles.includes(preset.role));
+  const fields = (engine?.settings ?? []).filter((field) => visibilityRank[field.visibility] <= visibilityRank[visibility] && field.available);
+  const error = save.error ?? clone.error ?? reset.error ?? remove.error ?? exportBundle.error;
+  return (
+    <div className="modal-backdrop">
+      <div className="modal settings-editor">
+        <header><div><small>{preset.role} generation preset</small><h2>Edit preset</h2></div><button className="icon-button" onClick={onClose} aria-label="Close preset editor"><X /></button></header>
+        <label>Preset name<input value={name} onChange={(event) => setName(event.target.value)} /></label>
+        <label className="toggle-row"><span><strong>Default {preset.role} preset</strong><small>Apply these values when no explicit preset is selected.</small></span><input type="checkbox" checked={isDefault} onChange={(event) => setIsDefault(event.target.checked)} /></label>
+        <div className="segmented compact">{(["basic", "advanced", "expert"] as Visibility[]).map((level) => <button key={level} className={visibility === level ? "active" : ""} onClick={() => setVisibility(level)}>{level}</button>)}</div>
+        <div className="settings-list embedded">{fields.map((field) => <div className="scoped-setting" key={`${field.scope}:${field.key}:${JSON.stringify(settings[field.key])}`}><span className="scope-label">{field.scope}</span><SettingControl field={field} value={settings[field.key] ?? field.default} onChange={(value) => setSettings({ ...settings, [field.key]: value })} /></div>)}</div>
+        {error && <div className="callout error">{error.message}</div>}
+        <footer className="editor-actions"><button className="secondary danger" onClick={() => remove.mutate()}>Delete</button><button className="secondary" onClick={() => reset.mutate()}>Reset</button><button className="secondary" onClick={() => exportBundle.mutate()}>Export</button><button className="secondary" onClick={() => clone.mutate()}>Clone</button><button className="primary" onClick={() => save.mutate()} disabled={!name.trim() || save.isPending}>Save preset</button></footer>
+      </div>
+    </div>
+  );
+}
+
 function SettingsView({ engines }: { engines: EngineCapabilities[] }) {
   const client = useQueryClient();
+  const [selectedProfile, setSelectedProfile] = useState<ModelProfile | null>(null);
+  const [selectedPreset, setSelectedPreset] = useState<GenerationPreset | null>(null);
+  const [presetName, setPresetName] = useState("");
+  const [presetRole, setPresetRole] = useState<GenerationPreset["role"]>("chat");
+  const [importError, setImportError] = useState("");
+  const profileImport = useRef<HTMLInputElement>(null);
+  const presetImport = useRef<HTMLInputElement>(null);
   const system = useQuery({ queryKey: ["system"], queryFn: api.system });
   const platforms = useQuery({ queryKey: ["platforms"], queryFn: api.platforms });
   const profiles = useQuery({ queryKey: ["profiles"], queryFn: api.profiles });
+  const presets = useQuery({ queryKey: ["presets"], queryFn: api.presets });
   const workers = useQuery({ queryKey: ["workers"], queryFn: api.workers, refetchInterval: 3_000 });
   const backups = useQuery({ queryKey: ["backups"], queryFn: api.backups });
   const refreshWorkers = () => void client.invalidateQueries({ queryKey: ["workers"] });
@@ -529,6 +657,31 @@ function SettingsView({ engines }: { engines: EngineCapabilities[] }) {
   const startMedia = useMutation({ mutationFn: api.startMediaWorker, onSuccess: refreshWorkers });
   const stopWorker = useMutation({ mutationFn: api.stopWorker, onSuccess: refreshWorkers });
   const createBackup = useMutation({ mutationFn: api.createBackup, onSuccess: () => void client.invalidateQueries({ queryKey: ["backups"] }) });
+  const createPreset = useMutation({
+    mutationFn: () => api.createPreset(presetRole, presetName),
+    onSuccess: () => {
+      setPresetName("");
+      void client.invalidateQueries({ queryKey: ["presets"] });
+    },
+  });
+  const importBundle = async (file: File | undefined, kind: "profile" | "preset") => {
+    if (!file) return;
+    setImportError("");
+    try {
+      const value = JSON.parse(await file.text()) as ModelProfileBundle | GenerationPresetBundle;
+      if (kind === "profile") {
+        if (value.format !== "lm-atelier-profile") throw new Error("This is not an LM Atelier profile bundle.");
+        await api.importProfile(value as ModelProfileBundle);
+        await client.invalidateQueries({ queryKey: ["profiles"] });
+      } else {
+        if (value.format !== "lm-atelier-preset") throw new Error("This is not an LM Atelier preset bundle.");
+        await api.importPreset(value as GenerationPresetBundle);
+        await client.invalidateQueries({ queryKey: ["presets"] });
+      }
+    } catch (error) {
+      setImportError(error instanceof Error ? error.message : "Could not import the bundle.");
+    }
+  };
   return (
     <div className="page-view settings-page">
       <header className="page-header"><div><small>System</small><h1>Runtime and diagnostics</h1><p>Capabilities are reported by each engine, so unsupported controls are never silently accepted.</p></div></header>
@@ -539,8 +692,22 @@ function SettingsView({ engines }: { engines: EngineCapabilities[] }) {
         {system.data && <div className={`support-summary ${system.data.support.platform_status}`}><div><span className="badge">This machine</span><h3>{system.data.support.platform_label}</h3><p>{system.data.distribution} {system.data.distribution_version} · {system.data.support.accelerator_label}</p></div><div className="support-flags"><span className={`badge ${system.data.support.chat_ready ? "tested" : ""}`}>Chat {system.data.support.chat_ready ? "ready" : "constrained"}</span><span className={`badge ${system.data.support.reference_media_ready ? "tested" : ""}`}>Media {system.data.support.reference_media_ready ? "reference-capable" : "not certified"}</span><span className="badge">{system.data.support.certification_status.replace("-", " ")}</span></div><ul>{system.data.support.messages.map((message) => <li key={message}>{message}</li>)}</ul></div>}
         <div className="platform-grid">{platforms.data?.map((entry) => <article className="platform-card" key={entry.id}><header><div><span className={`badge ${entry.status === "target" ? "likely" : ""}`}>{entry.status}</span><h3>{entry.name}</h3></div><Cpu size={18} /></header><p>{entry.accelerator} · {entry.workloads.join(" · ")}</p>{entry.vram_tiers_gb.length > 0 && <div className="capability-list">{entry.vram_tiers_gb.map((tier) => <span key={tier}>{tier} GB VRAM</span>)}</div>}<small>{entry.evidence}</small></article>)}</div>
       </section>
-      <section><h2>Profiles and workers</h2><div className="profile-table">{profiles.data?.map((profile: ModelProfile) => <div key={profile.id}><span className="badge">{profile.role}</span><strong>{profile.name}</strong><span>{profile.engine}</span>{profile.role === "chat" && profile.model_install_id ? <button className="secondary compact-button" onClick={() => loadChat.mutate(profile.id)}>Load</button> : <span>{profile.is_default ? "Default" : ""}</span>}</div>)}</div><div className="engine-grid">{workers.data?.map((worker) => <article className="engine-card" key={worker.name}><header><div><h3>{worker.name} worker</h3><p>{worker.running ? `Running · PID ${worker.pid}` : "Stopped or externally managed"}</p></div><StatusDot healthy={worker.running} /></header><div className="capability-list">{worker.name === "media" && !worker.running && <button className="secondary compact-button" onClick={() => startMedia.mutate()}>Start ComfyUI</button>}{worker.running && <button className="secondary compact-button" onClick={() => stopWorker.mutate(worker.name)}>Unload</button>}</div></article>)}</div>{(loadChat.error || startMedia.error || stopWorker.error) && <div className="callout error">{(loadChat.error || startMedia.error || stopWorker.error)?.message}</div>}</section>
+      <section>
+        <div className="detail-title"><div><h2>Model profiles</h2><p>Store load-time and request-time controls independently for every model.</p></div><button className="secondary" onClick={() => profileImport.current?.click()}>Import profile</button></div>
+        <input ref={profileImport} hidden type="file" accept="application/json,.json" onChange={(event) => { void importBundle(event.target.files?.[0], "profile"); event.target.value = ""; }} />
+        <div className="profile-table interactive">{profiles.data?.map((profile: ModelProfile) => <div key={profile.id}><span className="badge">{profile.role}</span><strong>{profile.name}{profile.is_default ? " · default" : ""}</strong><span>{profile.engine}</span><span className="row-actions">{profile.role === "chat" && profile.model_install_id && <button className="secondary compact-button" onClick={() => loadChat.mutate(profile.id)}>Load</button>}<button className="secondary compact-button" onClick={() => setSelectedProfile(profile)}>Edit</button></span></div>)}</div>
+      </section>
+      <section>
+        <div className="detail-title"><div><h2>Generation presets</h2><p>Reuse sampling and media-generation values across compatible models.</p></div><button className="secondary" onClick={() => presetImport.current?.click()}>Import preset</button></div>
+        <input ref={presetImport} hidden type="file" accept="application/json,.json" onChange={(event) => { void importBundle(event.target.files?.[0], "preset"); event.target.value = ""; }} />
+        <div className="preset-create"><input aria-label="New preset name" placeholder="New preset name" value={presetName} onChange={(event) => setPresetName(event.target.value)} /><select aria-label="New preset role" value={presetRole} onChange={(event) => setPresetRole(event.target.value as GenerationPreset["role"])}><option value="chat">Chat</option><option value="image">Image</option><option value="video">Video</option></select><button className="primary" disabled={!presetName.trim() || createPreset.isPending} onClick={() => createPreset.mutate()}><Plus size={15} />Create preset</button></div>
+        <div className="profile-table interactive">{presets.data?.map((preset) => <div key={preset.id}><span className="badge">{preset.role}</span><strong>{preset.name}{preset.is_default ? " · default" : ""}</strong><span>{Object.keys(preset.settings_json).length} overrides</span><button className="secondary compact-button" onClick={() => setSelectedPreset(preset)}>Edit</button></div>)}</div>
+        {(createPreset.error || importError) && <div className="callout error">{createPreset.error?.message || importError}</div>}
+      </section>
+      <section><h2>Workers</h2><div className="engine-grid">{workers.data?.map((worker) => <article className="engine-card" key={worker.name}><header><div><h3>{worker.name} worker</h3><p>{worker.running ? `Running · PID ${worker.pid}` : "Stopped or externally managed"}</p></div><StatusDot healthy={worker.running} /></header><div className="capability-list">{worker.name === "media" && !worker.running && <button className="secondary compact-button" onClick={() => startMedia.mutate()}>Start ComfyUI</button>}{worker.running && <button className="secondary compact-button" onClick={() => stopWorker.mutate(worker.name)}>Unload</button>}</div></article>)}</div>{(loadChat.error || startMedia.error || stopWorker.error) && <div className="callout error">{(loadChat.error || startMedia.error || stopWorker.error)?.message}</div>}</section>
       <section><div className="detail-title"><div><h2>Database backups</h2><p>Verified SQLite snapshots remain in the local data directory.</p></div><button className="secondary" onClick={() => createBackup.mutate()}>Create backup</button></div><div className="profile-table">{backups.data?.map((backup) => <div key={backup.name}><strong>{backup.name}</strong><span>{formatBytes(backup.size_bytes)}</span><span>{backup.sha256.slice(0, 12)}</span><span>{backup.verified ? "Verified" : "Snapshot"}</span></div>)}</div></section>
+      {selectedProfile && <ProfileEditor profile={selectedProfile} engines={engines} onClose={() => setSelectedProfile(null)} />}
+      {selectedPreset && <PresetEditor preset={selectedPreset} engines={engines} onClose={() => setSelectedPreset(null)} />}
     </div>
   );
 }

@@ -109,6 +109,12 @@ load settings as an argument array without a shell and only swaps after the
 worker health check succeeds. If you run `llama-server` yourself, omit the
 executable and point `LOCAL_LM_LLAMA_URL` at it.
 
+Profiles and generation presets can be edited at Basic, Advanced, or Expert
+visibility, cloned, reset, and exported as versioned JSON bundles. Imported
+profiles keep their model binding when the same install exists locally and
+otherwise import safely as unbound profiles so they can be attached to a model
+on the destination machine.
+
 Before each chat run, LM Atelier asks llama.cpp for the chat-template-aware
 input token count. When a conversation exceeds the selected profile's context
 window, it preserves project instructions and the newest request while omitting
