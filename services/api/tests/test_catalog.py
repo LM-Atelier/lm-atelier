@@ -90,9 +90,9 @@ def test_catalog_normalizes_filterable_model_metadata() -> None:
 def test_catalog_filters_and_rejects_external_cursors() -> None:
     model = HuggingFaceCatalog._normalize(
         {
-            "id": "owner/model",
+            "id": "owner/model-8B",
             "tags": ["gguf", "q4_k_m", "license:mit"],
-            "siblings": [{"rfilename": "model.gguf"}],
+            "siblings": [{"rfilename": "model.gguf", "size": 5_000_000_000}],
         },
         "chat",
     )
@@ -104,7 +104,25 @@ def test_catalog_filters_and_rejects_external_cursors() -> None:
         license_id="MIT",
         gated="open",
         architecture=None,
+        min_parameters=None,
+        max_parameters=None,
+        max_size_bytes=None,
     ) == [model]
+    assert (
+        HuggingFaceCatalog._filter_items(
+            [model],
+            compatibility=None,
+            file_format=None,
+            quantization=None,
+            license_id=None,
+            gated=None,
+            architecture=None,
+            min_parameters=None,
+            max_parameters=7_000_000_000,
+            max_size_bytes=None,
+        )
+        == []
+    )
     assert (
         HuggingFaceCatalog._filter_items(
             [model],
@@ -114,6 +132,9 @@ def test_catalog_filters_and_rejects_external_cursors() -> None:
             license_id=None,
             gated=None,
             architecture=None,
+            min_parameters=None,
+            max_parameters=None,
+            max_size_bytes=None,
         )
         == []
     )

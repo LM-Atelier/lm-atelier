@@ -376,6 +376,38 @@ class CatalogPage(ApiModel):
     next_cursor: str | None = None
 
 
+class CatalogDetail(ApiModel):
+    model: CatalogModel
+    revision: str
+    files: list[dict[str, Any]]
+
+
+class CatalogPreflightRequest(ApiModel):
+    revision: str = Field(default="main", min_length=1, max_length=200)
+    role: Literal["chat", "image", "video"]
+    engine: str = Field(min_length=1, max_length=32)
+    selected_files: list[str] = Field(default_factory=list, max_length=512)
+
+
+class CatalogPreflightCheck(ApiModel):
+    id: str
+    label: str
+    status: Literal["pass", "warn", "block"]
+    detail: str
+
+
+class CatalogPreflight(ApiModel):
+    remote_id: str
+    revision: str
+    selected_files: list[str]
+    download_bytes: int
+    available_disk_bytes: int
+    estimated_ram_bytes: int | None = None
+    estimated_vram_bytes: int | None = None
+    can_install: bool
+    checks: list[CatalogPreflightCheck]
+
+
 class DownloadRequest(ApiModel):
     remote_id: str = Field(min_length=1, max_length=500)
     revision: str = Field(default="main", min_length=1, max_length=200)

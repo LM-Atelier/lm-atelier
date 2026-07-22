@@ -55,7 +55,12 @@ revision directory retain files referenced by the remaining install records.
 
 Catalog results support cursor-based “load more” navigation and filters for
 compatibility tier, file format, quantization, architecture, license, and gated
-access. Search metadata is normalized from Hub tags, config, and file manifests;
+access, plus parameter-count and download-size bounds. Before a download is
+queued, an install preflight reports exact file selection, revision mutability,
+license and gated access, unsafe weight formats, disk fit, runtime compatibility,
+and estimated RAM or VRAM fit. Existing local files and directories can also be
+registered through the Advanced Import dialog. Search metadata is normalized
+from Hub tags, config, and file manifests;
 the Compatible-first option orders each fetched page by LM Atelier's explicit
 compatibility classification before source download counts.
 

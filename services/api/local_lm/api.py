@@ -43,11 +43,15 @@ from .models import (
 )
 from .orchestrator import ConversationOrchestrator
 from .platforms import list_platform_matrix
+from .preflight import assess_catalog_install
 from .recipes import get_reference_recipe, list_reference_recipes, recipe_download_request
 from .schemas import (
     ArtifactOut,
     BackupInfo,
+    CatalogDetail,
     CatalogPage,
+    CatalogPreflight,
+    CatalogPreflightRequest,
     ChatCreate,
     ChatDetail,
     ChatOut,
@@ -668,6 +672,9 @@ async def catalog_search(
     license_id: str | None = None,
     gated: str | None = None,
     architecture: str | None = None,
+    min_parameters: int | None = Query(default=None, ge=0),
+    max_parameters: int | None = Query(default=None, ge=0),
+    max_size_bytes: int | None = Query(default=None, ge=0),
 ) -> CatalogPage:
     catalog: HuggingFaceCatalog = _services(request).catalog
     try:
@@ -683,6 +690,9 @@ async def catalog_search(
             license_id=license_id,
             gated=gated,
             architecture=architecture,
+            min_parameters=min_parameters,
+            max_parameters=max_parameters,
+            max_size_bytes=max_size_bytes,
         )
     except ValueError as exc:
         raise HTTPException(422, f"invalid catalog request: {exc}") from exc
@@ -690,14 +700,42 @@ async def catalog_search(
         raise HTTPException(502, f"catalog request failed: {exc}") from exc
 
 
-@router.get("/catalog/{owner}/{name}")
+@router.get("/catalog/{owner}/{name}", response_model=CatalogDetail)
 async def catalog_detail(
-    owner: str, name: str, request: Request, revision: str = "main"
-) -> dict[str, Any]:
+    owner: str,
+    name: str,
+    request: Request,
+    revision: str = "main",
+    role: str | None = None,
+) -> CatalogDetail:
     try:
-        return await _services(request).catalog.inspect(f"{owner}/{name}", revision)
+        detail = await _services(request).catalog.inspect(f"{owner}/{name}", revision, role)
+        return CatalogDetail.model_validate(detail)
     except Exception as exc:
         raise HTTPException(502, f"catalog request failed: {exc}") from exc
+
+
+@router.post("/catalog/{owner}/{name}/preflight", response_model=CatalogPreflight)
+async def catalog_preflight(
+    owner: str,
+    name: str,
+    payload: CatalogPreflightRequest,
+    request: Request,
+) -> CatalogPreflight:
+    services = _services(request)
+    try:
+        raw_detail = await services.catalog.inspect(
+            f"{owner}/{name}", payload.revision, payload.role
+        )
+        detail = CatalogDetail.model_validate(raw_detail)
+    except Exception as exc:
+        raise HTTPException(502, f"catalog request failed: {exc}") from exc
+    return assess_catalog_install(
+        detail,
+        payload,
+        services.settings,
+        collect_system_info(services.settings),
+    )
 
 
 @router.post("/downloads", response_model=JobOut, status_code=202)
@@ -786,12 +824,11 @@ async def model_storage(request: Request, session: SessionDep) -> ModelStorageIn
 async def import_model(payload: ModelImport, session: SessionDep) -> ModelInstall:
     path = Path(payload.local_path).expanduser().resolve(strict=True)
     blocked = {".bin", ".pt", ".pth", ".ckpt", ".pkl", ".pickle"}
-    if path.is_file() and path.suffix.lower() in blocked:
+    files = [child for child in path.rglob("*") if child.is_file()] if path.is_dir() else [path]
+    unsafe = [child for child in files if child.suffix.lower() in blocked]
+    if unsafe:
         raise HTTPException(422, "pickle-compatible model files are blocked by default")
-    if path.is_dir():
-        size = sum(child.stat().st_size for child in path.rglob("*") if child.is_file())
-    else:
-        size = path.stat().st_size
+    size = sum(child.stat().st_size for child in files)
     install = ModelInstall(
         id=new_id("model"),
         name=payload.name,
@@ -800,7 +837,12 @@ async def import_model(payload: ModelImport, session: SessionDep) -> ModelInstal
         local_path=str(path),
         size_bytes=size,
         compatibility=CompatibilityLevel.ADVANCED.value,
-        manifest_json={"imported": True},
+        manifest_json={
+            "imported": True,
+            "path_type": "directory" if path.is_dir() else "file",
+            "file_count": len(files),
+            "pickle_compatible_weights": False,
+        },
     )
     session.add(install)
     session.commit()
