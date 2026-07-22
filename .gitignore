@@ -20,6 +20,7 @@ node_modules/
 .pnpm-store/
 dist/
 build/
+release/
 coverage/
 .vite/
 .next/

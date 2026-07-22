@@ -23,7 +23,9 @@ html, body, #root { width: 100%; height: 100%; margin: 0; }
 body { overflow: hidden; background: radial-gradient(circle at 70% -30%, #25204e 0, transparent 40%), var(--bg); }
 button, input, textarea, select { font: inherit; }
 button { color: inherit; }
-button:focus-visible, input:focus-visible, textarea:focus-visible, select:focus-visible { outline: 2px solid var(--accent-2); outline-offset: 2px; }
+button:focus-visible, a:focus-visible, input:focus-visible, textarea:focus-visible, select:focus-visible { outline: 2px solid var(--accent-2); outline-offset: 2px; }
+.skip-link { position: fixed; left: 12px; top: -60px; z-index: 100; border-radius: 8px; padding: 9px 12px; background: #f5f3ff; color: #171427; }
+.skip-link:focus { top: 12px; }
 
 .app-shell { display: grid; grid-template-columns: 272px 1fr; height: 100%; }
 .sidebar { background: rgba(14, 17, 22, .96); border-right: 1px solid var(--border); display: flex; flex-direction: column; min-width: 0; padding: 18px 14px 14px; overflow: hidden; }
@@ -336,7 +338,9 @@ h1, h2, h3 { margin: 0; }
 
 @media (max-width: 680px) {
   .app-shell { grid-template-columns: 1fr; }
-  .sidebar { display: none; }
+  .sidebar { position: relative; z-index: 20; height: auto; max-height: 100vh; border-right: 0; border-bottom: 1px solid var(--border); overflow-y: auto; }
+  .sidebar:not(.mobile-open) > :not(.brand) { display: none; }
+  .mobile-menu { display: inline-flex !important; }
   .profile-table.interactive > div { grid-template-columns: 65px 1fr auto; }
   .profile-table.interactive > div > span:nth-child(3) { display: none; }
   .preset-create { grid-template-columns: 1fr; }

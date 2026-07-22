@@ -57,6 +57,8 @@ jobs:
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0
+      - name: Validate Linux packaging scripts
+        run: bash -n scripts/package.sh packaging/linux/*.sh
       - name: Reject committed secrets and runtime artifacts
         run: |
           if git ls-files | grep -E '(^|/)(\.env|\.private|data|models|downloads|artifacts)(/|$)|\.(gguf|safetensors|ckpt|sqlite3?)$'; then
@@ -67,3 +69,27 @@ jobs:
             echo 'A likely credential is tracked.' >&2
             exit 1
           fi
+
+  windows-packaging:
+    name: Windows packaging scripts
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Validate PowerShell syntax
+        shell: pwsh
+        run: |
+          $failed = $false
+          Get-ChildItem packaging/windows/*.ps1 | ForEach-Object {
+            $tokens = $null
+            $errors = $null
+            [System.Management.Automation.Language.Parser]::ParseFile(
+              $_.FullName,
+              [ref]$tokens,
+              [ref]$errors
+            ) | Out-Null
+            if ($errors.Count -gt 0) {
+              Write-Error "Syntax errors in $($_.Name): $($errors -join '; ')"
+              $failed = $true
+            }
+          }
+          if ($failed) { exit 1 }
