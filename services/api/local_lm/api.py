@@ -276,6 +276,27 @@ async def create_project(payload: ProjectCreate, session: SessionDep) -> Project
     return project
 
 
+@router.post("/projects/import", response_model=ProjectOut, status_code=201)
+async def import_project(
+    request: Request,
+    session: SessionDep,
+    archive: Annotated[UploadFile, File()],
+) -> Project:
+    archive.file.seek(0, 2)
+    size = archive.file.tell()
+    archive.file.seek(0)
+    if size > _services(request).settings.max_project_import_bytes:
+        raise HTTPException(413, "project archive exceeds the configured limit")
+    try:
+        project = _services(request).exports.import_archive(session, archive.file)
+    except ValueError as exc:
+        session.rollback()
+        raise HTTPException(422, str(exc)) from exc
+    session.commit()
+    session.refresh(project)
+    return project
+
+
 @router.patch("/projects/{project_id}", response_model=ProjectOut)
 async def update_project(project_id: str, payload: ProjectUpdate, session: SessionDep) -> Project:
     project = session.get(Project, project_id)
@@ -301,9 +322,16 @@ async def delete_project(project_id: str, session: SessionDep) -> Response:
 
 
 @router.post("/projects/{project_id}/export", response_model=ArtifactOut, status_code=201)
-async def export_project(project_id: str, request: Request, session: SessionDep) -> ArtifactOut:
+async def export_project(
+    project_id: str,
+    request: Request,
+    session: SessionDep,
+    include_media: bool = True,
+) -> ArtifactOut:
     try:
-        artifact = _services(request).exports.export(session, project_id)
+        artifact = _services(request).exports.export(
+            session, project_id, include_media=include_media
+        )
     except LookupError as exc:
         raise HTTPException(404, str(exc)) from exc
     session.commit()

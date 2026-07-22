@@ -17,6 +17,7 @@ vi.mock("./api", () => ({
     updateChat: vi.fn(),
     deleteChat: vi.fn(),
     exportProject: vi.fn(),
+    importProject: vi.fn(),
     artifacts: vi.fn().mockResolvedValue([]),
     artifactStorage: vi.fn().mockResolvedValue({ total_bytes: 0, total_count: 0, referenced_bytes: 0, referenced_count: 0, unreferenced_bytes: 0, unreferenced_count: 0, temporary_bytes: 0, temporary_count: 0, eligible_bytes: 0, eligible_count: 0, disk_free_bytes: 1024, warning: false, retention_days: 30, temporary_retention_hours: 24 }),
     cleanupArtifacts: vi.fn(),
@@ -167,6 +168,39 @@ describe("App", () => {
     fireEvent.click(screen.getByText("Save chat"));
     await waitFor(() => expect(vi.mocked(api.updateChat).mock.calls[0]?.[0]).toBe("chat-1"));
     expect(vi.mocked(api.updateChat).mock.calls[0]?.[1]).toMatchObject({ title: "Renamed notes", project_id: null, archived: true });
+  });
+
+  it("imports portable project archives from the workspace sidebar", async () => {
+    const stamp = "2026-07-22T00:00:00Z";
+    vi.mocked(api.importProject).mockResolvedValue({ id: "project-imported", name: "Imported", description: "", instructions: "", archived: false, created_at: stamp, updated_at: stamp });
+    const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+    const { container } = render(
+      <QueryClientProvider client={client}>
+        <App />
+      </QueryClientProvider>,
+    );
+    const file = new File(["archive"], "portable.lm-atelier.zip", { type: "application/zip" });
+    const input = container.querySelector<HTMLInputElement>('input[accept*=".lm-atelier.zip"]');
+    expect(input).not.toBeNull();
+    fireEvent.change(input!, { target: { files: [file] } });
+    await waitFor(() => expect(vi.mocked(api.importProject).mock.calls[0]?.[0]).toBe(file));
+  });
+
+  it("exports projects with or without embedded media", async () => {
+    const click = vi.spyOn(HTMLAnchorElement.prototype, "click").mockImplementation(() => undefined);
+    const stamp = "2026-07-22T00:00:00Z";
+    vi.mocked(api.projects).mockResolvedValue([{ id: "project-1", name: "Portable", description: "", instructions: "", archived: false, created_at: stamp, updated_at: stamp }]);
+    vi.mocked(api.exportProject).mockResolvedValue({ url: "/api/artifacts/export/content" });
+    const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+    render(
+      <QueryClientProvider client={client}>
+        <App />
+      </QueryClientProvider>,
+    );
+    fireEvent.click(await screen.findByRole("button", { name: "Manage Portable" }));
+    fireEvent.click(await screen.findByText("Export metadata only"));
+    await waitFor(() => expect(vi.mocked(api.exportProject).mock.calls[0]).toEqual(["project-1", false]));
+    click.mockRestore();
   });
 
   it("resumes a paused model download from the job panel", async () => {
