@@ -45,6 +45,7 @@ from .orchestrator import ConversationOrchestrator
 from .platforms import list_platform_matrix
 from .preflight import assess_catalog_install
 from .recipes import get_reference_recipe, list_reference_recipes, recipe_download_request
+from .routing import RouteConfirmationRequired
 from .schemas import (
     ArtifactCleanupRequest,
     ArtifactCleanupResult,
@@ -444,9 +445,18 @@ async def create_turn(
 ) -> TurnAccepted:
     orchestrator: ConversationOrchestrator = _services(request).orchestrator
     try:
-        return orchestrator.create_turn(session, chat_id, payload)
+        return await orchestrator.create_turn(session, chat_id, payload)
     except LookupError as exc:
         raise HTTPException(404, str(exc)) from exc
+    except RouteConfirmationRequired as exc:
+        raise HTTPException(
+            409,
+            detail={
+                "code": "route_confirmation_required",
+                "message": str(exc),
+                "plan": exc.plan.model_dump(mode="json"),
+            },
+        ) from exc
     except ValueError as exc:
         raise HTTPException(422, str(exc)) from exc
 
@@ -489,7 +499,7 @@ async def regenerate_message(
         input_artifact_ids=prior_run.provenance_json.get("input_artifact_ids", []),
         settings={**prior_run.settings_json, **payload.settings},
     )
-    return _services(request).orchestrator.create_turn(
+    return await _services(request).orchestrator.create_turn(
         session, prior_run.chat_id, turn, use_explicit_parent=True
     )
 
@@ -511,7 +521,7 @@ async def edit_and_branch(
         if not payload.settings:
             updates["settings"] = prior_run.settings_json
     turn = payload.model_copy(update=updates)
-    return _services(request).orchestrator.create_turn(
+    return await _services(request).orchestrator.create_turn(
         session, source.chat_id, turn, use_explicit_parent=True
     )
 
