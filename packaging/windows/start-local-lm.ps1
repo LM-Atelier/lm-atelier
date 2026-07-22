@@ -1,8 +1,8 @@
 $ErrorActionPreference = "Stop"
-$Root = Resolve-Path (Join-Path $PSScriptRoot "..\..")
-Set-Location $Root
-if (-not (Test-Path ".venv\Scripts\lm-atelier.exe")) {
-  throw "LM Atelier is not installed. Create .venv and install services/api first."
-}
-if (-not (Test-Path "apps\web\dist")) { npm run build }
-& ".venv\Scripts\lm-atelier.exe"
+$InstallRoot = if ($env:LM_ATELIER_INSTALL_ROOT) { $env:LM_ATELIER_INSTALL_ROOT } else { Join-Path $env:LOCALAPPDATA "LMAtelier" }
+$Version = (Get-Content (Join-Path $InstallRoot "current-version.txt") -Raw).Trim()
+$AppRoot = Join-Path $InstallRoot "versions\$Version"
+if (-not $env:LOCAL_LM_DATA_DIR) { $env:LOCAL_LM_DATA_DIR = Join-Path $InstallRoot "data" }
+if (-not $env:LOCAL_LM_HOST) { $env:LOCAL_LM_HOST = "127.0.0.1" }
+Set-Location $AppRoot
+& (Join-Path $AppRoot ".venv\Scripts\lm-atelier.exe")

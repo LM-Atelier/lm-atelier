@@ -20,8 +20,8 @@ weight-free demo and adapters for `llama-server`, ComfyUI, and Hugging Face.
   disk preflight, resumable cache use, and atomic model activation.
 - Versioned ComfyUI workflow import, validation, declared inputs, and immutable
   run provenance.
-- Content-addressed artifacts, project ZIP exports, verified SQLite snapshots,
-  and restore-on-next-start.
+- Content-addressed media library, versioned project export/import, retention-safe
+  cleanup, verified state/media backups, and redacted diagnostics.
 - Loopback binding, authenticated same-origin sessions, CSRF protection, safe
   model formats, and no telemetry.
 
@@ -97,6 +97,13 @@ video output.
 
 Open `http://127.0.0.1:12340`. For frontend/backend hot reload, use
 `./scripts/dev.sh` and open the Vite URL it prints.
+
+Official release archives include the built web interface, so end users do not
+need Node.js. On Linux, run `packaging/linux/install.sh`; on Windows, run
+`packaging/windows/install.ps1`. Updates install side by side, rollback switches
+the active application version without touching data, and uninstall preserves
+data unless its explicit purge option is used. Maintainers can build both archive
+formats and checksums with `./scripts/package.sh`.
 
 Run every local quality gate with:
 
@@ -190,6 +197,10 @@ Copy `.env.example` to `.env`. Important settings include:
 | `LOCAL_LM_CHAT_ENGINE` | `mock` | `mock` or `llama.cpp` |
 | `LOCAL_LM_MEDIA_ENGINE` | `mock` | `mock` or `comfyui` |
 | `LOCAL_LM_HF_TOKEN` | unset | Optional gated/private Hub access token |
+| `LOCAL_LM_ARTIFACT_RETENTION_DAYS` | `30` | Recovery window for unreferenced artifacts |
+| `LOCAL_LM_TEMPORARY_RETENTION_HOURS` | `24` | Lifetime of temporary/intermediate media |
+| `LOCAL_LM_BACKUP_DAILY_COUNT` | `7` | Daily state snapshots to retain |
+| `LOCAL_LM_BACKUP_WEEKLY_COUNT` | `4` | Older weekly state snapshots to retain |
 
 For regular use, keep credentials out of `.env` and launch LM Atelier with the
 token supplied by the operating system's credential facility. Tokens are not
@@ -209,8 +220,21 @@ automatically requeue jobs interrupted by an orderly or unexpected shutdown.
 
 Database restore is staged rather than performed underneath a running API. Use
 the backup endpoint/UI to select a verified snapshot, then restart LM Atelier.
-Project exports are ordinary ZIP files with a versioned JSON manifest and
-hash-addressed media.
+Backups keep seven daily and four older weekly versions and can optionally carry
+checksum-verified media. Project `.lm-atelier.zip` archives use a versioned JSON
+manifest and can include hash-addressed media or metadata only. The import path
+validates archive boundaries, sizes, types, and content hashes before creating
+new local identities.
+
+The Settings page can download a redacted diagnostic bundle. It contains machine,
+capability, aggregate database, model-role, workflow-operation, and job-state
+facts, but excludes prompts, chat content, media, credentials, absolute paths,
+and log contents.
+
+Runtime releases used for compatibility evaluation are pinned in
+`packaging/engines.json`. llama.cpp and ComfyUI remain separately installed and
+retain their own licenses; their pinned entries are compatibility targets rather
+than bundled binaries or hardware certification claims.
 
 The Workflow studio imports and exports portable LM Atelier workflow bundles,
 keeps executable and UI graphs in immutable revisions, restores old versions as

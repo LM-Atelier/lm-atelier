@@ -172,6 +172,8 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     )
     if not web_dist.is_dir():
         web_dist = Path(__file__).resolve().parents[3] / "apps" / "web" / "dist"
+    if not web_dist.is_dir():
+        web_dist = Path(__file__).resolve().parent / "web"
     if web_dist.is_dir():
         app.mount("/", StaticFiles(directory=web_dist, html=True), name="web")
 
