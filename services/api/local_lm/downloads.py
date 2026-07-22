@@ -108,6 +108,35 @@ class DownloadManager:
         await self.events.publish("download.cancelled", job_id)
         return True
 
+    def cleanup_partials(self, session: Session) -> tuple[int, int]:
+        active_ids = set(
+            session.scalars(
+                select(Job.id).where(
+                    Job.kind == JobKind.DOWNLOAD.value,
+                    Job.status.in_(
+                        [
+                            JobStatus.QUEUED.value,
+                            JobStatus.RUNNING.value,
+                            JobStatus.PAUSED.value,
+                        ]
+                    ),
+                )
+            ).all()
+        )
+        removed_count = 0
+        reclaimed_bytes = 0
+        for candidate in self.settings.download_dir.glob("*.partial"):
+            job_id = candidate.name.removesuffix(".partial")
+            if job_id in active_ids:
+                continue
+            reclaimed_bytes += self._path_size(candidate)
+            if candidate.is_dir() and not candidate.is_symlink():
+                shutil.rmtree(candidate)
+            else:
+                candidate.unlink(missing_ok=True)
+            removed_count += 1
+        return removed_count, reclaimed_bytes
+
     async def _download(self, job_id: str) -> None:
         from .db import SessionLocal
 
@@ -290,6 +319,12 @@ class DownloadManager:
             while chunk := handle.read(1024 * 1024):
                 digest.update(chunk)
         return digest.hexdigest()
+
+    @staticmethod
+    def _path_size(path: Path) -> int:
+        if path.is_file():
+            return path.stat().st_size
+        return sum(item.stat().st_size for item in path.rglob("*") if item.is_file())
 
     @staticmethod
     def _select_files(request: DownloadRequest, siblings: list[Any]) -> list[str]:

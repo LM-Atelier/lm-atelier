@@ -220,6 +220,19 @@ export interface ModelInstall {
   updated_at: string;
 }
 
+export interface ModelStorageInfo {
+  installed_bytes: number;
+  partial_download_bytes: number;
+  catalog_cache_bytes: number;
+  installed_count: number;
+  partial_download_count: number;
+}
+
+export interface StorageCleanupResult {
+  removed_count: number;
+  reclaimed_bytes: number;
+}
+
 export interface CatalogModel {
   provider: string;
   remote_id: string;
