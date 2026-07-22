@@ -818,6 +818,43 @@ function SettingsView({ engines }: { engines: EngineCapabilities[] }) {
   );
 }
 
+function ChatManager({
+  chat,
+  projects,
+  onClose,
+  onSave,
+  onDelete,
+}: {
+  chat: Chat;
+  projects: Project[];
+  onClose: () => void;
+  onSave: (values: Partial<Chat>) => void;
+  onDelete: () => void;
+}) {
+  const [title, setTitle] = useState(chat.title);
+  const [projectId, setProjectId] = useState(chat.project_id ?? "");
+  const [archived, setArchived] = useState(chat.archived);
+  return <div className="modal-backdrop"><div className="modal workspace-editor"><header><div><small>Conversation</small><h2>Manage chat</h2></div><button className="icon-button" aria-label="Close chat manager" onClick={onClose}><X /></button></header><label>Title<input value={title} onChange={(event) => setTitle(event.target.value)} /></label><label>Project<select value={projectId} onChange={(event) => setProjectId(event.target.value)}><option value="">Unfiled</option>{projects.filter((project) => !project.archived).map((project) => <option key={project.id} value={project.id}>{project.name}</option>)}</select></label><label className="toggle-row"><span><strong>Archived</strong><small>Hide this chat from the active workspace without deleting its history.</small></span><input type="checkbox" checked={archived} onChange={(event) => setArchived(event.target.checked)} /></label><footer className="editor-actions"><button className="secondary danger" onClick={() => { if (window.confirm(`Delete ${chat.title} and its history?`)) onDelete(); }}>Delete chat</button><button className="secondary" onClick={onClose}>Cancel</button><button className="primary" disabled={!title.trim()} onClick={() => onSave({ title: title.trim(), project_id: projectId || null, archived })}>Save chat</button></footer></div></div>;
+}
+
+function ProjectManager({
+  project,
+  onClose,
+  onSave,
+  onDelete,
+}: {
+  project: Project;
+  onClose: () => void;
+  onSave: (values: Partial<Project>) => void;
+  onDelete: () => void;
+}) {
+  const [name, setName] = useState(project.name);
+  const [description, setDescription] = useState(project.description);
+  const [instructions, setInstructions] = useState(project.instructions);
+  const [archived, setArchived] = useState(project.archived);
+  return <div className="modal-backdrop"><div className="modal workspace-editor"><header><div><small>Workspace</small><h2>Manage project</h2></div><button className="icon-button" aria-label="Close project manager" onClick={onClose}><X /></button></header><label>Name<input value={name} onChange={(event) => setName(event.target.value)} /></label><label>Description<textarea rows={3} value={description} onChange={(event) => setDescription(event.target.value)} /></label><label>Project instructions<textarea rows={5} value={instructions} onChange={(event) => setInstructions(event.target.value)} /></label><label className="toggle-row"><span><strong>Archived</strong><small>Hide this project while preserving its chats and media.</small></span><input type="checkbox" checked={archived} onChange={(event) => setArchived(event.target.checked)} /></label><footer className="editor-actions"><button className="secondary danger" onClick={() => { if (window.confirm(`Delete ${project.name}? Its chats will become unfiled.`)) onDelete(); }}>Delete project</button><button className="secondary" onClick={onClose}>Cancel</button><button className="primary" disabled={!name.trim()} onClick={() => onSave({ name: name.trim(), description, instructions, archived })}>Save project</button></footer></div></div>;
+}
+
 function Sidebar({
   projects,
   chats,
@@ -829,6 +866,10 @@ function Sidebar({
   onNewChat,
   onNewProject,
   onExportProject,
+  onUpdateChat,
+  onDeleteChat,
+  onUpdateProject,
+  onDeleteProject,
 }: {
   projects: Project[];
   chats: Chat[];
@@ -840,19 +881,36 @@ function Sidebar({
   onNewChat: (projectId?: string | null) => void;
   onNewProject: () => void;
   onExportProject: (id: string) => void;
+  onUpdateChat: (id: string, values: Partial<Chat>) => void;
+  onDeleteChat: (id: string) => void;
+  onUpdateProject: (id: string, values: Partial<Project>) => void;
+  onDeleteProject: (id: string) => void;
 }) {
   const [openProjects, setOpenProjects] = useState<Set<string>>(new Set(projects.map((project) => project.id)));
-  const unfiled = chats.filter((chat) => !chat.project_id);
+  const [search, setSearch] = useState("");
+  const [showArchived, setShowArchived] = useState(false);
+  const [managedChat, setManagedChat] = useState<Chat | null>(null);
+  const [managedProject, setManagedProject] = useState<Project | null>(null);
+  useEffect(() => {
+    setOpenProjects((current) => new Set([...current, ...projects.map((project) => project.id)]));
+  }, [projects]);
+  const normalizedSearch = search.trim().toLowerCase();
+  const visibleChats = chats.filter((chat) => (showArchived || !chat.archived) && (!normalizedSearch || chat.title.toLowerCase().includes(normalizedSearch)));
+  const visibleProjects = projects.filter((project) => (showArchived || !project.archived) && (!normalizedSearch || project.name.toLowerCase().includes(normalizedSearch) || visibleChats.some((chat) => chat.project_id === project.id)));
+  const unfiled = visibleChats.filter((chat) => !chat.project_id);
+  const chatRow = (chat: Chat) => <div className="sidebar-chat-row" key={chat.id}><button className={`chat-main ${view === "chat" && currentChatId === chat.id ? "active" : ""}`} onClick={() => onChat(chat.id)}><MessageSquare size={14} /><span>{chat.title}</span>{chat.archived && <small>Archived</small>}</button><button className="inline-add" aria-label={`Manage ${chat.title}`} onClick={() => setManagedChat(chat)}><MoreHorizontal size={13} /></button></div>;
   return (
     <aside className="sidebar">
       <div className="brand"><div className="brand-mark"><Sparkles /></div><span>LM Atelier</span><button className="icon-button mobile-menu"><Menu /></button></div>
       <button className="new-chat" onClick={() => onNewChat(null)}><Plus size={18} />New chat</button>
       <nav className="primary-nav"><button className={view === "models" ? "active" : ""} onClick={() => onView("models")}><Library />Model library</button><button className={view === "workflows" ? "active" : ""} onClick={() => onView("workflows")}><WorkflowIcon />Workflows</button></nav>
+      <div className="workspace-search"><Search size={14} /><input aria-label="Search projects and chats" placeholder="Search workspace" value={search} onChange={(event) => setSearch(event.target.value)} /><button className={showArchived ? "active" : ""} aria-pressed={showArchived} onClick={() => setShowArchived((value) => !value)}>Archived</button></div>
       <div className="sidebar-section">
         <div className="section-title"><span>Projects</span><button onClick={onNewProject}><Plus size={15} /></button></div>
-        {projects.map((project) => {
+        {visibleProjects.map((project) => {
           const open = openProjects.has(project.id);
-          const projectChats = chats.filter((chat) => chat.project_id === project.id);
+          const projectMatches = normalizedSearch && project.name.toLowerCase().includes(normalizedSearch);
+          const projectChats = chats.filter((chat) => chat.project_id === project.id && (showArchived || !chat.archived) && (!normalizedSearch || projectMatches || chat.title.toLowerCase().includes(normalizedSearch)));
           return (
             <div className="project-group" key={project.id}>
               <div className="project-row">
@@ -868,14 +926,17 @@ function Sidebar({
                 </button>
                 <button className="inline-add" onClick={() => onNewChat(project.id)} aria-label={`New chat in ${project.name}`}><Plus size={13} /></button>
                 <button className="inline-add" onClick={() => onExportProject(project.id)} aria-label={`Export ${project.name}`}><Download size={13} /></button>
+                <button className="inline-add" onClick={() => setManagedProject(project)} aria-label={`Manage ${project.name}`}><MoreHorizontal size={13} /></button>
               </div>
-              {open && <div className="chat-list">{projectChats.map((chat) => <button className={view === "chat" && currentChatId === chat.id ? "active" : ""} key={chat.id} onClick={() => onChat(chat.id)}><MessageSquare size={14} /><span>{chat.title}</span></button>)}</div>}
+              {open && <div className="chat-list">{projectChats.map(chatRow)}</div>}
             </div>
           );
         })}
       </div>
-      {unfiled.length > 0 && <div className="sidebar-section"><div className="section-title"><span>Chats</span></div><div className="chat-list standalone">{unfiled.map((chat) => <button className={view === "chat" && currentChatId === chat.id ? "active" : ""} key={chat.id} onClick={() => onChat(chat.id)}><MessageSquare size={14} /><span>{chat.title}</span></button>)}</div></div>}
+      {unfiled.length > 0 && <div className="sidebar-section"><div className="section-title"><span>Chats</span></div><div className="chat-list standalone">{unfiled.map(chatRow)}</div></div>}
       <div className="sidebar-footer"><button className={view === "settings" ? "active" : ""} onClick={() => onView("settings")}><Settings />Settings</button><div className="connection"><StatusDot healthy={connected} />{connected ? "Local service connected" : "Reconnecting…"}</div></div>
+      {managedChat && <ChatManager chat={managedChat} projects={projects} onClose={() => setManagedChat(null)} onSave={(values) => { onUpdateChat(managedChat.id, values); setManagedChat(null); }} onDelete={() => { onDeleteChat(managedChat.id); setManagedChat(null); }} />}
+      {managedProject && <ProjectManager project={managedProject} onClose={() => setManagedProject(null)} onSave={(values) => { onUpdateProject(managedProject.id, values); setManagedProject(null); }} onDelete={() => { onDeleteProject(managedProject.id); setManagedProject(null); }} />}
     </aside>
   );
 }
@@ -898,8 +959,8 @@ export default function App() {
   const [currentChatId, setCurrentChatId] = useState<string | null>(() => localStorage.getItem("local-lm-chat"));
   const [connected, setConnected] = useState(false);
   const [liveText, setLiveText] = useState<Record<string, string>>({});
-  const projects = useQuery({ queryKey: ["projects"], queryFn: api.projects });
-  const chats = useQuery({ queryKey: ["chats"], queryFn: () => api.chats() });
+  const projects = useQuery({ queryKey: ["projects"], queryFn: () => api.projects(true) });
+  const chats = useQuery({ queryKey: ["chats"], queryFn: () => api.chats(null, true) });
   const chat = useQuery({ queryKey: ["chat", currentChatId], queryFn: () => api.chat(currentChatId!), enabled: Boolean(currentChatId) });
   const engines = useQuery({ queryKey: ["engines"], queryFn: api.engines });
   const profiles = useQuery({ queryKey: ["profiles"], queryFn: api.profiles });
@@ -973,6 +1034,34 @@ export default function App() {
       void client.invalidateQueries({ queryKey: ["chats"] });
     },
   });
+  const manageChat = useMutation({
+    mutationFn: ({ id, values }: { id: string; values: Partial<Chat> }) => api.updateChat(id, values),
+    onSuccess: () => {
+      void client.invalidateQueries({ queryKey: ["chat"] });
+      void client.invalidateQueries({ queryKey: ["chats"] });
+    },
+  });
+  const deleteChat = useMutation({
+    mutationFn: api.deleteChat,
+    onSuccess: (_value, deletedId) => {
+      if (currentChatId === deletedId) {
+        setCurrentChatId(null);
+        localStorage.removeItem("local-lm-chat");
+      }
+      void client.invalidateQueries({ queryKey: ["chats"] });
+    },
+  });
+  const updateProject = useMutation({
+    mutationFn: ({ id, values }: { id: string; values: Partial<Project> }) => api.updateProject(id, values),
+    onSuccess: () => void client.invalidateQueries({ queryKey: ["projects"] }),
+  });
+  const deleteProject = useMutation({
+    mutationFn: api.deleteProject,
+    onSuccess: () => {
+      void client.invalidateQueries({ queryKey: ["projects"] });
+      void client.invalidateQueries({ queryKey: ["chats"] });
+    },
+  });
   const exportProject = useMutation({
     mutationFn: api.exportProject,
     onSuccess: (artifact) => {
@@ -984,7 +1073,10 @@ export default function App() {
   });
 
   useEffect(() => {
-    if (!currentChatId && chats.data?.length) setCurrentChatId(chats.data[0].id);
+    if (!currentChatId) {
+      const firstActive = chats.data?.find((candidate) => !candidate.archived);
+      if (firstActive) setCurrentChatId(firstActive.id);
+    }
   }, [chats.data, currentChatId]);
 
   const allChats = chats.data ?? [];
@@ -998,10 +1090,10 @@ export default function App() {
 
   return (
     <div className="app-shell">
-      <Sidebar projects={allProjects} chats={allChats} currentChatId={currentChatId} view={view} connected={connected} onChat={(id) => { setCurrentChatId(id); localStorage.setItem("local-lm-chat", id); setView("chat"); }} onView={setView} onNewChat={(projectId) => createChat.mutate(projectId)} onNewProject={() => { const name = window.prompt("Project name"); if (name?.trim()) createProject.mutate(name.trim()); }} onExportProject={(id) => exportProject.mutate(id)} />
+      <Sidebar projects={allProjects} chats={allChats} currentChatId={currentChatId} view={view} connected={connected} onChat={(id) => { setCurrentChatId(id); localStorage.setItem("local-lm-chat", id); setView("chat"); }} onView={setView} onNewChat={(projectId) => createChat.mutate(projectId)} onNewProject={() => { const name = window.prompt("Project name"); if (name?.trim()) createProject.mutate(name.trim()); }} onExportProject={(id) => exportProject.mutate(id)} onUpdateChat={(id, values) => manageChat.mutate({ id, values })} onDeleteChat={(id) => deleteChat.mutate(id)} onUpdateProject={(id, values) => updateProject.mutate({ id, values })} onDeleteProject={(id) => deleteProject.mutate(id)} />
       <main>{activeContent}</main>
       <JobsPanel />
-      {(send.error || regenerate.error || branch.error || stop.error || createChat.error || createProject.error) && <div className="toast error"><X size={16} />{(send.error || regenerate.error || branch.error || stop.error || createChat.error || createProject.error)?.message}</div>}
+      {(send.error || regenerate.error || branch.error || stop.error || createChat.error || createProject.error || manageChat.error || deleteChat.error || updateProject.error || deleteProject.error) && <div className="toast error"><X size={16} />{(send.error || regenerate.error || branch.error || stop.error || createChat.error || createProject.error || manageChat.error || deleteChat.error || updateProject.error || deleteProject.error)?.message}</div>}
     </div>
   );
 }

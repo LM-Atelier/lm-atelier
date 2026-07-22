@@ -39,6 +39,35 @@ async def wait_for_run(client: AsyncClient, run_id: str) -> dict:  # type: ignor
     raise AssertionError("run did not complete")
 
 
+async def test_project_and_chat_management_contract(client: AsyncClient) -> None:
+    project = (await client.post("/api/projects", json={"name": "Research Lab"})).json()
+    chat = (
+        await client.post("/api/chats", json={"title": "Model notes", "project_id": project["id"]})
+    ).json()
+
+    project_search = await client.get("/api/projects", params={"query": "research"})
+    chat_search = await client.get("/api/chats", params={"query": "notes"})
+    assert [item["id"] for item in project_search.json()] == [project["id"]]
+    assert [item["id"] for item in chat_search.json()] == [chat["id"]]
+
+    archived = await client.patch(
+        f"/api/chats/{chat['id']}",
+        json={"title": "Archived notes", "archived": True, "project_id": None},
+    )
+    assert archived.status_code == 200
+    assert archived.json()["project_id"] is None
+    assert (await client.get("/api/chats")).json() == []
+    archived_list = await client.get("/api/chats", params={"include_archived": True})
+    assert [item["id"] for item in archived_list.json()] == [chat["id"]]
+
+    restored = await client.patch(f"/api/chats/{chat['id']}", json={"archived": False})
+    assert restored.status_code == 200
+    assert (await client.delete(f"/api/projects/{project['id']}")).status_code == 204
+    assert (await client.get(f"/api/chats/{chat['id']}")).json()["project_id"] is None
+    assert (await client.delete(f"/api/chats/{chat['id']}")).status_code == 204
+    assert (await client.get(f"/api/chats/{chat['id']}")).status_code == 404
+
+
 async def test_project_chat_text_and_inline_image_flow(client: AsyncClient) -> None:
     project_response = await client.post("/api/projects", json={"name": "Demo"})
     assert project_response.status_code == 201
