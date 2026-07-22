@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import math
 from collections.abc import AsyncIterator
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -21,6 +22,12 @@ class ChatEvent:
     type: str
     text: str = ""
     data: dict[str, Any] = field(default_factory=dict)
+
+
+def estimate_chat_tokens(messages: list[dict[str, Any]]) -> int:
+    """Return a conservative fallback when an engine tokenizer is unavailable."""
+    characters = sum(len(str(message.get("content", ""))) for message in messages)
+    return max(1, math.ceil(characters / 3) + (6 * len(messages)))
 
 
 @dataclass
@@ -55,6 +62,8 @@ class MediaEvent:
 
 class ChatAdapter(Protocol):
     async def capabilities(self) -> EngineCapabilities: ...
+
+    async def count_tokens(self, messages: list[dict[str, Any]]) -> int: ...
 
     def stream(self, request: ChatRequest) -> AsyncIterator[ChatEvent]: ...
 

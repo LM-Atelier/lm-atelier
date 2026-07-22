@@ -310,15 +310,23 @@ class ConversationOrchestrator:
             run = session.get(Run, run_id)
             if not run:
                 return
-            messages = self._context_messages(session, run)
+            messages, request_settings, context_metadata = await self._prepare_chat_context(
+                session, run
+            )
+            run.provenance_json = {
+                **run.provenance_json,
+                "context": context_metadata,
+            }
+            session.commit()
             request = ChatRequest(
                 run_id=run.id,
                 messages=messages,
-                settings=run.settings_json,
+                settings=request_settings,
             )
             assistant_id = run.assistant_message_id
 
         accumulated = ""
+        completion_metadata: dict[str, Any] = {}
         last_persisted_length = 0
         last_persisted_at = time.monotonic()
         async for event in self.engines.chat.stream(request):
@@ -345,6 +353,8 @@ class ConversationOrchestrator:
                 return
             elif event.type == "error":
                 raise RuntimeError(str(event.data.get("error", "chat engine failed")))
+            elif event.type in {"usage", "complete"}:
+                completion_metadata.update(event.data)
 
         with SessionLocal() as session:
             message = session.get(Message, assistant_id)
@@ -362,9 +372,90 @@ class ConversationOrchestrator:
                     message,
                     [MessagePart(position=0, type=PartType.TEXT.value, text=accumulated.rstrip())],
                 )
-            self._complete(session, run, job, {"characters": len(accumulated)})
+            context_metadata = dict(run.provenance_json.get("context", {}))
+            if usage := completion_metadata.get("usage"):
+                context_metadata["usage"] = usage
+            run.provenance_json = {
+                **run.provenance_json,
+                "context": context_metadata,
+                "completion": completion_metadata,
+            }
+            metadata_part = next(
+                (part for part in message.parts if part.type == PartType.GENERATION_METADATA.value),
+                None,
+            )
+            metadata = {
+                "run_id": run.id,
+                "context": context_metadata,
+                "completion": completion_metadata,
+            }
+            if metadata_part:
+                metadata_part.metadata_json = metadata
+            else:
+                message.parts.append(
+                    MessagePart(
+                        position=max((part.position for part in message.parts), default=-1) + 1,
+                        type=PartType.GENERATION_METADATA.value,
+                        metadata_json=metadata,
+                    )
+                )
+            self._complete(
+                session,
+                run,
+                job,
+                {"characters": len(accumulated), "context": context_metadata},
+            )
             session.commit()
         await self.events.publish("run.completed", run_id, {"job_id": job_id})
+
+    async def _prepare_chat_context(
+        self, session: Session, run: Run
+    ) -> tuple[list[dict[str, str]], dict[str, Any], dict[str, Any]]:
+        messages = self._context_messages(session, run)
+        profile = session.get(ModelProfile, run.profile_id) if run.profile_id else None
+        context_limit = int(
+            (profile.load_settings_json if profile else {}).get("context_length", 8192)
+        )
+        requested_output = int(run.settings_json.get("max_tokens", 1024))
+        safety_tokens = min(128, max(32, context_limit // 100))
+        maximum_output = max(1, context_limit - safety_tokens - 64)
+        output_limit = min(requested_output, maximum_output)
+        input_budget = max(64, context_limit - output_limit - safety_tokens)
+
+        input_tokens = await self.engines.chat.count_tokens(messages)
+        omitted = 0
+        system_messages = 1 if messages and messages[0].get("role") == "system" else 0
+        while input_tokens > input_budget and len(messages) > system_messages + 1:
+            remove_count = 1
+            if (
+                messages[system_messages].get("role") == MessageRole.USER.value
+                and len(messages) > system_messages + 2
+                and messages[system_messages + 1].get("role") == MessageRole.ASSISTANT.value
+            ):
+                remove_count = 2
+            del messages[system_messages : system_messages + remove_count]
+            omitted += remove_count
+            input_tokens = await self.engines.chat.count_tokens(messages)
+        if input_tokens > input_budget:
+            raise ValueError(
+                "The current instructions and message exceed this profile's context window. "
+                "Increase Context length, reduce Maximum output, or shorten the message."
+            )
+
+        request_settings = {**run.settings_json, "max_tokens": output_limit}
+        metadata = {
+            "policy": "preserve-system-and-newest",
+            "context_limit": context_limit,
+            "input_budget": input_budget,
+            "input_tokens": input_tokens,
+            "requested_output_tokens": requested_output,
+            "output_limit": output_limit,
+            "safety_tokens": safety_tokens,
+            "messages_included": len(messages),
+            "messages_omitted": omitted,
+            "output_adjusted": output_limit != requested_output,
+        }
+        return messages, request_settings, metadata
 
     async def _prepare_device_handoff(self, operation: str) -> str | None:
         if (

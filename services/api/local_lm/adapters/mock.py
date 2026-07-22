@@ -3,11 +3,19 @@ from __future__ import annotations
 import asyncio
 import html
 import shutil
+from typing import Any
 
 from ..domain import Operation
 from ..schemas import EngineCapabilities
 from ..settings_registry import CHAT_SETTINGS, IMAGE_SETTINGS, VIDEO_SETTINGS
-from .base import ChatEvent, ChatRequest, GeneratedAsset, MediaEvent, MediaRequest
+from .base import (
+    ChatEvent,
+    ChatRequest,
+    GeneratedAsset,
+    MediaEvent,
+    MediaRequest,
+    estimate_chat_tokens,
+)
 
 
 class MockChatAdapter:
@@ -28,6 +36,9 @@ class MockChatAdapter:
             healthy=True,
             details={"purpose": "offline development and contract testing"},
         )
+
+    async def count_tokens(self, messages: list[dict[str, Any]]) -> int:
+        return estimate_chat_tokens(messages)
 
     async def stream(self, request: ChatRequest):  # type: ignore[no-untyped-def]
         prompt = next(
