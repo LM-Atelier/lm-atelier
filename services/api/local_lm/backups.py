@@ -9,7 +9,7 @@ import tempfile
 import zipfile
 from contextlib import closing
 from datetime import UTC, datetime
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 
 from .config import Settings
 from .schemas import BackupInfo
@@ -211,7 +211,7 @@ class BackupManager:
                     if not isinstance(record, dict):
                         raise ValueError("invalid media backup artifact")
                     archive_path = str(record.get("archive_path", ""))
-                    relative_path = Path(str(record.get("relative_path", "")))
+                    relative_path = PurePosixPath(str(record.get("relative_path", "")))
                     digest_value = record.get("sha256")
                     if (
                         archive_path not in names
@@ -220,7 +220,7 @@ class BackupManager:
                         or archive_path in seen
                         or not isinstance(digest_value, str)
                         or relative_path
-                        != Path(digest_value[:2]) / digest_value[2:4] / digest_value
+                        != PurePosixPath(digest_value[:2]) / digest_value[2:4] / digest_value
                     ):
                         raise ValueError("unsafe media backup path")
                     seen.add(archive_path)
