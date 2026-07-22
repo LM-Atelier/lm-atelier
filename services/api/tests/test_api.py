@@ -302,6 +302,10 @@ async def test_workflow_revisions_and_validation(client: AsyncClient) -> None:
             "operation": "text_to_image",
             "engine": "mock",
             "api_graph": {"node": {"class_type": "Mock"}},
+            "input_schema": {
+                "type": "object",
+                "properties": {"steps": {"type": "integer", "default": 20}},
+            },
             "trusted": True,
         },
     )
@@ -316,6 +320,43 @@ async def test_workflow_revisions_and_validation(client: AsyncClient) -> None:
     validation = await client.post(f"/api/workflows/{workflow['id']}/validate")
     assert validation.status_code == 200
     assert validation.json()["valid"] is True
+
+    exported = await client.get(f"/api/workflows/{workflow['id']}/export")
+    assert exported.status_code == 200
+    bundle = exported.json()
+    assert bundle["format"] == "lm-atelier-workflow"
+    assert bundle["source_revision"] == 2
+
+    cloned = await client.post(
+        f"/api/workflows/{workflow['id']}/clone", json={"name": "Custom copy"}
+    )
+    assert cloned.status_code == 201
+    assert cloned.json()["name"] == "Custom copy"
+
+    bundle["name"] = "Imported workflow"
+    imported = await client.post("/api/workflows/import", json=bundle)
+    assert imported.status_code == 201
+    assert imported.json()["revisions"][0]["api_graph_json"] == {"node": {"class_type": "MockV2"}}
+
+    restored = await client.post(
+        f"/api/workflows/{workflow['id']}/revisions/{workflow['revisions'][0]['id']}/restore"
+    )
+    assert restored.status_code == 201
+    assert restored.json()["version"] == 3
+    assert restored.json()["api_graph_json"] == {"node": {"class_type": "Mock"}}
+
+    missing_dependency = await client.post(
+        f"/api/workflows/{workflow['id']}/revisions",
+        json={
+            "api_graph": {"node": {"class_type": "Mock"}},
+            "dependencies": {"models": ["not-installed"]},
+            "trusted": True,
+        },
+    )
+    assert missing_dependency.status_code == 201
+    validation = await client.post(f"/api/workflows/{workflow['id']}/validate")
+    assert validation.json()["valid"] is False
+    assert "missing model dependency" in validation.json()["errors"][0]
 
 
 async def test_profile_edit_clone_reset_and_portable_bundle(client: AsyncClient) -> None:

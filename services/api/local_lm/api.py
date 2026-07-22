@@ -86,10 +86,13 @@ from .schemas import (
     TurnAccepted,
     TurnRequest,
     WorkerStatus,
+    WorkflowBundle,
+    WorkflowClone,
     WorkflowCreate,
     WorkflowOut,
     WorkflowRevisionCreate,
     WorkflowRevisionOut,
+    WorkflowUpdate,
 )
 from .security import SessionSecurity
 from .settings_registry import CHAT_SETTINGS, IMAGE_SETTINGS, VIDEO_SETTINGS, validate_settings
@@ -1240,6 +1243,61 @@ async def create_workflow(payload: WorkflowCreate, session: SessionDep) -> Workf
     return created
 
 
+@router.patch("/workflows/{workflow_id}", response_model=WorkflowOut)
+async def update_workflow(
+    workflow_id: str, payload: WorkflowUpdate, session: SessionDep
+) -> WorkflowDefinition:
+    definition = session.get(WorkflowDefinition, workflow_id)
+    if not definition:
+        raise HTTPException(404, "workflow not found")
+    for key, value in payload.model_dump(exclude_unset=True).items():
+        setattr(definition, key, value)
+    session.commit()
+    updated = session.scalar(
+        select(WorkflowDefinition)
+        .options(selectinload(WorkflowDefinition.revisions))
+        .where(WorkflowDefinition.id == workflow_id)
+    )
+    if not updated:
+        raise HTTPException(500, "workflow could not be reloaded")
+    return updated
+
+
+@router.get("/workflows/{workflow_id}/export", response_model=WorkflowBundle)
+async def export_workflow(workflow_id: str, session: SessionDep) -> WorkflowBundle:
+    definition, revision = _workflow_and_revision(session, workflow_id)
+    return _workflow_bundle(definition, revision)
+
+
+@router.post("/workflows/import", response_model=WorkflowOut, status_code=201)
+async def import_workflow(payload: WorkflowBundle, session: SessionDep) -> WorkflowDefinition:
+    return await create_workflow(
+        WorkflowCreate(
+            name=payload.name,
+            operation=payload.operation,
+            description=payload.description,
+            engine=payload.engine,
+            engine_version=payload.engine_version,
+            ui_graph=payload.ui_graph,
+            api_graph=payload.api_graph,
+            input_schema=payload.input_schema,
+            dependencies=payload.dependencies,
+            trusted=payload.trusted,
+        ),
+        session,
+    )
+
+
+@router.post("/workflows/{workflow_id}/clone", response_model=WorkflowOut, status_code=201)
+async def clone_workflow(
+    workflow_id: str, payload: WorkflowClone, session: SessionDep
+) -> WorkflowDefinition:
+    definition, revision = _workflow_and_revision(session, workflow_id)
+    bundle = _workflow_bundle(definition, revision)
+    bundle.name = payload.name or f"{definition.name} copy"
+    return await import_workflow(bundle, session)
+
+
 @router.post(
     "/workflows/{workflow_id}/revisions",
     response_model=WorkflowRevisionOut,
@@ -1279,6 +1337,31 @@ async def create_workflow_revision(
     return revision
 
 
+@router.post(
+    "/workflows/{workflow_id}/revisions/{revision_id}/restore",
+    response_model=WorkflowRevisionOut,
+    status_code=201,
+)
+async def restore_workflow_revision(
+    workflow_id: str, revision_id: str, session: SessionDep
+) -> WorkflowRevision:
+    source = session.get(WorkflowRevision, revision_id)
+    if not source or source.workflow_id != workflow_id:
+        raise HTTPException(404, "workflow revision not found")
+    return await create_workflow_revision(
+        workflow_id,
+        WorkflowRevisionCreate(
+            engine_version=source.engine_version,
+            ui_graph=source.ui_graph_json,
+            api_graph=source.api_graph_json,
+            input_schema=source.input_schema_json,
+            dependencies=source.dependencies_json,
+            trusted=source.trusted,
+        ),
+        session,
+    )
+
+
 @router.post("/workflows/{workflow_id}/validate")
 async def validate_workflow(
     workflow_id: str, request: Request, session: SessionDep
@@ -1290,4 +1373,75 @@ async def validate_workflow(
     if not revision:
         raise HTTPException(404, "workflow revision not found")
     errors = await _services(request).engines.media.validate_workflow(revision.api_graph_json)
-    return {"valid": not errors, "errors": errors, "revision_id": revision.id}
+    warnings: list[str] = []
+    dependencies = revision.dependencies_json
+    required_models = dependencies.get("models", [])
+    installed = session.scalars(select(ModelInstall)).all()
+    installed_values = {
+        value for model in installed for value in (model.id, model.name, model.local_path)
+    }
+    for dependency in required_models if isinstance(required_models, list) else []:
+        value = (
+            dependency.get("id") or dependency.get("name") or dependency.get("path")
+            if isinstance(dependency, dict)
+            else dependency
+        )
+        if value and str(value) not in installed_values:
+            errors.append(f"missing model dependency: {value}")
+    required_engine_version = dependencies.get("engine_version")
+    if required_engine_version:
+        capabilities = await _services(request).engines.media.capabilities()
+        if str(required_engine_version) != capabilities.version:
+            errors.append(
+                "media engine version does not match the workflow requirement: "
+                f"expected {required_engine_version}, found {capabilities.version}"
+            )
+    minimum_vram = dependencies.get("minimum_vram_bytes")
+    if isinstance(minimum_vram, int) and minimum_vram > 0:
+        system = collect_system_info(_services(request).settings)
+        available = max(
+            (
+                device.available_memory_bytes or 0
+                for device in system.devices
+                if device.kind != "cpu"
+            ),
+            default=0,
+        )
+        if not available:
+            warnings.append("no accelerator memory was detected for this workflow")
+        elif available < minimum_vram:
+            errors.append("available accelerator memory is below the workflow requirement")
+    return {
+        "valid": not errors,
+        "errors": errors,
+        "warnings": warnings,
+        "revision_id": revision.id,
+    }
+
+
+def _workflow_and_revision(
+    session: Session, workflow_id: str
+) -> tuple[WorkflowDefinition, WorkflowRevision]:
+    definition = session.get(WorkflowDefinition, workflow_id)
+    if not definition or not definition.current_revision_id:
+        raise HTTPException(404, "workflow not found")
+    revision = session.get(WorkflowRevision, definition.current_revision_id)
+    if not revision:
+        raise HTTPException(404, "workflow revision not found")
+    return definition, revision
+
+
+def _workflow_bundle(definition: WorkflowDefinition, revision: WorkflowRevision) -> WorkflowBundle:
+    return WorkflowBundle(
+        name=definition.name,
+        operation=Operation(definition.operation),
+        description=definition.description,
+        engine=revision.engine,
+        engine_version=revision.engine_version,
+        ui_graph=revision.ui_graph_json,
+        api_graph=revision.api_graph_json,
+        input_schema=revision.input_schema_json,
+        dependencies=revision.dependencies_json,
+        trusted=revision.trusted,
+        source_revision=revision.version,
+    )

@@ -321,6 +321,31 @@ class WorkflowRevisionCreate(ApiModel):
     trusted: bool = False
 
 
+class WorkflowUpdate(ApiModel):
+    name: str | None = Field(default=None, min_length=1, max_length=240)
+    description: str | None = Field(default=None, max_length=10_000)
+
+
+class WorkflowClone(ApiModel):
+    name: str | None = Field(default=None, min_length=1, max_length=240)
+
+
+class WorkflowBundle(ApiModel):
+    format: Literal["lm-atelier-workflow"] = "lm-atelier-workflow"
+    version: Literal[1] = 1
+    name: str = Field(min_length=1, max_length=240)
+    operation: Operation
+    description: str = Field(default="", max_length=10_000)
+    engine: str = "comfyui"
+    engine_version: str | None = None
+    ui_graph: dict[str, Any] = Field(default_factory=dict)
+    api_graph: dict[str, Any]
+    input_schema: dict[str, Any] = Field(default_factory=dict)
+    dependencies: dict[str, Any] = Field(default_factory=dict)
+    trusted: bool = False
+    source_revision: int | None = None
+
+
 class WorkflowRevisionOut(ApiModel):
     id: str
     workflow_id: str
