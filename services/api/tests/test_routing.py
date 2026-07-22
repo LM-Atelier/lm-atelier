@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import pytest
 
+from local_lm.adapters.mock import MockChatAdapter
 from local_lm.domain import Operation, RoutingMode
 from local_lm.routing import ModalityRouter
 
@@ -45,3 +46,29 @@ def test_image_input_selects_image_to_video() -> None:
         input_artifact_ids=["sha256:example"],
     )
     assert plan.operation == Operation.IMAGE_TO_VIDEO
+
+
+@pytest.mark.asyncio
+async def test_structured_planner_preserves_text_discussion() -> None:
+    plan = await ModalityRouter().plan_with_model(
+        adapter=MockChatAdapter(),
+        text="Explain why diffusion images can look oversaturated",
+        mode=RoutingMode.AUTO,
+        input_artifact_ids=[],
+    )
+    assert plan.operation == Operation.TEXT
+    assert plan.reason.startswith("model planner:")
+
+
+@pytest.mark.asyncio
+async def test_structured_planner_resolves_prior_image_follow_up() -> None:
+    plan = await ModalityRouter().plan_with_model(
+        adapter=MockChatAdapter(),
+        text="Make it dusk and add warm window lights",
+        mode=RoutingMode.AUTO,
+        input_artifact_ids=[],
+        has_prior_image=True,
+        conversation=[{"role": "user", "content": "Draw a mountain cabin"}],
+    )
+    assert plan.operation == Operation.IMAGE_TO_IMAGE
+    assert plan.standalone_prompt == "Make it dusk and add warm window lights"

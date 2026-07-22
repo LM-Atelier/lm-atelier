@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import asyncio
 import html
+import json
+import re
 import shutil
 from typing import Any
 
@@ -42,6 +44,48 @@ class MockChatAdapter:
 
     async def stream(self, request: ChatRequest):  # type: ignore[no-untyped-def]
         if request.tools:
+            prompt = next(
+                (
+                    str(message.get("content", ""))
+                    for message in reversed(request.messages)
+                    if message.get("role") == "user"
+                ),
+                "",
+            )
+            prior_image = any(
+                "Prior generated image available: yes" in str(message.get("content", ""))
+                for message in request.messages
+            )
+            if re.search(r"\b(video|animation|clip|animate)\b", prompt, re.IGNORECASE):
+                mode = "video"
+            elif re.search(
+                r"\b(image|picture|photo|portrait|illustration|draw|paint|render)\b",
+                prompt,
+                re.IGNORECASE,
+            ) or (
+                prior_image
+                and re.search(
+                    r"^\s*(?:make|change|turn|add|remove|brighten|darken)\b",
+                    prompt,
+                    re.IGNORECASE,
+                )
+            ):
+                mode = "image"
+            else:
+                mode = "text"
+            required = (
+                request.tools[0].get("function", {}).get("parameters", {}).get("required", [])
+            )
+            if required == ["mode", "confidence"]:
+                arguments = {"mode": mode, "confidence": 1}
+            else:
+                arguments = {
+                    "mode": mode,
+                    "confidence": 0.6 if "maybe" in prompt.lower() else 0.98,
+                    "standalone_prompt": prompt,
+                    "reason": "deterministic mock planner",
+                    "use_prior_image": prior_image and mode in {"image", "video"},
+                }
             yield ChatEvent(
                 type="tool_delta",
                 data={
@@ -52,7 +96,7 @@ class MockChatAdapter:
                             "type": "function",
                             "function": {
                                 "name": "choose_route",
-                                "arguments": '{"mode":"image","confidence":1}',
+                                "arguments": json.dumps(arguments),
                             },
                         }
                     ]

@@ -144,6 +144,7 @@ class TurnRequest(ApiModel):
     parent_message_id: str | None = None
     input_artifact_ids: list[str] = Field(default_factory=list, max_length=16)
     settings: dict[str, Any] = Field(default_factory=dict)
+    confirm_media: bool = False
     idempotency_key: str | None = Field(default=None, max_length=200)
 
 

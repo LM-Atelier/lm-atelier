@@ -307,6 +307,27 @@ async def test_chat_tool_capability_probe_executes_declared_schema(client: Async
     assert response.json()["arguments"] == {"mode": "image", "confidence": 1}
 
 
+async def test_uncertain_auto_media_requires_confirmation(client: AsyncClient) -> None:
+    chat = (await client.post("/api/chats", json={"title": "Routing"})).json()
+    payload = {
+        "text": "Maybe create an image of a quiet harbor",
+        "mode": "auto",
+        "idempotency_key": "uncertain-media-route",
+    }
+    response = await client.post(f"/api/chats/{chat['id']}/turns", json=payload)
+    assert response.status_code == 409
+    detail = response.json()["detail"]
+    assert detail["code"] == "route_confirmation_required"
+    assert detail["plan"]["operation"] == "text_to_image"
+
+    confirmed = await client.post(
+        f"/api/chats/{chat['id']}/turns",
+        json={**payload, "confirm_media": True},
+    )
+    assert confirmed.status_code == 202
+    assert confirmed.json()["run"]["operation"] == "text_to_image"
+
+
 async def test_turn_idempotency_returns_original_run(client: AsyncClient) -> None:
     chat = (await client.post("/api/chats", json={"title": "Idempotency"})).json()
     payload = {"text": "Hello", "mode": "text", "idempotency_key": "stable-key"}

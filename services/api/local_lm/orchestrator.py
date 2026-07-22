@@ -42,7 +42,7 @@ from .models import (
     WorkflowRevision,
 )
 from .processes import ProcessSupervisor
-from .routing import ModalityRouter
+from .routing import ModalityRouter, RouteConfirmationRequired
 from .scheduler import ResourceScheduler
 from .schemas import MessageOut, RunOut, TurnAccepted, TurnRequest
 from .settings_registry import (
@@ -123,7 +123,7 @@ class ConversationOrchestrator:
                             )
             session.commit()
 
-    def create_turn(
+    async def create_turn(
         self,
         session: Session,
         chat_id: str,
@@ -163,12 +163,22 @@ class ConversationOrchestrator:
 
         mode = request.mode or RoutingMode(chat.routing_mode)
         has_prior_image = self._has_prior_image(session, chat.id)
-        plan = self.router.plan(
+        plan = await self.router.plan_with_model(
+            adapter=self.engines.chat,
             text=request.text,
             mode=mode,
             input_artifact_ids=request.input_artifact_ids,
             has_prior_image=has_prior_image,
+            conversation=self._routing_context(session, chat, parent_message_id),
         )
+        if (
+            mode == RoutingMode.AUTO
+            and chat.confirm_uncertain_media
+            and plan.operation != Operation.TEXT
+            and plan.confidence < 0.8
+            and not request.confirm_media
+        ):
+            raise RouteConfirmationRequired(plan)
         resolved_input_ids = list(request.input_artifact_ids)
         if plan.operation in {Operation.IMAGE_TO_IMAGE, Operation.IMAGE_TO_VIDEO}:
             if not resolved_input_ids:
@@ -917,6 +927,35 @@ class ConversationOrchestrator:
             .order_by(Run.created_at.desc())
             .limit(1)
         )
+
+    @staticmethod
+    def _routing_context(
+        session: Session, chat: Chat, parent_message_id: str | None
+    ) -> list[dict[str, str]]:
+        messages: list[dict[str, str]] = []
+        if chat.project_id:
+            project = session.get(Project, chat.project_id)
+            if project and project.instructions:
+                messages.append({"role": "system", "content": project.instructions})
+        rows: list[Message] = []
+        current_id = parent_message_id
+        visited: set[str] = set()
+        while current_id and current_id not in visited and len(rows) < 8:
+            visited.add(current_id)
+            message = session.scalar(
+                select(Message)
+                .options(selectinload(Message.parts))
+                .where(Message.id == current_id, Message.chat_id == chat.id)
+            )
+            if not message:
+                break
+            rows.append(message)
+            current_id = message.parent_id
+        for message in reversed(rows):
+            content = "\n".join(part.text for part in message.parts if part.text).strip()
+            if content:
+                messages.append({"role": message.role, "content": content})
+        return messages
 
     @staticmethod
     def _profile_for_operation(chat: Chat, operation: Operation) -> str | None:

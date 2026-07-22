@@ -33,6 +33,17 @@ import type {
 let csrfToken = "";
 let sessionPromise: Promise<void> | null = null;
 
+export class ApiError extends Error {
+  constructor(
+    public readonly status: number,
+    public readonly detail: unknown,
+    message: string,
+  ) {
+    super(message);
+    this.name = "ApiError";
+  }
+}
+
 async function ensureSession(): Promise<void> {
   if (csrfToken) return;
   if (!sessionPromise) {
@@ -58,13 +69,16 @@ async function request<T>(path: string, init: RequestInit = {}): Promise<T> {
   const response = await fetch(path, { ...init, headers, credentials: "same-origin" });
   if (!response.ok) {
     let message = `${response.status} ${response.statusText}`;
+    let detail: unknown;
     try {
-      const payload = (await response.json()) as { detail?: string };
-      if (payload.detail) message = payload.detail;
+      const payload = (await response.json()) as { detail?: unknown };
+      detail = payload.detail;
+      if (typeof detail === "string") message = detail;
+      else if (detail && typeof detail === "object" && "message" in detail && typeof detail.message === "string") message = detail.message;
     } catch {
       // Preserve the HTTP status text.
     }
-    throw new Error(message);
+    throw new ApiError(response.status, detail, message);
   }
   if (response.status === 204) return undefined as T;
   return (await response.json()) as T;
@@ -93,23 +107,43 @@ export const api = {
   updateChat: (id: string, values: Partial<Chat>) =>
     request<Chat>(`/api/chats/${id}`, { method: "PATCH", body: JSON.stringify(values) }),
   deleteChat: (id: string) => request<void>(`/api/chats/${id}`, { method: "DELETE" }),
-  sendTurn: (
+  sendTurn: async (
     chatId: string,
     text: string,
     mode: RoutingMode,
     inputArtifactIds: string[],
     settings: Record<string, unknown>,
-  ) =>
-    request<TurnAccepted>(`/api/chats/${chatId}/turns`, {
+  ) => {
+    const idempotencyKey = crypto.randomUUID();
+    const submit = (selectedMode: RoutingMode, confirmed = false) => request<TurnAccepted>(`/api/chats/${chatId}/turns`, {
       method: "POST",
       body: JSON.stringify({
         text,
-        mode,
+        mode: selectedMode,
         input_artifact_ids: inputArtifactIds,
         settings,
-        idempotency_key: crypto.randomUUID(),
+        confirm_media: confirmed,
+        idempotency_key: idempotencyKey,
       }),
-    }),
+    });
+    try {
+      return await submit(mode);
+    } catch (error) {
+      const detail = error instanceof ApiError && error.detail && typeof error.detail === "object" ? error.detail as Record<string, unknown> : null;
+      const plan = detail?.plan && typeof detail.plan === "object" ? detail.plan as Record<string, unknown> : null;
+      const operation = typeof plan?.operation === "string" ? plan.operation : "";
+      if (
+        error instanceof ApiError
+        && error.status === 409
+        && detail?.code === "route_confirmation_required"
+        && (operation.includes("image") || operation.includes("video"))
+        && window.confirm(`Auto mode suggests a ${operation.includes("video") ? "video" : "image"} generation. Start it?`)
+      ) {
+        return submit(operation.includes("video") ? "video" : "image", true);
+      }
+      throw error;
+    }
+  },
   regenerateMessage: (messageId: string) =>
     request<TurnAccepted>(`/api/messages/${messageId}/regenerate`, {
       method: "POST",
