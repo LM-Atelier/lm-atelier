@@ -34,6 +34,9 @@ class Settings(BaseSettings):
     auto_unload_chat_for_media: bool = True
     hf_token: str | None = None
     max_upload_bytes: int = 100 * 1024 * 1024
+    artifact_retention_days: int = Field(default=30, ge=1, le=3650)
+    temporary_retention_hours: int = Field(default=24, ge=1, le=168)
+    storage_warning_free_bytes: int = Field(default=10 * 1024**3, ge=0)
     max_concurrent_downloads: int = Field(default=2, ge=1, le=8)
     event_history_size: int = Field(default=2_000, ge=100, le=50_000)
 

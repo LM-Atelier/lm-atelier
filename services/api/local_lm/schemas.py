@@ -64,6 +64,40 @@ class ArtifactOut(ApiModel):
     url: str | None = None
 
 
+class ArtifactLibraryItem(ArtifactOut):
+    reference_count: int = 0
+    chat_ids: list[str] = Field(default_factory=list)
+    project_ids: list[str] = Field(default_factory=list)
+
+
+class ArtifactStorageInfo(ApiModel):
+    total_bytes: int
+    total_count: int
+    referenced_bytes: int
+    referenced_count: int
+    unreferenced_bytes: int
+    unreferenced_count: int
+    temporary_bytes: int
+    temporary_count: int
+    eligible_bytes: int
+    eligible_count: int
+    disk_free_bytes: int
+    warning: bool
+    retention_days: int
+    temporary_retention_hours: int
+
+
+class ArtifactCleanupRequest(ApiModel):
+    dry_run: bool = True
+
+
+class ArtifactCleanupResult(ApiModel):
+    dry_run: bool
+    marked_count: int
+    removed_count: int
+    reclaimed_bytes: int
+
+
 class MessagePartOut(ApiModel):
     id: str
     position: int

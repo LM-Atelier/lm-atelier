@@ -17,6 +17,9 @@ vi.mock("./api", () => ({
     updateChat: vi.fn(),
     deleteChat: vi.fn(),
     exportProject: vi.fn(),
+    artifacts: vi.fn().mockResolvedValue([]),
+    artifactStorage: vi.fn().mockResolvedValue({ total_bytes: 0, total_count: 0, referenced_bytes: 0, referenced_count: 0, unreferenced_bytes: 0, unreferenced_count: 0, temporary_bytes: 0, temporary_count: 0, eligible_bytes: 0, eligible_count: 0, disk_free_bytes: 1024, warning: false, retention_days: 30, temporary_retention_hours: 24 }),
+    cleanupArtifacts: vi.fn(),
     sendTurn: vi.fn(),
     regenerateMessage: vi.fn(),
     branchMessage: vi.fn(),
@@ -587,5 +590,49 @@ describe("App", () => {
     expect(screen.getByDisplayValue("20")).toBeInTheDocument();
     expect(screen.getByText("v2 · current")).toBeInTheDocument();
     expect(screen.queryByText("Restore as new revision")).not.toBeInTheDocument();
+  });
+
+  it("browses generated media and exposes retention-safe cleanup", async () => {
+    const stamp = "2026-07-22T00:00:00Z";
+    vi.mocked(api.artifacts).mockResolvedValue([{
+      id: "sha256:image",
+      sha256: "0123456789abcdef",
+      kind: "image",
+      media_type: "image/png",
+      size_bytes: 2048,
+      original_name: "observatory.png",
+      metadata_json: {},
+      created_at: stamp,
+      url: "/api/artifacts/sha256:image/content",
+      reference_count: 1,
+      chat_ids: ["chat-1"],
+      project_ids: [],
+    }]);
+    vi.mocked(api.artifactStorage).mockResolvedValue({
+      total_bytes: 2048,
+      total_count: 1,
+      referenced_bytes: 2048,
+      referenced_count: 1,
+      unreferenced_bytes: 0,
+      unreferenced_count: 0,
+      temporary_bytes: 0,
+      temporary_count: 0,
+      eligible_bytes: 0,
+      eligible_count: 0,
+      disk_free_bytes: 1024 ** 3,
+      warning: false,
+      retention_days: 30,
+      temporary_retention_hours: 24,
+    });
+    const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+    render(
+      <QueryClientProvider client={client}>
+        <App />
+      </QueryClientProvider>,
+    );
+    fireEvent.click(await screen.findByText("Media library"));
+    expect(await screen.findByText("observatory.png")).toBeInTheDocument();
+    expect(screen.getByText(/2\.0 KB · 1 reference/)).toBeInTheDocument();
+    expect(screen.getByText("Clean eligible")).toBeDisabled();
   });
 });
