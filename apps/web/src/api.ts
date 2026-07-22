@@ -203,8 +203,18 @@ export const api = {
     request<WorkerStatus>(`/api/workers/${name}/stop`, { method: "POST" }),
   backups: () => request<BackupInfo[]>("/api/backups"),
   createBackup: () => request<BackupInfo>("/api/backups", { method: "POST" }),
-  exportProject: (projectId: string) =>
-    request<{ url: string }>(`/api/projects/${projectId}/export`, { method: "POST" }),
+  exportProject: (projectId: string, includeMedia = true) =>
+    request<{ url: string }>(`/api/projects/${projectId}/export?${new URLSearchParams({ include_media: String(includeMedia) })}`, { method: "POST" }),
+  importProject: async (file: File) => {
+    await ensureSession();
+    const form = new FormData();
+    form.append("archive", file);
+    return request<Project>("/api/projects/import", {
+      method: "POST",
+      headers: { "x-local-lm-csrf": csrfToken },
+      body: form,
+    });
+  },
   artifacts: (kind = "", query = "") => {
     const parameters = new URLSearchParams({ query });
     if (kind) parameters.set("kind", kind);
