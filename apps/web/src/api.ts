@@ -6,9 +6,12 @@ import type {
   Chat,
   ChatDetail,
   EngineCapabilities,
+  GenerationPreset,
+  GenerationPresetBundle,
   Job,
   ModelInstall,
   ModelProfile,
+  ModelProfileBundle,
   PlatformMatrixEntry,
   Project,
   ReferenceRecipe,
@@ -118,6 +121,46 @@ export const api = {
         is_default: false,
       }),
     }),
+  updateProfile: (
+    id: string,
+    values: {
+      name?: string;
+      load_settings?: Record<string, unknown>;
+      request_settings?: Record<string, unknown>;
+      is_default?: boolean;
+    },
+  ) => request<ModelProfile>(`/api/profiles/${id}`, { method: "PATCH", body: JSON.stringify(values) }),
+  cloneProfile: (id: string, name?: string) =>
+    request<ModelProfile>(`/api/profiles/${id}/clone`, {
+      method: "POST",
+      body: JSON.stringify({ name }),
+    }),
+  resetProfile: (id: string) =>
+    request<ModelProfile>(`/api/profiles/${id}/reset`, { method: "POST" }),
+  exportProfile: (id: string) => request<ModelProfileBundle>(`/api/profiles/${id}/export`),
+  importProfile: (bundle: ModelProfileBundle) =>
+    request<ModelProfile>("/api/profiles/import", { method: "POST", body: JSON.stringify(bundle) }),
+  presets: () => request<GenerationPreset[]>("/api/presets"),
+  createPreset: (role: GenerationPreset["role"], name: string) =>
+    request<GenerationPreset>("/api/presets", {
+      method: "POST",
+      body: JSON.stringify({ role, name, settings: {} }),
+    }),
+  updatePreset: (
+    id: string,
+    values: { name?: string; settings?: Record<string, unknown>; is_default?: boolean },
+  ) => request<GenerationPreset>(`/api/presets/${id}`, { method: "PATCH", body: JSON.stringify(values) }),
+  clonePreset: (id: string, name?: string) =>
+    request<GenerationPreset>(`/api/presets/${id}/clone`, {
+      method: "POST",
+      body: JSON.stringify({ name }),
+    }),
+  resetPreset: (id: string) =>
+    request<GenerationPreset>(`/api/presets/${id}/reset`, { method: "POST" }),
+  exportPreset: (id: string) => request<GenerationPresetBundle>(`/api/presets/${id}/export`),
+  importPreset: (bundle: GenerationPresetBundle) =>
+    request<GenerationPreset>("/api/presets/import", { method: "POST", body: JSON.stringify(bundle) }),
+  deletePreset: (id: string) => request<void>(`/api/presets/${id}`, { method: "DELETE" }),
   workers: () => request<WorkerStatus[]>("/api/workers"),
   loadChatWorker: (profileId: string) =>
     request<WorkerStatus>(`/api/workers/chat/load/${profileId}`, { method: "POST" }),

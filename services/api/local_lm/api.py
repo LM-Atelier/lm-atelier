@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import shutil
 from pathlib import Path
-from typing import Annotated, Any
+from typing import Annotated, Any, Literal, cast
 from urllib.parse import quote
 
 from fastapi import APIRouter, Depends, File, HTTPException, Query, Request, Response, UploadFile
@@ -56,10 +56,14 @@ from .schemas import (
     MessageOut,
     ModelImport,
     ModelInstallOut,
+    ModelProfileBundle,
+    ModelProfileClone,
     ModelProfileCreate,
     ModelProfileOut,
     ModelProfileUpdate,
     PlatformMatrixEntry,
+    PresetBundle,
+    PresetClone,
     PresetCreate,
     PresetOut,
     PresetUpdate,
@@ -766,6 +770,71 @@ async def update_profile(
     return profile
 
 
+@router.post("/profiles/{profile_id}/clone", response_model=ModelProfileOut, status_code=201)
+async def clone_profile(
+    profile_id: str, payload: ModelProfileClone, session: SessionDep
+) -> ModelProfile:
+    source = session.get(ModelProfile, profile_id)
+    if not source:
+        raise HTTPException(404, "profile not found")
+    return await create_profile(
+        ModelProfileCreate(
+            name=payload.name or f"{source.name} copy",
+            role=cast(Literal["chat", "image", "video"], source.role),
+            engine=source.engine,
+            model_install_id=source.model_install_id,
+            load_settings=source.load_settings_json,
+            request_settings=source.request_settings_json,
+        ),
+        session,
+    )
+
+
+@router.post("/profiles/{profile_id}/reset", response_model=ModelProfileOut)
+async def reset_profile(profile_id: str, session: SessionDep) -> ModelProfile:
+    profile = session.get(ModelProfile, profile_id)
+    if not profile:
+        raise HTTPException(404, "profile not found")
+    profile.load_settings_json = {}
+    profile.request_settings_json = {}
+    session.commit()
+    session.refresh(profile)
+    return profile
+
+
+@router.get("/profiles/{profile_id}/export", response_model=ModelProfileBundle)
+async def export_profile(profile_id: str, session: SessionDep) -> ModelProfileBundle:
+    profile = session.get(ModelProfile, profile_id)
+    if not profile:
+        raise HTTPException(404, "profile not found")
+    return ModelProfileBundle(
+        name=profile.name,
+        role=cast(Literal["chat", "image", "video"], profile.role),
+        engine=profile.engine,
+        model_install_id=profile.model_install_id,
+        load_settings=profile.load_settings_json,
+        request_settings=profile.request_settings_json,
+    )
+
+
+@router.post("/profiles/import", response_model=ModelProfileOut, status_code=201)
+async def import_profile(payload: ModelProfileBundle, session: SessionDep) -> ModelProfile:
+    model_install_id = payload.model_install_id
+    if model_install_id and not session.get(ModelInstall, model_install_id):
+        model_install_id = None
+    return await create_profile(
+        ModelProfileCreate(
+            name=payload.name,
+            role=payload.role,
+            engine=payload.engine,
+            model_install_id=model_install_id,
+            load_settings=payload.load_settings,
+            request_settings=payload.request_settings,
+        ),
+        session,
+    )
+
+
 def _preset_fields(role: str):  # type: ignore[no-untyped-def]
     return {"chat": CHAT_SETTINGS, "image": IMAGE_SETTINGS, "video": VIDEO_SETTINGS}[role]
 
@@ -839,6 +908,53 @@ async def delete_preset(preset_id: str, session: SessionDep) -> Response:
     session.delete(preset)
     session.commit()
     return Response(status_code=204)
+
+
+@router.post("/presets/{preset_id}/clone", response_model=PresetOut, status_code=201)
+async def clone_preset(
+    preset_id: str, payload: PresetClone, session: SessionDep
+) -> GenerationPreset:
+    source = session.get(GenerationPreset, preset_id)
+    if not source:
+        raise HTTPException(404, "preset not found")
+    return await create_preset(
+        PresetCreate(
+            name=payload.name or f"{source.name} copy",
+            role=cast(Literal["chat", "image", "video"], source.role),
+            settings=source.settings_json,
+        ),
+        session,
+    )
+
+
+@router.post("/presets/{preset_id}/reset", response_model=PresetOut)
+async def reset_preset(preset_id: str, session: SessionDep) -> GenerationPreset:
+    preset = session.get(GenerationPreset, preset_id)
+    if not preset:
+        raise HTTPException(404, "preset not found")
+    preset.settings_json = {}
+    session.commit()
+    session.refresh(preset)
+    return preset
+
+
+@router.get("/presets/{preset_id}/export", response_model=PresetBundle)
+async def export_preset(preset_id: str, session: SessionDep) -> PresetBundle:
+    preset = session.get(GenerationPreset, preset_id)
+    if not preset:
+        raise HTTPException(404, "preset not found")
+    return PresetBundle(
+        name=preset.name,
+        role=cast(Literal["chat", "image", "video"], preset.role),
+        settings=preset.settings_json,
+    )
+
+
+@router.post("/presets/import", response_model=PresetOut, status_code=201)
+async def import_preset(payload: PresetBundle, session: SessionDep) -> GenerationPreset:
+    return await create_preset(
+        PresetCreate(name=payload.name, role=payload.role, settings=payload.settings), session
+    )
 
 
 @router.get("/workflows", response_model=list[WorkflowOut])
