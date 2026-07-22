@@ -21,13 +21,14 @@ def test_reference_recipes_are_immutable_safe_candidates() -> None:
     assert {recipe.id for recipe in recipes} == {
         "qwen3-8b-q4-k-m",
         "flux1-schnell-fp8",
+        "sd35-medium-fp8",
         "wan21-t2v-13b",
         "wan21-i2v-14b-480p-fp8",
     }
     blocked = {".bin", ".pt", ".pth", ".ckpt", ".pkl", ".pickle"}
     for recipe in recipes:
         assert re.fullmatch(r"[0-9a-f]{40}", recipe.revision)
-        assert recipe.license_id == "Apache-2.0"
+        assert recipe.license_id in {"Apache-2.0", "stabilityai-ai-community"}
         assert recipe.status == "reference-candidate"
         assert recipe.certified is False
         assert recipe.files
@@ -80,7 +81,7 @@ async def test_reference_recipe_api_lists_pinned_metadata(client: AsyncClient) -
     response = await client.get("/api/recipes")
     assert response.status_code == 200
     recipes = response.json()
-    assert len(recipes) == 4
+    assert len(recipes) == 5
     assert all(len(recipe["revision"]) == 40 for recipe in recipes)
     assert all(recipe["certified"] is False for recipe in recipes)
 

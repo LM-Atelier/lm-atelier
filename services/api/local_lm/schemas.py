@@ -692,3 +692,14 @@ class HealthOut(ApiModel):
     version: str
     database: bool
     engines: list[EngineCapabilities]
+
+
+class CredentialStatus(ApiModel):
+    provider: Literal["huggingface"] = "huggingface"
+    configured: bool
+    source: Literal["none", "environment", "credential_vault"]
+    vault_available: bool
+
+
+class CredentialSet(ApiModel):
+    token: str = Field(min_length=1, max_length=10_000)

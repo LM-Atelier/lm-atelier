@@ -18,6 +18,7 @@ from .artifacts import ArtifactStore
 from .backups import BackupManager
 from .catalog import HuggingFaceCatalog
 from .config import Settings, get_settings
+from .credentials import CredentialStore
 from .custom_nodes import CustomNodeManager
 from .database_migrations import upgrade_database
 from .db import SessionLocal, configure_database
@@ -55,9 +56,12 @@ class Services:
     exports: ProjectExporter
     diagnostics: DiagnosticBundleBuilder
     custom_nodes: CustomNodeManager
+    credentials: CredentialStore
 
 
 def build_services(settings: Settings) -> Services:
+    credentials = CredentialStore(settings.hf_token)
+    settings.hf_token = credentials.token()
     events = EventBroker(settings.event_history_size)
     artifacts = ArtifactStore(settings)
     engines = EngineRegistry(settings)
@@ -79,6 +83,7 @@ def build_services(settings: Settings) -> Services:
         exports=ProjectExporter(settings, artifacts),
         diagnostics=DiagnosticBundleBuilder(settings, artifacts),
         custom_nodes=CustomNodeManager(settings),
+        credentials=credentials,
     )
 
 

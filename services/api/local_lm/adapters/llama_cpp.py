@@ -15,7 +15,10 @@ from .base import ChatEvent, ChatRequest, estimate_chat_tokens
 class LlamaCppAdapter:
     def __init__(self, base_url: str) -> None:
         self.base_url = base_url.rstrip("/")
-        self._client = httpx.AsyncClient(base_url=self.base_url, timeout=None)
+        self._client = httpx.AsyncClient(
+            base_url=self.base_url,
+            timeout=httpx.Timeout(connect=10, read=None, write=30, pool=10),
+        )
         self._cancelled: set[str] = set()
 
     async def capabilities(self) -> EngineCapabilities:

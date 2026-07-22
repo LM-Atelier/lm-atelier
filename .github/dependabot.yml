@@ -6,15 +6,23 @@ updates:
       interval: weekly
     target-branch: develop
     open-pull-requests-limit: 5
+    groups:
+      web-dependencies:
+        patterns: ["*"]
+
   - package-ecosystem: pip
     directory: /services/api
     schedule:
       interval: weekly
     target-branch: develop
     open-pull-requests-limit: 5
+    groups:
+      api-dependencies:
+        patterns: ["*"]
+
   - package-ecosystem: github-actions
     directory: /
     schedule:
       interval: weekly
     target-branch: develop
-    open-pull-requests-limit: 5
+    open-pull-requests-limit: 3

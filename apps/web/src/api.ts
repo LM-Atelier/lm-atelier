@@ -10,6 +10,7 @@ import type {
   Chat,
   ChatDetail,
   CustomNodeInstall,
+  CredentialStatus,
   EngineCapabilities,
   GenerationPreset,
   GenerationPresetBundle,
@@ -173,6 +174,14 @@ export const api = {
   system: () => request<SystemInfo>("/api/system"),
   platforms: () => request<PlatformMatrixEntry[]>("/api/platforms"),
   createDiagnostics: () => request<{ url: string }>("/api/diagnostics", { method: "POST" }),
+  credentialStatus: () => request<CredentialStatus>("/api/credentials/huggingface"),
+  setHuggingFaceToken: (token: string) =>
+    request<CredentialStatus>("/api/credentials/huggingface", {
+      method: "PUT",
+      body: JSON.stringify({ token }),
+    }),
+  deleteHuggingFaceToken: () =>
+    request<CredentialStatus>("/api/credentials/huggingface", { method: "DELETE" }),
   models: () => request<ModelInstall[]>("/api/models"),
   modelStorage: () => request<ModelStorageInfo>("/api/models/storage"),
   deleteModel: (id: string) => request<void>(`/api/models/${id}`, { method: "DELETE" }),

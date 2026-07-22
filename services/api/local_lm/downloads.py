@@ -30,6 +30,10 @@ class DownloadManager:
         self._tasks: dict[str, asyncio.Task[None]] = {}
         self._semaphore = asyncio.Semaphore(settings.max_concurrent_downloads)
 
+    def set_token(self, token: str | None) -> None:
+        self.settings.hf_token = token
+        self._api = HfApi(token=token)
+
     def create(self, session: Session, request: DownloadRequest) -> Job:
         if not _REMOTE_ID.fullmatch(request.remote_id):
             raise ValueError("remote_id must be in owner/model form")
