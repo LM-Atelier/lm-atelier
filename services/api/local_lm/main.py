@@ -20,6 +20,7 @@ from .catalog import HuggingFaceCatalog
 from .config import Settings, get_settings
 from .database_migrations import upgrade_database
 from .db import SessionLocal, configure_database
+from .diagnostics import DiagnosticBundleBuilder
 from .downloads import DownloadManager
 from .engines import EngineRegistry
 from .events import EventBroker
@@ -51,6 +52,7 @@ class Services:
     processes: ProcessSupervisor
     backups: BackupManager
     exports: ProjectExporter
+    diagnostics: DiagnosticBundleBuilder
 
 
 def build_services(settings: Settings) -> Services:
@@ -73,6 +75,7 @@ def build_services(settings: Settings) -> Services:
         processes=processes,
         backups=BackupManager(settings),
         exports=ProjectExporter(settings, artifacts),
+        diagnostics=DiagnosticBundleBuilder(settings, artifacts),
     )
 
 
@@ -95,6 +98,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 dry_run=False,
             )
             session.commit()
+        services.backups.prune()
         services.orchestrator.recover_interrupted()
         services.downloads.recover_interrupted()
         logger.info(

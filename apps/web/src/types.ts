@@ -233,6 +233,8 @@ export interface BackupInfo {
   created_at: string;
   verified: boolean;
   restore_pending: boolean;
+  media_included: boolean;
+  media_size_bytes: number;
 }
 
 export interface ModelInstall {

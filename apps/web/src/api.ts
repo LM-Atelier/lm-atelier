@@ -133,6 +133,7 @@ export const api = {
     request<ToolCapabilityProbe>("/api/engines/chat/tool-probe", { method: "POST" }),
   system: () => request<SystemInfo>("/api/system"),
   platforms: () => request<PlatformMatrixEntry[]>("/api/platforms"),
+  createDiagnostics: () => request<{ url: string }>("/api/diagnostics", { method: "POST" }),
   models: () => request<ModelInstall[]>("/api/models"),
   modelStorage: () => request<ModelStorageInfo>("/api/models/storage"),
   deleteModel: (id: string) => request<void>(`/api/models/${id}`, { method: "DELETE" }),
@@ -202,7 +203,8 @@ export const api = {
   stopWorker: (name: "chat" | "media") =>
     request<WorkerStatus>(`/api/workers/${name}/stop`, { method: "POST" }),
   backups: () => request<BackupInfo[]>("/api/backups"),
-  createBackup: () => request<BackupInfo>("/api/backups", { method: "POST" }),
+  createBackup: (includeMedia = false) =>
+    request<BackupInfo>(`/api/backups?${new URLSearchParams({ include_media: String(includeMedia) })}`, { method: "POST" }),
   exportProject: (projectId: string, includeMedia = true) =>
     request<{ url: string }>(`/api/projects/${projectId}/export?${new URLSearchParams({ include_media: String(includeMedia) })}`, { method: "POST" }),
   importProject: async (file: File) => {
