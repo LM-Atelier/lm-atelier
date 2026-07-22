@@ -13,6 +13,7 @@ from sqlalchemy.orm import Session, selectinload
 from .capability_probe import probe_structured_tools
 from .catalog import HuggingFaceCatalog
 from .config import Settings
+from .credentials import CredentialVaultUnavailable
 from .custom_nodes import custom_node_dependency_errors
 from .db import get_session
 from .domain import (
@@ -63,6 +64,8 @@ from .schemas import (
     ChatCreate,
     ChatDetail,
     ChatOut,
+    CredentialSet,
+    CredentialStatus,
     CustomNodeInstallRequest,
     CustomNodeOut,
     CustomNodeTrustRequest,
@@ -139,6 +142,47 @@ async def health(request: Request) -> HealthOut:
         database=True,
         engines=capabilities,
     )
+
+
+@router.get("/credentials/huggingface", response_model=CredentialStatus)
+async def huggingface_credential_status(request: Request) -> CredentialStatus:
+    state = _services(request).credentials.state()
+    return CredentialStatus(
+        configured=state.configured,
+        source=state.source,
+        vault_available=state.vault_available,
+    )
+
+
+@router.put("/credentials/huggingface", response_model=CredentialStatus)
+async def set_huggingface_credential(payload: CredentialSet, request: Request) -> CredentialStatus:
+    services = _services(request)
+    try:
+        services.credentials.set_token(payload.token)
+    except ValueError as exc:
+        raise HTTPException(409, str(exc)) from exc
+    except CredentialVaultUnavailable as exc:
+        raise HTTPException(503, str(exc)) from exc
+    token = services.credentials.token()
+    services.settings.hf_token = token
+    services.catalog.set_token(token)
+    services.downloads.set_token(token)
+    return await huggingface_credential_status(request)
+
+
+@router.delete("/credentials/huggingface", response_model=CredentialStatus)
+async def delete_huggingface_credential(request: Request) -> CredentialStatus:
+    services = _services(request)
+    try:
+        services.credentials.delete_token()
+    except ValueError as exc:
+        raise HTTPException(409, str(exc)) from exc
+    except CredentialVaultUnavailable as exc:
+        raise HTTPException(503, str(exc)) from exc
+    services.settings.hf_token = None
+    services.catalog.set_token(None)
+    services.downloads.set_token(None)
+    return await huggingface_credential_status(request)
 
 
 @router.get("/system", response_model=SystemInfo)
