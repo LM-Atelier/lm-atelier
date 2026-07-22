@@ -14,6 +14,8 @@ vi.mock("./api", () => ({
     createChat: vi.fn(),
     sendTurn: vi.fn(),
     regenerateMessage: vi.fn(),
+    branchMessage: vi.fn(),
+    cancelChat: vi.fn(),
     jobs: vi.fn().mockResolvedValue([]),
     cancelJob: vi.fn(),
     engines: vi.fn().mockResolvedValue([
@@ -95,7 +97,11 @@ vi.mock("./api", () => ({
 }));
 
 describe("App", () => {
-  beforeEach(() => localStorage.clear());
+  beforeEach(() => {
+    localStorage.clear();
+    vi.mocked(api.profiles).mockResolvedValue([]);
+    vi.mocked(api.chats).mockResolvedValue([]);
+  });
   afterEach(cleanup);
 
   it("renders the local workspace shell without an existing chat", async () => {
@@ -149,5 +155,53 @@ describe("App", () => {
     expect(await screen.findByText("Edit profile")).toBeInTheDocument();
     expect(screen.getByDisplayValue("Local chat")).toBeInTheDocument();
     expect(screen.getByText("Default chat profile")).toBeInTheDocument();
+  });
+
+  it("renders Markdown on only the active edited branch", async () => {
+    localStorage.setItem("local-lm-chat", "chat-1");
+    const stamp = "2026-07-22T00:00:00Z";
+    const message = (id: string, parentId: string | null, role: "user" | "assistant", text: string) => ({
+      id,
+      chat_id: "chat-1",
+      parent_id: parentId,
+      role,
+      status: "complete" as const,
+      parts: [{ id: `${id}-part`, position: 0, type: "text" as const, text, artifact_id: null, metadata_json: {} }],
+      created_at: stamp,
+      updated_at: stamp,
+    });
+    vi.mocked(api.chat).mockResolvedValue({
+      id: "chat-1",
+      project_id: null,
+      title: "Branches",
+      archived: false,
+      routing_mode: "auto",
+      confirm_uncertain_media: false,
+      active_chat_profile_id: null,
+      active_image_profile_id: null,
+      active_video_profile_id: null,
+      active_head_message_id: "a3",
+      created_at: stamp,
+      updated_at: stamp,
+      messages: [
+        message("u1", null, "user", "First question"),
+        message("a1", "u1", "assistant", "First answer"),
+        message("u2", "a1", "user", "Old follow-up"),
+        message("a2", "u2", "assistant", "# Old branch"),
+        message("u3", "a1", "user", "Edited question"),
+        message("a3", "u3", "assistant", "# Edited answer"),
+      ],
+    });
+    const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+    render(
+      <QueryClientProvider client={client}>
+        <App />
+      </QueryClientProvider>,
+    );
+    expect(await screen.findByRole("heading", { name: "Edited answer" })).toBeInTheDocument();
+    expect(screen.queryByText("Old follow-up")).not.toBeInTheDocument();
+    expect(screen.queryByText("Old branch")).not.toBeInTheDocument();
+    fireEvent.click(screen.getAllByText("Edit and branch").at(-1)!);
+    expect(screen.getByDisplayValue("Edited question")).toBeInTheDocument();
   });
 });

@@ -140,6 +140,45 @@ async def test_turn_idempotency_returns_original_run(client: AsyncClient) -> Non
     assert first.json()["run"]["id"] == second.json()["run"]["id"]
 
 
+async def test_active_chat_run_can_be_cancelled_directly(client: AsyncClient) -> None:
+    chat = (await client.post("/api/chats", json={"title": "Stop response"})).json()
+    turn = await client.post(
+        f"/api/chats/{chat['id']}/turns",
+        json={"text": "Write a response long enough to stop", "mode": "text"},
+    )
+    assert turn.status_code == 202
+    cancelled = await client.post(f"/api/chats/{chat['id']}/cancel")
+    assert cancelled.status_code == 200
+    assert cancelled.json()["status"] == "cancelled"
+    run = (await client.get(f"/api/runs/{turn.json()['run']['id']}")).json()
+    assert run["status"] == "cancelled"
+
+
+async def test_editing_user_message_creates_new_active_branch(client: AsyncClient) -> None:
+    chat = (await client.post("/api/chats", json={"title": "Edit branch"})).json()
+    first = await client.post(
+        f"/api/chats/{chat['id']}/turns", json={"text": "Original question", "mode": "text"}
+    )
+    assert first.status_code == 202
+    await wait_for_run(client, first.json()["run"]["id"])
+    second = await client.post(
+        f"/api/chats/{chat['id']}/turns", json={"text": "Old branch follow-up", "mode": "text"}
+    )
+    assert second.status_code == 202
+    await wait_for_run(client, second.json()["run"]["id"])
+
+    branched = await client.post(
+        f"/api/messages/{first.json()['user_message']['id']}/branch",
+        json={"text": "Edited question"},
+    )
+    assert branched.status_code == 202
+    payload = branched.json()
+    assert payload["run"]["operation"] == "text"
+    assert payload["user_message"]["parent_id"] == first.json()["user_message"]["parent_id"]
+    detail = (await client.get(f"/api/chats/{chat['id']}")).json()
+    assert detail["active_head_message_id"] == payload["assistant_message"]["id"]
+
+
 async def test_new_turn_uses_persisted_active_branch_head(client: AsyncClient) -> None:
     chat = (await client.post("/api/chats", json={"title": "Branch head"})).json()
     first = await client.post(
