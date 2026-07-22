@@ -40,6 +40,7 @@ from .models import (
     WorkflowRevision,
 )
 from .orchestrator import ConversationOrchestrator
+from .platforms import list_platform_matrix
 from .recipes import get_reference_recipe, list_reference_recipes, recipe_download_request
 from .schemas import (
     ArtifactOut,
@@ -58,6 +59,7 @@ from .schemas import (
     ModelProfileCreate,
     ModelProfileOut,
     ModelProfileUpdate,
+    PlatformMatrixEntry,
     PresetCreate,
     PresetOut,
     PresetUpdate,
@@ -114,6 +116,11 @@ async def health(request: Request) -> HealthOut:
 async def system_info(request: Request) -> SystemInfo:
     settings: Settings = _services(request).settings
     return collect_system_info(settings)
+
+
+@router.get("/platforms", response_model=list[PlatformMatrixEntry])
+async def platform_matrix() -> list[PlatformMatrixEntry]:
+    return list_platform_matrix()
 
 
 @router.get("/backups", response_model=list[BackupInfo])

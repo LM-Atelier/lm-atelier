@@ -48,6 +48,27 @@ tests on declared target hardware. Media recipes use official Comfy-Org
 safe-tensor packages and native ComfyUI nodes; Local LM does not install custom
 node code. Model and workflow licenses remain independent of Local LM's license.
 
+## Target platform matrix
+
+The initial release targets Windows 11 x64 and Ubuntu 24.04 LTS x64. NVIDIA
+CUDA is the primary image/video accelerator, with 12 GB, 16 GB, and 24 GB VRAM
+validation tiers. CPU inference is the universal chat fallback on both target
+operating systems. Apple Silicon/Metal and Linux AMD/ROCm are experimental until
+dedicated machines and repeatable runtime evidence are available.
+
+| Platform | Status | Chat | Image/video | Current evidence |
+| --- | --- | --- | --- | --- |
+| Windows 11 x64 + NVIDIA CUDA | Target | CPU or CUDA | 12/16/24 GB VRAM tiers | Windows CI; GPU tests pending |
+| Ubuntu 24.04 LTS x64 + NVIDIA CUDA | Target | CPU or CUDA | 12/16/24 GB VRAM tiers | Ubuntu CI; GPU tests pending |
+| Windows 11/Ubuntu 24.04 x64 CPU | Target fallback | Supported | Not a reference media target | Automated tests; performance tests pending |
+| macOS Apple Silicon + Metal | Experimental | Experimental | Experimental | Dedicated runner pending |
+| Linux x64 + AMD ROCm | Experimental | Experimental | Experimental | Dedicated runner pending |
+
+The Settings page compares the current machine with this matrix. “Target” means
+the platform is in scope; it does not mean a hardware tier is certified. A tier
+remains `hardware-pending` until real llama.cpp and ComfyUI generation tests pass
+and their runtime, driver, model recipe, timings, and output checks are recorded.
+
 ## Quick start
 
 Requirements: Python 3.12+, Node.js 22+, npm, and optionally FFmpeg for mock
@@ -145,7 +166,8 @@ hash-addressed media.
 ## Development
 
 The web client lives in `apps/web`; the FastAPI package lives in `services/api`.
-Normal CI uses mock engines and never downloads model weights.
+Normal CI runs the web and API suites on both Ubuntu and Windows using mock
+engines and never downloads model weights.
 
 Development flows through descriptively named work branches into `develop`,
 then from `develop` into `main` for releases. Feature branch names never use a

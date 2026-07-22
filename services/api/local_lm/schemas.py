@@ -421,9 +421,36 @@ class DeviceInfo(ApiModel):
     details: dict[str, Any] = Field(default_factory=dict)
 
 
+class PlatformMatrixEntry(ApiModel):
+    id: str
+    name: str
+    status: Literal["target", "experimental"]
+    operating_systems: list[str]
+    architectures: list[str]
+    accelerator: str
+    workloads: list[str]
+    vram_tiers_gb: list[int] = Field(default_factory=list)
+    evidence: str
+    notes: list[str] = Field(default_factory=list)
+
+
+class PlatformAssessment(ApiModel):
+    platform_status: Literal["target", "experimental", "unsupported"]
+    platform_label: str
+    accelerator_status: Literal["primary", "experimental", "cpu-only"]
+    accelerator_label: str
+    certification_status: Literal["hardware-pending", "experimental", "unsupported"]
+    chat_ready: bool
+    reference_media_ready: bool
+    vram_tier_gb: int | None = None
+    messages: list[str] = Field(default_factory=list)
+
+
 class SystemInfo(ApiModel):
     platform: str
     platform_release: str
+    distribution: str
+    distribution_version: str
     architecture: str
     python_version: str
     cpu_count: int
@@ -433,6 +460,7 @@ class SystemInfo(ApiModel):
     disk_free_bytes: int
     ffmpeg_available: bool
     devices: list[DeviceInfo]
+    support: PlatformAssessment
 
 
 class WorkerStatus(ApiModel):

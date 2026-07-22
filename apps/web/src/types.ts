@@ -266,6 +266,8 @@ export interface Workflow {
 export interface SystemInfo {
   platform: string;
   platform_release: string;
+  distribution: string;
+  distribution_version: string;
   architecture: string;
   python_version: string;
   cpu_count: number;
@@ -274,6 +276,7 @@ export interface SystemInfo {
   disk_total_bytes: number;
   disk_free_bytes: number;
   ffmpeg_available: boolean;
+  support: PlatformAssessment;
   devices: Array<{
     id: string;
     name: string;
@@ -283,6 +286,31 @@ export interface SystemInfo {
     backend: string | null;
     details: Record<string, unknown>;
   }>;
+}
+
+export interface PlatformAssessment {
+  platform_status: "target" | "experimental" | "unsupported";
+  platform_label: string;
+  accelerator_status: "primary" | "experimental" | "cpu-only";
+  accelerator_label: string;
+  certification_status: "hardware-pending" | "experimental" | "unsupported";
+  chat_ready: boolean;
+  reference_media_ready: boolean;
+  vram_tier_gb: number | null;
+  messages: string[];
+}
+
+export interface PlatformMatrixEntry {
+  id: string;
+  name: string;
+  status: "target" | "experimental";
+  operating_systems: string[];
+  architectures: string[];
+  accelerator: string;
+  workloads: string[];
+  vram_tiers_gb: number[];
+  evidence: string;
+  notes: string[];
 }
 
 export interface AppEvent {

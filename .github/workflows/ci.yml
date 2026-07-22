@@ -11,7 +11,12 @@ permissions:
 
 jobs:
   web:
-    runs-on: ubuntu-latest
+    name: Web (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
@@ -25,7 +30,12 @@ jobs:
       - run: npm run build
 
   api:
-    runs-on: ubuntu-latest
+    name: API (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5

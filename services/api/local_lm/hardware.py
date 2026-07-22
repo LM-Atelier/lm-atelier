@@ -11,6 +11,7 @@ from typing import Any
 import psutil
 
 from .config import Settings
+from .platforms import assess_platform
 from .schemas import DeviceInfo, SystemInfo
 
 
@@ -88,6 +89,24 @@ def _llama_devices() -> list[DeviceInfo]:
 
 
 def collect_system_info(settings: Settings) -> SystemInfo:
+    platform_name = platform.system()
+    platform_release = platform.release()
+    distribution = platform_name
+    distribution_version = platform_release
+    if platform_name == "Windows":
+        try:
+            windows_build = int(platform.version().split(".")[-1])
+        except ValueError:
+            windows_build = 0
+        if windows_build >= 22_000:
+            distribution_version = "11"
+    elif platform_name == "Linux":
+        try:
+            release = platform.freedesktop_os_release()
+            distribution = release.get("NAME", release.get("ID", "Linux"))
+            distribution_version = release.get("VERSION_ID", platform_release)
+        except OSError:
+            pass
     memory = psutil.virtual_memory()
     disk = shutil.disk_usage(Path(settings.data_dir).resolve())
     devices = _nvidia_devices()
@@ -103,9 +122,19 @@ def collect_system_info(settings: Settings) -> SystemInfo:
             backend="cpu",
         )
     )
+    support = assess_platform(
+        platform_name=platform_name,
+        architecture=platform.machine(),
+        distribution=distribution,
+        distribution_version=distribution_version,
+        memory_total_bytes=memory.total,
+        devices=devices,
+    )
     return SystemInfo(
-        platform=platform.system(),
-        platform_release=platform.release(),
+        platform=platform_name,
+        platform_release=platform_release,
+        distribution=distribution,
+        distribution_version=distribution_version,
         architecture=platform.machine(),
         python_version=sys.version.split()[0],
         cpu_count=psutil.cpu_count(logical=True) or 1,
@@ -115,4 +144,5 @@ def collect_system_info(settings: Settings) -> SystemInfo:
         disk_free_bytes=disk.free,
         ffmpeg_available=shutil.which("ffmpeg") is not None,
         devices=devices,
+        support=support,
     )

@@ -9,6 +9,7 @@ import type {
   Job,
   ModelInstall,
   ModelProfile,
+  PlatformMatrixEntry,
   Project,
   ReferenceRecipe,
   RoutingMode,
@@ -96,6 +97,7 @@ export const api = {
   cancelJob: (id: string) => request<Job>(`/api/jobs/${id}/cancel`, { method: "POST" }),
   engines: () => request<EngineCapabilities[]>("/api/engines"),
   system: () => request<SystemInfo>("/api/system"),
+  platforms: () => request<PlatformMatrixEntry[]>("/api/platforms"),
   models: () => request<ModelInstall[]>("/api/models"),
   profiles: () => request<ModelProfile[]>("/api/profiles"),
   createProfile: (model: ModelInstall) =>
