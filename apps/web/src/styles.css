@@ -158,6 +158,9 @@ h1, h2, h3 { margin: 0; }
 .search-box svg { color: #747d8a; }
 .search-box input { width: 100%; background: transparent; border: 0; outline: 0; color: #fff; padding: 10px 0; }
 .toolbar select { padding: 9px 11px; }
+.catalog-filters { display: grid; grid-template-columns: repeat(3, minmax(130px, 1fr)); gap: 8px; margin: -10px 0 18px; }
+.catalog-filters input, .catalog-filters select { width: 100%; color: #e8ebef; border: 1px solid #343b47; border-radius: 8px; background: #1a1f27; padding: 8px 9px; outline: 0; }
+.load-more { display: flex; justify-content: center; padding: 18px; }
 .recipe-section { margin-bottom: 28px; }
 .section-heading { display: flex; justify-content: space-between; align-items: end; gap: 24px; margin-bottom: 13px; }
 .section-heading h2 { font-size: 19px; margin-top: 3px; }
@@ -296,6 +299,7 @@ h1, h2, h3 { margin: 0; }
   .page-header { flex-direction: column; }
   .section-heading { align-items: flex-start; flex-direction: column; gap: 7px; }
   .toolbar { grid-template-columns: 1fr; }.toolbar select:last-child { grid-column: auto; }
+  .catalog-filters { grid-template-columns: 1fr; }
   .model-card { grid-template-columns: 42px 1fr; }.model-stats { grid-column: 2; align-items: flex-start; flex-direction: row; }
   .workflow-layout { grid-template-columns: 1fr; }.workflow-list { border-right: 0; border-bottom: 1px solid var(--border); max-height: 220px; overflow-y: auto; }
   .metric-grid { grid-template-columns: 1fr; }

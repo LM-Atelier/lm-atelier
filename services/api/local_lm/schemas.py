@@ -361,6 +361,12 @@ class CatalogModel(ApiModel):
     gated: bool | str | None = None
     private: bool = False
     library_name: str | None = None
+    architecture: str | None = None
+    formats: list[str] = Field(default_factory=list)
+    quantizations: list[str] = Field(default_factory=list)
+    parameter_count: int | None = None
+    license_id: str | None = None
+    total_size_bytes: int | None = None
     compatibility: str
     compatibility_reasons: list[str] = Field(default_factory=list)
 

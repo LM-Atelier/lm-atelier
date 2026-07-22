@@ -1,4 +1,4 @@
-import { cleanup, fireEvent, render, screen } from "@testing-library/react";
+import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import App from "./App";
@@ -103,6 +103,7 @@ vi.mock("./api", () => ({
 
 describe("App", () => {
   beforeEach(() => {
+    vi.clearAllMocks();
     localStorage.clear();
     vi.mocked(api.profiles).mockResolvedValue([]);
     vi.mocked(api.chats).mockResolvedValue([]);
@@ -301,5 +302,24 @@ describe("App", () => {
     expect(screen.getByText("Clean 2 partial")).toBeEnabled();
     expect(await screen.findByText("Local GGUF")).toBeInTheDocument();
     expect(screen.getByTitle("Delete installed model")).toBeEnabled();
+  });
+
+  it("paginates catalog results and exposes compatibility filters", async () => {
+    vi.mocked(api.catalog).mockResolvedValue({
+      items: [],
+      next_cursor: "https://huggingface.co/api/models?cursor=next",
+    });
+    const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+    render(
+      <QueryClientProvider client={client}>
+        <App />
+      </QueryClientProvider>,
+    );
+    fireEvent.click(await screen.findByText("Model library"));
+    expect(await screen.findByLabelText("Compatibility filter")).toBeInTheDocument();
+    expect(screen.getByLabelText("Format filter")).toBeInTheDocument();
+    fireEvent.click(await screen.findByText("Load more models"));
+    await waitFor(() => expect(api.catalog).toHaveBeenCalledTimes(2));
+    expect(vi.mocked(api.catalog).mock.calls[1]?.[3]).toContain("cursor=next");
   });
 });
