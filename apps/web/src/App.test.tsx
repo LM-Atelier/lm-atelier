@@ -11,7 +11,12 @@ vi.mock("./api", () => ({
     chats: vi.fn().mockResolvedValue([]),
     chat: vi.fn(),
     createProject: vi.fn(),
+    updateProject: vi.fn(),
+    deleteProject: vi.fn(),
     createChat: vi.fn(),
+    updateChat: vi.fn(),
+    deleteChat: vi.fn(),
+    exportProject: vi.fn(),
     sendTurn: vi.fn(),
     regenerateMessage: vi.fn(),
     branchMessage: vi.fn(),
@@ -129,6 +134,30 @@ describe("App", () => {
     expect(await screen.findByText("Start a local conversation")).toBeInTheDocument();
     expect(screen.getByText("Model library")).toBeInTheDocument();
     expect(screen.getByText("Local service connected")).toBeInTheDocument();
+  });
+
+  it("searches and manages chats from the workspace sidebar", async () => {
+    const stamp = "2026-07-22T00:00:00Z";
+    vi.mocked(api.projects).mockResolvedValue([{ id: "project-1", name: "Research", description: "", instructions: "", archived: false, created_at: stamp, updated_at: stamp }]);
+    const chat = { id: "chat-1", project_id: "project-1", title: "Model notes", archived: false, routing_mode: "auto" as const, confirm_uncertain_media: false, active_chat_profile_id: null, active_image_profile_id: null, active_video_profile_id: null, active_head_message_id: null, created_at: stamp, updated_at: stamp };
+    vi.mocked(api.chats).mockResolvedValue([chat]);
+    vi.mocked(api.chat).mockResolvedValue({ ...chat, messages: [] });
+    vi.mocked(api.updateChat).mockResolvedValue({ id: "chat-1", project_id: null, title: "Renamed notes", archived: true, routing_mode: "auto", confirm_uncertain_media: false, active_chat_profile_id: null, active_image_profile_id: null, active_video_profile_id: null, active_head_message_id: null, created_at: stamp, updated_at: stamp });
+    const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+    render(
+      <QueryClientProvider client={client}>
+        <App />
+      </QueryClientProvider>,
+    );
+    expect(await screen.findByText("Model notes")).toBeInTheDocument();
+    fireEvent.change(screen.getByLabelText("Search projects and chats"), { target: { value: "notes" } });
+    fireEvent.click(screen.getByRole("button", { name: "Manage Model notes" }));
+    fireEvent.change(screen.getByDisplayValue("Model notes"), { target: { value: "Renamed notes" } });
+    fireEvent.change(screen.getByLabelText("Project"), { target: { value: "" } });
+    fireEvent.click(screen.getByRole("checkbox", { name: /Archived/ }));
+    fireEvent.click(screen.getByText("Save chat"));
+    await waitFor(() => expect(vi.mocked(api.updateChat).mock.calls[0]?.[0]).toBe("chat-1"));
+    expect(vi.mocked(api.updateChat).mock.calls[0]?.[1]).toMatchObject({ title: "Renamed notes", project_id: null, archived: true });
   });
 
   it("resumes a paused model download from the job panel", async () => {

@@ -67,13 +67,18 @@ async function request<T>(path: string, init: RequestInit = {}): Promise<T> {
 
 export const api = {
   initialize: ensureSession,
-  projects: () => request<Project[]>("/api/projects"),
+  projects: (includeArchived = false, query = "") =>
+    request<Project[]>(`/api/projects?${new URLSearchParams({ include_archived: String(includeArchived), query })}`),
   createProject: (name: string) =>
     request<Project>("/api/projects", { method: "POST", body: JSON.stringify({ name }) }),
   updateProject: (id: string, values: Partial<Project>) =>
     request<Project>(`/api/projects/${id}`, { method: "PATCH", body: JSON.stringify(values) }),
-  chats: (projectId?: string | null) =>
-    request<Chat[]>(`/api/chats${projectId ? `?project_id=${encodeURIComponent(projectId)}` : ""}`),
+  deleteProject: (id: string) => request<void>(`/api/projects/${id}`, { method: "DELETE" }),
+  chats: (projectId?: string | null, includeArchived = false, query = "") => {
+    const parameters = new URLSearchParams({ include_archived: String(includeArchived), query });
+    if (projectId) parameters.set("project_id", projectId);
+    return request<Chat[]>(`/api/chats?${parameters}`);
+  },
   chat: (id: string) => request<ChatDetail>(`/api/chats/${id}`),
   createChat: (projectId?: string | null) =>
     request<Chat>("/api/chats", {
@@ -82,6 +87,7 @@ export const api = {
     }),
   updateChat: (id: string, values: Partial<Chat>) =>
     request<Chat>(`/api/chats/${id}`, { method: "PATCH", body: JSON.stringify(values) }),
+  deleteChat: (id: string) => request<void>(`/api/chats/${id}`, { method: "DELETE" }),
   sendTurn: (
     chatId: string,
     text: string,

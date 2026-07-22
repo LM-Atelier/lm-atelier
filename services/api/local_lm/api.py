@@ -247,10 +247,16 @@ async def stop_worker(name: str, request: Request) -> WorkerStatus:
 
 
 @router.get("/projects", response_model=list[ProjectOut])
-async def list_projects(session: SessionDep, include_archived: bool = False) -> list[Project]:
+async def list_projects(
+    session: SessionDep,
+    include_archived: bool = False,
+    query: str = Query(default="", max_length=500),
+) -> list[Project]:
     statement = select(Project).order_by(Project.updated_at.desc())
     if not include_archived:
         statement = statement.where(Project.archived.is_(False))
+    if query.strip():
+        statement = statement.where(Project.name.ilike(f"%{query.strip()}%"))
     return list(session.scalars(statement).all())
 
 
@@ -304,12 +310,15 @@ async def list_chats(
     session: SessionDep,
     project_id: str | None = None,
     include_archived: bool = False,
+    query: str = Query(default="", max_length=500),
 ) -> list[Chat]:
     statement = select(Chat).order_by(Chat.updated_at.desc())
     if project_id:
         statement = statement.where(Chat.project_id == project_id)
     if not include_archived:
         statement = statement.where(Chat.archived.is_(False))
+    if query.strip():
+        statement = statement.where(Chat.title.ilike(f"%{query.strip()}%"))
     return list(session.scalars(statement).all())
 
 
