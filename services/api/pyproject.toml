@@ -6,6 +6,7 @@ build-backend = "hatchling.build"
 name = "local-lm-api"
 version = "0.1.0"
 description = "Local LM control plane"
+license = "Apache-2.0"
 requires-python = ">=3.11"
 dependencies = [
   "alembic>=1.16,<2",

@@ -127,5 +127,7 @@ then from `develop` into `main` for releases. Feature branch names never use a
 `feature/`, `feature-`, or `feat/` prefix. See
 [CONTRIBUTING.md](CONTRIBUTING.md).
 
-No redistribution license has been selected yet. Runtime and model licenses
-must be reviewed before publishing bundled installers.
+Local LM is licensed under the [Apache License 2.0](LICENSE). Optional runtimes,
+models, workflows, and custom nodes retain their own licenses. ComfyUI is a
+separately installed GPL-3.0 runtime and is not part of this Apache-licensed
+distribution.
