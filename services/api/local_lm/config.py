@@ -39,6 +39,7 @@ class Settings(BaseSettings):
     artifact_retention_days: int = Field(default=30, ge=1, le=3650)
     temporary_retention_hours: int = Field(default=24, ge=1, le=168)
     storage_warning_free_bytes: int = Field(default=10 * 1024**3, ge=0)
+    video_confirmation_work_units: int = Field(default=500_000_000, ge=0)
     backup_daily_count: int = Field(default=7, ge=1, le=90)
     backup_weekly_count: int = Field(default=4, ge=0, le=52)
     max_concurrent_downloads: int = Field(default=2, ge=1, le=8)

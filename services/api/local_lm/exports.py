@@ -63,13 +63,16 @@ class ProjectExporter:
                 for part in message.parts:
                     if part.artifact:
                         referenced[part.artifact.id] = part.artifact
-        poster_ids = {
-            poster_id
+        linked_artifact_ids = {
+            linked_id
             for artifact in referenced.values()
-            if isinstance((poster_id := artifact.metadata_json.get("poster_artifact_id")), str)
+            for key in ("poster_artifact_id", "browser_proxy_artifact_id")
+            if isinstance((linked_id := artifact.metadata_json.get(key)), str)
         }
-        if poster_ids:
-            for artifact in session.scalars(select(Artifact).where(Artifact.id.in_(poster_ids))):
+        if linked_artifact_ids:
+            for artifact in session.scalars(
+                select(Artifact).where(Artifact.id.in_(linked_artifact_ids))
+            ):
                 referenced[artifact.id] = artifact
 
         manifest = {

@@ -14,7 +14,7 @@ weight-free demo and adapters for `llama-server`, ComfyUI, and Hugging Face.
   message parts in SQLite.
 - Auto/Text/Image/Video routing, explicit modality overrides, contextual image
   references, durable streaming, cancellation, and restart reconciliation.
-- Inline image/video results, accessible video controls, and HTTP byte ranges.
+- Inline image/video results, accessible video controls, HTTP byte ranges, browser-compatible proxies, and expensive-video estimates.
 - Swappable chat/image/video profiles with Basic, Advanced, and Expert controls.
 - Hugging Face search and sorting, compatibility labels, exact file selection,
   disk preflight, resumable cache use, and atomic model activation.

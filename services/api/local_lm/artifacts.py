@@ -172,6 +172,56 @@ class ArtifactStore:
             return None
         return stdout if process.returncode == 0 and stdout else None
 
+    async def browser_video_proxy(self, artifact: Artifact) -> tuple[bytes, str, str] | None:
+        if artifact.media_type in {"video/mp4", "video/webm"}:
+            return None
+        executable = shutil.which("ffmpeg")
+        if not executable:
+            return None
+        fd, temporary_name = tempfile.mkstemp(prefix="video-proxy-", suffix=".mp4", dir=self.root)
+        os.close(fd)
+        temporary = Path(temporary_name)
+        try:
+            process = await asyncio.create_subprocess_exec(
+                executable,
+                "-hide_banner",
+                "-loglevel",
+                "error",
+                "-y",
+                "-i",
+                str(self.resolve(artifact)),
+                "-map",
+                "0:v:0",
+                "-map",
+                "0:a?",
+                "-c:v",
+                "libx264",
+                "-pix_fmt",
+                "yuv420p",
+                "-c:a",
+                "aac",
+                "-movflags",
+                "+faststart",
+                str(temporary),
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
+            )
+            await asyncio.wait_for(process.communicate(), timeout=600)
+            if process.returncode or not temporary.is_file() or temporary.stat().st_size == 0:
+                return None
+            return (
+                temporary.read_bytes(),
+                "video/mp4",
+                f"{artifact.original_name or 'video'}.proxy.mp4",
+            )
+        except (OSError, TimeoutError):
+            if "process" in locals() and process.returncode is None:
+                process.kill()
+                await process.wait()
+            return None
+        finally:
+            temporary.unlink(missing_ok=True)
+
     def delete_temporary_preview(self, session: Session, artifact_id: str) -> bool:
         artifact = session.get(Artifact, artifact_id)
         if not artifact or not artifact.metadata_json.get("temporary_preview"):
@@ -206,9 +256,10 @@ class ArtifactStore:
             return referenced
         posters = session.scalars(select(Artifact).where(Artifact.id.in_(referenced))).all()
         referenced.update(
-            poster_id
+            linked_id
             for artifact in posters
-            if isinstance((poster_id := artifact.metadata_json.get("poster_artifact_id")), str)
+            for key in ("poster_artifact_id", "browser_proxy_artifact_id")
+            if isinstance((linked_id := artifact.metadata_json.get(key)), str)
         )
         return referenced
 
