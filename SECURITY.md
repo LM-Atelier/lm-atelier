@@ -2,7 +2,7 @@
 
 ## Defaults
 
-Local LM binds to loopback, issues an authenticated browser session, requires a
+LM Atelier binds to loopback, issues an authenticated browser session, requires a
 CSRF token for state changes, does not send prompts or media as telemetry, and
 stores generated content under opaque artifact IDs. A non-loopback bind is
 rejected unless LAN mode is explicitly enabled.

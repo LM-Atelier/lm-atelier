@@ -90,6 +90,7 @@ describe("App", () => {
         <App />
       </QueryClientProvider>,
     );
+    expect(await screen.findByText("LM Atelier")).toBeInTheDocument();
     expect(await screen.findByText("Start a local conversation")).toBeInTheDocument();
     expect(screen.getByText("Model library")).toBeInTheDocument();
     expect(screen.getByText("Local service connected")).toBeInTheDocument();

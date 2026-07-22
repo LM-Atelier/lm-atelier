@@ -91,7 +91,10 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         services.orchestrator.recover_interrupted()
         services.downloads.recover_interrupted()
         logger.info(
-            "Local LM %s started on %s:%s", __version__, active_settings.host, active_settings.port
+            "LM Atelier %s started on %s:%s",
+            __version__,
+            active_settings.host,
+            active_settings.port,
         )
         yield
         await services.catalog.close()
@@ -99,7 +102,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         await services.processes.close()
 
     app = FastAPI(
-        title="Local LM API",
+        title="LM Atelier API",
         version=__version__,
         docs_url="/api/docs" if active_settings.dev else None,
         redoc_url=None,

@@ -540,7 +540,7 @@ function Sidebar({
   const unfiled = chats.filter((chat) => !chat.project_id);
   return (
     <aside className="sidebar">
-      <div className="brand"><div className="brand-mark"><Sparkles /></div><span>Local LM</span><button className="icon-button mobile-menu"><Menu /></button></div>
+      <div className="brand"><div className="brand-mark"><Sparkles /></div><span>LM Atelier</span><button className="icon-button mobile-menu"><Menu /></button></div>
       <button className="new-chat" onClick={() => onNewChat(null)}><Plus size={18} />New chat</button>
       <nav className="primary-nav"><button className={view === "models" ? "active" : ""} onClick={() => onView("models")}><Library />Model library</button><button className={view === "workflows" ? "active" : ""} onClick={() => onView("workflows")}><WorkflowIcon />Workflows</button></nav>
       <div className="sidebar-section">

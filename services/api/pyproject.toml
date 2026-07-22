@@ -3,9 +3,9 @@ requires = ["hatchling>=1.27"]
 build-backend = "hatchling.build"
 
 [project]
-name = "local-lm-api"
+name = "lm-atelier-api"
 version = "0.1.0"
-description = "Local LM control plane"
+description = "LM Atelier control plane"
 license = "Apache-2.0"
 requires-python = ">=3.11"
 dependencies = [
@@ -33,6 +33,7 @@ dev = [
 ]
 
 [project.scripts]
+lm-atelier = "local_lm.main:run"
 local-lm = "local_lm.main:run"
 
 [tool.hatch.build.targets.wheel]

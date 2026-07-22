@@ -112,7 +112,7 @@ class MockMediaAdapter:
                 '<rect width="1024" height="640" fill="url(#g)"/>',
                 '<circle cx="820" cy="120" r="220" fill="#ffba6b" opacity=".28"/>',
                 '<text x="72" y="270" fill="#ffffff" font-family="sans-serif" ',
-                'font-size="42" font-weight="700">Local LM mock image</text>',
+                'font-size="42" font-weight="700">LM Atelier mock image</text>',
                 '<foreignObject x="72" y="310" width="850" height="220">',
                 '<div xmlns="http://www.w3.org/1999/xhtml" ',
                 'style="color:#dfe5f3;font:26px sans-serif;line-height:1.4">',

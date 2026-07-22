@@ -7,4 +7,4 @@ cd "$root"
 if [[ ! -d apps/web/dist ]]; then
   npm run build
 fi
-exec .venv/bin/local-lm
+exec .venv/bin/lm-atelier

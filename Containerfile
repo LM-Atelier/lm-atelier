@@ -14,4 +14,4 @@ RUN pip install --no-cache-dir ./services/api
 COPY --from=web /source/apps/web/dist apps/web/dist
 EXPOSE 12340
 VOLUME ["/data"]
-CMD ["local-lm"]
+CMD ["lm-atelier"]

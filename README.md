@@ -1,6 +1,6 @@
-# Local LM
+# LM Atelier
 
-Local LM is a local-first AI workspace for chat, contextual image generation,
+LM Atelier is a local-first AI workspace for chat, contextual image generation,
 and contextual video generation. A single browser conversation can decide
 whether a request needs text, an image, or a video, run the selected local
 engine, and render the result inline.
@@ -45,8 +45,8 @@ These entries are deliberately labeled **reference candidates**. Their source,
 license, defaults, dependencies, and expected hashes are verified, but they are
 not labeled certified until the complete recipe passes repeatable generation
 tests on declared target hardware. Media recipes use official Comfy-Org
-safe-tensor packages and native ComfyUI nodes; Local LM does not install custom
-node code. Model and workflow licenses remain independent of Local LM's license.
+safe-tensor packages and native ComfyUI nodes; LM Atelier does not install custom
+node code. Model and workflow licenses remain independent of LM Atelier's license.
 
 ## Target platform matrix
 
@@ -104,7 +104,7 @@ LOCAL_LM_LLAMA_EXECUTABLE=/absolute/path/to/llama-server
 LOCAL_LM_LLAMA_URL=http://127.0.0.1:12341
 ```
 
-The Settings page can load and unload managed chat profiles. Local LM passes
+The Settings page can load and unload managed chat profiles. LM Atelier passes
 load settings as an argument array without a shell and only swaps after the
 worker health check succeeds. If you run `llama-server` yourself, omit the
 executable and point `LOCAL_LM_LLAMA_URL` at it.
@@ -125,12 +125,12 @@ LOCAL_LM_COMFY_EXECUTABLE=/absolute/path/to/python
 LOCAL_LM_COMFY_DIRECTORY=/absolute/path/to/ComfyUI
 ```
 
-Custom nodes are executable code. Local LM stores trust metadata but does not
+Custom nodes are executable code. LM Atelier stores trust metadata but does not
 install or execute a custom node on a user's behalf.
 
 Pinned Wan recipes also download the official example workflow JSON into their
 model install directory. Review it in ComfyUI, export it in API format, then
-import and trust that graph in Local LM. Recipe defaults remain editable through
+import and trust that graph in LM Atelier. Recipe defaults remain editable through
 the same Basic, Advanced, and Expert generation controls as other profiles.
 
 ## Configuration
@@ -146,7 +146,7 @@ Copy `.env.example` to `.env`. Important settings include:
 | `LOCAL_LM_MEDIA_ENGINE` | `mock` | `mock` or `comfyui` |
 | `LOCAL_LM_HF_TOKEN` | unset | Optional gated/private Hub access token |
 
-For regular use, keep credentials out of `.env` and launch Local LM with the
+For regular use, keep credentials out of `.env` and launch LM Atelier with the
 token supplied by the operating system's credential facility. Tokens are not
 stored in SQLite or returned by diagnostics.
 
@@ -159,7 +159,7 @@ stored in SQLite or returned by diagnostics.
 - Verified backups: `data/backups`
 
 Database restore is staged rather than performed underneath a running API. Use
-the backup endpoint/UI to select a verified snapshot, then restart Local LM.
+the backup endpoint/UI to select a verified snapshot, then restart LM Atelier.
 Project exports are ordinary ZIP files with a versioned JSON manifest and
 hash-addressed media.
 
@@ -174,7 +174,7 @@ then from `develop` into `main` for releases. Feature branch names never use a
 `feature/`, `feature-`, or `feat/` prefix. See
 [CONTRIBUTING.md](CONTRIBUTING.md).
 
-Local LM is licensed under the [Apache License 2.0](LICENSE). Optional runtimes,
+LM Atelier is licensed under the [Apache License 2.0](LICENSE). Optional runtimes,
 models, workflows, and custom nodes retain their own licenses. ComfyUI is a
 separately installed GPL-3.0 runtime and is not part of this Apache-licensed
 distribution.

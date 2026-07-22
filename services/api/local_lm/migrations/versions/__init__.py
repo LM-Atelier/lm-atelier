@@ -1,1 +1,1 @@
-"""Local LM database revisions."""
+"""LM Atelier database revisions."""
