@@ -166,13 +166,16 @@ class BackupManager:
                         raise ValueError("artifact path escapes the backup store")
                     if not source.is_file() or source.stat().st_size != int(size_bytes):
                         raise ValueError("artifact file is missing or changed during backup")
-                    archive_path = f"artifacts/{relative_path}"
+                    portable_relative_path = PurePosixPath(
+                        str(relative_path).replace("\\", "/")
+                    ).as_posix()
+                    archive_path = f"artifacts/{portable_relative_path}"
                     archive.write(source, archive_path, compress_type=zipfile.ZIP_STORED)
                     manifest.append(
                         {
                             "sha256": sha256,
                             "size_bytes": size_bytes,
-                            "relative_path": relative_path,
+                            "relative_path": portable_relative_path,
                             "archive_path": archive_path,
                         }
                     )

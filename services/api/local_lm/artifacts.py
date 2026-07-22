@@ -28,7 +28,7 @@ class ArtifactStore:
         return self.root / digest[:2] / digest[2:4] / digest
 
     def _relative(self, path: Path) -> str:
-        return str(path.relative_to(self.root))
+        return path.relative_to(self.root).as_posix()
 
     def resolve(self, artifact: Artifact) -> Path:
         path = (self.root / artifact.relative_path).resolve()
