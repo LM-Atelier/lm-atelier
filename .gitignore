@@ -16,6 +16,7 @@ venv/
 
 # JavaScript / TypeScript
 node_modules/
+*.tsbuildinfo
 .pnpm-store/
 dist/
 build/
@@ -24,6 +25,7 @@ coverage/
 .next/
 
 # Local application state
+.private/
 data/
 models/
 downloads/

@@ -1,0 +1,17 @@
+[Unit]
+Description=Local LM private AI workspace
+After=network.target
+
+[Service]
+Type=simple
+WorkingDirectory=%h/.local/share/local-lm/app
+Environment=LOCAL_LM_DATA_DIR=%h/.local/share/local-lm/data
+Environment=LOCAL_LM_HOST=127.0.0.1
+ExecStart=%h/.local/share/local-lm/app/.venv/bin/local-lm
+Restart=on-failure
+RestartSec=3
+NoNewPrivileges=true
+PrivateTmp=true
+
+[Install]
+WantedBy=default.target

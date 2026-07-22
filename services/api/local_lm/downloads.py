@@ -1,0 +1,271 @@
+from __future__ import annotations
+
+import asyncio
+import fnmatch
+import os
+import re
+import shutil
+from pathlib import PurePosixPath
+from typing import Any
+
+from huggingface_hub import HfApi, hf_hub_download
+from sqlalchemy import select
+from sqlalchemy.orm import Session
+
+from .config import Settings
+from .domain import CompatibilityLevel, JobKind, JobStatus, new_id, utcnow
+from .events import EventBroker
+from .models import Job, ModelInstall, ModelSource
+from .schemas import DownloadRequest
+
+_REMOTE_ID = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]*/[A-Za-z0-9][A-Za-z0-9_.-]*$")
+
+
+class DownloadManager:
+    def __init__(self, settings: Settings, events: EventBroker) -> None:
+        self.settings = settings
+        self.events = events
+        self._api = HfApi(token=settings.hf_token)
+        self._tasks: dict[str, asyncio.Task[None]] = {}
+        self._semaphore = asyncio.Semaphore(settings.max_concurrent_downloads)
+
+    def create(self, session: Session, request: DownloadRequest) -> Job:
+        if not _REMOTE_ID.fullmatch(request.remote_id):
+            raise ValueError("remote_id must be in owner/model form")
+        job = Job(
+            kind=JobKind.DOWNLOAD.value,
+            status=JobStatus.QUEUED.value,
+            phase="queued",
+            payload_json=request.model_dump(mode="json"),
+        )
+        session.add(job)
+        session.commit()
+        session.refresh(job)
+        self.start(job.id)
+        return job
+
+    def start(self, job_id: str) -> None:
+        if job_id in self._tasks and not self._tasks[job_id].done():
+            return
+        task = asyncio.create_task(self._download(job_id), name=f"download-{job_id}")
+        self._tasks[job_id] = task
+        task.add_done_callback(lambda _task: self._tasks.pop(job_id, None))
+
+    def recover_interrupted(self) -> None:
+        from .db import SessionLocal
+
+        with SessionLocal() as session:
+            jobs = session.scalars(
+                select(Job).where(
+                    Job.kind == JobKind.DOWNLOAD.value,
+                    Job.status == JobStatus.INTERRUPTED.value,
+                )
+            ).all()
+            for job in jobs:
+                job.status = JobStatus.QUEUED.value
+                job.phase = "resuming"
+            session.commit()
+            job_ids = [job.id for job in jobs]
+        for job_id in job_ids:
+            self.start(job_id)
+
+    async def cancel(self, job_id: str) -> bool:
+        from .db import SessionLocal
+
+        task = self._tasks.get(job_id)
+        if task:
+            task.cancel()
+        with SessionLocal() as session:
+            job = session.get(Job, job_id)
+            if not job or job.kind != JobKind.DOWNLOAD.value:
+                return False
+            if job.status in {JobStatus.COMPLETE.value, JobStatus.FAILED.value}:
+                return False
+            job.status = JobStatus.CANCELLED.value
+            job.phase = "cancelled"
+            job.completed_at = utcnow()
+            session.commit()
+        await self.events.publish("download.cancelled", job_id)
+        return True
+
+    async def _download(self, job_id: str) -> None:
+        from .db import SessionLocal
+
+        try:
+            async with self._semaphore:
+                with SessionLocal() as session:
+                    job = session.get(Job, job_id)
+                    if not job:
+                        return
+                    request = DownloadRequest.model_validate(job.payload_json)
+                    job.status = JobStatus.RUNNING.value
+                    job.phase = "inspecting"
+                    job.started_at = utcnow()
+                    job.attempt += 1
+                    session.commit()
+                await self.events.publish(
+                    "download.started", job_id, {"remote_id": request.remote_id}
+                )
+
+                info = await asyncio.to_thread(
+                    self._api.model_info,
+                    request.remote_id,
+                    revision=request.revision,
+                    files_metadata=True,
+                )
+                siblings = list(info.siblings or [])
+                filenames = self._select_files(request, siblings)
+                if not filenames:
+                    raise ValueError("no files matched the requested model selection")
+                total_size = sum(
+                    int(getattr(sibling, "size", 0) or 0)
+                    for sibling in siblings
+                    if sibling.rfilename in filenames
+                )
+                free_bytes = shutil.disk_usage(self.settings.model_dir).free
+                if total_size and free_bytes < int(total_size * 1.1):
+                    raise OSError(
+                        f"insufficient disk space: need about {total_size:,} bytes, "
+                        f"have {free_bytes:,}"
+                    )
+
+                revision = str(info.sha or request.revision)
+                safe_name = request.remote_id.replace("/", "--")
+                staging = self.settings.download_dir / f"{job_id}.partial"
+                destination = self.settings.model_dir / safe_name / revision
+                staging.mkdir(parents=True, exist_ok=True)
+                for index, filename in enumerate(filenames):
+                    await asyncio.to_thread(
+                        hf_hub_download,
+                        repo_id=request.remote_id,
+                        filename=filename,
+                        revision=revision,
+                        local_dir=staging,
+                        token=self.settings.hf_token,
+                    )
+                    with SessionLocal() as session:
+                        job = session.get(Job, job_id)
+                        if not job or job.status == JobStatus.CANCELLED.value:
+                            return
+                        job.phase = f"downloaded {filename}"
+                        job.progress = (index + 1) / len(filenames) * 0.9
+                        session.commit()
+                    await self.events.publish(
+                        "download.progress",
+                        job_id,
+                        {
+                            "progress": (index + 1) / len(filenames) * 0.9,
+                            "filename": filename,
+                        },
+                    )
+
+                destination.parent.mkdir(parents=True, exist_ok=True)
+                if destination.exists():
+                    shutil.rmtree(staging, ignore_errors=True)
+                else:
+                    os.replace(staging, destination)
+                installed_size = sum(
+                    path.stat().st_size for path in destination.rglob("*") if path.is_file()
+                )
+
+                with SessionLocal() as session:
+                    source = session.scalar(
+                        select(ModelSource).where(
+                            ModelSource.provider == "huggingface",
+                            ModelSource.remote_id == request.remote_id,
+                            ModelSource.revision == revision,
+                        )
+                    )
+                    if not source:
+                        source = ModelSource(
+                            provider="huggingface",
+                            remote_id=request.remote_id,
+                            revision=revision,
+                            metadata_json={
+                                "pipeline_tag": info.pipeline_tag,
+                                "tags": info.tags or [],
+                                "gated": info.gated,
+                            },
+                        )
+                        session.add(source)
+                        session.flush()
+                    install = ModelInstall(
+                        id=new_id("model"),
+                        source_id=source.id,
+                        name=request.remote_id.rsplit("/", 1)[-1],
+                        role=request.role,
+                        engine=request.engine,
+                        local_path=str(destination),
+                        size_bytes=installed_size,
+                        compatibility=CompatibilityLevel.LIKELY.value,
+                        manifest_json={
+                            "remote_id": request.remote_id,
+                            "revision": revision,
+                            "files": filenames,
+                        },
+                    )
+                    session.add(install)
+                    job = session.get(Job, job_id)
+                    if not job:
+                        return
+                    job.status = JobStatus.COMPLETE.value
+                    job.progress = 1
+                    job.phase = "complete"
+                    job.result_json = {"model_install_id": install.id}
+                    job.completed_at = utcnow()
+                    session.commit()
+                await self.events.publish(
+                    "download.completed", job_id, {"model_install_id": install.id}
+                )
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            with SessionLocal() as session:
+                job = session.get(Job, job_id)
+                if job:
+                    job.status = JobStatus.FAILED.value
+                    job.phase = "failed"
+                    job.error = str(exc)
+                    job.completed_at = utcnow()
+                    session.commit()
+            await self.events.publish("download.failed", job_id, {"error": str(exc)})
+
+    @staticmethod
+    def _select_files(request: DownloadRequest, siblings: list[Any]) -> list[str]:
+        blocked = {".bin", ".pt", ".pth", ".ckpt", ".pkl", ".pickle"}
+        available: list[str] = []
+        unsafe: list[str] = []
+        for sibling in siblings:
+            if not sibling.rfilename:
+                continue
+            filename = str(sibling.rfilename)
+            path = PurePosixPath(filename)
+            if path.is_absolute() or ".." in path.parts:
+                continue
+            if path.suffix.lower() in blocked:
+                unsafe.append(filename)
+                continue
+            available.append(filename)
+        if request.allow_patterns:
+            selected = [
+                filename
+                for filename in available
+                if any(fnmatch.fnmatch(filename, pattern) for pattern in request.allow_patterns)
+            ]
+            blocked_selected = [
+                filename
+                for filename in unsafe
+                if any(fnmatch.fnmatch(filename, pattern) for pattern in request.allow_patterns)
+            ]
+            if blocked_selected:
+                raise ValueError("pickle-compatible model weights are blocked by default")
+            return selected
+        if request.role == "chat" and request.engine == "llama.cpp":
+            ggufs = [
+                sibling for sibling in siblings if str(sibling.rfilename).lower().endswith(".gguf")
+            ]
+            if not ggufs:
+                return []
+            ggufs.sort(key=lambda item: int(getattr(item, "size", 0) or 0))
+            return [str(ggufs[0].rfilename)]
+        raise ValueError("select explicit files for image and video model downloads")

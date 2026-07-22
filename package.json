@@ -1,0 +1,18 @@
+{
+  "name": "local-lm",
+  "version": "0.1.0",
+  "private": true,
+  "workspaces": [
+    "apps/web"
+  ],
+  "scripts": {
+    "dev:web": "npm --workspace @local-lm/web run dev",
+    "build": "npm --workspace @local-lm/web run build",
+    "lint": "npm --workspace @local-lm/web run lint",
+    "test": "npm --workspace @local-lm/web run test",
+    "typecheck": "npm --workspace @local-lm/web run typecheck"
+  },
+  "engines": {
+    "node": ">=22"
+  }
+}
