@@ -25,11 +25,11 @@ and are then merged or cherry-picked into `develop` immediately.
 
 - Keep one coherent change per pull request.
 - Explain the user impact and the validation performed.
-- Update architecture, product, or roadmap documentation when behavior or scope
+- Update the API, tests, README, or security guidance when behavior or scope
   changes.
 - Do not commit model weights, generated media, secrets, local databases, or
   runtime caches.
 
 The project will require formatting, linting, type checks, unit tests,
 migration checks, license/dependency scans, and secret scanning before merges
-once the implementation toolchain is established.
+before merges. Run `./scripts/verify.sh` locally for the same core checks.
