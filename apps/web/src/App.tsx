@@ -51,7 +51,7 @@ import type {
   WorkflowBundle,
 } from "./types";
 
-type View = "chat" | "models" | "workflows" | "settings";
+type View = "chat" | "media" | "models" | "workflows" | "settings";
 type Visibility = "basic" | "advanced" | "expert";
 
 const visibilityRank: Record<Visibility, number> = { basic: 0, advanced: 1, expert: 2 };
@@ -116,6 +116,52 @@ function ArtifactPart({ part }: { part: MessagePart }) {
         <Film size={14} /> Generated video
       </figcaption>
     </figure>
+  );
+}
+
+function MediaLibraryView() {
+  const client = useQueryClient();
+  const [kind, setKind] = useState("");
+  const [search, setSearch] = useState("");
+  const artifacts = useQuery({
+    queryKey: ["artifacts", kind, search],
+    queryFn: () => api.artifacts(kind, search),
+  });
+  const storage = useQuery({ queryKey: ["artifact-storage"], queryFn: api.artifactStorage });
+  const cleanup = useMutation({
+    mutationFn: () => api.cleanupArtifacts(false),
+    onSuccess: () => {
+      void client.invalidateQueries({ queryKey: ["artifacts"] });
+      void client.invalidateQueries({ queryKey: ["artifact-storage"] });
+    },
+  });
+  return (
+    <div className="page-view media-library">
+      <header className="page-header">
+        <div><small>Local artifacts</small><h1>Media library</h1><p>Browse generated images and videos across every chat and project.</p></div>
+      </header>
+      {storage.data && <section className={`artifact-storage-summary ${storage.data.warning ? "warning" : ""}`}>
+        <div><strong>{formatBytes(storage.data.total_bytes)}</strong><small>{storage.data.total_count} stored artifacts</small></div>
+        <div><strong>{formatBytes(storage.data.referenced_bytes)}</strong><small>{storage.data.referenced_count} referenced</small></div>
+        <div><strong>{formatBytes(storage.data.disk_free_bytes)}</strong><small>disk available</small></div>
+        <div><strong>{formatBytes(storage.data.eligible_bytes)}</strong><small>{storage.data.eligible_count} eligible for cleanup</small></div>
+        <button className="secondary" disabled={!storage.data.eligible_count || cleanup.isPending} onClick={() => cleanup.mutate()}>{cleanup.isPending ? "Cleaning…" : "Clean eligible"}</button>
+      </section>}
+      <div className="media-toolbar">
+        <div className="workspace-search"><Search size={14} /><input aria-label="Search media" placeholder="Search filenames or hashes" value={search} onChange={(event) => setSearch(event.target.value)} /></div>
+        <select aria-label="Media type" value={kind} onChange={(event) => setKind(event.target.value)}><option value="">Images and videos</option><option value="image">Images</option><option value="video">Videos</option></select>
+      </div>
+      {cleanup.data && <div className="callout success">Removed {cleanup.data.removed_count} artifact{cleanup.data.removed_count === 1 ? "" : "s"} and reclaimed {formatBytes(cleanup.data.reclaimed_bytes)}. Newly unreferenced artifacts begin a {storage.data?.retention_days ?? 30}-day recovery window.</div>}
+      {cleanup.error && <div className="callout error">{cleanup.error.message}</div>}
+      {artifacts.data?.length ? <div className="media-grid">{artifacts.data.map((artifact) => {
+        const source = `/api/artifacts/${encodeURIComponent(artifact.id)}/content`;
+        const posterId = typeof artifact.metadata_json.poster_artifact_id === "string" ? artifact.metadata_json.poster_artifact_id : null;
+        return <article className="gallery-card" key={artifact.id}>
+          {artifact.kind === "image" ? <img src={source} alt={artifact.original_name ?? "Generated image"} loading="lazy" /> : <video src={source} poster={posterId ? `/api/artifacts/${encodeURIComponent(posterId)}/content` : undefined} controls preload="metadata" />}
+          <div><strong>{artifact.original_name ?? artifact.kind}</strong><small>{formatBytes(artifact.size_bytes)} · {artifact.reference_count} reference{artifact.reference_count === 1 ? "" : "s"}</small><span><a href={source} download>Download</a><code>{artifact.sha256.slice(0, 12)}</code></span></div>
+        </article>;
+      })}</div> : <EmptyState icon={<ImageIcon />} title="No generated media" body="Images and videos created in chat will appear here." />}
+    </div>
   );
 }
 
@@ -988,7 +1034,7 @@ function Sidebar({
     <aside className="sidebar">
       <div className="brand"><div className="brand-mark"><Sparkles /></div><span>LM Atelier</span><button className="icon-button mobile-menu"><Menu /></button></div>
       <button className="new-chat" onClick={() => onNewChat(null)}><Plus size={18} />New chat</button>
-      <nav className="primary-nav"><button className={view === "models" ? "active" : ""} onClick={() => onView("models")}><Library />Model library</button><button className={view === "workflows" ? "active" : ""} onClick={() => onView("workflows")}><WorkflowIcon />Workflows</button></nav>
+      <nav className="primary-nav"><button className={view === "media" ? "active" : ""} onClick={() => onView("media")}><ImageIcon />Media library</button><button className={view === "models" ? "active" : ""} onClick={() => onView("models")}><Library />Model library</button><button className={view === "workflows" ? "active" : ""} onClick={() => onView("workflows")}><WorkflowIcon />Workflows</button></nav>
       <div className="workspace-search"><Search size={14} /><input aria-label="Search projects and chats" placeholder="Search workspace" value={search} onChange={(event) => setSearch(event.target.value)} /><button className={showArchived ? "active" : ""} aria-pressed={showArchived} onClick={() => setShowArchived((value) => !value)}>Archived</button></div>
       <div className="sidebar-section">
         <div className="section-title"><span>Projects</span><button onClick={onNewProject}><Plus size={15} /></button></div>
@@ -1066,6 +1112,8 @@ export default function App() {
           void client.invalidateQueries({ queryKey: ["chat"] });
           void client.invalidateQueries({ queryKey: ["chats"] });
           void client.invalidateQueries({ queryKey: ["jobs"] });
+          void client.invalidateQueries({ queryKey: ["artifacts"] });
+          void client.invalidateQueries({ queryKey: ["artifact-storage"] });
           window.setTimeout(() => setLiveText({}), 200);
         }
       },
@@ -1168,6 +1216,7 @@ export default function App() {
   const allChats = chats.data ?? [];
   const allProjects = projects.data ?? [];
   const activeContent = useMemo(() => {
+    if (view === "media") return <MediaLibraryView />;
     if (view === "models") return <ModelsView />;
     if (view === "workflows") return <WorkflowsView />;
     if (view === "settings") return <SettingsView engines={engines.data ?? []} />;

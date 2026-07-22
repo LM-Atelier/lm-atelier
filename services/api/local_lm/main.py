@@ -88,6 +88,13 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         upgrade_database(active_settings)
         with SessionLocal() as session:
             seed_defaults(session, active_settings)
+            services.artifacts.cleanup_retention(
+                session,
+                retention_days=active_settings.artifact_retention_days,
+                temporary_hours=active_settings.temporary_retention_hours,
+                dry_run=False,
+            )
+            session.commit()
         services.orchestrator.recover_interrupted()
         services.downloads.recover_interrupted()
         logger.info(

@@ -3,12 +3,15 @@ from __future__ import annotations
 import asyncio
 import io
 import zipfile
+from datetime import UTC, datetime, timedelta
 
 from httpx2 import AsyncClient
 
 from local_lm.catalog import HuggingFaceCatalog
 from local_lm.config import Settings
+from local_lm.db import SessionLocal
 from local_lm.downloads import DownloadManager
+from local_lm.models import Artifact
 
 
 async def wait_for_assistant(client: AsyncClient, chat_id: str, expected_type: str) -> dict:  # type: ignore[type-arg]
@@ -314,6 +317,57 @@ async def test_artifact_upload_deduplicates_content(client: AsyncClient) -> None
     assert first.status_code == 201
     assert second.status_code == 201
     assert first.json()["id"] == second.json()["id"]
+
+
+async def test_media_library_reports_references_and_storage(client: AsyncClient) -> None:
+    chat = (await client.post("/api/chats", json={"title": "Gallery"})).json()
+    turn = await client.post(
+        f"/api/chats/{chat['id']}/turns",
+        json={"text": "Create an image for the gallery", "mode": "image"},
+    )
+    message = await wait_for_assistant(client, chat["id"], "image")
+    image = next(part for part in message["parts"] if part["type"] == "image")
+
+    gallery = await client.get("/api/artifacts", params={"kind": "image"})
+    assert gallery.status_code == 200
+    item = next(artifact for artifact in gallery.json() if artifact["id"] == image["artifact_id"])
+    assert item["reference_count"] == 1
+    assert item["chat_ids"] == [chat["id"]]
+
+    storage = await client.get("/api/artifacts/storage")
+    assert storage.status_code == 200
+    assert storage.json()["referenced_count"] >= 1
+    assert storage.json()["retention_days"] == 30
+    assert turn.status_code == 202
+
+
+async def test_retention_cleanup_only_removes_expired_unreferenced_artifacts(
+    client: AsyncClient,
+) -> None:
+    uploaded = await client.post(
+        "/api/artifacts",
+        files={"file": ("orphan.bin", b"expired-orphan", "application/octet-stream")},
+    )
+    artifact_id = uploaded.json()["id"]
+    with SessionLocal() as session:
+        artifact = session.get(Artifact, artifact_id)
+        assert artifact
+        artifact.metadata_json = {
+            **artifact.metadata_json,
+            "unreferenced_at": (datetime.now(UTC) - timedelta(days=31)).isoformat(),
+        }
+        session.commit()
+
+    preview = await client.post("/api/artifacts/cleanup", json={"dry_run": True})
+    assert preview.status_code == 200
+    assert preview.json()["removed_count"] == 1
+    assert (await client.get(f"/api/artifacts/{artifact_id}")).status_code == 200
+
+    cleaned = await client.post("/api/artifacts/cleanup", json={"dry_run": False})
+    assert cleaned.status_code == 200
+    assert cleaned.json()["removed_count"] == 1
+    assert cleaned.json()["reclaimed_bytes"] == len(b"expired-orphan")
+    assert (await client.get(f"/api/artifacts/{artifact_id}")).status_code == 404
 
 
 async def test_workflow_revisions_and_validation(client: AsyncClient) -> None:

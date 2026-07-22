@@ -46,7 +46,11 @@ from .platforms import list_platform_matrix
 from .preflight import assess_catalog_install
 from .recipes import get_reference_recipe, list_reference_recipes, recipe_download_request
 from .schemas import (
+    ArtifactCleanupRequest,
+    ArtifactCleanupResult,
+    ArtifactLibraryItem,
     ArtifactOut,
+    ArtifactStorageInfo,
     BackupInfo,
     CatalogDetail,
     CatalogPage,
@@ -602,6 +606,116 @@ async def upload_artifact(
     result = ArtifactOut.model_validate(artifact)
     result.url = f"/api/artifacts/{artifact.id}/content"
     return result
+
+
+@router.get("/artifacts", response_model=list[ArtifactLibraryItem])
+async def list_artifacts(
+    session: SessionDep,
+    kind: Literal["image", "video"] | None = None,
+    chat_id: str | None = None,
+    project_id: str | None = None,
+    query: str = Query(default="", max_length=200),
+) -> list[ArtifactLibraryItem]:
+    reference_rows = session.execute(
+        select(MessagePart.artifact_id, Message.chat_id, Chat.project_id)
+        .join(Message, Message.id == MessagePart.message_id)
+        .join(Chat, Chat.id == Message.chat_id)
+        .where(MessagePart.artifact_id.is_not(None))
+    ).all()
+    references: dict[str, list[tuple[str, str | None]]] = {}
+    for artifact_id, referenced_chat_id, referenced_project_id in reference_rows:
+        references.setdefault(artifact_id, []).append((referenced_chat_id, referenced_project_id))
+    statement = select(Artifact).where(
+        Artifact.kind.in_([ArtifactKind.IMAGE.value, ArtifactKind.VIDEO.value])
+    )
+    if kind:
+        statement = statement.where(Artifact.kind == kind)
+    normalized_query = query.strip().lower()
+    if normalized_query:
+        statement = statement.where(
+            func.lower(func.coalesce(Artifact.original_name, Artifact.sha256)).contains(
+                normalized_query
+            )
+        )
+    artifacts = session.scalars(statement.order_by(Artifact.created_at.desc())).all()
+    results: list[ArtifactLibraryItem] = []
+    for artifact in artifacts:
+        artifact_references = references.get(artifact.id, [])
+        chat_ids = sorted({item[0] for item in artifact_references})
+        project_ids = sorted({item[1] for item in artifact_references if item[1]})
+        if chat_id and chat_id not in chat_ids:
+            continue
+        if project_id and project_id not in project_ids:
+            continue
+        result = ArtifactLibraryItem.model_validate(artifact)
+        result.reference_count = len(artifact_references)
+        result.chat_ids = chat_ids
+        result.project_ids = project_ids
+        result.url = f"/api/artifacts/{artifact.id}/content"
+        results.append(result)
+    return results
+
+
+@router.get("/artifacts/storage", response_model=ArtifactStorageInfo)
+async def artifact_storage(request: Request, session: SessionDep) -> ArtifactStorageInfo:
+    services = _services(request)
+    artifacts = session.scalars(select(Artifact)).all()
+    referenced = services.artifacts.referenced_artifact_ids(session)
+    _marked, eligible_count, eligible_bytes = services.artifacts.cleanup_retention(
+        session,
+        retention_days=services.settings.artifact_retention_days,
+        temporary_hours=services.settings.temporary_retention_hours,
+        dry_run=True,
+    )
+    temporary = [
+        artifact
+        for artifact in artifacts
+        if artifact.metadata_json.get("temporary_preview")
+        or artifact.metadata_json.get("intermediate")
+    ]
+    referenced_artifacts = [artifact for artifact in artifacts if artifact.id in referenced]
+    disk_free = shutil.disk_usage(services.settings.data_dir).free
+    total_bytes = sum(artifact.size_bytes for artifact in artifacts)
+    referenced_bytes = sum(artifact.size_bytes for artifact in referenced_artifacts)
+    return ArtifactStorageInfo(
+        total_bytes=total_bytes,
+        total_count=len(artifacts),
+        referenced_bytes=referenced_bytes,
+        referenced_count=len(referenced_artifacts),
+        unreferenced_bytes=total_bytes - referenced_bytes,
+        unreferenced_count=len(artifacts) - len(referenced_artifacts),
+        temporary_bytes=sum(artifact.size_bytes for artifact in temporary),
+        temporary_count=len(temporary),
+        eligible_bytes=eligible_bytes,
+        eligible_count=eligible_count,
+        disk_free_bytes=disk_free,
+        warning=disk_free < services.settings.storage_warning_free_bytes,
+        retention_days=services.settings.artifact_retention_days,
+        temporary_retention_hours=services.settings.temporary_retention_hours,
+    )
+
+
+@router.post("/artifacts/cleanup", response_model=ArtifactCleanupResult)
+async def cleanup_artifacts(
+    payload: ArtifactCleanupRequest,
+    request: Request,
+    session: SessionDep,
+) -> ArtifactCleanupResult:
+    services = _services(request)
+    marked, removed, reclaimed = services.artifacts.cleanup_retention(
+        session,
+        retention_days=services.settings.artifact_retention_days,
+        temporary_hours=services.settings.temporary_retention_hours,
+        dry_run=payload.dry_run,
+    )
+    if not payload.dry_run:
+        session.commit()
+    return ArtifactCleanupResult(
+        dry_run=payload.dry_run,
+        marked_count=marked,
+        removed_count=removed,
+        reclaimed_bytes=reclaimed,
+    )
 
 
 @router.get("/artifacts/{artifact_id}", response_model=ArtifactOut)
