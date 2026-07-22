@@ -7,6 +7,7 @@ import zipfile
 from httpx2 import AsyncClient
 
 from local_lm.config import Settings
+from local_lm.downloads import DownloadManager
 
 
 async def wait_for_assistant(client: AsyncClient, chat_id: str, expected_type: str) -> dict:  # type: ignore[type-arg]
@@ -416,3 +417,33 @@ async def test_model_storage_cleanup_and_shared_path_deletion(
     assert cleaned.status_code == 200
     assert cleaned.json() == {"removed_count": 1, "reclaimed_bytes": len(b"incomplete")}
     assert not partial.exists()
+
+
+async def test_download_pause_resume_and_cancel(client: AsyncClient, monkeypatch) -> None:  # type: ignore[no-untyped-def]
+    gate = asyncio.Event()
+
+    async def wait_for_release(_manager: DownloadManager, _job_id: str) -> None:
+        await gate.wait()
+
+    monkeypatch.setattr(DownloadManager, "_download", wait_for_release)
+    created = await client.post(
+        "/api/downloads",
+        json={"remote_id": "owner/model", "role": "chat", "engine": "llama.cpp"},
+    )
+    assert created.status_code == 202
+    job_id = created.json()["id"]
+
+    paused = await client.post(f"/api/downloads/{job_id}/pause")
+    assert paused.status_code == 200
+    assert paused.json()["status"] == "paused"
+
+    resumed = await client.post(f"/api/downloads/{job_id}/resume")
+    assert resumed.status_code == 200
+    assert resumed.json()["status"] == "queued"
+
+    cancelled = await client.post(f"/api/jobs/{job_id}/cancel")
+    assert cancelled.status_code == 200
+    assert cancelled.json()["status"] == "cancelled"
+
+    cannot_resume = await client.post(f"/api/downloads/{job_id}/resume")
+    assert cannot_resume.status_code == 409

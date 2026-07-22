@@ -69,7 +69,12 @@ class DownloadManager:
             return
         task = asyncio.create_task(self._download(job_id), name=f"download-{job_id}")
         self._tasks[job_id] = task
-        task.add_done_callback(lambda _task: self._tasks.pop(job_id, None))
+
+        def discard(completed: asyncio.Task[None]) -> None:
+            if self._tasks.get(job_id) is completed:
+                self._tasks.pop(job_id, None)
+
+        task.add_done_callback(discard)
 
     def recover_interrupted(self) -> None:
         from .db import SessionLocal
@@ -78,7 +83,13 @@ class DownloadManager:
             jobs = session.scalars(
                 select(Job).where(
                     Job.kind == JobKind.DOWNLOAD.value,
-                    Job.status == JobStatus.INTERRUPTED.value,
+                    Job.status.in_(
+                        [
+                            JobStatus.INTERRUPTED.value,
+                            JobStatus.RUNNING.value,
+                            JobStatus.QUEUED.value,
+                        ]
+                    ),
                 )
             ).all()
             for job in jobs:
@@ -95,11 +106,16 @@ class DownloadManager:
         task = self._tasks.get(job_id)
         if task:
             task.cancel()
+            await asyncio.gather(task, return_exceptions=True)
         with SessionLocal() as session:
             job = session.get(Job, job_id)
             if not job or job.kind != JobKind.DOWNLOAD.value:
                 return False
-            if job.status in {JobStatus.COMPLETE.value, JobStatus.FAILED.value}:
+            if job.status in {
+                JobStatus.COMPLETE.value,
+                JobStatus.FAILED.value,
+                JobStatus.CANCELLED.value,
+            }:
                 return False
             job.status = JobStatus.CANCELLED.value
             job.phase = "cancelled"
@@ -107,6 +123,65 @@ class DownloadManager:
             session.commit()
         await self.events.publish("download.cancelled", job_id)
         return True
+
+    async def pause(self, job_id: str) -> bool:
+        from .db import SessionLocal
+
+        task = self._tasks.get(job_id)
+        if task:
+            task.cancel()
+            await asyncio.gather(task, return_exceptions=True)
+        with SessionLocal() as session:
+            job = session.get(Job, job_id)
+            if (
+                not job
+                or job.kind != JobKind.DOWNLOAD.value
+                or job.status not in {JobStatus.QUEUED.value, JobStatus.RUNNING.value}
+            ):
+                return False
+            job.status = JobStatus.PAUSED.value
+            job.phase = "paused"
+            session.commit()
+        await self.events.publish("download.paused", job_id)
+        return True
+
+    def resume(self, job_id: str) -> bool:
+        from .db import SessionLocal
+
+        with SessionLocal() as session:
+            job = session.get(Job, job_id)
+            if (
+                not job
+                or job.kind != JobKind.DOWNLOAD.value
+                or job.status != JobStatus.PAUSED.value
+            ):
+                return False
+            job.status = JobStatus.QUEUED.value
+            job.phase = "resume queued"
+            job.completed_at = None
+            session.commit()
+        self.start(job_id)
+        return True
+
+    async def close(self) -> None:
+        from .db import SessionLocal
+
+        tasks = list(self._tasks.values())
+        for task in tasks:
+            task.cancel()
+        if tasks:
+            await asyncio.gather(*tasks, return_exceptions=True)
+        with SessionLocal() as session:
+            jobs = session.scalars(
+                select(Job).where(
+                    Job.kind == JobKind.DOWNLOAD.value,
+                    Job.status.in_([JobStatus.QUEUED.value, JobStatus.RUNNING.value]),
+                )
+            ).all()
+            for job in jobs:
+                job.status = JobStatus.INTERRUPTED.value
+                job.phase = "interrupted by shutdown"
+            session.commit()
 
     def cleanup_partials(self, session: Session) -> tuple[int, int]:
         active_ids = set(

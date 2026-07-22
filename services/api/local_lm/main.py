@@ -97,6 +97,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             active_settings.port,
         )
         yield
+        await services.downloads.close()
         await services.catalog.close()
         await services.engines.close()
         await services.processes.close()

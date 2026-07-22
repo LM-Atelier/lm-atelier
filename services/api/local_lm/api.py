@@ -715,6 +715,28 @@ async def cleanup_partial_downloads(request: Request, session: SessionDep) -> St
     return StorageCleanupResult(removed_count=removed_count, reclaimed_bytes=reclaimed_bytes)
 
 
+@router.post("/downloads/{job_id}/pause", response_model=JobOut)
+async def pause_download(job_id: str, request: Request, session: SessionDep) -> Job:
+    if not await _services(request).downloads.pause(job_id):
+        raise HTTPException(409, "download is not running or cannot be paused")
+    session.expire_all()
+    job = session.get(Job, job_id)
+    if not job:
+        raise HTTPException(404, "download job not found")
+    return job
+
+
+@router.post("/downloads/{job_id}/resume", response_model=JobOut)
+async def resume_download(job_id: str, request: Request, session: SessionDep) -> Job:
+    if not _services(request).downloads.resume(job_id):
+        raise HTTPException(409, "download is not paused or cannot be resumed")
+    session.expire_all()
+    job = session.get(Job, job_id)
+    if not job:
+        raise HTTPException(404, "download job not found")
+    return job
+
+
 @router.get("/recipes", response_model=list[ReferenceRecipe])
 async def list_recipes() -> list[ReferenceRecipe]:
     return list_reference_recipes()
