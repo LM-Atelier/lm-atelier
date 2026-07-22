@@ -146,6 +146,11 @@ describe("App", () => {
     expect(await screen.findByText("Start a local conversation")).toBeInTheDocument();
     expect(screen.getByText("Model library")).toBeInTheDocument();
     expect(screen.getByText("Local service connected")).toBeInTheDocument();
+    expect(screen.getByText("Skip to main content")).toHaveAttribute("href", "#main-content");
+    const navigation = screen.getByRole("button", { name: "Toggle navigation" });
+    expect(navigation).toHaveAttribute("aria-expanded", "false");
+    fireEvent.click(navigation);
+    expect(navigation).toHaveAttribute("aria-expanded", "true");
   });
 
   it("searches and manages chats from the workspace sidebar", async () => {

@@ -1,0 +1,33 @@
+{
+  "schema_version": 1,
+  "updated_at": "2026-07-22",
+  "engines": {
+    "llama.cpp": {
+      "source": "https://github.com/ggml-org/llama.cpp",
+      "pinned_release": "b9637",
+      "distribution": "external",
+      "required_executable": "llama-server",
+      "required_contract": [
+        "GET /health",
+        "POST /v1/chat/completions",
+        "POST /tokenize"
+      ],
+      "certification": "hardware-pending"
+    },
+    "comfyui": {
+      "source": "https://github.com/Comfy-Org/ComfyUI",
+      "pinned_release": "v0.28.0",
+      "distribution": "external-gpl-3.0",
+      "required_contract": [
+        "GET /system_stats",
+        "GET /object_info",
+        "POST /prompt",
+        "POST /interrupt",
+        "GET /history/{prompt_id}",
+        "GET /view",
+        "WS /ws"
+      ],
+      "certification": "hardware-pending"
+    }
+  }
+}

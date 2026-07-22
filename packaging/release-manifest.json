@@ -1,0 +1,24 @@
+{
+  "schema_version": 1,
+  "application": "LM Atelier",
+  "version": "0.1.0",
+  "license": "Apache-2.0",
+  "distribution": "browser-first local service",
+  "supported_platforms": [
+    "Ubuntu 24.04 LTS x86_64",
+    "Windows 11 x86_64"
+  ],
+  "prerequisites": {
+    "python": ">=3.12",
+    "network": "Required for first install of Python dependencies; not required after setup",
+    "ffmpeg": "Optional for video posters and mock video",
+    "node": "Not required when installing an official archive with prebuilt web assets"
+  },
+  "data_policy": {
+    "update": "Application versions are installed side by side",
+    "rollback": "The prior application version can be reactivated without changing data",
+    "uninstall": "Application files are removed; user data is preserved unless purge is explicit"
+  },
+  "bundled_engines": false,
+  "signature_status": "unsigned-development-build"
+}
