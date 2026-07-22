@@ -28,6 +28,26 @@ weight-free demo and adapters for `llama-server`, ComfyUI, and Hugging Face.
 Mock engines exercise the entire product without model weights. Real inference
 requires separately installed runtime binaries and compatible models/workflows.
 
+## Reference recipes
+
+The Model library includes curated, one-click recipes pinned to immutable Hub
+commits and exact files. Downloads are checked against recorded SHA-256 hashes,
+and the managed ComfyUI worker receives generated extra-model-path mappings.
+
+| Role | Reference recipe | Download | Starting hardware | Operations |
+| --- | --- | ---: | --- | --- |
+| Chat | Qwen3 8B Q4_K_M | 5.0 GB | CPU, 8 GB RAM; 16 GB recommended | Text |
+| Image | FLUX.1 Schnell FP8 | 17.2 GB | 12 GB VRAM; 16 GB recommended | Text/image to image |
+| Video | Wan 2.1 T2V 1.3B | 9.8 GB | 8 GB VRAM; 12 GB recommended | Text to 480p video |
+| Video | Wan 2.1 I2V 14B 480p FP8 | 24.7 GB | 20 GB VRAM; 24 GB recommended | Image to 480p video |
+
+These entries are deliberately labeled **reference candidates**. Their source,
+license, defaults, dependencies, and expected hashes are verified, but they are
+not labeled certified until the complete recipe passes repeatable generation
+tests on declared target hardware. Media recipes use official Comfy-Org
+safe-tensor packages and native ComfyUI nodes; Local LM does not install custom
+node code. Model and workflow licenses remain independent of Local LM's license.
+
 ## Quick start
 
 Requirements: Python 3.12+, Node.js 22+, npm, and optionally FFmpeg for mock
@@ -86,6 +106,11 @@ LOCAL_LM_COMFY_DIRECTORY=/absolute/path/to/ComfyUI
 
 Custom nodes are executable code. Local LM stores trust metadata but does not
 install or execute a custom node on a user's behalf.
+
+Pinned Wan recipes also download the official example workflow JSON into their
+model install directory. Review it in ComfyUI, export it in API format, then
+import and trust that graph in Local LM. Recipe defaults remain editable through
+the same Basic, Advanced, and Expert generation controls as other profiles.
 
 ## Configuration
 

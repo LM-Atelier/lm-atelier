@@ -37,6 +37,7 @@ import type {
   MessagePart,
   ModelProfile,
   Project,
+  ReferenceRecipe,
   RoutingMode,
   SettingField,
   Workflow,
@@ -389,6 +390,25 @@ function ModelCard({ model, role, onDownload, pending }: { model: CatalogModel; 
   );
 }
 
+function RecipeCard({ recipe, pending, onInstall }: { recipe: ReferenceRecipe; pending: boolean; onInstall: () => void }) {
+  const memory = recipe.hardware.minimum_vram_gb
+    ? `${recipe.hardware.minimum_vram_gb} GB+ VRAM`
+    : `${recipe.hardware.minimum_ram_gb} GB+ RAM`;
+  return (
+    <article className="recipe-card">
+      <header>
+        <div className="model-icon">{recipe.role === "video" ? <Film /> : recipe.role === "image" ? <ImageIcon /> : <Bot />}</div>
+        <div><small>{recipe.role} · recipe v{recipe.version}</small><h3>{recipe.name}</h3></div>
+      </header>
+      <p>{recipe.summary}</p>
+      <div className="recipe-badges"><span className="badge likely">Reference candidate</span><span className="badge">{recipe.license_id}</span><span className="badge">{recipe.node_policy || recipe.engine}</span></div>
+      <div className="recipe-meta"><span><HardDrive size={14} />{formatBytes(recipe.total_size_bytes)}</span><span><Gauge size={14} />{memory}</span></div>
+      <small>{recipe.hardware.guidance}</small>
+      <button className="primary" onClick={onInstall} disabled={pending}>{pending ? "Queued" : "Install pinned recipe"}</button>
+    </article>
+  );
+}
+
 function ModelsView() {
   const client = useQueryClient();
   const [query, setQuery] = useState("");
@@ -399,11 +419,16 @@ function ModelsView() {
   const [selectedFiles, setSelectedFiles] = useState<string[]>([]);
   const catalog = useQuery({ queryKey: ["catalog", submitted, role, sort], queryFn: () => api.catalog(submitted, role, sort) });
   const detail = useQuery({ queryKey: ["catalog-detail", detailModel?.remote_id], queryFn: () => api.catalogDetail(detailModel!.remote_id), enabled: Boolean(detailModel) });
+  const recipes = useQuery({ queryKey: ["recipes"], queryFn: api.recipes });
   const installed = useQuery({ queryKey: ["models"], queryFn: api.models });
   const profiles = useQuery({ queryKey: ["profiles"], queryFn: api.profiles });
   const download = useMutation({
     mutationFn: ({ remoteId, files }: { remoteId: string; files: string[] }) => api.download(remoteId, role, role === "chat" ? "llama.cpp" : "comfyui", files),
     onSuccess: () => { setDetailModel(null); setSelectedFiles([]); void client.invalidateQueries({ queryKey: ["jobs"] }); },
+  });
+  const installRecipe = useMutation({
+    mutationFn: (recipeId: string) => api.installRecipe(recipeId),
+    onSuccess: () => void client.invalidateQueries({ queryKey: ["jobs"] }),
   });
   const createProfile = useMutation({
     mutationFn: api.createProfile,
@@ -412,6 +437,13 @@ function ModelsView() {
   return (
     <div className="page-view">
       <header className="page-header"><div><small>Model library</small><h1>Find the right local model</h1><p>Search Hugging Face, inspect compatibility, and manage downloads without leaving the app.</p></div><div className="storage-pill"><HardDrive size={17} />{installed.data?.length ?? 0} installed</div></header>
+      <section className="recipe-section">
+        <div className="section-heading"><div><small>Curated starting points</small><h2>Reference recipes</h2></div><p>Immutable revisions, exact safe files, conservative defaults, and hardware guidance. Certification follows real-device validation.</p></div>
+        {recipes.isLoading && <div className="loading-line" />}
+        {recipes.error && <div className="callout error">{recipes.error.message}</div>}
+        {installRecipe.error && <div className="callout error">{installRecipe.error.message}</div>}
+        <div className="recipe-grid">{recipes.data?.map((recipe) => <RecipeCard key={recipe.id} recipe={recipe} pending={installRecipe.isPending && installRecipe.variables === recipe.id} onInstall={() => installRecipe.mutate(recipe.id)} />)}</div>
+      </section>
       <div className="toolbar">
         <form className="search-box" onSubmit={(event) => { event.preventDefault(); setSubmitted(query); }}><Search size={18} /><input value={query} onChange={(event) => setQuery(event.target.value)} placeholder="Search models" /></form>
         <select value={role} onChange={(event) => setRole(event.target.value)}><option value="chat">Chat</option><option value="image">Image</option><option value="video">Video</option></select>

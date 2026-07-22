@@ -335,6 +335,49 @@ class DownloadRequest(ApiModel):
     role: Literal["chat", "image", "video"]
     engine: str = Field(min_length=1, max_length=32)
     allow_patterns: list[str] = Field(default_factory=list)
+    expected_sha256: dict[str, str] = Field(default_factory=dict)
+    recipe_id: str | None = None
+    recipe_version: int | None = None
+    comfy_paths: dict[str, str] = Field(default_factory=dict)
+    workflow_path: str | None = None
+    default_settings: dict[str, Any] = Field(default_factory=dict)
+
+
+class RecipeFile(ApiModel):
+    path: str
+    size_bytes: int | None = None
+    sha256: str | None = None
+
+
+class RecipeHardware(ApiModel):
+    tier: Literal["cpu", "midrange-gpu", "high-end-gpu"]
+    minimum_ram_gb: int
+    recommended_ram_gb: int
+    minimum_vram_gb: int | None = None
+    recommended_vram_gb: int | None = None
+    guidance: str
+
+
+class ReferenceRecipe(ApiModel):
+    id: str
+    version: int
+    name: str
+    summary: str
+    role: Literal["chat", "image", "video"]
+    engine: Literal["llama.cpp", "comfyui"]
+    operations: list[str]
+    license_id: str
+    status: Literal["reference-candidate", "certified"]
+    certified: bool
+    remote_id: str
+    revision: str
+    files: list[RecipeFile]
+    total_size_bytes: int | None
+    hardware: RecipeHardware
+    default_settings: dict[str, Any]
+    workflow_path: str | None = None
+    node_policy: str | None = None
+    notes: list[str] = Field(default_factory=list)
 
 
 class SettingField(ApiModel):

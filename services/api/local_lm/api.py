@@ -40,6 +40,7 @@ from .models import (
     WorkflowRevision,
 )
 from .orchestrator import ConversationOrchestrator
+from .recipes import get_reference_recipe, list_reference_recipes, recipe_download_request
 from .schemas import (
     ArtifactOut,
     BackupInfo,
@@ -63,6 +64,7 @@ from .schemas import (
     ProjectCreate,
     ProjectOut,
     ProjectUpdate,
+    ReferenceRecipe,
     RegenerateRequest,
     RunOut,
     SystemInfo,
@@ -597,6 +599,31 @@ async def create_download(payload: DownloadRequest, request: Request, session: S
     manager: DownloadManager = _services(request).downloads
     try:
         return manager.create(session, payload)
+    except ValueError as exc:
+        raise HTTPException(422, str(exc)) from exc
+
+
+@router.get("/recipes", response_model=list[ReferenceRecipe])
+async def list_recipes() -> list[ReferenceRecipe]:
+    return list_reference_recipes()
+
+
+@router.get("/recipes/{recipe_id}", response_model=ReferenceRecipe)
+async def get_recipe(recipe_id: str) -> ReferenceRecipe:
+    recipe = get_reference_recipe(recipe_id)
+    if not recipe:
+        raise HTTPException(404, "reference recipe not found")
+    return recipe
+
+
+@router.post("/recipes/{recipe_id}/install", response_model=JobOut, status_code=202)
+async def install_recipe(recipe_id: str, request: Request, session: SessionDep) -> Job:
+    recipe = get_reference_recipe(recipe_id)
+    if not recipe:
+        raise HTTPException(404, "reference recipe not found")
+    manager: DownloadManager = _services(request).downloads
+    try:
+        return manager.create(session, recipe_download_request(recipe))
     except ValueError as exc:
         raise HTTPException(422, str(exc)) from exc
 

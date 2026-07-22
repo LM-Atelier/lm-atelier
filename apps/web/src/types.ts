@@ -205,6 +205,41 @@ export interface CatalogDetail {
   files: Array<{ filename: string; size: number | null; sha256: string | null }>;
 }
 
+export interface RecipeFile {
+  path: string;
+  size_bytes: number | null;
+  sha256: string | null;
+}
+
+export interface ReferenceRecipe {
+  id: string;
+  version: number;
+  name: string;
+  summary: string;
+  role: "chat" | "image" | "video";
+  engine: "llama.cpp" | "comfyui";
+  operations: string[];
+  license_id: string;
+  status: "reference-candidate" | "certified";
+  certified: boolean;
+  remote_id: string;
+  revision: string;
+  files: RecipeFile[];
+  total_size_bytes: number | null;
+  hardware: {
+    tier: "cpu" | "midrange-gpu" | "high-end-gpu";
+    minimum_ram_gb: number;
+    recommended_ram_gb: number;
+    minimum_vram_gb: number | null;
+    recommended_vram_gb: number | null;
+    guidance: string;
+  };
+  default_settings: Record<string, unknown>;
+  workflow_path: string | null;
+  node_policy: string | null;
+  notes: string[];
+}
+
 export interface WorkflowRevision {
   id: string;
   workflow_id: string;

@@ -10,6 +10,7 @@ import type {
   ModelInstall,
   ModelProfile,
   Project,
+  ReferenceRecipe,
   RoutingMode,
   SystemInfo,
   TurnAccepted,
@@ -126,6 +127,9 @@ export const api = {
     ),
   catalogDetail: (remoteId: string) =>
     request<CatalogDetail>(`/api/catalog/${remoteId}`),
+  recipes: () => request<ReferenceRecipe[]>("/api/recipes"),
+  installRecipe: (recipeId: string) =>
+    request<Job>(`/api/recipes/${encodeURIComponent(recipeId)}/install`, { method: "POST" }),
   download: (remoteId: string, role: string, engine: string, allowPatterns: string[] = []) =>
     request<Job>("/api/downloads", {
       method: "POST",

@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
+import os
 from dataclasses import dataclass
 from pathlib import Path
 from typing import IO, Any
@@ -91,9 +93,59 @@ class ProcessSupervisor:
             parsed.hostname or "127.0.0.1",
             "--port",
             str(parsed.port or 8188),
+            "--extra-model-paths-config",
+            str(self._write_comfy_model_paths()),
         ]
         await self._replace("media", command, self.settings.comfy_url + "/system_stats")
         return self.statuses()[1]
+
+    def _write_comfy_model_paths(self) -> Path:
+        from sqlalchemy import select
+
+        from .db import SessionLocal
+
+        config: dict[str, dict[str, str]] = {}
+        seen: set[tuple[str, tuple[tuple[str, str], ...]]] = set()
+        with SessionLocal() as session:
+            installs = session.scalars(
+                select(ModelInstall).where(
+                    ModelInstall.engine == "comfyui", ModelInstall.active.is_(True)
+                )
+            ).all()
+            for install in installs:
+                raw_paths = install.manifest_json.get("comfy_paths") or {}
+                paths = self._validated_comfy_paths(raw_paths)
+                if not paths:
+                    continue
+                base_path = str(Path(install.local_path).resolve())
+                signature = (base_path, tuple(sorted(paths.items())))
+                if signature in seen:
+                    continue
+                seen.add(signature)
+                config[f"local_lm_{len(config) + 1}"] = {
+                    "base_path": base_path,
+                    **paths,
+                }
+        destination = self.settings.state_dir / "comfy-extra-model-paths.yaml"
+        temporary = destination.with_suffix(".tmp")
+        temporary.write_text(json.dumps(config, indent=2), encoding="utf-8")
+        os.replace(temporary, destination)
+        return destination
+
+    @staticmethod
+    def _validated_comfy_paths(value: object) -> dict[str, str]:
+        if not isinstance(value, dict):
+            return {}
+        allowed = {"checkpoints", "diffusion_models", "text_encoders", "vae", "clip_vision"}
+        result: dict[str, str] = {}
+        for key, item in value.items():
+            if key not in allowed or not isinstance(item, str):
+                continue
+            path = Path(item)
+            if path.is_absolute() or ".." in path.parts:
+                continue
+            result[key] = item
+        return result
 
     async def stop(self, name: str) -> WorkerStatus:
         if name not in self._locks:

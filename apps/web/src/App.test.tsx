@@ -33,6 +33,8 @@ vi.mock("./api", () => ({
     models: vi.fn(),
     profiles: vi.fn().mockResolvedValue([]),
     catalog: vi.fn(),
+    recipes: vi.fn().mockResolvedValue([]),
+    installRecipe: vi.fn(),
     download: vi.fn(),
     workflows: vi.fn(),
     createWorkflow: vi.fn(),

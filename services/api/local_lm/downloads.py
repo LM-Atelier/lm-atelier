@@ -2,10 +2,11 @@ from __future__ import annotations
 
 import asyncio
 import fnmatch
+import hashlib
 import os
 import re
 import shutil
-from pathlib import PurePosixPath
+from pathlib import Path, PurePosixPath
 from typing import Any
 
 from huggingface_hub import HfApi, hf_hub_download
@@ -32,6 +33,25 @@ class DownloadManager:
     def create(self, session: Session, request: DownloadRequest) -> Job:
         if not _REMOTE_ID.fullmatch(request.remote_id):
             raise ValueError("remote_id must be in owner/model form")
+        for filename, digest in request.expected_sha256.items():
+            path = PurePosixPath(filename)
+            if path.is_absolute() or ".." in path.parts:
+                raise ValueError("expected hash paths must be safe relative paths")
+            if not re.fullmatch(r"[0-9a-f]{64}", digest):
+                raise ValueError("expected SHA-256 values must be lowercase hexadecimal")
+        allowed_comfy_folders = {
+            "checkpoints",
+            "diffusion_models",
+            "text_encoders",
+            "vae",
+            "clip_vision",
+        }
+        for folder, relative_path in request.comfy_paths.items():
+            path = PurePosixPath(relative_path)
+            if folder not in allowed_comfy_folders:
+                raise ValueError(f"unsupported ComfyUI model folder: {folder}")
+            if path.is_absolute() or ".." in path.parts:
+                raise ValueError("ComfyUI model paths must be safe relative paths")
         job = Job(
             kind=JobKind.DOWNLOAD.value,
             status=JobStatus.QUEUED.value,
@@ -135,7 +155,7 @@ class DownloadManager:
                 destination = self.settings.model_dir / safe_name / revision
                 staging.mkdir(parents=True, exist_ok=True)
                 for index, filename in enumerate(filenames):
-                    await asyncio.to_thread(
+                    downloaded_path = await asyncio.to_thread(
                         hf_hub_download,
                         repo_id=request.remote_id,
                         filename=filename,
@@ -143,6 +163,18 @@ class DownloadManager:
                         local_dir=staging,
                         token=self.settings.hf_token,
                     )
+                    expected_hash = request.expected_sha256.get(filename)
+                    if expected_hash:
+                        with SessionLocal() as session:
+                            job = session.get(Job, job_id)
+                            if job:
+                                job.phase = f"verifying {filename}"
+                                session.commit()
+                        actual_hash = await asyncio.to_thread(
+                            self._sha256_file, Path(downloaded_path)
+                        )
+                        if actual_hash != expected_hash:
+                            raise ValueError(f"SHA-256 mismatch for {filename}")
                     with SessionLocal() as session:
                         job = session.get(Job, job_id)
                         if not job or job.status == JobStatus.CANCELLED.value:
@@ -160,10 +192,7 @@ class DownloadManager:
                     )
 
                 destination.parent.mkdir(parents=True, exist_ok=True)
-                if destination.exists():
-                    shutil.rmtree(staging, ignore_errors=True)
-                else:
-                    os.replace(staging, destination)
+                self._activate_staging(staging, destination)
                 installed_size = sum(
                     path.stat().st_size for path in destination.rglob("*") if path.is_file()
                 )
@@ -202,6 +231,12 @@ class DownloadManager:
                             "remote_id": request.remote_id,
                             "revision": revision,
                             "files": filenames,
+                            "expected_sha256": request.expected_sha256,
+                            "recipe_id": request.recipe_id,
+                            "recipe_version": request.recipe_version,
+                            "comfy_paths": request.comfy_paths,
+                            "workflow_path": request.workflow_path,
+                            "default_settings": request.default_settings,
                         },
                     )
                     session.add(install)
@@ -229,6 +264,32 @@ class DownloadManager:
                     job.completed_at = utcnow()
                     session.commit()
             await self.events.publish("download.failed", job_id, {"error": str(exc)})
+
+    @staticmethod
+    def _activate_staging(staging: Path, destination: Path) -> None:
+        """Atomically add complete files while preserving other selections from a revision."""
+        if not destination.exists():
+            os.replace(staging, destination)
+            return
+        for source in sorted(staging.rglob("*")):
+            if not source.is_file():
+                continue
+            relative = source.relative_to(staging)
+            target = destination / relative
+            target.parent.mkdir(parents=True, exist_ok=True)
+            if target.exists():
+                source.unlink()
+            else:
+                os.replace(source, target)
+        shutil.rmtree(staging, ignore_errors=True)
+
+    @staticmethod
+    def _sha256_file(path: Path) -> str:
+        digest = hashlib.sha256()
+        with path.open("rb") as handle:
+            while chunk := handle.read(1024 * 1024):
+                digest.update(chunk)
+        return digest.hexdigest()
 
     @staticmethod
     def _select_files(request: DownloadRequest, siblings: list[Any]) -> list[str]:
