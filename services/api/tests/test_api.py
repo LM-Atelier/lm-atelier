@@ -234,3 +234,86 @@ async def test_workflow_revisions_and_validation(client: AsyncClient) -> None:
     validation = await client.post(f"/api/workflows/{workflow['id']}/validate")
     assert validation.status_code == 200
     assert validation.json()["valid"] is True
+
+
+async def test_profile_edit_clone_reset_and_portable_bundle(client: AsyncClient) -> None:
+    profiles = (await client.get("/api/profiles?role=chat")).json()
+    source = profiles[0]
+    updated = await client.patch(
+        f"/api/profiles/{source['id']}",
+        json={
+            "name": "Focused chat",
+            "load_settings": {"context_length": 16_384},
+            "request_settings": {"temperature": 0.25},
+        },
+    )
+    assert updated.status_code == 200
+    assert updated.json()["load_settings_json"] == {"context_length": 16_384}
+
+    cloned = await client.post(
+        f"/api/profiles/{source['id']}/clone", json={"name": "Focused chat copy"}
+    )
+    assert cloned.status_code == 201
+    assert cloned.json()["request_settings_json"] == {"temperature": 0.25}
+    assert cloned.json()["is_default"] is False
+
+    exported = await client.get(f"/api/profiles/{source['id']}/export")
+    assert exported.status_code == 200
+    bundle = exported.json()
+    assert bundle["format"] == "lm-atelier-profile"
+    assert bundle["version"] == 1
+
+    bundle["name"] = "Imported portable chat"
+    bundle["model_install_id"] = "missing-on-this-machine"
+    imported = await client.post("/api/profiles/import", json=bundle)
+    assert imported.status_code == 201
+    assert imported.json()["model_install_id"] is None
+    assert imported.json()["load_settings_json"] == {"context_length": 16_384}
+
+    reset = await client.post(f"/api/profiles/{source['id']}/reset")
+    assert reset.status_code == 200
+    assert reset.json()["load_settings_json"] == {}
+    assert reset.json()["request_settings_json"] == {}
+
+    invalid = await client.post(
+        "/api/profiles/import",
+        json={
+            "format": "lm-atelier-profile",
+            "version": 1,
+            "name": "Invalid",
+            "role": "chat",
+            "engine": "llama.cpp",
+            "load_settings": {"not_a_setting": True},
+        },
+    )
+    assert invalid.status_code == 422
+
+
+async def test_preset_lifecycle_and_portable_bundle(client: AsyncClient) -> None:
+    created = await client.post(
+        "/api/presets",
+        json={"name": "Precise", "role": "chat", "settings": {"temperature": 0.1}},
+    )
+    assert created.status_code == 201
+    preset = created.json()
+
+    cloned = await client.post(f"/api/presets/{preset['id']}/clone", json={"name": "Precise copy"})
+    assert cloned.status_code == 201
+    assert cloned.json()["settings_json"] == {"temperature": 0.1}
+
+    exported = await client.get(f"/api/presets/{preset['id']}/export")
+    assert exported.status_code == 200
+    bundle = exported.json()
+    assert bundle["format"] == "lm-atelier-preset"
+
+    bundle["name"] = "Imported precise"
+    imported = await client.post("/api/presets/import", json=bundle)
+    assert imported.status_code == 201
+    assert imported.json()["settings_json"] == {"temperature": 0.1}
+
+    reset = await client.post(f"/api/presets/{preset['id']}/reset")
+    assert reset.status_code == 200
+    assert reset.json()["settings_json"] == {}
+
+    deleted = await client.delete(f"/api/presets/{cloned.json()['id']}")
+    assert deleted.status_code == 204

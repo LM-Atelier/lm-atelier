@@ -143,6 +143,33 @@ export interface ModelProfile {
   is_default: boolean;
 }
 
+export interface ModelProfileBundle {
+  format: "lm-atelier-profile";
+  version: 1;
+  name: string;
+  role: "chat" | "image" | "video";
+  engine: string;
+  model_install_id: string | null;
+  load_settings: Record<string, unknown>;
+  request_settings: Record<string, unknown>;
+}
+
+export interface GenerationPreset {
+  id: string;
+  name: string;
+  role: "chat" | "image" | "video";
+  settings_json: Record<string, unknown>;
+  is_default: boolean;
+}
+
+export interface GenerationPresetBundle {
+  format: "lm-atelier-preset";
+  version: 1;
+  name: string;
+  role: "chat" | "image" | "video";
+  settings: Record<string, unknown>;
+}
+
 export interface WorkerStatus {
   name: "chat" | "media";
   managed: boolean;

@@ -2,6 +2,7 @@ import { cleanup, fireEvent, render, screen } from "@testing-library/react";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import App from "./App";
+import { api } from "./api";
 
 vi.mock("./api", () => ({
   api: {
@@ -59,6 +60,19 @@ vi.mock("./api", () => ({
     platforms: vi.fn().mockResolvedValue([]),
     models: vi.fn(),
     profiles: vi.fn().mockResolvedValue([]),
+    updateProfile: vi.fn(),
+    cloneProfile: vi.fn(),
+    resetProfile: vi.fn(),
+    exportProfile: vi.fn(),
+    importProfile: vi.fn(),
+    presets: vi.fn().mockResolvedValue([]),
+    createPreset: vi.fn(),
+    updatePreset: vi.fn(),
+    clonePreset: vi.fn(),
+    resetPreset: vi.fn(),
+    exportPreset: vi.fn(),
+    importPreset: vi.fn(),
+    deletePreset: vi.fn(),
     workers: vi.fn().mockResolvedValue([]),
     backups: vi.fn().mockResolvedValue([]),
     loadChatWorker: vi.fn(),
@@ -108,5 +122,32 @@ describe("App", () => {
     expect(await screen.findByText("Platform support")).toBeInTheDocument();
     expect(await screen.findByText("Ubuntu 24.04 LTS x64 target")).toBeInTheDocument();
     expect(screen.getByText("hardware pending")).toBeInTheDocument();
+  });
+
+  it("opens a model profile in the schema-driven settings editor", async () => {
+    vi.mocked(api.profiles).mockResolvedValue([
+      {
+        id: "profile-1",
+        model_install_id: "model-1",
+        name: "Local chat",
+        role: "chat",
+        engine: "mock",
+        load_settings_json: {},
+        request_settings_json: {},
+        is_default: true,
+      },
+    ]);
+    const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+    render(
+      <QueryClientProvider client={client}>
+        <App />
+      </QueryClientProvider>,
+    );
+    fireEvent.click(await screen.findByText("Settings"));
+    expect(await screen.findByText("Local chat · default")).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "Edit" }));
+    expect(await screen.findByText("Edit profile")).toBeInTheDocument();
+    expect(screen.getByDisplayValue("Local chat")).toBeInTheDocument();
+    expect(screen.getByText("Default chat profile")).toBeInTheDocument();
   });
 });
