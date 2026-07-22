@@ -191,6 +191,32 @@ class ConversationOrchestrator:
                 plan.standalone_prompt = f"{prior_prompt}. Follow-up instruction: {request.text}"
         plan.input_artifact_ids = resolved_input_ids
 
+        profile_id = self._profile_for_operation(chat, plan.operation)
+        profile = session.get(ModelProfile, profile_id) if profile_id else None
+        fields = self._fields_for_operation(plan.operation)
+        effective_settings = resolve_settings(
+            defaults(fields), profile.request_settings_json if profile else None, request.settings
+        )
+        effective_settings = validate_settings(effective_settings, fields)
+        generation_estimate = (
+            self._video_estimate(effective_settings) if "video" in plan.operation.value else None
+        )
+        if generation_estimate:
+            plan.parameter_overrides = {
+                **plan.parameter_overrides,
+                "_generation_estimate": generation_estimate,
+            }
+        if (
+            mode == RoutingMode.AUTO
+            and chat.confirm_uncertain_media
+            and generation_estimate
+            and self.engines.settings.video_confirmation_work_units > 0
+            and generation_estimate["work_units"]
+            >= self.engines.settings.video_confirmation_work_units
+            and not request.confirm_media
+        ):
+            raise RouteConfirmationRequired(plan)
+
         user_message = Message(
             chat_id=chat.id,
             parent_id=parent_message_id,
@@ -221,13 +247,6 @@ class ConversationOrchestrator:
         assistant_message.parent_id = user_message.id
         chat.active_head_message_id = assistant_message.id
 
-        profile_id = self._profile_for_operation(chat, plan.operation)
-        profile = session.get(ModelProfile, profile_id) if profile_id else None
-        fields = self._fields_for_operation(plan.operation)
-        effective_settings = resolve_settings(
-            defaults(fields), profile.request_settings_json if profile else None, request.settings
-        )
-        effective_settings = validate_settings(effective_settings, fields)
         workflow_revision = self._workflow_for_operation(
             session, plan.operation, project_id=chat.project_id
         )
@@ -288,6 +307,7 @@ class ConversationOrchestrator:
                 "model": model_provenance,
                 "workflow": workflow_provenance,
                 "resolved_settings": effective_settings,
+                "generation_estimate": generation_estimate,
             },
         )
         session.add(run)
@@ -734,8 +754,31 @@ class ConversationOrchestrator:
                     },
                 )
                 poster_artifact_id: str | None = None
+                proxy_artifact_id: str | None = None
                 if generated.kind == "video":
-                    poster_content = await self.artifacts.video_poster(artifact)
+                    playback_artifact = artifact
+                    proxy_result = await self.artifacts.browser_video_proxy(artifact)
+                    if proxy_result:
+                        proxy_content, proxy_media_type, proxy_name = proxy_result
+                        proxy = self.artifacts.ingest_bytes(
+                            session,
+                            proxy_content,
+                            kind=ArtifactKind.OTHER,
+                            media_type=proxy_media_type,
+                            original_name=proxy_name,
+                            metadata={
+                                "run_id": run.id,
+                                "browser_proxy": True,
+                                "proxy_for": artifact.id,
+                            },
+                        )
+                        proxy_artifact_id = proxy.id
+                        playback_artifact = proxy
+                        artifact.metadata_json = {
+                            **artifact.metadata_json,
+                            "browser_proxy_artifact_id": proxy.id,
+                        }
+                    poster_content = await self.artifacts.video_poster(playback_artifact)
                     if poster_content:
                         poster = self.artifacts.ingest_bytes(
                             session,
@@ -759,6 +802,7 @@ class ConversationOrchestrator:
                         "media_type": artifact.media_type,
                         "size_bytes": artifact.size_bytes,
                         "poster_artifact_id": poster_artifact_id,
+                        "browser_proxy_artifact_id": proxy_artifact_id,
                     }
                 )
                 parts.append(
@@ -771,6 +815,7 @@ class ConversationOrchestrator:
                         metadata_json={
                             "media_type": artifact.media_type,
                             "poster_artifact_id": poster_artifact_id,
+                            "browser_proxy_artifact_id": proxy_artifact_id,
                         },
                     )
                 )
@@ -980,6 +1025,25 @@ class ConversationOrchestrator:
         if "video" in operation.value:
             return VIDEO_SETTINGS
         return IMAGE_SETTINGS
+
+    @staticmethod
+    def _video_estimate(settings: dict[str, Any]) -> dict[str, int | float]:
+        width = int(settings.get("width", 768))
+        height = int(settings.get("height", 432))
+        frames = int(settings.get("frames", 49))
+        fps = max(float(settings.get("fps", 24)), 1)
+        steps = int(settings.get("steps", 30))
+        raw_bytes = width * height * frames * 3
+        return {
+            "width": width,
+            "height": height,
+            "frames": frames,
+            "fps": fps,
+            "duration_seconds": round(frames / fps, 2),
+            "work_units": width * height * frames * steps,
+            "estimated_output_bytes": max(1_000_000, raw_bytes // 45),
+            "estimated_intermediate_bytes": raw_bytes * 2,
+        }
 
     @staticmethod
     def _job_kind(operation: Operation) -> JobKind:

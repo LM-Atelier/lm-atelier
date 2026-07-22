@@ -94,7 +94,8 @@ function StatusDot({ healthy }: { healthy: boolean }) {
 
 function ArtifactPart({ part }: { part: MessagePart }) {
   if (!part.artifact_id) return null;
-  const source = `/api/artifacts/${encodeURIComponent(part.artifact_id)}/content`;
+  const proxyId = typeof part.metadata_json.browser_proxy_artifact_id === "string" ? part.metadata_json.browser_proxy_artifact_id : null;
+  const source = `/api/artifacts/${encodeURIComponent(proxyId ?? part.artifact_id)}/content`;
   const preview = Boolean(part.metadata_json.preview);
   if (part.type === "image") {
     return (
@@ -156,9 +157,11 @@ function MediaLibraryView() {
       {cleanup.error && <div className="callout error">{cleanup.error.message}</div>}
       {artifacts.data?.length ? <div className="media-grid">{artifacts.data.map((artifact) => {
         const source = `/api/artifacts/${encodeURIComponent(artifact.id)}/content`;
+        const proxyId = typeof artifact.metadata_json.browser_proxy_artifact_id === "string" ? artifact.metadata_json.browser_proxy_artifact_id : null;
+        const playbackSource = proxyId ? `/api/artifacts/${encodeURIComponent(proxyId)}/content` : source;
         const posterId = typeof artifact.metadata_json.poster_artifact_id === "string" ? artifact.metadata_json.poster_artifact_id : null;
         return <article className="gallery-card" key={artifact.id}>
-          {artifact.kind === "image" ? <img src={source} alt={artifact.original_name ?? "Generated image"} loading="lazy" /> : <video src={source} poster={posterId ? `/api/artifacts/${encodeURIComponent(posterId)}/content` : undefined} controls preload="metadata" />}
+          {artifact.kind === "image" ? <img src={source} alt={artifact.original_name ?? "Generated image"} loading="lazy" /> : <video src={playbackSource} poster={posterId ? `/api/artifacts/${encodeURIComponent(posterId)}/content` : undefined} controls preload="metadata" />}
           <div><strong>{artifact.original_name ?? artifact.kind}</strong><small>{formatBytes(artifact.size_bytes)} · {artifact.reference_count} reference{artifact.reference_count === 1 ? "" : "s"}</small><span><a href={source} download>Download</a><code>{artifact.sha256.slice(0, 12)}</code></span></div>
         </article>;
       })}</div> : <EmptyState icon={<ImageIcon />} title="No generated media" body="Images and videos created in chat will appear here." />}
