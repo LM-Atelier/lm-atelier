@@ -143,14 +143,23 @@ async def platform_matrix() -> list[PlatformMatrixEntry]:
     return list_platform_matrix()
 
 
+@router.post("/diagnostics", response_model=ArtifactOut, status_code=201)
+async def create_diagnostics(request: Request, session: SessionDep) -> ArtifactOut:
+    artifact = _services(request).diagnostics.create(session)
+    session.commit()
+    result = ArtifactOut.model_validate(artifact)
+    result.url = f"/api/artifacts/{artifact.id}/content"
+    return result
+
+
 @router.get("/backups", response_model=list[BackupInfo])
 async def list_backups(request: Request) -> list[BackupInfo]:
     return _services(request).backups.list()
 
 
 @router.post("/backups", response_model=BackupInfo, status_code=201)
-async def create_backup(request: Request) -> BackupInfo:
-    return _services(request).backups.create()
+async def create_backup(request: Request, include_media: bool = False) -> BackupInfo:
+    return _services(request).backups.create(include_media=include_media)
 
 
 @router.post("/backups/{name}/verify", response_model=BackupInfo)
