@@ -95,6 +95,7 @@ class ChatOut(ApiModel):
     active_chat_profile_id: str | None
     active_image_profile_id: str | None
     active_video_profile_id: str | None
+    active_head_message_id: str | None
     created_at: datetime
     updated_at: datetime
 

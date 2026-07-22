@@ -53,6 +53,7 @@ export interface Chat {
   active_chat_profile_id: string | null;
   active_image_profile_id: string | null;
   active_video_profile_id: string | null;
+  active_head_message_id: string | null;
   created_at: string;
   updated_at: string;
 }

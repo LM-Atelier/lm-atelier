@@ -109,6 +109,12 @@ load settings as an argument array without a shell and only swaps after the
 worker health check succeeds. If you run `llama-server` yourself, omit the
 executable and point `LOCAL_LM_LLAMA_URL` at it.
 
+Before each chat run, LM Atelier asks llama.cpp for the chat-template-aware
+input token count. When a conversation exceeds the selected profile's context
+window, it preserves project instructions and the newest request while omitting
+the oldest turns until the prompt fits. The response shows context usage and
+any omission count, and the complete policy is retained in run provenance.
+
 ## Real images and video with ComfyUI
 
 1. Install ComfyUI separately and prepare API-format workflows whose tunable

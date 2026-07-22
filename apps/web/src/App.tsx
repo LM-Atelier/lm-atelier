@@ -18,6 +18,7 @@ import {
   MoreHorizontal,
   Paperclip,
   Plus,
+  RotateCcw,
   Search,
   Send,
   Settings,
@@ -116,8 +117,22 @@ function PartView({ part, liveText }: { part: MessagePart; liveText?: string }) 
   return <div className="message-error">Unsupported message part: {String(part.type)}</div>;
 }
 
-function MessageBubble({ message, liveText }: { message: Message; liveText?: string }) {
+function MessageBubble({
+  message,
+  liveText,
+  onRegenerate,
+}: {
+  message: Message;
+  liveText?: string;
+  onRegenerate?: (messageId: string) => void;
+}) {
   const visibleParts = message.parts.filter((part) => part.type !== "generation_metadata");
+  const metadata = message.parts.find((part) => part.type === "generation_metadata")?.metadata_json;
+  const context = metadata?.context as Record<string, unknown> | undefined;
+  const usage = context?.usage as Record<string, unknown> | undefined;
+  const inputTokens = Number(usage?.prompt_tokens ?? context?.input_tokens ?? 0);
+  const contextLimit = Number(context?.context_limit ?? 0);
+  const omitted = Number(context?.messages_omitted ?? 0);
   return (
     <article className={`message ${message.role}`}>
       <div className="avatar">{message.role === "user" ? "You" : <Bot size={19} />}</div>
@@ -125,6 +140,21 @@ function MessageBubble({ message, liveText }: { message: Message; liveText?: str
         {visibleParts.map((part) => <PartView key={part.id} part={part} liveText={liveText} />)}
         {liveText && !visibleParts.some((part) => part.type === "text") && (
           <div className="message-text">{liveText}</div>
+        )}
+        {message.role === "assistant" && message.status === "complete" && (
+          <div className="message-meta">
+            {contextLimit > 0 && (
+              <span>
+                Context {inputTokens.toLocaleString()} / {contextLimit.toLocaleString()} tokens
+                {omitted > 0 ? ` · ${omitted} earlier message${omitted === 1 ? "" : "s"} omitted` : ""}
+              </span>
+            )}
+            {onRegenerate && (
+              <button onClick={() => onRegenerate(message.id)} aria-label="Regenerate response">
+                <RotateCcw size={13} /> Regenerate
+              </button>
+            )}
+          </div>
         )}
       </div>
     </article>
@@ -341,6 +371,7 @@ function ChatView({
   liveText,
   onSend,
   onProfile,
+  onRegenerate,
 }: {
   chat?: ChatDetail;
   engines: EngineCapabilities[];
@@ -348,6 +379,7 @@ function ChatView({
   liveText: Record<string, string>;
   onSend: (text: string, mode: RoutingMode, artifacts: string[], settings: Record<string, unknown>) => void;
   onProfile: (field: "active_chat_profile_id" | "active_image_profile_id" | "active_video_profile_id", id: string | null) => void;
+  onRegenerate: (messageId: string) => void;
 }) {
   const endRef = useRef<HTMLDivElement>(null);
   useEffect(() => endRef.current?.scrollIntoView({ behavior: "smooth" }), [chat?.messages, liveText]);
@@ -368,7 +400,7 @@ function ChatView({
       <div className="messages">
         {chat.messages.length === 0 ? (
           <EmptyState icon={<Sparkles />} title="What should we make?" body="Ask a question or describe an image or video. Auto mode chooses the appropriate local model." />
-        ) : chat.messages.map((message) => <MessageBubble key={message.id} message={message} liveText={liveText[message.id]} />)}
+        ) : chat.messages.map((message) => <MessageBubble key={message.id} message={message} liveText={liveText[message.id]} onRegenerate={busy ? undefined : onRegenerate} />)}
         <div ref={endRef} />
       </div>
       <Composer chat={chat} engines={engines} busy={busy} onSend={onSend} />
@@ -635,6 +667,14 @@ export default function App() {
       void client.invalidateQueries({ queryKey: ["jobs"] });
     },
   });
+  const regenerate = useMutation({
+    mutationFn: api.regenerateMessage,
+    onSuccess: (accepted) => {
+      client.setQueryData<ChatDetail>(["chat", currentChatId], (current) => current ? { ...current, messages: [...current.messages, accepted.user_message, accepted.assistant_message] } : current);
+      void client.invalidateQueries({ queryKey: ["chats"] });
+      void client.invalidateQueries({ queryKey: ["jobs"] });
+    },
+  });
   const updateChat = useMutation({
     mutationFn: (values: Partial<Chat>) => api.updateChat(currentChatId!, values),
     onSuccess: () => {
@@ -662,15 +702,15 @@ export default function App() {
     if (view === "models") return <ModelsView />;
     if (view === "workflows") return <WorkflowsView />;
     if (view === "settings") return <SettingsView engines={engines.data ?? []} />;
-    return <ChatView chat={chat.data} engines={engines.data ?? []} profiles={profiles.data ?? []} liveText={liveText} onProfile={(field, id) => updateChat.mutate({ [field]: id })} onSend={(text, mode, artifacts, settings) => send.mutate({ text, mode, artifacts, settings })} />;
-  }, [view, engines.data, profiles.data, chat.data, liveText, send, updateChat]);
+    return <ChatView chat={chat.data} engines={engines.data ?? []} profiles={profiles.data ?? []} liveText={liveText} onProfile={(field, id) => updateChat.mutate({ [field]: id })} onRegenerate={(messageId) => regenerate.mutate(messageId)} onSend={(text, mode, artifacts, settings) => send.mutate({ text, mode, artifacts, settings })} />;
+  }, [view, engines.data, profiles.data, chat.data, liveText, send, regenerate, updateChat]);
 
   return (
     <div className="app-shell">
       <Sidebar projects={allProjects} chats={allChats} currentChatId={currentChatId} view={view} connected={connected} onChat={(id) => { setCurrentChatId(id); localStorage.setItem("local-lm-chat", id); setView("chat"); }} onView={setView} onNewChat={(projectId) => createChat.mutate(projectId)} onNewProject={() => { const name = window.prompt("Project name"); if (name?.trim()) createProject.mutate(name.trim()); }} onExportProject={(id) => exportProject.mutate(id)} />
       <main>{activeContent}</main>
       <JobsPanel />
-      {(send.error || createChat.error || createProject.error) && <div className="toast error"><X size={16} />{(send.error || createChat.error || createProject.error)?.message}</div>}
+      {(send.error || regenerate.error || createChat.error || createProject.error) && <div className="toast error"><X size={16} />{(send.error || regenerate.error || createChat.error || createProject.error)?.message}</div>}
     </div>
   );
 }

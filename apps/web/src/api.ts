@@ -93,6 +93,11 @@ export const api = {
         idempotency_key: crypto.randomUUID(),
       }),
     }),
+  regenerateMessage: (messageId: string) =>
+    request<TurnAccepted>(`/api/messages/${messageId}/regenerate`, {
+      method: "POST",
+      body: JSON.stringify({ settings: {} }),
+    }),
   jobs: () => request<Job[]>("/api/jobs"),
   cancelJob: (id: string) => request<Job>(`/api/jobs/${id}/cancel`, { method: "POST" }),
   engines: () => request<EngineCapabilities[]>("/api/engines"),

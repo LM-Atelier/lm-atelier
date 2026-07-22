@@ -67,6 +67,7 @@ class Chat(TimestampMixin, Base):
     active_chat_profile_id: Mapped[str | None] = mapped_column(String(40), nullable=True)
     active_image_profile_id: Mapped[str | None] = mapped_column(String(40), nullable=True)
     active_video_profile_id: Mapped[str | None] = mapped_column(String(40), nullable=True)
+    active_head_message_id: Mapped[str | None] = mapped_column(String(40), nullable=True)
 
     project: Mapped[Project | None] = relationship(back_populates="chats")
     messages: Mapped[list[Message]] = relationship(
