@@ -6,6 +6,7 @@ import os
 import re
 import sqlite3
 import tempfile
+from contextlib import closing
 from datetime import UTC, datetime
 from pathlib import Path
 
@@ -34,8 +35,8 @@ class BackupManager:
         temporary = Path(temporary_name)
         try:
             with (
-                sqlite3.connect(self._database_path()) as source,
-                sqlite3.connect(temporary) as target,
+                closing(sqlite3.connect(self._database_path())) as source,
+                closing(sqlite3.connect(temporary)) as target,
             ):
                 source.backup(target)
             self._verify_path(temporary)
@@ -72,7 +73,10 @@ class BackupManager:
         self._verify_path(source_path)
         destination = self._database_path()
         destination.parent.mkdir(parents=True, exist_ok=True)
-        with sqlite3.connect(source_path) as source, sqlite3.connect(destination) as target:
+        with (
+            closing(sqlite3.connect(source_path)) as source,
+            closing(sqlite3.connect(destination)) as target,
+        ):
             source.backup(target)
         marker.unlink()
         return True
@@ -90,7 +94,7 @@ class BackupManager:
 
     @staticmethod
     def _verify_path(path: Path) -> None:
-        with sqlite3.connect(f"file:{path}?mode=ro", uri=True) as connection:
+        with closing(sqlite3.connect(f"file:{path}?mode=ro", uri=True)) as connection:
             result = connection.execute("PRAGMA integrity_check").fetchone()
         if not result or result[0] != "ok":
             raise ValueError("backup failed SQLite integrity verification")
