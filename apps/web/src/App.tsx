@@ -19,6 +19,8 @@ import {
   MessageSquare,
   MoreHorizontal,
   Paperclip,
+  Pause,
+  Play,
   Plus,
   RotateCcw,
   Search,
@@ -846,10 +848,13 @@ function Sidebar({
 function JobsPanel() {
   const client = useQueryClient();
   const jobs = useQuery({ queryKey: ["jobs"], queryFn: api.jobs, refetchInterval: 3_000 });
-  const cancel = useMutation({ mutationFn: api.cancelJob, onSuccess: () => void client.invalidateQueries({ queryKey: ["jobs"] }) });
+  const refresh = () => void client.invalidateQueries({ queryKey: ["jobs"] });
+  const cancel = useMutation({ mutationFn: api.cancelJob, onSuccess: refresh });
+  const pause = useMutation({ mutationFn: api.pauseDownload, onSuccess: refresh });
+  const resume = useMutation({ mutationFn: api.resumeDownload, onSuccess: refresh });
   const active = jobs.data?.filter((job) => ["queued", "running", "paused"].includes(job.status)) ?? [];
   if (!active.length) return null;
-  return <div className="jobs-panel"><header><Activity size={16} /><span>{active.length} active job{active.length === 1 ? "" : "s"}</span></header>{active.map((job) => <div className="job-row" key={job.id}><div><strong>{job.kind}</strong><small>{job.phase}</small><div className="progress-track"><div style={{ width: `${Math.max(4, job.progress * 100)}%` }} /></div></div><button className="icon-button" onClick={() => cancel.mutate(job.id)}><CircleStop size={17} /></button></div>)}</div>;
+  return <div className="jobs-panel"><header><Activity size={16} /><span>{active.length} active job{active.length === 1 ? "" : "s"}</span></header>{active.map((job) => <div className="job-row" key={job.id}><div><strong>{job.kind}</strong><small>{job.phase}</small><div className="progress-track"><div style={{ width: `${Math.max(4, job.progress * 100)}%` }} /></div></div><span className="job-actions">{job.kind === "download" && (job.status === "paused" ? <button className="icon-button" aria-label="Resume download" onClick={() => resume.mutate(job.id)}><Play size={16} /></button> : <button className="icon-button" aria-label="Pause download" onClick={() => pause.mutate(job.id)}><Pause size={16} /></button>)}<button className="icon-button" aria-label="Cancel job" onClick={() => cancel.mutate(job.id)}><CircleStop size={17} /></button></span></div>)}</div>;
 }
 
 export default function App() {
