@@ -33,6 +33,7 @@ vi.mock("./api", () => ({
         details: {},
       },
     ]),
+    probeChatTools: vi.fn(),
     system: vi.fn().mockResolvedValue({
       platform: "Linux",
       platform_release: "6.8",
@@ -235,5 +236,26 @@ describe("App", () => {
     expect(screen.getByText("current RAM")).toBeInTheDocument();
     expect(screen.getByText("measured peak")).toBeInTheDocument();
     expect(screen.getByText("estimated load")).toBeInTheDocument();
+  });
+
+  it("runs an executable structured-tool capability probe", async () => {
+    vi.mocked(api.probeChatTools).mockResolvedValue({
+      engine: "mock",
+      version: "1",
+      advertised: true,
+      passed: true,
+      tool_name: "choose_route",
+      arguments: { mode: "image", confidence: 1 },
+      error: null,
+    });
+    const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+    render(
+      <QueryClientProvider client={client}>
+        <App />
+      </QueryClientProvider>,
+    );
+    fireEvent.click(await screen.findByText("Settings"));
+    fireEvent.click(await screen.findByText("Test structured tools"));
+    expect(await screen.findByText("Structured tool schema passed on mock 1.")).toBeInTheDocument();
   });
 });

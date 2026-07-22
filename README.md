@@ -115,6 +115,11 @@ the complete worker process tree. Chat cards also show a conservative pre-load
 estimate based on GGUF size and context length. CPU/GPU placement can change the
 actual result, so estimates and measurements are labeled separately.
 
+The Engines panel can run an executable structured-tool probe against the active
+chat adapter. It supplies a function with a strict routing schema, assembles
+streamed tool-call fragments, validates the returned JSON arguments, and reports
+the observed result separately from the engine's advertised capability.
+
 Profiles and generation presets can be edited at Basic, Advanced, or Expert
 visibility, cloned, reset, and exported as versioned JSON bundles. Imported
 profiles keep their model binding when the same install exists locally and
