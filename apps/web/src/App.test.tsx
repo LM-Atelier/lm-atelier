@@ -89,9 +89,12 @@ vi.mock("./api", () => ({
     stopWorker: vi.fn(),
     createBackup: vi.fn(),
     catalog: vi.fn(),
+    catalogDetail: vi.fn(),
+    catalogPreflight: vi.fn(),
     recipes: vi.fn().mockResolvedValue([]),
     installRecipe: vi.fn(),
     download: vi.fn(),
+    importModel: vi.fn(),
     workflows: vi.fn(),
     createWorkflow: vi.fn(),
     validateWorkflow: vi.fn(),
@@ -339,6 +342,20 @@ describe("App", () => {
     expect(screen.getByTitle("Delete installed model")).toBeEnabled();
   });
 
+  it("opens the advanced local model import form", async () => {
+    const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+    render(
+      <QueryClientProvider client={client}>
+        <App />
+      </QueryClientProvider>,
+    );
+    fireEvent.click(await screen.findByText("Model library"));
+    fireEvent.click(await screen.findByText("Import local"));
+    expect(await screen.findByRole("heading", { name: "Import a local model" })).toBeInTheDocument();
+    expect(screen.getByText(/Pickle-compatible formats are blocked/)).toBeInTheDocument();
+    expect(screen.getByPlaceholderText("/path/to/model.gguf")).toBeInTheDocument();
+  });
+
   it("paginates catalog results and exposes compatibility filters", async () => {
     vi.mocked(api.catalog).mockResolvedValue({
       items: [],
@@ -356,5 +373,61 @@ describe("App", () => {
     fireEvent.click(await screen.findByText("Load more models"));
     await waitFor(() => expect(api.catalog).toHaveBeenCalledTimes(2));
     expect(vi.mocked(api.catalog).mock.calls[1]?.[3]).toContain("cursor=next");
+  });
+
+  it("shows catalog install checks before queueing a model", async () => {
+    const model = {
+      provider: "huggingface",
+      remote_id: "owner/model-8B-GGUF",
+      name: "model-8B-GGUF",
+      author: "owner",
+      pipeline_tag: "text-generation",
+      tags: ["gguf"],
+      downloads: 42,
+      likes: 3,
+      trending_score: 1,
+      created_at: "2026-07-22T00:00:00Z",
+      last_modified: "2026-07-22T00:00:00Z",
+      gated: false,
+      private: false,
+      library_name: null,
+      architecture: "qwen3",
+      formats: ["gguf"],
+      quantizations: ["q4_k_m"],
+      parameter_count: 8_000_000_000,
+      license_id: "apache-2.0",
+      total_size_bytes: 1024,
+      compatibility: "likely",
+      compatibility_reasons: ["GGUF artifact detected"],
+    };
+    vi.mocked(api.catalog).mockResolvedValue({ items: [model], next_cursor: null });
+    vi.mocked(api.catalogDetail).mockResolvedValue({
+      model,
+      revision: "main",
+      files: [{ filename: "model-q4.gguf", size: 1024, sha256: null }],
+    });
+    vi.mocked(api.catalogPreflight).mockResolvedValue({
+      remote_id: model.remote_id,
+      revision: "main",
+      selected_files: ["model-q4.gguf"],
+      download_bytes: 1024,
+      available_disk_bytes: 4096,
+      estimated_ram_bytes: 2048,
+      estimated_vram_bytes: null,
+      can_install: true,
+      checks: [{ id: "disk", label: "Disk capacity", status: "pass", detail: "Fits." }],
+    });
+    const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+    render(
+      <QueryClientProvider client={client}>
+        <App />
+      </QueryClientProvider>,
+    );
+    fireEvent.click(await screen.findByText("Model library"));
+    fireEvent.click(await screen.findByText("Choose files"));
+    expect(await screen.findByRole("heading", { name: model.remote_id })).toBeInTheDocument();
+    expect(await screen.findByText("Disk capacity")).toBeInTheDocument();
+    expect(screen.getByText("apache-2.0")).toBeInTheDocument();
+    expect(screen.getByText("Queue download")).toBeEnabled();
   });
 });

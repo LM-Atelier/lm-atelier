@@ -503,9 +503,28 @@ function ModelsView() {
   const [quantization, setQuantization] = useState("");
   const [licenseId, setLicenseId] = useState("");
   const [architecture, setArchitecture] = useState("");
+  const [minParameters, setMinParameters] = useState("");
+  const [maxParameters, setMaxParameters] = useState("");
+  const [maxSizeGb, setMaxSizeGb] = useState("");
   const [detailModel, setDetailModel] = useState<CatalogModel | null>(null);
+  const [revision, setRevision] = useState("main");
   const [selectedFiles, setSelectedFiles] = useState<string[]>([]);
-  const catalogFilters = { compatibility, file_format: fileFormat, gated, quantization, license_id: licenseId, architecture };
+  const [importOpen, setImportOpen] = useState(false);
+  const [importName, setImportName] = useState("");
+  const [importPath, setImportPath] = useState("");
+  const [importRole, setImportRole] = useState("chat");
+  const [importEngine, setImportEngine] = useState("llama.cpp");
+  const catalogFilters = {
+    compatibility,
+    file_format: fileFormat,
+    gated,
+    quantization,
+    license_id: licenseId,
+    architecture,
+    min_parameters: minParameters ? String(Number(minParameters) * 1_000_000_000) : "",
+    max_parameters: maxParameters ? String(Number(maxParameters) * 1_000_000_000) : "",
+    max_size_bytes: maxSizeGb ? String(Number(maxSizeGb) * 1024 ** 3) : "",
+  };
   const catalog = useInfiniteQuery({
     queryKey: ["catalog", submitted, role, sort, catalogFilters],
     queryFn: ({ pageParam }) => api.catalog(submitted, role, sort, pageParam, catalogFilters),
@@ -513,13 +532,18 @@ function ModelsView() {
     getNextPageParam: (page) => page.next_cursor ?? undefined,
   });
   const catalogItems = useMemo(() => catalog.data?.pages.flatMap((page) => page.items) ?? [], [catalog.data]);
-  const detail = useQuery({ queryKey: ["catalog-detail", detailModel?.remote_id], queryFn: () => api.catalogDetail(detailModel!.remote_id), enabled: Boolean(detailModel) });
+  const detail = useQuery({ queryKey: ["catalog-detail", detailModel?.remote_id, role, revision], queryFn: () => api.catalogDetail(detailModel!.remote_id, role, revision), enabled: Boolean(detailModel) });
+  const preflight = useQuery({
+    queryKey: ["catalog-preflight", detailModel?.remote_id, role, revision, selectedFiles],
+    queryFn: () => api.catalogPreflight(detailModel!.remote_id, role, role === "chat" ? "llama.cpp" : "comfyui", revision, selectedFiles),
+    enabled: Boolean(detailModel && detail.data),
+  });
   const recipes = useQuery({ queryKey: ["recipes"], queryFn: api.recipes });
   const installed = useQuery({ queryKey: ["models"], queryFn: api.models });
   const storage = useQuery({ queryKey: ["model-storage"], queryFn: api.modelStorage });
   const profiles = useQuery({ queryKey: ["profiles"], queryFn: api.profiles });
   const download = useMutation({
-    mutationFn: ({ remoteId, files }: { remoteId: string; files: string[] }) => api.download(remoteId, role, role === "chat" ? "llama.cpp" : "comfyui", files),
+    mutationFn: ({ remoteId, revision: selectedRevision, files }: { remoteId: string; revision: string; files: string[] }) => api.download(remoteId, role, role === "chat" ? "llama.cpp" : "comfyui", selectedRevision, files),
     onSuccess: () => { setDetailModel(null); setSelectedFiles([]); void client.invalidateQueries({ queryKey: ["jobs"] }); },
   });
   const installRecipe = useMutation({
@@ -541,9 +565,19 @@ function ModelsView() {
     mutationFn: api.cleanupDownloads,
     onSuccess: () => void client.invalidateQueries({ queryKey: ["model-storage"] }),
   });
+  const importModel = useMutation({
+    mutationFn: () => api.importModel({ name: importName, local_path: importPath, role: importRole, engine: importEngine }),
+    onSuccess: () => {
+      setImportOpen(false);
+      setImportName("");
+      setImportPath("");
+      void client.invalidateQueries({ queryKey: ["models"] });
+      void client.invalidateQueries({ queryKey: ["model-storage"] });
+    },
+  });
   return (
     <div className="page-view">
-      <header className="page-header"><div><small>Model library</small><h1>Find the right local model</h1><p>Search Hugging Face, inspect compatibility, and manage downloads without leaving the app.</p></div><div className="storage-actions"><div className="storage-pill"><HardDrive size={17} />{storage.data?.installed_count ?? installed.data?.length ?? 0} installed · {formatBytes(storage.data?.installed_bytes)}</div><button className="secondary compact-button" disabled={!storage.data?.partial_download_count || cleanupDownloads.isPending} onClick={() => cleanupDownloads.mutate()}>Clean {storage.data?.partial_download_count ?? 0} partial</button></div></header>
+      <header className="page-header"><div><small>Model library</small><h1>Find the right local model</h1><p>Search Hugging Face, inspect compatibility, and manage downloads without leaving the app.</p></div><div className="storage-actions"><div className="storage-pill"><HardDrive size={17} />{storage.data?.installed_count ?? installed.data?.length ?? 0} installed · {formatBytes(storage.data?.installed_bytes)}</div><button className="secondary compact-button" onClick={() => setImportOpen(true)}><Folder size={16} />Import local</button><button className="secondary compact-button" disabled={!storage.data?.partial_download_count || cleanupDownloads.isPending} onClick={() => cleanupDownloads.mutate()}>Clean {storage.data?.partial_download_count ?? 0} partial</button></div></header>
       <section className="recipe-section">
         <div className="section-heading"><div><small>Curated starting points</small><h2>Reference recipes</h2></div><p>Immutable revisions, exact safe files, conservative defaults, and hardware guidance. Certification follows real-device validation.</p></div>
         {recipes.isLoading && <div className="loading-line" />}
@@ -556,14 +590,15 @@ function ModelsView() {
         <select value={role} onChange={(event) => setRole(event.target.value)}><option value="chat">Chat</option><option value="image">Image</option><option value="video">Video</option></select>
         <select value={sort} onChange={(event) => setSort(event.target.value)}><option value="trending">Trending</option><option value="downloads">Downloads</option><option value="likes">Likes</option><option value="newest">Newest</option><option value="updated">Recently updated</option><option value="compatible">Compatible first</option></select>
       </div>
-      <div className="catalog-filters"><select aria-label="Compatibility filter" value={compatibility} onChange={(event) => setCompatibility(event.target.value)}><option value="">All compatibility</option><option value="likely">Likely compatible</option><option value="advanced_import">Advanced import</option><option value="unsupported">Unsupported</option></select><select aria-label="Format filter" value={fileFormat} onChange={(event) => setFileFormat(event.target.value)}><option value="">All formats</option><option value="gguf">GGUF</option><option value="safetensors">safetensors</option></select><select aria-label="Access filter" value={gated} onChange={(event) => setGated(event.target.value)}><option value="">All access</option><option value="open">Open</option><option value="gated">Gated</option></select><input aria-label="Quantization filter" placeholder="Quantization (Q4_K_M, FP8…)" value={quantization} onChange={(event) => setQuantization(event.target.value)} /><input aria-label="Architecture filter" placeholder="Architecture" value={architecture} onChange={(event) => setArchitecture(event.target.value)} /><input aria-label="License filter" placeholder="License" value={licenseId} onChange={(event) => setLicenseId(event.target.value)} /></div>
+      <div className="catalog-filters"><select aria-label="Compatibility filter" value={compatibility} onChange={(event) => setCompatibility(event.target.value)}><option value="">All compatibility</option><option value="likely">Likely compatible</option><option value="advanced_import">Advanced import</option><option value="unsupported">Unsupported</option></select><select aria-label="Format filter" value={fileFormat} onChange={(event) => setFileFormat(event.target.value)}><option value="">All formats</option><option value="gguf">GGUF</option><option value="safetensors">safetensors</option></select><select aria-label="Access filter" value={gated} onChange={(event) => setGated(event.target.value)}><option value="">All access</option><option value="open">Open</option><option value="gated">Gated</option></select><input aria-label="Quantization filter" placeholder="Quantization (Q4_K_M, FP8…)" value={quantization} onChange={(event) => setQuantization(event.target.value)} /><input aria-label="Architecture filter" placeholder="Architecture" value={architecture} onChange={(event) => setArchitecture(event.target.value)} /><input aria-label="License filter" placeholder="License" value={licenseId} onChange={(event) => setLicenseId(event.target.value)} /><input aria-label="Minimum parameters" type="number" min="0" placeholder="Min parameters (B)" value={minParameters} onChange={(event) => setMinParameters(event.target.value)} /><input aria-label="Maximum parameters" type="number" min="0" placeholder="Max parameters (B)" value={maxParameters} onChange={(event) => setMaxParameters(event.target.value)} /><input aria-label="Maximum download size" type="number" min="0" placeholder="Max download (GB)" value={maxSizeGb} onChange={(event) => setMaxSizeGb(event.target.value)} /></div>
       {(installed.data?.length ?? 0) > 0 && <section><h2>Installed models</h2><div className="profile-table model-installs">{installed.data?.map((model) => { const bound = profiles.data?.some((profile) => profile.model_install_id === model.id) ?? false; return <div key={model.id}><span className="badge">{model.role}</span><strong>{model.name}</strong><span>{formatBytes(model.size_bytes)}</span><span className="row-actions"><button className="secondary compact-button" disabled={bound || createProfile.isPending} onClick={() => createProfile.mutate(model)}>{bound ? "Profile ready" : "Create profile"}</button><button className="secondary compact-button danger" disabled={bound || deleteModel.isPending} title={bound ? "Delete the model profile first" : "Delete installed model"} onClick={() => { if (window.confirm(`Delete ${model.name} from local storage?`)) deleteModel.mutate(model.id); }}>Delete</button></span></div>; })}</div></section>}
       {(deleteModel.error || cleanupDownloads.error) && <div className="callout error">{deleteModel.error?.message || cleanupDownloads.error?.message}</div>}
       {catalog.isLoading && <div className="loading-line" />}
       {catalog.error && <div className="callout error">{catalog.error.message}</div>}
-      <div className="model-grid">{catalogItems.map((model) => <ModelCard key={model.remote_id} model={model} role={role} pending={download.isPending && download.variables?.remoteId === model.remote_id} onDownload={() => { setDetailModel(model); setSelectedFiles([]); }} />)}</div>
+      <div className="model-grid">{catalogItems.map((model) => <ModelCard key={model.remote_id} model={model} role={role} pending={download.isPending && download.variables?.remoteId === model.remote_id} onDownload={() => { setDetailModel(model); setRevision("main"); setSelectedFiles([]); }} />)}</div>
       {catalog.hasNextPage && <div className="load-more"><button className="secondary" disabled={catalog.isFetchingNextPage} onClick={() => void catalog.fetchNextPage()}>{catalog.isFetchingNextPage ? "Loading…" : "Load more models"}</button></div>}
-      {detailModel && <div className="modal-backdrop"><div className="modal model-files"><header><div><small>Advanced install</small><h2>{detailModel.remote_id}</h2></div><button className="icon-button" onClick={() => setDetailModel(null)}><X /></button></header><p>Select exact files. Chat installs may leave this empty to choose the smallest GGUF automatically; image and video installs require an explicit selection.</p><div className="file-picker">{detail.data?.files.map((file) => <label key={file.filename}><input type="checkbox" checked={selectedFiles.includes(file.filename)} onChange={(event) => setSelectedFiles((current) => event.target.checked ? [...current, file.filename] : current.filter((name) => name !== file.filename))} /><span><strong>{file.filename}</strong><small>{formatBytes(file.size)}</small></span></label>)}</div>{detail.error && <div className="callout error">{detail.error.message}</div>}<footer><span>{formatBytes(detail.data?.files.filter((file) => selectedFiles.includes(file.filename)).reduce((total, file) => total + (file.size ?? 0), 0))} selected</span><button className="primary" disabled={detail.isLoading || (role !== "chat" && selectedFiles.length === 0)} onClick={() => download.mutate({ remoteId: detailModel.remote_id, files: selectedFiles })}>Queue download</button></footer></div></div>}
+      {detailModel && <div className="modal-backdrop"><div className="modal model-files"><header><div><small>Install preflight</small><h2>{detailModel.remote_id}</h2></div><button className="icon-button" onClick={() => setDetailModel(null)}><X /></button></header><div className="model-preflight-meta"><span><strong>{detail.data?.model.license_id ?? "Unknown"}</strong><small>License</small></span><span><strong>{detail.data?.model.architecture ?? "Unknown"}</strong><small>Architecture</small></span><span><strong>{formatBytes(detail.data?.model.total_size_bytes)}</strong><small>Repository size</small></span><span><strong>{detail.data?.model.gated ? "Gated" : "Open"}</strong><small>Access</small></span></div><label>Revision or commit SHA<input value={revision} onChange={(event) => { setRevision(event.target.value); setSelectedFiles([]); }} /></label><p>Select exact files. Chat installs may leave this empty to preselect the smallest GGUF; image and video installs require an explicit selection.</p><div className="file-picker">{detail.data?.files.map((file) => <label key={file.filename}><input type="checkbox" checked={selectedFiles.includes(file.filename)} onChange={(event) => setSelectedFiles((current) => event.target.checked ? [...current, file.filename] : current.filter((name) => name !== file.filename))} /><span><strong>{file.filename}</strong><small>{formatBytes(file.size)}</small></span></label>)}</div>{detail.error && <div className="callout error">{detail.error.message}</div>}{preflight.error && <div className="callout error">{preflight.error.message}</div>}{preflight.data && <div className="preflight-checks">{preflight.data.checks.map((check) => <div className={`preflight-check ${check.status}`} key={check.id}><span>{check.status}</span><div><strong>{check.label}</strong><small>{check.detail}</small></div></div>)}</div>}<footer><span>{formatBytes(preflight.data?.download_bytes)} selected · {formatBytes(preflight.data?.available_disk_bytes)} free</span><button className="primary" disabled={detail.isLoading || preflight.isLoading || !preflight.data?.can_install} onClick={() => download.mutate({ remoteId: detailModel.remote_id, revision, files: preflight.data?.selected_files ?? selectedFiles })}>Queue download</button></footer></div></div>}
+      {importOpen && <div className="modal-backdrop"><div className="modal"><header><div><small>Advanced import</small><h2>Import a local model</h2></div><button className="icon-button" aria-label="Close local import" onClick={() => setImportOpen(false)}><X /></button></header><p>Register an existing model file or directory. Pickle-compatible formats are blocked; imported models are marked for advanced review.</p><label>Display name<input value={importName} onChange={(event) => setImportName(event.target.value)} /></label><label>Absolute local path<input value={importPath} onChange={(event) => setImportPath(event.target.value)} placeholder="/path/to/model.gguf" /></label><label>Role<select value={importRole} onChange={(event) => { const next = event.target.value; setImportRole(next); setImportEngine(next === "chat" ? "llama.cpp" : "comfyui"); }}><option value="chat">Chat</option><option value="image">Image</option><option value="video">Video</option></select></label><label>Runtime<select value={importEngine} onChange={(event) => setImportEngine(event.target.value)}><option value="llama.cpp">llama.cpp</option><option value="comfyui">ComfyUI</option></select></label>{importModel.error && <div className="callout error">{importModel.error.message}</div>}<footer><button className="secondary" onClick={() => setImportOpen(false)}>Cancel</button><button className="primary" disabled={!importName.trim() || !importPath.trim() || importModel.isPending} onClick={() => importModel.mutate()}>{importModel.isPending ? "Importing…" : "Import model"}</button></footer></div></div>}
     </div>
   );
 }

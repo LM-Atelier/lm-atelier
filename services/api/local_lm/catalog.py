@@ -51,6 +51,9 @@ class HuggingFaceCatalog:
         license_id: str | None = None,
         gated: str | None = None,
         architecture: str | None = None,
+        min_parameters: int | None = None,
+        max_parameters: int | None = None,
+        max_size_bytes: int | None = None,
     ) -> CatalogPage:
         params: dict[str, Any] = {
             "search": query or None,
@@ -76,6 +79,9 @@ class HuggingFaceCatalog:
             license_id,
             gated,
             architecture,
+            min_parameters,
+            max_parameters,
+            max_size_bytes,
         )
         try:
             response = await self._client.get(url, params=None if cursor else params)
@@ -90,6 +96,9 @@ class HuggingFaceCatalog:
                 license_id=license_id,
                 gated=gated,
                 architecture=architecture,
+                min_parameters=min_parameters,
+                max_parameters=max_parameters,
+                max_size_bytes=max_size_bytes,
             )
             if sort == "compatible":
                 rank = {"tested": 0, "likely": 1, "advanced_import": 2, "unsupported": 3}
@@ -107,8 +116,10 @@ class HuggingFaceCatalog:
                 return CatalogPage.model_validate_json(cache.read_text(encoding="utf-8"))
             raise
 
-    async def inspect(self, remote_id: str, revision: str = "main") -> dict[str, Any]:
-        cache = self._cache_path("detail", remote_id, revision)
+    async def inspect(
+        self, remote_id: str, revision: str = "main", requested_role: str | None = None
+    ) -> dict[str, Any]:
+        cache = self._cache_path("detail", remote_id, revision, requested_role)
         try:
             response = await self._client.get(
                 f"/api/models/{remote_id}",
@@ -130,8 +141,12 @@ class HuggingFaceCatalog:
                     "sha256": (lfs.get("oid") or "").removeprefix("sha256:") or None,
                 }
             )
-        model = self._normalize(payload, None)
-        result = {"model": model.model_dump(mode="json"), "files": siblings}
+        model = self._normalize(payload, requested_role)
+        result = {
+            "model": model.model_dump(mode="json"),
+            "revision": revision,
+            "files": siblings,
+        }
         self._write_cache(cache, json.dumps(result, default=str))
         return result
 
@@ -189,6 +204,9 @@ class HuggingFaceCatalog:
         license_id: str | None,
         gated: str | None,
         architecture: str | None,
+        min_parameters: int | None = None,
+        max_parameters: int | None = None,
+        max_size_bytes: int | None = None,
     ) -> list[CatalogModel]:
         return [
             item
@@ -202,6 +220,18 @@ class HuggingFaceCatalog:
             and (not license_id or (item.license_id or "").lower() == license_id.lower())
             and (gated not in {"gated", "open"} or bool(item.gated) == (gated == "gated"))
             and (not architecture or architecture.lower() in (item.architecture or "").lower())
+            and (
+                min_parameters is None
+                or (item.parameter_count is not None and item.parameter_count >= min_parameters)
+            )
+            and (
+                max_parameters is None
+                or (item.parameter_count is not None and item.parameter_count <= max_parameters)
+            )
+            and (
+                max_size_bytes is None
+                or (item.total_size_bytes is not None and item.total_size_bytes <= max_size_bytes)
+            )
         ]
 
     @classmethod
