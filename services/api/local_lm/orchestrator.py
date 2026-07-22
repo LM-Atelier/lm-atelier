@@ -124,12 +124,16 @@ class ConversationOrchestrator:
             if not parent or parent.chat_id != chat_id:
                 raise LookupError("parent message not found in this chat")
         else:
-            parent_message_id = session.scalar(
-                select(Message.id)
-                .where(Message.chat_id == chat_id)
-                .order_by(Message.created_at.desc())
-                .limit(1)
-            )
+            parent_message_id = chat.active_head_message_id
+            if not parent_message_id:
+                parent_message_id = session.scalar(
+                    select(Message.id)
+                    .where(Message.chat_id == chat_id)
+                    .order_by(
+                        Message.updated_at.desc(), Message.created_at.desc(), Message.id.desc()
+                    )
+                    .limit(1)
+                )
         for artifact_id in request.input_artifact_ids:
             if not session.get(Artifact, artifact_id):
                 raise LookupError(f"input artifact not found: {artifact_id}")
@@ -181,6 +185,7 @@ class ConversationOrchestrator:
         session.add_all([user_message, assistant_message])
         session.flush()
         assistant_message.parent_id = user_message.id
+        chat.active_head_message_id = assistant_message.id
 
         profile_id = self._profile_for_operation(chat, plan.operation)
         profile = session.get(ModelProfile, profile_id) if profile_id else None

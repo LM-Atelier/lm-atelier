@@ -20,7 +20,9 @@ def test_migrations_round_trip(tmp_path) -> None:  # type: ignore[no-untyped-def
                 "select name from sqlite_master where type = 'table'"
             ).fetchall()
         }
+        chat_columns = {row[1] for row in connection.execute("PRAGMA table_info(chats)").fetchall()}
     assert {"projects", "messages", "generation_presets"} <= tables
+    assert "active_head_message_id" in chat_columns
 
     command.downgrade(config, "base")
     command.upgrade(config, "head")

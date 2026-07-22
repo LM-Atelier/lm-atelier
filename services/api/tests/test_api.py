@@ -140,6 +140,29 @@ async def test_turn_idempotency_returns_original_run(client: AsyncClient) -> Non
     assert first.json()["run"]["id"] == second.json()["run"]["id"]
 
 
+async def test_new_turn_uses_persisted_active_branch_head(client: AsyncClient) -> None:
+    chat = (await client.post("/api/chats", json={"title": "Branch head"})).json()
+    first = await client.post(
+        f"/api/chats/{chat['id']}/turns",
+        json={"text": "First", "mode": "text"},
+    )
+    first_run = await wait_for_run(client, first.json()["run"]["id"])
+    first_assistant_id = first_run["assistant_message_id"]
+
+    refreshed = (await client.get(f"/api/chats/{chat['id']}")).json()
+    assert refreshed["active_head_message_id"] == first_assistant_id
+
+    second = await client.post(
+        f"/api/chats/{chat['id']}/turns",
+        json={"text": "Second", "mode": "text"},
+    )
+    assert second.status_code == 202
+    assert second.json()["user_message"]["parent_id"] == first_assistant_id
+    assert (await client.get(f"/api/chats/{chat['id']}")).json()[
+        "active_head_message_id"
+    ] == second.json()["assistant_message"]["id"]
+
+
 async def test_long_chat_records_visible_context_truncation(client: AsyncClient) -> None:
     profiles = (await client.get("/api/profiles?role=chat")).json()
     profile = profiles[0]
