@@ -78,15 +78,17 @@ class BackupManager:
         self._media_path(path).unlink(missing_ok=True)
 
     def prune(self) -> int:
-        paths = sorted(self.settings.backup_dir.glob("*.sqlite3"), reverse=True)
         daily: dict[str, Path] = {}
-        parsed: list[tuple[Path, datetime]] = []
-        for path in paths:
+        candidates: list[tuple[Path, datetime, int]] = []
+        for path in self.settings.backup_dir.glob("*.sqlite3"):
             match = _BACKUP_NAME.fullmatch(path.name)
             if not match:
                 continue
             created = datetime.strptime(match.group("stamp"), "%Y%m%dT%H%M%SZ").replace(tzinfo=UTC)
-            parsed.append((path, created))
+            candidates.append((path, created, path.stat().st_mtime_ns))
+        candidates.sort(key=lambda item: (item[1], item[2]), reverse=True)
+        parsed = [(path, created) for path, created, _mtime in candidates]
+        for path, created in parsed:
             daily.setdefault(created.date().isoformat(), path)
         keep = set(list(daily.values())[: self.settings.backup_daily_count])
         daily_dates = sorted(daily, reverse=True)[: self.settings.backup_daily_count]
