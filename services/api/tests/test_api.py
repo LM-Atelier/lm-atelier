@@ -166,6 +166,81 @@ async def test_inline_video_and_project_export(client: AsyncClient) -> None:
     with zipfile.ZipFile(io.BytesIO(archive.content)) as bundle:
         assert "manifest.json" in bundle.namelist()
         assert any(name.startswith("artifacts/") for name in bundle.namelist())
+        manifest = bundle.read("manifest.json")
+        assert b'"version": 2' in manifest
+
+    imported = await client.post(
+        "/api/projects/import",
+        files={
+            "archive": (
+                "film-lab.lm-atelier.zip",
+                archive.content,
+                "application/zip",
+            )
+        },
+    )
+    assert imported.status_code == 201, imported.text
+    imported_chats = await client.get("/api/chats", params={"project_id": imported.json()["id"]})
+    assert [item["title"] for item in imported_chats.json()] == ["Storyboard"]
+    imported_detail = (await client.get(f"/api/chats/{imported_chats.json()[0]['id']}")).json()
+    imported_video = next(
+        part
+        for message in imported_detail["messages"]
+        for part in message["parts"]
+        if part["type"] == "video"
+    )
+    assert imported_video["artifact_id"] == video_part["artifact_id"]
+
+
+async def test_metadata_only_project_export_import_marks_missing_media(
+    client: AsyncClient,
+) -> None:
+    project = (await client.post("/api/projects", json={"name": "Portable"})).json()
+    chat = (
+        await client.post("/api/chats", json={"title": "Images", "project_id": project["id"]})
+    ).json()
+    await client.post(
+        f"/api/chats/{chat['id']}/turns",
+        json={"text": "Create a portable image", "mode": "image"},
+    )
+    await wait_for_assistant(client, chat["id"], "image")
+    exported = await client.post(
+        f"/api/projects/{project['id']}/export", params={"include_media": False}
+    )
+    archive = await client.get(exported.json()["url"])
+    with zipfile.ZipFile(io.BytesIO(archive.content)) as bundle:
+        assert not any(name.startswith("artifacts/") for name in bundle.namelist())
+
+    imported = await client.post(
+        "/api/projects/import",
+        files={"archive": ("metadata.lm-atelier.zip", archive.content, "application/zip")},
+    )
+    assert imported.status_code == 201, imported.text
+    imported_chat = (
+        await client.get("/api/chats", params={"project_id": imported.json()["id"]})
+    ).json()[0]
+    detail = (await client.get(f"/api/chats/{imported_chat['id']}")).json()
+    image_part = next(
+        part
+        for message in detail["messages"]
+        for part in message["parts"]
+        if part["type"] == "image"
+    )
+    assert image_part["artifact_id"] is None
+    assert image_part["metadata_json"]["missing_import_artifact_id"].startswith("sha256:")
+
+
+async def test_project_import_rejects_unsafe_archive_paths(client: AsyncClient) -> None:
+    buffer = io.BytesIO()
+    with zipfile.ZipFile(buffer, "w") as bundle:
+        bundle.writestr("../outside", b"unsafe")
+        bundle.writestr("manifest.json", b"{}")
+    response = await client.post(
+        "/api/projects/import",
+        files={"archive": ("unsafe.zip", buffer.getvalue(), "application/zip")},
+    )
+    assert response.status_code == 422
+    assert "unsafe path" in response.json()["detail"]
 
 
 async def test_backup_create_verify_and_restore_marker(client: AsyncClient) -> None:

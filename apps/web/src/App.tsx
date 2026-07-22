@@ -28,6 +28,7 @@ import {
   Settings,
   SlidersHorizontal,
   Sparkles,
+  Upload,
   Workflow as WorkflowIcon,
   X,
 } from "lucide-react";
@@ -973,17 +974,19 @@ function ProjectManager({
   onClose,
   onSave,
   onDelete,
+  onExport,
 }: {
   project: Project;
   onClose: () => void;
   onSave: (values: Partial<Project>) => void;
   onDelete: () => void;
+  onExport: (includeMedia: boolean) => void;
 }) {
   const [name, setName] = useState(project.name);
   const [description, setDescription] = useState(project.description);
   const [instructions, setInstructions] = useState(project.instructions);
   const [archived, setArchived] = useState(project.archived);
-  return <div className="modal-backdrop"><div className="modal workspace-editor"><header><div><small>Workspace</small><h2>Manage project</h2></div><button className="icon-button" aria-label="Close project manager" onClick={onClose}><X /></button></header><label>Name<input value={name} onChange={(event) => setName(event.target.value)} /></label><label>Description<textarea rows={3} value={description} onChange={(event) => setDescription(event.target.value)} /></label><label>Project instructions<textarea rows={5} value={instructions} onChange={(event) => setInstructions(event.target.value)} /></label><label className="toggle-row"><span><strong>Archived</strong><small>Hide this project while preserving its chats and media.</small></span><input type="checkbox" checked={archived} onChange={(event) => setArchived(event.target.checked)} /></label><footer className="editor-actions"><button className="secondary danger" onClick={() => { if (window.confirm(`Delete ${project.name}? Its chats will become unfiled.`)) onDelete(); }}>Delete project</button><button className="secondary" onClick={onClose}>Cancel</button><button className="primary" disabled={!name.trim()} onClick={() => onSave({ name: name.trim(), description, instructions, archived })}>Save project</button></footer></div></div>;
+  return <div className="modal-backdrop"><div className="modal workspace-editor"><header><div><small>Workspace</small><h2>Manage project</h2></div><button className="icon-button" aria-label="Close project manager" onClick={onClose}><X /></button></header><label>Name<input value={name} onChange={(event) => setName(event.target.value)} /></label><label>Description<textarea rows={3} value={description} onChange={(event) => setDescription(event.target.value)} /></label><label>Project instructions<textarea rows={5} value={instructions} onChange={(event) => setInstructions(event.target.value)} /></label><label className="toggle-row"><span><strong>Archived</strong><small>Hide this project while preserving its chats and media.</small></span><input type="checkbox" checked={archived} onChange={(event) => setArchived(event.target.checked)} /></label><div className="project-export-actions"><button className="secondary" onClick={() => onExport(false)}>Export metadata only</button><button className="secondary" onClick={() => onExport(true)}>Export with media</button></div><footer className="editor-actions"><button className="secondary danger" onClick={() => { if (window.confirm(`Delete ${project.name}? Its chats will become unfiled.`)) onDelete(); }}>Delete project</button><button className="secondary" onClick={onClose}>Cancel</button><button className="primary" disabled={!name.trim()} onClick={() => onSave({ name: name.trim(), description, instructions, archived })}>Save project</button></footer></div></div>;
 }
 
 function Sidebar({
@@ -997,6 +1000,7 @@ function Sidebar({
   onNewChat,
   onNewProject,
   onExportProject,
+  onImportProject,
   onUpdateChat,
   onDeleteChat,
   onUpdateProject,
@@ -1011,7 +1015,8 @@ function Sidebar({
   onView: (view: View) => void;
   onNewChat: (projectId?: string | null) => void;
   onNewProject: () => void;
-  onExportProject: (id: string) => void;
+  onExportProject: (id: string, includeMedia?: boolean) => void;
+  onImportProject: (file: File) => void;
   onUpdateChat: (id: string, values: Partial<Chat>) => void;
   onDeleteChat: (id: string) => void;
   onUpdateProject: (id: string, values: Partial<Project>) => void;
@@ -1022,6 +1027,7 @@ function Sidebar({
   const [showArchived, setShowArchived] = useState(false);
   const [managedChat, setManagedChat] = useState<Chat | null>(null);
   const [managedProject, setManagedProject] = useState<Project | null>(null);
+  const projectImport = useRef<HTMLInputElement>(null);
   useEffect(() => {
     setOpenProjects((current) => new Set([...current, ...projects.map((project) => project.id)]));
   }, [projects]);
@@ -1037,7 +1043,7 @@ function Sidebar({
       <nav className="primary-nav"><button className={view === "media" ? "active" : ""} onClick={() => onView("media")}><ImageIcon />Media library</button><button className={view === "models" ? "active" : ""} onClick={() => onView("models")}><Library />Model library</button><button className={view === "workflows" ? "active" : ""} onClick={() => onView("workflows")}><WorkflowIcon />Workflows</button></nav>
       <div className="workspace-search"><Search size={14} /><input aria-label="Search projects and chats" placeholder="Search workspace" value={search} onChange={(event) => setSearch(event.target.value)} /><button className={showArchived ? "active" : ""} aria-pressed={showArchived} onClick={() => setShowArchived((value) => !value)}>Archived</button></div>
       <div className="sidebar-section">
-        <div className="section-title"><span>Projects</span><button onClick={onNewProject}><Plus size={15} /></button></div>
+        <div className="section-title"><span>Projects</span><input ref={projectImport} hidden type="file" accept=".zip,.lm-atelier.zip,application/zip" onChange={(event) => { const file = event.target.files?.[0]; if (file) onImportProject(file); event.target.value = ""; }} /><button aria-label="Import project" onClick={() => projectImport.current?.click()}><Upload size={14} /></button><button aria-label="New project" onClick={onNewProject}><Plus size={15} /></button></div>
         {visibleProjects.map((project) => {
           const open = openProjects.has(project.id);
           const projectMatches = normalizedSearch && project.name.toLowerCase().includes(normalizedSearch);
@@ -1067,7 +1073,7 @@ function Sidebar({
       {unfiled.length > 0 && <div className="sidebar-section"><div className="section-title"><span>Chats</span></div><div className="chat-list standalone">{unfiled.map(chatRow)}</div></div>}
       <div className="sidebar-footer"><button className={view === "settings" ? "active" : ""} onClick={() => onView("settings")}><Settings />Settings</button><div className="connection"><StatusDot healthy={connected} />{connected ? "Local service connected" : "Reconnecting…"}</div></div>
       {managedChat && <ChatManager chat={managedChat} projects={projects} onClose={() => setManagedChat(null)} onSave={(values) => { onUpdateChat(managedChat.id, values); setManagedChat(null); }} onDelete={() => { onDeleteChat(managedChat.id); setManagedChat(null); }} />}
-      {managedProject && <ProjectManager project={managedProject} onClose={() => setManagedProject(null)} onSave={(values) => { onUpdateProject(managedProject.id, values); setManagedProject(null); }} onDelete={() => { onDeleteProject(managedProject.id); setManagedProject(null); }} />}
+      {managedProject && <ProjectManager project={managedProject} onClose={() => setManagedProject(null)} onSave={(values) => { onUpdateProject(managedProject.id, values); setManagedProject(null); }} onDelete={() => { onDeleteProject(managedProject.id); setManagedProject(null); }} onExport={(includeMedia) => onExportProject(managedProject.id, includeMedia)} />}
     </aside>
   );
 }
@@ -1197,12 +1203,27 @@ export default function App() {
     },
   });
   const exportProject = useMutation({
-    mutationFn: api.exportProject,
+    mutationFn: ({ id, includeMedia = true }: { id: string; includeMedia?: boolean }) => api.exportProject(id, includeMedia),
     onSuccess: (artifact) => {
       const link = document.createElement("a");
       link.href = artifact.url;
       link.download = "";
       link.click();
+    },
+  });
+  const importProject = useMutation({
+    mutationFn: api.importProject,
+    onSuccess: (project) => {
+      void client.invalidateQueries({ queryKey: ["projects"] });
+      void client.invalidateQueries({ queryKey: ["chats"] });
+      window.setTimeout(() => {
+        const importedChat = client.getQueryData<Chat[]>(["chats"])?.find((item) => item.project_id === project.id);
+        if (importedChat) {
+          setCurrentChatId(importedChat.id);
+          localStorage.setItem("local-lm-chat", importedChat.id);
+          setView("chat");
+        }
+      }, 100);
     },
   });
 
@@ -1225,10 +1246,10 @@ export default function App() {
 
   return (
     <div className="app-shell">
-      <Sidebar projects={allProjects} chats={allChats} currentChatId={currentChatId} view={view} connected={connected} onChat={(id) => { setCurrentChatId(id); localStorage.setItem("local-lm-chat", id); setView("chat"); }} onView={setView} onNewChat={(projectId) => createChat.mutate(projectId)} onNewProject={() => { const name = window.prompt("Project name"); if (name?.trim()) createProject.mutate(name.trim()); }} onExportProject={(id) => exportProject.mutate(id)} onUpdateChat={(id, values) => manageChat.mutate({ id, values })} onDeleteChat={(id) => deleteChat.mutate(id)} onUpdateProject={(id, values) => updateProject.mutate({ id, values })} onDeleteProject={(id) => deleteProject.mutate(id)} />
+      <Sidebar projects={allProjects} chats={allChats} currentChatId={currentChatId} view={view} connected={connected} onChat={(id) => { setCurrentChatId(id); localStorage.setItem("local-lm-chat", id); setView("chat"); }} onView={setView} onNewChat={(projectId) => createChat.mutate(projectId)} onNewProject={() => { const name = window.prompt("Project name"); if (name?.trim()) createProject.mutate(name.trim()); }} onExportProject={(id, includeMedia) => exportProject.mutate({ id, includeMedia })} onImportProject={(file) => importProject.mutate(file)} onUpdateChat={(id, values) => manageChat.mutate({ id, values })} onDeleteChat={(id) => deleteChat.mutate(id)} onUpdateProject={(id, values) => updateProject.mutate({ id, values })} onDeleteProject={(id) => deleteProject.mutate(id)} />
       <main>{activeContent}</main>
       <JobsPanel />
-      {(send.error || regenerate.error || branch.error || stop.error || createChat.error || createProject.error || manageChat.error || deleteChat.error || updateProject.error || deleteProject.error) && <div className="toast error"><X size={16} />{(send.error || regenerate.error || branch.error || stop.error || createChat.error || createProject.error || manageChat.error || deleteChat.error || updateProject.error || deleteProject.error)?.message}</div>}
+      {(send.error || regenerate.error || branch.error || stop.error || createChat.error || createProject.error || importProject.error || manageChat.error || deleteChat.error || updateProject.error || deleteProject.error) && <div className="toast error"><X size={16} />{(send.error || regenerate.error || branch.error || stop.error || createChat.error || createProject.error || importProject.error || manageChat.error || deleteChat.error || updateProject.error || deleteProject.error)?.message}</div>}
     </div>
   );
 }
