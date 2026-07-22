@@ -271,6 +271,15 @@ h1, h2, h3 { margin: 0; }
 .file-picker label > span { min-width: 0; display: grid; gap: 2px; }
 .file-picker strong { overflow-wrap: anywhere; font-size: 12px; }
 .file-picker small { color: var(--muted); }
+.model-preflight-meta { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 7px; margin: 14px 0; }
+.model-preflight-meta > span { display: grid; gap: 3px; padding: 9px; border: 1px solid var(--border); border-radius: 8px; background: #11151b; min-width: 0; }
+.model-preflight-meta strong { overflow: hidden; color: #e8ebef; font-size: 12px; text-overflow: ellipsis; white-space: nowrap; }
+.model-preflight-meta small { color: var(--muted); font-size: 10px; text-transform: uppercase; }
+.preflight-checks { display: grid; gap: 6px; margin: 14px 0; }
+.preflight-check { display: grid; grid-template-columns: 54px 1fr; gap: 9px; align-items: start; padding: 8px 9px; border: 1px solid var(--border); border-radius: 8px; background: #11151b; }
+.preflight-check > span { border-radius: 999px; padding: 2px 6px; text-align: center; font-size: 9px; font-weight: 800; text-transform: uppercase; }
+.preflight-check.pass > span { color: #87ddb0; background: #173b2a; }.preflight-check.warn > span { color: #f0ca7b; background: #3c3019; }.preflight-check.block > span { color: #f39a9a; background: #431f24; }
+.preflight-check div { display: grid; gap: 2px; }.preflight-check strong { font-size: 11px; }.preflight-check small { color: var(--muted); line-height: 1.35; }
 
 .jobs-panel { position: fixed; right: 16px; bottom: 16px; width: 310px; z-index: 15; border: 1px solid #353d48; border-radius: 12px; background: #151920eb; backdrop-filter: blur(12px); box-shadow: 0 16px 45px #0008; padding: 11px; }
 .jobs-panel > header { display: flex; align-items: center; gap: 7px; color: #c4cbd5; font-size: 12px; padding: 2px 3px 9px; }
@@ -301,6 +310,7 @@ h1, h2, h3 { margin: 0; }
   .section-heading { align-items: flex-start; flex-direction: column; gap: 7px; }
   .toolbar { grid-template-columns: 1fr; }.toolbar select:last-child { grid-column: auto; }
   .catalog-filters { grid-template-columns: 1fr; }
+  .model-preflight-meta { grid-template-columns: repeat(2, minmax(0, 1fr)); }
   .model-card { grid-template-columns: 42px 1fr; }.model-stats { grid-column: 2; align-items: flex-start; flex-direction: row; }
   .workflow-layout { grid-template-columns: 1fr; }.workflow-list { border-right: 0; border-bottom: 1px solid var(--border); max-height: 220px; overflow-y: auto; }
   .metric-grid { grid-template-columns: 1fr; }

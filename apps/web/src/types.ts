@@ -265,7 +265,25 @@ export interface CatalogPage {
 
 export interface CatalogDetail {
   model: CatalogModel;
+  revision: string;
   files: Array<{ filename: string; size: number | null; sha256: string | null }>;
+}
+
+export interface CatalogPreflight {
+  remote_id: string;
+  revision: string;
+  selected_files: string[];
+  download_bytes: number;
+  available_disk_bytes: number;
+  estimated_ram_bytes: number | null;
+  estimated_vram_bytes: number | null;
+  can_install: boolean;
+  checks: Array<{
+    id: string;
+    label: string;
+    status: "pass" | "warn" | "block";
+    detail: string;
+  }>;
 }
 
 export interface RecipeFile {

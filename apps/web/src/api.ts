@@ -3,6 +3,7 @@ import type {
   BackupInfo,
   CatalogPage,
   CatalogDetail,
+  CatalogPreflight,
   Chat,
   ChatDetail,
   EngineCapabilities,
@@ -205,21 +206,36 @@ export const api = {
     for (const [key, value] of Object.entries(filters)) if (value) parameters.set(key, value);
     return request<CatalogPage>(`/api/catalog?${parameters.toString()}`);
   },
-  catalogDetail: (remoteId: string) =>
-    request<CatalogDetail>(`/api/catalog/${remoteId}`),
+  catalogDetail: (remoteId: string, role: string, revision = "main") =>
+    request<CatalogDetail>(`/api/catalog/${remoteId}?${new URLSearchParams({ role, revision })}`),
+  catalogPreflight: (
+    remoteId: string,
+    role: string,
+    engine: string,
+    revision: string,
+    selectedFiles: string[],
+  ) => request<CatalogPreflight>(`/api/catalog/${remoteId}/preflight`, {
+    method: "POST",
+    body: JSON.stringify({ role, engine, revision, selected_files: selectedFiles }),
+  }),
   recipes: () => request<ReferenceRecipe[]>("/api/recipes"),
   installRecipe: (recipeId: string) =>
     request<Job>(`/api/recipes/${encodeURIComponent(recipeId)}/install`, { method: "POST" }),
-  download: (remoteId: string, role: string, engine: string, allowPatterns: string[] = []) =>
+  download: (remoteId: string, role: string, engine: string, revision: string, allowPatterns: string[] = []) =>
     request<Job>("/api/downloads", {
       method: "POST",
       body: JSON.stringify({
         remote_id: remoteId,
-        revision: "main",
+        revision,
         role,
         engine,
         allow_patterns: allowPatterns,
       }),
+    }),
+  importModel: (payload: { name: string; role: string; engine: string; local_path: string }) =>
+    request<ModelInstall>("/api/models/import", {
+      method: "POST",
+      body: JSON.stringify(payload),
     }),
   workflows: () => request<Workflow[]>("/api/workflows"),
   createWorkflow: (payload: Record<string, unknown>) =>

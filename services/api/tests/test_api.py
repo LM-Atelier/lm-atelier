@@ -6,6 +6,7 @@ import zipfile
 
 from httpx2 import AsyncClient
 
+from local_lm.catalog import HuggingFaceCatalog
 from local_lm.config import Settings
 from local_lm.downloads import DownloadManager
 
@@ -418,6 +419,20 @@ async def test_model_storage_cleanup_and_shared_path_deletion(
     assert cleaned.json() == {"removed_count": 1, "reclaimed_bytes": len(b"incomplete")}
     assert not partial.exists()
 
+    unsafe = settings.data_dir / "unsafe-import"
+    unsafe.mkdir()
+    (unsafe / "weights.ckpt").write_bytes(b"pickle-compatible")
+    blocked = await client.post(
+        "/api/models/import",
+        json={
+            "name": "Unsafe directory",
+            "role": "image",
+            "engine": "comfyui",
+            "local_path": str(unsafe),
+        },
+    )
+    assert blocked.status_code == 422
+
 
 async def test_download_pause_resume_and_cancel(client: AsyncClient, monkeypatch) -> None:  # type: ignore[no-untyped-def]
     gate = asyncio.Event()
@@ -447,3 +462,80 @@ async def test_download_pause_resume_and_cancel(client: AsyncClient, monkeypatch
 
     cannot_resume = await client.post(f"/api/downloads/{job_id}/resume")
     assert cannot_resume.status_code == 409
+
+
+async def test_catalog_preflight_blocks_gated_unsafe_weights(
+    client: AsyncClient, monkeypatch
+) -> None:  # type: ignore[no-untyped-def]
+    async def inspect(
+        _catalog: HuggingFaceCatalog,
+        remote_id: str,
+        revision: str = "main",
+        requested_role: str | None = None,
+    ) -> dict:  # type: ignore[type-arg]
+        return {
+            "model": {
+                "remote_id": remote_id,
+                "name": "Unsafe model",
+                "gated": True,
+                "compatibility": "advanced_import",
+                "compatibility_reasons": ["manual review required"],
+            },
+            "revision": revision,
+            "files": [{"filename": "weights/model.ckpt", "size": 1024, "sha256": None}],
+        }
+
+    monkeypatch.setattr(HuggingFaceCatalog, "inspect", inspect)
+    response = await client.post(
+        "/api/catalog/owner/model/preflight",
+        json={
+            "revision": "main",
+            "role": "image",
+            "engine": "comfyui",
+            "selected_files": ["weights/model.ckpt"],
+        },
+    )
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["can_install"] is False
+    blocked = {check["id"] for check in payload["checks"] if check["status"] == "block"}
+    assert {"weights", "access"}.issubset(blocked)
+
+
+async def test_catalog_preflight_autoselects_smallest_gguf(
+    client: AsyncClient, monkeypatch
+) -> None:  # type: ignore[no-untyped-def]
+    async def inspect(
+        _catalog: HuggingFaceCatalog,
+        remote_id: str,
+        revision: str = "main",
+        requested_role: str | None = None,
+    ) -> dict:  # type: ignore[type-arg]
+        return {
+            "model": {
+                "remote_id": remote_id,
+                "name": "Safe model",
+                "license_id": "apache-2.0",
+                "compatibility": "likely",
+                "compatibility_reasons": ["GGUF artifact detected"],
+            },
+            "revision": revision,
+            "files": [
+                {"filename": "large.gguf", "size": 2048, "sha256": None},
+                {"filename": "small.gguf", "size": 1024, "sha256": None},
+            ],
+        }
+
+    monkeypatch.setattr(HuggingFaceCatalog, "inspect", inspect)
+    response = await client.post(
+        "/api/catalog/owner/model/preflight",
+        json={
+            "revision": "abc123",
+            "role": "chat",
+            "engine": "llama.cpp",
+            "selected_files": [],
+        },
+    )
+    assert response.status_code == 200
+    assert response.json()["can_install"] is True
+    assert response.json()["selected_files"] == ["small.gguf"]
