@@ -48,6 +48,11 @@ tests on declared target hardware. Media recipes use official Comfy-Org
 safe-tensor packages and native ComfyUI nodes; LM Atelier does not install custom
 node code. Model and workflow licenses remain independent of LM Atelier's license.
 
+The library reports installed, catalog-cache, and incomplete-download storage.
+Orphaned staging directories can be cleaned from the interface. Deletion is
+blocked while a profile references a model, and multiple installs that share a
+revision directory retain files referenced by the remaining install records.
+
 ## Target platform matrix
 
 The initial release targets Windows 11 x64 and Ubuntu 24.04 LTS x64. NVIDIA
