@@ -189,10 +189,18 @@ export const api = {
   createBackup: () => request<BackupInfo>("/api/backups", { method: "POST" }),
   exportProject: (projectId: string) =>
     request<{ url: string }>(`/api/projects/${projectId}/export`, { method: "POST" }),
-  catalog: (query: string, role: string, sort: string) =>
-    request<CatalogPage>(
-      `/api/catalog?query=${encodeURIComponent(query)}&role=${encodeURIComponent(role)}&sort=${encodeURIComponent(sort)}`,
-    ),
+  catalog: (
+    query: string,
+    role: string,
+    sort: string,
+    cursor?: string | null,
+    filters: Record<string, string> = {},
+  ) => {
+    const parameters = new URLSearchParams({ query, role, sort });
+    if (cursor) parameters.set("cursor", cursor);
+    for (const [key, value] of Object.entries(filters)) if (value) parameters.set(key, value);
+    return request<CatalogPage>(`/api/catalog?${parameters.toString()}`);
+  },
   catalogDetail: (remoteId: string) =>
     request<CatalogDetail>(`/api/catalog/${remoteId}`),
   recipes: () => request<ReferenceRecipe[]>("/api/recipes"),
