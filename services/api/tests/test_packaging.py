@@ -2,7 +2,10 @@ from __future__ import annotations
 
 import json
 import subprocess
+import sys
 from pathlib import Path
+
+import pytest
 
 from local_lm import __version__
 
@@ -23,6 +26,7 @@ def test_release_and_engine_manifests_are_pinned_and_versioned() -> None:
     )
 
 
+@pytest.mark.skipif(sys.platform == "win32", reason="Bash syntax is checked by Ubuntu CI")
 def test_linux_release_scripts_pass_shell_syntax_check() -> None:
     scripts = [ROOT / "scripts/package.sh", *sorted((ROOT / "packaging/linux").glob("*.sh"))]
     subprocess.run(["bash", "-n", *map(str, scripts)], check=True)
