@@ -6,10 +6,11 @@ import logging
 import os
 from dataclasses import dataclass
 from pathlib import Path
-from typing import IO, Any
+from typing import IO, Any, Literal
 from urllib.parse import urlparse
 
 import httpx
+import psutil
 
 from .config import Settings
 from .models import ModelInstall, ModelProfile
@@ -25,6 +26,9 @@ class WorkerRecord:
     command: list[str]
     log_handle: IO[bytes]
     profile_id: str | None = None
+    state: Literal["starting", "ready"] = "starting"
+    estimated_memory_bytes: int | None = None
+    peak_memory_bytes: int = 0
 
 
 class ProcessSupervisor:
@@ -40,15 +44,26 @@ class ProcessSupervisor:
         for name in ("chat", "media"):
             record = self._workers.get(name)
             running = record is not None and record.process.returncode is None
+            current_memory = (
+                self._process_tree_rss(record.process.pid) if running and record else None
+            )
+            if record and current_memory is not None:
+                record.peak_memory_bytes = max(record.peak_memory_bytes, current_memory)
             result.append(
                 WorkerStatus(
                     name=name,
+                    state=(
+                        record.state if running and record else "exited" if record else "stopped"
+                    ),
                     managed=record is not None,
                     running=running,
                     pid=record.process.pid if running and record else None,
                     profile_id=record.profile_id if record else None,
                     command=record.command if record else [],
                     exit_code=record.process.returncode if record else None,
+                    estimated_memory_bytes=record.estimated_memory_bytes if record else None,
+                    current_memory_bytes=current_memory,
+                    peak_memory_bytes=(record.peak_memory_bytes or None) if record else None,
                 )
             )
         return result
@@ -71,7 +86,14 @@ class ProcessSupervisor:
             str(parsed.port or 12341),
             *self._llama_load_arguments(profile.load_settings_json),
         ]
-        await self._replace("chat", command, self.settings.llama_url + "/health", profile.id)
+        estimate = self._estimate_chat_memory(model_path.stat().st_size, profile.load_settings_json)
+        await self._replace(
+            "chat",
+            command,
+            self.settings.llama_url + "/health",
+            profile.id,
+            estimated_memory_bytes=estimate,
+        )
         return self.statuses()[0]
 
     async def start_media(self) -> WorkerStatus:
@@ -163,6 +185,7 @@ class ProcessSupervisor:
         command: list[str],
         health_url: str,
         profile_id: str | None = None,
+        estimated_memory_bytes: int | None = None,
     ) -> None:
         async with self._locks[name]:
             await self._stop_unlocked(name)
@@ -179,10 +202,18 @@ class ProcessSupervisor:
             except Exception:
                 log_handle.close()
                 raise
-            record = WorkerRecord(name, process, command, log_handle, profile_id)
+            record = WorkerRecord(
+                name,
+                process,
+                command,
+                log_handle,
+                profile_id,
+                estimated_memory_bytes=estimated_memory_bytes,
+            )
             self._workers[name] = record
             try:
                 await self._wait_healthy(record, health_url)
+                record.state = "ready"
             except Exception:
                 await self._stop_unlocked(name)
                 raise
@@ -267,3 +298,23 @@ class ProcessSupervisor:
         if settings.get("mlock") is True:
             arguments.append("--mlock")
         return arguments
+
+    @staticmethod
+    def _estimate_chat_memory(model_bytes: int, settings: dict[str, Any]) -> int:
+        context_length = int(settings.get("context_length", 8192))
+        context_overhead = max(512 * 1024**2, context_length * 128 * 1024)
+        return model_bytes + context_overhead
+
+    @staticmethod
+    def _process_tree_rss(pid: int) -> int | None:
+        try:
+            process = psutil.Process(pid)
+            total = process.memory_info().rss
+            for child in process.children(recursive=True):
+                try:
+                    total += child.memory_info().rss
+                except (psutil.AccessDenied, psutil.NoSuchProcess):
+                    continue
+            return total
+        except (psutil.AccessDenied, psutil.NoSuchProcess):
+            return None

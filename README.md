@@ -109,6 +109,12 @@ load settings as an argument array without a shell and only swaps after the
 worker health check succeeds. If you run `llama-server` yourself, omit the
 executable and point `LOCAL_LM_LLAMA_URL` at it.
 
+Managed worker cards distinguish starting, ready, stopped, and exited states;
+show active and queued generation counts; and sample current and peak RAM for
+the complete worker process tree. Chat cards also show a conservative pre-load
+estimate based on GGUF size and context length. CPU/GPU placement can change the
+actual result, so estimates and measurements are labeled separately.
+
 Profiles and generation presets can be edited at Basic, Advanced, or Expert
 visibility, cloned, reset, and exported as versioned JSON bundles. Imported
 profiles keep their model binding when the same install exists locally and

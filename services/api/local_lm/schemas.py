@@ -493,12 +493,18 @@ class SystemInfo(ApiModel):
 
 class WorkerStatus(ApiModel):
     name: Literal["chat", "media"]
+    state: Literal["stopped", "starting", "ready", "exited"] = "stopped"
     managed: bool
     running: bool
     pid: int | None = None
     profile_id: str | None = None
     command: list[str] = Field(default_factory=list)
     exit_code: int | None = None
+    estimated_memory_bytes: int | None = None
+    current_memory_bytes: int | None = None
+    peak_memory_bytes: int | None = None
+    active_jobs: int = 0
+    queued_jobs: int = 0
 
 
 class BackupInfo(ApiModel):

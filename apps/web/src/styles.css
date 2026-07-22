@@ -217,6 +217,10 @@ h1, h2, h3 { margin: 0; }
 .engine-card { border: 1px solid var(--border); border-radius: 13px; background: #12161c; padding: 15px; }
 .engine-card header { display: grid; grid-template-columns: 42px 1fr auto; align-items: center; gap: 11px; }
 .engine-card h3 { font-size: 14px; }.engine-card p { color: #7f8895; font-size: 11px; margin: 3px 0 0; }
+.worker-metrics { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 12px; }
+.worker-metrics span { display: grid; gap: 1px; border: 1px solid #303641; border-radius: 7px; background: #171c23; color: #767f8c; padding: 6px 8px; font-size: 9px; }
+.worker-metrics strong { color: #d9dde4; font-size: 11px; }
+.runtime-note { margin: 10px 2px 0; font-size: 10px; line-height: 1.5; }
 .capability-list { display: flex; flex-wrap: wrap; gap: 6px; border-top: 1px solid #242a33; margin-top: 13px; padding-top: 12px; }
 .capability-list span { border-radius: 15px; background: #20252d; color: #929ba8; font-size: 10px; padding: 4px 7px; }
 .metric-grid { display: grid; grid-template-columns: repeat(4, 1fr); gap: 10px; }
