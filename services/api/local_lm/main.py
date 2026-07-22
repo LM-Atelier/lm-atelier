@@ -18,6 +18,7 @@ from .artifacts import ArtifactStore
 from .backups import BackupManager
 from .catalog import HuggingFaceCatalog
 from .config import Settings, get_settings
+from .custom_nodes import CustomNodeManager
 from .database_migrations import upgrade_database
 from .db import SessionLocal, configure_database
 from .diagnostics import DiagnosticBundleBuilder
@@ -53,6 +54,7 @@ class Services:
     backups: BackupManager
     exports: ProjectExporter
     diagnostics: DiagnosticBundleBuilder
+    custom_nodes: CustomNodeManager
 
 
 def build_services(settings: Settings) -> Services:
@@ -76,6 +78,7 @@ def build_services(settings: Settings) -> Services:
         backups=BackupManager(settings),
         exports=ProjectExporter(settings, artifacts),
         diagnostics=DiagnosticBundleBuilder(settings, artifacts),
+        custom_nodes=CustomNodeManager(settings),
     )
 
 

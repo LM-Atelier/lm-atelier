@@ -65,6 +65,7 @@ class Settings(BaseSettings):
             self.download_dir,
             self.model_dir,
             self.workflow_dir,
+            self.custom_node_dir,
             self.export_dir,
             self.backup_dir,
             self.catalog_cache_dir,
@@ -91,6 +92,12 @@ class Settings(BaseSettings):
     @property
     def workflow_dir(self) -> Path:
         return self.data_dir / "workflows"
+
+    @property
+    def custom_node_dir(self) -> Path:
+        if self.comfy_directory:
+            return self.comfy_directory / "custom_nodes"
+        return self.data_dir / "custom-nodes"
 
     @property
     def export_dir(self) -> Path:
