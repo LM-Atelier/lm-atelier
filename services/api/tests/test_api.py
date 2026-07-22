@@ -87,6 +87,12 @@ async def test_project_chat_text_and_inline_image_flow(client: AsyncClient) -> N
     assert text_response.json()["run"]["operation"] == "text"
     assistant = await wait_for_assistant(client, chat["id"], "text")
     assert "Mock local response" in assistant["parts"][0]["text"]
+    text_metadata = next(
+        part for part in assistant["parts"] if part["type"] == "generation_metadata"
+    )["metadata_json"]
+    assert text_metadata["provenance"]["output"]["kind"] == "text"
+    assert len(text_metadata["provenance"]["output"]["sha256"]) == 64
+    assert "resolved_settings" in text_metadata["provenance"]
 
     image_response = await client.post(
         f"/api/chats/{chat['id']}/turns",
@@ -100,6 +106,14 @@ async def test_project_chat_text_and_inline_image_flow(client: AsyncClient) -> N
     assert image_response.json()["run"]["operation"] == "text_to_image"
     image_message = await wait_for_assistant(client, chat["id"], "image")
     image_part = next(part for part in image_message["parts"] if part["type"] == "image")
+    image_metadata = next(
+        part for part in image_message["parts"] if part["type"] == "generation_metadata"
+    )["metadata_json"]
+    image_output = image_metadata["provenance"]["outputs"][0]
+    assert image_output["artifact_id"] == image_part["artifact_id"]
+    assert image_output["sha256"] == image_part["artifact"]["sha256"]
+    assert image_part["artifact"]["kind"] == "image"
+    assert image_part["artifact"]["metadata_json"].get("temporary_preview") is None
     content = await client.get(f"/api/artifacts/{image_part['artifact_id']}/content")
     assert content.status_code == 200
     assert content.headers["content-type"].startswith("image/svg+xml")
@@ -133,7 +147,15 @@ async def test_inline_video_and_project_export(client: AsyncClient) -> None:
     )
     assert response.status_code == 202
     message = await wait_for_assistant(client, chat["id"], "video")
-    assert any(part["artifact_id"] for part in message["parts"] if part["type"] == "video")
+    video_part = next(part for part in message["parts"] if part["type"] == "video")
+    assert video_part["artifact_id"]
+    metadata = next(part for part in message["parts"] if part["type"] == "generation_metadata")[
+        "metadata_json"
+    ]
+    output = metadata["provenance"]["outputs"][0]
+    assert output["artifact_id"] == video_part["artifact_id"]
+    assert output["sha256"] == video_part["artifact"]["sha256"]
+    assert output["kind"] == video_part["artifact"]["kind"]
 
     exported = await client.post(f"/api/projects/{project['id']}/export")
     assert exported.status_code == 201

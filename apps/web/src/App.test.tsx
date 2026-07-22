@@ -287,6 +287,76 @@ describe("App", () => {
     expect(screen.getByDisplayValue("Edited question")).toBeInTheDocument();
   });
 
+  it("renders an in-progress media preview inside the assistant message", async () => {
+    localStorage.setItem("local-lm-chat", "chat-preview");
+    const stamp = "2026-07-22T00:00:00Z";
+    vi.mocked(api.chat).mockResolvedValue({
+      id: "chat-preview",
+      project_id: null,
+      title: "Preview",
+      archived: false,
+      routing_mode: "auto",
+      confirm_uncertain_media: false,
+      active_chat_profile_id: null,
+      active_image_profile_id: null,
+      active_video_profile_id: null,
+      active_head_message_id: "assistant-preview",
+      created_at: stamp,
+      updated_at: stamp,
+      messages: [
+        {
+          id: "user-preview",
+          chat_id: "chat-preview",
+          parent_id: null,
+          role: "user",
+          status: "complete",
+          parts: [{ id: "prompt", position: 0, type: "text", text: "Create an image", artifact_id: null, metadata_json: {} }],
+          created_at: stamp,
+          updated_at: stamp,
+        },
+        {
+          id: "assistant-preview",
+          chat_id: "chat-preview",
+          parent_id: "user-preview",
+          role: "assistant",
+          status: "pending",
+          parts: [
+            { id: "progress", position: 0, type: "progress", text: "Preview", artifact_id: null, metadata_json: { progress: 0.85 } },
+            {
+              id: "preview",
+              position: 1,
+              type: "image",
+              text: null,
+              artifact_id: "sha256:preview",
+              metadata_json: { preview: true },
+              artifact: {
+                id: "sha256:preview",
+                sha256: "preview",
+                kind: "thumbnail",
+                media_type: "image/png",
+                size_bytes: 100,
+                original_name: "generation-preview",
+                metadata_json: { temporary_preview: true },
+                created_at: stamp,
+                url: "/api/artifacts/sha256:preview/content",
+              },
+            },
+          ],
+          created_at: stamp,
+          updated_at: stamp,
+        },
+      ],
+    });
+    const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+    render(
+      <QueryClientProvider client={client}>
+        <App />
+      </QueryClientProvider>,
+    );
+    expect(await screen.findByAltText("Generation preview")).toBeInTheDocument();
+    expect(screen.getByText("Generation preview")).toBeInTheDocument();
+  });
+
   it("shows managed worker queue and memory telemetry", async () => {
     vi.mocked(api.workers).mockResolvedValue([
       {
