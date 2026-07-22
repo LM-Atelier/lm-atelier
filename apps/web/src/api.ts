@@ -9,6 +9,7 @@ import type {
   CatalogPreflight,
   Chat,
   ChatDetail,
+  CustomNodeInstall,
   EngineCapabilities,
   GenerationPreset,
   GenerationPresetBundle,
@@ -317,8 +318,19 @@ export const api = {
   cloneWorkflow: (id: string, name?: string) =>
     request<Workflow>(`/api/workflows/${id}/clone`, { method: "POST", body: JSON.stringify({ name }) }),
   exportWorkflow: (id: string) => request<WorkflowBundle>(`/api/workflows/${id}/export`),
+  workflowOpenTarget: (id: string) => request<{ url: string; filename: string; ui_graph: Record<string, unknown> }>(`/api/workflows/${id}/open-target`),
   importWorkflow: (bundle: WorkflowBundle) =>
     request<Workflow>("/api/workflows/import", { method: "POST", body: JSON.stringify(bundle) }),
+  customNodes: () => request<CustomNodeInstall[]>("/api/custom-nodes"),
+  installCustomNode: (payload: { name: string; source_url: string; revision: string }) =>
+    request<CustomNodeInstall>("/api/custom-nodes", { method: "POST", body: JSON.stringify(payload) }),
+  updateCustomNode: (id: string, revision: string) =>
+    request<CustomNodeInstall>(`/api/custom-nodes/${id}`, { method: "PATCH", body: JSON.stringify({ revision }) }),
+  trustCustomNode: (id: string, trusted: boolean) =>
+    request<CustomNodeInstall>(`/api/custom-nodes/${id}/trust`, { method: "POST", body: JSON.stringify({ trusted }) }),
+  rollbackCustomNode: (id: string) =>
+    request<CustomNodeInstall>(`/api/custom-nodes/${id}/rollback`, { method: "POST" }),
+  removeCustomNode: (id: string) => request<void>(`/api/custom-nodes/${id}`, { method: "DELETE" }),
   validateWorkflow: (id: string) =>
     request<{ valid: boolean; errors: string[]; warnings: string[]; revision_id: string }>(
       `/api/workflows/${id}/validate`,

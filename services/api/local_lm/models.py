@@ -257,6 +257,21 @@ class WorkflowRevision(TimestampMixin, Base):
     )
 
 
+class CustomNodeInstall(TimestampMixin, Base):
+    __tablename__ = "custom_node_installs"
+
+    id: Mapped[str] = mapped_column(String(40), primary_key=True, default=lambda: new_id("node"))
+    name: Mapped[str] = mapped_column(String(240), index=True)
+    source_url: Mapped[str] = mapped_column(String(1000), unique=True)
+    revision: Mapped[str] = mapped_column(String(40))
+    previous_revision: Mapped[str | None] = mapped_column(String(40), nullable=True)
+    installed_path: Mapped[str] = mapped_column(Text)
+    tree_hash: Mapped[str] = mapped_column(String(64))
+    trusted: Mapped[bool] = mapped_column(Boolean, default=False, index=True)
+    active: Mapped[bool] = mapped_column(Boolean, default=True, index=True)
+    security_json: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
+
+
 class Job(TimestampMixin, Base):
     __tablename__ = "jobs"
 

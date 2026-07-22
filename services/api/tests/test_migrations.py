@@ -24,7 +24,7 @@ def test_migrations_round_trip(tmp_path) -> None:  # type: ignore[no-untyped-def
         project_columns = {
             row[1] for row in connection.execute("PRAGMA table_info(projects)").fetchall()
         }
-    assert {"projects", "messages", "generation_presets"} <= tables
+    assert {"projects", "messages", "generation_presets", "custom_node_installs"} <= tables
     assert "active_head_message_id" in chat_columns
     assert {"image_workflow_revision_id", "video_workflow_revision_id"} <= project_columns
 

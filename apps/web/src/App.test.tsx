@@ -112,8 +112,15 @@ vi.mock("./api", () => ({
     restoreWorkflowRevision: vi.fn(),
     cloneWorkflow: vi.fn(),
     exportWorkflow: vi.fn(),
+    workflowOpenTarget: vi.fn(),
     importWorkflow: vi.fn(),
     validateWorkflow: vi.fn(),
+    customNodes: vi.fn().mockResolvedValue([]),
+    installCustomNode: vi.fn(),
+    updateCustomNode: vi.fn(),
+    trustCustomNode: vi.fn(),
+    rollbackCustomNode: vi.fn(),
+    removeCustomNode: vi.fn(),
     upload: vi.fn(),
   },
   connectEvents: vi.fn().mockImplementation(async (_onEvent, onStatus) => {
@@ -132,6 +139,7 @@ describe("App", () => {
     vi.mocked(api.models).mockResolvedValue([]);
     vi.mocked(api.catalog).mockResolvedValue({ items: [], next_cursor: null });
     vi.mocked(api.workflows).mockResolvedValue([]);
+    vi.mocked(api.customNodes).mockResolvedValue([]);
   });
   afterEach(cleanup);
 

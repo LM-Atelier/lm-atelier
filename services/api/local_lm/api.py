@@ -13,6 +13,7 @@ from sqlalchemy.orm import Session, selectinload
 from .capability_probe import probe_structured_tools
 from .catalog import HuggingFaceCatalog
 from .config import Settings
+from .custom_nodes import custom_node_dependency_errors
 from .db import get_session
 from .domain import (
     ArtifactKind,
@@ -23,6 +24,7 @@ from .domain import (
     Operation,
     RoutingMode,
     new_id,
+    utcnow,
 )
 from .downloads import DownloadManager
 from .engines import EngineRegistry
@@ -30,6 +32,7 @@ from .hardware import collect_system_info
 from .models import (
     Artifact,
     Chat,
+    CustomNodeInstall,
     GenerationPreset,
     Job,
     Message,
@@ -60,6 +63,10 @@ from .schemas import (
     ChatCreate,
     ChatDetail,
     ChatOut,
+    CustomNodeInstallRequest,
+    CustomNodeOut,
+    CustomNodeTrustRequest,
+    CustomNodeUpdateRequest,
     DownloadRequest,
     EngineCapabilities,
     HealthOut,
@@ -94,6 +101,7 @@ from .schemas import (
     WorkflowBundle,
     WorkflowClone,
     WorkflowCreate,
+    WorkflowOpenTarget,
     WorkflowOut,
     WorkflowRevisionCreate,
     WorkflowRevisionOut,
@@ -1386,6 +1394,120 @@ async def import_preset(payload: PresetBundle, session: SessionDep) -> Generatio
     )
 
 
+def _require_media_worker_stopped(request: Request) -> None:
+    if any(
+        worker.name == "media" and worker.running
+        for worker in _services(request).processes.statuses()
+    ):
+        raise HTTPException(409, "stop the media worker before changing custom nodes")
+
+
+@router.get("/custom-nodes", response_model=list[CustomNodeOut])
+async def list_custom_nodes(session: SessionDep) -> list[CustomNodeInstall]:
+    return list(session.scalars(select(CustomNodeInstall).order_by(CustomNodeInstall.name)).all())
+
+
+@router.post("/custom-nodes", response_model=CustomNodeOut, status_code=201)
+async def install_custom_node(
+    payload: CustomNodeInstallRequest, request: Request, session: SessionDep
+) -> CustomNodeInstall:
+    _require_media_worker_stopped(request)
+    try:
+        source_url = _services(request).custom_nodes.normalize_source(payload.source_url)
+    except ValueError as exc:
+        raise HTTPException(422, str(exc)) from exc
+    existing = session.scalar(
+        select(CustomNodeInstall).where(CustomNodeInstall.source_url == source_url)
+    )
+    if existing:
+        raise HTTPException(409, "this custom node source is already managed")
+    try:
+        install = await _services(request).custom_nodes.install(
+            session,
+            name=payload.name,
+            source_url=source_url,
+            revision=payload.revision,
+        )
+    except (OSError, RuntimeError, ValueError, TimeoutError) as exc:
+        session.rollback()
+        raise HTTPException(422, str(exc)) from exc
+    session.commit()
+    session.refresh(install)
+    return install
+
+
+@router.patch("/custom-nodes/{node_id}", response_model=CustomNodeOut)
+async def update_custom_node(
+    node_id: str, payload: CustomNodeUpdateRequest, request: Request, session: SessionDep
+) -> CustomNodeInstall:
+    _require_media_worker_stopped(request)
+    install = session.get(CustomNodeInstall, node_id)
+    if not install:
+        raise HTTPException(404, "custom node install not found")
+    try:
+        await _services(request).custom_nodes.update(install, payload.revision)
+    except (OSError, RuntimeError, ValueError, TimeoutError) as exc:
+        session.rollback()
+        raise HTTPException(422, str(exc)) from exc
+    session.commit()
+    session.refresh(install)
+    return install
+
+
+@router.post("/custom-nodes/{node_id}/trust", response_model=CustomNodeOut)
+async def trust_custom_node(
+    node_id: str, payload: CustomNodeTrustRequest, request: Request, session: SessionDep
+) -> CustomNodeInstall:
+    _require_media_worker_stopped(request)
+    install = session.get(CustomNodeInstall, node_id)
+    if not install:
+        raise HTTPException(404, "custom node install not found")
+    if payload.trusted:
+        try:
+            await _services(request).custom_nodes.verify(install)
+        except (OSError, RuntimeError, ValueError, TimeoutError) as exc:
+            raise HTTPException(422, str(exc)) from exc
+    install.trusted = payload.trusted
+    install.security_json = {
+        **install.security_json,
+        "reviewed_at": utcnow().isoformat(),
+        "trusted_by_local_user": payload.trusted,
+    }
+    session.commit()
+    session.refresh(install)
+    return install
+
+
+@router.post("/custom-nodes/{node_id}/rollback", response_model=CustomNodeOut)
+async def rollback_custom_node(
+    node_id: str, request: Request, session: SessionDep
+) -> CustomNodeInstall:
+    _require_media_worker_stopped(request)
+    install = session.get(CustomNodeInstall, node_id)
+    if not install:
+        raise HTTPException(404, "custom node install not found")
+    try:
+        await _services(request).custom_nodes.rollback(install)
+    except (OSError, RuntimeError, ValueError, TimeoutError) as exc:
+        session.rollback()
+        raise HTTPException(422, str(exc)) from exc
+    session.commit()
+    session.refresh(install)
+    return install
+
+
+@router.delete("/custom-nodes/{node_id}", status_code=204)
+async def remove_custom_node(node_id: str, request: Request, session: SessionDep) -> Response:
+    _require_media_worker_stopped(request)
+    install = session.get(CustomNodeInstall, node_id)
+    if not install:
+        raise HTTPException(404, "custom node install not found")
+    _services(request).custom_nodes.remove(install)
+    session.delete(install)
+    session.commit()
+    return Response(status_code=204)
+
+
 @router.get("/workflows", response_model=list[WorkflowOut])
 async def list_workflows(session: SessionDep) -> list[WorkflowDefinition]:
     return list(
@@ -1455,6 +1577,24 @@ async def update_workflow(
 async def export_workflow(workflow_id: str, session: SessionDep) -> WorkflowBundle:
     definition, revision = _workflow_and_revision(session, workflow_id)
     return _workflow_bundle(definition, revision)
+
+
+@router.get("/workflows/{workflow_id}/open-target", response_model=WorkflowOpenTarget)
+async def workflow_open_target(
+    workflow_id: str, request: Request, session: SessionDep
+) -> WorkflowOpenTarget:
+    definition, revision = _workflow_and_revision(session, workflow_id)
+    if not revision.ui_graph_json:
+        raise HTTPException(422, "this workflow has no ComfyUI user-interface graph")
+    filename = "".join(
+        character if character.isalnum() or character in "-_" else "-"
+        for character in definition.name
+    ).strip("-")
+    return WorkflowOpenTarget(
+        url=_services(request).settings.comfy_url,
+        filename=f"{filename or 'workflow'}.comfyui.json",
+        ui_graph=revision.ui_graph_json,
+    )
 
 
 @router.post("/workflows/import", response_model=WorkflowOut, status_code=201)
@@ -1563,6 +1703,7 @@ async def validate_workflow(
     errors = await _services(request).engines.media.validate_workflow(revision.api_graph_json)
     warnings: list[str] = []
     dependencies = revision.dependencies_json
+    errors.extend(custom_node_dependency_errors(session, dependencies.get("custom_nodes")))
     required_models = dependencies.get("models", [])
     installed = session.scalars(select(ModelInstall)).all()
     installed_values = {
