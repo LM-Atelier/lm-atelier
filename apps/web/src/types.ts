@@ -344,6 +344,22 @@ export interface Workflow {
   revisions: WorkflowRevision[];
 }
 
+export interface WorkflowBundle {
+  format: "lm-atelier-workflow";
+  version: 1;
+  name: string;
+  operation: string;
+  description: string;
+  engine: string;
+  engine_version: string | null;
+  ui_graph: Record<string, unknown>;
+  api_graph: Record<string, unknown>;
+  input_schema: Record<string, unknown>;
+  dependencies: Record<string, unknown>;
+  trusted: boolean;
+  source_revision: number | null;
+}
+
 export interface SystemInfo {
   platform: string;
   platform_release: string;

@@ -102,6 +102,12 @@ vi.mock("./api", () => ({
     importModel: vi.fn(),
     workflows: vi.fn(),
     createWorkflow: vi.fn(),
+    updateWorkflow: vi.fn(),
+    createWorkflowRevision: vi.fn(),
+    restoreWorkflowRevision: vi.fn(),
+    cloneWorkflow: vi.fn(),
+    exportWorkflow: vi.fn(),
+    importWorkflow: vi.fn(),
     validateWorkflow: vi.fn(),
     upload: vi.fn(),
   },
@@ -458,5 +464,58 @@ describe("App", () => {
     expect(await screen.findByText("Disk capacity")).toBeInTheDocument();
     expect(screen.getByText("apache-2.0")).toBeInTheDocument();
     expect(screen.getByText("Queue download")).toBeEnabled();
+  });
+
+  it("renders workflow revision history and declared controls", async () => {
+    const stamp = "2026-07-22T00:00:00Z";
+    vi.mocked(api.workflows).mockResolvedValue([
+      {
+        id: "workflow-1",
+        name: "Studio image",
+        operation: "text_to_image",
+        description: "A tunable image pipeline",
+        current_revision_id: "revision-2",
+        revisions: [
+          {
+            id: "revision-1",
+            workflow_id: "workflow-1",
+            version: 1,
+            engine: "comfyui",
+            engine_version: null,
+            ui_graph_json: {},
+            api_graph_json: { node: { class_type: "Sampler" } },
+            input_schema_json: {},
+            dependencies_json: {},
+            trusted: true,
+            created_at: stamp,
+          },
+          {
+            id: "revision-2",
+            workflow_id: "workflow-1",
+            version: 2,
+            engine: "comfyui",
+            engine_version: null,
+            ui_graph_json: {},
+            api_graph_json: { node: { class_type: "SamplerV2" } },
+            input_schema_json: { type: "object", properties: { steps: { type: "integer", title: "Steps", default: 20, minimum: 1, maximum: 100 } } },
+            dependencies_json: { models: [] },
+            trusted: true,
+            created_at: stamp,
+          },
+        ],
+      },
+    ]);
+    const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+    render(
+      <QueryClientProvider client={client}>
+        <App />
+      </QueryClientProvider>,
+    );
+    fireEvent.click(await screen.findByText("Workflows"));
+    fireEvent.click(await screen.findByText("Studio image"));
+    expect(await screen.findByText("Declared controls")).toBeInTheDocument();
+    expect(screen.getByDisplayValue("20")).toBeInTheDocument();
+    expect(screen.getByText("v2 · current")).toBeInTheDocument();
+    expect(screen.queryByText("Restore as new revision")).not.toBeInTheDocument();
   });
 });
