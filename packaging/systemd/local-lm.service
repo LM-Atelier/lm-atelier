@@ -1,0 +1,17 @@
+[Unit]
+Description=LM Atelier private AI workspace
+After=network.target
+
+[Service]
+Type=simple
+WorkingDirectory=%h/.local/share/lm-atelier/current
+Environment=LOCAL_LM_DATA_DIR=%h/.local/share/lm-atelier/data
+Environment=LOCAL_LM_HOST=127.0.0.1
+ExecStart=%h/.local/share/lm-atelier/current/.venv/bin/lm-atelier
+Restart=on-failure
+RestartSec=3
+NoNewPrivileges=true
+PrivateTmp=true
+
+[Install]
+WantedBy=default.target

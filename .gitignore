@@ -16,14 +16,17 @@ venv/
 
 # JavaScript / TypeScript
 node_modules/
+*.tsbuildinfo
 .pnpm-store/
 dist/
 build/
+release/
 coverage/
 .vite/
 .next/
 
 # Local application state
+.private/
 data/
 models/
 downloads/
