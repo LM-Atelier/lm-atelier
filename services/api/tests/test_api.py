@@ -565,6 +565,44 @@ async def test_workflow_revisions_and_validation(client: AsyncClient) -> None:
     assert "missing model dependency" in validation.json()["errors"][0]
 
 
+async def test_project_pins_an_immutable_media_workflow_revision(client: AsyncClient) -> None:
+    workflow = (
+        await client.post(
+            "/api/workflows",
+            json={
+                "name": "Project image recipe",
+                "operation": "text_to_image",
+                "api_graph": {"1": {"class_type": "SaveImage", "inputs": {}}},
+                "trusted": True,
+            },
+        )
+    ).json()
+    revision_id = workflow["current_revision_id"]
+    project_response = await client.post(
+        "/api/projects",
+        json={"name": "Pinned studio", "image_workflow_revision_id": revision_id},
+    )
+    assert project_response.status_code == 201
+    project = project_response.json()
+    assert project["image_workflow_revision_id"] == revision_id
+
+    incompatible = await client.patch(
+        f"/api/projects/{project['id']}",
+        json={"video_workflow_revision_id": revision_id},
+    )
+    assert incompatible.status_code == 422
+
+    chat = (
+        await client.post("/api/chats", json={"title": "Pinned run", "project_id": project["id"]})
+    ).json()
+    turn = await client.post(
+        f"/api/chats/{chat['id']}/turns",
+        json={"text": "Draw a blue cabin", "mode": "image"},
+    )
+    assert turn.status_code == 202
+    assert turn.json()["run"]["workflow_revision_id"] == revision_id
+
+
 async def test_profile_edit_clone_reset_and_portable_bundle(client: AsyncClient) -> None:
     profiles = (await client.get("/api/profiles?role=chat")).json()
     source = profiles[0]

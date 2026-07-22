@@ -22,7 +22,16 @@ from .domain import (
     RoutingMode,
     RunStatus,
 )
-from .models import Artifact, Chat, Message, MessagePart, Project, Run
+from .models import (
+    Artifact,
+    Chat,
+    Message,
+    MessagePart,
+    Project,
+    Run,
+    WorkflowDefinition,
+    WorkflowRevision,
+)
 from .schemas import ChatDetail, ProjectOut, RunOut
 
 
@@ -259,6 +268,16 @@ class ProjectExporter:
             description=self._optional_text(project_data.get("description"), 10_000) or "",
             instructions=self._optional_text(project_data.get("instructions"), 100_000) or "",
             archived=bool(project_data.get("archived", False)),
+            image_workflow_revision_id=self._available_workflow_revision(
+                session,
+                project_data.get("image_workflow_revision_id"),
+                {Operation.TEXT_TO_IMAGE.value, Operation.IMAGE_TO_IMAGE.value},
+            ),
+            video_workflow_revision_id=self._available_workflow_revision(
+                session,
+                project_data.get("video_workflow_revision_id"),
+                {Operation.TEXT_TO_VIDEO.value, Operation.IMAGE_TO_VIDEO.value},
+            ),
         )
         session.add(project)
         session.flush()
@@ -377,6 +396,18 @@ class ProjectExporter:
             )
         session.flush()
         return project
+
+    @staticmethod
+    def _available_workflow_revision(
+        session: Session, value: Any, operations: set[str]
+    ) -> str | None:
+        if not isinstance(value, str):
+            return None
+        revision = session.get(WorkflowRevision, value)
+        definition = session.get(WorkflowDefinition, revision.workflow_id) if revision else None
+        if not revision or not definition or definition.operation not in operations:
+            return None
+        return revision.id
 
     @staticmethod
     def _text(value: object, label: str, maximum: int) -> str:
