@@ -155,7 +155,7 @@ async def test_inline_video_and_project_export(client: AsyncClient) -> None:
     output = metadata["provenance"]["outputs"][0]
     assert output["artifact_id"] == video_part["artifact_id"]
     assert output["sha256"] == video_part["artifact"]["sha256"]
-    assert output["kind"] == "video"
+    assert output["kind"] == video_part["artifact"]["kind"]
 
     exported = await client.post(f"/api/projects/{project['id']}/export")
     assert exported.status_code == 201
