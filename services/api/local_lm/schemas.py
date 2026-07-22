@@ -439,6 +439,16 @@ class EngineCapabilities(ApiModel):
     details: dict[str, Any] = Field(default_factory=dict)
 
 
+class ToolCapabilityProbe(ApiModel):
+    engine: str
+    version: str
+    advertised: bool
+    passed: bool
+    tool_name: str | None = None
+    arguments: dict[str, Any] | None = None
+    error: str | None = None
+
+
 class DeviceInfo(ApiModel):
     id: str
     name: str

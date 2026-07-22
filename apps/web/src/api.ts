@@ -17,6 +17,7 @@ import type {
   ReferenceRecipe,
   RoutingMode,
   SystemInfo,
+  ToolCapabilityProbe,
   TurnAccepted,
   Workflow,
   WorkerStatus,
@@ -111,6 +112,8 @@ export const api = {
   jobs: () => request<Job[]>("/api/jobs"),
   cancelJob: (id: string) => request<Job>(`/api/jobs/${id}/cancel`, { method: "POST" }),
   engines: () => request<EngineCapabilities[]>("/api/engines"),
+  probeChatTools: () =>
+    request<ToolCapabilityProbe>("/api/engines/chat/tool-probe", { method: "POST" }),
   system: () => request<SystemInfo>("/api/system"),
   platforms: () => request<PlatformMatrixEntry[]>("/api/platforms"),
   models: () => request<ModelInstall[]>("/api/models"),

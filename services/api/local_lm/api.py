@@ -9,6 +9,7 @@ from fastapi import APIRouter, Depends, File, HTTPException, Query, Request, Res
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session, selectinload
 
+from .capability_probe import probe_structured_tools
 from .catalog import HuggingFaceCatalog
 from .config import Settings
 from .db import get_session
@@ -74,6 +75,7 @@ from .schemas import (
     RegenerateRequest,
     RunOut,
     SystemInfo,
+    ToolCapabilityProbe,
     TurnAccepted,
     TurnRequest,
     WorkerStatus,
@@ -171,6 +173,11 @@ async def delete_backup(name: str, request: Request) -> Response:
 @router.get("/engines", response_model=list[EngineCapabilities])
 async def engine_capabilities(request: Request) -> list[EngineCapabilities]:
     return await _services(request).engines.capabilities()
+
+
+@router.post("/engines/chat/tool-probe", response_model=ToolCapabilityProbe)
+async def probe_chat_tool_capability(request: Request) -> ToolCapabilityProbe:
+    return await probe_structured_tools(_services(request).engines.chat)
 
 
 @router.get("/workers", response_model=list[WorkerStatus])

@@ -133,6 +133,13 @@ async def test_worker_management_reports_missing_local_binaries(client: AsyncCli
     assert media.status_code == 422
 
 
+async def test_chat_tool_capability_probe_executes_declared_schema(client: AsyncClient) -> None:
+    response = await client.post("/api/engines/chat/tool-probe")
+    assert response.status_code == 200
+    assert response.json()["passed"] is True
+    assert response.json()["arguments"] == {"mode": "image", "confidence": 1}
+
+
 async def test_turn_idempotency_returns_original_run(client: AsyncClient) -> None:
     chat = (await client.post("/api/chats", json={"title": "Idempotency"})).json()
     payload = {"text": "Hello", "mode": "text", "idempotency_key": "stable-key"}
