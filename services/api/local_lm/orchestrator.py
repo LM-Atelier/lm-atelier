@@ -107,7 +107,14 @@ class ConversationOrchestrator:
                             )
             session.commit()
 
-    def create_turn(self, session: Session, chat_id: str, request: TurnRequest) -> TurnAccepted:
+    def create_turn(
+        self,
+        session: Session,
+        chat_id: str,
+        request: TurnRequest,
+        *,
+        use_explicit_parent: bool = False,
+    ) -> TurnAccepted:
         if request.idempotency_key:
             existing = session.scalar(
                 select(Run).where(Run.idempotency_key == request.idempotency_key)
@@ -123,7 +130,7 @@ class ConversationOrchestrator:
             parent = session.get(Message, parent_message_id)
             if not parent or parent.chat_id != chat_id:
                 raise LookupError("parent message not found in this chat")
-        else:
+        elif not use_explicit_parent:
             parent_message_id = chat.active_head_message_id
             if not parent_message_id:
                 parent_message_id = session.scalar(

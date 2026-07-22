@@ -390,14 +390,7 @@ async def regenerate_message(
     if not user_message:
         raise HTTPException(404, "source user message not found")
     text = "\n".join(part.text for part in user_message.parts if part.text).strip()
-    operation = Operation(prior_run.operation)
-    mode = (
-        RoutingMode.TEXT
-        if operation == Operation.TEXT
-        else RoutingMode.VIDEO
-        if "video" in operation.value
-        else RoutingMode.IMAGE
-    )
+    mode = _mode_for_operation(Operation(prior_run.operation))
     turn = TurnRequest(
         text=text,
         mode=mode,
@@ -405,7 +398,9 @@ async def regenerate_message(
         input_artifact_ids=prior_run.provenance_json.get("input_artifact_ids", []),
         settings={**prior_run.settings_json, **payload.settings},
     )
-    return _services(request).orchestrator.create_turn(session, prior_run.chat_id, turn)
+    return _services(request).orchestrator.create_turn(
+        session, prior_run.chat_id, turn, use_explicit_parent=True
+    )
 
 
 @router.post("/messages/{message_id}/branch", response_model=TurnAccepted, status_code=202)
@@ -415,8 +410,27 @@ async def edit_and_branch(
     source = session.get(Message, message_id)
     if not source or source.role != MessageRole.USER.value:
         raise HTTPException(404, "user message not found")
-    turn = payload.model_copy(update={"parent_message_id": source.parent_id})
-    return _services(request).orchestrator.create_turn(session, source.chat_id, turn)
+    prior_run = session.scalar(select(Run).where(Run.user_message_id == source.id))
+    updates: dict[str, Any] = {"parent_message_id": source.parent_id}
+    if prior_run:
+        if payload.mode is None:
+            updates["mode"] = _mode_for_operation(Operation(prior_run.operation))
+        if not payload.input_artifact_ids:
+            updates["input_artifact_ids"] = prior_run.provenance_json.get("input_artifact_ids", [])
+        if not payload.settings:
+            updates["settings"] = prior_run.settings_json
+    turn = payload.model_copy(update=updates)
+    return _services(request).orchestrator.create_turn(
+        session, source.chat_id, turn, use_explicit_parent=True
+    )
+
+
+def _mode_for_operation(operation: Operation) -> RoutingMode:
+    if operation == Operation.TEXT:
+        return RoutingMode.TEXT
+    if "video" in operation.value:
+        return RoutingMode.VIDEO
+    return RoutingMode.IMAGE
 
 
 @router.get("/runs/{run_id}", response_model=RunOut)
@@ -452,6 +466,33 @@ async def cancel_job(job_id: str, request: Request, session: SessionDep) -> Job:
         raise HTTPException(409, "job is already terminal or cannot be cancelled")
     session.expire_all()
     refreshed = session.get(Job, job_id)
+    if not refreshed:
+        raise HTTPException(404, "job not found")
+    return refreshed
+
+
+@router.post("/chats/{chat_id}/cancel", response_model=JobOut)
+async def cancel_active_chat_run(chat_id: str, request: Request, session: SessionDep) -> Job:
+    if not session.get(Chat, chat_id):
+        raise HTTPException(404, "chat not found")
+    job = session.scalar(
+        select(Job)
+        .join(Run, Job.run_id == Run.id)
+        .where(
+            Run.chat_id == chat_id,
+            Job.status.in_(["queued", "running", "paused"]),
+            Job.cancellable.is_(True),
+        )
+        .order_by(Job.created_at.desc(), Job.id.desc())
+        .limit(1)
+    )
+    if not job:
+        raise HTTPException(409, "chat has no cancellable run")
+    changed = await _services(request).orchestrator.cancel(job.id)
+    if not changed:
+        raise HTTPException(409, "chat run is already terminal or cannot be cancelled")
+    session.expire_all()
+    refreshed = session.get(Job, job.id)
     if not refreshed:
         raise HTTPException(404, "job not found")
     return refreshed

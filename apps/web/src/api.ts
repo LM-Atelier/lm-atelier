@@ -101,6 +101,13 @@ export const api = {
       method: "POST",
       body: JSON.stringify({ settings: {} }),
     }),
+  branchMessage: (messageId: string, text: string) =>
+    request<TurnAccepted>(`/api/messages/${messageId}/branch`, {
+      method: "POST",
+      body: JSON.stringify({ text, idempotency_key: crypto.randomUUID() }),
+    }),
+  cancelChat: (chatId: string) =>
+    request<Job>(`/api/chats/${chatId}/cancel`, { method: "POST" }),
   jobs: () => request<Job[]>("/api/jobs"),
   cancelJob: (id: string) => request<Job>(`/api/jobs/${id}/cancel`, { method: "POST" }),
   engines: () => request<EngineCapabilities[]>("/api/engines"),
