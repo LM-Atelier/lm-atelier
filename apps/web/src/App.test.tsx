@@ -72,6 +72,7 @@ vi.mock("./api", () => ({
       },
     }),
     platforms: vi.fn().mockResolvedValue([]),
+    createDiagnostics: vi.fn(),
     models: vi.fn(),
     modelStorage: vi.fn().mockResolvedValue({ installed_bytes: 0, partial_download_bytes: 0, catalog_cache_bytes: 0, installed_count: 0, partial_download_count: 0 }),
     deleteModel: vi.fn(),
@@ -444,6 +445,22 @@ describe("App", () => {
     fireEvent.click(await screen.findByText("Settings"));
     fireEvent.click(await screen.findByText("Test structured tools"));
     expect(await screen.findByText("Structured tool schema passed on mock 1.")).toBeInTheDocument();
+  });
+
+  it("downloads a redacted diagnostic bundle", async () => {
+    const click = vi.spyOn(HTMLAnchorElement.prototype, "click").mockImplementation(() => undefined);
+    vi.mocked(api.createDiagnostics).mockResolvedValue({ url: "/api/artifacts/diagnostics/content" });
+    const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+    render(
+      <QueryClientProvider client={client}>
+        <App />
+      </QueryClientProvider>,
+    );
+    fireEvent.click(await screen.findByText("Settings"));
+    fireEvent.click(await screen.findByText("Download redacted diagnostics"));
+    await waitFor(() => expect(api.createDiagnostics).toHaveBeenCalledOnce());
+    expect(click).toHaveBeenCalledOnce();
+    click.mockRestore();
   });
 
   it("shows installed-model storage and partial cleanup controls", async () => {

@@ -243,7 +243,9 @@ async def test_project_import_rejects_unsafe_archive_paths(client: AsyncClient) 
     assert "unsafe path" in response.json()["detail"]
 
 
-async def test_backup_create_verify_and_restore_marker(client: AsyncClient) -> None:
+async def test_backup_create_verify_and_restore_marker(
+    client: AsyncClient, settings: Settings
+) -> None:
     created = await client.post("/api/backups")
     assert created.status_code == 201
     name = created.json()["name"]
@@ -253,6 +255,38 @@ async def test_backup_create_verify_and_restore_marker(client: AsyncClient) -> N
     restore = await client.post(f"/api/backups/{name}/restore")
     assert restore.status_code == 200
     assert restore.json()["restore_pending"] is True
+
+    await client.post(
+        "/api/artifacts",
+        files={"file": ("backup-image.png", b"backup-media", "image/png")},
+    )
+    media_backup = await client.post("/api/backups", params={"include_media": True})
+    assert media_backup.status_code == 201
+    assert media_backup.json()["media_included"] is True
+    assert media_backup.json()["media_size_bytes"] > 0
+    assert (settings.backup_dir / f"{media_backup.json()['name']}.media.zip").is_file()
+    assert (await client.post(f"/api/backups/{media_backup.json()['name']}/verify")).json()[
+        "verified"
+    ] is True
+
+
+async def test_diagnostic_bundle_is_redacted(client: AsyncClient) -> None:
+    secret_prompt = "diagnostic-secret-prompt-that-must-not-leak"
+    chat = (await client.post("/api/chats", json={"title": "Private"})).json()
+    turn = await client.post(
+        f"/api/chats/{chat['id']}/turns", json={"text": secret_prompt, "mode": "text"}
+    )
+    await wait_for_run(client, turn.json()["run"]["id"])
+
+    created = await client.post("/api/diagnostics")
+    assert created.status_code == 201
+    archive = await client.get(created.json()["url"])
+    assert secret_prompt.encode() not in archive.content
+    with zipfile.ZipFile(io.BytesIO(archive.content)) as bundle:
+        payload = bundle.read("diagnostics.json")
+        assert secret_prompt.encode() not in payload
+        assert b'"prompts_included": false' in payload
+        assert b'"tokens_included": false' in payload
 
 
 async def test_worker_management_reports_missing_local_binaries(client: AsyncClient) -> None:

@@ -634,6 +634,8 @@ class BackupInfo(ApiModel):
     created_at: datetime
     verified: bool = False
     restore_pending: bool = False
+    media_included: bool = False
+    media_size_bytes: int = 0
 
 
 class EventOut(ApiModel):
