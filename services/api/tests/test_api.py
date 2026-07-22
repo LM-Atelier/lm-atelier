@@ -328,6 +328,31 @@ async def test_uncertain_auto_media_requires_confirmation(client: AsyncClient) -
     assert confirmed.json()["run"]["operation"] == "text_to_image"
 
 
+async def test_expensive_auto_video_reports_estimate_before_queueing(
+    client: AsyncClient,
+) -> None:
+    chat = (await client.post("/api/chats", json={"title": "Video estimate"})).json()
+    payload = {
+        "text": "Generate a video of a lighthouse through the night",
+        "mode": "auto",
+        "settings": {"width": 1024, "height": 576, "frames": 121, "steps": 30, "fps": 24},
+        "idempotency_key": "expensive-video-route",
+    }
+    response = await client.post(f"/api/chats/{chat['id']}/turns", json=payload)
+    assert response.status_code == 409
+    detail = response.json()["detail"]
+    estimate = detail["plan"]["parameter_overrides"]["_generation_estimate"]
+    assert detail["plan"]["operation"] == "text_to_video"
+    assert estimate["duration_seconds"] == 5.04
+    assert estimate["estimated_intermediate_bytes"] > estimate["estimated_output_bytes"]
+
+    confirmed = await client.post(
+        f"/api/chats/{chat['id']}/turns", json={**payload, "confirm_media": True}
+    )
+    assert confirmed.status_code == 202
+    assert confirmed.json()["run"]["provenance_json"]["generation_estimate"] == estimate
+
+
 async def test_turn_idempotency_returns_original_run(client: AsyncClient) -> None:
     chat = (await client.post("/api/chats", json={"title": "Idempotency"})).json()
     payload = {"text": "Hello", "mode": "text", "idempotency_key": "stable-key"}
