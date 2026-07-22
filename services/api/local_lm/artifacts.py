@@ -7,6 +7,7 @@ import os
 import shutil
 import tempfile
 from contextlib import suppress
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import IO
 
@@ -191,3 +192,85 @@ class ArtifactStore:
             with suppress(OSError):
                 parent.rmdir()
         return True
+
+    @staticmethod
+    def referenced_artifact_ids(session: Session) -> set[str]:
+        referenced = {
+            artifact_id
+            for artifact_id in session.scalars(
+                select(MessagePart.artifact_id).where(MessagePart.artifact_id.is_not(None))
+            )
+            if artifact_id
+        }
+        if not referenced:
+            return referenced
+        posters = session.scalars(select(Artifact).where(Artifact.id.in_(referenced))).all()
+        referenced.update(
+            poster_id
+            for artifact in posters
+            if isinstance((poster_id := artifact.metadata_json.get("poster_artifact_id")), str)
+        )
+        return referenced
+
+    def cleanup_retention(
+        self,
+        session: Session,
+        *,
+        retention_days: int,
+        temporary_hours: int,
+        dry_run: bool,
+        now: datetime | None = None,
+    ) -> tuple[int, int, int]:
+        current = now or datetime.now(UTC)
+        referenced = self.referenced_artifact_ids(session)
+        marked_count = 0
+        removed_count = 0
+        reclaimed_bytes = 0
+        for artifact in session.scalars(select(Artifact).order_by(Artifact.created_at)).all():
+            metadata = dict(artifact.metadata_json)
+            if artifact.id in referenced:
+                if "unreferenced_at" in metadata and not dry_run:
+                    metadata.pop("unreferenced_at", None)
+                    artifact.metadata_json = metadata
+                continue
+            temporary = bool(metadata.get("temporary_preview") or metadata.get("intermediate"))
+            age = current - self._aware(artifact.created_at)
+            eligible = temporary and age >= timedelta(hours=temporary_hours)
+            unreferenced_at = self._metadata_datetime(metadata.get("unreferenced_at"))
+            if not temporary and unreferenced_at:
+                eligible = current - unreferenced_at >= timedelta(days=retention_days)
+            if eligible:
+                removed_count += 1
+                reclaimed_bytes += artifact.size_bytes
+                if not dry_run:
+                    self._delete_artifact(session, artifact)
+                continue
+            if not temporary and not unreferenced_at:
+                marked_count += 1
+                if not dry_run:
+                    metadata["unreferenced_at"] = current.isoformat()
+                    artifact.metadata_json = metadata
+        if not dry_run:
+            session.flush()
+        return marked_count, removed_count, reclaimed_bytes
+
+    def _delete_artifact(self, session: Session, artifact: Artifact) -> None:
+        path = self.resolve(artifact)
+        session.delete(artifact)
+        session.flush()
+        path.unlink(missing_ok=True)
+        for parent in (path.parent, path.parent.parent):
+            with suppress(OSError):
+                parent.rmdir()
+
+    @staticmethod
+    def _aware(value: datetime) -> datetime:
+        return value.replace(tzinfo=UTC) if value.tzinfo is None else value.astimezone(UTC)
+
+    @classmethod
+    def _metadata_datetime(cls, value: object) -> datetime | None:
+        if not isinstance(value, str):
+            return None
+        with suppress(ValueError):
+            return cls._aware(datetime.fromisoformat(value))
+        return None

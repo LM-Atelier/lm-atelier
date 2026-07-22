@@ -1,5 +1,8 @@
 import type {
   AppEvent,
+  ArtifactCleanupResult,
+  ArtifactLibraryItem,
+  ArtifactStorageInfo,
   BackupInfo,
   CatalogPage,
   CatalogDetail,
@@ -202,6 +205,17 @@ export const api = {
   createBackup: () => request<BackupInfo>("/api/backups", { method: "POST" }),
   exportProject: (projectId: string) =>
     request<{ url: string }>(`/api/projects/${projectId}/export`, { method: "POST" }),
+  artifacts: (kind = "", query = "") => {
+    const parameters = new URLSearchParams({ query });
+    if (kind) parameters.set("kind", kind);
+    return request<ArtifactLibraryItem[]>(`/api/artifacts?${parameters}`);
+  },
+  artifactStorage: () => request<ArtifactStorageInfo>("/api/artifacts/storage"),
+  cleanupArtifacts: (dryRun: boolean) =>
+    request<ArtifactCleanupResult>("/api/artifacts/cleanup", {
+      method: "POST",
+      body: JSON.stringify({ dry_run: dryRun }),
+    }),
   catalog: (
     query: string,
     role: string,

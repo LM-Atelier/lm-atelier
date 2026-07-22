@@ -22,6 +22,36 @@ export interface Artifact {
   url?: string | null;
 }
 
+export interface ArtifactLibraryItem extends Artifact {
+  reference_count: number;
+  chat_ids: string[];
+  project_ids: string[];
+}
+
+export interface ArtifactStorageInfo {
+  total_bytes: number;
+  total_count: number;
+  referenced_bytes: number;
+  referenced_count: number;
+  unreferenced_bytes: number;
+  unreferenced_count: number;
+  temporary_bytes: number;
+  temporary_count: number;
+  eligible_bytes: number;
+  eligible_count: number;
+  disk_free_bytes: number;
+  warning: boolean;
+  retention_days: number;
+  temporary_retention_hours: number;
+}
+
+export interface ArtifactCleanupResult {
+  dry_run: boolean;
+  marked_count: number;
+  removed_count: number;
+  reclaimed_bytes: number;
+}
+
 export interface MessagePart {
   id: string;
   position: number;
