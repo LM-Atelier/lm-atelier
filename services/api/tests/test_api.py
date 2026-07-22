@@ -22,6 +22,19 @@ async def wait_for_assistant(client: AsyncClient, chat_id: str, expected_type: s
     raise AssertionError("assistant run did not complete")
 
 
+async def wait_for_run(client: AsyncClient, run_id: str) -> dict:  # type: ignore[type-arg]
+    deadline = asyncio.get_running_loop().time() + 5
+    while asyncio.get_running_loop().time() < deadline:
+        response = await client.get(f"/api/runs/{run_id}")
+        assert response.status_code == 200
+        run = response.json()
+        if run["status"] in {"complete", "failed", "cancelled"}:
+            assert run["status"] == "complete", run
+            return run
+        await asyncio.sleep(0.03)
+    raise AssertionError("run did not complete")
+
+
 async def test_project_chat_text_and_inline_image_flow(client: AsyncClient) -> None:
     project_response = await client.post("/api/projects", json={"name": "Demo"})
     assert project_response.status_code == 201
@@ -125,6 +138,64 @@ async def test_turn_idempotency_returns_original_run(client: AsyncClient) -> Non
     assert first.status_code == 202
     assert second.status_code == 202
     assert first.json()["run"]["id"] == second.json()["run"]["id"]
+
+
+async def test_new_turn_uses_persisted_active_branch_head(client: AsyncClient) -> None:
+    chat = (await client.post("/api/chats", json={"title": "Branch head"})).json()
+    first = await client.post(
+        f"/api/chats/{chat['id']}/turns",
+        json={"text": "First", "mode": "text"},
+    )
+    first_run = await wait_for_run(client, first.json()["run"]["id"])
+    first_assistant_id = first_run["assistant_message_id"]
+
+    refreshed = (await client.get(f"/api/chats/{chat['id']}")).json()
+    assert refreshed["active_head_message_id"] == first_assistant_id
+
+    second = await client.post(
+        f"/api/chats/{chat['id']}/turns",
+        json={"text": "Second", "mode": "text"},
+    )
+    assert second.status_code == 202
+    assert second.json()["user_message"]["parent_id"] == first_assistant_id
+    assert (await client.get(f"/api/chats/{chat['id']}")).json()[
+        "active_head_message_id"
+    ] == second.json()["assistant_message"]["id"]
+
+
+async def test_long_chat_records_visible_context_truncation(client: AsyncClient) -> None:
+    profiles = (await client.get("/api/profiles?role=chat")).json()
+    profile = profiles[0]
+    updated = await client.patch(
+        f"/api/profiles/{profile['id']}",
+        json={
+            "load_settings": {"context_length": 512},
+            "request_settings": {"max_tokens": 64},
+        },
+    )
+    assert updated.status_code == 200
+    chat = (await client.post("/api/chats", json={"title": "Long context"})).json()
+
+    final_run: dict = {}
+    for index in range(6):
+        response = await client.post(
+            f"/api/chats/{chat['id']}/turns",
+            json={
+                "text": f"Turn {index}: " + ("context detail " * 12),
+                "mode": "text",
+            },
+        )
+        assert response.status_code == 202
+        final_run = await wait_for_run(client, response.json()["run"]["id"])
+
+    context = final_run["provenance_json"]["context"]
+    assert context["messages_omitted"] > 0
+    assert context["input_tokens"] <= context["input_budget"]
+
+    detail = (await client.get(f"/api/chats/{chat['id']}")).json()
+    assistant = [item for item in detail["messages"] if item["role"] == "assistant"][-1]
+    metadata = next(part for part in assistant["parts"] if part["type"] == "generation_metadata")
+    assert metadata["metadata_json"]["context"]["messages_omitted"] > 0
 
 
 async def test_artifact_upload_deduplicates_content(client: AsyncClient) -> None:
