@@ -22,6 +22,8 @@ import type {
   ToolCapabilityProbe,
   TurnAccepted,
   Workflow,
+  WorkflowBundle,
+  WorkflowRevision,
   WorkerStatus,
 } from "./types";
 
@@ -246,8 +248,19 @@ export const api = {
   workflows: () => request<Workflow[]>("/api/workflows"),
   createWorkflow: (payload: Record<string, unknown>) =>
     request<Workflow>("/api/workflows", { method: "POST", body: JSON.stringify(payload) }),
+  updateWorkflow: (id: string, payload: Record<string, unknown>) =>
+    request<Workflow>(`/api/workflows/${id}`, { method: "PATCH", body: JSON.stringify(payload) }),
+  createWorkflowRevision: (id: string, payload: Record<string, unknown>) =>
+    request<WorkflowRevision>(`/api/workflows/${id}/revisions`, { method: "POST", body: JSON.stringify(payload) }),
+  restoreWorkflowRevision: (id: string, revisionId: string) =>
+    request<WorkflowRevision>(`/api/workflows/${id}/revisions/${revisionId}/restore`, { method: "POST" }),
+  cloneWorkflow: (id: string, name?: string) =>
+    request<Workflow>(`/api/workflows/${id}/clone`, { method: "POST", body: JSON.stringify({ name }) }),
+  exportWorkflow: (id: string) => request<WorkflowBundle>(`/api/workflows/${id}/export`),
+  importWorkflow: (bundle: WorkflowBundle) =>
+    request<Workflow>("/api/workflows/import", { method: "POST", body: JSON.stringify(bundle) }),
   validateWorkflow: (id: string) =>
-    request<{ valid: boolean; errors: string[]; revision_id: string }>(
+    request<{ valid: boolean; errors: string[]; warnings: string[]; revision_id: string }>(
       `/api/workflows/${id}/validate`,
       { method: "POST" },
     ),

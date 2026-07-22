@@ -212,6 +212,12 @@ the backup endpoint/UI to select a verified snapshot, then restart LM Atelier.
 Project exports are ordinary ZIP files with a versioned JSON manifest and
 hash-addressed media.
 
+The Workflow studio imports and exports portable LM Atelier workflow bundles,
+keeps executable and UI graphs in immutable revisions, restores old versions as
+new revisions, and validates declared model, engine-version, node, and device
+requirements before execution. JSON-schema input declarations render as tunable
+controls without changing the stored ComfyUI graph.
+
 ## Development
 
 The web client lives in `apps/web`; the FastAPI package lives in `services/api`.
