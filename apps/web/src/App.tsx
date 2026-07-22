@@ -94,19 +94,24 @@ function StatusDot({ healthy }: { healthy: boolean }) {
 function ArtifactPart({ part }: { part: MessagePart }) {
   if (!part.artifact_id) return null;
   const source = `/api/artifacts/${encodeURIComponent(part.artifact_id)}/content`;
+  const preview = Boolean(part.metadata_json.preview);
   if (part.type === "image") {
     return (
-      <figure className="media-card">
-        <img src={source} alt="Generated result" loading="lazy" />
+      <figure className={`media-card ${preview ? "preview" : ""}`}>
+        <img src={source} alt={preview ? "Generation preview" : "Generated result"} loading="lazy" />
         <figcaption>
-          <ImageIcon size={14} /> Generated image
+          <ImageIcon size={14} /> {preview ? "Generation preview" : "Generated image"}
         </figcaption>
       </figure>
     );
   }
+  const posterId = typeof part.metadata_json.poster_artifact_id === "string"
+    ? part.metadata_json.poster_artifact_id
+    : null;
+  const poster = posterId ? `/api/artifacts/${encodeURIComponent(posterId)}/content` : undefined;
   return (
     <figure className="media-card">
-      <video src={source} controls preload="metadata" />
+      <video src={source} poster={poster} controls preload="metadata" />
       <figcaption>
         <Film size={14} /> Generated video
       </figcaption>
@@ -1056,6 +1061,7 @@ export default function App() {
           return;
         }
         if (event.type.includes("progress") || event.type.startsWith("download.")) void client.invalidateQueries({ queryKey: ["jobs"] });
+        if (event.type === "generation.preview") void client.invalidateQueries({ queryKey: ["chat"] });
         if (["run.completed", "run.failed", "run.cancelled"].includes(event.type)) {
           void client.invalidateQueries({ queryKey: ["chat"] });
           void client.invalidateQueries({ queryKey: ["chats"] });

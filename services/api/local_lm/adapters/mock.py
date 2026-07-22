@@ -124,6 +124,13 @@ class MockMediaAdapter:
             yield MediaEvent(type="progress", progress=progress, phase=phase)
             await asyncio.sleep(0.05)
 
+        preview = self._mock_image(request)
+        yield MediaEvent(
+            type="preview",
+            progress=0.85,
+            phase="preview",
+            preview=preview.content,
+        )
         if "video" in request.operation:
             asset = await self._mock_video(request)
         else:

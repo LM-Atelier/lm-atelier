@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import logging
 import time
 from pathlib import Path
@@ -34,6 +35,7 @@ from .models import (
     MessagePart,
     ModelInstall,
     ModelProfile,
+    ModelSource,
     Project,
     Run,
     WorkflowDefinition,
@@ -53,6 +55,20 @@ from .settings_registry import (
 )
 
 logger = logging.getLogger(__name__)
+
+
+def _preview_media_type(content: bytes) -> str:
+    if content.startswith(b"\x89PNG"):
+        return "image/png"
+    if content.startswith(b"\xff\xd8"):
+        return "image/jpeg"
+    if content.startswith((b"GIF87a", b"GIF89a")):
+        return "image/gif"
+    if content.startswith(b"RIFF") and content[8:12] == b"WEBP":
+        return "image/webp"
+    if content.lstrip().startswith(b"<svg"):
+        return "image/svg+xml"
+    return "application/octet-stream"
 
 
 class ConversationOrchestrator:
@@ -202,6 +218,45 @@ class ConversationOrchestrator:
         )
         effective_settings = validate_settings(effective_settings, fields)
         workflow_revision = self._workflow_for_operation(session, plan.operation)
+        model_provenance: dict[str, Any] | None = None
+        if profile and profile.model_install_id:
+            install = session.get(ModelInstall, profile.model_install_id)
+            source = (
+                session.get(ModelSource, install.source_id)
+                if install and install.source_id
+                else None
+            )
+            if install:
+                model_provenance = {
+                    "profile_id": profile.id,
+                    "profile_name": profile.name,
+                    "install_id": install.id,
+                    "engine": install.engine,
+                    "local_path": install.local_path,
+                    "size_bytes": install.size_bytes,
+                    "manifest": install.manifest_json,
+                    "source": {
+                        "provider": source.provider,
+                        "remote_id": source.remote_id,
+                        "revision": source.revision,
+                        "metadata": source.metadata_json,
+                    }
+                    if source
+                    else None,
+                }
+        workflow_provenance = (
+            {
+                "definition_id": workflow_revision.workflow_id,
+                "revision_id": workflow_revision.id,
+                "version": workflow_revision.version,
+                "engine": workflow_revision.engine,
+                "engine_version": workflow_revision.engine_version,
+                "trusted": workflow_revision.trusted,
+                "dependencies": workflow_revision.dependencies_json,
+            }
+            if workflow_revision
+            else None
+        )
 
         run = Run(
             idempotency_key=request.idempotency_key,
@@ -217,6 +272,9 @@ class ConversationOrchestrator:
             provenance_json={
                 "routing": plan.model_dump(mode="json"),
                 "input_artifact_ids": resolved_input_ids,
+                "model": model_provenance,
+                "workflow": workflow_provenance,
+                "resolved_settings": effective_settings,
             },
         )
         session.add(run)
@@ -276,6 +334,14 @@ class ConversationOrchestrator:
             session.commit()
         await self.events.publish("run.cancelled", job.run_id, {"job_id": job_id})
         return True
+
+    async def close(self) -> None:
+        tasks = tuple(self._tasks.values())
+        for task in tasks:
+            task.cancel()
+        if tasks:
+            await asyncio.gather(*tasks, return_exceptions=True)
+        self._tasks.clear()
 
     async def _execute(self, job_id: str, run_id: str) -> None:
         try:
@@ -387,10 +453,23 @@ class ConversationOrchestrator:
             context_metadata = dict(run.provenance_json.get("context", {}))
             if usage := completion_metadata.get("usage"):
                 context_metadata["usage"] = usage
+            text_output = accumulated.rstrip()
+            self._complete(
+                session,
+                run,
+                job,
+                {"characters": len(accumulated), "context": context_metadata},
+            )
             run.provenance_json = {
                 **run.provenance_json,
                 "context": context_metadata,
                 "completion": completion_metadata,
+                "output": {
+                    "kind": "text",
+                    "characters": len(text_output),
+                    "sha256": hashlib.sha256(text_output.encode()).hexdigest(),
+                },
+                "timings": {"duration_ms": run.duration_ms},
             }
             metadata_part = next(
                 (part for part in message.parts if part.type == PartType.GENERATION_METADATA.value),
@@ -400,6 +479,7 @@ class ConversationOrchestrator:
                 "run_id": run.id,
                 "context": context_metadata,
                 "completion": completion_metadata,
+                "provenance": run.provenance_json,
             }
             if metadata_part:
                 metadata_part.metadata_json = metadata
@@ -411,12 +491,6 @@ class ConversationOrchestrator:
                         metadata_json=metadata,
                     )
                 )
-            self._complete(
-                session,
-                run,
-                job,
-                {"characters": len(accumulated), "context": context_metadata},
-            )
             session.commit()
         await self.events.publish("run.completed", run_id, {"job_id": job_id})
 
@@ -529,12 +603,14 @@ class ConversationOrchestrator:
             assistant_id = run.assistant_message_id
 
         completed_assets = []
+        preview_artifact_id: str | None = None
         async for event in self.engines.media.generate(request):
             if event.type in {"progress", "queued"}:
                 with SessionLocal() as session:
                     job = session.get(Job, job_id)
                     message = session.get(Message, assistant_id)
                     if job and message:
+                        preview_ids = self._temporary_preview_ids(message)
                         job.progress = event.progress
                         job.phase = event.phase
                         self._replace_parts(
@@ -551,6 +627,9 @@ class ConversationOrchestrator:
                                 )
                             ],
                         )
+                        session.flush()
+                        for artifact_id in preview_ids:
+                            self.artifacts.delete_temporary_preview(session, artifact_id)
                         session.commit()
                 await self.events.publish(
                     "generation.progress",
@@ -558,8 +637,55 @@ class ConversationOrchestrator:
                     {"progress": event.progress, "phase": event.phase, "job_id": job_id},
                 )
             elif event.type == "preview" and event.preview:
+                old_preview_id = preview_artifact_id
+                with SessionLocal() as session:
+                    message = session.get(Message, assistant_id)
+                    job = session.get(Job, job_id)
+                    if message and job:
+                        preview = self.artifacts.ingest_bytes(
+                            session,
+                            event.preview,
+                            kind=ArtifactKind.THUMBNAIL,
+                            media_type=_preview_media_type(event.preview),
+                            original_name="generation-preview",
+                            metadata={
+                                "run_id": run_id,
+                                "temporary_preview": True,
+                            },
+                        )
+                        preview_artifact_id = preview.id
+                        self._replace_parts(
+                            message,
+                            [
+                                MessagePart(
+                                    position=0,
+                                    type=PartType.PROGRESS.value,
+                                    text=event.phase.title() or "Preview",
+                                    metadata_json={
+                                        "progress": event.progress,
+                                        "phase": event.phase or "preview",
+                                    },
+                                ),
+                                MessagePart(
+                                    position=1,
+                                    type=PartType.IMAGE.value,
+                                    artifact_id=preview.id,
+                                    metadata_json={"preview": True},
+                                ),
+                            ],
+                        )
+                        session.commit()
+                        if old_preview_id and old_preview_id != preview.id:
+                            self.artifacts.delete_temporary_preview(session, old_preview_id)
+                            session.commit()
                 await self.events.publish(
-                    "generation.preview", run_id, {"job_id": job_id, "bytes": len(event.preview)}
+                    "generation.preview",
+                    run_id,
+                    {
+                        "job_id": job_id,
+                        "bytes": len(event.preview),
+                        "artifact_id": preview_artifact_id,
+                    },
                 )
             elif event.type == "cancelled":
                 return
@@ -574,6 +700,7 @@ class ConversationOrchestrator:
                 return
             parts: list[MessagePart] = []
             artifact_ids: list[str] = []
+            output_provenance: list[dict[str, Any]] = []
             for generated in completed_assets:
                 kind = ArtifactKind(generated.kind)
                 artifact = self.artifacts.ingest_bytes(
@@ -588,7 +715,34 @@ class ConversationOrchestrator:
                         "settings": run.settings_json,
                     },
                 )
+                poster_artifact_id: str | None = None
+                if generated.kind == "video":
+                    poster_content = await self.artifacts.video_poster(artifact)
+                    if poster_content:
+                        poster = self.artifacts.ingest_bytes(
+                            session,
+                            poster_content,
+                            kind=ArtifactKind.THUMBNAIL,
+                            media_type="image/jpeg",
+                            original_name=f"{generated.name}.poster.jpg",
+                            metadata={"run_id": run.id, "poster_for": artifact.id},
+                        )
+                        poster_artifact_id = poster.id
+                        artifact.metadata_json = {
+                            **artifact.metadata_json,
+                            "poster_artifact_id": poster.id,
+                        }
                 artifact_ids.append(artifact.id)
+                output_provenance.append(
+                    {
+                        "artifact_id": artifact.id,
+                        "sha256": artifact.sha256,
+                        "kind": artifact.kind,
+                        "media_type": artifact.media_type,
+                        "size_bytes": artifact.size_bytes,
+                        "poster_artifact_id": poster_artifact_id,
+                    }
+                )
                 parts.append(
                     MessagePart(
                         position=len(parts),
@@ -596,19 +750,30 @@ class ConversationOrchestrator:
                         if generated.kind == "image"
                         else PartType.VIDEO.value,
                         artifact_id=artifact.id,
-                        metadata_json={"media_type": artifact.media_type},
+                        metadata_json={
+                            "media_type": artifact.media_type,
+                            "poster_artifact_id": poster_artifact_id,
+                        },
                     )
                 )
+            self._complete(session, run, job, {"artifact_ids": artifact_ids})
+            run.provenance_json = {
+                **run.provenance_json,
+                "outputs": output_provenance,
+                "timings": {"duration_ms": run.duration_ms},
+            }
             parts.append(
                 MessagePart(
                     position=len(parts),
                     type=PartType.GENERATION_METADATA.value,
-                    metadata_json={"run_id": run.id},
+                    metadata_json={"run_id": run.id, "provenance": run.provenance_json},
                 )
             )
             self._replace_parts(message, parts)
-            self._complete(session, run, job, {"artifact_ids": artifact_ids})
             session.commit()
+            if preview_artifact_id and preview_artifact_id not in artifact_ids:
+                self.artifacts.delete_temporary_preview(session, preview_artifact_id)
+                session.commit()
         for artifact_id in artifact_ids:
             await self.events.publish(
                 "artifact.ready", run_id, {"artifact_id": artifact_id, "job_id": job_id}
@@ -631,11 +796,15 @@ class ConversationOrchestrator:
             run.completed_at = now
             message = session.get(Message, run.assistant_message_id)
             if message:
+                preview_ids = self._temporary_preview_ids(message)
                 message.status = MessageStatus.FAILED.value
                 self._replace_parts(
                     message,
                     [MessagePart(position=0, type=PartType.ERROR.value, text=error)],
                 )
+                session.flush()
+                for artifact_id in preview_ids:
+                    self.artifacts.delete_temporary_preview(session, artifact_id)
             session.commit()
         await self.events.publish("run.failed", run_id, {"job_id": job_id, "error": error})
 
@@ -668,11 +837,23 @@ class ConversationOrchestrator:
         run.completed_at = now
         message = session.get(Message, run.assistant_message_id)
         if message:
+            preview_ids = self._temporary_preview_ids(message)
             message.status = MessageStatus.CANCELLED.value
             self._replace_parts(
                 message,
                 [MessagePart(position=0, type=PartType.ERROR.value, text="Generation cancelled")],
             )
+            session.flush()
+            for artifact_id in preview_ids:
+                self.artifacts.delete_temporary_preview(session, artifact_id)
+
+    @staticmethod
+    def _temporary_preview_ids(message: Message) -> list[str]:
+        return [
+            part.artifact_id
+            for part in message.parts
+            if part.artifact_id and part.metadata_json.get("preview")
+        ]
 
     @staticmethod
     def _persist_streamed_text(message_id: str, text: str) -> None:
