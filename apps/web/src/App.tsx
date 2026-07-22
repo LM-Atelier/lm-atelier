@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from "react";
-import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
+import { useInfiniteQuery, useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 import {
@@ -462,7 +462,7 @@ function ModelCard({ model, role, onDownload, pending }: { model: CatalogModel; 
       <div className="model-icon">{role === "video" ? <Film /> : role === "image" ? <ImageIcon /> : <Bot />}</div>
       <div className="model-copy">
         <h3>{model.name}</h3><p>{model.author} · {model.pipeline_tag || model.library_name || "model"}</p>
-        <div className="badges"><span className={`badge ${model.compatibility}`}>{model.compatibility.replace("_", " ")}</span>{model.gated && <span className="badge">Gated</span>}</div>
+        <div className="badges"><span className={`badge ${model.compatibility}`}>{model.compatibility.replace("_", " ")}</span>{model.gated && <span className="badge">Gated</span>}{model.formats.slice(0, 2).map((format) => <span className="badge" key={format}>{format}</span>)}{model.quantizations.slice(0, 2).map((value) => <span className="badge" key={value}>{value}</span>)}</div>
         <small>{model.compatibility_reasons.join(" · ")}</small>
       </div>
       <div className="model-stats"><span><Download size={14} />{model.downloads?.toLocaleString() ?? "—"}</span><button className="primary compact-button" onClick={onDownload} disabled={pending}>{pending ? "Queued" : "Choose files"}</button></div>
@@ -495,9 +495,22 @@ function ModelsView() {
   const [submitted, setSubmitted] = useState("");
   const [role, setRole] = useState("chat");
   const [sort, setSort] = useState("trending");
+  const [compatibility, setCompatibility] = useState("");
+  const [fileFormat, setFileFormat] = useState("");
+  const [gated, setGated] = useState("");
+  const [quantization, setQuantization] = useState("");
+  const [licenseId, setLicenseId] = useState("");
+  const [architecture, setArchitecture] = useState("");
   const [detailModel, setDetailModel] = useState<CatalogModel | null>(null);
   const [selectedFiles, setSelectedFiles] = useState<string[]>([]);
-  const catalog = useQuery({ queryKey: ["catalog", submitted, role, sort], queryFn: () => api.catalog(submitted, role, sort) });
+  const catalogFilters = { compatibility, file_format: fileFormat, gated, quantization, license_id: licenseId, architecture };
+  const catalog = useInfiniteQuery({
+    queryKey: ["catalog", submitted, role, sort, catalogFilters],
+    queryFn: ({ pageParam }) => api.catalog(submitted, role, sort, pageParam, catalogFilters),
+    initialPageParam: null as string | null,
+    getNextPageParam: (page) => page.next_cursor ?? undefined,
+  });
+  const catalogItems = useMemo(() => catalog.data?.pages.flatMap((page) => page.items) ?? [], [catalog.data]);
   const detail = useQuery({ queryKey: ["catalog-detail", detailModel?.remote_id], queryFn: () => api.catalogDetail(detailModel!.remote_id), enabled: Boolean(detailModel) });
   const recipes = useQuery({ queryKey: ["recipes"], queryFn: api.recipes });
   const installed = useQuery({ queryKey: ["models"], queryFn: api.models });
@@ -539,13 +552,15 @@ function ModelsView() {
       <div className="toolbar">
         <form className="search-box" onSubmit={(event) => { event.preventDefault(); setSubmitted(query); }}><Search size={18} /><input value={query} onChange={(event) => setQuery(event.target.value)} placeholder="Search models" /></form>
         <select value={role} onChange={(event) => setRole(event.target.value)}><option value="chat">Chat</option><option value="image">Image</option><option value="video">Video</option></select>
-        <select value={sort} onChange={(event) => setSort(event.target.value)}><option value="trending">Trending</option><option value="downloads">Downloads</option><option value="likes">Likes</option><option value="newest">Newest</option><option value="updated">Recently updated</option></select>
+        <select value={sort} onChange={(event) => setSort(event.target.value)}><option value="trending">Trending</option><option value="downloads">Downloads</option><option value="likes">Likes</option><option value="newest">Newest</option><option value="updated">Recently updated</option><option value="compatible">Compatible first</option></select>
       </div>
+      <div className="catalog-filters"><select aria-label="Compatibility filter" value={compatibility} onChange={(event) => setCompatibility(event.target.value)}><option value="">All compatibility</option><option value="likely">Likely compatible</option><option value="advanced_import">Advanced import</option><option value="unsupported">Unsupported</option></select><select aria-label="Format filter" value={fileFormat} onChange={(event) => setFileFormat(event.target.value)}><option value="">All formats</option><option value="gguf">GGUF</option><option value="safetensors">safetensors</option></select><select aria-label="Access filter" value={gated} onChange={(event) => setGated(event.target.value)}><option value="">All access</option><option value="open">Open</option><option value="gated">Gated</option></select><input aria-label="Quantization filter" placeholder="Quantization (Q4_K_M, FP8…)" value={quantization} onChange={(event) => setQuantization(event.target.value)} /><input aria-label="Architecture filter" placeholder="Architecture" value={architecture} onChange={(event) => setArchitecture(event.target.value)} /><input aria-label="License filter" placeholder="License" value={licenseId} onChange={(event) => setLicenseId(event.target.value)} /></div>
       {(installed.data?.length ?? 0) > 0 && <section><h2>Installed models</h2><div className="profile-table model-installs">{installed.data?.map((model) => { const bound = profiles.data?.some((profile) => profile.model_install_id === model.id) ?? false; return <div key={model.id}><span className="badge">{model.role}</span><strong>{model.name}</strong><span>{formatBytes(model.size_bytes)}</span><span className="row-actions"><button className="secondary compact-button" disabled={bound || createProfile.isPending} onClick={() => createProfile.mutate(model)}>{bound ? "Profile ready" : "Create profile"}</button><button className="secondary compact-button danger" disabled={bound || deleteModel.isPending} title={bound ? "Delete the model profile first" : "Delete installed model"} onClick={() => { if (window.confirm(`Delete ${model.name} from local storage?`)) deleteModel.mutate(model.id); }}>Delete</button></span></div>; })}</div></section>}
       {(deleteModel.error || cleanupDownloads.error) && <div className="callout error">{deleteModel.error?.message || cleanupDownloads.error?.message}</div>}
       {catalog.isLoading && <div className="loading-line" />}
       {catalog.error && <div className="callout error">{catalog.error.message}</div>}
-      <div className="model-grid">{catalog.data?.items.map((model) => <ModelCard key={model.remote_id} model={model} role={role} pending={download.isPending && download.variables?.remoteId === model.remote_id} onDownload={() => { setDetailModel(model); setSelectedFiles([]); }} />)}</div>
+      <div className="model-grid">{catalogItems.map((model) => <ModelCard key={model.remote_id} model={model} role={role} pending={download.isPending && download.variables?.remoteId === model.remote_id} onDownload={() => { setDetailModel(model); setSelectedFiles([]); }} />)}</div>
+      {catalog.hasNextPage && <div className="load-more"><button className="secondary" disabled={catalog.isFetchingNextPage} onClick={() => void catalog.fetchNextPage()}>{catalog.isFetchingNextPage ? "Loading…" : "Load more models"}</button></div>}
       {detailModel && <div className="modal-backdrop"><div className="modal model-files"><header><div><small>Advanced install</small><h2>{detailModel.remote_id}</h2></div><button className="icon-button" onClick={() => setDetailModel(null)}><X /></button></header><p>Select exact files. Chat installs may leave this empty to choose the smallest GGUF automatically; image and video installs require an explicit selection.</p><div className="file-picker">{detail.data?.files.map((file) => <label key={file.filename}><input type="checkbox" checked={selectedFiles.includes(file.filename)} onChange={(event) => setSelectedFiles((current) => event.target.checked ? [...current, file.filename] : current.filter((name) => name !== file.filename))} /><span><strong>{file.filename}</strong><small>{formatBytes(file.size)}</small></span></label>)}</div>{detail.error && <div className="callout error">{detail.error.message}</div>}<footer><span>{formatBytes(detail.data?.files.filter((file) => selectedFiles.includes(file.filename)).reduce((total, file) => total + (file.size ?? 0), 0))} selected</span><button className="primary" disabled={detail.isLoading || (role !== "chat" && selectedFiles.length === 0)} onClick={() => download.mutate({ remoteId: detailModel.remote_id, files: selectedFiles })}>Queue download</button></footer></div></div>}
     </div>
   );

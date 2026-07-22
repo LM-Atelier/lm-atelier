@@ -3,9 +3,11 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import re
 from datetime import datetime
 from pathlib import Path
 from typing import Any
+from urllib.parse import urlparse
 
 import httpx
 
@@ -20,6 +22,9 @@ SORTS = {
     "newest": "createdAt",
     "updated": "lastModified",
 }
+
+_QUANTIZATION = re.compile(r"^(?:q\d(?:_[a-z0-9]+)*|i?q\d(?:_[a-z0-9]+)*|fp\d+|bf16)$", re.I)
+_PARAMETERS = re.compile(r"(?:^|[-_ ])(\d+(?:\.\d+)?)\s*([bmk])(?:$|[-_ ])", re.I)
 
 
 class HuggingFaceCatalog:
@@ -40,6 +45,12 @@ class HuggingFaceCatalog:
         sort: str = "trending",
         limit: int = 30,
         cursor: str | None = None,
+        compatibility: str | None = None,
+        file_format: str | None = None,
+        quantization: str | None = None,
+        license_id: str | None = None,
+        gated: str | None = None,
+        architecture: str | None = None,
     ) -> CatalogPage:
         params: dict[str, Any] = {
             "search": query or None,
@@ -51,13 +62,43 @@ class HuggingFaceCatalog:
         }
         if role:
             params["pipeline_tag"] = self._pipeline_tag(role)
-        url = cursor or "/api/models"
-        cache = self._cache_path("search", query, role, sort, limit, cursor)
+        url = self._validated_cursor(cursor) if cursor else "/api/models"
+        cache = self._cache_path(
+            "search",
+            query,
+            role,
+            sort,
+            limit,
+            cursor,
+            compatibility,
+            file_format,
+            quantization,
+            license_id,
+            gated,
+            architecture,
+        )
         try:
             response = await self._client.get(url, params=None if cursor else params)
             response.raise_for_status()
             payload = response.json()
             items = [self._normalize(item, role) for item in payload if isinstance(item, dict)]
+            items = self._filter_items(
+                items,
+                compatibility=compatibility,
+                file_format=file_format,
+                quantization=quantization,
+                license_id=license_id,
+                gated=gated,
+                architecture=architecture,
+            )
+            if sort == "compatible":
+                rank = {"tested": 0, "likely": 1, "advanced_import": 2, "unsupported": 3}
+                items.sort(
+                    key=lambda item: (
+                        rank.get(item.compatibility, 4),
+                        -(item.downloads or 0),
+                    )
+                )
             result = CatalogPage(items=items, next_cursor=self._next_link(response))
             self._write_cache(cache, result.model_dump_json())
             return result
@@ -127,11 +168,78 @@ class HuggingFaceCatalog:
                 return link[start + 1 : end]
         return None
 
+    @staticmethod
+    def _validated_cursor(cursor: str) -> str:
+        parsed = urlparse(cursor)
+        if parsed.scheme not in {"https", ""}:
+            raise ValueError("catalog cursor must use HTTPS")
+        if parsed.netloc and parsed.netloc != "huggingface.co":
+            raise ValueError("catalog cursor must stay on huggingface.co")
+        if parsed.path != "/api/models":
+            raise ValueError("catalog cursor path is invalid")
+        return cursor
+
+    @staticmethod
+    def _filter_items(
+        items: list[CatalogModel],
+        *,
+        compatibility: str | None,
+        file_format: str | None,
+        quantization: str | None,
+        license_id: str | None,
+        gated: str | None,
+        architecture: str | None,
+    ) -> list[CatalogModel]:
+        return [
+            item
+            for item in items
+            if (not compatibility or item.compatibility == compatibility)
+            and (not file_format or file_format.lower() in item.formats)
+            and (
+                not quantization
+                or quantization.lower() in {value.lower() for value in item.quantizations}
+            )
+            and (not license_id or (item.license_id or "").lower() == license_id.lower())
+            and (gated not in {"gated", "open"} or bool(item.gated) == (gated == "gated"))
+            and (not architecture or architecture.lower() in (item.architecture or "").lower())
+        ]
+
     @classmethod
     def _normalize(cls, item: dict[str, Any], requested_role: str | None) -> CatalogModel:
         tags = [str(tag) for tag in item.get("tags") or []]
         siblings = item.get("siblings") or []
         filenames = [str(sibling.get("rfilename", "")) for sibling in siblings]
+        formats = sorted(
+            {
+                Path(filename).suffix.lower().lstrip(".")
+                for filename in filenames
+                if Path(filename).suffix
+            }
+        )
+        quantizations = sorted(
+            {tag.lower() for tag in tags if _QUANTIZATION.fullmatch(tag)}
+            | {
+                match.group(0).lower()
+                for filename in filenames
+                for match in re.finditer(
+                    r"(?<![a-z0-9])(?:q\d(?:_[a-z0-9]+)*|fp\d+|bf16)(?![a-z0-9])",
+                    filename,
+                    re.I,
+                )
+            }
+        )
+        license_id = next(
+            (tag.split(":", 1)[1] for tag in tags if tag.lower().startswith("license:")), None
+        )
+        architecture = (item.get("config") or {}).get("model_type") or next(
+            (tag.split(":", 1)[1] for tag in tags if tag.lower().startswith("base_model:")),
+            None,
+        )
+        parameter_count = cls._parameter_count(tags, remote_id=str(item.get("id") or ""))
+        sizes = [
+            int(sibling.get("size") or (sibling.get("lfs") or {}).get("size") or 0)
+            for sibling in siblings
+        ]
         compatibility, reasons = cls._compatibility(
             requested_role=requested_role,
             pipeline_tag=item.get("pipeline_tag"),
@@ -153,9 +261,25 @@ class HuggingFaceCatalog:
             gated=item.get("gated"),
             private=bool(item.get("private", False)),
             library_name=item.get("library_name"),
+            architecture=str(architecture) if architecture else None,
+            formats=formats,
+            quantizations=quantizations,
+            parameter_count=parameter_count,
+            license_id=license_id,
+            total_size_bytes=sum(sizes) or None,
             compatibility=compatibility.value,
             compatibility_reasons=reasons,
         )
+
+    @staticmethod
+    def _parameter_count(tags: list[str], remote_id: str) -> int | None:
+        for value in [*tags, remote_id.rsplit("/", 1)[-1]]:
+            match = _PARAMETERS.search(value)
+            if not match:
+                continue
+            multiplier = {"b": 1_000_000_000, "m": 1_000_000, "k": 1_000}[match.group(2).lower()]
+            return int(float(match.group(1)) * multiplier)
+        return None
 
     @staticmethod
     def _datetime(value: Any) -> datetime | None:

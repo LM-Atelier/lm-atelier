@@ -248,6 +248,12 @@ export interface CatalogModel {
   gated: boolean | string | null;
   private: boolean;
   library_name: string | null;
+  architecture: string | null;
+  formats: string[];
+  quantizations: string[];
+  parameter_count: number | null;
+  license_id: string | null;
+  total_size_bytes: number | null;
   compatibility: string;
   compatibility_reasons: string[];
 }

@@ -662,10 +662,30 @@ async def catalog_search(
     sort: str = "trending",
     limit: int = Query(default=30, ge=1, le=100),
     cursor: str | None = None,
+    compatibility: str | None = None,
+    file_format: str | None = None,
+    quantization: str | None = None,
+    license_id: str | None = None,
+    gated: str | None = None,
+    architecture: str | None = None,
 ) -> CatalogPage:
     catalog: HuggingFaceCatalog = _services(request).catalog
     try:
-        return await catalog.search(query=query, role=role, sort=sort, limit=limit, cursor=cursor)
+        return await catalog.search(
+            query=query,
+            role=role,
+            sort=sort,
+            limit=limit,
+            cursor=cursor,
+            compatibility=compatibility,
+            file_format=file_format,
+            quantization=quantization,
+            license_id=license_id,
+            gated=gated,
+            architecture=architecture,
+        )
+    except ValueError as exc:
+        raise HTTPException(422, f"invalid catalog request: {exc}") from exc
     except Exception as exc:
         raise HTTPException(502, f"catalog request failed: {exc}") from exc
 
