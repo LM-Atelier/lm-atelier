@@ -1824,18 +1824,25 @@ async def validate_workflow(
     minimum_vram = dependencies.get("minimum_vram_bytes")
     if isinstance(minimum_vram, int) and minimum_vram > 0:
         system = collect_system_info(_services(request).settings)
-        available = max(
-            (
-                device.available_memory_bytes or 0
-                for device in system.devices
-                if device.kind != "cpu"
-            ),
+        accelerators = [device for device in system.devices if device.kind != "cpu"]
+        capacity = max(
+            (device.total_memory_bytes or 0 for device in accelerators),
             default=0,
         )
-        if not available:
-            warnings.append("no accelerator memory was detected for this workflow")
-        elif available < minimum_vram:
-            errors.append("available accelerator memory is below the workflow requirement")
+        available_values = [
+            device.available_memory_bytes
+            for device in accelerators
+            if device.available_memory_bytes is not None
+        ]
+        available = max(available_values, default=None)
+        if not capacity:
+            warnings.append("no accelerator memory capacity was detected for this workflow")
+        elif capacity < minimum_vram:
+            errors.append("accelerator memory capacity is below the workflow requirement")
+        elif available is not None and available < minimum_vram:
+            warnings.append(
+                "currently available accelerator memory is below the workflow requirement"
+            )
     return {
         "valid": not errors,
         "errors": errors,

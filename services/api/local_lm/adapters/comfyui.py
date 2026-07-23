@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import json
 from collections.abc import AsyncIterator
 from typing import Any
@@ -94,29 +95,97 @@ class ComfyUIAdapter:
             (scheme, parsed.netloc, "/ws", "", urlencode({"clientId": client_id}), "")
         )
 
-    async def generate(self, request: MediaRequest) -> AsyncIterator[MediaEvent]:
-        client_id = uuid4().hex
+    @staticmethod
+    def _image_format(content: bytes) -> tuple[str, str]:
+        if content.startswith(b"\x89PNG\r\n\x1a\n"):
+            return ".png", "image/png"
+        if content.startswith(b"\xff\xd8"):
+            return ".jpg", "image/jpeg"
+        if content.startswith((b"GIF87a", b"GIF89a")):
+            return ".gif", "image/gif"
+        if content.startswith(b"RIFF") and content[8:12] == b"WEBP":
+            return ".webp", "image/webp"
+        if content.startswith(b"BM"):
+            return ".bmp", "image/bmp"
+        if content.startswith((b"II*\x00", b"MM\x00*")):
+            return ".tiff", "image/tiff"
+        raise ValueError("ComfyUI conditioning inputs must be supported raster images")
+
+    async def _upload_inputs(self, request: MediaRequest) -> list[str]:
+        uploaded: list[str] = []
+        for index, path in enumerate(request.input_paths):
+            content = await asyncio.to_thread(path.read_bytes)
+            extension, media_type = self._image_format(content)
+            filename = f"lm-atelier-{request.run_id}-{index}{extension}"
+            response = await self._client.post(
+                "/upload/image",
+                data={
+                    "type": "temp",
+                    "subfolder": "lm-atelier",
+                    "overwrite": "true",
+                },
+                files={"image": (filename, content, media_type)},
+            )
+            response.raise_for_status()
+            payload = response.json()
+            uploaded_name = str(payload.get("name") or "")
+            upload_type = str(payload.get("type") or "")
+            if not uploaded_name or upload_type not in {"input", "temp"}:
+                raise ValueError("ComfyUI returned an invalid conditioning-image upload")
+            subfolder = str(payload.get("subfolder") or "").strip("/\\")
+            reference = f"{subfolder}/{uploaded_name}" if subfolder else uploaded_name
+            if upload_type == "temp":
+                reference = f"{reference} [temp]"
+            uploaded.append(reference)
+        return uploaded
+
+    async def _request_parameters(self, request: MediaRequest) -> dict[str, Any]:
+        if (
+            request.operation
+            in {
+                Operation.IMAGE_TO_IMAGE.value,
+                Operation.IMAGE_TO_VIDEO.value,
+            }
+            and not request.input_paths
+        ):
+            raise ValueError(f"{request.operation} requires a conditioning image")
         parameters = {
             "prompt": request.prompt,
             "negative_prompt": request.negative_prompt or "",
             **request.parameters,
         }
-        graph = self._compile(request.workflow, parameters)
-        response = await self._client.post(
-            "/prompt", json={"prompt": graph, "client_id": client_id}
-        )
-        response.raise_for_status()
-        payload = response.json()
-        if payload.get("node_errors"):
-            raise ValueError(f"ComfyUI rejected workflow: {payload['node_errors']}")
-        prompt_id = str(payload["prompt_id"])
-        self._jobs[request.run_id] = prompt_id
-        yield MediaEvent(type="queued", progress=0, phase="queued", data={"prompt_id": prompt_id})
+        uploaded = await self._upload_inputs(request)
+        if uploaded:
+            parameters["input_image"] = uploaded[0]
+            parameters["input_images"] = uploaded
+            parameters.update(
+                {f"input_image_{index}": reference for index, reference in enumerate(uploaded)}
+            )
+        return parameters
 
+    async def generate(self, request: MediaRequest) -> AsyncIterator[MediaEvent]:
+        client_id = uuid4().hex
+        parameters = await self._request_parameters(request)
+        graph = self._compile(request.workflow, parameters)
         try:
             async with websockets.connect(
                 self._websocket_url(client_id), max_size=32 * 1024 * 1024
             ) as socket:
+                response = await self._client.post(
+                    "/prompt", json={"prompt": graph, "client_id": client_id}
+                )
+                response.raise_for_status()
+                payload = response.json()
+                if payload.get("node_errors"):
+                    raise ValueError(f"ComfyUI rejected workflow: {payload['node_errors']}")
+                prompt_id = str(payload["prompt_id"])
+                self._jobs[request.run_id] = prompt_id
+                yield MediaEvent(
+                    type="queued",
+                    progress=0,
+                    phase="queued",
+                    data={"prompt_id": prompt_id},
+                )
                 async for raw in socket:
                     if not isinstance(raw, str):
                         yield MediaEvent(type="preview", phase="preview", preview=bytes(raw))
@@ -167,11 +236,16 @@ class ComfyUIAdapter:
                     media_type = file_response.headers.get(
                         "content-type", "application/octet-stream"
                     )
+                    kind = self._output_kind(
+                        filename=str(item["filename"]),
+                        media_type=media_type,
+                        default_kind=default_kind,
+                    )
                     assets.append(
                         GeneratedAsset(
                             content=file_response.content,
                             media_type=media_type,
-                            kind=default_kind,
+                            kind=kind,
                             name=str(item["filename"]),
                             metadata={"prompt_id": prompt_id, "operation": operation},
                         )
@@ -179,6 +253,14 @@ class ComfyUIAdapter:
         if not assets:
             raise RuntimeError("ComfyUI completed without collectible image or video outputs")
         return assets
+
+    @staticmethod
+    def _output_kind(*, filename: str, media_type: str, default_kind: str) -> str:
+        if media_type.lower().startswith("video/"):
+            return "video"
+        if filename.lower().endswith((".mp4", ".webm", ".mov", ".mkv", ".avi")):
+            return "video"
+        return default_kind
 
     async def cancel(self, run_id: str) -> None:
         if run_id in self._jobs:

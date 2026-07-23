@@ -1,0 +1,214 @@
+from __future__ import annotations
+
+import json
+from pathlib import Path
+from typing import Any
+
+import httpx
+import pytest
+
+from local_lm.adapters.base import MediaRequest
+from local_lm.adapters.comfyui import ComfyUIAdapter
+
+
+def media_request(path: Path | None = None, *, operation: str = "image_to_image") -> MediaRequest:
+    return MediaRequest(
+        run_id="run_conditioning",
+        operation=operation,
+        prompt="Restyle the source image",
+        negative_prompt="blur",
+        input_paths=[path] if path else [],
+        workflow={},
+        parameters={"seed": 42},
+    )
+
+
+async def test_conditioning_images_are_staged_and_exposed_as_workflow_parameters(
+    tmp_path: Path,
+) -> None:
+    source = tmp_path / "content-addressed-artifact"
+    source.write_bytes(b"\x89PNG\r\n\x1a\n" + b"test-image")
+    captured_body = b""
+
+    async def upload(request: httpx.Request) -> httpx.Response:
+        nonlocal captured_body
+        captured_body = await request.aread()
+        assert request.url.path == "/upload/image"
+        return httpx.Response(
+            200,
+            json={
+                "name": "lm-atelier-run_conditioning-0.png",
+                "subfolder": "lm-atelier",
+                "type": "temp",
+            },
+        )
+
+    adapter = ComfyUIAdapter("http://comfy.test")
+    await adapter._client.aclose()
+    adapter._client = httpx.AsyncClient(
+        base_url="http://comfy.test",
+        transport=httpx.MockTransport(upload),
+    )
+    try:
+        parameters = await adapter._request_parameters(media_request(source))
+    finally:
+        await adapter.close()
+
+    reference = "lm-atelier/lm-atelier-run_conditioning-0.png [temp]"
+    assert parameters["input_image"] == reference
+    assert parameters["input_image_0"] == reference
+    assert parameters["input_images"] == [reference]
+    assert parameters["prompt"] == "Restyle the source image"
+    assert parameters["negative_prompt"] == "blur"
+    assert parameters["seed"] == 42
+    assert b'name="type"' in captured_body
+    assert b"temp" in captured_body
+    assert b'name="subfolder"' in captured_body
+    assert b"lm-atelier" in captured_body
+    assert b'filename="lm-atelier-run_conditioning-0.png"' in captured_body
+
+
+async def test_conditioning_requires_an_input_and_rejects_non_images(tmp_path: Path) -> None:
+    adapter = ComfyUIAdapter("http://comfy.test")
+    try:
+        with pytest.raises(ValueError, match="requires a conditioning image"):
+            await adapter._request_parameters(media_request())
+
+        invalid = tmp_path / "not-an-image"
+        invalid.write_bytes(b"plain text")
+        with pytest.raises(ValueError, match="supported raster images"):
+            await adapter._request_parameters(media_request(invalid))
+    finally:
+        await adapter.close()
+
+
+async def test_websocket_is_connected_before_a_warm_prompt_can_complete(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    events: list[str] = []
+    prompt_id = "prompt-warm"
+
+    class Socket:
+        def __init__(self) -> None:
+            self.messages = iter(
+                [
+                    json.dumps(
+                        {
+                            "type": "executing",
+                            "data": {"prompt_id": prompt_id, "node": None},
+                        }
+                    )
+                ]
+            )
+
+        async def __aenter__(self) -> Socket:
+            events.append("connected")
+            return self
+
+        async def __aexit__(self, *_args: Any) -> None:
+            return None
+
+        def __aiter__(self) -> Socket:
+            return self
+
+        async def __anext__(self) -> str:
+            try:
+                return next(self.messages)
+            except StopIteration as exc:
+                raise StopAsyncIteration from exc
+
+    def connect(*_args: Any, **_kwargs: Any) -> Socket:
+        return Socket()
+
+    async def comfy(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/prompt":
+            events.append("prompted")
+            assert events == ["connected", "prompted"]
+            return httpx.Response(200, json={"prompt_id": prompt_id, "node_errors": {}})
+        if request.url.path == f"/history/{prompt_id}":
+            return httpx.Response(
+                200,
+                json={
+                    prompt_id: {
+                        "outputs": {
+                            "save": {
+                                "images": [
+                                    {
+                                        "filename": "warm.png",
+                                        "subfolder": "",
+                                        "type": "output",
+                                    }
+                                ]
+                            }
+                        }
+                    }
+                },
+            )
+        if request.url.path == "/view":
+            return httpx.Response(
+                200, content=b"\x89PNG\r\n\x1a\n", headers={"content-type": "image/png"}
+            )
+        raise AssertionError(f"unexpected ComfyUI request: {request.method} {request.url}")
+
+    monkeypatch.setattr("local_lm.adapters.comfyui.websockets.connect", connect)
+    adapter = ComfyUIAdapter("http://comfy.test")
+    await adapter._client.aclose()
+    adapter._client = httpx.AsyncClient(
+        base_url="http://comfy.test",
+        transport=httpx.MockTransport(comfy),
+    )
+    request = media_request(operation="text_to_image")
+    try:
+        generated = [event async for event in adapter.generate(request)]
+    finally:
+        await adapter.close()
+
+    assert events == ["connected", "prompted"]
+    assert [event.type for event in generated] == ["queued", "complete"]
+    assert generated[-1].assets[0].name == "warm.png"
+
+
+async def test_native_save_video_is_classified_by_media_type_not_collection() -> None:
+    prompt_id = "prompt-video"
+
+    async def comfy(request: httpx.Request) -> httpx.Response:
+        if request.url.path == f"/history/{prompt_id}":
+            return httpx.Response(
+                200,
+                json={
+                    prompt_id: {
+                        "outputs": {
+                            "save": {
+                                "images": [
+                                    {
+                                        "filename": "native.mp4",
+                                        "subfolder": "",
+                                        "type": "output",
+                                    }
+                                ]
+                            }
+                        }
+                    }
+                },
+            )
+        if request.url.path == "/view":
+            return httpx.Response(
+                200,
+                content=b"mp4-content",
+                headers={"content-type": "video/mp4"},
+            )
+        raise AssertionError(f"unexpected ComfyUI request: {request.method} {request.url}")
+
+    adapter = ComfyUIAdapter("http://comfy.test")
+    await adapter._client.aclose()
+    adapter._client = httpx.AsyncClient(
+        base_url="http://comfy.test",
+        transport=httpx.MockTransport(comfy),
+    )
+    try:
+        outputs = await adapter._collect_outputs(prompt_id, "text_to_video")
+    finally:
+        await adapter.close()
+
+    assert outputs[0].kind == "video"
+    assert outputs[0].media_type == "video/mp4"
