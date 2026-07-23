@@ -19,7 +19,10 @@ class EngineRegistry:
         else:
             self.chat = load_external_adapter("chat", settings.chat_engine, settings)
         if settings.media_engine == "comfyui":
-            self.media = ComfyUIAdapter(settings.comfy_url)
+            self.media = ComfyUIAdapter(
+                settings.comfy_url,
+                inactivity_seconds=settings.comfy_inactivity_seconds,
+            )
         elif settings.media_engine == "mock":
             self.media = MockMediaAdapter()
         else:

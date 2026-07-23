@@ -5,7 +5,9 @@ from pathlib import Path
 from typing import Any
 
 import pytest
+from pydantic import ValidationError
 
+from local_lm.adapters.comfyui import ComfyUIAdapter
 from local_lm.adapters.conformance import probe_chat_adapter, probe_media_adapter
 from local_lm.adapters.discovery import AdapterLoadError, load_external_adapter
 from local_lm.adapters.mock import MockChatAdapter, MockMediaAdapter
@@ -55,6 +57,24 @@ def test_role_settings_are_additive_for_legacy_adapter_capabilities() -> None:
     )
 
     assert capabilities.settings_by_role == {}
+
+
+async def test_comfyui_inactivity_timeout_is_validated_and_wired(tmp_path: Path) -> None:
+    with pytest.raises(ValidationError):
+        Settings(data_dir=tmp_path, comfy_inactivity_seconds=29)
+
+    registry = EngineRegistry(
+        Settings(
+            data_dir=tmp_path,
+            media_engine="comfyui",
+            comfy_inactivity_seconds=321,
+        )
+    )
+    try:
+        assert isinstance(registry.media, ComfyUIAdapter)
+        assert registry.media.inactivity_seconds == 321
+    finally:
+        await registry.close()
 
 
 @dataclass

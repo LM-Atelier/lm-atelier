@@ -43,6 +43,7 @@ class DiagnosticBundleBuilder:
                 "chat_engine": self.settings.chat_engine,
                 "media_engine": self.settings.media_engine,
                 "auto_unload_chat_for_media": self.settings.auto_unload_chat_for_media,
+                "comfy_inactivity_seconds": self.settings.comfy_inactivity_seconds,
                 "artifact_retention_days": self.settings.artifact_retention_days,
                 "temporary_retention_hours": self.settings.temporary_retention_hours,
                 "backup_daily_count": self.settings.backup_daily_count,

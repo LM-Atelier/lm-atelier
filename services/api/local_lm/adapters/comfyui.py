@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import json
 from collections.abc import AsyncIterator
+from contextlib import suppress
 from typing import Any
 from urllib.parse import urlencode, urlparse, urlunparse
 from uuid import uuid4
@@ -17,8 +18,11 @@ from .base import GeneratedAsset, MediaEvent, MediaRequest
 
 
 class ComfyUIAdapter:
-    def __init__(self, base_url: str) -> None:
+    def __init__(self, base_url: str, *, inactivity_seconds: float = 600) -> None:
+        if inactivity_seconds <= 0:
+            raise ValueError("ComfyUI inactivity timeout must be positive")
         self.base_url = base_url.rstrip("/")
+        self.inactivity_seconds = inactivity_seconds
         self._client = httpx.AsyncClient(
             base_url=self.base_url,
             timeout=httpx.Timeout(connect=10, read=None, write=30, pool=10),
@@ -186,7 +190,22 @@ class ComfyUIAdapter:
                     phase="queued",
                     data={"prompt_id": prompt_id},
                 )
-                async for raw in socket:
+                messages = socket.__aiter__()
+                while True:
+                    try:
+                        raw = await asyncio.wait_for(
+                            anext(messages),
+                            timeout=self.inactivity_seconds,
+                        )
+                    except StopAsyncIteration:
+                        break
+                    except TimeoutError as exc:
+                        with suppress(httpx.HTTPError):
+                            await self.cancel(request.run_id)
+                        raise RuntimeError(
+                            "ComfyUI stopped reporting generation activity for "
+                            f"{self.inactivity_seconds:g} seconds; the run was interrupted"
+                        ) from exc
                     if not isinstance(raw, str):
                         yield MediaEvent(type="preview", phase="preview", preview=bytes(raw))
                         continue

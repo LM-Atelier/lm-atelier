@@ -29,6 +29,7 @@ class Settings(BaseSettings):
     llama_executable: Path | None = None
     comfy_executable: Path | None = None
     comfy_directory: Path | None = None
+    comfy_inactivity_seconds: float = Field(default=600, ge=30, le=7200)
     worker_startup_seconds: float = Field(default=60, ge=1, le=600)
     worker_shutdown_seconds: float = Field(default=10, ge=1, le=60)
     auto_unload_chat_for_media: bool = True
