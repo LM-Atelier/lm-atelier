@@ -586,6 +586,7 @@ class EngineCapabilities(ApiModel):
     streaming: bool
     tool_calling: bool
     settings: list[SettingField]
+    settings_by_role: dict[str, list[SettingField]] = Field(default_factory=dict)
     healthy: bool
     details: dict[str, Any] = Field(default_factory=dict)
 

@@ -33,6 +33,7 @@ import {
   X,
 } from "lucide-react";
 import { api, connectEvents } from "./api";
+import { resolveCapabilitySettings } from "./settings";
 import type {
   AppEvent,
   CatalogModel,
@@ -330,7 +331,7 @@ function SettingsDrawer({
   const [visibility, setVisibility] = useState<Visibility>("basic");
   const role = mode === "video" ? "video" : mode === "image" ? "image" : "chat";
   const engine = engines.find((item) => item.roles.includes(role));
-  const fields = (engine?.settings ?? []).filter(
+  const fields = resolveCapabilitySettings(engine, role).filter(
     (field) => visibilityRank[field.visibility] <= visibilityRank[visibility] && field.available,
   );
   return (
@@ -831,7 +832,7 @@ function ProfileEditor({
   });
   const engine = engines.find((item) => item.engine === profile.engine && item.roles.includes(profile.role))
     ?? engines.find((item) => item.roles.includes(profile.role));
-  const fields = (engine?.settings ?? []).filter(
+  const fields = resolveCapabilitySettings(engine, profile.role).filter(
     (field) => visibilityRank[field.visibility] <= visibilityRank[visibility] && field.available,
   );
   const error = save.error ?? clone.error ?? reset.error ?? remove.error ?? exportBundle.error;
@@ -879,7 +880,7 @@ function PresetEditor({
   const remove = useMutation({ mutationFn: () => api.deletePreset(preset.id), onSuccess: () => { refresh(); onClose(); } });
   const exportBundle = useMutation({ mutationFn: () => api.exportPreset(preset.id), onSuccess: (bundle) => downloadJson(bundle, `${preset.name.replaceAll(/[^a-z0-9]+/gi, "-").toLowerCase()}.lm-atelier-preset.json`) });
   const engine = engines.find((item) => item.roles.includes(preset.role));
-  const fields = (engine?.settings ?? []).filter((field) => visibilityRank[field.visibility] <= visibilityRank[visibility] && field.available);
+  const fields = resolveCapabilitySettings(engine, preset.role).filter((field) => visibilityRank[field.visibility] <= visibilityRank[visibility] && field.available);
   const error = save.error ?? clone.error ?? reset.error ?? remove.error ?? exportBundle.error;
   return (
     <div className="modal-backdrop">

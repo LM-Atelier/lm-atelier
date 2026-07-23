@@ -43,6 +43,7 @@ class LlamaCppAdapter:
             streaming=True,
             tool_calling=True,
             settings=CHAT_SETTINGS,
+            settings_by_role={"chat": CHAT_SETTINGS},
             healthy=healthy,
             details=details,
         )
