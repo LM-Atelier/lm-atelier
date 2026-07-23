@@ -5,6 +5,7 @@ import io
 import zipfile
 from collections.abc import AsyncIterator
 from datetime import UTC, datetime, timedelta
+from types import SimpleNamespace
 
 from httpx2 import AsyncClient
 
@@ -801,6 +802,58 @@ async def test_workflow_revisions_and_validation(client: AsyncClient) -> None:
     validation = await client.post(f"/api/workflows/{workflow['id']}/validate")
     assert validation.json()["valid"] is False
     assert "missing model dependency" in validation.json()["errors"][0]
+
+
+async def test_workflow_vram_requirement_uses_device_capacity(
+    client: AsyncClient, monkeypatch
+) -> None:
+    memory = {
+        "total": 16 * 1024**3,
+        "available": 8 * 1024**3,
+    }
+
+    def system_info(_settings):  # type: ignore[no-untyped-def]
+        return SimpleNamespace(
+            devices=[
+                SimpleNamespace(
+                    kind="gpu",
+                    total_memory_bytes=memory["total"],
+                    available_memory_bytes=memory["available"],
+                )
+            ]
+        )
+
+    monkeypatch.setattr("local_lm.api.collect_system_info", system_info)
+    workflow = (
+        await client.post(
+            "/api/workflows",
+            json={
+                "name": "VRAM capacity contract",
+                "operation": "text_to_image",
+                "engine": "mock",
+                "api_graph": {"node": {"class_type": "Mock"}},
+                "dependencies": {"minimum_vram_bytes": 12 * 1024**3},
+                "trusted": True,
+            },
+        )
+    ).json()
+
+    under_pressure = await client.post(f"/api/workflows/{workflow['id']}/validate")
+    assert under_pressure.status_code == 200
+    assert under_pressure.json()["valid"] is True
+    assert under_pressure.json()["errors"] == []
+    assert under_pressure.json()["warnings"] == [
+        "currently available accelerator memory is below the workflow requirement"
+    ]
+
+    memory["total"] = 8 * 1024**3
+    insufficient = await client.post(f"/api/workflows/{workflow['id']}/validate")
+    assert insufficient.status_code == 200
+    assert insufficient.json()["valid"] is False
+    assert insufficient.json()["warnings"] == []
+    assert insufficient.json()["errors"] == [
+        "accelerator memory capacity is below the workflow requirement"
+    ]
 
 
 async def test_project_pins_an_immutable_media_workflow_revision(client: AsyncClient) -> None:
