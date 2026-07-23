@@ -108,6 +108,7 @@ class ProcessSupervisor:
         if directory not in entrypoint.parents:
             raise ValueError("ComfyUI entrypoint escapes its configured directory")
         parsed = urlparse(self.settings.comfy_url)
+        trusted_custom_nodes = await self._trusted_comfy_node_folders()
         command = [
             str(executable.expanduser().resolve(strict=True)),
             str(entrypoint),
@@ -117,9 +118,35 @@ class ProcessSupervisor:
             str(parsed.port or 8188),
             "--extra-model-paths-config",
             str(self._write_comfy_model_paths()),
+            "--disable-all-custom-nodes",
         ]
+        if trusted_custom_nodes:
+            command.extend(["--whitelist-custom-nodes", *trusted_custom_nodes])
         await self._replace("media", command, self.settings.comfy_url + "/system_stats")
         return self.statuses()[1]
+
+    async def _trusted_comfy_node_folders(self) -> list[str]:
+        from sqlalchemy import select
+
+        from .custom_nodes import CustomNodeManager
+        from .db import SessionLocal
+        from .models import CustomNodeInstall
+
+        with SessionLocal() as session:
+            installs = list(
+                session.scalars(
+                    select(CustomNodeInstall)
+                    .where(
+                        CustomNodeInstall.active.is_(True),
+                        CustomNodeInstall.trusted.is_(True),
+                    )
+                    .order_by(CustomNodeInstall.installed_path)
+                ).all()
+            )
+            manager = CustomNodeManager(self.settings)
+            for install in installs:
+                await manager.verify(install)
+            return [install.installed_path for install in installs]
 
     def _write_comfy_model_paths(self) -> Path:
         from sqlalchemy import select
@@ -257,10 +284,12 @@ class ProcessSupervisor:
         path = path.expanduser().resolve(strict=True)
         if path.is_file() and path.suffix.lower() == ".gguf":
             return path
+        raw_files = manifest.get("files", [])
+        filenames = raw_files if isinstance(raw_files, list) else []
         candidates = [
             (path / filename).resolve()
-            for filename in manifest.get("files", [])
-            if str(filename).lower().endswith(".gguf")
+            for filename in filenames
+            if isinstance(filename, str) and filename.lower().endswith(".gguf")
         ]
         candidates = [item for item in candidates if item.is_file() and path in item.parents]
         if not candidates:

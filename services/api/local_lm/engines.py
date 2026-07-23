@@ -4,6 +4,7 @@ from .adapters import ComfyUIAdapter, LlamaCppAdapter, MockChatAdapter, MockMedi
 from .adapters.base import ChatAdapter, MediaAdapter
 from .adapters.discovery import load_external_adapter
 from .config import Settings
+from .schemas import EngineCapabilities
 
 
 class EngineRegistry:
@@ -24,7 +25,7 @@ class EngineRegistry:
         else:
             self.media = load_external_adapter("media", settings.media_engine, settings)
 
-    async def capabilities(self):  # type: ignore[no-untyped-def]
+    async def capabilities(self) -> list[EngineCapabilities]:
         return [await self.chat.capabilities(), await self.media.capabilities()]
 
     async def close(self) -> None:

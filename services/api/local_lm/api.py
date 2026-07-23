@@ -3,7 +3,7 @@ from __future__ import annotations
 import shutil
 from contextlib import suppress
 from pathlib import Path
-from typing import Annotated, Any, Literal, cast
+from typing import TYPE_CHECKING, Annotated, Any, Literal, cast
 from urllib.parse import quote
 
 from fastapi import APIRouter, Depends, File, HTTPException, Query, Request, Response, UploadFile
@@ -114,11 +114,14 @@ from .schemas import (
 from .security import SessionSecurity
 from .settings_registry import CHAT_SETTINGS, IMAGE_SETTINGS, VIDEO_SETTINGS, validate_settings
 
+if TYPE_CHECKING:
+    from .main import Services
+
 SessionDep = Annotated[Session, Depends(get_session)]
 
 
-def _services(request: Request) -> Any:
-    return request.app.state.services
+def _services(request: Request) -> Services:
+    return cast("Services", request.app.state.services)
 
 
 router = APIRouter(prefix="/api")
