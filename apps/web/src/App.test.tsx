@@ -645,18 +645,22 @@ describe("App", () => {
     vi.mocked(api.catalogDetail).mockResolvedValue({
       model,
       revision: "main",
-      files: [{ filename: "model-q4.gguf", size: 1024, sha256: null }],
+      files: [{ filename: "model-q4.gguf", size: 1024, sha256: "a".repeat(64) }],
     });
     vi.mocked(api.catalogPreflight).mockResolvedValue({
       remote_id: model.remote_id,
       revision: "main",
       selected_files: ["model-q4.gguf"],
+      expected_sha256: { "model-q4.gguf": "a".repeat(64) },
       download_bytes: 1024,
       available_disk_bytes: 4096,
       estimated_ram_bytes: 2048,
       estimated_vram_bytes: null,
       can_install: true,
-      checks: [{ id: "disk", label: "Disk capacity", status: "pass", detail: "Fits." }],
+      checks: [
+        { id: "checksum", label: "Checksum metadata", status: "pass", detail: "Available." },
+        { id: "disk", label: "Disk capacity", status: "pass", detail: "Fits." },
+      ],
     });
     const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
     render(
@@ -668,8 +672,17 @@ describe("App", () => {
     fireEvent.click(await screen.findByText("Choose files"));
     expect(await screen.findByRole("heading", { name: model.remote_id })).toBeInTheDocument();
     expect(await screen.findByText("Disk capacity")).toBeInTheDocument();
+    expect(screen.getByText("Checksum metadata")).toBeInTheDocument();
     expect(screen.getByText("apache-2.0")).toBeInTheDocument();
-    expect(screen.getByText("Queue download")).toBeEnabled();
+    fireEvent.click(screen.getByText("Queue download"));
+    await waitFor(() => expect(api.download).toHaveBeenCalledWith(
+      model.remote_id,
+      "chat",
+      "llama.cpp",
+      "main",
+      ["model-q4.gguf"],
+      { "model-q4.gguf": "a".repeat(64) },
+    ));
   });
 
   it("renders workflow revision history and declared controls", async () => {

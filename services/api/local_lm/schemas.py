@@ -500,6 +500,7 @@ class CatalogPreflight(ApiModel):
     remote_id: str
     revision: str
     selected_files: list[str]
+    expected_sha256: dict[str, str] = Field(default_factory=dict)
     download_bytes: int
     available_disk_bytes: int
     estimated_ram_bytes: int | None = None
