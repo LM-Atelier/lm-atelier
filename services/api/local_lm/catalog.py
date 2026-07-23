@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import json
 import os
@@ -93,7 +94,10 @@ class HuggingFaceCatalog:
             response = await self._client.get(url, params=None if cursor else params)
             response.raise_for_status()
             payload = response.json()
-            items = [self._normalize(item, role) for item in payload if isinstance(item, dict)]
+            raw_items = [item for item in payload if isinstance(item, dict)]
+            if max_size_bytes is not None:
+                raw_items = await self._hydrate_file_sizes(raw_items, role)
+            items = [self._normalize(item, role) for item in raw_items]
             items = self._filter_items(
                 items,
                 compatibility=compatibility,
@@ -129,7 +133,7 @@ class HuggingFaceCatalog:
         try:
             response = await self._client.get(
                 f"/api/models/{remote_id}",
-                params={"revision": revision, "files_metadata": "true"},
+                params={"revision": revision, "blobs": "true"},
             )
             response.raise_for_status()
             payload = response.json()
@@ -158,6 +162,39 @@ class HuggingFaceCatalog:
 
     async def close(self) -> None:
         await self._client.aclose()
+
+    async def _hydrate_file_sizes(
+        self, items: list[dict[str, Any]], requested_role: str | None
+    ) -> list[dict[str, Any]]:
+        semaphore = asyncio.Semaphore(6)
+
+        async def hydrate(item: dict[str, Any]) -> dict[str, Any]:
+            remote_id = str(item.get("id") or item.get("modelId") or "")
+            if not remote_id:
+                return item
+            revision = str(item.get("sha") or "main")
+            try:
+                async with semaphore:
+                    detail = await self.inspect(remote_id, revision, requested_role)
+            except (httpx.HTTPError, ValueError):
+                return item
+            files = detail.get("files")
+            if not isinstance(files, list):
+                return item
+            siblings = [
+                {
+                    "rfilename": file.get("filename"),
+                    "size": file.get("size"),
+                    "lfs": {
+                        "oid": f"sha256:{file['sha256']}" if file.get("sha256") else None,
+                    },
+                }
+                for file in files
+                if isinstance(file, dict)
+            ]
+            return {**item, "siblings": siblings}
+
+        return list(await asyncio.gather(*(hydrate(item) for item in items)))
 
     def _cache_path(self, *parts: object) -> Path:
         key = hashlib.sha256(json.dumps(parts, sort_keys=True, default=str).encode()).hexdigest()
