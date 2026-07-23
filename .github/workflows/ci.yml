@@ -4,6 +4,10 @@ on:
   pull_request:
     branches: [develop, main]
     types: [opened, synchronize, reopened, ready_for_review]
+    # These paths are validated locally and cannot change application behavior.
+    paths-ignore:
+      - "**/*.md"
+      - ".github/dependabot.yml"
   workflow_dispatch:
 
 permissions:
