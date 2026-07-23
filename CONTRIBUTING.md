@@ -35,3 +35,19 @@ checks, license/dependency scans, and secret scanning before merges. Run
 `./scripts/verify.sh` on Linux or
 `powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\verify.ps1` on
 Windows for the local core checks.
+
+## Hosted CI
+
+Pull requests create a visible skipped check by default so routine verification
+does not consume constrained hosted-runner quota. Run the complete local parity
+gate above before requesting merge.
+
+Add the `run-ci` label to a ready pull request when an Ubuntu compatibility run
+is warranted. The label event starts CI, and later pushes rerun it while the
+label remains attached. Remove and re-add the label to request another run
+without a new commit. Maintainers can also start the workflow manually with
+`workflow_dispatch`.
+
+Before enabling required checks for a public release, replace this temporary
+quota policy with protected-branch CI appropriate to the repository's runner
+budget.
