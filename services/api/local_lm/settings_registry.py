@@ -1,7 +1,8 @@
 from __future__ import annotations
 
+import math
 from collections.abc import Iterable, Mapping
-from typing import Any
+from typing import Any, Literal, cast
 
 from .schemas import SettingField
 
@@ -536,6 +537,132 @@ def resolve_settings(*layers: Mapping[str, Any] | None) -> dict[str, Any]:
     return resolved
 
 
+def workflow_settings(
+    fields: Iterable[SettingField],
+    input_schema: Mapping[str, Any] | None,
+) -> list[SettingField]:
+    """Overlay a workflow's declared JSON-Schema controls on engine defaults.
+
+    Existing role fields remain available because older workflow schemas may
+    declare only the controls they customize. A schema may also add a custom
+    user control when it supplies a default, const, or enum. Properties without
+    one of those UI hints are treated as runtime bindings such as input_image.
+    """
+
+    base_fields = list(fields)
+    if not input_schema:
+        return base_fields
+    properties = input_schema.get("properties")
+    if not isinstance(properties, Mapping):
+        return base_fields
+
+    definitions = {field.key: field for field in base_fields}
+    resolved: list[SettingField] = []
+    for field in base_fields:
+        property_schema = properties.get(field.key)
+        resolved.append(
+            _workflow_setting(field.key, property_schema, field)
+            if isinstance(property_schema, Mapping)
+            else field
+        )
+
+    for key, property_schema in properties.items():
+        if (
+            not isinstance(key, str)
+            or key in definitions
+            or not isinstance(property_schema, Mapping)
+            or not any(name in property_schema for name in ("default", "const", "enum"))
+        ):
+            continue
+        resolved.append(_workflow_setting(key, property_schema, None))
+    return resolved
+
+
+def _workflow_setting(
+    key: str,
+    schema: Mapping[str, Any],
+    base: SettingField | None,
+) -> SettingField:
+    declared_type = schema.get("type")
+    supported_types = {"boolean", "integer", "number", "string", "enum", "array", "object"}
+    if declared_type not in supported_types:
+        declared_type = (
+            base.type
+            if base
+            else _setting_type_for_value(schema.get("const", schema.get("default")))
+        )
+    if declared_type not in supported_types:
+        raise ValueError(f"workflow setting {key} must declare a supported type")
+
+    choices: list[Any]
+    if "const" in schema:
+        choices = [schema["const"]]
+    elif isinstance(schema.get("enum"), list):
+        choices = list(schema["enum"])
+    else:
+        choices = list(base.choices) if base else []
+
+    if "const" in schema:
+        default = schema["const"]
+    elif "default" in schema:
+        default = schema["default"]
+    elif base:
+        default = base.default
+    elif choices:
+        default = choices[0]
+    else:
+        default = None
+
+    minimum = schema.get("minimum", base.minimum if base else None)
+    maximum = schema.get("maximum", base.maximum if base else None)
+    # LM Atelier resolves the random-seed sentinel before dispatching to the
+    # workflow, so preserve it even when a workflow declares non-negative seeds.
+    if key == "seed" and base and base.default == -1 and default == -1:
+        minimum = min(float(minimum), -1) if minimum is not None else -1
+
+    help_text = str(schema.get("description") or (base.help if base else ""))
+    if "const" in schema:
+        fixed_note = f"Fixed by this workflow at {schema['const']}."
+        help_text = f"{help_text} {fixed_note}".strip()
+
+    return SettingField(
+        key=key,
+        label=str(schema.get("title") or (base.label if base else key.replace("_", " ").title())),
+        type=cast(
+            Literal["boolean", "integer", "number", "string", "enum", "array", "object"],
+            declared_type,
+        ),
+        default=default,
+        minimum=minimum,
+        maximum=maximum,
+        step=schema.get("multipleOf", base.step if base else None),
+        multiple_of=schema.get("multipleOf"),
+        choices=choices,
+        scope=base.scope if base else "workflow",
+        visibility=base.visibility if base else "advanced",
+        restart_required=base.restart_required if base else False,
+        available=base.available if base else True,
+        unavailable_reason=base.unavailable_reason if base else None,
+        help=help_text,
+    )
+
+
+def _setting_type_for_value(value: Any) -> str | None:
+    if isinstance(value, bool):
+        return "boolean"
+    if isinstance(value, int):
+        return "integer"
+    if isinstance(value, float):
+        return "number"
+    if isinstance(value, str):
+        return "string"
+    if isinstance(value, list):
+        return "array"
+    if isinstance(value, dict):
+        return "object"
+    return None
+
+
 def validate_settings(values: Mapping[str, Any], fields: Iterable[SettingField]) -> dict[str, Any]:
     definitions = {field.key: field for field in fields}
     unknown = set(values) - set(definitions)
@@ -565,6 +692,10 @@ def validate_settings(values: Mapping[str, Any], fields: Iterable[SettingField])
                 raise ValueError(f"{key} must be at least {field.minimum}")
             if field.maximum is not None and value > field.maximum:
                 raise ValueError(f"{key} must be at most {field.maximum}")
+            if field.multiple_of is not None:
+                quotient = value / field.multiple_of
+                if not math.isclose(quotient, round(quotient), rel_tol=1e-9, abs_tol=1e-9):
+                    raise ValueError(f"{key} must be a multiple of {field.multiple_of}")
         if field.choices and value not in field.choices:
             raise ValueError(f"{key} must be one of {field.choices}")
         validated[key] = value

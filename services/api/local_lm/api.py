@@ -112,7 +112,14 @@ from .schemas import (
     WorkflowUpdate,
 )
 from .security import SessionSecurity
-from .settings_registry import CHAT_SETTINGS, IMAGE_SETTINGS, VIDEO_SETTINGS, validate_settings
+from .settings_registry import (
+    CHAT_SETTINGS,
+    IMAGE_SETTINGS,
+    VIDEO_SETTINGS,
+    defaults,
+    validate_settings,
+    workflow_settings,
+)
 
 if TYPE_CHECKING:
     from .main import Services
@@ -614,8 +621,15 @@ async def regenerate_message(
         raise HTTPException(404, "source user message not found")
     text = "\n".join(part.text for part in user_message.parts if part.text).strip()
     mode = _mode_for_operation(Operation(prior_run.operation))
+    prior_revision = (
+        session.get(WorkflowRevision, prior_run.workflow_revision_id)
+        if prior_run.workflow_revision_id
+        else None
+    )
     prior_settings = orchestrator.request_settings_for_operation(
-        Operation(prior_run.operation), prior_run.settings_json
+        Operation(prior_run.operation),
+        prior_run.settings_json,
+        input_schema=prior_revision.input_schema_json if prior_revision else None,
     )
     turn = TurnRequest(
         text=text,
@@ -644,8 +658,15 @@ async def edit_and_branch(
         if not payload.input_artifact_ids:
             updates["input_artifact_ids"] = prior_run.provenance_json.get("input_artifact_ids", [])
         if not payload.settings:
+            prior_revision = (
+                session.get(WorkflowRevision, prior_run.workflow_revision_id)
+                if prior_run.workflow_revision_id
+                else None
+            )
             updates["settings"] = _services(request).orchestrator.request_settings_for_operation(
-                Operation(prior_run.operation), prior_run.settings_json
+                Operation(prior_run.operation),
+                prior_run.settings_json,
+                input_schema=prior_revision.input_schema_json if prior_revision else None,
             )
     turn = payload.model_copy(update=updates)
     return await _services(request).orchestrator.create_turn(
@@ -1798,6 +1819,12 @@ async def validate_workflow(
         raise HTTPException(404, "workflow revision not found")
     errors = await _services(request).engines.media.validate_workflow(revision.api_graph_json)
     warnings: list[str] = []
+    try:
+        base_fields = VIDEO_SETTINGS if "video" in definition.operation else IMAGE_SETTINGS
+        declared_fields = workflow_settings(base_fields, revision.input_schema_json)
+        validate_settings(defaults(declared_fields), declared_fields)
+    except ValueError as exc:
+        errors.append(f"invalid workflow input schema: {exc}")
     dependencies = revision.dependencies_json
     errors.extend(custom_node_dependency_errors(session, dependencies.get("custom_nodes")))
     required_models = dependencies.get("models", [])

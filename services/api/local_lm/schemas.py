@@ -568,6 +568,7 @@ class SettingField(ApiModel):
     minimum: float | None = None
     maximum: float | None = None
     step: float | None = None
+    multiple_of: float | None = None
     choices: list[Any] = Field(default_factory=list)
     scope: Literal["load", "request", "workflow"]
     visibility: Literal["basic", "advanced", "expert"] = "advanced"

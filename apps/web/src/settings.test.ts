@@ -1,5 +1,9 @@
 import { describe, expect, it } from "vitest";
-import { resolveCapabilitySettings } from "./settings";
+import {
+  normalizeSettingsForFields,
+  resolveCapabilitySettings,
+  resolveWorkflowSettings,
+} from "./settings";
 import type { EngineCapabilities, SettingField } from "./types";
 
 const imageField: SettingField = {
@@ -50,5 +54,51 @@ describe("resolveCapabilitySettings", () => {
     const engine = mediaCapabilities();
 
     expect(resolveCapabilitySettings(engine, "image")).toEqual([imageField, videoField]);
+  });
+});
+
+describe("resolveWorkflowSettings", () => {
+  it("overlays workflow defaults and fixed values without dropping legacy controls", () => {
+    const fields = resolveWorkflowSettings(
+      [imageField, videoField],
+      {
+        type: "object",
+        properties: {
+          frames: { type: "integer", const: 81 },
+          camera_strength: {
+            type: "number",
+            title: "Camera strength",
+            default: 0.5,
+            minimum: 0,
+            maximum: 1,
+          },
+          input_image: { type: "string" },
+        },
+      },
+    );
+
+    expect(fields.find((field) => field.key === "negative_prompt")).toEqual(imageField);
+    expect(fields.find((field) => field.key === "frames")).toMatchObject({
+      default: 81,
+      choices: [81],
+    });
+    expect(fields.find((field) => field.key === "camera_strength")).toMatchObject({
+      label: "Camera strength",
+      type: "number",
+      default: 0.5,
+      minimum: 0,
+      maximum: 1,
+    });
+    expect(fields.some((field) => field.key === "input_image")).toBe(false);
+  });
+
+  it("removes stale overrides that conflict with the selected workflow", () => {
+    const fields = resolveWorkflowSettings(
+      [videoField],
+      { properties: { frames: { type: "integer", const: 81 } } },
+    );
+
+    expect(normalizeSettingsForFields({ frames: 49, imaginary: true }, fields)).toEqual({});
+    expect(normalizeSettingsForFields({ frames: 81 }, fields)).toEqual({ frames: 81 });
   });
 });
