@@ -24,6 +24,7 @@ from .domain import (
     PartType,
     RoutingMode,
     RunStatus,
+    elapsed_milliseconds,
     utcnow,
 )
 from .engines import EngineRegistry
@@ -876,7 +877,7 @@ class ConversationOrchestrator:
         run.status = RunStatus.COMPLETE.value
         run.completed_at = now
         if run.started_at:
-            run.duration_ms = int((time.time() - run.started_at.timestamp()) * 1000)
+            run.duration_ms = elapsed_milliseconds(run.started_at, now)
         message = session.get(Message, run.assistant_message_id)
         if message:
             message.status = MessageStatus.COMPLETE.value

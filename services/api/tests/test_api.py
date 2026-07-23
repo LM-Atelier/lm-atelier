@@ -37,6 +37,11 @@ async def wait_for_run(client: AsyncClient, run_id: str) -> dict:  # type: ignor
         run = response.json()
         if run["status"] in {"complete", "failed", "cancelled"}:
             assert run["status"] == "complete", run
+            assert run["started_at"] is not None
+            assert run["completed_at"] is not None
+            assert isinstance(run["duration_ms"], int)
+            assert run["duration_ms"] >= 0
+            assert run["provenance_json"]["timings"]["duration_ms"] == run["duration_ms"]
             return run
         await asyncio.sleep(0.03)
     raise AssertionError("run did not complete")
