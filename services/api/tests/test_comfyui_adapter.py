@@ -9,7 +9,7 @@ import httpx
 import pytest
 
 from local_lm.adapters.base import MediaRequest
-from local_lm.adapters.comfyui import ComfyUIAdapter
+from local_lm.adapters.comfyui import ComfyUIAdapter, _preview_payload
 
 
 def media_request(path: Path | None = None, *, operation: str = "image_to_image") -> MediaRequest:
@@ -22,6 +22,22 @@ def media_request(path: Path | None = None, *, operation: str = "image_to_image"
         workflow={},
         parameters={"seed": 42},
     )
+
+
+def test_preview_binary_envelopes_are_decoded_and_validated() -> None:
+    jpeg = b"\xff\xd8\xff\xe0preview"
+    png = b"\x89PNG\r\n\x1a\npreview"
+    metadata = b'{"node_id":"sampler"}'
+
+    assert _preview_payload(jpeg) == jpeg
+    assert _preview_payload((1).to_bytes(4, "big") + (1).to_bytes(4, "big") + jpeg) == jpeg
+    assert (
+        _preview_payload((4).to_bytes(4, "big") + len(metadata).to_bytes(4, "big") + metadata + png)
+        == png
+    )
+    assert _preview_payload((3).to_bytes(4, "big") + b"text") is None
+    assert _preview_payload((4).to_bytes(4, "big") + (999).to_bytes(4, "big")) is None
+    assert _preview_payload((1).to_bytes(4, "big") + (1).to_bytes(4, "big") + b"invalid") is None
 
 
 async def test_conditioning_images_are_staged_and_exposed_as_workflow_parameters(

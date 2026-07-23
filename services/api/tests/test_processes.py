@@ -89,6 +89,7 @@ async def test_media_start_disables_unapproved_custom_nodes(
     await supervisor.start_media()
 
     command = captured["command"]
+    assert command[command.index("--preview-method") + 1] == "latent2rgb"
     assert "--disable-all-custom-nodes" in command
     assert command[command.index("--whitelist-custom-nodes") + 1 :] == ["lm-atelier-node_reviewed"]
 
