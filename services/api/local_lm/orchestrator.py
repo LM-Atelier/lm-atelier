@@ -337,7 +337,8 @@ class ConversationOrchestrator:
         task.add_done_callback(lambda finished: self._task_done(job_id, finished))
 
     def _task_done(self, job_id: str, task: asyncio.Task[None]) -> None:
-        self._tasks.pop(job_id, None)
+        if self._tasks.get(job_id) is task:
+            self._tasks.pop(job_id, None)
         if task.cancelled():
             return
         exception = task.exception()
@@ -347,6 +348,7 @@ class ConversationOrchestrator:
             )
 
     async def cancel(self, job_id: str) -> bool:
+        cancelled_task: asyncio.Task[None] | None = None
         with SessionLocal() as session:
             job = session.get(Job, job_id)
             if not job or job.status in {
@@ -364,8 +366,11 @@ class ConversationOrchestrator:
             task = self._tasks.get(job_id)
             if task:
                 task.cancel()
+                cancelled_task = task
             self._mark_cancelled(session, job)
             session.commit()
+        if cancelled_task:
+            await asyncio.gather(cancelled_task, return_exceptions=True)
         await self.events.publish("run.cancelled", job.run_id, {"job_id": job_id})
         return True
 

@@ -44,6 +44,7 @@ class MockChatAdapter:
         return estimate_chat_tokens(messages)
 
     async def stream(self, request: ChatRequest):  # type: ignore[no-untyped-def]
+        self._cancelled.discard(request.run_id)
         if request.tools:
             prompt = next(
                 (
@@ -162,6 +163,7 @@ class MockMediaAdapter:
         return [] if isinstance(workflow, dict) else ["workflow must be an object"]
 
     async def generate(self, request: MediaRequest):  # type: ignore[no-untyped-def]
+        self._cancelled.discard(request.run_id)
         for progress, phase in ((0.05, "loading"), (0.25, "encoding prompt"), (0.7, "sampling")):
             if request.run_id in self._cancelled:
                 self._cancelled.discard(request.run_id)

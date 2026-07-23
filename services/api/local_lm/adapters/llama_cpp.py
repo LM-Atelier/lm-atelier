@@ -99,6 +99,7 @@ class LlamaCppAdapter:
         }
 
     async def stream(self, request: ChatRequest) -> AsyncIterator[ChatEvent]:
+        self._cancelled.discard(request.run_id)
         payload: dict[str, Any] = {
             "model": "local-model",
             "messages": request.messages,
