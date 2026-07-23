@@ -368,19 +368,22 @@ function Composer({
   chat,
   engines,
   busy,
+  settings,
+  onSettings,
   onSend,
   onStop,
 }: {
   chat: Chat;
   engines: EngineCapabilities[];
   busy: boolean;
+  settings: Record<string, unknown>;
+  onSettings: (settings: Record<string, unknown>) => void;
   onSend: (text: string, mode: RoutingMode, artifacts: string[], settings: Record<string, unknown>) => void;
   onStop: () => void;
 }) {
   const [text, setText] = useState("");
   const [mode, setMode] = useState<RoutingMode>(chat.routing_mode);
   const [settingsOpen, setSettingsOpen] = useState(false);
-  const [settings, setSettings] = useState<Record<string, unknown>>({});
   const [attachments, setAttachments] = useState<string[]>([]);
   const [uploading, setUploading] = useState(false);
   const fileInput = useRef<HTMLInputElement>(null);
@@ -445,7 +448,7 @@ function Composer({
         </div>
         <small className="composer-note">Local models can make mistakes. Generation stays on this machine.</small>
       </div>
-      <SettingsDrawer open={settingsOpen} onClose={() => setSettingsOpen(false)} mode={mode} engines={engines} values={settings} onValues={setSettings} />
+      <SettingsDrawer open={settingsOpen} onClose={() => setSettingsOpen(false)} mode={mode} engines={engines} values={settings} onValues={onSettings} />
     </>
   );
 }
@@ -469,6 +472,8 @@ function ChatView({
   engines,
   profiles,
   liveText,
+  settings,
+  onSettings,
   onSend,
   onProfile,
   onRegenerate,
@@ -479,10 +484,12 @@ function ChatView({
   engines: EngineCapabilities[];
   profiles: ModelProfile[];
   liveText: Record<string, string>;
+  settings: Record<string, unknown>;
+  onSettings: (settings: Record<string, unknown>) => void;
   onSend: (text: string, mode: RoutingMode, artifacts: string[], settings: Record<string, unknown>) => void;
   onProfile: (field: "active_chat_profile_id" | "active_image_profile_id" | "active_video_profile_id", id: string | null) => void;
-  onRegenerate: (messageId: string) => void;
-  onEdit: (messageId: string, text: string) => void;
+  onRegenerate: (messageId: string, settings: Record<string, unknown>) => void;
+  onEdit: (messageId: string, text: string, settings: Record<string, unknown>) => void;
   onStop: () => void;
 }) {
   const endRef = useRef<HTMLDivElement>(null);
@@ -509,10 +516,16 @@ function ChatView({
       <div className="messages">
         {messages.length === 0 ? (
           <EmptyState icon={<Sparkles />} title="What should we make?" body="Ask a question or describe an image or video. Auto mode chooses the appropriate local model." />
-        ) : messages.map((message) => <MessageBubble key={message.id} message={message} liveText={liveText[message.id]} onRegenerate={busy ? undefined : onRegenerate} onEdit={busy ? undefined : onEdit} />)}
+        ) : messages.map((message) => <MessageBubble
+          key={message.id}
+          message={message}
+          liveText={liveText[message.id]}
+          onRegenerate={busy ? undefined : (messageId) => onRegenerate(messageId, settings)}
+          onEdit={busy ? undefined : (messageId, text) => onEdit(messageId, text, settings)}
+        />)}
         <div ref={endRef} />
       </div>
-      <Composer chat={chat} engines={engines} busy={busy} onSend={onSend} onStop={onStop} />
+      <Composer chat={chat} engines={engines} busy={busy} settings={settings} onSettings={onSettings} onSend={onSend} onStop={onStop} />
     </div>
   );
 }
@@ -1108,35 +1121,37 @@ function Sidebar({
       <button className="new-chat" onClick={() => { onNewChat(null); setMobileOpen(false); }}><Plus size={18} />New chat</button>
       <nav className="primary-nav"><button className={view === "media" ? "active" : ""} onClick={() => { onView("media"); setMobileOpen(false); }}><ImageIcon />Media library</button><button className={view === "models" ? "active" : ""} onClick={() => { onView("models"); setMobileOpen(false); }}><Library />Model library</button><button className={view === "workflows" ? "active" : ""} onClick={() => { onView("workflows"); setMobileOpen(false); }}><WorkflowIcon />Workflows</button></nav>
       <div className="workspace-search"><Search size={14} /><input aria-label="Search projects and chats" placeholder="Search workspace" value={search} onChange={(event) => setSearch(event.target.value)} /><button className={showArchived ? "active" : ""} aria-pressed={showArchived} onClick={() => setShowArchived((value) => !value)}>Archived</button></div>
-      <div className="sidebar-section">
-        <div className="section-title"><span>Projects</span><input ref={projectImport} hidden type="file" accept=".zip,.lm-atelier.zip,application/zip" onChange={(event) => { const file = event.target.files?.[0]; if (file) onImportProject(file); event.target.value = ""; }} /><button aria-label="Import project" onClick={() => projectImport.current?.click()}><Upload size={14} /></button><button aria-label="New project" onClick={onNewProject}><Plus size={15} /></button></div>
-        {visibleProjects.map((project) => {
-          const open = openProjects.has(project.id);
-          const projectMatches = normalizedSearch && project.name.toLowerCase().includes(normalizedSearch);
-          const projectChats = chats.filter((chat) => chat.project_id === project.id && (showArchived || !chat.archived) && (!normalizedSearch || projectMatches || chat.title.toLowerCase().includes(normalizedSearch)));
-          return (
-            <div className="project-group" key={project.id}>
-              <div className="project-row">
-                <button className="project-main" onClick={() => setOpenProjects((current) => {
-                  const next = new Set(current);
-                  if (open) next.delete(project.id);
-                  else next.add(project.id);
-                  return next;
-                })}>
-                  <ChevronDown className={open ? "" : "closed"} size={14} />
-                  <Folder size={16} />
-                  <span>{project.name}</span>
-                </button>
-                <button className="inline-add" onClick={() => onNewChat(project.id)} aria-label={`New chat in ${project.name}`}><Plus size={13} /></button>
-                <button className="inline-add" onClick={() => onExportProject(project.id)} aria-label={`Export ${project.name}`}><Download size={13} /></button>
-                <button className="inline-add" onClick={() => setManagedProject(project)} aria-label={`Manage ${project.name}`}><MoreHorizontal size={13} /></button>
+      <div className="workspace-tree" role="region" aria-label="Projects and chats">
+        <div className="sidebar-section">
+          <div className="section-title"><span>Projects</span><input ref={projectImport} hidden type="file" accept=".zip,.lm-atelier.zip,application/zip" onChange={(event) => { const file = event.target.files?.[0]; if (file) onImportProject(file); event.target.value = ""; }} /><button aria-label="Import project" onClick={() => projectImport.current?.click()}><Upload size={14} /></button><button aria-label="New project" onClick={onNewProject}><Plus size={15} /></button></div>
+          {visibleProjects.map((project) => {
+            const open = openProjects.has(project.id);
+            const projectMatches = normalizedSearch && project.name.toLowerCase().includes(normalizedSearch);
+            const projectChats = chats.filter((chat) => chat.project_id === project.id && (showArchived || !chat.archived) && (!normalizedSearch || projectMatches || chat.title.toLowerCase().includes(normalizedSearch)));
+            return (
+              <div className="project-group" key={project.id}>
+                <div className="project-row">
+                  <button className="project-main" onClick={() => setOpenProjects((current) => {
+                    const next = new Set(current);
+                    if (open) next.delete(project.id);
+                    else next.add(project.id);
+                    return next;
+                  })}>
+                    <ChevronDown className={open ? "" : "closed"} size={14} />
+                    <Folder size={16} />
+                    <span>{project.name}</span>
+                  </button>
+                  <button className="inline-add" onClick={() => onNewChat(project.id)} aria-label={`New chat in ${project.name}`}><Plus size={13} /></button>
+                  <button className="inline-add" onClick={() => onExportProject(project.id)} aria-label={`Export ${project.name}`}><Download size={13} /></button>
+                  <button className="inline-add" onClick={() => setManagedProject(project)} aria-label={`Manage ${project.name}`}><MoreHorizontal size={13} /></button>
+                </div>
+                {open && <div className="chat-list">{projectChats.map(chatRow)}</div>}
               </div>
-              {open && <div className="chat-list">{projectChats.map(chatRow)}</div>}
-            </div>
-          );
-        })}
+            );
+          })}
+        </div>
+        {unfiled.length > 0 && <div className="sidebar-section"><div className="section-title"><span>Chats</span></div><div className="chat-list standalone">{unfiled.map(chatRow)}</div></div>}
       </div>
-      {unfiled.length > 0 && <div className="sidebar-section"><div className="section-title"><span>Chats</span></div><div className="chat-list standalone">{unfiled.map(chatRow)}</div></div>}
       <div className="sidebar-footer"><button className={view === "settings" ? "active" : ""} onClick={() => { onView("settings"); setMobileOpen(false); }}><Settings />Settings</button><div className="connection"><StatusDot healthy={connected} />{connected ? "Local service connected" : "Reconnecting…"}</div></div>
       {managedChat && <ChatManager chat={managedChat} projects={projects} onClose={() => setManagedChat(null)} onSave={(values) => { onUpdateChat(managedChat.id, values); setManagedChat(null); }} onDelete={() => { onDeleteChat(managedChat.id); setManagedChat(null); }} />}
       {managedProject && <ProjectManager project={managedProject} onClose={() => setManagedProject(null)} onSave={(values) => { onUpdateProject(managedProject.id, values); setManagedProject(null); }} onDelete={() => { onDeleteProject(managedProject.id); setManagedProject(null); }} onExport={(includeMedia) => onExportProject(managedProject.id, includeMedia)} />}
@@ -1162,6 +1177,7 @@ export default function App() {
   const [currentChatId, setCurrentChatId] = useState<string | null>(() => localStorage.getItem("local-lm-chat"));
   const [connected, setConnected] = useState(false);
   const [liveText, setLiveText] = useState<Record<string, string>>({});
+  const [turnSettingsByChat, setTurnSettingsByChat] = useState<Record<string, Record<string, unknown>>>({});
   const projects = useQuery({ queryKey: ["projects"], queryFn: () => api.projects(true) });
   const chats = useQuery({ queryKey: ["chats"], queryFn: () => api.chats(null, true) });
   const chat = useQuery({ queryKey: ["chat", currentChatId], queryFn: () => api.chat(currentChatId!), enabled: Boolean(currentChatId) });
@@ -1211,7 +1227,7 @@ export default function App() {
     },
   });
   const regenerate = useMutation({
-    mutationFn: api.regenerateMessage,
+    mutationFn: ({ messageId, settings }: { messageId: string; settings: Record<string, unknown> }) => api.regenerateMessage(messageId, settings),
     onSuccess: (accepted) => {
       client.setQueryData<ChatDetail>(["chat", currentChatId], (current) => current ? { ...current, active_head_message_id: accepted.assistant_message.id, messages: [...current.messages, accepted.user_message, accepted.assistant_message] } : current);
       void client.invalidateQueries({ queryKey: ["chats"] });
@@ -1219,7 +1235,7 @@ export default function App() {
     },
   });
   const branch = useMutation({
-    mutationFn: ({ messageId, text }: { messageId: string; text: string }) => api.branchMessage(messageId, text),
+    mutationFn: ({ messageId, text, settings }: { messageId: string; text: string; settings: Record<string, unknown> }) => api.branchMessage(messageId, text, settings),
     onSuccess: (accepted) => {
       client.setQueryData<ChatDetail>(["chat", currentChatId], (current) => current ? { ...current, active_head_message_id: accepted.assistant_message.id, messages: [...current.messages, accepted.user_message, accepted.assistant_message] } : current);
       void client.invalidateQueries({ queryKey: ["chats"] });
@@ -1250,6 +1266,11 @@ export default function App() {
   const deleteChat = useMutation({
     mutationFn: api.deleteChat,
     onSuccess: (_value, deletedId) => {
+      setTurnSettingsByChat((current) => {
+        const next = { ...current };
+        delete next[deletedId];
+        return next;
+      });
       if (currentChatId === deletedId) {
         setCurrentChatId(null);
         localStorage.removeItem("local-lm-chat");
@@ -1307,8 +1328,10 @@ export default function App() {
     if (view === "models") return <ModelsView />;
     if (view === "workflows") return <WorkflowsView />;
     if (view === "settings") return <SettingsView engines={engines.data ?? []} />;
-    return <ChatView chat={chat.data} engines={engines.data ?? []} profiles={profiles.data ?? []} liveText={liveText} onProfile={(field, id) => updateChat.mutate({ [field]: id })} onRegenerate={(messageId) => regenerate.mutate(messageId)} onEdit={(messageId, text) => branch.mutate({ messageId, text })} onStop={() => stop.mutate()} onSend={(text, mode, artifacts, settings) => send.mutate({ text, mode, artifacts, settings })} />;
-  }, [view, engines.data, profiles.data, chat.data, liveText, send, regenerate, branch, stop, updateChat]);
+    return <ChatView chat={chat.data} engines={engines.data ?? []} profiles={profiles.data ?? []} liveText={liveText} settings={currentChatId ? turnSettingsByChat[currentChatId] ?? {} : {}} onSettings={(settings) => {
+      if (currentChatId) setTurnSettingsByChat((current) => ({ ...current, [currentChatId]: settings }));
+    }} onProfile={(field, id) => updateChat.mutate({ [field]: id })} onRegenerate={(messageId, settings) => regenerate.mutate({ messageId, settings })} onEdit={(messageId, text, settings) => branch.mutate({ messageId, text, settings })} onStop={() => stop.mutate()} onSend={(text, mode, artifacts, settings) => send.mutate({ text, mode, artifacts, settings })} />;
+  }, [view, engines.data, profiles.data, chat.data, liveText, currentChatId, turnSettingsByChat, send, regenerate, branch, stop, updateChat]);
 
   return (
     <div className="app-shell">

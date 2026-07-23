@@ -33,6 +33,7 @@ import type {
 } from "./types";
 
 let csrfToken = "";
+let eventSequence = 0;
 let sessionPromise: Promise<void> | null = null;
 
 export class ApiError extends Error {
@@ -54,8 +55,9 @@ async function ensureSession(): Promise<void> {
       credentials: "same-origin",
     }).then(async (response) => {
       if (!response.ok) throw new Error("Could not initialize the local session");
-      const payload = (await response.json()) as { csrf_token: string };
+      const payload = (await response.json()) as { csrf_token: string; event_sequence?: number };
       csrfToken = payload.csrf_token;
+      eventSequence = Math.max(0, payload.event_sequence ?? 0);
     });
   }
   await sessionPromise;
@@ -150,15 +152,15 @@ export const api = {
       throw error;
     }
   },
-  regenerateMessage: (messageId: string) =>
+  regenerateMessage: (messageId: string, settings: Record<string, unknown>) =>
     request<TurnAccepted>(`/api/messages/${messageId}/regenerate`, {
       method: "POST",
-      body: JSON.stringify({ settings: {} }),
+      body: JSON.stringify({ settings }),
     }),
-  branchMessage: (messageId: string, text: string) =>
+  branchMessage: (messageId: string, text: string, settings: Record<string, unknown>) =>
     request<TurnAccepted>(`/api/messages/${messageId}/branch`, {
       method: "POST",
-      body: JSON.stringify({ text, idempotency_key: crypto.randomUUID() }),
+      body: JSON.stringify({ text, settings, idempotency_key: crypto.randomUUID() }),
     }),
   cancelChat: (chatId: string) =>
     request<Job>(`/api/chats/${chatId}/cancel`, { method: "POST" }),
@@ -378,7 +380,7 @@ export async function connectEvents(
   let closed = false;
   let socket: WebSocket | null = null;
   let retry: number | undefined;
-  let lastSequence = 0;
+  let lastSequence = eventSequence;
 
   const open = () => {
     if (closed) return;
@@ -388,6 +390,7 @@ export async function connectEvents(
     socket.onmessage = (message) => {
       const event = JSON.parse(message.data as string) as AppEvent;
       lastSequence = Math.max(lastSequence, event.sequence);
+      eventSequence = lastSequence;
       onEvent(event);
     };
     socket.onclose = () => {

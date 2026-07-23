@@ -31,6 +31,18 @@ const videoSetting: SettingField = {
   help: "Number of video frames.",
 };
 
+const maxTokensSetting: SettingField = {
+  ...imageSetting,
+  key: "max_tokens",
+  label: "Maximum output",
+  type: "integer",
+  default: 1024,
+  minimum: 1,
+  maximum: 131072,
+  scope: "request",
+  help: "Maximum tokens generated for one assistant run.",
+};
+
 const roleAwareMediaEngine: EngineCapabilities = {
   engine: "mock",
   version: "1",
@@ -228,6 +240,39 @@ describe("App", () => {
     fireEvent.click(screen.getByText("Save chat"));
     await waitFor(() => expect(vi.mocked(api.updateChat).mock.calls[0]?.[0]).toBe("chat-1"));
     expect(vi.mocked(api.updateChat).mock.calls[0]?.[1]).toMatchObject({ title: "Renamed notes", project_id: null, archived: true });
+  });
+
+  it("contains long chat lists in a dedicated workspace scroll region", async () => {
+    const stamp = "2026-07-22T00:00:00Z";
+    vi.mocked(api.chats).mockResolvedValue(
+      Array.from({ length: 40 }, (_, index) => ({
+        id: `chat-${index}`,
+        project_id: null,
+        title: `Diagnostic chat ${index + 1}`,
+        archived: false,
+        routing_mode: "auto" as const,
+        confirm_uncertain_media: false,
+        active_chat_profile_id: null,
+        active_image_profile_id: null,
+        active_video_profile_id: null,
+        active_head_message_id: null,
+        created_at: stamp,
+        updated_at: stamp,
+      })),
+    );
+    const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+    render(
+      <QueryClientProvider client={client}>
+        <App />
+      </QueryClientProvider>,
+    );
+
+    const workspace = await screen.findByRole("region", { name: "Projects and chats" });
+    expect(workspace).toHaveClass("workspace-tree");
+    await waitFor(() => expect(workspace.querySelectorAll(".sidebar-chat-row")).toHaveLength(40));
+    expect(workspace).toContainElement(screen.getByText("Diagnostic chat 40"));
+    expect(workspace).not.toContainElement(screen.getByLabelText("Search projects and chats"));
+    expect(workspace).not.toContainElement(screen.getByRole("button", { name: "Settings" }));
   });
 
   it("imports portable project archives from the workspace sidebar", async () => {
@@ -460,6 +505,63 @@ describe("App", () => {
     const cancellation = screen.getByText("Generation cancelled");
     expect(cancellation.closest(".message-meta")).not.toBeNull();
     expect(cancellation.closest(".message-error")).toBeNull();
+  });
+
+  it("keeps failed assistant text above its error", async () => {
+    localStorage.setItem("local-lm-chat", "chat-failed");
+    const stamp = "2026-07-23T00:00:00Z";
+    const chat = {
+      id: "chat-failed",
+      project_id: null,
+      title: "Failed stream",
+      archived: false,
+      routing_mode: "text" as const,
+      confirm_uncertain_media: false,
+      active_chat_profile_id: null,
+      active_image_profile_id: null,
+      active_video_profile_id: null,
+      active_head_message_id: "assistant-failed",
+      created_at: stamp,
+      updated_at: stamp,
+    };
+    vi.mocked(api.chats).mockResolvedValue([chat]);
+    vi.mocked(api.chat).mockResolvedValue({
+      ...chat,
+      messages: [
+        {
+          id: "user-failed",
+          chat_id: chat.id,
+          parent_id: null,
+          role: "user",
+          status: "complete",
+          parts: [{ id: "prompt", position: 0, type: "text", text: "Keep counting", artifact_id: null, metadata_json: {} }],
+          created_at: stamp,
+          updated_at: stamp,
+        },
+        {
+          id: "assistant-failed",
+          chat_id: chat.id,
+          parent_id: "user-failed",
+          role: "assistant",
+          status: "failed",
+          parts: [
+            { id: "partial", position: 0, type: "text", text: "1 2 3 4 5", artifact_id: null, metadata_json: {} },
+            { id: "error", position: 1, type: "error", text: "llama.cpp stream failed: ReadError", artifact_id: null, metadata_json: {} },
+          ],
+          created_at: stamp,
+          updated_at: stamp,
+        },
+      ],
+    });
+    const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+    render(
+      <QueryClientProvider client={client}>
+        <App />
+      </QueryClientProvider>,
+    );
+    expect(await screen.findByText("1 2 3 4 5")).toBeInTheDocument();
+    const error = screen.getByText("llama.cpp stream failed: ReadError");
+    expect(error.closest(".message-error")).not.toBeNull();
   });
 
   it("renders an in-progress media preview inside the assistant message", async () => {
@@ -911,5 +1013,133 @@ describe("App", () => {
     fireEvent.change(mode, { target: { value: "video" } });
     expect(await screen.findByText("Frames")).toBeInTheDocument();
     expect(screen.queryByText("Negative prompt")).not.toBeInTheDocument();
+  });
+
+  it("applies turn controls to send, edit-and-branch, and regenerate actions", async () => {
+    const stamp = "2026-07-22T00:00:00Z";
+    const chat = {
+      id: "chat-turn-overrides",
+      project_id: null,
+      title: "Turn overrides",
+      archived: false,
+      routing_mode: "text" as const,
+      confirm_uncertain_media: false,
+      active_chat_profile_id: null,
+      active_image_profile_id: null,
+      active_video_profile_id: null,
+      active_head_message_id: "assistant-turn-overrides",
+      created_at: stamp,
+      updated_at: stamp,
+    };
+    const userMessage = {
+      id: "user-turn-overrides",
+      chat_id: chat.id,
+      parent_id: null,
+      role: "user" as const,
+      status: "complete" as const,
+      parts: [{ id: "user-part", position: 0, type: "text" as const, text: "Count to 100", artifact_id: null, metadata_json: {} }],
+      created_at: stamp,
+      updated_at: stamp,
+    };
+    const assistantMessage = {
+      id: "assistant-turn-overrides",
+      chat_id: chat.id,
+      parent_id: userMessage.id,
+      role: "assistant" as const,
+      status: "complete" as const,
+      parts: [{ id: "assistant-part", position: 0, type: "text" as const, text: "1 2 3", artifact_id: null, metadata_json: {} }],
+      created_at: stamp,
+      updated_at: stamp,
+    };
+    localStorage.setItem("local-lm-chat", chat.id);
+    vi.mocked(api.engines).mockResolvedValue([{
+      ...roleAwareMediaEngine,
+      roles: ["chat"],
+      operations: ["text"],
+      settings: [maxTokensSetting],
+      settings_by_role: { chat: [maxTokensSetting] },
+    }]);
+    vi.mocked(api.chats).mockResolvedValue([chat]);
+    vi.mocked(api.chat).mockResolvedValue({ ...chat, messages: [userMessage, assistantMessage] });
+    vi.mocked(api.sendTurn).mockReturnValue(new Promise(() => {}));
+    vi.mocked(api.branchMessage).mockReturnValue(new Promise(() => {}));
+    vi.mocked(api.regenerateMessage).mockReturnValue(new Promise(() => {}));
+    const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+    render(
+      <QueryClientProvider client={client}>
+        <App />
+      </QueryClientProvider>,
+    );
+
+    fireEvent.click(await screen.findByRole("button", { name: "Turn settings" }));
+    fireEvent.change(screen.getByRole("spinbutton", { name: /Maximum output/ }), { target: { value: "4096" } });
+    fireEvent.click(screen.getByRole("button", { name: "Close settings" }));
+
+    fireEvent.change(screen.getByPlaceholderText(/Ask anything/), { target: { value: "Count to 1000" } });
+    fireEvent.click(screen.getByRole("button", { name: "Send" }));
+    await waitFor(() => expect(api.sendTurn).toHaveBeenCalledWith(chat.id, "Count to 1000", "text", [], { max_tokens: 4096 }));
+
+    fireEvent.click(screen.getByText("Edit and branch"));
+    fireEvent.change(screen.getByLabelText("Edit message"), { target: { value: "Count to 1000" } });
+    fireEvent.click(screen.getByText("Send edited message"));
+    await waitFor(() => expect(api.branchMessage).toHaveBeenCalledWith(userMessage.id, "Count to 1000", { max_tokens: 4096 }));
+
+    fireEvent.click(screen.getByRole("button", { name: "Regenerate response" }));
+    await waitFor(() => expect(api.regenerateMessage).toHaveBeenCalledWith(assistantMessage.id, { max_tokens: 4096 }));
+  });
+
+  it("keeps turn controls isolated to their chat", async () => {
+    const stamp = "2026-07-22T00:00:00Z";
+    const chat = (id: string, title: string) => ({
+      id,
+      project_id: null,
+      title,
+      archived: false,
+      routing_mode: "text" as const,
+      confirm_uncertain_media: false,
+      active_chat_profile_id: null,
+      active_image_profile_id: null,
+      active_video_profile_id: null,
+      active_head_message_id: null,
+      created_at: stamp,
+      updated_at: stamp,
+    });
+    const firstChat = chat("chat-settings-one", "Settings chat one");
+    const secondChat = chat("chat-settings-two", "Settings chat two");
+    localStorage.setItem("local-lm-chat", firstChat.id);
+    vi.mocked(api.engines).mockResolvedValue([{
+      ...roleAwareMediaEngine,
+      roles: ["chat"],
+      operations: ["text"],
+      settings: [maxTokensSetting],
+      settings_by_role: { chat: [maxTokensSetting] },
+    }]);
+    vi.mocked(api.chats).mockResolvedValue([firstChat, secondChat]);
+    vi.mocked(api.chat).mockImplementation(async (id) => ({
+      ...(id === firstChat.id ? firstChat : secondChat),
+      messages: [],
+    }));
+    const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+    render(
+      <QueryClientProvider client={client}>
+        <App />
+      </QueryClientProvider>,
+    );
+
+    fireEvent.click(await screen.findByRole("button", { name: "Turn settings" }));
+    fireEvent.change(screen.getByRole("spinbutton", { name: /Maximum output/ }), { target: { value: "4096" } });
+    fireEvent.click(screen.getByRole("button", { name: "Close settings" }));
+
+    fireEvent.click(screen.getByText(secondChat.title));
+    await screen.findByRole("heading", { name: secondChat.title });
+    fireEvent.click(screen.getByRole("button", { name: "Turn settings" }));
+    expect(screen.getByRole("spinbutton", { name: /Maximum output/ })).toHaveValue(1024);
+    fireEvent.change(screen.getByRole("spinbutton", { name: /Maximum output/ }), { target: { value: "2048" } });
+    fireEvent.click(screen.getByRole("button", { name: "Close settings" }));
+
+    fireEvent.click(screen.getByText(firstChat.title));
+    await screen.findByRole("heading", { name: firstChat.title });
+    fireEvent.click(screen.getByRole("button", { name: "Turn settings" }));
+    expect(screen.getByRole("spinbutton", { name: /Maximum output/ })).toHaveValue(4096);
   });
 });
