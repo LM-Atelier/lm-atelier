@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from typing import Literal
 
 import keyring
 from keyring.errors import KeyringError
@@ -13,7 +14,7 @@ class CredentialVaultUnavailable(RuntimeError):
 @dataclass(frozen=True)
 class CredentialState:
     configured: bool
-    source: str
+    source: Literal["none", "environment", "credential_vault"]
     vault_available: bool
 
 
