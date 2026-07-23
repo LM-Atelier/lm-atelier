@@ -5,4 +5,5 @@ $AppRoot = Join-Path $InstallRoot "versions\$Version"
 if (-not $env:LOCAL_LM_DATA_DIR) { $env:LOCAL_LM_DATA_DIR = Join-Path $InstallRoot "data" }
 if (-not $env:LOCAL_LM_HOST) { $env:LOCAL_LM_HOST = "127.0.0.1" }
 Set-Location $AppRoot
-& (Join-Path $AppRoot ".venv\Scripts\lm-atelier.exe")
+$Python = Join-Path $AppRoot ".venv\Scripts\python.exe"
+& $Python -c "from local_lm.main import run; run()"

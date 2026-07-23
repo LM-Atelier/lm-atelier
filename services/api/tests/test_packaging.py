@@ -39,3 +39,15 @@ def test_installers_preserve_data_unless_purge_is_explicit() -> None:
     assert "--purge-data" in linux
     assert "PurgeData" in windows
     assert "versions" in linux and "versions" in windows
+
+
+def test_installed_launchers_avoid_relocated_console_scripts() -> None:
+    linux = (ROOT / "packaging/linux/start-installed.sh").read_text()
+    windows = (ROOT / "packaging/windows/start-local-lm.ps1").read_text()
+
+    assert ".venv/bin/python" in linux
+    assert '.venv\\Scripts\\python.exe"' in windows
+    assert "from local_lm.main import run; run()" in linux
+    assert "from local_lm.main import run; run()" in windows
+    assert ".venv/bin/lm-atelier" not in linux
+    assert ".venv\\Scripts\\lm-atelier.exe" not in windows
