@@ -3,13 +3,17 @@ from __future__ import annotations
 import asyncio
 import fnmatch
 import hashlib
+import json
 import os
 import re
 import shutil
+import subprocess
+import sys
+from contextlib import suppress
 from pathlib import Path, PurePosixPath
 from typing import Any
 
-from huggingface_hub import HfApi, hf_hub_download
+from huggingface_hub import HfApi
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
@@ -28,6 +32,7 @@ class DownloadManager:
         self.events = events
         self._api = HfApi(token=settings.hf_token)
         self._tasks: dict[str, asyncio.Task[None]] = {}
+        self._workers: dict[str, subprocess.Popen[bytes]] = {}
         self._semaphore = asyncio.Semaphore(settings.max_concurrent_downloads)
 
     def set_token(self, token: str | None) -> None:
@@ -107,10 +112,7 @@ class DownloadManager:
     async def cancel(self, job_id: str) -> bool:
         from .db import SessionLocal
 
-        task = self._tasks.get(job_id)
-        if task:
-            task.cancel()
-            await asyncio.gather(task, return_exceptions=True)
+        await self._stop_task(job_id)
         with SessionLocal() as session:
             job = session.get(Job, job_id)
             if not job or job.kind != JobKind.DOWNLOAD.value:
@@ -131,10 +133,7 @@ class DownloadManager:
     async def pause(self, job_id: str) -> bool:
         from .db import SessionLocal
 
-        task = self._tasks.get(job_id)
-        if task:
-            task.cancel()
-            await asyncio.gather(task, return_exceptions=True)
+        await self._stop_task(job_id)
         with SessionLocal() as session:
             job = session.get(Job, job_id)
             if (
@@ -170,11 +169,10 @@ class DownloadManager:
     async def close(self) -> None:
         from .db import SessionLocal
 
-        tasks = list(self._tasks.values())
-        for task in tasks:
-            task.cancel()
-        if tasks:
-            await asyncio.gather(*tasks, return_exceptions=True)
+        await asyncio.gather(
+            *(self._stop_task(job_id) for job_id in list(self._tasks)),
+            return_exceptions=True,
+        )
         with SessionLocal() as session:
             jobs = session.scalars(
                 select(Job).where(
@@ -263,13 +261,12 @@ class DownloadManager:
                 destination = self.settings.model_dir / safe_name / revision
                 staging.mkdir(parents=True, exist_ok=True)
                 for index, filename in enumerate(filenames):
-                    downloaded_path = await asyncio.to_thread(
-                        hf_hub_download,
-                        repo_id=request.remote_id,
+                    downloaded_path = await self._download_file(
+                        job_id=job_id,
+                        remote_id=request.remote_id,
                         filename=filename,
                         revision=revision,
-                        local_dir=staging,
-                        token=self.settings.hf_token,
+                        staging=staging,
                     )
                     expected_hash = request.expected_sha256.get(filename)
                     if expected_hash:
@@ -372,6 +369,73 @@ class DownloadManager:
                     job.completed_at = utcnow()
                     session.commit()
             await self.events.publish("download.failed", job_id, {"error": str(exc)})
+
+    async def _stop_task(self, job_id: str) -> None:
+        """Stop the isolated transfer process before cancelling its controller task."""
+        worker = self._workers.get(job_id)
+        if worker and worker.poll() is None:
+            with suppress(ProcessLookupError):
+                worker.terminate()
+        task = self._tasks.get(job_id)
+        if task and not task.done():
+            task.cancel()
+            await asyncio.gather(task, return_exceptions=True)
+        if worker and worker.poll() is None:
+            with suppress(ProcessLookupError):
+                await asyncio.to_thread(worker.wait)
+
+    async def _download_file(
+        self,
+        *,
+        job_id: str,
+        remote_id: str,
+        filename: str,
+        revision: str,
+        staging: Path,
+    ) -> str:
+        """Run the blocking Hub transfer in a process that pause/cancel can terminate."""
+        creationflags = subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0
+        environment = os.environ.copy()
+        environment["HF_HUB_DISABLE_PROGRESS_BARS"] = "1"
+        process = subprocess.Popen(
+            [sys.executable, "-m", "local_lm.download_worker"],
+            stdin=subprocess.PIPE,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            env=environment,
+            creationflags=creationflags,
+        )
+        self._workers[job_id] = process
+        payload = json.dumps(
+            {
+                "repo_id": remote_id,
+                "filename": filename,
+                "revision": revision,
+                "local_dir": str(staging),
+                "token": self.settings.hf_token,
+            }
+        ).encode()
+        try:
+            stdout, stderr = await asyncio.to_thread(process.communicate, payload)
+        finally:
+            if self._workers.get(job_id) is process:
+                self._workers.pop(job_id, None)
+            if process.poll() is None:
+                with suppress(ProcessLookupError):
+                    process.terminate()
+                with suppress(ProcessLookupError):
+                    await asyncio.to_thread(process.wait)
+        if process.returncode:
+            detail = stderr.decode(errors="replace").strip()
+            raise RuntimeError(detail[-2_000:] or "Hub download worker failed")
+        try:
+            result = json.loads(stdout)
+            path = result["path"]
+        except (json.JSONDecodeError, KeyError, TypeError) as exc:
+            raise RuntimeError("Hub download worker returned an invalid response") from exc
+        if not isinstance(path, str):
+            raise RuntimeError("Hub download worker returned an invalid path")
+        return path
 
     @staticmethod
     def _activate_staging(staging: Path, destination: Path) -> None:
