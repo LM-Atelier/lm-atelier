@@ -418,6 +418,30 @@ async def test_active_chat_run_can_be_cancelled_directly(client: AsyncClient) ->
     assert run["status"] == "cancelled"
 
 
+async def test_cancelled_media_run_can_be_retried(client: AsyncClient) -> None:
+    chat = (await client.post("/api/chats", json={"title": "Retry cancelled media"})).json()
+    turn = await client.post(
+        f"/api/chats/{chat['id']}/turns",
+        json={"text": "Create a retryable video", "mode": "video"},
+    )
+    assert turn.status_code == 202
+
+    cancelled = await client.post(f"/api/chats/{chat['id']}/cancel")
+    assert cancelled.status_code == 200
+    assert cancelled.json()["status"] == "cancelled"
+
+    retried = await client.post(f"/api/jobs/{cancelled.json()['id']}/retry")
+    assert retried.status_code == 200
+    assert retried.json()["status"] in {"queued", "running"}
+
+    run = await wait_for_run(client, turn.json()["run"]["id"])
+    assert run["operation"] == "text_to_video"
+    jobs = (await client.get("/api/jobs")).json()
+    completed = next(job for job in jobs if job["id"] == cancelled.json()["id"])
+    assert completed["status"] == "complete"
+    assert completed["attempt"] == 2
+
+
 async def test_editing_user_message_creates_new_active_branch(client: AsyncClient) -> None:
     chat = (await client.post("/api/chats", json={"title": "Edit branch"})).json()
     first = await client.post(
