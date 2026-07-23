@@ -899,14 +899,14 @@ function PresetEditor({
   const remove = useMutation({ mutationFn: () => api.deletePreset(preset.id), onSuccess: () => { refresh(); onClose(); } });
   const exportBundle = useMutation({ mutationFn: () => api.exportPreset(preset.id), onSuccess: (bundle) => downloadJson(bundle, `${preset.name.replaceAll(/[^a-z0-9]+/gi, "-").toLowerCase()}.lm-atelier-preset.json`) });
   const engine = engines.find((item) => item.roles.includes(preset.role));
-  const fields = resolveCapabilitySettings(engine, preset.role).filter((field) => visibilityRank[field.visibility] <= visibilityRank[visibility] && field.available);
+  const fields = resolveCapabilitySettings(engine, preset.role).filter((field) => field.scope !== "load" && visibilityRank[field.visibility] <= visibilityRank[visibility] && field.available);
   const error = save.error ?? clone.error ?? reset.error ?? remove.error ?? exportBundle.error;
   return (
     <div className="modal-backdrop">
       <div className="modal settings-editor">
         <header><div><small>{preset.role} generation preset</small><h2>Edit preset</h2></div><button className="icon-button" onClick={onClose} aria-label="Close preset editor"><X /></button></header>
         <label>Preset name<input value={name} onChange={(event) => setName(event.target.value)} /></label>
-        <label className="toggle-row"><span><strong>Default {preset.role} preset</strong><small>Apply these values when no explicit preset is selected.</small></span><input type="checkbox" checked={isDefault} onChange={(event) => setIsDefault(event.target.checked)} /></label>
+        <label className="toggle-row"><span><strong>Default {preset.role} preset</strong><small>Apply these values automatically to new {preset.role} generations.</small></span><input type="checkbox" checked={isDefault} onChange={(event) => setIsDefault(event.target.checked)} /></label>
         <div className="segmented compact">{(["basic", "advanced", "expert"] as Visibility[]).map((level) => <button key={level} className={visibility === level ? "active" : ""} onClick={() => setVisibility(level)}>{level}</button>)}</div>
         <div className="settings-list embedded">{fields.map((field) => <div className="scoped-setting" key={`${field.scope}:${field.key}:${JSON.stringify(settings[field.key])}`}><span className="scope-label">{field.scope}</span><SettingControl field={field} value={settings[field.key] ?? field.default} onChange={(value) => setSettings({ ...settings, [field.key]: value })} /></div>)}</div>
         {error && <div className="callout error">{error.message}</div>}

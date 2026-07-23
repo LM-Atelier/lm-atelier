@@ -32,6 +32,7 @@ from .events import EventBroker
 from .models import (
     Artifact,
     Chat,
+    GenerationPreset,
     Job,
     Message,
     MessagePart,
@@ -197,10 +198,20 @@ class ConversationOrchestrator:
         fields = self._fields_for_operation(plan.operation)
         request_fields = [field for field in fields if field.scope != "load"]
         request_settings = validate_settings(request.settings, request_fields)
+        preset = self._default_preset(session, plan.operation)
+        preset_settings = validate_settings(
+            {
+                key: value
+                for key, value in (preset.settings_json if preset else {}).items()
+                if key in {field.key for field in request_fields}
+            },
+            request_fields,
+        )
         effective_settings = resolve_settings(
             defaults(fields),
             profile.load_settings_json if profile else None,
             profile.request_settings_json if profile else None,
+            preset_settings,
             request_settings,
         )
         effective_settings = validate_settings(effective_settings, fields)
@@ -311,6 +322,16 @@ class ConversationOrchestrator:
                 "routing": plan.model_dump(mode="json"),
                 "input_artifact_ids": resolved_input_ids,
                 "model": model_provenance,
+                "preset": (
+                    {
+                        "id": preset.id,
+                        "name": preset.name,
+                        "role": preset.role,
+                        "settings": preset_settings,
+                    }
+                    if preset
+                    else None
+                ),
                 "workflow": workflow_provenance,
                 "resolved_settings": effective_settings,
                 "generation_estimate": generation_estimate,
@@ -1097,6 +1118,26 @@ class ConversationOrchestrator:
         if "image" in operation.value and "video" not in operation.value:
             return chat.active_image_profile_id
         return chat.active_video_profile_id
+
+    @classmethod
+    def _default_preset(cls, session: Session, operation: Operation) -> GenerationPreset | None:
+        return session.scalar(
+            select(GenerationPreset)
+            .where(
+                GenerationPreset.role == cls._role_for_operation(operation),
+                GenerationPreset.is_default.is_(True),
+            )
+            .order_by(GenerationPreset.updated_at.desc(), GenerationPreset.id)
+            .limit(1)
+        )
+
+    @staticmethod
+    def _role_for_operation(operation: Operation) -> str:
+        if operation == Operation.TEXT:
+            return "chat"
+        if "video" in operation.value:
+            return "video"
+        return "image"
 
     @staticmethod
     def _fields_for_operation(operation: Operation):  # type: ignore[no-untyped-def]

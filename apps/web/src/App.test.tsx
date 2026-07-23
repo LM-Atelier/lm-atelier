@@ -990,6 +990,35 @@ describe("App", () => {
     expect(screen.queryByText("Negative prompt")).not.toBeInTheDocument();
   });
 
+  it("keeps load-only controls out of generation presets", async () => {
+    vi.mocked(api.engines).mockResolvedValue([{
+      ...roleAwareMediaEngine,
+      roles: ["chat"],
+      operations: ["text"],
+      settings: [contextLengthSetting, maxTokensSetting],
+      settings_by_role: { chat: [contextLengthSetting, maxTokensSetting] },
+    }]);
+    vi.mocked(api.presets).mockResolvedValue([{
+      id: "chat-preset",
+      name: "Chat preset",
+      role: "chat",
+      settings_json: {},
+      is_default: false,
+    }]);
+    const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+    render(
+      <QueryClientProvider client={client}>
+        <App />
+      </QueryClientProvider>,
+    );
+
+    fireEvent.click(await screen.findByText("Settings"));
+    await screen.findByText("Chat preset");
+    fireEvent.click(screen.getByRole("button", { name: "Edit" }));
+    expect(await screen.findByText("Maximum output")).toBeInTheDocument();
+    expect(screen.queryByText("Context length")).not.toBeInTheDocument();
+  });
+
   it("isolates role-aware settings in per-turn controls", async () => {
     const stamp = "2026-07-22T00:00:00Z";
     const chat = {

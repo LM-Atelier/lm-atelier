@@ -877,6 +877,60 @@ async def test_preset_lifecycle_and_portable_bundle(client: AsyncClient) -> None
     assert deleted.status_code == 204
 
 
+async def test_default_preset_is_resolved_between_profile_and_turn_settings(
+    client: AsyncClient,
+) -> None:
+    profiles = (await client.get("/api/profiles?role=chat")).json()
+    profile = profiles[0]
+    updated = await client.patch(
+        f"/api/profiles/{profile['id']}",
+        json={"request_settings": {"temperature": 0.25, "max_tokens": 32}},
+    )
+    assert updated.status_code == 200
+    preset = await client.post(
+        "/api/presets",
+        json={
+            "name": "Default precise",
+            "role": "chat",
+            "settings": {"temperature": 0.1, "max_tokens": 48},
+            "is_default": True,
+        },
+    )
+    assert preset.status_code == 201
+    chat = (await client.post("/api/chats", json={"title": "Preset resolution"})).json()
+    turn = await client.post(
+        f"/api/chats/{chat['id']}/turns",
+        json={
+            "text": "Apply all setting layers",
+            "mode": "text",
+            "settings": {"max_tokens": 16},
+        },
+    )
+    assert turn.status_code == 202
+    run = turn.json()["run"]
+    assert run["settings_json"]["temperature"] == 0.1
+    assert run["settings_json"]["max_tokens"] == 16
+    assert run["provenance_json"]["preset"] == {
+        "id": preset.json()["id"],
+        "name": "Default precise",
+        "role": "chat",
+        "settings": {"temperature": 0.1, "max_tokens": 48},
+    }
+
+
+async def test_chat_preset_rejects_load_only_settings(client: AsyncClient) -> None:
+    preset = await client.post(
+        "/api/presets",
+        json={
+            "name": "Invalid load preset",
+            "role": "chat",
+            "settings": {"context_length": 512},
+        },
+    )
+    assert preset.status_code == 422
+    assert "unsupported settings: context_length" in preset.json()["detail"]
+
+
 async def test_model_storage_cleanup_and_shared_path_deletion(
     client: AsyncClient, settings: Settings
 ) -> None:

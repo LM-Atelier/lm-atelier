@@ -1207,7 +1207,7 @@ async def create_profile(payload: ModelProfileCreate, session: SessionDep) -> Mo
             select(ModelProfile).where(ModelProfile.role == payload.role)
         ).all():
             profile.is_default = False
-    fields = _preset_fields(payload.role)
+    fields = _role_fields(payload.role)
     try:
         load_settings = validate_settings(
             payload.load_settings, [field for field in fields if field.scope == "load"]
@@ -1252,7 +1252,7 @@ async def update_profile(
         try:
             profile.load_settings_json = validate_settings(
                 values.pop("load_settings") or {},
-                [field for field in _preset_fields(profile.role) if field.scope == "load"],
+                [field for field in _role_fields(profile.role) if field.scope == "load"],
             )
         except ValueError as exc:
             raise HTTPException(422, str(exc)) from exc
@@ -1260,7 +1260,7 @@ async def update_profile(
         try:
             profile.request_settings_json = validate_settings(
                 values.pop("request_settings") or {},
-                [field for field in _preset_fields(profile.role) if field.scope != "load"],
+                [field for field in _role_fields(profile.role) if field.scope != "load"],
             )
         except ValueError as exc:
             raise HTTPException(422, str(exc)) from exc
@@ -1351,8 +1351,12 @@ async def import_profile(payload: ModelProfileBundle, session: SessionDep) -> Mo
     )
 
 
-def _preset_fields(role: str):  # type: ignore[no-untyped-def]
+def _role_fields(role: str):  # type: ignore[no-untyped-def]
     return {"chat": CHAT_SETTINGS, "image": IMAGE_SETTINGS, "video": VIDEO_SETTINGS}[role]
+
+
+def _preset_fields(role: str):  # type: ignore[no-untyped-def]
+    return [field for field in _role_fields(role) if field.scope != "load"]
 
 
 @router.get("/presets", response_model=list[PresetOut])
