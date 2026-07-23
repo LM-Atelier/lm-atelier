@@ -145,7 +145,11 @@ class LlamaCppAdapter:
                         finish_reason = str(choice["finish_reason"])
                 yield ChatEvent(type="complete", data={"finish_reason": finish_reason})
         except httpx.HTTPError as exc:
-            yield ChatEvent(type="error", data={"error": str(exc)})
+            detail = str(exc).strip() or type(exc).__name__
+            yield ChatEvent(
+                type="error",
+                data={"error": f"llama.cpp stream failed: {detail}"},
+            )
 
     async def cancel(self, run_id: str) -> None:
         self._cancelled.add(run_id)

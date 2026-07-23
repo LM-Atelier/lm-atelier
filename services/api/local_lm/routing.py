@@ -88,18 +88,11 @@ class ModalityRouter:
                     "Route the latest user message. A request to discuss, explain, write, or "
                     "analyze media is text; only route image/video when the user wants media "
                     "created or modified. Use prior-image context only for a clear visual "
-                    "follow-up. Always call choose_route and do not answer normally."
-                ),
-            }
-        ]
-        messages.append(
-            {
-                "role": "system",
-                "content": (
+                    "follow-up. Always call choose_route and do not answer normally.\n"
                     f"Prior generated image available: {'yes' if has_prior_image else 'no'}."
                 ),
             }
-        )
+        ]
         messages.extend((conversation or [])[-8:])
         messages.append({"role": "user", "content": text})
         calls: dict[int, dict[str, str]] = {}
