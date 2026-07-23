@@ -411,11 +411,31 @@ async def test_active_chat_run_can_be_cancelled_directly(client: AsyncClient) ->
         json={"text": "Write a response long enough to stop", "mode": "text"},
     )
     assert turn.status_code == 202
+    assistant_id = turn.json()["assistant_message"]["id"]
+    deadline = asyncio.get_running_loop().time() + 5
+    streamed_text = ""
+    while asyncio.get_running_loop().time() < deadline:
+        assistant = (await client.get(f"/api/messages/{assistant_id}")).json()
+        streamed_text = "".join(
+            part["text"] or "" for part in assistant["parts"] if part["type"] == "text"
+        )
+        if streamed_text:
+            break
+        await asyncio.sleep(0.01)
+    assert streamed_text
+
     cancelled = await client.post(f"/api/chats/{chat['id']}/cancel")
     assert cancelled.status_code == 200
     assert cancelled.json()["status"] == "cancelled"
     run = (await client.get(f"/api/runs/{turn.json()['run']['id']}")).json()
     assert run["status"] == "cancelled"
+    assistant = (await client.get(f"/api/messages/{assistant_id}")).json()
+    assert assistant["status"] == "cancelled"
+    final_text = "".join(
+        part["text"] or "" for part in assistant["parts"] if part["type"] == "text"
+    )
+    assert final_text.startswith(streamed_text.rstrip())
+    assert not any(part["type"] == "error" for part in assistant["parts"])
 
 
 async def test_cancelled_media_run_can_be_retried(client: AsyncClient) -> None:
