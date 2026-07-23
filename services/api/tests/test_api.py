@@ -14,7 +14,7 @@ from local_lm.catalog import HuggingFaceCatalog
 from local_lm.config import Settings
 from local_lm.db import SessionLocal
 from local_lm.downloads import DownloadManager
-from local_lm.models import Artifact
+from local_lm.models import Artifact, Job
 
 
 async def wait_for_assistant(client: AsyncClient, chat_id: str, expected_type: str) -> dict:  # type: ignore[type-arg]
@@ -48,6 +48,23 @@ async def wait_for_run(client: AsyncClient, run_id: str) -> dict:  # type: ignor
             return run
         await asyncio.sleep(0.03)
     raise AssertionError("run did not complete")
+
+
+async def test_health_probes_the_database(client: AsyncClient, monkeypatch) -> None:  # type: ignore[no-untyped-def]
+    healthy = await client.get("/api/health")
+    assert healthy.status_code == 200
+    assert healthy.json()["database"] is True
+
+    def fail_probe(*_args, **_kwargs):  # type: ignore[no-untyped-def]
+        from sqlalchemy.exc import OperationalError
+
+        raise OperationalError("SELECT 1", {}, Exception("database unavailable"))
+
+    monkeypatch.setattr("sqlalchemy.orm.Session.execute", fail_probe)
+    degraded = await client.get("/api/health")
+    assert degraded.status_code == 200
+    assert degraded.json()["status"] == "degraded"
+    assert degraded.json()["database"] is False
 
 
 async def test_project_and_chat_management_contract(client: AsyncClient) -> None:
@@ -306,6 +323,29 @@ async def test_worker_management_reports_missing_local_binaries(client: AsyncCli
     assert all(item["current_memory_bytes"] is None for item in workers.json())
     media = await client.post("/api/workers/media/start")
     assert media.status_code == 422
+
+
+async def test_worker_changes_are_rejected_while_generation_is_pending(
+    client: AsyncClient,
+) -> None:
+    with SessionLocal() as session:
+        session.add(
+            Job(
+                kind="chat",
+                status="queued",
+                phase="queued",
+                payload_json={},
+            )
+        )
+        session.commit()
+
+    stopped = await client.post("/api/workers/chat/stop")
+    assert stopped.status_code == 409
+    assert "active or queued job" in stopped.json()["detail"]
+
+    profiles = (await client.get("/api/profiles?role=chat")).json()
+    loaded = await client.post(f"/api/workers/chat/load/{profiles[0]['id']}")
+    assert loaded.status_code == 409
 
 
 async def test_chat_tool_capability_probe_executes_declared_schema(client: AsyncClient) -> None:
@@ -580,11 +620,27 @@ async def test_long_chat_records_visible_context_truncation(client: AsyncClient)
     context = final_run["provenance_json"]["context"]
     assert context["messages_omitted"] > 0
     assert context["input_tokens"] <= context["input_budget"]
+    assert final_run["settings_json"]["context_length"] == 512
+    assert final_run["provenance_json"]["resolved_settings"]["context_length"] == 512
 
     detail = (await client.get(f"/api/chats/{chat['id']}")).json()
     assistant = [item for item in detail["messages"] if item["role"] == "assistant"][-1]
     metadata = next(part for part in assistant["parts"] if part["type"] == "generation_metadata")
     assert metadata["metadata_json"]["context"]["messages_omitted"] > 0
+
+
+async def test_turn_rejects_load_only_setting_overrides(client: AsyncClient) -> None:
+    chat = (await client.post("/api/chats", json={"title": "Load settings"})).json()
+    response = await client.post(
+        f"/api/chats/{chat['id']}/turns",
+        json={
+            "text": "Do not restart the worker",
+            "mode": "text",
+            "settings": {"context_length": 512},
+        },
+    )
+    assert response.status_code == 422
+    assert "unsupported settings: context_length" in response.json()["detail"]
 
 
 async def test_artifact_upload_deduplicates_content(client: AsyncClient) -> None:
@@ -836,6 +892,60 @@ async def test_preset_lifecycle_and_portable_bundle(client: AsyncClient) -> None
 
     deleted = await client.delete(f"/api/presets/{cloned.json()['id']}")
     assert deleted.status_code == 204
+
+
+async def test_default_preset_is_resolved_between_profile_and_turn_settings(
+    client: AsyncClient,
+) -> None:
+    profiles = (await client.get("/api/profiles?role=chat")).json()
+    profile = profiles[0]
+    updated = await client.patch(
+        f"/api/profiles/{profile['id']}",
+        json={"request_settings": {"temperature": 0.25, "max_tokens": 32}},
+    )
+    assert updated.status_code == 200
+    preset = await client.post(
+        "/api/presets",
+        json={
+            "name": "Default precise",
+            "role": "chat",
+            "settings": {"temperature": 0.1, "max_tokens": 48},
+            "is_default": True,
+        },
+    )
+    assert preset.status_code == 201
+    chat = (await client.post("/api/chats", json={"title": "Preset resolution"})).json()
+    turn = await client.post(
+        f"/api/chats/{chat['id']}/turns",
+        json={
+            "text": "Apply all setting layers",
+            "mode": "text",
+            "settings": {"max_tokens": 16},
+        },
+    )
+    assert turn.status_code == 202
+    run = turn.json()["run"]
+    assert run["settings_json"]["temperature"] == 0.1
+    assert run["settings_json"]["max_tokens"] == 16
+    assert run["provenance_json"]["preset"] == {
+        "id": preset.json()["id"],
+        "name": "Default precise",
+        "role": "chat",
+        "settings": {"temperature": 0.1, "max_tokens": 48},
+    }
+
+
+async def test_chat_preset_rejects_load_only_settings(client: AsyncClient) -> None:
+    preset = await client.post(
+        "/api/presets",
+        json={
+            "name": "Invalid load preset",
+            "role": "chat",
+            "settings": {"context_length": 512},
+        },
+    )
+    assert preset.status_code == 422
+    assert "unsupported settings: context_length" in preset.json()["detail"]
 
 
 async def test_model_storage_cleanup_and_shared_path_deletion(

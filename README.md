@@ -149,6 +149,11 @@ profiles keep their model binding when the same install exists locally and
 otherwise import safely as unbound profiles so they can be attached to a model
 on the destination machine.
 
+The default preset for a generation role is applied automatically. Settings
+resolve from capability defaults, then the selected model profile, the role's
+default preset, and finally per-turn overrides. Load-time controls remain
+profile-only because changing them requires replacing the worker.
+
 Before each chat run, LM Atelier asks llama.cpp for the chat-template-aware
 input token count. When a conversation exceeds the selected profile's context
 window, it preserves project instructions and the newest request while omitting

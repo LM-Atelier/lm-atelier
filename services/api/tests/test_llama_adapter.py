@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import json
 
 import httpx
@@ -89,6 +90,49 @@ async def test_llama_adapter_sends_tools_and_streams_structured_deltas() -> None
         assert events[-1].data["finish_reason"] == "tool_calls"
     finally:
         await adapter.close()
+
+
+async def test_llama_adapter_completes_when_terminal_choice_does_not_close_stream() -> None:
+    class NeverClosingTerminalStream(httpx.AsyncByteStream):
+        async def __aiter__(self):  # type: ignore[no-untyped-def]
+            yield b'data: {"choices":[{"delta":{"content":"done"}}]}\n\n'
+            yield (
+                b'data: {"choices":[{"delta":{},"finish_reason":"stop"}],'
+                b'"usage":{"completion_tokens":1}}\n\n'
+            )
+            await asyncio.Event().wait()
+
+    async def handler(_request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200,
+            stream=NeverClosingTerminalStream(),
+            headers={"content-type": "text/event-stream"},
+        )
+
+    adapter = LlamaCppAdapter("http://llama.test")
+    await adapter._client.aclose()
+    adapter._client = httpx.AsyncClient(
+        base_url="http://llama.test", transport=httpx.MockTransport(handler)
+    )
+    try:
+        events = await asyncio.wait_for(
+            _collect_events(
+                adapter,
+                ChatRequest(
+                    run_id="never-closing-terminal",
+                    messages=[{"role": "user", "content": "Finish"}],
+                ),
+            ),
+            timeout=0.5,
+        )
+        assert [event.type for event in events] == ["delta", "usage", "complete"]
+        assert events[-1].data["finish_reason"] == "stop"
+    finally:
+        await adapter.close()
+
+
+async def _collect_events(adapter: LlamaCppAdapter, request: ChatRequest):  # type: ignore[no-untyped-def]
+    return [event async for event in adapter.stream(request)]
 
 
 async def test_llama_adapter_names_an_http_error_after_partial_stream_output() -> None:

@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import asyncio
+
 import pytest
 from httpx2 import AsyncClient
 from sqlalchemy.orm import Session
@@ -26,6 +28,37 @@ def test_custom_node_sources_and_revisions_are_strictly_pinned(settings) -> None
             manager.normalize_source(unsafe)
     with pytest.raises(ValueError):
         manager.normalize_revision("main")
+
+
+async def test_custom_node_timeout_kills_and_reaps_git_process(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class HangingProcess:
+        returncode: int | None = None
+        killed = False
+        waited = False
+
+        async def communicate(self):  # type: ignore[no-untyped-def]
+            await asyncio.Event().wait()
+
+        def kill(self) -> None:
+            self.killed = True
+            self.returncode = -9
+
+        async def wait(self) -> int:
+            self.waited = True
+            return self.returncode or 0
+
+    process = HangingProcess()
+
+    async def create_process(*_args, **_kwargs):  # type: ignore[no-untyped-def]
+        return process
+
+    monkeypatch.setattr(asyncio, "create_subprocess_exec", create_process)
+    with pytest.raises(RuntimeError, match="timed out"):
+        await CustomNodeManager._run("git", "--version", timeout=0.01)
+    assert process.killed is True
+    assert process.waited is True
 
 
 async def test_custom_node_lifecycle_and_workflow_trust_gate(
