@@ -2,8 +2,10 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 from collections.abc import AsyncIterator
 from contextlib import suppress
+from pathlib import Path, PurePosixPath
 from typing import Any
 from urllib.parse import urlencode, urlparse, urlunparse
 from uuid import uuid4
@@ -15,6 +17,8 @@ from ..domain import Operation
 from ..schemas import EngineCapabilities
 from ..settings_registry import IMAGE_SETTINGS, VIDEO_SETTINGS
 from .base import GeneratedAsset, MediaEvent, MediaRequest
+
+logger = logging.getLogger(__name__)
 
 
 def _is_preview_image(content: bytes) -> bool:
@@ -47,11 +51,20 @@ def _preview_payload(frame: bytes) -> bytes | None:
 
 
 class ComfyUIAdapter:
-    def __init__(self, base_url: str, *, inactivity_seconds: float = 600) -> None:
+    def __init__(
+        self,
+        base_url: str,
+        *,
+        inactivity_seconds: float = 600,
+        managed_output_root: Path | None = None,
+    ) -> None:
         if inactivity_seconds <= 0:
             raise ValueError("ComfyUI inactivity timeout must be positive")
         self.base_url = base_url.rstrip("/")
         self.inactivity_seconds = inactivity_seconds
+        self.managed_output_root = (
+            managed_output_root.expanduser().resolve() if managed_output_root else None
+        )
         self._client = httpx.AsyncClient(
             base_url=self.base_url,
             timeout=httpx.Timeout(connect=10, read=None, write=30, pool=10),
@@ -268,6 +281,7 @@ class ComfyUIAdapter:
         history = response.json().get(prompt_id, {})
         outputs = history.get("outputs") or {}
         assets: list[GeneratedAsset] = []
+        managed_paths: set[Path] = set()
         for node_output in outputs.values():
             for collection, default_kind in (
                 ("images", "image"),
@@ -299,9 +313,50 @@ class ComfyUIAdapter:
                             metadata={"prompt_id": prompt_id, "operation": operation},
                         )
                     )
+                    if managed_path := self._managed_output_path(item):
+                        managed_paths.add(managed_path)
         if not assets:
             raise RuntimeError("ComfyUI completed without collectible image or video outputs")
+        await self._remove_managed_outputs(managed_paths)
         return assets
+
+    def _managed_output_path(self, item: dict[str, Any]) -> Path | None:
+        root = self.managed_output_root
+        if root is None or str(item.get("type", "output")) != "output":
+            return None
+        filename = str(item.get("filename") or "")
+        subfolder = str(item.get("subfolder") or "")
+        filename_path = PurePosixPath(filename.replace("\\", "/"))
+        subfolder_path = PurePosixPath(subfolder.replace("\\", "/"))
+        unsafe_parts = {"", ".", ".."}
+        if (
+            not filename
+            or filename_path.is_absolute()
+            or len(filename_path.parts) != 1
+            or filename_path.name in unsafe_parts
+            or subfolder_path.is_absolute()
+            or any(part in unsafe_parts or ":" in part for part in subfolder_path.parts)
+            or ":" in filename_path.name
+        ):
+            return None
+        candidate = root.joinpath(*subfolder_path.parts, filename_path.name).resolve()
+        try:
+            candidate.relative_to(root)
+        except ValueError:
+            return None
+        return candidate
+
+    @staticmethod
+    async def _remove_managed_outputs(paths: set[Path]) -> None:
+        for path in paths:
+            try:
+                await asyncio.to_thread(path.unlink, missing_ok=True)
+            except OSError as exc:
+                logger.warning(
+                    "Could not remove collected managed ComfyUI output %s: %s",
+                    path,
+                    exc,
+                )
 
     @staticmethod
     def _output_kind(*, filename: str, media_type: str, default_kind: str) -> str:

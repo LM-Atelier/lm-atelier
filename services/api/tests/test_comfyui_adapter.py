@@ -279,3 +279,79 @@ async def test_native_save_video_is_classified_by_media_type_not_collection() ->
 
     assert outputs[0].kind == "video"
     assert outputs[0].media_type == "video/mp4"
+
+
+async def test_collected_managed_outputs_are_removed_after_all_downloads(tmp_path: Path) -> None:
+    prompt_id = "prompt-cleanup"
+    output_root = tmp_path / "output"
+    first = output_root / "LMAtelier" / "first.png"
+    second = output_root / "LMAtelier" / "second.mp4"
+    first.parent.mkdir(parents=True)
+    first.write_bytes(b"first")
+    second.write_bytes(b"second")
+
+    async def comfy(request: httpx.Request) -> httpx.Response:
+        if request.url.path == f"/history/{prompt_id}":
+            return httpx.Response(
+                200,
+                json={
+                    prompt_id: {
+                        "outputs": {
+                            "save": {
+                                "images": [
+                                    {
+                                        "filename": first.name,
+                                        "subfolder": "LMAtelier",
+                                        "type": "output",
+                                    },
+                                    {
+                                        "filename": second.name,
+                                        "subfolder": "LMAtelier",
+                                        "type": "output",
+                                    },
+                                ]
+                            }
+                        }
+                    }
+                },
+            )
+        if request.url.path == "/view":
+            filename = request.url.params["filename"]
+            content = (output_root / "LMAtelier" / filename).read_bytes()
+            media_type = "video/mp4" if filename.endswith(".mp4") else "image/png"
+            return httpx.Response(200, content=content, headers={"content-type": media_type})
+        raise AssertionError(f"unexpected ComfyUI request: {request.method} {request.url}")
+
+    adapter = ComfyUIAdapter("http://comfy.test", managed_output_root=output_root)
+    await adapter._client.aclose()
+    adapter._client = httpx.AsyncClient(
+        base_url="http://comfy.test",
+        transport=httpx.MockTransport(comfy),
+    )
+    try:
+        outputs = await adapter._collect_outputs(prompt_id, "text_to_video")
+    finally:
+        await adapter.close()
+
+    assert [output.content for output in outputs] == [b"first", b"second"]
+    assert not first.exists()
+    assert not second.exists()
+
+
+def test_managed_output_cleanup_rejects_external_temporary_and_unsafe_paths(
+    tmp_path: Path,
+) -> None:
+    root = tmp_path / "output"
+    managed = ComfyUIAdapter("http://comfy.test", managed_output_root=root)
+    external = ComfyUIAdapter("http://comfy.test")
+    try:
+        safe = {"filename": "result.png", "subfolder": "LMAtelier", "type": "output"}
+        assert managed._managed_output_path(safe) == (root / "LMAtelier" / "result.png").resolve()
+        assert external._managed_output_path(safe) is None
+        assert managed._managed_output_path({**safe, "type": "temp"}) is None
+        assert managed._managed_output_path({**safe, "filename": "../outside.png"}) is None
+        assert managed._managed_output_path({**safe, "subfolder": "../outside"}) is None
+        assert managed._managed_output_path({**safe, "subfolder": "C:\\outside"}) is None
+    finally:
+        asyncio.run(managed.close())
+        asyncio.run(external.close())

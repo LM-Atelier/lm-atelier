@@ -109,6 +109,8 @@ class ProcessSupervisor:
             raise ValueError("ComfyUI entrypoint escapes its configured directory")
         parsed = urlparse(self.settings.comfy_url)
         trusted_custom_nodes = await self._trusted_comfy_node_folders()
+        output_directory = self.settings.comfy_output_dir.resolve()
+        output_directory.mkdir(parents=True, exist_ok=True)
         command = [
             str(executable.expanduser().resolve(strict=True)),
             str(entrypoint),
@@ -118,6 +120,8 @@ class ProcessSupervisor:
             str(parsed.port or 8188),
             "--extra-model-paths-config",
             str(self._write_comfy_model_paths()),
+            "--output-directory",
+            str(output_directory),
             "--preview-method",
             "latent2rgb",
             "--disable-all-custom-nodes",
