@@ -56,6 +56,7 @@ from .settings_registry import (
     defaults,
     resolve_settings,
     validate_settings,
+    workflow_settings,
 )
 
 logger = logging.getLogger(__name__)
@@ -196,22 +197,35 @@ class ConversationOrchestrator:
 
         profile_id = self._profile_for_operation(chat, plan.operation)
         profile = session.get(ModelProfile, profile_id) if profile_id else None
-        fields = self._fields_for_operation(plan.operation)
+        workflow_revision = self._workflow_for_operation(
+            session, plan.operation, project_id=chat.project_id
+        )
+        fields = workflow_settings(
+            self._fields_for_operation(plan.operation),
+            workflow_revision.input_schema_json if workflow_revision else None,
+        )
         request_fields = [field for field in fields if field.scope != "load"]
         request_settings = validate_settings(request.settings, request_fields)
         preset = self._default_preset(session, plan.operation)
-        preset_settings = validate_settings(
-            {
-                key: value
-                for key, value in (preset.settings_json if preset else {}).items()
-                if key in {field.key for field in request_fields}
-            },
+        profile_load_settings = self._compatible_workflow_settings(
+            profile.load_settings_json if profile else {},
+            fields,
+            enabled=workflow_revision is not None,
+        )
+        profile_request_settings = self._compatible_workflow_settings(
+            profile.request_settings_json if profile else {},
             request_fields,
+            enabled=workflow_revision is not None,
+        )
+        preset_settings = self._compatible_workflow_settings(
+            preset.settings_json if preset else {},
+            request_fields,
+            enabled=workflow_revision is not None,
         )
         effective_settings = resolve_settings(
             defaults(fields),
-            profile.load_settings_json if profile else None,
-            profile.request_settings_json if profile else None,
+            profile_load_settings,
+            profile_request_settings,
             preset_settings,
             request_settings,
         )
@@ -267,9 +281,6 @@ class ConversationOrchestrator:
         assistant_message.parent_id = user_message.id
         chat.active_head_message_id = assistant_message.id
 
-        workflow_revision = self._workflow_for_operation(
-            session, plan.operation, project_id=chat.project_id
-        )
         model_provenance: dict[str, Any] | None = None
         if profile and profile.model_install_id:
             install = session.get(ModelInstall, profile.model_install_id)
@@ -1152,12 +1163,39 @@ class ConversationOrchestrator:
 
     @classmethod
     def request_settings_for_operation(
-        cls, operation: Operation, values: dict[str, Any]
+        cls,
+        operation: Operation,
+        values: dict[str, Any],
+        *,
+        input_schema: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
-        request_keys = {
-            field.key for field in cls._fields_for_operation(operation) if field.scope != "load"
-        }
+        fields = workflow_settings(cls._fields_for_operation(operation), input_schema)
+        request_keys = {field.key for field in fields if field.scope != "load"}
         return {key: value for key, value in values.items() if key in request_keys}
+
+    @staticmethod
+    def _compatible_workflow_settings(
+        values: dict[str, Any],
+        fields: list[Any],
+        *,
+        enabled: bool,
+    ) -> dict[str, Any]:
+        if not enabled:
+            return validate_settings(values, fields)
+        compatible: dict[str, Any] = {}
+        field_keys = {field.key for field in fields}
+        for key, value in values.items():
+            if key not in field_keys:
+                continue
+            try:
+                compatible.update(validate_settings({key: value}, fields))
+            except ValueError:
+                # Profiles and presets predate workflow-specific constraints
+                # and may be reused across workflows. An incompatible stored
+                # value falls back to the workflow default; explicit per-turn
+                # values are still rejected above.
+                continue
+        return compatible
 
     @staticmethod
     def _video_estimate(settings: dict[str, Any]) -> dict[str, int | float]:

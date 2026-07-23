@@ -13,6 +13,7 @@ from contextlib import suppress
 from pathlib import Path, PurePosixPath
 from typing import Any
 
+import psutil
 from huggingface_hub import HfApi
 from sqlalchemy import select
 from sqlalchemy.orm import Session
@@ -258,6 +259,11 @@ class DownloadManager:
                     for sibling in siblings
                     if sibling.rfilename in filenames
                 )
+                file_sizes = {
+                    str(sibling.rfilename): int(getattr(sibling, "size", 0) or 0)
+                    for sibling in siblings
+                    if sibling.rfilename in filenames
+                }
                 free_bytes = shutil.disk_usage(self.settings.model_dir).free
                 if total_size and free_bytes < int(total_size * 1.1):
                     raise OSError(
@@ -270,13 +276,23 @@ class DownloadManager:
                 staging = self.settings.download_dir / f"{job_id}.partial"
                 destination = self.settings.model_dir / safe_name / revision
                 staging.mkdir(parents=True, exist_ok=True)
+                completed_bytes = 0
                 for index, filename in enumerate(filenames):
+                    with SessionLocal() as session:
+                        job = session.get(Job, job_id)
+                        if not job or job.status == JobStatus.CANCELLED.value:
+                            return
+                        job.phase = f"downloading {filename}"
+                        session.commit()
                     downloaded_path = await self._download_file(
                         job_id=job_id,
                         remote_id=request.remote_id,
                         filename=filename,
                         revision=revision,
                         staging=staging,
+                        file_size=file_sizes.get(filename) or None,
+                        completed_bytes=completed_bytes,
+                        total_size=total_size or None,
                     )
                     expected_hash = request.expected_sha256.get(filename)
                     if expected_hash:
@@ -295,13 +311,22 @@ class DownloadManager:
                         if not job or job.status == JobStatus.CANCELLED.value:
                             return
                         job.phase = f"downloaded {filename}"
-                        job.progress = (index + 1) / len(filenames) * 0.9
+                        completed_bytes += file_sizes.get(filename, 0)
+                        job.progress = (
+                            completed_bytes / total_size * 0.9
+                            if total_size
+                            else (index + 1) / len(filenames) * 0.9
+                        )
                         session.commit()
                     await self.events.publish(
                         "download.progress",
                         job_id,
                         {
-                            "progress": (index + 1) / len(filenames) * 0.9,
+                            "progress": (
+                                completed_bytes / total_size * 0.9
+                                if total_size
+                                else (index + 1) / len(filenames) * 0.9
+                            ),
                             "filename": filename,
                         },
                     )
@@ -402,6 +427,9 @@ class DownloadManager:
         filename: str,
         revision: str,
         staging: Path,
+        file_size: int | None = None,
+        completed_bytes: int = 0,
+        total_size: int | None = None,
     ) -> str:
         from .db import SessionLocal
 
@@ -413,6 +441,9 @@ class DownloadManager:
                     filename=filename,
                     revision=revision,
                     staging=staging,
+                    file_size=file_size,
+                    completed_bytes=completed_bytes,
+                    total_size=total_size,
                 )
             except RuntimeError:
                 if attempt >= _TRANSFER_ATTEMPTS:
@@ -442,6 +473,9 @@ class DownloadManager:
         filename: str,
         revision: str,
         staging: Path,
+        file_size: int | None = None,
+        completed_bytes: int = 0,
+        total_size: int | None = None,
     ) -> str:
         """Run the blocking Hub transfer in a process that pause/cancel can terminate."""
         creationflags = getattr(subprocess, "CREATE_NO_WINDOW", 0) if os.name == "nt" else 0
@@ -465,9 +499,28 @@ class DownloadManager:
                 "token": self.settings.hf_token,
             }
         ).encode()
+        monitor_stop: asyncio.Event | None = None
+        monitor: asyncio.Task[None] | None = None
+        if file_size and total_size:
+            monitor_stop = asyncio.Event()
+            monitor = asyncio.create_task(
+                self._monitor_transfer(
+                    job_id=job_id,
+                    filename=filename,
+                    staging=staging,
+                    process=process,
+                    file_size=file_size,
+                    completed_bytes=completed_bytes,
+                    total_size=total_size,
+                    stop=monitor_stop,
+                )
+            )
         try:
             stdout, stderr = await asyncio.to_thread(process.communicate, payload)
         finally:
+            if monitor_stop and monitor:
+                monitor_stop.set()
+                await asyncio.gather(monitor, return_exceptions=True)
             if self._workers.get(job_id) is process:
                 self._workers.pop(job_id, None)
             if process.poll() is None:
@@ -486,6 +539,89 @@ class DownloadManager:
         if not isinstance(path, str):
             raise RuntimeError("Hub download worker returned an invalid path")
         return path
+
+    async def _monitor_transfer(
+        self,
+        *,
+        job_id: str,
+        filename: str,
+        staging: Path,
+        process: subprocess.Popen[bytes],
+        file_size: int | None,
+        completed_bytes: int,
+        total_size: int | None,
+        stop: asyncio.Event,
+    ) -> None:
+        from .db import SessionLocal
+
+        initial_current_bytes = self._staged_current_file_bytes(staging, completed_bytes, file_size)
+        initial_write_bytes = self._process_tree_write_bytes(process.pid)
+        maximum_transferred = initial_current_bytes
+        last_reported = -1.0
+        while not stop.is_set():
+            staged_bytes = self._staged_current_file_bytes(staging, completed_bytes, file_size)
+            written_bytes = max(
+                self._process_tree_write_bytes(process.pid) - initial_write_bytes,
+                0,
+            )
+            maximum_transferred = max(
+                maximum_transferred,
+                staged_bytes,
+                initial_current_bytes + written_bytes,
+            )
+            if file_size:
+                maximum_transferred = min(maximum_transferred, file_size)
+            progress = (
+                min((completed_bytes + maximum_transferred) / total_size * 0.9, 0.9)
+                if total_size
+                else 0.0
+            )
+            if last_reported < 0 or progress - last_reported >= 0.001:
+                with SessionLocal() as session:
+                    job = session.get(Job, job_id)
+                    if not job or job.status != JobStatus.RUNNING.value:
+                        return
+                    job.phase = f"downloading {filename}"
+                    job.progress = max(job.progress, progress)
+                    session.commit()
+                await self.events.publish(
+                    "download.progress",
+                    job_id,
+                    {
+                        "progress": progress,
+                        "filename": filename,
+                        "downloaded_bytes": maximum_transferred,
+                        "file_size_bytes": file_size,
+                    },
+                )
+                last_reported = progress
+            with suppress(TimeoutError):
+                await asyncio.wait_for(stop.wait(), timeout=1)
+
+    @classmethod
+    def _staged_current_file_bytes(
+        cls,
+        staging: Path,
+        completed_bytes: int,
+        file_size: int | None,
+    ) -> int:
+        staged = max(cls._path_size(staging) - completed_bytes, 0)
+        return min(staged, file_size) if file_size else staged
+
+    @staticmethod
+    def _process_tree_write_bytes(pid: int) -> int:
+        try:
+            root = psutil.Process(pid)
+            processes = [root, *root.children(recursive=True)]
+        except (psutil.AccessDenied, psutil.NoSuchProcess):
+            return 0
+        total = 0
+        for process in processes:
+            try:
+                total += int(process.io_counters().write_bytes)
+            except (psutil.AccessDenied, psutil.NoSuchProcess):
+                continue
+        return total
 
     @staticmethod
     def _activate_staging(staging: Path, destination: Path) -> None:
