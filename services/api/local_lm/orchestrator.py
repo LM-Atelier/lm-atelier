@@ -32,6 +32,7 @@ from .events import EventBroker
 from .models import (
     Artifact,
     Chat,
+    GenerationPreset,
     Job,
     Message,
     MessagePart,
@@ -46,7 +47,7 @@ from .models import (
 from .processes import ProcessSupervisor
 from .routing import ModalityRouter, RouteConfirmationRequired
 from .scheduler import ResourceScheduler
-from .schemas import MessageOut, RunOut, TurnAccepted, TurnRequest
+from .schemas import MessageOut, RunOut, TurnAccepted, TurnRequest, WorkerStatus
 from .settings_registry import (
     CHAT_SETTINGS,
     IMAGE_SETTINGS,
@@ -195,8 +196,23 @@ class ConversationOrchestrator:
         profile_id = self._profile_for_operation(chat, plan.operation)
         profile = session.get(ModelProfile, profile_id) if profile_id else None
         fields = self._fields_for_operation(plan.operation)
+        request_fields = [field for field in fields if field.scope != "load"]
+        request_settings = validate_settings(request.settings, request_fields)
+        preset = self._default_preset(session, plan.operation)
+        preset_settings = validate_settings(
+            {
+                key: value
+                for key, value in (preset.settings_json if preset else {}).items()
+                if key in {field.key for field in request_fields}
+            },
+            request_fields,
+        )
         effective_settings = resolve_settings(
-            defaults(fields), profile.request_settings_json if profile else None, request.settings
+            defaults(fields),
+            profile.load_settings_json if profile else None,
+            profile.request_settings_json if profile else None,
+            preset_settings,
+            request_settings,
         )
         effective_settings = validate_settings(effective_settings, fields)
         generation_estimate = (
@@ -306,6 +322,16 @@ class ConversationOrchestrator:
                 "routing": plan.model_dump(mode="json"),
                 "input_artifact_ids": resolved_input_ids,
                 "model": model_provenance,
+                "preset": (
+                    {
+                        "id": preset.id,
+                        "name": preset.name,
+                        "role": preset.role,
+                        "settings": preset_settings,
+                    }
+                    if preset
+                    else None
+                ),
                 "workflow": workflow_provenance,
                 "resolved_settings": effective_settings,
                 "generation_estimate": generation_estimate,
@@ -424,6 +450,7 @@ class ConversationOrchestrator:
             await self._fail(job_id, run_id, detail)
 
     async def _execute_chat(self, job_id: str, run_id: str) -> None:
+        worker = await self._ensure_chat_worker(run_id)
         with SessionLocal() as session:
             run = session.get(Run, run_id)
             if not run:
@@ -434,6 +461,16 @@ class ConversationOrchestrator:
             run.provenance_json = {
                 **run.provenance_json,
                 "context": context_metadata,
+                **(
+                    {
+                        "worker": worker.model_dump(
+                            mode="json",
+                            exclude={"active_jobs", "queued_jobs"},
+                        )
+                    }
+                    if worker
+                    else {}
+                ),
             }
             session.commit()
             request = ChatRequest(
@@ -545,6 +582,29 @@ class ConversationOrchestrator:
                 )
             session.commit()
         await self.events.publish("run.completed", run_id, {"job_id": job_id})
+
+    async def _ensure_chat_worker(self, run_id: str) -> WorkerStatus | None:
+        if (
+            self.engines.settings.chat_engine != "llama.cpp"
+            or not self.processes.settings.llama_executable
+        ):
+            return None
+        with SessionLocal() as session:
+            run = session.get(Run, run_id)
+            profile = session.get(ModelProfile, run.profile_id) if run and run.profile_id else None
+            install = (
+                session.get(ModelInstall, profile.model_install_id)
+                if profile and profile.model_install_id
+                else None
+            )
+            if not profile or not install:
+                raise RuntimeError("the selected chat profile does not have an installed model")
+            session.expunge(profile)
+            session.expunge(install)
+        status = next(item for item in self.processes.statuses() if item.name == "chat")
+        if status.running and status.state == "ready" and status.profile_id == profile.id:
+            return status
+        return await self.processes.load_chat(profile, install)
 
     async def _prepare_chat_context(
         self, session: Session, run: Run
@@ -1059,6 +1119,26 @@ class ConversationOrchestrator:
             return chat.active_image_profile_id
         return chat.active_video_profile_id
 
+    @classmethod
+    def _default_preset(cls, session: Session, operation: Operation) -> GenerationPreset | None:
+        return session.scalar(
+            select(GenerationPreset)
+            .where(
+                GenerationPreset.role == cls._role_for_operation(operation),
+                GenerationPreset.is_default.is_(True),
+            )
+            .order_by(GenerationPreset.updated_at.desc(), GenerationPreset.id)
+            .limit(1)
+        )
+
+    @staticmethod
+    def _role_for_operation(operation: Operation) -> str:
+        if operation == Operation.TEXT:
+            return "chat"
+        if "video" in operation.value:
+            return "video"
+        return "image"
+
     @staticmethod
     def _fields_for_operation(operation: Operation):  # type: ignore[no-untyped-def]
         if operation == Operation.TEXT:
@@ -1066,6 +1146,15 @@ class ConversationOrchestrator:
         if "video" in operation.value:
             return VIDEO_SETTINGS
         return IMAGE_SETTINGS
+
+    @classmethod
+    def request_settings_for_operation(
+        cls, operation: Operation, values: dict[str, Any]
+    ) -> dict[str, Any]:
+        request_keys = {
+            field.key for field in cls._fields_for_operation(operation) if field.scope != "load"
+        }
+        return {key: value for key, value in values.items() if key in request_keys}
 
     @staticmethod
     def _video_estimate(settings: dict[str, Any]) -> dict[str, int | float]:

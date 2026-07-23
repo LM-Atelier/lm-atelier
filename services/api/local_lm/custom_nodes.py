@@ -6,6 +6,7 @@ import os
 import re
 import shutil
 import tempfile
+from contextlib import suppress
 from pathlib import Path
 from urllib.parse import urlparse
 
@@ -199,7 +200,7 @@ class CustomNodeManager:
         return value.strip().lower()
 
     @staticmethod
-    async def _run(*command: str) -> str:
+    async def _run(*command: str, timeout: float = 180) -> str:
         environment = {**os.environ, "GIT_TERMINAL_PROMPT": "0", "GIT_CONFIG_NOSYSTEM": "1"}
         process = await asyncio.create_subprocess_exec(
             *command,
@@ -207,11 +208,25 @@ class CustomNodeManager:
             stderr=asyncio.subprocess.PIPE,
             env=environment,
         )
-        stdout, stderr = await asyncio.wait_for(process.communicate(), timeout=180)
+        try:
+            stdout, stderr = await asyncio.wait_for(process.communicate(), timeout=timeout)
+        except TimeoutError as exc:
+            await CustomNodeManager._terminate(process)
+            raise RuntimeError("custom node Git operation timed out") from exc
+        except asyncio.CancelledError:
+            await CustomNodeManager._terminate(process)
+            raise
         if process.returncode:
             detail = stderr.decode("utf-8", errors="replace").strip()[-1000:]
             raise RuntimeError(detail or "custom node Git operation failed")
         return stdout.decode("utf-8", errors="replace").strip()
+
+    @staticmethod
+    async def _terminate(process: asyncio.subprocess.Process) -> None:
+        if process.returncode is None:
+            with suppress(ProcessLookupError):
+                process.kill()
+        await process.wait()
 
     @staticmethod
     def _inspect(path: Path, source_url: str) -> dict[str, object]:

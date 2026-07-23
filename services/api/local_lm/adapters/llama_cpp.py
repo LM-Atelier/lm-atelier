@@ -184,6 +184,19 @@ class LlamaCppAdapter:
                             yield ChatEvent(type="tool_delta", data={"tool_calls": tool_calls})
                         if choice.get("finish_reason"):
                             finish_reason = str(choice["finish_reason"])
+                            # llama.cpp has emitted streams that publish an authoritative
+                            # terminal choice but never close the HTTP response. Waiting for
+                            # [DONE] or EOF in that case strands the LM Atelier run forever.
+                            # Metadata present on this terminal frame was already emitted
+                            # above, so it is safe to complete immediately.
+                            if retry_prefix is not None and len(attempt_text) < len(retry_prefix):
+                                yield self._stream_error(httpx.ReadError(""))
+                                return
+                            yield ChatEvent(
+                                type="complete",
+                                data={"finish_reason": finish_reason},
+                            )
+                            return
                     yield ChatEvent(
                         type="complete",
                         data={"finish_reason": finish_reason or "stop"},
