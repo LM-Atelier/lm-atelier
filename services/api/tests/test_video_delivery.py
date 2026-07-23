@@ -37,3 +37,24 @@ async def test_artifact_content_supports_browser_byte_ranges(client: AsyncClient
     assert partial.content == b"2345"
     assert partial.headers["content-range"] == "bytes 2-5/10"
     assert partial.headers["accept-ranges"] == "bytes"
+    assert partial.headers["etag"] == f'"{artifact_id.removeprefix("sha256:")}"'
+    assert partial.headers["content-security-policy"] == "sandbox; default-src 'none'"
+    assert partial.headers["x-content-type-options"] == "nosniff"
+
+    suffix = await client.get(
+        f"/api/artifacts/{artifact_id}/content", headers={"Range": "bytes=-3"}
+    )
+    assert suffix.status_code == 206
+    assert suffix.content == b"789"
+    assert suffix.headers["content-range"] == "bytes 7-9/10"
+
+    invalid = await client.get(
+        f"/api/artifacts/{artifact_id}/content", headers={"Range": "bytes=50-60"}
+    )
+    assert invalid.status_code == 416
+    assert invalid.headers["content-range"] == "bytes */10"
+
+    complete = await client.get(f"/api/artifacts/{artifact_id}/content")
+    assert complete.status_code == 200
+    assert complete.content == content
+    assert complete.headers["content-length"] == "10"

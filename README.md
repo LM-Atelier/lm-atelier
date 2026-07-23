@@ -111,6 +111,12 @@ Run every local quality gate with:
 ./scripts/verify.sh
 ```
 
+On Windows PowerShell, run the equivalent native entry point:
+
+```powershell
+powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\verify.ps1
+```
+
 Application state defaults to `./data` and is ignored by Git. Set
 `LOCAL_LM_DATA_DIR` to relocate it.
 
