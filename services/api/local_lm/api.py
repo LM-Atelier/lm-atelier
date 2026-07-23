@@ -1067,7 +1067,7 @@ async def pause_download(job_id: str, request: Request, session: SessionDep) -> 
 @router.post("/downloads/{job_id}/resume", response_model=JobOut)
 async def resume_download(job_id: str, request: Request, session: SessionDep) -> Job:
     if not _services(request).downloads.resume(job_id):
-        raise HTTPException(409, "download is not paused or cannot be resumed")
+        raise HTTPException(409, "download is not paused, failed, or interrupted")
     session.expire_all()
     job = session.get(Job, job_id)
     if not job:

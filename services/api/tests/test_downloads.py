@@ -89,3 +89,37 @@ async def test_download_worker_receives_token_over_stdin_not_command_line(
     assert "secret-token" not in " ".join(workers[0].command)
     assert json.loads(workers[0].payload)["token"] == "secret-token"
     assert "job_test" not in manager._workers
+
+
+async def test_download_file_retries_transient_worker_failures(
+    settings: Settings,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    manager = DownloadManager(settings, EventBroker())
+    attempts = 0
+    sleeps: list[int] = []
+
+    async def download_once(**_kwargs: Any) -> str:
+        nonlocal attempts
+        attempts += 1
+        if attempts < 3:
+            raise RuntimeError("incomplete HTTP read")
+        return "C:/models/model.gguf"
+
+    async def sleep(seconds: int) -> None:
+        sleeps.append(seconds)
+
+    monkeypatch.setattr(manager, "_download_file_once", download_once)
+    monkeypatch.setattr(asyncio, "sleep", sleep)
+
+    path = await manager._download_file(
+        job_id="job_test",
+        remote_id="owner/model",
+        filename="model.gguf",
+        revision="a" * 40,
+        staging=Path("C:/staging"),
+    )
+
+    assert path == "C:/models/model.gguf"
+    assert attempts == 3
+    assert sleeps == [1, 2]
