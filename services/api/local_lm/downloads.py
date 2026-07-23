@@ -24,6 +24,7 @@ from .models import Job, ModelInstall, ModelSource
 from .schemas import DownloadRequest
 
 _REMOTE_ID = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]*/[A-Za-z0-9][A-Za-z0-9_.-]*$")
+_TRANSFER_ATTEMPTS = 3
 
 
 class DownloadManager:
@@ -156,11 +157,18 @@ class DownloadManager:
             if (
                 not job
                 or job.kind != JobKind.DOWNLOAD.value
-                or job.status != JobStatus.PAUSED.value
+                or job.status
+                not in {
+                    JobStatus.PAUSED.value,
+                    JobStatus.FAILED.value,
+                    JobStatus.INTERRUPTED.value,
+                }
             ):
                 return False
+            retrying = job.status != JobStatus.PAUSED.value
             job.status = JobStatus.QUEUED.value
-            job.phase = "resume queued"
+            job.phase = "retry queued" if retrying else "resume queued"
+            job.error = None
             job.completed_at = None
             session.commit()
         self.start(job_id)
@@ -227,6 +235,8 @@ class DownloadManager:
                     job.status = JobStatus.RUNNING.value
                     job.phase = "inspecting"
                     job.started_at = utcnow()
+                    job.completed_at = None
+                    job.error = None
                     job.attempt += 1
                     session.commit()
                 await self.events.publish(
@@ -385,6 +395,46 @@ class DownloadManager:
                 await asyncio.to_thread(worker.wait)
 
     async def _download_file(
+        self,
+        *,
+        job_id: str,
+        remote_id: str,
+        filename: str,
+        revision: str,
+        staging: Path,
+    ) -> str:
+        from .db import SessionLocal
+
+        for attempt in range(1, _TRANSFER_ATTEMPTS + 1):
+            try:
+                return await self._download_file_once(
+                    job_id=job_id,
+                    remote_id=remote_id,
+                    filename=filename,
+                    revision=revision,
+                    staging=staging,
+                )
+            except RuntimeError:
+                if attempt >= _TRANSFER_ATTEMPTS:
+                    raise
+                with SessionLocal() as session:
+                    job = session.get(Job, job_id)
+                    if job:
+                        job.phase = f"retrying {filename} ({attempt + 1}/{_TRANSFER_ATTEMPTS})"
+                        session.commit()
+                await self.events.publish(
+                    "download.retrying",
+                    job_id,
+                    {
+                        "filename": filename,
+                        "attempt": attempt + 1,
+                        "maximum_attempts": _TRANSFER_ATTEMPTS,
+                    },
+                )
+                await asyncio.sleep(2 ** (attempt - 1))
+        raise RuntimeError("download transfer exhausted its retry budget")
+
+    async def _download_file_once(
         self,
         *,
         job_id: str,

@@ -7,7 +7,7 @@ import os
 import re
 from datetime import datetime
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 from urllib.parse import urlparse
 
 import httpx
@@ -139,7 +139,10 @@ class HuggingFaceCatalog:
             payload = response.json()
         except (httpx.HTTPError, ValueError):
             if cache.is_file():
-                return json.loads(cache.read_text(encoding="utf-8"))
+                cached = json.loads(cache.read_text(encoding="utf-8"))
+                if not isinstance(cached, dict):
+                    raise ValueError("cached catalog detail must be an object") from None
+                return cast(dict[str, Any], cached)
             raise
         siblings = []
         for sibling in payload.get("siblings") or []:
@@ -218,13 +221,13 @@ class HuggingFaceCatalog:
 
     @staticmethod
     def _next_link(response: httpx.Response) -> str | None:
-        for link in response.headers.get("link", "").split(","):
+        for link in str(response.headers.get("link", "")).split(","):
             if 'rel="next"' not in link:
                 continue
             start = link.find("<")
             end = link.find(">", start + 1)
             if start >= 0 and end > start:
-                return link[start + 1 : end]
+                return str(link[start + 1 : end])
         return None
 
     @staticmethod

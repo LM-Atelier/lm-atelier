@@ -13,6 +13,7 @@ from local_lm.adapters.mock import MockChatAdapter
 from local_lm.catalog import HuggingFaceCatalog
 from local_lm.config import Settings
 from local_lm.db import SessionLocal
+from local_lm.domain import JobStatus, utcnow
 from local_lm.downloads import DownloadManager
 from local_lm.models import Artifact, Job
 
@@ -1038,6 +1039,27 @@ async def test_download_pause_resume_and_cancel(client: AsyncClient, monkeypatch
 
     cannot_resume = await client.post(f"/api/downloads/{job_id}/resume")
     assert cannot_resume.status_code == 409
+
+    failed = await client.post(
+        "/api/downloads",
+        json={"remote_id": "owner/retry", "role": "chat", "engine": "llama.cpp"},
+    )
+    failed_id = failed.json()["id"]
+    with SessionLocal() as session:
+        failed_job = session.get(Job, failed_id)
+        assert failed_job
+        failed_job.status = JobStatus.FAILED.value
+        failed_job.phase = "failed"
+        failed_job.error = "incomplete HTTP read"
+        failed_job.completed_at = utcnow()
+        session.commit()
+
+    retried = await client.post(f"/api/downloads/{failed_id}/resume")
+    assert retried.status_code == 200
+    assert retried.json()["status"] == "queued"
+    assert retried.json()["phase"] == "retry queued"
+    assert retried.json()["error"] is None
+    await client.post(f"/api/jobs/{failed_id}/cancel")
 
 
 async def test_catalog_preflight_blocks_gated_unsafe_weights(
