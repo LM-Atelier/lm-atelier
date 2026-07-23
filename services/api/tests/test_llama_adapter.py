@@ -89,3 +89,40 @@ async def test_llama_adapter_sends_tools_and_streams_structured_deltas() -> None
         assert events[-1].data["finish_reason"] == "tool_calls"
     finally:
         await adapter.close()
+
+
+async def test_llama_adapter_names_an_http_error_after_partial_stream_output() -> None:
+    class BrokenStream(httpx.AsyncByteStream):
+        async def __aiter__(self):  # type: ignore[no-untyped-def]
+            yield b'data: {"choices":[{"delta":{"content":"partial"}}]}\n\n'
+            raise httpx.ReadError("")
+
+    async def handler(_request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200,
+            stream=BrokenStream(),
+            headers={"content-type": "text/event-stream"},
+        )
+
+    adapter = LlamaCppAdapter("http://llama.test")
+    await adapter._client.aclose()
+    adapter._client = httpx.AsyncClient(
+        base_url="http://llama.test", transport=httpx.MockTransport(handler)
+    )
+    try:
+        events = [
+            event
+            async for event in adapter.stream(
+                ChatRequest(
+                    run_id="failed-stream",
+                    messages=[{"role": "user", "content": "Keep this partial output"}],
+                )
+            )
+        ]
+        assert len(events) == 2
+        assert events[0].type == "delta"
+        assert events[0].text == "partial"
+        assert events[1].type == "error"
+        assert events[1].data["error"] == "llama.cpp stream failed: ReadError"
+    finally:
+        await adapter.close()

@@ -420,7 +420,8 @@ class ConversationOrchestrator:
                     session.commit()
             raise
         except Exception as exc:
-            await self._fail(job_id, run_id, str(exc))
+            detail = str(exc).strip() or f"Generation failed ({type(exc).__name__})"
+            await self._fail(job_id, run_id, detail)
 
     async def _execute_chat(self, job_id: str, run_id: str) -> None:
         with SessionLocal() as session:
@@ -472,10 +473,15 @@ class ConversationOrchestrator:
                         self._persist_streamed_text(assistant_id, accumulated.rstrip())
                     return
                 elif event.type == "error":
-                    raise RuntimeError(str(event.data.get("error", "chat engine failed")))
+                    detail = str(event.data.get("error") or "").strip()
+                    raise RuntimeError(detail or "Chat engine stream failed")
                 elif event.type in {"usage", "complete"}:
                     completion_metadata.update(event.data)
         except asyncio.CancelledError:
+            if accumulated:
+                self._persist_streamed_text(assistant_id, accumulated.rstrip())
+            raise
+        except Exception:
             if accumulated:
                 self._persist_streamed_text(assistant_id, accumulated.rstrip())
             raise
@@ -874,10 +880,27 @@ class ConversationOrchestrator:
             if message:
                 preview_ids = self._temporary_preview_ids(message)
                 message.status = MessageStatus.FAILED.value
-                self._replace_parts(
-                    message,
-                    [MessagePart(position=0, type=PartType.ERROR.value, text=error)],
-                )
+                if run.operation == Operation.TEXT.value:
+                    error_part = next(
+                        (part for part in message.parts if part.type == PartType.ERROR.value),
+                        None,
+                    )
+                    if error_part:
+                        error_part.text = error
+                    else:
+                        message.parts.append(
+                            MessagePart(
+                                position=max((part.position for part in message.parts), default=-1)
+                                + 1,
+                                type=PartType.ERROR.value,
+                                text=error,
+                            )
+                        )
+                else:
+                    self._replace_parts(
+                        message,
+                        [MessagePart(position=0, type=PartType.ERROR.value, text=error)],
+                    )
                 session.flush()
                 for artifact_id in preview_ids:
                     self.artifacts.delete_temporary_preview(session, artifact_id)
