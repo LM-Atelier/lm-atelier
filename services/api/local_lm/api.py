@@ -4,12 +4,12 @@ import shutil
 from contextlib import suppress
 from pathlib import Path
 from typing import TYPE_CHECKING, Annotated, Any, Literal, cast
-from urllib.parse import quote
 
 from fastapi import APIRouter, Depends, File, HTTPException, Query, Request, Response, UploadFile
 from sqlalchemy import func, select, text
 from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.orm import Session, selectinload
+from starlette.responses import FileResponse
 
 from .capability_probe import probe_structured_tools
 from .catalog import HuggingFaceCatalog
@@ -923,31 +923,6 @@ async def get_artifact(artifact_id: str, session: SessionDep) -> ArtifactOut:
     return result
 
 
-def _byte_range(value: str | None, size: int) -> tuple[int, int] | None:
-    if not value:
-        return None
-    if not value.startswith("bytes=") or "," in value:
-        raise HTTPException(416, "only a single byte range is supported")
-    raw_start, separator, raw_end = value[6:].partition("-")
-    if not separator:
-        raise HTTPException(416, "invalid byte range")
-    try:
-        if raw_start:
-            start = int(raw_start)
-            end = min(int(raw_end), size - 1) if raw_end else size - 1
-        else:
-            suffix = int(raw_end)
-            if suffix <= 0:
-                raise ValueError
-            start = max(size - suffix, 0)
-            end = size - 1
-    except ValueError as exc:
-        raise HTTPException(416, "invalid byte range") from exc
-    if start < 0 or start >= size or end < start:
-        raise HTTPException(416, "byte range is outside the artifact")
-    return start, end
-
-
 @router.get("/artifacts/{artifact_id}/content")
 async def artifact_content(artifact_id: str, request: Request, session: SessionDep) -> Response:
     artifact = session.get(Artifact, artifact_id)
@@ -956,26 +931,19 @@ async def artifact_content(artifact_id: str, request: Request, session: SessionD
     path: Path = _services(request).artifacts.resolve(artifact)
     if not path.is_file():
         raise HTTPException(410, "artifact file is missing")
-    size = path.stat().st_size
-    selected_range = _byte_range(request.headers.get("range"), size)
-    start, end = selected_range or (0, max(size - 1, 0))
-    length = end - start + 1 if size else 0
-    filename = quote(artifact.original_name or "artifact")
-    headers = {
-        "Accept-Ranges": "bytes",
-        "Content-Length": str(length),
-        "Content-Disposition": f"inline; filename*=UTF-8''{filename}",
-    }
-    if selected_range:
-        headers["Content-Range"] = f"bytes {start}-{end}/{size}"
-    with path.open("rb") as handle:
-        handle.seek(start)
-        content = handle.read(length)
-    return Response(
-        content,
+    return FileResponse(
+        path,
         media_type=artifact.media_type,
-        status_code=206 if selected_range else 200,
-        headers=headers,
+        filename=Path(artifact.original_name or "artifact").name,
+        content_disposition_type="inline",
+        stat_result=path.stat(),
+        headers={
+            "Cache-Control": "private, max-age=31536000, immutable",
+            "Content-Security-Policy": "sandbox; default-src 'none'",
+            "Cross-Origin-Resource-Policy": "same-origin",
+            "ETag": f'"{artifact.sha256}"',
+            "X-Content-Type-Options": "nosniff",
+        },
     )
 
 
