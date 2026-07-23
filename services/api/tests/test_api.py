@@ -14,7 +14,7 @@ from local_lm.catalog import HuggingFaceCatalog
 from local_lm.config import Settings
 from local_lm.db import SessionLocal
 from local_lm.downloads import DownloadManager
-from local_lm.models import Artifact
+from local_lm.models import Artifact, Job
 
 
 async def wait_for_assistant(client: AsyncClient, chat_id: str, expected_type: str) -> dict:  # type: ignore[type-arg]
@@ -308,6 +308,29 @@ async def test_worker_management_reports_missing_local_binaries(client: AsyncCli
     assert media.status_code == 422
 
 
+async def test_worker_changes_are_rejected_while_generation_is_pending(
+    client: AsyncClient,
+) -> None:
+    with SessionLocal() as session:
+        session.add(
+            Job(
+                kind="chat",
+                status="queued",
+                phase="queued",
+                payload_json={},
+            )
+        )
+        session.commit()
+
+    stopped = await client.post("/api/workers/chat/stop")
+    assert stopped.status_code == 409
+    assert "active or queued job" in stopped.json()["detail"]
+
+    profiles = (await client.get("/api/profiles?role=chat")).json()
+    loaded = await client.post(f"/api/workers/chat/load/{profiles[0]['id']}")
+    assert loaded.status_code == 409
+
+
 async def test_chat_tool_capability_probe_executes_declared_schema(client: AsyncClient) -> None:
     response = await client.post("/api/engines/chat/tool-probe")
     assert response.status_code == 200
@@ -580,11 +603,27 @@ async def test_long_chat_records_visible_context_truncation(client: AsyncClient)
     context = final_run["provenance_json"]["context"]
     assert context["messages_omitted"] > 0
     assert context["input_tokens"] <= context["input_budget"]
+    assert final_run["settings_json"]["context_length"] == 512
+    assert final_run["provenance_json"]["resolved_settings"]["context_length"] == 512
 
     detail = (await client.get(f"/api/chats/{chat['id']}")).json()
     assistant = [item for item in detail["messages"] if item["role"] == "assistant"][-1]
     metadata = next(part for part in assistant["parts"] if part["type"] == "generation_metadata")
     assert metadata["metadata_json"]["context"]["messages_omitted"] > 0
+
+
+async def test_turn_rejects_load_only_setting_overrides(client: AsyncClient) -> None:
+    chat = (await client.post("/api/chats", json={"title": "Load settings"})).json()
+    response = await client.post(
+        f"/api/chats/{chat['id']}/turns",
+        json={
+            "text": "Do not restart the worker",
+            "mode": "text",
+            "settings": {"context_length": 512},
+        },
+    )
+    assert response.status_code == 422
+    assert "unsupported settings: context_length" in response.json()["detail"]
 
 
 async def test_artifact_upload_deduplicates_content(client: AsyncClient) -> None:

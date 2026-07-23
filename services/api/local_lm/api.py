@@ -289,8 +289,29 @@ async def worker_status(request: Request, session: SessionDep) -> list[WorkerSta
     return statuses
 
 
+def _ensure_worker_idle(session: Session, name: str) -> None:
+    kinds = [JobKind.CHAT.value] if name == "chat" else [JobKind.IMAGE.value, JobKind.VIDEO.value]
+    busy_jobs = (
+        session.scalar(
+            select(func.count(Job.id)).where(
+                Job.kind.in_(kinds),
+                Job.status.in_(["queued", "running", "paused"]),
+            )
+        )
+        or 0
+    )
+    if busy_jobs:
+        raise HTTPException(
+            409,
+            f"the {name} worker has {busy_jobs} active or queued "
+            f"{'job' if busy_jobs == 1 else 'jobs'}; cancel or wait for them before "
+            "changing the worker",
+        )
+
+
 @router.post("/workers/chat/load/{profile_id}", response_model=WorkerStatus)
 async def load_chat_worker(profile_id: str, request: Request, session: SessionDep) -> WorkerStatus:
+    _ensure_worker_idle(session, "chat")
     profile = session.get(ModelProfile, profile_id)
     if not profile or not profile.model_install_id:
         raise HTTPException(404, "profile with a model install not found")
@@ -304,7 +325,8 @@ async def load_chat_worker(profile_id: str, request: Request, session: SessionDe
 
 
 @router.post("/workers/media/start", response_model=WorkerStatus)
-async def start_media_worker(request: Request) -> WorkerStatus:
+async def start_media_worker(request: Request, session: SessionDep) -> WorkerStatus:
+    _ensure_worker_idle(session, "media")
     try:
         return await _services(request).processes.start_media()
     except (OSError, RuntimeError, ValueError, TimeoutError) as exc:
@@ -312,7 +334,10 @@ async def start_media_worker(request: Request) -> WorkerStatus:
 
 
 @router.post("/workers/{name}/stop", response_model=WorkerStatus)
-async def stop_worker(name: str, request: Request) -> WorkerStatus:
+async def stop_worker(name: str, request: Request, session: SessionDep) -> WorkerStatus:
+    if name not in {"chat", "media"}:
+        raise HTTPException(422, "worker must be chat or media")
+    _ensure_worker_idle(session, name)
     try:
         return await _services(request).processes.stop(name)
     except ValueError as exc:
@@ -563,6 +588,7 @@ async def regenerate_message(
     request: Request,
     session: SessionDep,
 ) -> TurnAccepted:
+    orchestrator: ConversationOrchestrator = _services(request).orchestrator
     prior_run = session.scalar(select(Run).where(Run.assistant_message_id == message_id))
     if not prior_run:
         raise HTTPException(404, "assistant run not found")
@@ -575,12 +601,15 @@ async def regenerate_message(
         raise HTTPException(404, "source user message not found")
     text = "\n".join(part.text for part in user_message.parts if part.text).strip()
     mode = _mode_for_operation(Operation(prior_run.operation))
+    prior_settings = orchestrator.request_settings_for_operation(
+        Operation(prior_run.operation), prior_run.settings_json
+    )
     turn = TurnRequest(
         text=text,
         mode=mode,
         parent_message_id=user_message.parent_id,
         input_artifact_ids=prior_run.provenance_json.get("input_artifact_ids", []),
-        settings={**prior_run.settings_json, **payload.settings},
+        settings={**prior_settings, **payload.settings},
     )
     return await _services(request).orchestrator.create_turn(
         session, prior_run.chat_id, turn, use_explicit_parent=True
@@ -602,7 +631,9 @@ async def edit_and_branch(
         if not payload.input_artifact_ids:
             updates["input_artifact_ids"] = prior_run.provenance_json.get("input_artifact_ids", [])
         if not payload.settings:
-            updates["settings"] = prior_run.settings_json
+            updates["settings"] = _services(request).orchestrator.request_settings_for_operation(
+                Operation(prior_run.operation), prior_run.settings_json
+            )
     turn = payload.model_copy(update=updates)
     return await _services(request).orchestrator.create_turn(
         session, source.chat_id, turn, use_explicit_parent=True

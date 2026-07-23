@@ -43,6 +43,18 @@ const maxTokensSetting: SettingField = {
   help: "Maximum tokens generated for one assistant run.",
 };
 
+const contextLengthSetting: SettingField = {
+  ...maxTokensSetting,
+  key: "context_length",
+  label: "Context length",
+  default: 8192,
+  minimum: 512,
+  maximum: 1048576,
+  scope: "load",
+  restart_required: true,
+  help: "Maximum tokens held in the model context.",
+};
+
 const roleAwareMediaEngine: EngineCapabilities = {
   engine: "mock",
   version: "1",
@@ -663,6 +675,7 @@ describe("App", () => {
     expect(screen.getByText("current RAM")).toBeInTheDocument();
     expect(screen.getByText("measured peak")).toBeInTheDocument();
     expect(screen.getByText("estimated load")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Unload" })).toBeDisabled();
   });
 
   it("runs an executable structured-tool capability probe", async () => {
@@ -1056,8 +1069,8 @@ describe("App", () => {
       ...roleAwareMediaEngine,
       roles: ["chat"],
       operations: ["text"],
-      settings: [maxTokensSetting],
-      settings_by_role: { chat: [maxTokensSetting] },
+      settings: [contextLengthSetting, maxTokensSetting],
+      settings_by_role: { chat: [contextLengthSetting, maxTokensSetting] },
     }]);
     vi.mocked(api.chats).mockResolvedValue([chat]);
     vi.mocked(api.chat).mockResolvedValue({ ...chat, messages: [userMessage, assistantMessage] });
@@ -1072,6 +1085,7 @@ describe("App", () => {
     );
 
     fireEvent.click(await screen.findByRole("button", { name: "Turn settings" }));
+    expect(screen.queryByRole("spinbutton", { name: /Context length/ })).not.toBeInTheDocument();
     fireEvent.change(screen.getByRole("spinbutton", { name: /Maximum output/ }), { target: { value: "4096" } });
     fireEvent.click(screen.getByRole("button", { name: "Close settings" }));
 
