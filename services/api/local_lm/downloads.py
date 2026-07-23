@@ -394,7 +394,7 @@ class DownloadManager:
         staging: Path,
     ) -> str:
         """Run the blocking Hub transfer in a process that pause/cancel can terminate."""
-        creationflags = subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0
+        creationflags = getattr(subprocess, "CREATE_NO_WINDOW", 0) if os.name == "nt" else 0
         environment = os.environ.copy()
         environment["HF_HUB_DISABLE_PROGRESS_BARS"] = "1"
         process = subprocess.Popen(
