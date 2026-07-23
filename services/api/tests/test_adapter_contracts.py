@@ -77,6 +77,39 @@ async def test_comfyui_inactivity_timeout_is_validated_and_wired(tmp_path: Path)
         await registry.close()
 
 
+async def test_comfyui_managed_output_cleanup_is_wired_only_for_managed_runtime(
+    tmp_path: Path,
+) -> None:
+    executable = tmp_path / "python"
+    directory = tmp_path / "comfyui"
+    managed = EngineRegistry(
+        Settings(
+            data_dir=tmp_path / "managed-data",
+            media_engine="comfyui",
+            comfy_executable=executable,
+            comfy_directory=directory,
+        )
+    )
+    external = EngineRegistry(
+        Settings(
+            data_dir=tmp_path / "external-data",
+            media_engine="comfyui",
+            comfy_directory=directory,
+        )
+    )
+    try:
+        assert isinstance(managed.media, ComfyUIAdapter)
+        assert (
+            managed.media.managed_output_root
+            == (tmp_path / "managed-data" / "state" / "comfy-output").resolve()
+        )
+        assert isinstance(external.media, ComfyUIAdapter)
+        assert external.media.managed_output_root is None
+    finally:
+        await managed.close()
+        await external.close()
+
+
 @dataclass
 class FakeEntryPoint:
     name: str

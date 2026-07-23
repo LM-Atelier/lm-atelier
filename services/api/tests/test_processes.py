@@ -89,6 +89,9 @@ async def test_media_start_disables_unapproved_custom_nodes(
     await supervisor.start_media()
 
     command = captured["command"]
+    output_directory = settings.state_dir / "comfy-output"
+    assert output_directory.is_dir()
+    assert command[command.index("--output-directory") + 1] == str(output_directory.resolve())
     assert command[command.index("--preview-method") + 1] == "latent2rgb"
     assert "--disable-all-custom-nodes" in command
     assert command[command.index("--whitelist-custom-nodes") + 1 :] == ["lm-atelier-node_reviewed"]
