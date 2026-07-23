@@ -407,6 +407,61 @@ describe("App", () => {
     expect(screen.getByDisplayValue("Edited question")).toBeInTheDocument();
   });
 
+  it("keeps cancelled assistant text above subdued cancellation metadata", async () => {
+    localStorage.setItem("local-lm-chat", "chat-cancelled");
+    const stamp = "2026-07-22T00:00:00Z";
+    const chat = {
+      id: "chat-cancelled",
+      project_id: null,
+      title: "Cancelled stream",
+      archived: false,
+      routing_mode: "text" as const,
+      confirm_uncertain_media: false,
+      active_chat_profile_id: null,
+      active_image_profile_id: null,
+      active_video_profile_id: null,
+      active_head_message_id: "assistant-cancelled",
+      created_at: stamp,
+      updated_at: stamp,
+    };
+    vi.mocked(api.chats).mockResolvedValue([chat]);
+    vi.mocked(api.chat).mockResolvedValue({
+      ...chat,
+      messages: [
+        {
+          id: "user-cancelled",
+          chat_id: chat.id,
+          parent_id: null,
+          role: "user",
+          status: "complete",
+          parts: [{ id: "prompt", position: 0, type: "text", text: "Keep counting", artifact_id: null, metadata_json: {} }],
+          created_at: stamp,
+          updated_at: stamp,
+        },
+        {
+          id: "assistant-cancelled",
+          chat_id: chat.id,
+          parent_id: "user-cancelled",
+          role: "assistant",
+          status: "cancelled",
+          parts: [{ id: "partial", position: 0, type: "text", text: "1 2 3 4 5", artifact_id: null, metadata_json: {} }],
+          created_at: stamp,
+          updated_at: stamp,
+        },
+      ],
+    });
+    const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+    render(
+      <QueryClientProvider client={client}>
+        <App />
+      </QueryClientProvider>,
+    );
+    expect(await screen.findByText("1 2 3 4 5")).toBeInTheDocument();
+    const cancellation = screen.getByText("Generation cancelled");
+    expect(cancellation.closest(".message-meta")).not.toBeNull();
+    expect(cancellation.closest(".message-error")).toBeNull();
+  });
+
   it("renders an in-progress media preview inside the assistant message", async () => {
     localStorage.setItem("local-lm-chat", "chat-preview");
     const stamp = "2026-07-22T00:00:00Z";

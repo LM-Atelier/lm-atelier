@@ -222,6 +222,9 @@ function MessageBubble({
           <div className="message-text markdown"><ReactMarkdown remarkPlugins={[remarkGfm]}>{liveText}</ReactMarkdown></div>
         )}
         {message.role === "user" && message.status === "complete" && onEdit && !editing && <div className="message-meta"><button onClick={() => setEditing(true)}>Edit and branch</button></div>}
+        {message.role === "assistant" && message.status === "cancelled" && !visibleParts.some((part) => part.type === "error") && (
+          <div className="message-meta"><span>Generation cancelled</span></div>
+        )}
         {message.role === "assistant" && message.status === "complete" && (
           <div className="message-meta">
             {contextLimit > 0 && (

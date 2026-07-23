@@ -446,32 +446,39 @@ class ConversationOrchestrator:
         completion_metadata: dict[str, Any] = {}
         last_persisted_length = 0
         last_persisted_at = time.monotonic()
-        async for event in self.engines.chat.stream(request):
-            if event.type == "delta":
-                accumulated += event.text
-                await self.events.publish(
-                    "text.delta",
-                    run_id,
-                    {
-                        "text": event.text,
-                        "job_id": job_id,
-                        "assistant_message_id": assistant_id,
-                    },
-                )
-                now = time.monotonic()
-                if (
-                    len(accumulated) - last_persisted_length >= 32
-                    or now - last_persisted_at >= 0.25
-                ):
-                    self._persist_streamed_text(assistant_id, accumulated)
-                    last_persisted_length = len(accumulated)
-                    last_persisted_at = now
-            elif event.type == "cancelled":
-                return
-            elif event.type == "error":
-                raise RuntimeError(str(event.data.get("error", "chat engine failed")))
-            elif event.type in {"usage", "complete"}:
-                completion_metadata.update(event.data)
+        try:
+            async for event in self.engines.chat.stream(request):
+                if event.type == "delta":
+                    accumulated += event.text
+                    await self.events.publish(
+                        "text.delta",
+                        run_id,
+                        {
+                            "text": event.text,
+                            "job_id": job_id,
+                            "assistant_message_id": assistant_id,
+                        },
+                    )
+                    now = time.monotonic()
+                    if (
+                        len(accumulated) - last_persisted_length >= 32
+                        or now - last_persisted_at >= 0.25
+                    ):
+                        self._persist_streamed_text(assistant_id, accumulated)
+                        last_persisted_length = len(accumulated)
+                        last_persisted_at = now
+                elif event.type == "cancelled":
+                    if accumulated:
+                        self._persist_streamed_text(assistant_id, accumulated.rstrip())
+                    return
+                elif event.type == "error":
+                    raise RuntimeError(str(event.data.get("error", "chat engine failed")))
+                elif event.type in {"usage", "complete"}:
+                    completion_metadata.update(event.data)
+        except asyncio.CancelledError:
+            if accumulated:
+                self._persist_streamed_text(assistant_id, accumulated.rstrip())
+            raise
 
         with SessionLocal() as session:
             message = session.get(Message, assistant_id)
@@ -908,10 +915,15 @@ class ConversationOrchestrator:
         if message:
             preview_ids = self._temporary_preview_ids(message)
             message.status = MessageStatus.CANCELLED.value
-            self._replace_parts(
-                message,
-                [MessagePart(position=0, type=PartType.ERROR.value, text="Generation cancelled")],
-            )
+            if run.operation != Operation.TEXT.value:
+                self._replace_parts(
+                    message,
+                    [
+                        MessagePart(
+                            position=0, type=PartType.ERROR.value, text="Generation cancelled"
+                        )
+                    ],
+                )
             session.flush()
             for artifact_id in preview_ids:
                 self.artifacts.delete_temporary_preview(session, artifact_id)
