@@ -3,6 +3,48 @@ import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import App from "./App";
 import { api } from "./api";
+import type { EngineCapabilities, SettingField } from "./types";
+
+const imageSetting: SettingField = {
+  key: "negative_prompt",
+  label: "Negative prompt",
+  type: "string",
+  default: "",
+  minimum: null,
+  maximum: null,
+  step: null,
+  choices: [],
+  scope: "workflow",
+  visibility: "basic",
+  restart_required: false,
+  available: true,
+  unavailable_reason: null,
+  help: "Exclude unwanted image details.",
+};
+
+const videoSetting: SettingField = {
+  ...imageSetting,
+  key: "frames",
+  label: "Frames",
+  type: "integer",
+  default: 49,
+  help: "Number of video frames.",
+};
+
+const roleAwareMediaEngine: EngineCapabilities = {
+  engine: "mock",
+  version: "1",
+  roles: ["image", "video"],
+  operations: ["text_to_image", "text_to_video"],
+  formats: ["mock"],
+  devices: ["cpu:0"],
+  streaming: false,
+  tool_calling: false,
+  settings: [imageSetting, videoSetting],
+  settings_by_role: { image: [imageSetting], video: [videoSetting] },
+  healthy: true,
+  details: {},
+};
 
 vi.mock("./api", () => ({
   api: {
@@ -725,5 +767,81 @@ describe("App", () => {
     expect(await screen.findByText("observatory.png")).toBeInTheDocument();
     expect(screen.getByText(/2\.0 KB · 1 reference/)).toBeInTheDocument();
     expect(screen.getByText("Clean eligible")).toBeDisabled();
+  });
+
+  it("isolates role-aware settings in profile and preset editors", async () => {
+    vi.mocked(api.engines).mockResolvedValue([roleAwareMediaEngine]);
+    vi.mocked(api.profiles).mockResolvedValue([{
+      id: "image-profile",
+      model_install_id: null,
+      name: "Image profile",
+      role: "image",
+      engine: "mock",
+      load_settings_json: {},
+      request_settings_json: {},
+      is_default: false,
+    }]);
+    vi.mocked(api.presets).mockResolvedValue([{
+      id: "video-preset",
+      name: "Video preset",
+      role: "video",
+      settings_json: {},
+      is_default: false,
+    }]);
+    const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+    render(
+      <QueryClientProvider client={client}>
+        <App />
+      </QueryClientProvider>,
+    );
+
+    fireEvent.click(await screen.findByText("Settings"));
+    await screen.findByText("Image profile");
+    fireEvent.click(screen.getAllByRole("button", { name: "Edit" })[0]);
+    expect(await screen.findByText("Negative prompt")).toBeInTheDocument();
+    expect(screen.queryByText("Frames")).not.toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole("button", { name: "Close profile editor" }));
+    fireEvent.click(screen.getAllByRole("button", { name: "Edit" })[1]);
+    expect(await screen.findByText("Frames")).toBeInTheDocument();
+    expect(screen.queryByText("Negative prompt")).not.toBeInTheDocument();
+  });
+
+  it("isolates role-aware settings in per-turn controls", async () => {
+    const stamp = "2026-07-22T00:00:00Z";
+    const chat = {
+      id: "chat-role-settings",
+      project_id: null,
+      title: "Role settings",
+      archived: false,
+      routing_mode: "auto" as const,
+      confirm_uncertain_media: false,
+      active_chat_profile_id: null,
+      active_image_profile_id: null,
+      active_video_profile_id: null,
+      active_head_message_id: null,
+      created_at: stamp,
+      updated_at: stamp,
+    };
+    localStorage.setItem("local-lm-chat", chat.id);
+    vi.mocked(api.engines).mockResolvedValue([roleAwareMediaEngine]);
+    vi.mocked(api.chats).mockResolvedValue([chat]);
+    vi.mocked(api.chat).mockResolvedValue({ ...chat, messages: [] });
+    const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+    render(
+      <QueryClientProvider client={client}>
+        <App />
+      </QueryClientProvider>,
+    );
+
+    const mode = await screen.findByDisplayValue("Auto");
+    fireEvent.change(mode, { target: { value: "image" } });
+    fireEvent.click(screen.getByRole("button", { name: "Turn settings" }));
+    expect(await screen.findByText("Negative prompt")).toBeInTheDocument();
+    expect(screen.queryByText("Frames")).not.toBeInTheDocument();
+
+    fireEvent.change(mode, { target: { value: "video" } });
+    expect(await screen.findByText("Frames")).toBeInTheDocument();
+    expect(screen.queryByText("Negative prompt")).not.toBeInTheDocument();
   });
 });
