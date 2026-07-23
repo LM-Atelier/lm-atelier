@@ -159,7 +159,7 @@ async def test_catalog_detail_requests_live_blob_metadata(tmp_path) -> None:
                     {
                         "rfilename": "Model-8B-Q4_K_M.gguf",
                         "size": 5_000_000_000,
-                        "lfs": {"oid": f"sha256:{'a' * 64}"},
+                        "lfs": {"sha256": "a" * 64},
                     }
                 ],
             },

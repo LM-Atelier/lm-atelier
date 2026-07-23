@@ -925,8 +925,8 @@ async def test_catalog_preflight_autoselects_smallest_gguf(
             },
             "revision": revision,
             "files": [
-                {"filename": "large.gguf", "size": 2048, "sha256": None},
-                {"filename": "small.gguf", "size": 1024, "sha256": None},
+                {"filename": "large.gguf", "size": 2048, "sha256": "b" * 64},
+                {"filename": "small.gguf", "size": 1024, "sha256": "a" * 64},
             ],
         }
 
@@ -943,3 +943,6 @@ async def test_catalog_preflight_autoselects_smallest_gguf(
     assert response.status_code == 200
     assert response.json()["can_install"] is True
     assert response.json()["selected_files"] == ["small.gguf"]
+    assert response.json()["expected_sha256"] == {"small.gguf": "a" * 64}
+    checksum = next(check for check in response.json()["checks"] if check["id"] == "checksum")
+    assert checksum["status"] == "pass"
