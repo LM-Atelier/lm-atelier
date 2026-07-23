@@ -307,6 +307,42 @@ async def test_chat_tool_capability_probe_executes_declared_schema(client: Async
     assert response.json()["arguments"] == {"mode": "image", "confidence": 1}
 
 
+async def test_engine_api_isolates_media_settings_by_role(client: AsyncClient) -> None:
+    response = await client.get("/api/engines")
+    assert response.status_code == 200
+    media = next(item for item in response.json() if {"image", "video"} <= set(item["roles"]))
+
+    image_keys = [field["key"] for field in media["settings_by_role"]["image"]]
+    video_keys = [field["key"] for field in media["settings_by_role"]["video"]]
+    assert image_keys == [
+        "negative_prompt",
+        "seed",
+        "width",
+        "height",
+        "steps",
+        "cfg",
+        "sampler",
+        "scheduler",
+        "denoise",
+        "batch_size",
+        "loras",
+    ]
+    assert video_keys == [
+        "seed",
+        "width",
+        "height",
+        "frames",
+        "fps",
+        "steps",
+        "guidance",
+        "motion_strength",
+        "codec",
+    ]
+    assert "frames" not in image_keys
+    assert "negative_prompt" not in video_keys
+    assert len(media["settings"]) == len(image_keys) + len(video_keys)
+
+
 async def test_uncertain_auto_media_requires_confirmation(client: AsyncClient) -> None:
     chat = (await client.post("/api/chats", json={"title": "Routing"})).json()
     payload = {

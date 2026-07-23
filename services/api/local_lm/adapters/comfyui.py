@@ -51,6 +51,7 @@ class ComfyUIAdapter:
             streaming=False,
             tool_calling=False,
             settings=[*IMAGE_SETTINGS, *VIDEO_SETTINGS],
+            settings_by_role={"image": IMAGE_SETTINGS, "video": VIDEO_SETTINGS},
             healthy=healthy,
             details=details,
         )

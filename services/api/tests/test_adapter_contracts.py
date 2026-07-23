@@ -11,6 +11,8 @@ from local_lm.adapters.discovery import AdapterLoadError, load_external_adapter
 from local_lm.adapters.mock import MockChatAdapter, MockMediaAdapter
 from local_lm.config import Settings
 from local_lm.engines import EngineRegistry
+from local_lm.schemas import EngineCapabilities
+from local_lm.settings_registry import IMAGE_SETTINGS, VIDEO_SETTINGS
 
 
 async def test_builtin_adapters_pass_public_conformance_probes() -> None:
@@ -22,6 +24,37 @@ async def test_builtin_adapters_pass_public_conformance_probes() -> None:
     finally:
         await chat.close()
         await media.close()
+
+
+async def test_builtin_media_capabilities_isolate_role_settings() -> None:
+    adapter = MockMediaAdapter()
+    try:
+        capabilities = await adapter.capabilities()
+    finally:
+        await adapter.close()
+
+    assert capabilities.settings_by_role == {
+        "image": IMAGE_SETTINGS,
+        "video": VIDEO_SETTINGS,
+    }
+    assert capabilities.settings == [*IMAGE_SETTINGS, *VIDEO_SETTINGS]
+
+
+def test_role_settings_are_additive_for_legacy_adapter_capabilities() -> None:
+    capabilities = EngineCapabilities(
+        engine="legacy-media",
+        version="1",
+        roles=["image", "video"],
+        operations=["text_to_image", "text_to_video"],
+        formats=["legacy"],
+        devices=["cpu:0"],
+        streaming=False,
+        tool_calling=False,
+        settings=IMAGE_SETTINGS,
+        healthy=True,
+    )
+
+    assert capabilities.settings_by_role == {}
 
 
 @dataclass

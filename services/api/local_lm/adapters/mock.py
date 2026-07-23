@@ -35,6 +35,7 @@ class MockChatAdapter:
             streaming=True,
             tool_calling=True,
             settings=CHAT_SETTINGS,
+            settings_by_role={"chat": CHAT_SETTINGS},
             healthy=True,
             details={"purpose": "offline development and contract testing"},
         )
@@ -152,6 +153,7 @@ class MockMediaAdapter:
             streaming=False,
             tool_calling=False,
             settings=[*IMAGE_SETTINGS, *VIDEO_SETTINGS],
+            settings_by_role={"image": IMAGE_SETTINGS, "video": VIDEO_SETTINGS},
             healthy=True,
             details={"purpose": "offline development and contract testing"},
         )
