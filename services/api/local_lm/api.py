@@ -124,9 +124,13 @@ router = APIRouter(prefix="/api")
 
 
 @router.post("/session")
-async def create_session(request: Request, response: Response) -> dict[str, str]:
-    security: SessionSecurity = _services(request).security
-    return {"csrf_token": security.issue_session(response)}
+async def create_session(request: Request, response: Response) -> dict[str, str | int]:
+    services = _services(request)
+    security: SessionSecurity = services.security
+    return {
+        "csrf_token": security.issue_session(response),
+        "event_sequence": services.events.sequence,
+    }
 
 
 @router.get("/health", response_model=HealthOut)
