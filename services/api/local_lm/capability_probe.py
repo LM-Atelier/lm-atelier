@@ -23,6 +23,10 @@ PROBE_TOOL = {
     },
 }
 
+# Qwen3 chat templates honor this directive and otherwise may spend the probe's
+# small output budget on hidden reasoning before attempting the structured call.
+PROBE_USER_PROMPT = "/no_think\nCreate an image of a violet observatory."
+
 
 async def probe_structured_tools(adapter: ChatAdapter) -> ToolCapabilityProbe:
     capabilities = await adapter.capabilities()
@@ -44,7 +48,10 @@ async def probe_structured_tools(adapter: ChatAdapter) -> ToolCapabilityProbe:
                 "role": "system",
                 "content": "Always call choose_route. Do not answer with ordinary text.",
             },
-            {"role": "user", "content": "Create an image of a violet observatory."},
+            {
+                "role": "user",
+                "content": PROBE_USER_PROMPT,
+            },
         ],
         tools=[PROBE_TOOL],
         settings={"temperature": 0, "max_tokens": 96},
