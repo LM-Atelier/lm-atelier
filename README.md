@@ -175,7 +175,11 @@ while keeping the prior branch in local history.
 
 1. Install ComfyUI separately and prepare API-format workflows whose tunable
    values use `${prompt}`, `${negative_prompt}`, `${seed}`, and other declared
-   parameter placeholders.
+   parameter placeholders. Image-to-image and image-to-video workflows can use
+   `${input_image}` for the first conditioning image, `${input_image_0}` and
+   subsequent numbered aliases, or `${input_images}` for the complete staged
+   list. LM Atelier uploads those inputs to ComfyUI's temporary area before
+   queueing the graph.
 2. Import the workflow in the Workflows page and validate it against the active
    ComfyUI node inventory.
 3. Configure either an external server or the managed worker:
