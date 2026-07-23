@@ -17,6 +17,35 @@ from ..settings_registry import IMAGE_SETTINGS, VIDEO_SETTINGS
 from .base import GeneratedAsset, MediaEvent, MediaRequest
 
 
+def _is_preview_image(content: bytes) -> bool:
+    return (
+        content.startswith((b"\x89PNG", b"\xff\xd8", b"GIF87a", b"GIF89a"))
+        or (content.startswith(b"RIFF") and content[8:12] == b"WEBP")
+        or content.lstrip().startswith(b"<svg")
+    )
+
+
+def _preview_payload(frame: bytes) -> bytes | None:
+    if _is_preview_image(frame):
+        return frame
+    if len(frame) < 8:
+        return None
+    event_type = int.from_bytes(frame[:4], "big")
+    if event_type == 1:
+        # PREVIEW_IMAGE: event type, image format, then encoded image.
+        payload = frame[8:]
+    elif event_type == 4:
+        # PREVIEW_IMAGE_WITH_METADATA: event type, metadata length, JSON, image.
+        metadata_length = int.from_bytes(frame[4:8], "big")
+        payload_start = 8 + metadata_length
+        if payload_start > len(frame):
+            return None
+        payload = frame[payload_start:]
+    else:
+        return None
+    return payload if _is_preview_image(payload) else None
+
+
 class ComfyUIAdapter:
     def __init__(self, base_url: str, *, inactivity_seconds: float = 600) -> None:
         if inactivity_seconds <= 0:
@@ -207,7 +236,8 @@ class ComfyUIAdapter:
                             f"{self.inactivity_seconds:g} seconds; the run was interrupted"
                         ) from exc
                     if not isinstance(raw, str):
-                        yield MediaEvent(type="preview", phase="preview", preview=bytes(raw))
+                        if preview := _preview_payload(bytes(raw)):
+                            yield MediaEvent(type="preview", phase="preview", preview=preview)
                         continue
                     message = json.loads(raw)
                     message_type = message.get("type")
