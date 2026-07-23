@@ -50,6 +50,23 @@ async def wait_for_run(client: AsyncClient, run_id: str) -> dict:  # type: ignor
     raise AssertionError("run did not complete")
 
 
+async def test_health_probes_the_database(client: AsyncClient, monkeypatch) -> None:  # type: ignore[no-untyped-def]
+    healthy = await client.get("/api/health")
+    assert healthy.status_code == 200
+    assert healthy.json()["database"] is True
+
+    def fail_probe(*_args, **_kwargs):  # type: ignore[no-untyped-def]
+        from sqlalchemy.exc import OperationalError
+
+        raise OperationalError("SELECT 1", {}, Exception("database unavailable"))
+
+    monkeypatch.setattr("sqlalchemy.orm.Session.execute", fail_probe)
+    degraded = await client.get("/api/health")
+    assert degraded.status_code == 200
+    assert degraded.json()["status"] == "degraded"
+    assert degraded.json()["database"] is False
+
+
 async def test_project_and_chat_management_contract(client: AsyncClient) -> None:
     project = (await client.post("/api/projects", json={"name": "Research Lab"})).json()
     chat = (

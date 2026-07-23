@@ -7,7 +7,8 @@ from typing import Annotated, Any, Literal, cast
 from urllib.parse import quote
 
 from fastapi import APIRouter, Depends, File, HTTPException, Query, Request, Response, UploadFile
-from sqlalchemy import func, select
+from sqlalchemy import func, select, text
+from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.orm import Session, selectinload
 
 from .capability_probe import probe_structured_tools
@@ -134,16 +135,25 @@ async def create_session(request: Request, response: Response) -> dict[str, str 
 
 
 @router.get("/health", response_model=HealthOut)
-async def health(request: Request) -> HealthOut:
+async def health(request: Request, session: SessionDep) -> HealthOut:
     engines: EngineRegistry = _services(request).engines
+    database_healthy = True
+    try:
+        session.execute(text("SELECT 1")).scalar_one()
+    except SQLAlchemyError:
+        database_healthy = False
     try:
         capabilities = await engines.capabilities()
     except Exception:
         capabilities = []
     return HealthOut(
-        status="ok" if all(item.healthy for item in capabilities) else "degraded",
+        status=(
+            "ok"
+            if database_healthy and capabilities and all(item.healthy for item in capabilities)
+            else "degraded"
+        ),
         version="0.1.0",
-        database=True,
+        database=database_healthy,
         engines=capabilities,
     )
 
