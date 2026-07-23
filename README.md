@@ -267,8 +267,10 @@ controls without changing the stored ComfyUI graph.
 ## Development
 
 The web client lives in `apps/web`; the FastAPI package lives in `services/api`.
-Normal CI runs the web and API suites on both Ubuntu and Windows using mock
-engines and never downloads model weights.
+The local verification scripts run the complete web/API gate without model
+weights. Hosted Ubuntu compatibility CI is currently opt-in through a ready
+pull request's `run-ci` label or manual workflow dispatch so the project's
+constrained Actions quota is reserved for cross-platform checks.
 
 Development flows through descriptively named work branches into `develop`,
 then from `develop` into `main` for releases. Feature branch names never use a
