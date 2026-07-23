@@ -1057,6 +1057,75 @@ describe("App", () => {
     expect(screen.queryByText("Negative prompt")).not.toBeInTheDocument();
   });
 
+  it("applies the pinned workflow schema to per-turn controls", async () => {
+    const stamp = "2026-07-22T00:00:00Z";
+    const project = {
+      id: "project-workflow-controls",
+      name: "Video project",
+      description: "",
+      instructions: "",
+      archived: false,
+      image_workflow_revision_id: null,
+      video_workflow_revision_id: "revision-video",
+      created_at: stamp,
+      updated_at: stamp,
+    };
+    const chat = {
+      id: "chat-workflow-controls",
+      project_id: project.id,
+      title: "Workflow controls",
+      archived: false,
+      routing_mode: "video" as const,
+      confirm_uncertain_media: false,
+      active_chat_profile_id: null,
+      active_image_profile_id: null,
+      active_video_profile_id: null,
+      active_head_message_id: null,
+      created_at: stamp,
+      updated_at: stamp,
+    };
+    localStorage.setItem("local-lm-chat", chat.id);
+    vi.mocked(api.projects).mockResolvedValue([project]);
+    vi.mocked(api.chats).mockResolvedValue([chat]);
+    vi.mocked(api.chat).mockResolvedValue({ ...chat, messages: [] });
+    vi.mocked(api.engines).mockResolvedValue([roleAwareMediaEngine]);
+    vi.mocked(api.workflows).mockResolvedValue([{
+      id: "workflow-video",
+      name: "Fixed video",
+      operation: "text_to_video",
+      description: "",
+      current_revision_id: "revision-video",
+      revisions: [{
+        id: "revision-video",
+        workflow_id: "workflow-video",
+        version: 1,
+        engine: "mock",
+        engine_version: null,
+        ui_graph_json: {},
+        api_graph_json: {},
+        input_schema_json: {
+          type: "object",
+          properties: { frames: { type: "integer", const: 81, default: 81 } },
+        },
+        dependencies_json: {},
+        trusted: true,
+        created_at: stamp,
+      }],
+    }]);
+    const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+    render(
+      <QueryClientProvider client={client}>
+        <App />
+      </QueryClientProvider>,
+    );
+
+    fireEvent.click(await screen.findByRole("button", { name: "Turn settings" }));
+    const frames = await screen.findByRole("spinbutton", { name: /Frames/ });
+    expect(frames).toHaveValue(81);
+    expect(frames).toBeDisabled();
+    expect(screen.getByText(/Fixed by this workflow at 81/)).toBeInTheDocument();
+  });
+
   it("applies turn controls to send, edit-and-branch, and regenerate actions", async () => {
     const stamp = "2026-07-22T00:00:00Z";
     const chat = {

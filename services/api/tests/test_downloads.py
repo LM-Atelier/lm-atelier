@@ -3,13 +3,17 @@ from __future__ import annotations
 import asyncio
 import json
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any
 
 import pytest
 
 from local_lm.config import Settings
+from local_lm.db import SessionLocal, configure_database, init_db
+from local_lm.domain import JobKind, JobStatus
 from local_lm.downloads import DownloadManager
 from local_lm.events import EventBroker
+from local_lm.models import Job
 
 
 class FakeWorker:
@@ -123,3 +127,62 @@ async def test_download_file_retries_transient_worker_failures(
     assert path == "C:/models/model.gguf"
     assert attempts == 3
     assert sleeps == [1, 2]
+
+
+async def test_transfer_monitor_reports_process_tree_bytes(
+    settings: Settings,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    settings.prepare()
+    configure_database(settings)
+    init_db()
+    broker = EventBroker()
+    manager = DownloadManager(settings, broker)
+    with SessionLocal() as session:
+        session.add(
+            Job(
+                id="job_progress",
+                kind=JobKind.DOWNLOAD.value,
+                status=JobStatus.RUNNING.value,
+                progress=0,
+                phase="inspecting",
+            )
+        )
+        session.commit()
+
+    staging = settings.download_dir / "job_progress.partial"
+    staging.mkdir(parents=True)
+    write_samples = iter([0, 50])
+    monkeypatch.setattr(
+        manager,
+        "_process_tree_write_bytes",
+        lambda _pid: next(write_samples, 50),
+    )
+    stop = asyncio.Event()
+
+    async def stop_after_sample() -> None:
+        await asyncio.sleep(0.01)
+        stop.set()
+
+    stopper = asyncio.create_task(stop_after_sample())
+    await manager._monitor_transfer(
+        job_id="job_progress",
+        filename="model.safetensors",
+        staging=staging,
+        process=SimpleNamespace(pid=123),  # type: ignore[arg-type]
+        file_size=100,
+        completed_bytes=0,
+        total_size=100,
+        stop=stop,
+    )
+    await stopper
+
+    with SessionLocal() as session:
+        job = session.get(Job, "job_progress")
+        assert job
+        assert job.phase == "downloading model.safetensors"
+        assert job.progress == pytest.approx(0.45)
+    event = broker.since(0)[0]
+    assert event.type == "download.progress"
+    assert event.payload["downloaded_bytes"] == 50
+    assert event.payload["file_size_bytes"] == 100

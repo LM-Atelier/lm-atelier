@@ -33,7 +33,11 @@ import {
   X,
 } from "lucide-react";
 import { api, connectEvents } from "./api";
-import { resolveCapabilitySettings } from "./settings";
+import {
+  normalizeSettingsForFields,
+  resolveCapabilitySettings,
+  resolveWorkflowSettings,
+} from "./settings";
 import type {
   AppEvent,
   CatalogModel,
@@ -50,6 +54,7 @@ import type {
   ReferenceRecipe,
   RoutingMode,
   SettingField,
+  Workflow,
   WorkflowBundle,
 } from "./types";
 
@@ -254,11 +259,12 @@ function SettingControl({
   value: unknown;
   onChange: (value: unknown) => void;
 }) {
+  const fixed = field.choices.length === 1;
   if (field.type === "boolean") {
     return (
       <label className="setting-row toggle-row">
         <span><strong>{field.label}</strong><small>{field.help}</small></span>
-        <input type="checkbox" checked={Boolean(value)} onChange={(event) => onChange(event.target.checked)} />
+        <input type="checkbox" checked={Boolean(value)} disabled={fixed} onChange={(event) => onChange(event.target.checked)} />
       </label>
     );
   }
@@ -266,7 +272,7 @@ function SettingControl({
     return (
       <label className="setting-row">
         <span><strong>{field.label}</strong><small>{field.help}</small></span>
-        <select value={String(value ?? "")} onChange={(event) => onChange(event.target.value)}>
+        <select value={String(value ?? "")} disabled={fixed} onChange={(event) => onChange(event.target.value)}>
           {field.choices.map((choice) => <option key={String(choice)}>{String(choice)}</option>)}
         </select>
       </label>
@@ -282,6 +288,7 @@ function SettingControl({
           min={field.minimum ?? undefined}
           max={field.maximum ?? undefined}
           step={field.step ?? (field.type === "integer" ? 1 : 0.01)}
+          disabled={fixed}
           onChange={(event) => onChange(field.type === "integer" ? Number.parseInt(event.target.value) : Number(event.target.value))}
         />
       </label>
@@ -293,6 +300,7 @@ function SettingControl({
         <span><strong>{field.label}</strong><small>{field.help}</small></span>
         <textarea
           rows={3}
+          disabled={fixed}
           defaultValue={JSON.stringify(value ?? field.default, null, 2)}
           onBlur={(event) => {
             try {
@@ -311,7 +319,7 @@ function SettingControl({
   return (
     <label className="setting-row">
       <span><strong>{field.label}</strong><small>{field.help}</small></span>
-      <input value={String(value ?? "")} onChange={(event) => onChange(event.target.value)} />
+      <input value={String(value ?? "")} disabled={fixed} onChange={(event) => onChange(event.target.value)} />
     </label>
   );
 }
@@ -323,6 +331,7 @@ function SettingsDrawer({
   engines,
   values,
   onValues,
+  workflowSchema,
 }: {
   open: boolean;
   onClose: () => void;
@@ -330,11 +339,15 @@ function SettingsDrawer({
   engines: EngineCapabilities[];
   values: Record<string, unknown>;
   onValues: (values: Record<string, unknown>) => void;
+  workflowSchema?: Record<string, unknown>;
 }) {
   const [visibility, setVisibility] = useState<Visibility>("basic");
   const role = mode === "video" ? "video" : mode === "image" ? "image" : "chat";
   const engine = engines.find((item) => item.roles.includes(role));
-  const fields = resolveCapabilitySettings(engine, role).filter(
+  const fields = resolveWorkflowSettings(
+    resolveCapabilitySettings(engine, role),
+    workflowSchema,
+  ).filter(
     (field) =>
       field.scope !== "load"
       && visibilityRank[field.visibility] <= visibilityRank[visibility]
@@ -375,6 +388,8 @@ function Composer({
   onSettings,
   onSend,
   onStop,
+  workflows,
+  project,
 }: {
   chat: Chat;
   engines: EngineCapabilities[];
@@ -383,6 +398,8 @@ function Composer({
   onSettings: (settings: Record<string, unknown>) => void;
   onSend: (text: string, mode: RoutingMode, artifacts: string[], settings: Record<string, unknown>) => void;
   onStop: () => void;
+  workflows: Workflow[];
+  project?: Project;
 }) {
   const [text, setText] = useState("");
   const [mode, setMode] = useState<RoutingMode>(chat.routing_mode);
@@ -390,10 +407,17 @@ function Composer({
   const [attachments, setAttachments] = useState<string[]>([]);
   const [uploading, setUploading] = useState(false);
   const fileInput = useRef<HTMLInputElement>(null);
+  const workflowSchema = workflowSchemaForTurn(workflows, project, mode, attachments.length > 0);
 
   const submit = () => {
     if (!text.trim() || busy) return;
-    onSend(text.trim(), mode, attachments, settings);
+    const role = mode === "video" ? "video" : mode === "image" ? "image" : "chat";
+    const engine = engines.find((item) => item.roles.includes(role));
+    const fields = resolveWorkflowSettings(
+      resolveCapabilitySettings(engine, role),
+      workflowSchema,
+    );
+    onSend(text.trim(), mode, attachments, normalizeSettingsForFields(settings, fields));
     setText("");
     setAttachments([]);
   };
@@ -451,7 +475,7 @@ function Composer({
         </div>
         <small className="composer-note">Local models can make mistakes. Generation stays on this machine.</small>
       </div>
-      <SettingsDrawer open={settingsOpen} onClose={() => setSettingsOpen(false)} mode={mode} engines={engines} values={settings} onValues={onSettings} />
+      <SettingsDrawer open={settingsOpen} onClose={() => setSettingsOpen(false)} mode={mode} engines={engines} values={settings} onValues={onSettings} workflowSchema={workflowSchema} />
     </>
   );
 }
@@ -470,10 +494,36 @@ function activeBranchMessages(chat: ChatDetail): Message[] {
   return lineage.length > 0 ? lineage : chat.messages;
 }
 
+function workflowSchemaForTurn(
+  workflows: Workflow[],
+  project: Project | undefined,
+  mode: RoutingMode,
+  hasAttachments: boolean,
+): Record<string, unknown> | undefined {
+  if (mode !== "image" && mode !== "video") return undefined;
+  const operation = mode === "image"
+    ? hasAttachments ? "image_to_image" : "text_to_image"
+    : hasAttachments ? "image_to_video" : "text_to_video";
+  const pinnedRevisionId = mode === "image"
+    ? project?.image_workflow_revision_id
+    : project?.video_workflow_revision_id;
+  if (pinnedRevisionId) {
+    for (const workflow of workflows) {
+      const revision = workflow.revisions.find((item) => item.id === pinnedRevisionId);
+      if (revision && workflow.operation === operation) return revision.input_schema_json;
+    }
+  }
+  const workflow = workflows.find((item) => item.operation === operation);
+  return workflow?.revisions.find((item) => item.id === workflow.current_revision_id)
+    ?.input_schema_json;
+}
+
 function ChatView({
   chat,
   engines,
   profiles,
+  workflows,
+  project,
   liveText,
   settings,
   onSettings,
@@ -486,6 +536,8 @@ function ChatView({
   chat?: ChatDetail;
   engines: EngineCapabilities[];
   profiles: ModelProfile[];
+  workflows: Workflow[];
+  project?: Project;
   liveText: Record<string, string>;
   settings: Record<string, unknown>;
   onSettings: (settings: Record<string, unknown>) => void;
@@ -528,7 +580,7 @@ function ChatView({
         />)}
         <div ref={endRef} />
       </div>
-      <Composer chat={chat} engines={engines} busy={busy} settings={settings} onSettings={onSettings} onSend={onSend} onStop={onStop} />
+      <Composer chat={chat} engines={engines} busy={busy} settings={settings} onSettings={onSettings} onSend={onSend} onStop={onStop} workflows={workflows} project={project} />
     </div>
   );
 }
@@ -1190,6 +1242,7 @@ export default function App() {
   const chat = useQuery({ queryKey: ["chat", currentChatId], queryFn: () => api.chat(currentChatId!), enabled: Boolean(currentChatId) });
   const engines = useQuery({ queryKey: ["engines"], queryFn: api.engines });
   const profiles = useQuery({ queryKey: ["profiles"], queryFn: api.profiles });
+  const workflows = useQuery({ queryKey: ["workflows"], queryFn: api.workflows });
 
   useEffect(() => {
     let dispose: (() => void) | undefined;
@@ -1328,17 +1381,17 @@ export default function App() {
     }
   }, [chats.data, currentChatId]);
 
-  const allChats = chats.data ?? [];
-  const allProjects = projects.data ?? [];
+  const allChats = useMemo(() => chats.data ?? [], [chats.data]);
+  const allProjects = useMemo(() => projects.data ?? [], [projects.data]);
   const activeContent = useMemo(() => {
     if (view === "media") return <MediaLibraryView />;
     if (view === "models") return <ModelsView />;
     if (view === "workflows") return <WorkflowsView />;
     if (view === "settings") return <SettingsView engines={engines.data ?? []} />;
-    return <ChatView chat={chat.data} engines={engines.data ?? []} profiles={profiles.data ?? []} liveText={liveText} settings={currentChatId ? turnSettingsByChat[currentChatId] ?? {} : {}} onSettings={(settings) => {
+    return <ChatView chat={chat.data} engines={engines.data ?? []} profiles={profiles.data ?? []} workflows={workflows.data ?? []} project={allProjects.find((item) => item.id === chat.data?.project_id)} liveText={liveText} settings={currentChatId ? turnSettingsByChat[currentChatId] ?? {} : {}} onSettings={(settings) => {
       if (currentChatId) setTurnSettingsByChat((current) => ({ ...current, [currentChatId]: settings }));
     }} onProfile={(field, id) => updateChat.mutate({ [field]: id })} onRegenerate={(messageId, settings) => regenerate.mutate({ messageId, settings })} onEdit={(messageId, text, settings) => branch.mutate({ messageId, text, settings })} onStop={() => stop.mutate()} onSend={(text, mode, artifacts, settings) => send.mutate({ text, mode, artifacts, settings })} />;
-  }, [view, engines.data, profiles.data, chat.data, liveText, currentChatId, turnSettingsByChat, send, regenerate, branch, stop, updateChat]);
+  }, [view, engines.data, profiles.data, workflows.data, allProjects, chat.data, liveText, currentChatId, turnSettingsByChat, send, regenerate, branch, stop, updateChat]);
 
   return (
     <div className="app-shell">

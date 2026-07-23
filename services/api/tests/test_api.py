@@ -894,6 +894,132 @@ async def test_project_pins_an_immutable_media_workflow_revision(client: AsyncCl
     assert turn.json()["run"]["workflow_revision_id"] == revision_id
 
 
+async def test_pinned_workflow_schema_drives_generation_settings(client: AsyncClient) -> None:
+    workflow = (
+        await client.post(
+            "/api/workflows",
+            json={
+                "name": "Constrained video recipe",
+                "operation": "text_to_video",
+                "engine": "mock",
+                "api_graph": {"node": {"class_type": "Mock"}},
+                "input_schema": {
+                    "type": "object",
+                    "properties": {
+                        "width": {"type": "integer", "const": 832},
+                        "height": {"type": "integer", "const": 480},
+                        "frames": {"type": "integer", "default": 81, "minimum": 1},
+                        "fps": {"type": "number", "default": 16, "minimum": 1},
+                        "steps": {
+                            "type": "integer",
+                            "default": 12,
+                            "minimum": 1,
+                            "maximum": 30,
+                        },
+                        "codec": {"type": "string", "const": "h264"},
+                        "camera_strength": {
+                            "type": "number",
+                            "default": 0.5,
+                            "minimum": 0,
+                            "maximum": 1,
+                        },
+                    },
+                },
+                "trusted": True,
+            },
+        )
+    ).json()
+    project = (
+        await client.post(
+            "/api/projects",
+            json={
+                "name": "Constrained video project",
+                "video_workflow_revision_id": workflow["current_revision_id"],
+            },
+        )
+    ).json()
+    profile = (
+        await client.post(
+            "/api/profiles",
+            json={
+                "name": "Reusable video profile",
+                "role": "video",
+                "engine": "mock",
+                "request_settings": {"width": 768, "steps": 20},
+            },
+        )
+    ).json()
+    preset = await client.post(
+        "/api/presets",
+        json={
+            "name": "Reusable video preset",
+            "role": "video",
+            "settings": {"frames": 49, "codec": "vp9"},
+            "is_default": True,
+        },
+    )
+    assert preset.status_code == 201
+    chat = (
+        await client.post(
+            "/api/chats",
+            json={"title": "Workflow settings", "project_id": project["id"]},
+        )
+    ).json()
+    selected = await client.patch(
+        f"/api/chats/{chat['id']}",
+        json={"active_video_profile_id": profile["id"]},
+    )
+    assert selected.status_code == 200
+
+    turn = await client.post(
+        f"/api/chats/{chat['id']}/turns",
+        json={
+            "text": "Create a short camera move",
+            "mode": "video",
+            "settings": {"camera_strength": 0.75},
+        },
+    )
+    assert turn.status_code == 202
+    run = turn.json()["run"]
+    assert run["workflow_revision_id"] == workflow["current_revision_id"]
+    assert run["settings_json"]["width"] == 832
+    assert run["settings_json"]["height"] == 480
+    # Compatible stored profile/preset values still apply, while values that
+    # conflict with fixed workflow controls fall back to the workflow defaults.
+    assert run["settings_json"]["frames"] == 49
+    assert run["settings_json"]["fps"] == 16
+    assert run["settings_json"]["steps"] == 20
+    assert run["settings_json"]["codec"] == "h264"
+    assert run["settings_json"]["camera_strength"] == 0.75
+    assert run["provenance_json"]["generation_estimate"]["width"] == 832
+    assert run["provenance_json"]["generation_estimate"]["height"] == 480
+
+    regenerated = await client.post(
+        f"/api/messages/{run['assistant_message_id']}/regenerate",
+        json={"settings": {}},
+    )
+    assert regenerated.status_code == 202
+    assert regenerated.json()["run"]["settings_json"]["camera_strength"] == 0.75
+
+    branched = await client.post(
+        f"/api/messages/{run['user_message_id']}/branch",
+        json={"text": "Create a different camera move", "settings": {}},
+    )
+    assert branched.status_code == 202
+    assert branched.json()["run"]["settings_json"]["camera_strength"] == 0.75
+
+    incompatible = await client.post(
+        f"/api/chats/{chat['id']}/turns",
+        json={
+            "text": "Try an unsupported codec",
+            "mode": "video",
+            "settings": {"codec": "vp9"},
+        },
+    )
+    assert incompatible.status_code == 422
+    assert "codec must be one of" in incompatible.json()["detail"]
+
+
 async def test_profile_edit_clone_reset_and_portable_bundle(client: AsyncClient) -> None:
     profiles = (await client.get("/api/profiles?role=chat")).json()
     source = profiles[0]

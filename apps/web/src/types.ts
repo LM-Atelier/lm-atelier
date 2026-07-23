@@ -142,6 +142,7 @@ export interface SettingField {
   minimum: number | null;
   maximum: number | null;
   step: number | null;
+  multiple_of?: number | null;
   choices: unknown[];
   scope: "load" | "request" | "workflow";
   visibility: "basic" | "advanced" | "expert";
