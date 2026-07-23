@@ -7,7 +7,8 @@ from typing import Annotated, Any, Literal, cast
 from urllib.parse import quote
 
 from fastapi import APIRouter, Depends, File, HTTPException, Query, Request, Response, UploadFile
-from sqlalchemy import func, select
+from sqlalchemy import func, select, text
+from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.orm import Session, selectinload
 
 from .capability_probe import probe_structured_tools
@@ -134,16 +135,25 @@ async def create_session(request: Request, response: Response) -> dict[str, str 
 
 
 @router.get("/health", response_model=HealthOut)
-async def health(request: Request) -> HealthOut:
+async def health(request: Request, session: SessionDep) -> HealthOut:
     engines: EngineRegistry = _services(request).engines
+    database_healthy = True
+    try:
+        session.execute(text("SELECT 1")).scalar_one()
+    except SQLAlchemyError:
+        database_healthy = False
     try:
         capabilities = await engines.capabilities()
     except Exception:
         capabilities = []
     return HealthOut(
-        status="ok" if all(item.healthy for item in capabilities) else "degraded",
+        status=(
+            "ok"
+            if database_healthy and capabilities and all(item.healthy for item in capabilities)
+            else "degraded"
+        ),
         version="0.1.0",
-        database=True,
+        database=database_healthy,
         engines=capabilities,
     )
 
@@ -289,8 +299,29 @@ async def worker_status(request: Request, session: SessionDep) -> list[WorkerSta
     return statuses
 
 
+def _ensure_worker_idle(session: Session, name: str) -> None:
+    kinds = [JobKind.CHAT.value] if name == "chat" else [JobKind.IMAGE.value, JobKind.VIDEO.value]
+    busy_jobs = (
+        session.scalar(
+            select(func.count(Job.id)).where(
+                Job.kind.in_(kinds),
+                Job.status.in_(["queued", "running", "paused"]),
+            )
+        )
+        or 0
+    )
+    if busy_jobs:
+        raise HTTPException(
+            409,
+            f"the {name} worker has {busy_jobs} active or queued "
+            f"{'job' if busy_jobs == 1 else 'jobs'}; cancel or wait for them before "
+            "changing the worker",
+        )
+
+
 @router.post("/workers/chat/load/{profile_id}", response_model=WorkerStatus)
 async def load_chat_worker(profile_id: str, request: Request, session: SessionDep) -> WorkerStatus:
+    _ensure_worker_idle(session, "chat")
     profile = session.get(ModelProfile, profile_id)
     if not profile or not profile.model_install_id:
         raise HTTPException(404, "profile with a model install not found")
@@ -304,7 +335,8 @@ async def load_chat_worker(profile_id: str, request: Request, session: SessionDe
 
 
 @router.post("/workers/media/start", response_model=WorkerStatus)
-async def start_media_worker(request: Request) -> WorkerStatus:
+async def start_media_worker(request: Request, session: SessionDep) -> WorkerStatus:
+    _ensure_worker_idle(session, "media")
     try:
         return await _services(request).processes.start_media()
     except (OSError, RuntimeError, ValueError, TimeoutError) as exc:
@@ -312,7 +344,10 @@ async def start_media_worker(request: Request) -> WorkerStatus:
 
 
 @router.post("/workers/{name}/stop", response_model=WorkerStatus)
-async def stop_worker(name: str, request: Request) -> WorkerStatus:
+async def stop_worker(name: str, request: Request, session: SessionDep) -> WorkerStatus:
+    if name not in {"chat", "media"}:
+        raise HTTPException(422, "worker must be chat or media")
+    _ensure_worker_idle(session, name)
     try:
         return await _services(request).processes.stop(name)
     except ValueError as exc:
@@ -563,6 +598,7 @@ async def regenerate_message(
     request: Request,
     session: SessionDep,
 ) -> TurnAccepted:
+    orchestrator: ConversationOrchestrator = _services(request).orchestrator
     prior_run = session.scalar(select(Run).where(Run.assistant_message_id == message_id))
     if not prior_run:
         raise HTTPException(404, "assistant run not found")
@@ -575,12 +611,15 @@ async def regenerate_message(
         raise HTTPException(404, "source user message not found")
     text = "\n".join(part.text for part in user_message.parts if part.text).strip()
     mode = _mode_for_operation(Operation(prior_run.operation))
+    prior_settings = orchestrator.request_settings_for_operation(
+        Operation(prior_run.operation), prior_run.settings_json
+    )
     turn = TurnRequest(
         text=text,
         mode=mode,
         parent_message_id=user_message.parent_id,
         input_artifact_ids=prior_run.provenance_json.get("input_artifact_ids", []),
-        settings={**prior_run.settings_json, **payload.settings},
+        settings={**prior_settings, **payload.settings},
     )
     return await _services(request).orchestrator.create_turn(
         session, prior_run.chat_id, turn, use_explicit_parent=True
@@ -602,7 +641,9 @@ async def edit_and_branch(
         if not payload.input_artifact_ids:
             updates["input_artifact_ids"] = prior_run.provenance_json.get("input_artifact_ids", [])
         if not payload.settings:
-            updates["settings"] = prior_run.settings_json
+            updates["settings"] = _services(request).orchestrator.request_settings_for_operation(
+                Operation(prior_run.operation), prior_run.settings_json
+            )
     turn = payload.model_copy(update=updates)
     return await _services(request).orchestrator.create_turn(
         session, source.chat_id, turn, use_explicit_parent=True
@@ -1176,7 +1217,7 @@ async def create_profile(payload: ModelProfileCreate, session: SessionDep) -> Mo
             select(ModelProfile).where(ModelProfile.role == payload.role)
         ).all():
             profile.is_default = False
-    fields = _preset_fields(payload.role)
+    fields = _role_fields(payload.role)
     try:
         load_settings = validate_settings(
             payload.load_settings, [field for field in fields if field.scope == "load"]
@@ -1221,7 +1262,7 @@ async def update_profile(
         try:
             profile.load_settings_json = validate_settings(
                 values.pop("load_settings") or {},
-                [field for field in _preset_fields(profile.role) if field.scope == "load"],
+                [field for field in _role_fields(profile.role) if field.scope == "load"],
             )
         except ValueError as exc:
             raise HTTPException(422, str(exc)) from exc
@@ -1229,7 +1270,7 @@ async def update_profile(
         try:
             profile.request_settings_json = validate_settings(
                 values.pop("request_settings") or {},
-                [field for field in _preset_fields(profile.role) if field.scope != "load"],
+                [field for field in _role_fields(profile.role) if field.scope != "load"],
             )
         except ValueError as exc:
             raise HTTPException(422, str(exc)) from exc
@@ -1320,8 +1361,12 @@ async def import_profile(payload: ModelProfileBundle, session: SessionDep) -> Mo
     )
 
 
-def _preset_fields(role: str):  # type: ignore[no-untyped-def]
+def _role_fields(role: str):  # type: ignore[no-untyped-def]
     return {"chat": CHAT_SETTINGS, "image": IMAGE_SETTINGS, "video": VIDEO_SETTINGS}[role]
+
+
+def _preset_fields(role: str):  # type: ignore[no-untyped-def]
+    return [field for field in _role_fields(role) if field.scope != "load"]
 
 
 @router.get("/presets", response_model=list[PresetOut])
