@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import json
 from pathlib import Path
 from typing import Any
@@ -166,6 +167,56 @@ async def test_websocket_is_connected_before_a_warm_prompt_can_complete(
     assert events == ["connected", "prompted"]
     assert [event.type for event in generated] == ["queued", "complete"]
     assert generated[-1].assets[0].name == "warm.png"
+
+
+async def test_silent_websocket_is_interrupted_after_configured_inactivity(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    prompt_id = "prompt-silent"
+    interrupted = False
+
+    class Socket:
+        async def __aenter__(self) -> Socket:
+            return self
+
+        async def __aexit__(self, *_args: Any) -> None:
+            return None
+
+        def __aiter__(self) -> Socket:
+            return self
+
+        async def __anext__(self) -> str:
+            await asyncio.Event().wait()
+            raise AssertionError("unreachable")
+
+    def connect(*_args: Any, **_kwargs: Any) -> Socket:
+        return Socket()
+
+    async def comfy(request: httpx.Request) -> httpx.Response:
+        nonlocal interrupted
+        if request.url.path == "/prompt":
+            return httpx.Response(200, json={"prompt_id": prompt_id, "node_errors": {}})
+        if request.url.path == "/interrupt":
+            interrupted = True
+            return httpx.Response(200, json={})
+        raise AssertionError(f"unexpected ComfyUI request: {request.method} {request.url}")
+
+    monkeypatch.setattr("local_lm.adapters.comfyui.websockets.connect", connect)
+    adapter = ComfyUIAdapter("http://comfy.test", inactivity_seconds=0.01)
+    await adapter._client.aclose()
+    adapter._client = httpx.AsyncClient(
+        base_url="http://comfy.test",
+        transport=httpx.MockTransport(comfy),
+    )
+    request = media_request(operation="text_to_image")
+    try:
+        with pytest.raises(RuntimeError, match="stopped reporting generation activity"):
+            [event async for event in adapter.generate(request)]
+    finally:
+        await adapter.close()
+
+    assert interrupted
+    assert request.run_id not in adapter._jobs
 
 
 async def test_native_save_video_is_classified_by_media_type_not_collection() -> None:

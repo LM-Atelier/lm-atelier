@@ -30,6 +30,8 @@ and are then merged or cherry-picked into `develop` immediately.
 - Do not commit model weights, generated media, secrets, local databases, or
   runtime caches.
 
-The project will require formatting, linting, type checks, unit tests,
-migration checks, license/dependency scans, and secret scanning before merges
-before merges. Run `./scripts/verify.sh` locally for the same core checks.
+The project requires formatting, linting, type checks, unit tests, migration
+checks, license/dependency scans, and secret scanning before merges. Run
+`./scripts/verify.sh` on Linux or
+`powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\verify.ps1` on
+Windows for the local core checks.

@@ -314,6 +314,7 @@ async def test_diagnostic_bundle_is_redacted(client: AsyncClient) -> None:
         assert secret_prompt.encode() not in payload
         assert b'"prompts_included": false' in payload
         assert b'"tokens_included": false' in payload
+        assert b'"comfy_inactivity_seconds": 600' in payload
 
 
 async def test_worker_management_reports_missing_local_binaries(client: AsyncClient) -> None:
