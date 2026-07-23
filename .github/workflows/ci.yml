@@ -3,7 +3,7 @@ name: CI
 on:
   pull_request:
     branches: [develop, main]
-    types: [opened, synchronize, reopened, ready_for_review]
+    types: [opened, synchronize, reopened, ready_for_review, labeled]
     # These paths are validated locally and cannot change application behavior.
     paths-ignore:
       - "**/*.md"
@@ -20,7 +20,15 @@ concurrency:
 jobs:
   compatibility:
     name: Ubuntu compatibility
-    if: github.event_name == 'workflow_dispatch' || github.event.pull_request.draft == false
+    # Local parity verification is the default while hosted Actions quota is
+    # constrained. Label a ready PR `run-ci` when an Ubuntu run is warranted;
+    # subsequent pushes keep running while the label remains attached.
+    if: >-
+      github.event_name == 'workflow_dispatch' ||
+      (
+        github.event.pull_request.draft == false &&
+        contains(github.event.pull_request.labels.*.name, 'run-ci')
+      )
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v7
