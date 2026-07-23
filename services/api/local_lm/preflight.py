@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import re
 from pathlib import PurePosixPath
 from typing import Literal
 
@@ -68,6 +69,27 @@ def assess_catalog_install(
                 "Pickle-compatible weights are blocked: " + ", ".join(unsafe_weights[:3])
                 if unsafe_weights
                 else "No blocked pickle-compatible weights are selected."
+            ),
+        )
+    )
+
+    expected_sha256 = {
+        name: str(files[name].get("sha256")).lower()
+        for name in selected
+        if name in files
+        and isinstance(files[name].get("sha256"), str)
+        and re.fullmatch(r"[0-9a-fA-F]{64}", str(files[name]["sha256"]))
+    }
+    checksum_complete = bool(selected) and len(expected_sha256) == len(selected)
+    checks.append(
+        _check(
+            "checksum",
+            "Checksum metadata",
+            "pass" if checksum_complete else "warn",
+            (
+                "SHA-256 metadata is available for every selected file."
+                if checksum_complete
+                else "One or more selected files have no public SHA-256 metadata."
             ),
         )
     )
@@ -207,6 +229,7 @@ def assess_catalog_install(
         remote_id=detail.model.remote_id,
         revision=request.revision,
         selected_files=selected,
+        expected_sha256=expected_sha256,
         download_bytes=download_bytes,
         available_disk_bytes=system.disk_free_bytes,
         estimated_ram_bytes=estimated_ram,
