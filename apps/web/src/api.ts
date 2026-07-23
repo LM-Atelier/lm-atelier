@@ -152,15 +152,15 @@ export const api = {
       throw error;
     }
   },
-  regenerateMessage: (messageId: string) =>
+  regenerateMessage: (messageId: string, settings: Record<string, unknown>) =>
     request<TurnAccepted>(`/api/messages/${messageId}/regenerate`, {
       method: "POST",
-      body: JSON.stringify({ settings: {} }),
+      body: JSON.stringify({ settings }),
     }),
-  branchMessage: (messageId: string, text: string) =>
+  branchMessage: (messageId: string, text: string, settings: Record<string, unknown>) =>
     request<TurnAccepted>(`/api/messages/${messageId}/branch`, {
       method: "POST",
-      body: JSON.stringify({ text, idempotency_key: crypto.randomUUID() }),
+      body: JSON.stringify({ text, settings, idempotency_key: crypto.randomUUID() }),
     }),
   cancelChat: (chatId: string) =>
     request<Job>(`/api/chats/${chatId}/cancel`, { method: "POST" }),

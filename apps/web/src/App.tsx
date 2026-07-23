@@ -368,19 +368,22 @@ function Composer({
   chat,
   engines,
   busy,
+  settings,
+  onSettings,
   onSend,
   onStop,
 }: {
   chat: Chat;
   engines: EngineCapabilities[];
   busy: boolean;
+  settings: Record<string, unknown>;
+  onSettings: (settings: Record<string, unknown>) => void;
   onSend: (text: string, mode: RoutingMode, artifacts: string[], settings: Record<string, unknown>) => void;
   onStop: () => void;
 }) {
   const [text, setText] = useState("");
   const [mode, setMode] = useState<RoutingMode>(chat.routing_mode);
   const [settingsOpen, setSettingsOpen] = useState(false);
-  const [settings, setSettings] = useState<Record<string, unknown>>({});
   const [attachments, setAttachments] = useState<string[]>([]);
   const [uploading, setUploading] = useState(false);
   const fileInput = useRef<HTMLInputElement>(null);
@@ -445,7 +448,7 @@ function Composer({
         </div>
         <small className="composer-note">Local models can make mistakes. Generation stays on this machine.</small>
       </div>
-      <SettingsDrawer open={settingsOpen} onClose={() => setSettingsOpen(false)} mode={mode} engines={engines} values={settings} onValues={setSettings} />
+      <SettingsDrawer open={settingsOpen} onClose={() => setSettingsOpen(false)} mode={mode} engines={engines} values={settings} onValues={onSettings} />
     </>
   );
 }
@@ -481,11 +484,12 @@ function ChatView({
   liveText: Record<string, string>;
   onSend: (text: string, mode: RoutingMode, artifacts: string[], settings: Record<string, unknown>) => void;
   onProfile: (field: "active_chat_profile_id" | "active_image_profile_id" | "active_video_profile_id", id: string | null) => void;
-  onRegenerate: (messageId: string) => void;
-  onEdit: (messageId: string, text: string) => void;
+  onRegenerate: (messageId: string, settings: Record<string, unknown>) => void;
+  onEdit: (messageId: string, text: string, settings: Record<string, unknown>) => void;
   onStop: () => void;
 }) {
   const endRef = useRef<HTMLDivElement>(null);
+  const [settings, setSettings] = useState<Record<string, unknown>>({});
   useEffect(() => {
     if (typeof endRef.current?.scrollIntoView === "function") {
       endRef.current.scrollIntoView({ behavior: "smooth" });
@@ -509,10 +513,16 @@ function ChatView({
       <div className="messages">
         {messages.length === 0 ? (
           <EmptyState icon={<Sparkles />} title="What should we make?" body="Ask a question or describe an image or video. Auto mode chooses the appropriate local model." />
-        ) : messages.map((message) => <MessageBubble key={message.id} message={message} liveText={liveText[message.id]} onRegenerate={busy ? undefined : onRegenerate} onEdit={busy ? undefined : onEdit} />)}
+        ) : messages.map((message) => <MessageBubble
+          key={message.id}
+          message={message}
+          liveText={liveText[message.id]}
+          onRegenerate={busy ? undefined : (messageId) => onRegenerate(messageId, settings)}
+          onEdit={busy ? undefined : (messageId, text) => onEdit(messageId, text, settings)}
+        />)}
         <div ref={endRef} />
       </div>
-      <Composer chat={chat} engines={engines} busy={busy} onSend={onSend} onStop={onStop} />
+      <Composer chat={chat} engines={engines} busy={busy} settings={settings} onSettings={setSettings} onSend={onSend} onStop={onStop} />
     </div>
   );
 }
@@ -1213,7 +1223,7 @@ export default function App() {
     },
   });
   const regenerate = useMutation({
-    mutationFn: api.regenerateMessage,
+    mutationFn: ({ messageId, settings }: { messageId: string; settings: Record<string, unknown> }) => api.regenerateMessage(messageId, settings),
     onSuccess: (accepted) => {
       client.setQueryData<ChatDetail>(["chat", currentChatId], (current) => current ? { ...current, active_head_message_id: accepted.assistant_message.id, messages: [...current.messages, accepted.user_message, accepted.assistant_message] } : current);
       void client.invalidateQueries({ queryKey: ["chats"] });
@@ -1221,7 +1231,7 @@ export default function App() {
     },
   });
   const branch = useMutation({
-    mutationFn: ({ messageId, text }: { messageId: string; text: string }) => api.branchMessage(messageId, text),
+    mutationFn: ({ messageId, text, settings }: { messageId: string; text: string; settings: Record<string, unknown> }) => api.branchMessage(messageId, text, settings),
     onSuccess: (accepted) => {
       client.setQueryData<ChatDetail>(["chat", currentChatId], (current) => current ? { ...current, active_head_message_id: accepted.assistant_message.id, messages: [...current.messages, accepted.user_message, accepted.assistant_message] } : current);
       void client.invalidateQueries({ queryKey: ["chats"] });
@@ -1309,7 +1319,7 @@ export default function App() {
     if (view === "models") return <ModelsView />;
     if (view === "workflows") return <WorkflowsView />;
     if (view === "settings") return <SettingsView engines={engines.data ?? []} />;
-    return <ChatView chat={chat.data} engines={engines.data ?? []} profiles={profiles.data ?? []} liveText={liveText} onProfile={(field, id) => updateChat.mutate({ [field]: id })} onRegenerate={(messageId) => regenerate.mutate(messageId)} onEdit={(messageId, text) => branch.mutate({ messageId, text })} onStop={() => stop.mutate()} onSend={(text, mode, artifacts, settings) => send.mutate({ text, mode, artifacts, settings })} />;
+    return <ChatView chat={chat.data} engines={engines.data ?? []} profiles={profiles.data ?? []} liveText={liveText} onProfile={(field, id) => updateChat.mutate({ [field]: id })} onRegenerate={(messageId, settings) => regenerate.mutate({ messageId, settings })} onEdit={(messageId, text, settings) => branch.mutate({ messageId, text, settings })} onStop={() => stop.mutate()} onSend={(text, mode, artifacts, settings) => send.mutate({ text, mode, artifacts, settings })} />;
   }, [view, engines.data, profiles.data, chat.data, liveText, send, regenerate, branch, stop, updateChat]);
 
   return (

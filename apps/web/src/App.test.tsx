@@ -31,6 +31,18 @@ const videoSetting: SettingField = {
   help: "Number of video frames.",
 };
 
+const maxTokensSetting: SettingField = {
+  ...imageSetting,
+  key: "max_tokens",
+  label: "Maximum output",
+  type: "integer",
+  default: 1024,
+  minimum: 1,
+  maximum: 131072,
+  scope: "request",
+  help: "Maximum tokens generated for one assistant run.",
+};
+
 const roleAwareMediaEngine: EngineCapabilities = {
   engine: "mock",
   version: "1",
@@ -1001,5 +1013,78 @@ describe("App", () => {
     fireEvent.change(mode, { target: { value: "video" } });
     expect(await screen.findByText("Frames")).toBeInTheDocument();
     expect(screen.queryByText("Negative prompt")).not.toBeInTheDocument();
+  });
+
+  it("applies turn controls to send, edit-and-branch, and regenerate actions", async () => {
+    const stamp = "2026-07-22T00:00:00Z";
+    const chat = {
+      id: "chat-turn-overrides",
+      project_id: null,
+      title: "Turn overrides",
+      archived: false,
+      routing_mode: "text" as const,
+      confirm_uncertain_media: false,
+      active_chat_profile_id: null,
+      active_image_profile_id: null,
+      active_video_profile_id: null,
+      active_head_message_id: "assistant-turn-overrides",
+      created_at: stamp,
+      updated_at: stamp,
+    };
+    const userMessage = {
+      id: "user-turn-overrides",
+      chat_id: chat.id,
+      parent_id: null,
+      role: "user" as const,
+      status: "complete" as const,
+      parts: [{ id: "user-part", position: 0, type: "text" as const, text: "Count to 100", artifact_id: null, metadata_json: {} }],
+      created_at: stamp,
+      updated_at: stamp,
+    };
+    const assistantMessage = {
+      id: "assistant-turn-overrides",
+      chat_id: chat.id,
+      parent_id: userMessage.id,
+      role: "assistant" as const,
+      status: "complete" as const,
+      parts: [{ id: "assistant-part", position: 0, type: "text" as const, text: "1 2 3", artifact_id: null, metadata_json: {} }],
+      created_at: stamp,
+      updated_at: stamp,
+    };
+    localStorage.setItem("local-lm-chat", chat.id);
+    vi.mocked(api.engines).mockResolvedValue([{
+      ...roleAwareMediaEngine,
+      roles: ["chat"],
+      operations: ["text"],
+      settings: [maxTokensSetting],
+      settings_by_role: { chat: [maxTokensSetting] },
+    }]);
+    vi.mocked(api.chats).mockResolvedValue([chat]);
+    vi.mocked(api.chat).mockResolvedValue({ ...chat, messages: [userMessage, assistantMessage] });
+    vi.mocked(api.sendTurn).mockReturnValue(new Promise(() => {}));
+    vi.mocked(api.branchMessage).mockReturnValue(new Promise(() => {}));
+    vi.mocked(api.regenerateMessage).mockReturnValue(new Promise(() => {}));
+    const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+    render(
+      <QueryClientProvider client={client}>
+        <App />
+      </QueryClientProvider>,
+    );
+
+    fireEvent.click(await screen.findByRole("button", { name: "Turn settings" }));
+    fireEvent.change(screen.getByRole("spinbutton", { name: /Maximum output/ }), { target: { value: "4096" } });
+    fireEvent.click(screen.getByRole("button", { name: "Close settings" }));
+
+    fireEvent.change(screen.getByPlaceholderText(/Ask anything/), { target: { value: "Count to 1000" } });
+    fireEvent.click(screen.getByRole("button", { name: "Send" }));
+    await waitFor(() => expect(api.sendTurn).toHaveBeenCalledWith(chat.id, "Count to 1000", "text", [], { max_tokens: 4096 }));
+
+    fireEvent.click(screen.getByText("Edit and branch"));
+    fireEvent.change(screen.getByLabelText("Edit message"), { target: { value: "Count to 1000" } });
+    fireEvent.click(screen.getByText("Send edited message"));
+    await waitFor(() => expect(api.branchMessage).toHaveBeenCalledWith(userMessage.id, "Count to 1000", { max_tokens: 4096 }));
+
+    fireEvent.click(screen.getByRole("button", { name: "Regenerate response" }));
+    await waitFor(() => expect(api.regenerateMessage).toHaveBeenCalledWith(assistantMessage.id, { max_tokens: 4096 }));
   });
 });
