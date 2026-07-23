@@ -1255,7 +1255,9 @@ export default function App() {
           return;
         }
         if (event.type.includes("progress") || event.type.startsWith("download.")) void client.invalidateQueries({ queryKey: ["jobs"] });
-        if (event.type === "generation.preview") void client.invalidateQueries({ queryKey: ["chat"] });
+        if (["generation.progress", "generation.preview"].includes(event.type)) {
+          void client.invalidateQueries({ queryKey: ["chat"] });
+        }
         if (["run.completed", "run.failed", "run.cancelled"].includes(event.type)) {
           void client.invalidateQueries({ queryKey: ["chat"] });
           void client.invalidateQueries({ queryKey: ["chats"] });
