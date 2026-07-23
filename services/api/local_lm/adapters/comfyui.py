@@ -236,11 +236,16 @@ class ComfyUIAdapter:
                     media_type = file_response.headers.get(
                         "content-type", "application/octet-stream"
                     )
+                    kind = self._output_kind(
+                        filename=str(item["filename"]),
+                        media_type=media_type,
+                        default_kind=default_kind,
+                    )
                     assets.append(
                         GeneratedAsset(
                             content=file_response.content,
                             media_type=media_type,
-                            kind=default_kind,
+                            kind=kind,
                             name=str(item["filename"]),
                             metadata={"prompt_id": prompt_id, "operation": operation},
                         )
@@ -248,6 +253,14 @@ class ComfyUIAdapter:
         if not assets:
             raise RuntimeError("ComfyUI completed without collectible image or video outputs")
         return assets
+
+    @staticmethod
+    def _output_kind(*, filename: str, media_type: str, default_kind: str) -> str:
+        if media_type.lower().startswith("video/"):
+            return "video"
+        if filename.lower().endswith((".mp4", ".webm", ".mov", ".mkv", ".avi")):
+            return "video"
+        return default_kind
 
     async def cancel(self, run_id: str) -> None:
         if run_id in self._jobs:
