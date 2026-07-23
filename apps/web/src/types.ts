@@ -309,6 +309,7 @@ export interface CatalogPreflight {
   remote_id: string;
   revision: string;
   selected_files: string[];
+  expected_sha256: Record<string, string>;
   download_bytes: number;
   available_disk_bytes: number;
   estimated_ram_bytes: number | null;

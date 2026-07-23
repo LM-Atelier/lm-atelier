@@ -148,7 +148,8 @@ class HuggingFaceCatalog:
                 {
                     "filename": sibling.get("rfilename"),
                     "size": sibling.get("size") or lfs.get("size"),
-                    "sha256": (lfs.get("oid") or "").removeprefix("sha256:") or None,
+                    "sha256": (lfs.get("sha256") or lfs.get("oid") or "").removeprefix("sha256:")
+                    or None,
                 }
             )
         model = self._normalize(payload, requested_role)

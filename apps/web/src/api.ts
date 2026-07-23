@@ -303,7 +303,14 @@ export const api = {
   recipes: () => request<ReferenceRecipe[]>("/api/recipes"),
   installRecipe: (recipeId: string) =>
     request<Job>(`/api/recipes/${encodeURIComponent(recipeId)}/install`, { method: "POST" }),
-  download: (remoteId: string, role: string, engine: string, revision: string, allowPatterns: string[] = []) =>
+  download: (
+    remoteId: string,
+    role: string,
+    engine: string,
+    revision: string,
+    allowPatterns: string[] = [],
+    expectedSha256: Record<string, string> = {},
+  ) =>
     request<Job>("/api/downloads", {
       method: "POST",
       body: JSON.stringify({
@@ -312,6 +319,7 @@ export const api = {
         role,
         engine,
         allow_patterns: allowPatterns,
+        expected_sha256: expectedSha256,
       }),
     }),
   importModel: (payload: { name: string; role: string; engine: string; local_path: string }) =>
