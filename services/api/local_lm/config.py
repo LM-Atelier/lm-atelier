@@ -80,6 +80,10 @@ class Settings(BaseSettings):
         return self.data_dir / "state"
 
     @property
+    def comfy_output_dir(self) -> Path:
+        return self.state_dir / "comfy-output"
+
+    @property
     def artifact_dir(self) -> Path:
         return self.data_dir / "artifacts" / "sha256"
 
