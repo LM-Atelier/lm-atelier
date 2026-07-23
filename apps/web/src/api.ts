@@ -36,6 +36,11 @@ let csrfToken = "";
 let eventSequence = 0;
 let sessionPromise: Promise<void> | null = null;
 
+function resetSession(): void {
+  csrfToken = "";
+  sessionPromise = null;
+}
+
 export class ApiError extends Error {
   constructor(
     public readonly status: number,
@@ -50,20 +55,30 @@ export class ApiError extends Error {
 async function ensureSession(): Promise<void> {
   if (csrfToken) return;
   if (!sessionPromise) {
-    sessionPromise = fetch("/api/session", {
-      method: "POST",
-      credentials: "same-origin",
-    }).then(async (response) => {
+    sessionPromise = (async () => {
+      const response = await fetch("/api/session", {
+        method: "POST",
+        credentials: "same-origin",
+      });
       if (!response.ok) throw new Error("Could not initialize the local session");
       const payload = (await response.json()) as { csrf_token: string; event_sequence?: number };
       csrfToken = payload.csrf_token;
       eventSequence = Math.max(0, payload.event_sequence ?? 0);
-    });
+    })();
   }
-  await sessionPromise;
+  try {
+    await sessionPromise;
+  } catch (error) {
+    sessionPromise = null;
+    throw error;
+  }
 }
 
-async function request<T>(path: string, init: RequestInit = {}): Promise<T> {
+async function request<T>(
+  path: string,
+  init: RequestInit = {},
+  retrySession = true,
+): Promise<T> {
   if (path !== "/api/session") await ensureSession();
   const headers = new Headers(init.headers);
   if (init.body && !(init.body instanceof FormData)) headers.set("content-type", "application/json");
@@ -71,6 +86,11 @@ async function request<T>(path: string, init: RequestInit = {}): Promise<T> {
     headers.set("x-local-lm-csrf", csrfToken);
   }
   const response = await fetch(path, { ...init, headers, credentials: "same-origin" });
+  if (response.status === 401 && path !== "/api/session" && retrySession) {
+    resetSession();
+    await ensureSession();
+    return request<T>(path, init, false);
+  }
   if (!response.ok) {
     let message = `${response.status} ${response.statusText}`;
     let detail: unknown;
@@ -376,32 +396,59 @@ export async function connectEvents(
   onEvent: (event: AppEvent) => void,
   onStatus: (connected: boolean) => void,
 ): Promise<() => void> {
-  await ensureSession();
   let closed = false;
+  let opening = false;
   let socket: WebSocket | null = null;
   let retry: number | undefined;
   let lastSequence = eventSequence;
+  let sequenceInitialized = false;
 
-  const open = () => {
-    if (closed) return;
-    const scheme = window.location.protocol === "https:" ? "wss:" : "ws:";
-    socket = new WebSocket(`${scheme}//${window.location.host}/api/events?after=${lastSequence}`);
-    socket.onopen = () => onStatus(true);
-    socket.onmessage = (message) => {
-      const event = JSON.parse(message.data as string) as AppEvent;
-      lastSequence = Math.max(lastSequence, event.sequence);
-      eventSequence = lastSequence;
-      onEvent(event);
-    };
-    socket.onclose = () => {
-      onStatus(false);
-      if (!closed) retry = window.setTimeout(open, 1_000);
-    };
+  const scheduleRetry = () => {
+    if (closed || retry !== undefined) return;
+    retry = window.setTimeout(() => {
+      retry = undefined;
+      void open();
+    }, 1_000);
   };
-  open();
+
+  const open = async () => {
+    if (closed || opening) return;
+    opening = true;
+    try {
+      await ensureSession();
+      if (closed) return;
+      if (!sequenceInitialized) {
+        lastSequence = eventSequence;
+        sequenceInitialized = true;
+      } else if (eventSequence < lastSequence) {
+        lastSequence = 0;
+      }
+      const scheme = window.location.protocol === "https:" ? "wss:" : "ws:";
+      socket = new WebSocket(`${scheme}//${window.location.host}/api/events?after=${lastSequence}`);
+      socket.onopen = () => onStatus(true);
+      socket.onmessage = (message) => {
+        const event = JSON.parse(message.data as string) as AppEvent;
+        lastSequence = Math.max(lastSequence, event.sequence);
+        eventSequence = lastSequence;
+        onEvent(event);
+      };
+      socket.onclose = () => {
+        onStatus(false);
+        if (closed) return;
+        resetSession();
+        scheduleRetry();
+      };
+    } catch {
+      onStatus(false);
+      scheduleRetry();
+    } finally {
+      opening = false;
+    }
+  };
+  await open();
   return () => {
     closed = true;
-    if (retry) window.clearTimeout(retry);
+    if (retry !== undefined) window.clearTimeout(retry);
     socket?.close();
   };
 }

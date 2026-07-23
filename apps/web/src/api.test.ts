@@ -1,6 +1,7 @@
 import { afterEach, expect, it, vi } from "vitest";
 
 afterEach(() => {
+  vi.useRealTimers();
   vi.unstubAllGlobals();
   vi.resetModules();
 });
@@ -68,4 +69,246 @@ it("sends turn overrides with edited branches and regenerated responses", async 
   expect(JSON.parse(String(fetchMock.mock.calls[2][1]?.body))).toEqual({
     settings: { max_tokens: 4096 },
   });
+});
+
+it("retries session initialization after a transient startup failure", async () => {
+  const fetchMock = vi.fn()
+    .mockRejectedValueOnce(new Error("service is starting"))
+    .mockResolvedValueOnce(
+      new Response(JSON.stringify({ csrf_token: "csrf-recovered" }), {
+        status: 200,
+        headers: { "content-type": "application/json" },
+      }),
+    )
+    .mockResolvedValueOnce(
+      new Response(JSON.stringify([]), {
+        status: 200,
+        headers: { "content-type": "application/json" },
+      }),
+    );
+  vi.stubGlobal("fetch", fetchMock);
+
+  const { api } = await import("./api");
+  await expect(api.projects()).rejects.toThrow("service is starting");
+  await expect(api.projects()).resolves.toEqual([]);
+
+  expect(fetchMock.mock.calls.map(([url]) => url)).toEqual([
+    "/api/session",
+    "/api/session",
+    "/api/projects?include_archived=false&query=",
+  ]);
+});
+
+it("refreshes an expired session once before retrying an API request", async () => {
+  const fetchMock = vi.fn()
+    .mockResolvedValueOnce(
+      new Response(JSON.stringify({ csrf_token: "csrf-old" }), {
+        status: 200,
+        headers: { "content-type": "application/json" },
+      }),
+    )
+    .mockResolvedValueOnce(
+      new Response(JSON.stringify({ detail: "session required" }), {
+        status: 401,
+        headers: { "content-type": "application/json" },
+      }),
+    )
+    .mockResolvedValueOnce(
+      new Response(JSON.stringify({ csrf_token: "csrf-new" }), {
+        status: 200,
+        headers: { "content-type": "application/json" },
+      }),
+    )
+    .mockResolvedValueOnce(
+      new Response(JSON.stringify({ id: "project-1", name: "Recovered" }), {
+        status: 200,
+        headers: { "content-type": "application/json" },
+      }),
+    );
+  vi.stubGlobal("fetch", fetchMock);
+
+  const { api } = await import("./api");
+  await expect(api.createProject("Recovered")).resolves.toMatchObject({
+    id: "project-1",
+  });
+
+  const firstHeaders = new Headers(fetchMock.mock.calls[1][1]?.headers);
+  const retriedHeaders = new Headers(fetchMock.mock.calls[3][1]?.headers);
+  expect(firstHeaders.get("x-local-lm-csrf")).toBe("csrf-old");
+  expect(retriedHeaders.get("x-local-lm-csrf")).toBe("csrf-new");
+});
+
+it("keeps retrying event initialization while the local service starts", async () => {
+  vi.useFakeTimers();
+  const urls: string[] = [];
+
+  class FakeWebSocket {
+    onopen: (() => void) | null = null;
+    onmessage: ((message: MessageEvent) => void) | null = null;
+    onclose: ((event: CloseEvent) => void) | null = null;
+
+    constructor(url: string) {
+      urls.push(url);
+    }
+
+    close() {}
+  }
+
+  const fetchMock = vi.fn()
+    .mockRejectedValueOnce(new Error("service is starting"))
+    .mockResolvedValueOnce(
+      new Response(JSON.stringify({ csrf_token: "csrf", event_sequence: 9 }), {
+        status: 200,
+        headers: { "content-type": "application/json" },
+      }),
+    );
+  vi.stubGlobal("fetch", fetchMock);
+  vi.stubGlobal("WebSocket", FakeWebSocket);
+
+  const { connectEvents } = await import("./api");
+  const onStatus = vi.fn();
+  const dispose = await connectEvents(vi.fn(), onStatus);
+
+  expect(urls).toHaveLength(0);
+  expect(onStatus).toHaveBeenCalledWith(false);
+  await vi.advanceTimersByTimeAsync(1_000);
+  expect(urls).toHaveLength(1);
+  expect(new URL(urls[0]).searchParams.get("after")).toBe("9");
+  dispose();
+});
+
+it("renews the session after an authenticated event socket is rejected", async () => {
+  vi.useFakeTimers();
+  const sockets: FakeWebSocket[] = [];
+
+  class FakeWebSocket {
+    onopen: (() => void) | null = null;
+    onmessage: ((message: MessageEvent) => void) | null = null;
+    onclose: ((event: CloseEvent) => void) | null = null;
+
+    constructor() {
+      sockets.push(this);
+    }
+
+    close() {}
+  }
+
+  const fetchMock = vi.fn()
+    .mockResolvedValueOnce(
+      new Response(JSON.stringify({ csrf_token: "csrf-old" }), {
+        status: 200,
+        headers: { "content-type": "application/json" },
+      }),
+    )
+    .mockResolvedValueOnce(
+      new Response(JSON.stringify({ csrf_token: "csrf-new" }), {
+        status: 200,
+        headers: { "content-type": "application/json" },
+      }),
+    );
+  vi.stubGlobal("fetch", fetchMock);
+  vi.stubGlobal("WebSocket", FakeWebSocket);
+
+  const { connectEvents } = await import("./api");
+  const dispose = await connectEvents(vi.fn(), vi.fn());
+  expect(sockets).toHaveLength(1);
+
+  sockets[0].onclose?.({ code: 4401 } as CloseEvent);
+  await vi.advanceTimersByTimeAsync(1_000);
+
+  expect(fetchMock).toHaveBeenCalledTimes(2);
+  expect(sockets).toHaveLength(2);
+  dispose();
+});
+
+it("replays events from zero when the service sequence resets after a restart", async () => {
+  vi.useFakeTimers();
+  const urls: string[] = [];
+  const sockets: FakeWebSocket[] = [];
+
+  class FakeWebSocket {
+    onopen: (() => void) | null = null;
+    onmessage: ((message: MessageEvent) => void) | null = null;
+    onclose: ((event: CloseEvent) => void) | null = null;
+
+    constructor(url: string) {
+      urls.push(url);
+      sockets.push(this);
+    }
+
+    close() {}
+  }
+
+  const fetchMock = vi.fn()
+    .mockResolvedValueOnce(
+      new Response(JSON.stringify({ csrf_token: "csrf-old", event_sequence: 742 }), {
+        status: 200,
+        headers: { "content-type": "application/json" },
+      }),
+    )
+    .mockResolvedValueOnce(
+      new Response(JSON.stringify({ csrf_token: "csrf-new", event_sequence: 3 }), {
+        status: 200,
+        headers: { "content-type": "application/json" },
+      }),
+    );
+  vi.stubGlobal("fetch", fetchMock);
+  vi.stubGlobal("WebSocket", FakeWebSocket);
+
+  const { connectEvents } = await import("./api");
+  const dispose = await connectEvents(vi.fn(), vi.fn());
+  expect(new URL(urls[0]).searchParams.get("after")).toBe("742");
+
+  sockets[0].onclose?.({ code: 1006 } as CloseEvent);
+  await vi.advanceTimersByTimeAsync(1_000);
+
+  expect(fetchMock).toHaveBeenCalledTimes(2);
+  expect(new URL(urls[1]).searchParams.get("after")).toBe("0");
+  dispose();
+});
+
+it("retains the last received sequence during a same-service reconnect", async () => {
+  vi.useFakeTimers();
+  const urls: string[] = [];
+  const sockets: FakeWebSocket[] = [];
+
+  class FakeWebSocket {
+    onopen: (() => void) | null = null;
+    onmessage: ((message: MessageEvent) => void) | null = null;
+    onclose: ((event: CloseEvent) => void) | null = null;
+
+    constructor(url: string) {
+      urls.push(url);
+      sockets.push(this);
+    }
+
+    close() {}
+  }
+
+  const fetchMock = vi.fn()
+    .mockResolvedValueOnce(
+      new Response(JSON.stringify({ csrf_token: "csrf", event_sequence: 10 }), {
+        status: 200,
+        headers: { "content-type": "application/json" },
+      }),
+    )
+    .mockResolvedValueOnce(
+      new Response(JSON.stringify({ csrf_token: "csrf", event_sequence: 15 }), {
+        status: 200,
+        headers: { "content-type": "application/json" },
+      }),
+    );
+  vi.stubGlobal("fetch", fetchMock);
+  vi.stubGlobal("WebSocket", FakeWebSocket);
+
+  const { connectEvents } = await import("./api");
+  const dispose = await connectEvents(vi.fn(), vi.fn());
+  sockets[0].onmessage?.({
+    data: JSON.stringify({ sequence: 12, type: "generation.progress", payload: {} }),
+  } as MessageEvent);
+  sockets[0].onclose?.({ code: 1006 } as CloseEvent);
+  await vi.advanceTimersByTimeAsync(1_000);
+
+  expect(new URL(urls[1]).searchParams.get("after")).toBe("12");
+  dispose();
 });
