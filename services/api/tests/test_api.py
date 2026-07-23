@@ -392,6 +392,35 @@ async def test_engine_api_isolates_media_settings_by_role(client: AsyncClient) -
     assert len(media["settings"]) == len(image_keys) + len(video_keys)
 
 
+async def test_random_media_seed_is_resolved_and_persisted(
+    client: AsyncClient, monkeypatch
+) -> None:
+    monkeypatch.setattr("local_lm.orchestrator.secrets.randbelow", lambda _upper: 8675309)
+    chat = (await client.post("/api/chats", json={"title": "Seed provenance"})).json()
+
+    random_seed = await client.post(
+        f"/api/chats/{chat['id']}/turns",
+        json={"text": "Create an image of a seed vault", "mode": "image"},
+    )
+    assert random_seed.status_code == 202
+    random_run = random_seed.json()["run"]
+    assert random_run["settings_json"]["seed"] == 8675309
+    assert random_run["provenance_json"]["resolved_settings"]["seed"] == 8675309
+
+    explicit_seed = await client.post(
+        f"/api/chats/{chat['id']}/turns",
+        json={
+            "text": "Create a second image of a seed vault",
+            "mode": "image",
+            "settings": {"seed": 42},
+        },
+    )
+    assert explicit_seed.status_code == 202
+    explicit_run = explicit_seed.json()["run"]
+    assert explicit_run["settings_json"]["seed"] == 42
+    assert explicit_run["provenance_json"]["resolved_settings"]["seed"] == 42
+
+
 async def test_uncertain_auto_media_requires_confirmation(client: AsyncClient) -> None:
     chat = (await client.post("/api/chats", json={"title": "Routing"})).json()
     payload = {

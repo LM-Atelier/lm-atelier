@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import logging
+import secrets
 import time
 from pathlib import Path
 from typing import Any
@@ -215,6 +216,8 @@ class ConversationOrchestrator:
             request_settings,
         )
         effective_settings = validate_settings(effective_settings, fields)
+        if plan.operation != Operation.TEXT and effective_settings.get("seed") == -1:
+            effective_settings["seed"] = secrets.randbelow(2_147_483_648)
         generation_estimate = (
             self._video_estimate(effective_settings) if "video" in plan.operation.value else None
         )
