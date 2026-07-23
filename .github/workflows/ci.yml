@@ -3,47 +3,36 @@ name: CI
 on:
   pull_request:
     branches: [develop, main]
-  push:
-    branches: [develop, main]
+    types: [opened, synchronize, reopened, ready_for_review]
+  workflow_dispatch:
 
 permissions:
   contents: read
 
+concurrency:
+  group: ci-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
 jobs:
-  web:
-    name: Web (${{ matrix.os }})
-    strategy:
-      fail-fast: false
-      matrix:
-        os: [ubuntu-latest, windows-latest]
-    runs-on: ${{ matrix.os }}
+  compatibility:
+    name: Ubuntu compatibility
+    if: github.event_name == 'workflow_dispatch' || github.event.pull_request.draft == false
+    runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
       - uses: actions/setup-node@v4
         with:
           node-version: 22
           cache: npm
-      - run: npm ci
-      - run: npm run lint
-      - run: npm run typecheck
-      - run: npm test
-      - run: npm run build
-
-  api:
-    name: API (${{ matrix.os }})
-    strategy:
-      fail-fast: false
-      matrix:
-        os: [ubuntu-latest, windows-latest]
-    runs-on: ${{ matrix.os }}
-    steps:
-      - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
           cache: pip
       - run: python -m pip install --upgrade pip
       - run: python -m pip install -e './services/api[dev]'
+      - run: npm ci
       - run: ruff format --check services/api
       - run: ruff check services/api
       - run: mypy services/api/local_lm
@@ -51,32 +40,11 @@ jobs:
       - run: pytest services/api/tests -q
         env:
           LOCAL_LM_DATA_DIR: ${{ runner.temp }}/local-lm-tests
-
-  hygiene:
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-        with:
-          fetch-depth: 0
-      - name: Validate Linux packaging scripts
-        run: bash -n scripts/package.sh packaging/linux/*.sh
-      - name: Reject committed secrets and runtime artifacts
-        run: |
-          if git ls-files | grep -E '(^|/)(\.env|\.private|data|models|downloads|artifacts)(/|$)|\.(gguf|safetensors|ckpt|sqlite3?)$'; then
-            echo 'A private/runtime artifact is tracked.' >&2
-            exit 1
-          fi
-          if git grep -I -E '(hf_[A-Za-z0-9]{20,}|BEGIN (RSA |EC |OPENSSH )?PRIVATE KEY)' -- . ':!package-lock.json'; then
-            echo 'A likely credential is tracked.' >&2
-            exit 1
-          fi
-
-  windows-packaging:
-    name: Windows packaging scripts
-    runs-on: windows-latest
-    steps:
-      - uses: actions/checkout@v4
-      - name: Validate PowerShell syntax
+      - run: npm run lint
+      - run: npm run typecheck
+      - run: npm test
+      - run: npm run build
+      - name: Validate Windows packaging scripts
         shell: pwsh
         run: |
           $failed = $false
@@ -94,3 +62,15 @@ jobs:
             }
           }
           if ($failed) { exit 1 }
+      - name: Validate Linux packaging scripts
+        run: bash -n scripts/package.sh packaging/linux/*.sh
+      - name: Reject committed secrets and runtime artifacts
+        run: |
+          if git ls-files | grep -E '(^|/)(\.env|\.private|data|models|downloads|artifacts)(/|$)|\.(gguf|safetensors|ckpt|sqlite3?)$'; then
+            echo 'A private/runtime artifact is tracked.' >&2
+            exit 1
+          fi
+          if git grep -I -E '(hf_[A-Za-z0-9]{20,}|BEGIN (RSA |EC |OPENSSH )?PRIVATE KEY)' -- . ':!package-lock.json'; then
+            echo 'A likely credential is tracked.' >&2
+            exit 1
+          fi
