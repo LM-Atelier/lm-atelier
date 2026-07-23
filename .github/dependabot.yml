@@ -1,4 +1,6 @@
 version: 2
+# Keep update PRs stable between monthly reviews. Maintainers refresh and run
+# the complete local verification matrix before merging a grouped update.
 updates:
   - package-ecosystem: npm
     directory: /
@@ -6,6 +8,7 @@ updates:
       interval: monthly
     target-branch: develop
     open-pull-requests-limit: 5
+    rebase-strategy: disabled
     groups:
       web-dependencies:
         patterns: ["*"]
@@ -16,6 +19,7 @@ updates:
       interval: monthly
     target-branch: develop
     open-pull-requests-limit: 5
+    rebase-strategy: disabled
     groups:
       api-dependencies:
         patterns: ["*"]
@@ -26,3 +30,7 @@ updates:
       interval: monthly
     target-branch: develop
     open-pull-requests-limit: 3
+    rebase-strategy: disabled
+    groups:
+      workflow-actions:
+        patterns: ["*"]
