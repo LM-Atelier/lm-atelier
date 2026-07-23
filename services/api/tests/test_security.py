@@ -16,6 +16,7 @@ async def test_non_dev_api_requires_cookie_and_csrf(tmp_path) -> None:  # type: 
             session = await client.post("/api/session")
             assert session.status_code == 200
             csrf = session.json()["csrf_token"]
+            assert session.json()["event_sequence"] == 0
             assert (await client.get("/api/projects")).status_code == 200
             denied = await client.post("/api/projects", json={"name": "Denied"})
             assert denied.status_code == 403

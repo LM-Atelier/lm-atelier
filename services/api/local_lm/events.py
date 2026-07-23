@@ -23,6 +23,10 @@ class EventBroker:
         self._sequence = 0
         self._lock = asyncio.Lock()
 
+    @property
+    def sequence(self) -> int:
+        return self._sequence
+
     async def publish(
         self, event_type: str, entity_id: str | None = None, payload: dict[str, Any] | None = None
     ) -> EventOut:
@@ -52,11 +56,14 @@ class EventBroker:
 
     @asynccontextmanager
     async def subscribe(self, after: int = 0) -> AsyncIterator[asyncio.Queue[EventOut]]:
-        subscription = Subscription(queue=asyncio.Queue(maxsize=500))
-        for event in self.since(after):
-            subscription.queue.put_nowait(event)
-        self._subscribers.add(subscription)
+        async with self._lock:
+            replay = self.since(after)
+            subscription = Subscription(queue=asyncio.Queue(maxsize=max(500, len(replay) + 500)))
+            for event in replay:
+                subscription.queue.put_nowait(event)
+            self._subscribers.add(subscription)
         try:
             yield subscription.queue
         finally:
-            self._subscribers.discard(subscription)
+            async with self._lock:
+                self._subscribers.discard(subscription)
