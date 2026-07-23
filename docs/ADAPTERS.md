@@ -47,6 +47,12 @@ marked unavailable with a reason; silently dropping submitted settings violates
 the contract. Generated assets return bytes and metadata to the control plane,
 which remains responsible for content-addressed storage and provenance.
 
+Adapters that serve more than one role should populate `settings_by_role` with
+the settings for each advertised role. They must also retain those definitions
+in the flat `settings` list for older LM Atelier clients. The role mapping is an
+additive version 1 field: adapters that omit it remain compatible, and clients
+fall back to `settings` when the requested role has no mapping.
+
 ## Conformance
 
 An adapter package can use the same probes as LM Atelier's built-ins:

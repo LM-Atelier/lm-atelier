@@ -1,4 +1,5 @@
 export type RoutingMode = "auto" | "text" | "image" | "video";
+export type EngineRole = "chat" | "image" | "video";
 
 export interface Project {
   id: string;
@@ -160,6 +161,7 @@ export interface EngineCapabilities {
   streaming: boolean;
   tool_calling: boolean;
   settings: SettingField[];
+  settings_by_role?: Partial<Record<EngineRole, SettingField[]>>;
   healthy: boolean;
   details: Record<string, unknown>;
 }

@@ -4,6 +4,7 @@ from collections.abc import AsyncIterator
 from dataclasses import dataclass, field
 from pathlib import Path
 
+from ..schemas import EngineCapabilities
 from .base import ChatAdapter, ChatRequest, MediaAdapter, MediaRequest
 from .discovery import ADAPTER_CONTRACT_VERSION
 
@@ -25,6 +26,7 @@ class ConformanceReport:
 async def probe_chat_adapter(adapter: ChatAdapter) -> ConformanceReport:
     errors: list[str] = []
     capabilities = await adapter.capabilities()
+    _validate_role_settings(capabilities, errors)
     if "chat" not in capabilities.roles:
         errors.append("capabilities must include the chat role")
     if "text" not in capabilities.operations:
@@ -57,6 +59,7 @@ async def probe_media_adapter(
 ) -> ConformanceReport:
     errors: list[str] = []
     capabilities = await adapter.capabilities()
+    _validate_role_settings(capabilities, errors)
     if not {"image", "video"}.intersection(capabilities.roles):
         errors.append("capabilities must include an image or video role")
     selected_workflow = workflow or {}
@@ -93,3 +96,22 @@ async def probe_media_adapter(
 def _require_async_iterator(value: object, errors: list[str], method: str) -> None:
     if not isinstance(value, AsyncIterator):
         errors.append(f"{method} must return an async iterator")
+
+
+def _validate_role_settings(capabilities: EngineCapabilities, errors: list[str]) -> None:
+    roles = set(capabilities.roles)
+    flat_settings = {(field.scope, field.key) for field in capabilities.settings}
+    for role, role_fields in capabilities.settings_by_role.items():
+        if role not in roles:
+            errors.append(f"settings_by_role includes unadvertised role {role}")
+        seen: set[tuple[str, str]] = set()
+        for setting in role_fields:
+            identity = (setting.scope, setting.key)
+            if identity in seen:
+                errors.append(f"settings_by_role[{role}] duplicates {setting.scope}:{setting.key}")
+            seen.add(identity)
+            if identity not in flat_settings:
+                errors.append(
+                    f"settings_by_role[{role}] setting {setting.scope}:{setting.key} "
+                    "is missing from legacy settings"
+                )
