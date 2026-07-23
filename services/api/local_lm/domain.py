@@ -13,6 +13,19 @@ def utcnow() -> datetime:
     return datetime.now(UTC)
 
 
+def elapsed_milliseconds(started_at: datetime, completed_at: datetime) -> int:
+    """Return elapsed wall time while treating SQLite-naive timestamps as UTC."""
+    normalized_start = (
+        started_at.replace(tzinfo=UTC) if started_at.tzinfo is None else started_at.astimezone(UTC)
+    )
+    normalized_end = (
+        completed_at.replace(tzinfo=UTC)
+        if completed_at.tzinfo is None
+        else completed_at.astimezone(UTC)
+    )
+    return max(0, int((normalized_end - normalized_start).total_seconds() * 1000))
+
+
 class MessageRole(StrEnum):
     USER = "user"
     ASSISTANT = "assistant"
