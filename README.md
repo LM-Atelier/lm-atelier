@@ -157,7 +157,9 @@ any omission count, and the complete policy is retained in run provenance.
 
 Assistant text streams as Markdown with tables, task lists, links, and fenced
 code. The composer becomes a stop control while a run is active. Stopping keeps
-the text received so far and marks it with subdued cancellation metadata.
+the text received so far and marks it with subdued cancellation metadata. If a
+chat stream fails after producing text, that partial response remains visible
+with the failure shown beneath it.
 Editing a user message creates a new branch from that point, preserves the
 source run's modality and settings, and displays only the newly selected branch
 while keeping the prior branch in local history.

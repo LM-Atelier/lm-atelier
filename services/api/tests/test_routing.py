@@ -1,10 +1,24 @@
 from __future__ import annotations
 
+from collections.abc import AsyncIterator
+
 import pytest
 
+from local_lm.adapters.base import ChatEvent, ChatRequest
 from local_lm.adapters.mock import MockChatAdapter
 from local_lm.domain import Operation, RoutingMode
 from local_lm.routing import ModalityRouter
+
+
+class CapturingMockChatAdapter(MockChatAdapter):
+    def __init__(self) -> None:
+        super().__init__()
+        self.last_request: ChatRequest | None = None
+
+    async def stream(self, request: ChatRequest) -> AsyncIterator[ChatEvent]:
+        self.last_request = request
+        async for event in super().stream(request):
+            yield event
 
 
 @pytest.mark.parametrize(
@@ -72,3 +86,21 @@ async def test_structured_planner_resolves_prior_image_follow_up() -> None:
     )
     assert plan.operation == Operation.IMAGE_TO_IMAGE
     assert plan.standalone_prompt == "Make it dusk and add warm window lights"
+
+
+@pytest.mark.asyncio
+async def test_structured_planner_uses_one_system_message_for_template_compatibility() -> None:
+    adapter = CapturingMockChatAdapter()
+    await ModalityRouter().plan_with_model(
+        adapter=adapter,
+        text="Explain image generation",
+        mode=RoutingMode.AUTO,
+        input_artifact_ids=[],
+        has_prior_image=True,
+    )
+    assert adapter.last_request is not None
+    system_messages = [
+        message for message in adapter.last_request.messages if message["role"] == "system"
+    ]
+    assert len(system_messages) == 1
+    assert "Prior generated image available: yes." in system_messages[0]["content"]

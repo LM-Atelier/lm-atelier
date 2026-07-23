@@ -3,10 +3,13 @@ from __future__ import annotations
 import asyncio
 import io
 import zipfile
+from collections.abc import AsyncIterator
 from datetime import UTC, datetime, timedelta
 
 from httpx2 import AsyncClient
 
+from local_lm.adapters.base import ChatEvent, ChatRequest
+from local_lm.adapters.mock import MockChatAdapter
 from local_lm.catalog import HuggingFaceCatalog
 from local_lm.config import Settings
 from local_lm.db import SessionLocal
@@ -436,6 +439,45 @@ async def test_active_chat_run_can_be_cancelled_directly(client: AsyncClient) ->
     )
     assert final_text.startswith(streamed_text.rstrip())
     assert not any(part["type"] == "error" for part in assistant["parts"])
+
+
+async def test_failed_chat_run_preserves_streamed_text_and_reports_error(
+    client: AsyncClient, monkeypatch
+) -> None:  # type: ignore[no-untyped-def]
+    async def fail_after_delta(
+        _adapter: MockChatAdapter, _request: ChatRequest
+    ) -> AsyncIterator[ChatEvent]:
+        yield ChatEvent(type="delta", text="Partial response that should remain")
+        yield ChatEvent(type="error", data={"error": ""})
+
+    monkeypatch.setattr(MockChatAdapter, "stream", fail_after_delta)
+    chat = (await client.post("/api/chats", json={"title": "Failed response"})).json()
+    turn = await client.post(
+        f"/api/chats/{chat['id']}/turns",
+        json={"text": "Start a response", "mode": "text"},
+    )
+    assert turn.status_code == 202
+
+    deadline = asyncio.get_running_loop().time() + 5
+    run = turn.json()["run"]
+    while asyncio.get_running_loop().time() < deadline:
+        run = (await client.get(f"/api/runs/{run['id']}")).json()
+        if run["status"] == "failed":
+            break
+        await asyncio.sleep(0.01)
+    assert run["status"] == "failed"
+    assert run["error"] == "Chat engine stream failed"
+
+    assistant = (await client.get(f"/api/messages/{turn.json()['assistant_message']['id']}")).json()
+    assert assistant["status"] == "failed"
+    assert [
+        (part["type"], part["text"])
+        for part in assistant["parts"]
+        if part["type"] in {"text", "error"}
+    ] == [
+        ("text", "Partial response that should remain"),
+        ("error", "Chat engine stream failed"),
+    ]
 
 
 async def test_cancelled_media_run_can_be_retried(client: AsyncClient) -> None:
