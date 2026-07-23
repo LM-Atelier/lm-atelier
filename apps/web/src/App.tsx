@@ -472,6 +472,8 @@ function ChatView({
   engines,
   profiles,
   liveText,
+  settings,
+  onSettings,
   onSend,
   onProfile,
   onRegenerate,
@@ -482,6 +484,8 @@ function ChatView({
   engines: EngineCapabilities[];
   profiles: ModelProfile[];
   liveText: Record<string, string>;
+  settings: Record<string, unknown>;
+  onSettings: (settings: Record<string, unknown>) => void;
   onSend: (text: string, mode: RoutingMode, artifacts: string[], settings: Record<string, unknown>) => void;
   onProfile: (field: "active_chat_profile_id" | "active_image_profile_id" | "active_video_profile_id", id: string | null) => void;
   onRegenerate: (messageId: string, settings: Record<string, unknown>) => void;
@@ -489,7 +493,6 @@ function ChatView({
   onStop: () => void;
 }) {
   const endRef = useRef<HTMLDivElement>(null);
-  const [settings, setSettings] = useState<Record<string, unknown>>({});
   useEffect(() => {
     if (typeof endRef.current?.scrollIntoView === "function") {
       endRef.current.scrollIntoView({ behavior: "smooth" });
@@ -522,7 +525,7 @@ function ChatView({
         />)}
         <div ref={endRef} />
       </div>
-      <Composer chat={chat} engines={engines} busy={busy} settings={settings} onSettings={setSettings} onSend={onSend} onStop={onStop} />
+      <Composer chat={chat} engines={engines} busy={busy} settings={settings} onSettings={onSettings} onSend={onSend} onStop={onStop} />
     </div>
   );
 }
@@ -1174,6 +1177,7 @@ export default function App() {
   const [currentChatId, setCurrentChatId] = useState<string | null>(() => localStorage.getItem("local-lm-chat"));
   const [connected, setConnected] = useState(false);
   const [liveText, setLiveText] = useState<Record<string, string>>({});
+  const [turnSettingsByChat, setTurnSettingsByChat] = useState<Record<string, Record<string, unknown>>>({});
   const projects = useQuery({ queryKey: ["projects"], queryFn: () => api.projects(true) });
   const chats = useQuery({ queryKey: ["chats"], queryFn: () => api.chats(null, true) });
   const chat = useQuery({ queryKey: ["chat", currentChatId], queryFn: () => api.chat(currentChatId!), enabled: Boolean(currentChatId) });
@@ -1262,6 +1266,11 @@ export default function App() {
   const deleteChat = useMutation({
     mutationFn: api.deleteChat,
     onSuccess: (_value, deletedId) => {
+      setTurnSettingsByChat((current) => {
+        const next = { ...current };
+        delete next[deletedId];
+        return next;
+      });
       if (currentChatId === deletedId) {
         setCurrentChatId(null);
         localStorage.removeItem("local-lm-chat");
@@ -1319,8 +1328,10 @@ export default function App() {
     if (view === "models") return <ModelsView />;
     if (view === "workflows") return <WorkflowsView />;
     if (view === "settings") return <SettingsView engines={engines.data ?? []} />;
-    return <ChatView chat={chat.data} engines={engines.data ?? []} profiles={profiles.data ?? []} liveText={liveText} onProfile={(field, id) => updateChat.mutate({ [field]: id })} onRegenerate={(messageId, settings) => regenerate.mutate({ messageId, settings })} onEdit={(messageId, text, settings) => branch.mutate({ messageId, text, settings })} onStop={() => stop.mutate()} onSend={(text, mode, artifacts, settings) => send.mutate({ text, mode, artifacts, settings })} />;
-  }, [view, engines.data, profiles.data, chat.data, liveText, send, regenerate, branch, stop, updateChat]);
+    return <ChatView chat={chat.data} engines={engines.data ?? []} profiles={profiles.data ?? []} liveText={liveText} settings={currentChatId ? turnSettingsByChat[currentChatId] ?? {} : {}} onSettings={(settings) => {
+      if (currentChatId) setTurnSettingsByChat((current) => ({ ...current, [currentChatId]: settings }));
+    }} onProfile={(field, id) => updateChat.mutate({ [field]: id })} onRegenerate={(messageId, settings) => regenerate.mutate({ messageId, settings })} onEdit={(messageId, text, settings) => branch.mutate({ messageId, text, settings })} onStop={() => stop.mutate()} onSend={(text, mode, artifacts, settings) => send.mutate({ text, mode, artifacts, settings })} />;
+  }, [view, engines.data, profiles.data, chat.data, liveText, currentChatId, turnSettingsByChat, send, regenerate, branch, stop, updateChat]);
 
   return (
     <div className="app-shell">

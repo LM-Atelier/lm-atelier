@@ -1087,4 +1087,59 @@ describe("App", () => {
     fireEvent.click(screen.getByRole("button", { name: "Regenerate response" }));
     await waitFor(() => expect(api.regenerateMessage).toHaveBeenCalledWith(assistantMessage.id, { max_tokens: 4096 }));
   });
+
+  it("keeps turn controls isolated to their chat", async () => {
+    const stamp = "2026-07-22T00:00:00Z";
+    const chat = (id: string, title: string) => ({
+      id,
+      project_id: null,
+      title,
+      archived: false,
+      routing_mode: "text" as const,
+      confirm_uncertain_media: false,
+      active_chat_profile_id: null,
+      active_image_profile_id: null,
+      active_video_profile_id: null,
+      active_head_message_id: null,
+      created_at: stamp,
+      updated_at: stamp,
+    });
+    const firstChat = chat("chat-settings-one", "Settings chat one");
+    const secondChat = chat("chat-settings-two", "Settings chat two");
+    localStorage.setItem("local-lm-chat", firstChat.id);
+    vi.mocked(api.engines).mockResolvedValue([{
+      ...roleAwareMediaEngine,
+      roles: ["chat"],
+      operations: ["text"],
+      settings: [maxTokensSetting],
+      settings_by_role: { chat: [maxTokensSetting] },
+    }]);
+    vi.mocked(api.chats).mockResolvedValue([firstChat, secondChat]);
+    vi.mocked(api.chat).mockImplementation(async (id) => ({
+      ...(id === firstChat.id ? firstChat : secondChat),
+      messages: [],
+    }));
+    const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+    render(
+      <QueryClientProvider client={client}>
+        <App />
+      </QueryClientProvider>,
+    );
+
+    fireEvent.click(await screen.findByRole("button", { name: "Turn settings" }));
+    fireEvent.change(screen.getByRole("spinbutton", { name: /Maximum output/ }), { target: { value: "4096" } });
+    fireEvent.click(screen.getByRole("button", { name: "Close settings" }));
+
+    fireEvent.click(screen.getByText(secondChat.title));
+    await screen.findByRole("heading", { name: secondChat.title });
+    fireEvent.click(screen.getByRole("button", { name: "Turn settings" }));
+    expect(screen.getByRole("spinbutton", { name: /Maximum output/ })).toHaveValue(1024);
+    fireEvent.change(screen.getByRole("spinbutton", { name: /Maximum output/ }), { target: { value: "2048" } });
+    fireEvent.click(screen.getByRole("button", { name: "Close settings" }));
+
+    fireEvent.click(screen.getByText(firstChat.title));
+    await screen.findByRole("heading", { name: firstChat.title });
+    fireEvent.click(screen.getByRole("button", { name: "Turn settings" }));
+    expect(screen.getByRole("spinbutton", { name: /Maximum output/ })).toHaveValue(4096);
+  });
 });
