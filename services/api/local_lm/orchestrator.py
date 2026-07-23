@@ -11,7 +11,7 @@ from typing import Any
 from sqlalchemy import select
 from sqlalchemy.orm import Session, object_session, selectinload
 
-from .adapters.base import ChatRequest, MediaRequest
+from .adapters.base import ChatRequest, MediaEvent, MediaRequest
 from .artifacts import ArtifactStore
 from .custom_nodes import custom_node_dependency_errors
 from .db import SessionLocal
@@ -741,26 +741,9 @@ class ConversationOrchestrator:
                     job = session.get(Job, job_id)
                     message = session.get(Message, assistant_id)
                     if job and message:
-                        preview_ids = self._temporary_preview_ids(message)
                         job.progress = event.progress
                         job.phase = event.phase
-                        self._replace_parts(
-                            message,
-                            [
-                                MessagePart(
-                                    position=0,
-                                    type=PartType.PROGRESS.value,
-                                    text=event.phase.title(),
-                                    metadata_json={
-                                        "progress": event.progress,
-                                        "phase": event.phase,
-                                    },
-                                )
-                            ],
-                        )
-                        session.flush()
-                        for artifact_id in preview_ids:
-                            self.artifacts.delete_temporary_preview(session, artifact_id)
+                        self._replace_parts(message, self._media_progress_parts(message, event))
                         session.commit()
                 await self.events.publish(
                     "generation.progress",
@@ -1032,6 +1015,35 @@ class ConversationOrchestrator:
             for part in message.parts
             if part.artifact_id and part.metadata_json.get("preview")
         ]
+
+    @staticmethod
+    def _media_progress_parts(message: Message, event: MediaEvent) -> list[MessagePart]:
+        parts = [
+            MessagePart(
+                position=0,
+                type=PartType.PROGRESS.value,
+                text=event.phase.title(),
+                metadata_json={"progress": event.progress, "phase": event.phase},
+            )
+        ]
+        preview = next(
+            (
+                part
+                for part in message.parts
+                if part.artifact_id and part.metadata_json.get("preview")
+            ),
+            None,
+        )
+        if preview:
+            parts.append(
+                MessagePart(
+                    position=1,
+                    type=PartType.IMAGE.value,
+                    artifact_id=preview.artifact_id,
+                    metadata_json=dict(preview.metadata_json),
+                )
+            )
+        return parts
 
     @staticmethod
     def _persist_streamed_text(message_id: str, text: str) -> None:

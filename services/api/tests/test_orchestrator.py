@@ -4,7 +4,8 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, Mock
 
-from local_lm.models import ModelInstall, ModelProfile, Run
+from local_lm.adapters.base import MediaEvent
+from local_lm.models import Message, MessagePart, ModelInstall, ModelProfile, Run
 from local_lm.orchestrator import ConversationOrchestrator
 from local_lm.schemas import WorkerStatus
 
@@ -58,3 +59,32 @@ async def test_managed_chat_worker_is_aligned_to_the_run_profile(monkeypatch) ->
 
     assert result == aligned
     processes.load_chat.assert_awaited_once_with(profile, install)
+
+
+def test_media_progress_preserves_the_latest_preview() -> None:
+    message = Message(chat_id="chat-1", role="assistant", status="pending")
+    message.parts = [
+        MessagePart(
+            position=0,
+            type="progress",
+            text="Preview",
+            metadata_json={"progress": 0.4, "phase": "preview"},
+        ),
+        MessagePart(
+            position=1,
+            type="image",
+            artifact_id="sha256:preview",
+            metadata_json={"preview": True},
+        ),
+    ]
+
+    parts = ConversationOrchestrator._media_progress_parts(
+        message,
+        MediaEvent(type="progress", progress=0.5, phase="sampling"),
+    )
+
+    assert [(part.position, part.type) for part in parts] == [(0, "progress"), (1, "image")]
+    assert parts[0].text == "Sampling"
+    assert parts[0].metadata_json == {"progress": 0.5, "phase": "sampling"}
+    assert parts[1].artifact_id == "sha256:preview"
+    assert parts[1].metadata_json == {"preview": True}

@@ -1246,6 +1246,14 @@ export default function App() {
 
   useEffect(() => {
     let dispose: (() => void) | undefined;
+    let mediaRefresh: number | undefined;
+    const scheduleMediaRefresh = () => {
+      if (mediaRefresh !== undefined) return;
+      mediaRefresh = window.setTimeout(() => {
+        mediaRefresh = undefined;
+        void client.invalidateQueries({ queryKey: ["chat"] });
+      }, 100);
+    };
     void connectEvents(
       (event: AppEvent) => {
         if (event.type === "text.delta") {
@@ -1255,8 +1263,12 @@ export default function App() {
           return;
         }
         if (event.type.includes("progress") || event.type.startsWith("download.")) void client.invalidateQueries({ queryKey: ["jobs"] });
-        if (event.type === "generation.preview") void client.invalidateQueries({ queryKey: ["chat"] });
+        if (["generation.progress", "generation.preview"].includes(event.type)) {
+          scheduleMediaRefresh();
+        }
         if (["run.completed", "run.failed", "run.cancelled"].includes(event.type)) {
+          if (mediaRefresh !== undefined) window.clearTimeout(mediaRefresh);
+          mediaRefresh = undefined;
           void client.invalidateQueries({ queryKey: ["chat"] });
           void client.invalidateQueries({ queryKey: ["chats"] });
           void client.invalidateQueries({ queryKey: ["jobs"] });
@@ -1267,7 +1279,10 @@ export default function App() {
       },
       setConnected,
     ).then((cleanup) => { dispose = cleanup; });
-    return () => dispose?.();
+    return () => {
+      if (mediaRefresh !== undefined) window.clearTimeout(mediaRefresh);
+      dispose?.();
+    };
   }, [client]);
 
   const createChat = useMutation({

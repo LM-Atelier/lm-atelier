@@ -1,8 +1,8 @@
-import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import App from "./App";
-import { api } from "./api";
+import { api, connectEvents } from "./api";
 import type { EngineCapabilities, SettingField } from "./types";
 
 const imageSetting: SettingField = {
@@ -228,6 +228,34 @@ describe("App", () => {
     expect(navigation).toHaveAttribute("aria-expanded", "false");
     fireEvent.click(navigation);
     expect(navigation).toHaveAttribute("aria-expanded", "true");
+  });
+
+  it("refreshes the visible chat when media generation progress changes", async () => {
+    const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+    const invalidate = vi.spyOn(client, "invalidateQueries");
+    render(
+      <QueryClientProvider client={client}>
+        <App />
+      </QueryClientProvider>,
+    );
+    expect(await screen.findByText("LM Atelier")).toBeInTheDocument();
+    const onEvent = vi.mocked(connectEvents).mock.calls.at(-1)?.[0];
+    expect(onEvent).toBeDefined();
+
+    act(() => {
+      onEvent?.({
+        sequence: 1,
+        type: "generation.progress",
+        entity_id: "run-1",
+        payload: { progress: 0.5, phase: "sampling", job_id: "job-1" },
+        created_at: "2026-07-23T00:00:00Z",
+      });
+    });
+
+    await waitFor(() => {
+      expect(invalidate).toHaveBeenCalledWith({ queryKey: ["jobs"] });
+      expect(invalidate).toHaveBeenCalledWith({ queryKey: ["chat"] });
+    });
   });
 
   it("searches and manages chats from the workspace sidebar", async () => {

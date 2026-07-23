@@ -118,6 +118,8 @@ class ProcessSupervisor:
             str(parsed.port or 8188),
             "--extra-model-paths-config",
             str(self._write_comfy_model_paths()),
+            "--preview-method",
+            "latent2rgb",
             "--disable-all-custom-nodes",
         ]
         if trusted_custom_nodes:
