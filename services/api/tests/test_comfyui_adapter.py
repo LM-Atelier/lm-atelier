@@ -166,3 +166,49 @@ async def test_websocket_is_connected_before_a_warm_prompt_can_complete(
     assert events == ["connected", "prompted"]
     assert [event.type for event in generated] == ["queued", "complete"]
     assert generated[-1].assets[0].name == "warm.png"
+
+
+async def test_native_save_video_is_classified_by_media_type_not_collection() -> None:
+    prompt_id = "prompt-video"
+
+    async def comfy(request: httpx.Request) -> httpx.Response:
+        if request.url.path == f"/history/{prompt_id}":
+            return httpx.Response(
+                200,
+                json={
+                    prompt_id: {
+                        "outputs": {
+                            "save": {
+                                "images": [
+                                    {
+                                        "filename": "native.mp4",
+                                        "subfolder": "",
+                                        "type": "output",
+                                    }
+                                ]
+                            }
+                        }
+                    }
+                },
+            )
+        if request.url.path == "/view":
+            return httpx.Response(
+                200,
+                content=b"mp4-content",
+                headers={"content-type": "video/mp4"},
+            )
+        raise AssertionError(f"unexpected ComfyUI request: {request.method} {request.url}")
+
+    adapter = ComfyUIAdapter("http://comfy.test")
+    await adapter._client.aclose()
+    adapter._client = httpx.AsyncClient(
+        base_url="http://comfy.test",
+        transport=httpx.MockTransport(comfy),
+    )
+    try:
+        outputs = await adapter._collect_outputs(prompt_id, "text_to_video")
+    finally:
+        await adapter.close()
+
+    assert outputs[0].kind == "video"
+    assert outputs[0].media_type == "video/mp4"
