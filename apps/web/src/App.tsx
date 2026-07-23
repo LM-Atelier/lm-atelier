@@ -1108,35 +1108,37 @@ function Sidebar({
       <button className="new-chat" onClick={() => { onNewChat(null); setMobileOpen(false); }}><Plus size={18} />New chat</button>
       <nav className="primary-nav"><button className={view === "media" ? "active" : ""} onClick={() => { onView("media"); setMobileOpen(false); }}><ImageIcon />Media library</button><button className={view === "models" ? "active" : ""} onClick={() => { onView("models"); setMobileOpen(false); }}><Library />Model library</button><button className={view === "workflows" ? "active" : ""} onClick={() => { onView("workflows"); setMobileOpen(false); }}><WorkflowIcon />Workflows</button></nav>
       <div className="workspace-search"><Search size={14} /><input aria-label="Search projects and chats" placeholder="Search workspace" value={search} onChange={(event) => setSearch(event.target.value)} /><button className={showArchived ? "active" : ""} aria-pressed={showArchived} onClick={() => setShowArchived((value) => !value)}>Archived</button></div>
-      <div className="sidebar-section">
-        <div className="section-title"><span>Projects</span><input ref={projectImport} hidden type="file" accept=".zip,.lm-atelier.zip,application/zip" onChange={(event) => { const file = event.target.files?.[0]; if (file) onImportProject(file); event.target.value = ""; }} /><button aria-label="Import project" onClick={() => projectImport.current?.click()}><Upload size={14} /></button><button aria-label="New project" onClick={onNewProject}><Plus size={15} /></button></div>
-        {visibleProjects.map((project) => {
-          const open = openProjects.has(project.id);
-          const projectMatches = normalizedSearch && project.name.toLowerCase().includes(normalizedSearch);
-          const projectChats = chats.filter((chat) => chat.project_id === project.id && (showArchived || !chat.archived) && (!normalizedSearch || projectMatches || chat.title.toLowerCase().includes(normalizedSearch)));
-          return (
-            <div className="project-group" key={project.id}>
-              <div className="project-row">
-                <button className="project-main" onClick={() => setOpenProjects((current) => {
-                  const next = new Set(current);
-                  if (open) next.delete(project.id);
-                  else next.add(project.id);
-                  return next;
-                })}>
-                  <ChevronDown className={open ? "" : "closed"} size={14} />
-                  <Folder size={16} />
-                  <span>{project.name}</span>
-                </button>
-                <button className="inline-add" onClick={() => onNewChat(project.id)} aria-label={`New chat in ${project.name}`}><Plus size={13} /></button>
-                <button className="inline-add" onClick={() => onExportProject(project.id)} aria-label={`Export ${project.name}`}><Download size={13} /></button>
-                <button className="inline-add" onClick={() => setManagedProject(project)} aria-label={`Manage ${project.name}`}><MoreHorizontal size={13} /></button>
+      <div className="workspace-tree" role="region" aria-label="Projects and chats">
+        <div className="sidebar-section">
+          <div className="section-title"><span>Projects</span><input ref={projectImport} hidden type="file" accept=".zip,.lm-atelier.zip,application/zip" onChange={(event) => { const file = event.target.files?.[0]; if (file) onImportProject(file); event.target.value = ""; }} /><button aria-label="Import project" onClick={() => projectImport.current?.click()}><Upload size={14} /></button><button aria-label="New project" onClick={onNewProject}><Plus size={15} /></button></div>
+          {visibleProjects.map((project) => {
+            const open = openProjects.has(project.id);
+            const projectMatches = normalizedSearch && project.name.toLowerCase().includes(normalizedSearch);
+            const projectChats = chats.filter((chat) => chat.project_id === project.id && (showArchived || !chat.archived) && (!normalizedSearch || projectMatches || chat.title.toLowerCase().includes(normalizedSearch)));
+            return (
+              <div className="project-group" key={project.id}>
+                <div className="project-row">
+                  <button className="project-main" onClick={() => setOpenProjects((current) => {
+                    const next = new Set(current);
+                    if (open) next.delete(project.id);
+                    else next.add(project.id);
+                    return next;
+                  })}>
+                    <ChevronDown className={open ? "" : "closed"} size={14} />
+                    <Folder size={16} />
+                    <span>{project.name}</span>
+                  </button>
+                  <button className="inline-add" onClick={() => onNewChat(project.id)} aria-label={`New chat in ${project.name}`}><Plus size={13} /></button>
+                  <button className="inline-add" onClick={() => onExportProject(project.id)} aria-label={`Export ${project.name}`}><Download size={13} /></button>
+                  <button className="inline-add" onClick={() => setManagedProject(project)} aria-label={`Manage ${project.name}`}><MoreHorizontal size={13} /></button>
+                </div>
+                {open && <div className="chat-list">{projectChats.map(chatRow)}</div>}
               </div>
-              {open && <div className="chat-list">{projectChats.map(chatRow)}</div>}
-            </div>
-          );
-        })}
+            );
+          })}
+        </div>
+        {unfiled.length > 0 && <div className="sidebar-section"><div className="section-title"><span>Chats</span></div><div className="chat-list standalone">{unfiled.map(chatRow)}</div></div>}
       </div>
-      {unfiled.length > 0 && <div className="sidebar-section"><div className="section-title"><span>Chats</span></div><div className="chat-list standalone">{unfiled.map(chatRow)}</div></div>}
       <div className="sidebar-footer"><button className={view === "settings" ? "active" : ""} onClick={() => { onView("settings"); setMobileOpen(false); }}><Settings />Settings</button><div className="connection"><StatusDot healthy={connected} />{connected ? "Local service connected" : "Reconnecting…"}</div></div>
       {managedChat && <ChatManager chat={managedChat} projects={projects} onClose={() => setManagedChat(null)} onSave={(values) => { onUpdateChat(managedChat.id, values); setManagedChat(null); }} onDelete={() => { onDeleteChat(managedChat.id); setManagedChat(null); }} />}
       {managedProject && <ProjectManager project={managedProject} onClose={() => setManagedProject(null)} onSave={(values) => { onUpdateProject(managedProject.id, values); setManagedProject(null); }} onDelete={() => { onDeleteProject(managedProject.id); setManagedProject(null); }} onExport={(includeMedia) => onExportProject(managedProject.id, includeMedia)} />}

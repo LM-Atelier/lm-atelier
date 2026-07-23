@@ -230,6 +230,39 @@ describe("App", () => {
     expect(vi.mocked(api.updateChat).mock.calls[0]?.[1]).toMatchObject({ title: "Renamed notes", project_id: null, archived: true });
   });
 
+  it("contains long chat lists in a dedicated workspace scroll region", async () => {
+    const stamp = "2026-07-22T00:00:00Z";
+    vi.mocked(api.chats).mockResolvedValue(
+      Array.from({ length: 40 }, (_, index) => ({
+        id: `chat-${index}`,
+        project_id: null,
+        title: `Diagnostic chat ${index + 1}`,
+        archived: false,
+        routing_mode: "auto" as const,
+        confirm_uncertain_media: false,
+        active_chat_profile_id: null,
+        active_image_profile_id: null,
+        active_video_profile_id: null,
+        active_head_message_id: null,
+        created_at: stamp,
+        updated_at: stamp,
+      })),
+    );
+    const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+    render(
+      <QueryClientProvider client={client}>
+        <App />
+      </QueryClientProvider>,
+    );
+
+    const workspace = await screen.findByRole("region", { name: "Projects and chats" });
+    expect(workspace).toHaveClass("workspace-tree");
+    await waitFor(() => expect(workspace.querySelectorAll(".sidebar-chat-row")).toHaveLength(40));
+    expect(workspace).toContainElement(screen.getByText("Diagnostic chat 40"));
+    expect(workspace).not.toContainElement(screen.getByLabelText("Search projects and chats"));
+    expect(workspace).not.toContainElement(screen.getByRole("button", { name: "Settings" }));
+  });
+
   it("imports portable project archives from the workspace sidebar", async () => {
     const stamp = "2026-07-22T00:00:00Z";
     vi.mocked(api.importProject).mockResolvedValue({ id: "project-imported", name: "Imported", description: "", instructions: "", archived: false, image_workflow_revision_id: null, video_workflow_revision_id: null, created_at: stamp, updated_at: stamp });

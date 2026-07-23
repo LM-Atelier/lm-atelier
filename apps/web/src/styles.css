@@ -45,6 +45,9 @@ button:focus-visible, a:focus-visible, input:focus-visible, textarea:focus-visib
 .workspace-search input { min-width: 0; border: 0; outline: 0; background: transparent; color: #dfe3ea; font-size: 11px; }
 .workspace-search button { border: 0; border-radius: 6px; background: transparent; color: #777f8e; padding: 4px 6px; font-size: 9px; cursor: pointer; }
 .workspace-search button.active { background: #302b50; color: #c9c2ff; }
+.workspace-tree { flex: 1; min-height: 0; overflow-y: auto; overscroll-behavior: contain; padding-right: 2px; scrollbar-color: #3c4350 transparent; scrollbar-width: thin; }
+.workspace-tree::-webkit-scrollbar { width: 8px; }
+.workspace-tree::-webkit-scrollbar-thumb { border: 2px solid transparent; border-radius: 8px; background: #3c4350; background-clip: padding-box; }
 .sidebar-section { min-height: 0; }
 .section-title { display: flex; align-items: center; justify-content: space-between; color: #777f8e; text-transform: uppercase; letter-spacing: .11em; font-size: 11px; font-weight: 700; padding: 8px 10px 5px; }
 .section-title button, .inline-add { border: 0; background: transparent; color: #777f8e; padding: 2px; display: grid; place-items: center; cursor: pointer; }
@@ -344,6 +347,7 @@ h1, h2, h3 { margin: 0; }
 @media (max-width: 680px) {
   .app-shell { grid-template-columns: 1fr; }
   .sidebar { position: relative; z-index: 20; height: auto; max-height: 100vh; border-right: 0; border-bottom: 1px solid var(--border); overflow-y: auto; }
+  .workspace-tree { flex: none; min-height: auto; overflow: visible; padding-right: 0; }
   .sidebar:not(.mobile-open) > :not(.brand) { display: none; }
   .mobile-menu { display: inline-flex !important; }
   .profile-table.interactive > div { grid-template-columns: 65px 1fr auto; }
