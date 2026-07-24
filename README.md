@@ -85,50 +85,68 @@ the platform is in scope; it does not mean a hardware tier is certified. A tier
 remains `hardware-pending` until real llama.cpp and ComfyUI generation tests pass
 and their runtime, driver, model recipe, timings, and output checks are recorded.
 
-## Quick start
-
-Requirements: Python 3.12+, Node.js 22+, npm, and optionally FFmpeg for mock
-video output.
+## Install LM Atelier
 
 ### Windows
 
-Extract the Windows release ZIP. Its top-level folder contains two normal
-Windows applications:
+1. Download `LM-Atelier-Setup-<version>-windows-x86_64.exe` from the repository's
+   [Releases](https://github.com/ajccarlson/lm-atelier/releases/latest) page.
+2. Double-click it and complete the short setup wizard.
+3. Open **LM Atelier** from the installed folder, Start menu, or optional desktop
+   shortcut.
 
-1. Double-click **Setup LM Atelier.exe** once to install or update.
-2. Double-click **LM Atelier.exe** for normal use.
+The installer includes the application, Python runtime, API, and web interface.
+It installs for the current user and does not require Python, Node.js, npm, or
+administrator access. Keep the LM Atelier terminal open while using the app;
+closing it stops the local service.
 
-Setup also creates an **LM Atelier** entry in the Windows Start menu. Either
-launcher starts the local service and opens `http://127.0.0.1:12340` in the
-default browser. Users do not need to browse into `scripts`, `packaging`, or a
-virtual environment.
+### Linux
 
-For a source checkout that has already been set up, the generated Windows
-executable is:
+1. Download `LM-Atelier-Setup-<version>-linux-x86_64.run` from
+   [Releases](https://github.com/ajccarlson/lm-atelier/releases/latest).
+2. Make it executable and run it:
 
-```powershell
-.\.venv\Scripts\lm-atelier.exe
+```bash
+chmod +x LM-Atelier-Setup-*-linux-x86_64.run
+./LM-Atelier-Setup-*-linux-x86_64.run
 ```
 
-Keep its terminal open while using LM Atelier and press `Ctrl+C` to stop it.
+The per-user installer adds LM Atelier to the application menu and
+`~/.local/bin`. It does not require root, Python, Node.js, or npm. Run the same
+installer with `--uninstall` to remove the application while preserving user
+data, or `--purge-data` to remove both.
 
-### Linux and macOS source setup
+Official installers contain only LM Atelier and its language/runtime
+dependencies. Optional model weights, llama.cpp, ComfyUI, and FFmpeg are not
+bundled. Windows may show a SmartScreen warning until release signing is
+available; verify the download against the release's `SHA256SUMS` file.
+
+## Source setup
+
+Source development requires Python 3.12+, Node.js 22+, and npm. Optionally
+install FFmpeg for mock video output.
 
 ```bash
 ./scripts/setup.sh
 ./scripts/start.sh
 ```
 
-Open `http://127.0.0.1:12340`. For frontend/backend hot reload, use
-`./scripts/dev.sh` and open the Vite URL it prints.
+On Windows, the equivalent source commands are:
 
-Official release archives include the built web interface, so end users do not
-need Node.js. On Linux, run `packaging/linux/install.sh`; on Windows, use the two
-top-level applications described above. Updates install side by side, rollback
-switches the active application version without touching data, and uninstall
-preserves data unless its explicit purge option is used. Maintainers build the
-Linux archive with `./scripts/package.sh` and the Windows ZIP plus checksums
-with `.\scripts\package.ps1`.
+```powershell
+py -3.12 -m venv .venv
+.\.venv\Scripts\python.exe -m pip install -e '.\services\api[dev]'
+npm.cmd ci
+npm.cmd run build
+.\.venv\Scripts\lm-atelier.exe
+```
+
+Open `http://127.0.0.1:12340`. For frontend/backend hot reload, use
+`scripts/dev.sh` in Git Bash and open the Vite URL it prints.
+
+Maintainers build the self-contained installers with
+`.\scripts\build-windows-installer.ps1` on Windows and
+`./scripts/build-linux-installer.sh` on Ubuntu.
 
 Run every local quality gate with:
 

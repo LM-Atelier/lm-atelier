@@ -11,6 +11,7 @@ from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.orm import Session, selectinload
 from starlette.responses import FileResponse
 
+from . import __version__
 from .capability_probe import probe_structured_tools
 from .catalog import HuggingFaceCatalog
 from .config import Settings
@@ -163,7 +164,7 @@ async def health(request: Request, session: SessionDep) -> HealthOut:
             if database_healthy and capabilities and all(item.healthy for item in capabilities)
             else "degraded"
         ),
-        version="0.1.0",
+        version=__version__,
         database=database_healthy,
         engines=capabilities,
     )
