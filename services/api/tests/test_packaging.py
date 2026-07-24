@@ -51,3 +51,20 @@ def test_installed_launchers_avoid_relocated_console_scripts() -> None:
     assert "from local_lm.main import run; run()" in windows
     assert ".venv/bin/lm-atelier" not in linux
     assert ".venv\\Scripts\\lm-atelier.exe" not in windows
+
+
+def test_windows_install_creates_and_removes_a_start_menu_launcher() -> None:
+    installer = (ROOT / "packaging/windows/install.ps1").read_text()
+    launcher = (ROOT / "packaging/windows/start-local-lm.ps1").read_text()
+    uninstaller = (ROOT / "packaging/windows/uninstall.ps1").read_text()
+    readme = (ROOT / "README.md").read_text(encoding="utf-8")
+
+    assert '[Environment]::GetFolderPath("Programs")' in installer
+    assert '"LM Atelier.lnk"' in installer
+    assert "CreateShortcut" in installer
+    assert "Windows Start menu" in installer
+    assert "Invoke-WebRequest" in launcher
+    assert "Start-Process $Url" in launcher
+    assert '"LM Atelier.lnk"' in uninstaller
+    assert r".\.venv\Scripts\lm-atelier.exe" in readme
+    assert "Windows Start menu" in readme

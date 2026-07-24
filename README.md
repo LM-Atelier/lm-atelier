@@ -90,6 +90,24 @@ and their runtime, driver, model recipe, timings, and output checks are recorded
 Requirements: Python 3.12+, Node.js 22+, npm, and optionally FFmpeg for mock
 video output.
 
+### Windows
+
+An installed release creates an **LM Atelier** entry in the Windows Start menu.
+Open it like any other application; it starts the local service and opens
+`http://127.0.0.1:12340` in the default browser. Users do not need to find a
+virtual environment or run the internal launcher script.
+
+For a source checkout that has already been set up, the generated Windows
+executable is:
+
+```powershell
+.\.venv\Scripts\lm-atelier.exe
+```
+
+Keep its terminal open while using LM Atelier and press `Ctrl+C` to stop it.
+
+### Linux and macOS source setup
+
 ```bash
 ./scripts/setup.sh
 ./scripts/start.sh
@@ -100,10 +118,11 @@ Open `http://127.0.0.1:12340`. For frontend/backend hot reload, use
 
 Official release archives include the built web interface, so end users do not
 need Node.js. On Linux, run `packaging/linux/install.sh`; on Windows, run
-`packaging/windows/install.ps1`. Updates install side by side, rollback switches
-the active application version without touching data, and uninstall preserves
-data unless its explicit purge option is used. Maintainers can build both archive
-formats and checksums with `./scripts/package.sh`.
+`packaging/windows/install.ps1` once and then launch **LM Atelier** from the
+Windows Start menu. Updates install side by side, rollback switches the active
+application version without touching data, and uninstall preserves data unless
+its explicit purge option is used. Maintainers can build both archive formats
+and checksums with `./scripts/package.sh`.
 
 Run every local quality gate with:
 
