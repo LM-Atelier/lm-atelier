@@ -3,6 +3,8 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
+import pytest
+
 from local_lm.comfy_templates import ComfyTemplateRegistry
 from local_lm.config import Settings
 
@@ -171,10 +173,11 @@ def _registry(tmp_path: Path) -> ComfyTemplateRegistry:
     return ComfyTemplateRegistry(settings)
 
 
-def test_registry_resolves_backend_declared_model_bundle(tmp_path: Path) -> None:
+def test_registry_requires_the_exact_backend_declared_repository(tmp_path: Path) -> None:
     registry = _registry(tmp_path)
 
-    matches = registry.matches("Tongyi-MAI/Z-Image-Turbo", "image")
+    assert registry.matches("Tongyi-MAI/Z-Image-Turbo", "image") == []
+    matches = registry.matches("Comfy-Org/z_image_turbo", "image")
 
     assert [item.id for item in matches] == ["image_z_image_turbo_int8"]
     assert matches[0].remote_id == "Comfy-Org/z_image_turbo"
@@ -241,6 +244,49 @@ def test_registry_compiles_modern_combo_widgets(tmp_path: Path) -> None:
         "type": "string",
         "default": "euler",
     }
+
+
+def test_registry_rejects_a_template_model_missing_from_the_running_runtime(
+    tmp_path: Path,
+) -> None:
+    registry = _registry(tmp_path)
+    object_info = {
+        "CheckpointLoaderSimple": {
+            "input": {
+                "required": {
+                    "ckpt_name": [
+                        "COMBO",
+                        {"options": ["another-model.safetensors"]},
+                    ]
+                }
+            },
+            "input_order": {"required": ["ckpt_name"]},
+        },
+        "KSamplerSelect": {
+            "input": {
+                "required": {
+                    "sampler_name": [
+                        "COMBO",
+                        {"options": ["euler"]},
+                    ]
+                }
+            },
+            "input_order": {"required": ["sampler_name"]},
+        },
+        "SaveImage": {
+            "input": {
+                "required": {
+                    "images": ["IMAGE"],
+                    "filename_prefix": ["STRING", {"default": "ComfyUI"}],
+                }
+            },
+            "input_order": {"required": ["images", "filename_prefix"]},
+            "output_node": True,
+        },
+    }
+
+    with pytest.raises(ValueError, match="does not advertise"):
+        registry.compile("sdxlturbo_example", "image", object_info)
 
 
 def test_registry_compiles_subgraph_and_runtime_bindings(tmp_path: Path) -> None:
