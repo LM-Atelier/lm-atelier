@@ -19,6 +19,7 @@ def test_release_and_engine_manifests_are_pinned_and_versioned() -> None:
     assert release["version"] == __version__
     assert release["data_policy"]["rollback"]
     assert release["bundled_engines"] is False
+    assert release["prerequisites"]["python"] == "Bundled in official installers"
     assert engines["engines"]["llama.cpp"]["pinned_release"] != "latest"
     assert engines["engines"]["comfyui"]["pinned_release"] != "latest"
     assert all(
@@ -28,7 +29,11 @@ def test_release_and_engine_manifests_are_pinned_and_versioned() -> None:
 
 @pytest.mark.skipif(sys.platform == "win32", reason="Bash syntax is checked by Ubuntu CI")
 def test_linux_release_scripts_pass_shell_syntax_check() -> None:
-    scripts = [ROOT / "scripts/package.sh", *sorted((ROOT / "packaging/linux").glob("*.sh"))]
+    scripts = [
+        ROOT / "scripts/package.sh",
+        ROOT / "scripts/build-linux-installer.sh",
+        *sorted((ROOT / "packaging/linux").glob("*.sh")),
+    ]
     subprocess.run(["bash", "-n", *map(str, scripts)], check=True)
 
 
@@ -53,23 +58,14 @@ def test_installed_launchers_avoid_relocated_console_scripts() -> None:
     assert ".venv\\Scripts\\lm-atelier.exe" not in windows
 
 
-def test_windows_install_creates_and_removes_a_start_menu_launcher() -> None:
-    installer = (ROOT / "packaging/windows/install.ps1").read_text()
-    launcher = (ROOT / "packaging/windows/start-local-lm.ps1").read_text()
-    uninstaller = (ROOT / "packaging/windows/uninstall.ps1").read_text()
+def test_windows_installer_creates_start_menu_and_application_launchers() -> None:
+    installer = (ROOT / "packaging/windows/LMAtelier.iss").read_text()
     readme = (ROOT / "README.md").read_text(encoding="utf-8")
 
-    assert '[Environment]::GetFolderPath("Programs")' in installer
-    assert '"LM Atelier.lnk"' in installer
-    assert "CreateShortcut" in installer
-    assert '$ApplicationLauncher = Join-Path $VersionRoot "LM Atelier.exe"' in installer
-    assert "$Shortcut.TargetPath = $ApplicationLauncher" in installer
-    assert "Windows Start menu" in installer
-    assert "Invoke-WebRequest" in launcher
-    assert "Start-Process $Url" in launcher
-    assert '"LM Atelier.lnk"' in uninstaller
-    assert r".\.venv\Scripts\lm-atelier.exe" in readme
-    assert "Windows Start menu" in readme
+    assert r"DefaultDirName={localappdata}\Programs\LM Atelier" in installer
+    assert 'Name: "{group}\\LM Atelier"' in installer
+    assert 'Filename: "{app}\\{#MyAppExeName}"' in installer
+    assert "LM Atelier terminal" in readme
 
 
 @pytest.mark.skipif(sys.platform != "win32", reason="Native launchers build on Windows")
@@ -95,14 +91,29 @@ def test_windows_release_builds_top_level_native_launchers(tmp_path: Path) -> No
     assert not (tmp_path / "Start LM Atelier.exe").exists()
 
 
-def test_release_workflow_packages_the_top_level_windows_applications() -> None:
-    package = (ROOT / "scripts/package.ps1").read_text()
+def test_release_workflow_builds_self_contained_platform_installers() -> None:
     workflow = (ROOT / ".github/workflows/release.yml").read_text()
     readme = (ROOT / "README.md").read_text(encoding="utf-8")
 
-    assert "build-launchers.ps1" in package
-    assert "Setup LM Atelier.exe" in readme
-    assert "LM Atelier.exe" in readme
-    assert "Start LM Atelier.exe" not in package
+    assert "build-windows-installer.ps1" in workflow
+    assert "build-linux-installer.sh" in workflow
+    assert "LM-Atelier-Setup-<version>-windows-x86_64.exe" in readme
+    assert "LM-Atelier-Setup-<version>-linux-x86_64.run" in readme
     assert "windows-2025" in workflow
-    assert r".\scripts\package.ps1" in workflow
+    assert "ubuntu-24.04" in workflow
+
+
+def test_frozen_installer_contracts_are_explicit() -> None:
+    spec = (ROOT / "packaging/LMAtelier.spec").read_text()
+    windows = (ROOT / "packaging/windows/LMAtelier.iss").read_text()
+    linux = (ROOT / "packaging/linux/self-extracting-installer.sh").read_text()
+    linux_uninstall = (ROOT / "packaging/linux/frozen-uninstall.sh").read_text()
+
+    assert '"apps" / "web" / "dist"' in spec
+    assert '"local_lm/migrations"' in spec
+    assert "PrivilegesRequired=lowest" in windows
+    assert r"DefaultDirName={localappdata}\Programs\LM Atelier" in windows
+    assert r'Filename: "{app}\{#MyAppExeName}"' in windows
+    assert "__LM_ATELIER_PAYLOAD_BELOW__" in linux
+    assert "$HOME/.local/bin/lm-atelier" in linux
+    assert "--purge-data" in linux_uninstall
