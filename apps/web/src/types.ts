@@ -181,6 +181,7 @@ export interface ModelProfile {
   id: string;
   model_install_id: string | null;
   name: string;
+  use_case: string;
   role: "chat" | "image" | "video";
   engine: string;
   load_settings_json: Record<string, unknown>;
@@ -192,6 +193,7 @@ export interface ModelProfileBundle {
   format: "lm-atelier-profile";
   version: 1;
   name: string;
+  use_case: string;
   role: "chat" | "image" | "video";
   engine: string;
   model_install_id: string | null;
@@ -419,6 +421,7 @@ export interface SystemInfo {
   distribution_version: string;
   architecture: string;
   python_version: string;
+  cpu_model: string;
   cpu_count: number;
   memory_total_bytes: number;
   memory_available_bytes: number;

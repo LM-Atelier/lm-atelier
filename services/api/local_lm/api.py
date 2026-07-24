@@ -49,6 +49,7 @@ from .models import (
 from .orchestrator import ConversationOrchestrator
 from .platforms import list_platform_matrix
 from .preflight import assess_catalog_install
+from .profile_service import AUTO_PROFILE_ID, ensure_profile_for_install
 from .recipes import get_reference_recipe, list_reference_recipes, recipe_download_request
 from .routing import RouteConfirmationRequired
 from .schemas import (
@@ -499,19 +500,13 @@ async def list_chats(
 async def create_chat(payload: ChatCreate, session: SessionDep) -> Chat:
     if payload.project_id and not session.get(Project, payload.project_id):
         raise HTTPException(404, "project not found")
-    defaults = {
-        profile.role: profile.id
-        for profile in session.scalars(
-            select(ModelProfile).where(ModelProfile.is_default.is_(True))
-        ).all()
-    }
     chat = Chat(
         title=payload.title,
         project_id=payload.project_id,
         routing_mode=payload.routing_mode.value,
-        active_chat_profile_id=defaults.get(ModelRole.CHAT.value),
-        active_image_profile_id=defaults.get(ModelRole.IMAGE.value),
-        active_video_profile_id=defaults.get(ModelRole.VIDEO.value),
+        active_chat_profile_id=AUTO_PROFILE_ID,
+        active_image_profile_id=AUTO_PROFILE_ID,
+        active_video_profile_id=AUTO_PROFILE_ID,
     )
     session.add(chat)
     session.commit()
@@ -550,6 +545,20 @@ async def update_chat(chat_id: str, payload: dict[str, Any], session: SessionDep
         and not session.get(Project, values["project_id"])
     ):
         raise HTTPException(404, "project not found")
+    profile_fields = {
+        "active_chat_profile_id": ModelRole.CHAT.value,
+        "active_image_profile_id": ModelRole.IMAGE.value,
+        "active_video_profile_id": ModelRole.VIDEO.value,
+    }
+    for field, role in profile_fields.items():
+        profile_id = values.get(field)
+        if profile_id in (None, AUTO_PROFILE_ID):
+            continue
+        profile = session.get(ModelProfile, profile_id)
+        if not profile:
+            raise HTTPException(404, f"{role} profile not found")
+        if profile.role != role:
+            raise HTTPException(422, f"{field} requires a {role} profile")
     for key, value in values.items():
         setattr(chat, key, value)
     session.commit()
@@ -1134,6 +1143,8 @@ async def import_model(payload: ModelImport, session: SessionDep) -> ModelInstal
         },
     )
     session.add(install)
+    session.flush()
+    ensure_profile_for_install(session, install)
     session.commit()
     session.refresh(install)
     return install
@@ -1221,6 +1232,7 @@ async def create_profile(payload: ModelProfileCreate, session: SessionDep) -> Mo
         raise HTTPException(422, str(exc)) from exc
     profile = ModelProfile(
         name=payload.name,
+        use_case=payload.use_case,
         role=payload.role,
         engine=payload.engine,
         model_install_id=payload.model_install_id,
@@ -1298,6 +1310,7 @@ async def clone_profile(
     return await create_profile(
         ModelProfileCreate(
             name=payload.name or f"{source.name} copy",
+            use_case=source.use_case,
             role=cast(Literal["chat", "image", "video"], source.role),
             engine=source.engine,
             model_install_id=source.model_install_id,
@@ -1327,6 +1340,7 @@ async def export_profile(profile_id: str, session: SessionDep) -> ModelProfileBu
         raise HTTPException(404, "profile not found")
     return ModelProfileBundle(
         name=profile.name,
+        use_case=profile.use_case,
         role=cast(Literal["chat", "image", "video"], profile.role),
         engine=profile.engine,
         model_install_id=profile.model_install_id,
@@ -1343,6 +1357,7 @@ async def import_profile(payload: ModelProfileBundle, session: SessionDep) -> Mo
     return await create_profile(
         ModelProfileCreate(
             name=payload.name,
+            use_case=payload.use_case,
             role=payload.role,
             engine=payload.engine,
             model_install_id=model_install_id,

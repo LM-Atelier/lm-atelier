@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import re
 from pathlib import PurePosixPath
-from typing import Literal
+from typing import Any, Literal
 
 from .config import Settings
 from .schemas import (
@@ -16,6 +16,65 @@ from .schemas import (
 _BLOCKED_SUFFIXES = {".bin", ".pt", ".pth", ".ckpt", ".pkl", ".pickle"}
 
 
+def _automatic_selection(files: dict[str, dict[str, Any]], role: str) -> list[str]:
+    if role == "chat":
+        ggufs = [
+            item
+            for name, item in files.items()
+            if name.lower().endswith(".gguf") and "mmproj" not in name.lower()
+        ]
+        if ggufs:
+            chosen = min(ggufs, key=lambda item: int(item.get("size") or 2**63 - 1))
+            return [str(chosen["filename"])]
+        return []
+
+    safe_weights = [
+        item for name, item in files.items() if PurePosixPath(name).suffix.lower() == ".safetensors"
+    ]
+    if not safe_weights:
+        return []
+    primary_markers = ("diffusion", "checkpoint", "model", "unet", "t2v", "i2v")
+    dependency_markers = ("vae", "text_encoder", "text_encoders", "clip_vision")
+
+    def primary_rank(item: dict[str, Any]) -> tuple[int, int, int]:
+        name = str(item.get("filename") or "").lower()
+        dependency = any(marker in name for marker in dependency_markers)
+        marked = any(marker in name for marker in primary_markers)
+        depth = len(PurePosixPath(name).parts)
+        return (0 if dependency else 1, 1 if marked else 0, -depth)
+
+    primary = max(
+        safe_weights,
+        key=lambda item: (
+            primary_rank(item),
+            int(item.get("size") or 0),
+            str(item.get("filename") or ""),
+        ),
+    )
+    selected = [str(primary["filename"])]
+    # Component-style media repositories need one companion from each declared
+    # dependency folder. Single-checkpoint repositories naturally select only
+    # the primary file.
+    primary_name = str(primary.get("filename") or "")
+    if len(PurePosixPath(primary_name).parts) > 1:
+        for marker in dependency_markers:
+            companions = [
+                item for item in safe_weights if marker in str(item.get("filename") or "").lower()
+            ]
+            if companions:
+                chosen = min(
+                    companions,
+                    key=lambda item: (
+                        int(item.get("size") or 2**63 - 1),
+                        str(item.get("filename") or ""),
+                    ),
+                )
+                filename = str(chosen["filename"])
+                if filename not in selected:
+                    selected.append(filename)
+    return selected
+
+
 def assess_catalog_install(
     detail: CatalogDetail,
     request: CatalogPreflightRequest,
@@ -26,11 +85,8 @@ def assess_catalog_install(
     selected = list(dict.fromkeys(request.selected_files))
     checks: list[CatalogPreflightCheck] = []
 
-    if not selected and request.role == "chat":
-        ggufs = [item for name, item in files.items() if name.lower().endswith(".gguf")]
-        if ggufs:
-            chosen = min(ggufs, key=lambda item: int(item.get("size") or 2**63 - 1))
-            selected = [str(chosen["filename"])]
+    if not selected:
+        selected = _automatic_selection(files, request.role)
 
     missing = [name for name in selected if name not in files]
     unsafe_paths = [
@@ -40,7 +96,12 @@ def assess_catalog_install(
     ]
     if not selected:
         checks.append(
-            _check("selection", "File selection", "block", "Select at least one model file.")
+            _check(
+                "selection",
+                "Automatic model selection",
+                "block",
+                "No safe model file could be selected automatically.",
+            )
         )
     elif missing or unsafe_paths:
         detail_text = "Selected files are not present in this revision."
@@ -51,9 +112,12 @@ def assess_catalog_install(
         checks.append(
             _check(
                 "selection",
-                "File selection",
+                "Automatic model selection",
                 "pass",
-                f"{len(selected)} exact file{'s' if len(selected) != 1 else ''} selected.",
+                (
+                    f"LM Atelier selected {len(selected)} safe file"
+                    f"{'s' if len(selected) != 1 else ''} for this runtime."
+                ),
             )
         )
 

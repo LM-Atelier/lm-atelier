@@ -118,6 +118,7 @@ vi.mock("./api", () => ({
       distribution_version: "24.04",
       architecture: "x86_64",
       python_version: "3.12",
+      cpu_model: "Test CPU 9000",
       cpu_count: 16,
       memory_total_bytes: 32 * 1024 ** 3,
       memory_available_bytes: 16 * 1024 ** 3,
@@ -222,7 +223,7 @@ describe("App", () => {
     expect(await screen.findByText("LM Atelier")).toBeInTheDocument();
     expect(await screen.findByText("Start a local conversation")).toBeInTheDocument();
     expect(screen.getByText("Model library")).toBeInTheDocument();
-    expect(screen.getByText("Local service connected")).toBeInTheDocument();
+    expect(screen.queryByText("Local service connected")).not.toBeInTheDocument();
     expect(screen.getByText("Skip to main content")).toHaveAttribute("href", "#main-content");
     const navigation = screen.getByRole("button", { name: "Toggle navigation" });
     expect(navigation).toHaveAttribute("aria-expanded", "false");
@@ -381,7 +382,7 @@ describe("App", () => {
     await waitFor(() => expect(vi.mocked(api.resumeDownload).mock.calls[0]?.[0]).toBe("download-1"));
   });
 
-  it("shows the current machine against the approved platform matrix", async () => {
+  it("shows useful machine details without platform-status clutter", async () => {
     const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
     render(
       <QueryClientProvider client={client}>
@@ -389,9 +390,9 @@ describe("App", () => {
       </QueryClientProvider>,
     );
     fireEvent.click(screen.getByText("Settings"));
-    expect(await screen.findByText("Platform support")).toBeInTheDocument();
-    expect(await screen.findByText("Ubuntu 24.04 LTS x64 target")).toBeInTheDocument();
-    expect(screen.getByText("hardware pending")).toBeInTheDocument();
+    expect(await screen.findByText("Test CPU 9000")).toBeInTheDocument();
+    expect(screen.getByText("16 logical processors")).toBeInTheDocument();
+    expect(screen.queryByText("Platform support")).not.toBeInTheDocument();
   });
 
   it("stores a Hugging Face token without echoing it back", async () => {
@@ -423,6 +424,7 @@ describe("App", () => {
         id: "profile-1",
         model_install_id: "model-1",
         name: "Local chat",
+        use_case: "",
         role: "chat",
         engine: "mock",
         load_settings_json: {},
@@ -437,11 +439,11 @@ describe("App", () => {
       </QueryClientProvider>,
     );
     fireEvent.click(await screen.findByText("Settings"));
-    expect(await screen.findByText("Local chat · default")).toBeInTheDocument();
+    expect(await screen.findByText(/Default.*default/)).toBeInTheDocument();
     fireEvent.click(screen.getByRole("button", { name: "Edit" }));
     expect(await screen.findByText("Edit profile")).toBeInTheDocument();
     expect(screen.getByDisplayValue("Local chat")).toBeInTheDocument();
-    expect(screen.getByText("Default chat profile")).toBeInTheDocument();
+    expect(screen.getByText("Default model")).toBeInTheDocument();
   });
 
   it("renders Markdown on only the active edited branch", async () => {
@@ -727,9 +729,7 @@ describe("App", () => {
     expect(await screen.findByText("Structured tool schema passed on mock 1.")).toBeInTheDocument();
   });
 
-  it("downloads a redacted diagnostic bundle", async () => {
-    const click = vi.spyOn(HTMLAnchorElement.prototype, "click").mockImplementation(() => undefined);
-    vi.mocked(api.createDiagnostics).mockResolvedValue({ url: "/api/artifacts/diagnostics/content" });
+  it("keeps diagnostic bundle controls out of routine settings", async () => {
     const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
     render(
       <QueryClientProvider client={client}>
@@ -737,10 +737,8 @@ describe("App", () => {
       </QueryClientProvider>,
     );
     fireEvent.click(await screen.findByText("Settings"));
-    fireEvent.click(await screen.findByText("Download redacted diagnostics"));
-    await waitFor(() => expect(api.createDiagnostics).toHaveBeenCalledOnce());
-    expect(click).toHaveBeenCalledOnce();
-    click.mockRestore();
+    expect(screen.queryByText("Download redacted diagnostics")).not.toBeInTheDocument();
+    expect(screen.queryByText("FFmpeg")).not.toBeInTheDocument();
   });
 
   it("shows installed-model storage and partial cleanup controls", async () => {
@@ -814,7 +812,7 @@ describe("App", () => {
     expect(vi.mocked(api.catalog).mock.calls[1]?.[3]).toContain("cursor=next");
   });
 
-  it("shows catalog install checks before queueing a model", async () => {
+  it("preflights and queues a safe catalog model from one click", async () => {
     const model = {
       provider: "huggingface",
       remote_id: "owner/model-8B-GGUF",
@@ -867,12 +865,14 @@ describe("App", () => {
       </QueryClientProvider>,
     );
     fireEvent.click(await screen.findByText("Model library"));
-    fireEvent.click(await screen.findByText("Choose files"));
-    expect(await screen.findByRole("heading", { name: model.remote_id })).toBeInTheDocument();
-    expect(await screen.findByText("Disk capacity")).toBeInTheDocument();
-    expect(screen.getByText("Checksum metadata")).toBeInTheDocument();
-    expect(screen.getByText("apache-2.0")).toBeInTheDocument();
-    fireEvent.click(screen.getByText("Queue download"));
+    fireEvent.click(await screen.findByText("Install"));
+    await waitFor(() => expect(api.catalogPreflight).toHaveBeenCalledWith(
+      model.remote_id,
+      "chat",
+      "llama.cpp",
+      "main",
+      [],
+    ));
     await waitFor(() => expect(api.download).toHaveBeenCalledWith(
       model.remote_id,
       "chat",
@@ -986,6 +986,7 @@ describe("App", () => {
       id: "image-profile",
       model_install_id: null,
       name: "Image profile",
+      use_case: "",
       role: "image",
       engine: "mock",
       load_settings_json: {},
