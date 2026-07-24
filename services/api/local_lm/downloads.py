@@ -22,6 +22,7 @@ from .config import Settings
 from .domain import CompatibilityLevel, JobKind, JobStatus, new_id, utcnow
 from .events import EventBroker
 from .models import Job, ModelInstall, ModelSource
+from .profile_service import ensure_profile_for_install
 from .schemas import DownloadRequest
 
 _REMOTE_ID = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]*/[A-Za-z0-9][A-Za-z0-9_.-]*$")
@@ -44,6 +45,10 @@ class DownloadManager:
     def create(self, session: Session, request: DownloadRequest) -> Job:
         if not _REMOTE_ID.fullmatch(request.remote_id):
             raise ValueError("remote_id must be in owner/model form")
+        if request.role != "chat" and not request.comfy_paths:
+            request = request.model_copy(
+                update={"comfy_paths": self._automatic_comfy_paths(request.allow_patterns)}
+            )
         for filename, digest in request.expected_sha256.items():
             path = PurePosixPath(filename)
             if path.is_absolute() or ".." in path.parts:
@@ -74,6 +79,28 @@ class DownloadManager:
         session.refresh(job)
         self.start(job.id)
         return job
+
+    @staticmethod
+    def _automatic_comfy_paths(filenames: list[str]) -> dict[str, str]:
+        known_folders = {
+            "checkpoints",
+            "diffusion_models",
+            "text_encoders",
+            "vae",
+            "clip_vision",
+        }
+        paths: dict[str, str] = {}
+        for filename in filenames:
+            parts = PurePosixPath(filename).parts
+            for index, part in enumerate(parts[:-1]):
+                if part in known_folders:
+                    paths[part] = str(PurePosixPath(*parts[: index + 1]))
+        if paths:
+            return paths
+        primary_name = " ".join(filenames).lower()
+        if any(marker in primary_name for marker in ("diffusion", "unet", "t2v", "i2v")):
+            return {"diffusion_models": "."}
+        return {"checkpoints": "."}
 
     def start(self, job_id: str) -> None:
         if job_id in self._tasks and not self._tasks[job_id].done():
@@ -380,17 +407,28 @@ class DownloadManager:
                         },
                     )
                     session.add(install)
+                    session.flush()
+                    profile = ensure_profile_for_install(
+                        session,
+                        install,
+                        default_settings=request.default_settings,
+                    )
                     job = session.get(Job, job_id)
                     if not job:
                         return
                     job.status = JobStatus.COMPLETE.value
                     job.progress = 1
                     job.phase = "complete"
-                    job.result_json = {"model_install_id": install.id}
+                    job.result_json = {
+                        "model_install_id": install.id,
+                        "profile_id": profile.id,
+                    }
                     job.completed_at = utcnow()
                     session.commit()
                 await self.events.publish(
-                    "download.completed", job_id, {"model_install_id": install.id}
+                    "download.completed",
+                    job_id,
+                    {"model_install_id": install.id, "profile_id": profile.id},
                 )
         except asyncio.CancelledError:
             raise

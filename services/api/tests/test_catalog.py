@@ -54,6 +54,21 @@ def test_explicit_download_patterns_are_honored() -> None:
     assert files == ["model.safetensors"]
 
 
+def test_automatic_comfy_paths_cover_checkpoint_and_component_layouts() -> None:
+    assert DownloadManager._automatic_comfy_paths(["model.safetensors"]) == {"checkpoints": "."}
+    assert DownloadManager._automatic_comfy_paths(
+        [
+            "split_files/diffusion_models/model.safetensors",
+            "split_files/text_encoders/encoder.safetensors",
+            "split_files/vae/vae.safetensors",
+        ]
+    ) == {
+        "diffusion_models": "split_files/diffusion_models",
+        "text_encoders": "split_files/text_encoders",
+        "vae": "split_files/vae",
+    }
+
+
 def test_pickle_compatible_download_is_blocked() -> None:
     request = DownloadRequest(
         remote_id="owner/model",

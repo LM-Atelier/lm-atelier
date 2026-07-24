@@ -262,6 +262,7 @@ class ModelImport(ApiModel):
 
 class ModelProfileCreate(ApiModel):
     name: str = Field(min_length=1, max_length=200)
+    use_case: str = Field(default="", max_length=1_000)
     role: Literal["chat", "image", "video"]
     engine: str = Field(min_length=1, max_length=32)
     model_install_id: str | None = None
@@ -272,6 +273,7 @@ class ModelProfileCreate(ApiModel):
 
 class ModelProfileUpdate(ApiModel):
     name: str | None = Field(default=None, min_length=1, max_length=200)
+    use_case: str | None = Field(default=None, max_length=1_000)
     load_settings: dict[str, Any] | None = None
     request_settings: dict[str, Any] | None = None
     is_default: bool | None = None
@@ -285,6 +287,7 @@ class ModelProfileBundle(ApiModel):
     format: Literal["lm-atelier-profile"] = "lm-atelier-profile"
     version: Literal[1] = 1
     name: str = Field(min_length=1, max_length=200)
+    use_case: str = Field(default="", max_length=1_000)
     role: Literal["chat", "image", "video"]
     engine: str = Field(min_length=1, max_length=32)
     model_install_id: str | None = None
@@ -296,6 +299,7 @@ class ModelProfileOut(ApiModel):
     id: str
     model_install_id: str | None
     name: str
+    use_case: str
     role: str
     engine: str
     load_settings_json: dict[str, Any]
@@ -645,6 +649,7 @@ class SystemInfo(ApiModel):
     distribution_version: str
     architecture: str
     python_version: str
+    cpu_model: str
     cpu_count: int
     memory_total_bytes: int
     memory_available_bytes: int

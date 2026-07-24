@@ -5,14 +5,15 @@ from sqlalchemy.orm import Session
 
 from .config import Settings
 from .domain import ModelRole, Operation
-from .models import ModelProfile, WorkflowDefinition, WorkflowRevision
+from .models import ModelInstall, ModelProfile, WorkflowDefinition, WorkflowRevision
+from .profile_service import ensure_profile_for_install
 
 
 def seed_defaults(session: Session, settings: Settings) -> None:
     profile_specs = [
-        ("Default chat", ModelRole.CHAT.value, settings.chat_engine),
-        ("Default image", ModelRole.IMAGE.value, settings.media_engine),
-        ("Default video", ModelRole.VIDEO.value, settings.media_engine),
+        ("Default", ModelRole.CHAT.value, settings.chat_engine),
+        ("Default", ModelRole.IMAGE.value, settings.media_engine),
+        ("Default", ModelRole.VIDEO.value, settings.media_engine),
     ]
     for name, role, engine in profile_specs:
         existing_profile = session.scalar(
@@ -20,6 +21,14 @@ def seed_defaults(session: Session, settings: Settings) -> None:
         )
         if not existing_profile:
             session.add(ModelProfile(name=name, role=role, engine=engine, is_default=True))
+
+    session.flush()
+    for install in session.scalars(select(ModelInstall).where(ModelInstall.active.is_(True))).all():
+        ensure_profile_for_install(
+            session,
+            install,
+            default_settings=install.manifest_json.get("default_settings", {}),
+        )
 
     if settings.media_engine == "mock":
         for operation in (
