@@ -391,7 +391,8 @@ describe("App", () => {
     );
     fireEvent.click(screen.getByText("Settings"));
     expect(await screen.findByText("Test CPU 9000")).toBeInTheDocument();
-    expect(screen.getByText("16 logical processors")).toBeInTheDocument();
+    expect(screen.getByText("CPU model")).toBeInTheDocument();
+    expect(screen.queryByText(/logical processors/i)).not.toBeInTheDocument();
     expect(screen.queryByText("Platform support")).not.toBeInTheDocument();
   });
 
