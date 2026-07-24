@@ -5,7 +5,7 @@ and contextual video generation. A single browser conversation can decide
 whether a request needs text, an image, or a video, run the selected local
 engine, and render the result inline.
 
-The repository contains a working `0.1.0` foundation with mock engines for a
+The repository contains a working `0.1.1` foundation with mock engines for a
 weight-free demo and adapters for `llama-server`, ComfyUI, and Hugging Face.
 
 ## What works
@@ -146,7 +146,11 @@ Open `http://127.0.0.1:12340`. For frontend/backend hot reload, use
 
 Maintainers build the self-contained installers with
 `.\scripts\build-windows-installer.ps1` on Windows and
-`./scripts/build-linux-installer.sh` on Ubuntu.
+`./scripts/build-linux-installer.sh` on Ubuntu. The manually dispatched
+`Release installers` workflow can build only the platform that is unavailable
+locally, avoiding duplicate hosted-runner builds. Create version tags and
+GitHub releases only after both platform installers pass their smoke tests and
+generate a fresh `SHA256SUMS` covering the exact uploaded files.
 
 Run every local quality gate with:
 
