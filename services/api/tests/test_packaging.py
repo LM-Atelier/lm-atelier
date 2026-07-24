@@ -62,9 +62,47 @@ def test_windows_install_creates_and_removes_a_start_menu_launcher() -> None:
     assert '[Environment]::GetFolderPath("Programs")' in installer
     assert '"LM Atelier.lnk"' in installer
     assert "CreateShortcut" in installer
+    assert '$ApplicationLauncher = Join-Path $VersionRoot "LM Atelier.exe"' in installer
+    assert "$Shortcut.TargetPath = $ApplicationLauncher" in installer
     assert "Windows Start menu" in installer
     assert "Invoke-WebRequest" in launcher
     assert "Start-Process $Url" in launcher
     assert '"LM Atelier.lnk"' in uninstaller
     assert r".\.venv\Scripts\lm-atelier.exe" in readme
     assert "Windows Start menu" in readme
+
+
+@pytest.mark.skipif(sys.platform != "win32", reason="Native launchers build on Windows")
+def test_windows_release_builds_top_level_native_launchers(tmp_path: Path) -> None:
+    subprocess.run(
+        [
+            "powershell.exe",
+            "-NoProfile",
+            "-ExecutionPolicy",
+            "Bypass",
+            "-File",
+            str(ROOT / "packaging/windows/build-launchers.ps1"),
+            "-OutputDirectory",
+            str(tmp_path),
+        ],
+        check=True,
+    )
+
+    setup = tmp_path / "Setup LM Atelier.exe"
+    application = tmp_path / "LM Atelier.exe"
+    assert setup.read_bytes().startswith(b"MZ")
+    assert application.read_bytes().startswith(b"MZ")
+    assert not (tmp_path / "Start LM Atelier.exe").exists()
+
+
+def test_release_workflow_packages_the_top_level_windows_applications() -> None:
+    package = (ROOT / "scripts/package.ps1").read_text()
+    workflow = (ROOT / ".github/workflows/release.yml").read_text()
+    readme = (ROOT / "README.md").read_text(encoding="utf-8")
+
+    assert "build-launchers.ps1" in package
+    assert "Setup LM Atelier.exe" in readme
+    assert "LM Atelier.exe" in readme
+    assert "Start LM Atelier.exe" not in package
+    assert "windows-2025" in workflow
+    assert r".\scripts\package.ps1" in workflow
