@@ -5,7 +5,7 @@ and contextual video generation. A single browser conversation can decide
 whether a request needs text, an image, or a video, run the selected local
 engine, and render the result inline.
 
-The repository contains a working `0.1.1` foundation with mock engines for a
+The repository contains a working `0.1.2` foundation with mock engines for a
 weight-free demo and adapters for `llama-server`, ComfyUI, and Hugging Face.
 
 ## What works

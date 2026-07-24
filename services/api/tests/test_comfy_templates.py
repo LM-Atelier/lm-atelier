@@ -119,6 +119,53 @@ def _registry(tmp_path: Path) -> ComfyTemplateRegistry:
         json.dumps(template),
         encoding="utf-8",
     )
+    (templates / "sdxlturbo_example.json").write_text(
+        json.dumps(
+            {
+                "nodes": [
+                    {
+                        "id": 1,
+                        "type": "CheckpointLoaderSimple",
+                        "inputs": [],
+                        "outputs": [{"name": "MODEL", "type": "MODEL", "links": []}],
+                        "properties": {
+                            "cnr_id": "comfy-core",
+                            "models": [
+                                {
+                                    "name": "sd_xl_turbo_1.0_fp16.safetensors",
+                                    "url": (
+                                        "https://huggingface.co/stabilityai/sdxl-turbo/"
+                                        "resolve/main/sd_xl_turbo_1.0_fp16.safetensors"
+                                    ),
+                                    "directory": "checkpoints",
+                                }
+                            ],
+                        },
+                        "widgets_values": ["sd_xl_turbo_1.0_fp16.safetensors"],
+                    },
+                    {
+                        "id": 2,
+                        "type": "SaveImage",
+                        "inputs": [],
+                        "outputs": [],
+                        "properties": {"cnr_id": "comfy-core"},
+                        "widgets_values": ["sdxl-turbo"],
+                    },
+                    {
+                        "id": 3,
+                        "type": "KSamplerSelect",
+                        "inputs": [],
+                        "outputs": [{"name": "SAMPLER", "type": "SAMPLER", "links": []}],
+                        "properties": {"cnr_id": "comfy-core"},
+                        "widgets_values": ["euler"],
+                    },
+                ],
+                "links": [],
+            }
+        ),
+        encoding="utf-8",
+    )
+    (templates / "index.en.json").write_text("[]", encoding="utf-8")
     settings = Settings(data_dir=tmp_path / "data", comfy_directory=comfy)
     settings.prepare()
     return ComfyTemplateRegistry(settings)
@@ -135,6 +182,65 @@ def test_registry_resolves_backend_declared_model_bundle(tmp_path: Path) -> None
         "split_files/diffusion_models/z_image_turbo_int8.safetensors"
     ]
     assert matches[0].comfy_paths == {"diffusion_models": "split_files/diffusion_models"}
+
+
+def test_registry_prefers_exact_repository_and_rejects_generic_turbo_overlap(
+    tmp_path: Path,
+) -> None:
+    registry = _registry(tmp_path)
+
+    matches = registry.matches("stabilityai/sdxl-turbo", "image")
+
+    assert [item.id for item in matches] == ["sdxlturbo_example"]
+    assert matches[0].remote_id == "stabilityai/sdxl-turbo"
+    assert registry.matches("owner/unrelated-turbo", "image") == []
+
+
+def test_registry_compiles_modern_combo_widgets(tmp_path: Path) -> None:
+    registry = _registry(tmp_path)
+    object_info = {
+        "CheckpointLoaderSimple": {
+            "input": {
+                "required": {
+                    "ckpt_name": [
+                        "COMBO",
+                        {"options": ["sd_xl_turbo_1.0_fp16.safetensors"]},
+                    ]
+                }
+            },
+            "input_order": {"required": ["ckpt_name"]},
+        },
+        "KSamplerSelect": {
+            "input": {
+                "required": {
+                    "sampler_name": [
+                        "COMBO",
+                        {"options": ["euler", "euler_ancestral"]},
+                    ]
+                }
+            },
+            "input_order": {"required": ["sampler_name"]},
+        },
+        "SaveImage": {
+            "input": {
+                "required": {
+                    "images": ["IMAGE"],
+                    "filename_prefix": ["STRING", {"default": "ComfyUI"}],
+                }
+            },
+            "input_order": {"required": ["images", "filename_prefix"]},
+            "output_node": True,
+        },
+    }
+
+    compiled = registry.compile("sdxlturbo_example", "image", object_info)
+
+    assert compiled.api_graph["1"]["inputs"]["ckpt_name"] == ("sd_xl_turbo_1.0_fp16.safetensors")
+    assert compiled.api_graph["3"]["inputs"]["sampler_name"] == "${sampler}"
+    assert compiled.input_schema["properties"]["sampler"] == {
+        "type": "string",
+        "default": "euler",
+    }
 
 
 def test_registry_compiles_subgraph_and_runtime_bindings(tmp_path: Path) -> None:

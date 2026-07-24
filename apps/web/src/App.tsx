@@ -758,7 +758,7 @@ function ModelsView() {
   });
   const installedRemoteIds = new Set(
     installed.data
-      ?.filter((model) => model.role === role)
+      ?.filter((model) => model.role === role && model.active)
       ?.flatMap((model) => [
         model.manifest_json.remote_id,
         model.manifest_json.source_remote_id,
