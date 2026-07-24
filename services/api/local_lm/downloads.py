@@ -11,19 +11,24 @@ import subprocess
 import sys
 from contextlib import suppress
 from pathlib import Path, PurePosixPath
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 import psutil
 from huggingface_hub import HfApi
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
+from .comfy_templates import ComfyTemplateRegistry, CompiledComfyTemplate
 from .config import Settings
 from .domain import CompatibilityLevel, JobKind, JobStatus, new_id, utcnow
 from .events import EventBroker
-from .models import Job, ModelInstall, ModelSource
+from .models import Job, ModelInstall, ModelSource, WorkflowDefinition, WorkflowRevision
 from .profile_service import ensure_profile_for_install
 from .schemas import DownloadRequest
+
+if TYPE_CHECKING:
+    from .adapters.comfyui import ComfyUIAdapter
+    from .processes import ProcessSupervisor
 
 _REMOTE_ID = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]*/[A-Za-z0-9][A-Za-z0-9_.-]*$")
 _TRANSFER_ATTEMPTS = 3
@@ -36,9 +41,19 @@ def download_worker_command() -> list[str]:
 
 
 class DownloadManager:
-    def __init__(self, settings: Settings, events: EventBroker) -> None:
+    def __init__(
+        self,
+        settings: Settings,
+        events: EventBroker,
+        *,
+        media_adapter: ComfyUIAdapter | None = None,
+        processes: ProcessSupervisor | None = None,
+    ) -> None:
         self.settings = settings
         self.events = events
+        self.media_adapter = media_adapter
+        self.processes = processes
+        self.comfy_templates = ComfyTemplateRegistry(settings)
         self._api = HfApi(token=settings.hf_token)
         self._tasks: dict[str, asyncio.Task[None]] = {}
         self._workers: dict[str, subprocess.Popen[bytes]] = {}
@@ -51,10 +66,24 @@ class DownloadManager:
     def create(self, session: Session, request: DownloadRequest) -> Job:
         if not _REMOTE_ID.fullmatch(request.remote_id):
             raise ValueError("remote_id must be in owner/model form")
+        if request.source_remote_id and not _REMOTE_ID.fullmatch(request.source_remote_id):
+            raise ValueError("source_remote_id must be in owner/model form")
         if request.role != "chat" and not request.comfy_paths:
             request = request.model_copy(
                 update={"comfy_paths": self._automatic_comfy_paths(request.allow_patterns)}
             )
+        if request.workflow_template_id:
+            template = self.comfy_templates.validate_download(
+                request.workflow_template_id,
+                request.role,
+                request.remote_id,
+                request.allow_patterns,
+                request.comfy_paths,
+            )
+            if request.workflow_template_sha256 != template.sha256:
+                raise ValueError("ComfyUI template changed; run the install check again")
+        elif request.workflow_template_sha256:
+            raise ValueError("workflow template hash requires a template identifier")
         for filename, digest in request.expected_sha256.items():
             path = PurePosixPath(filename)
             if path.is_absolute() or ".." in path.parts:
@@ -294,6 +323,7 @@ class DownloadManager:
                 await self.events.publish(
                     "download.started", job_id, {"remote_id": request.remote_id}
                 )
+                compiled_template = await self._prepare_comfy_template(request)
 
                 info = await asyncio.to_thread(
                     self._api.model_info,
@@ -387,6 +417,10 @@ class DownloadManager:
                 installed_size = sum(
                     path.stat().st_size for path in destination.rglob("*") if path.is_file()
                 )
+                template_defaults = (
+                    self._template_defaults(compiled_template) if compiled_template else {}
+                )
+                default_settings = {**template_defaults, **request.default_settings}
 
                 with SessionLocal() as session:
                     source = session.scalar(
@@ -420,6 +454,7 @@ class DownloadManager:
                         compatibility=CompatibilityLevel.LIKELY.value,
                         manifest_json={
                             "remote_id": request.remote_id,
+                            "source_remote_id": request.source_remote_id,
                             "revision": revision,
                             "files": filenames,
                             "expected_sha256": request.expected_sha256,
@@ -427,32 +462,73 @@ class DownloadManager:
                             "recipe_version": request.recipe_version,
                             "comfy_paths": request.comfy_paths,
                             "workflow_path": request.workflow_path,
-                            "default_settings": request.default_settings,
+                            "workflow_template_id": request.workflow_template_id,
+                            "workflow_template_sha256": request.workflow_template_sha256,
+                            "default_settings": default_settings,
                         },
                     )
                     session.add(install)
                     session.flush()
+                    superseded_install_ids = (
+                        self._deactivate_superseded_media_installs(
+                            session,
+                            install,
+                            request.source_remote_id,
+                        )
+                        if compiled_template
+                        else []
+                    )
                     profile = ensure_profile_for_install(
                         session,
                         install,
-                        default_settings=request.default_settings,
+                        default_settings=default_settings,
                     )
+                    workflow_revision_id = None
+                    if compiled_template:
+                        workflow_revision = self._ensure_template_workflow(
+                            session,
+                            compiled_template,
+                            install,
+                        )
+                        workflow_revision_id = workflow_revision.id
+                    job = session.get(Job, job_id)
+                    if not job:
+                        return
+                    job.progress = 0.95
+                    job.phase = "activating"
+                    job.result_json = {
+                        "model_install_id": install.id,
+                        "profile_id": profile.id,
+                        "workflow_revision_id": workflow_revision_id,
+                        "superseded_model_install_ids": superseded_install_ids,
+                    }
+                    session.commit()
+                    install_id = install.id
+                    profile_id = profile.id
+
+                if compiled_template:
+                    if not self.processes or not self.media_adapter:
+                        raise RuntimeError("automatic ComfyUI activation is unavailable")
+                    await self.processes.start_media()
+                    validation_errors = await self.media_adapter.validate_workflow(
+                        compiled_template.api_graph
+                    )
+                    if validation_errors:
+                        raise ValueError("; ".join(validation_errors))
+
+                with SessionLocal() as session:
                     job = session.get(Job, job_id)
                     if not job:
                         return
                     job.status = JobStatus.COMPLETE.value
                     job.progress = 1
                     job.phase = "complete"
-                    job.result_json = {
-                        "model_install_id": install.id,
-                        "profile_id": profile.id,
-                    }
                     job.completed_at = utcnow()
                     session.commit()
                 await self.events.publish(
                     "download.completed",
                     job_id,
-                    {"model_install_id": install.id, "profile_id": profile.id},
+                    {"model_install_id": install_id, "profile_id": profile_id},
                 )
         except asyncio.CancelledError:
             raise
@@ -466,6 +542,126 @@ class DownloadManager:
                     job.completed_at = utcnow()
                     session.commit()
             await self.events.publish("download.failed", job_id, {"error": str(exc)})
+
+    async def _prepare_comfy_template(
+        self, request: DownloadRequest
+    ) -> CompiledComfyTemplate | None:
+        if not request.workflow_template_id:
+            return None
+        if not self.media_adapter:
+            raise RuntimeError("automatic ComfyUI workflow setup is unavailable")
+        try:
+            object_info = await self.media_adapter.object_info()
+        except Exception:
+            if not self.processes:
+                raise
+            await self.processes.start_media()
+            object_info = await self.media_adapter.object_info()
+        compiled = self.comfy_templates.compile(
+            request.workflow_template_id,
+            request.role,
+            object_info,
+        )
+        if compiled.template.sha256 != request.workflow_template_sha256:
+            raise ValueError("ComfyUI template changed; run the install check again")
+        errors = await self.media_adapter.validate_workflow(compiled.api_graph)
+        if errors:
+            raise ValueError("; ".join(errors))
+        return compiled
+
+    @staticmethod
+    def _deactivate_superseded_media_installs(
+        session: Session,
+        current: ModelInstall,
+        source_remote_id: str | None,
+    ) -> list[str]:
+        if not source_remote_id:
+            return []
+        source_key = source_remote_id.casefold()
+        superseded: list[str] = []
+        candidates = session.scalars(
+            select(ModelInstall).where(
+                ModelInstall.id != current.id,
+                ModelInstall.role == current.role,
+                ModelInstall.engine == current.engine,
+                ModelInstall.active.is_(True),
+            )
+        ).all()
+        for candidate in candidates:
+            identities = {
+                str(candidate.manifest_json.get("remote_id") or "").casefold(),
+                str(candidate.manifest_json.get("source_remote_id") or "").casefold(),
+            }
+            if source_key not in identities:
+                continue
+            candidate.active = False
+            superseded.append(candidate.id)
+        return superseded
+
+    @staticmethod
+    def _template_defaults(compiled: CompiledComfyTemplate) -> dict[str, Any]:
+        properties = compiled.input_schema.get("properties")
+        if not isinstance(properties, dict):
+            return {}
+        return {
+            key: value["default"]
+            for key, value in properties.items()
+            if isinstance(value, dict)
+            and "default" in value
+            and not (isinstance(value["default"], str) and value["default"].startswith("${"))
+        }
+
+    @staticmethod
+    def _ensure_template_workflow(
+        session: Session,
+        compiled: CompiledComfyTemplate,
+        install: ModelInstall,
+    ) -> WorkflowRevision:
+        name = f"ComfyUI template · {compiled.template.id}"
+        definition = session.scalar(
+            select(WorkflowDefinition).where(
+                WorkflowDefinition.name == name,
+                WorkflowDefinition.operation == compiled.template.operation,
+            )
+        )
+        if not definition:
+            definition = WorkflowDefinition(
+                name=name,
+                operation=compiled.template.operation,
+                description=(
+                    "Automatically configured from the workflow catalog shipped with ComfyUI."
+                ),
+            )
+            session.add(definition)
+            session.flush()
+        current = (
+            session.get(WorkflowRevision, definition.current_revision_id)
+            if definition.current_revision_id
+            else None
+        )
+        if current and current.dependencies_json.get("template_sha256") == compiled.template.sha256:
+            return current
+        version = max((item.version for item in definition.revisions), default=0) + 1
+        revision = WorkflowRevision(
+            workflow_id=definition.id,
+            version=version,
+            engine="comfyui",
+            ui_graph_json=compiled.ui_graph,
+            api_graph_json=compiled.api_graph,
+            input_schema_json=compiled.input_schema,
+            dependencies_json={
+                "model_install_ids": [install.id],
+                "template_id": compiled.template.id,
+                "template_sha256": compiled.template.sha256,
+                "model_files": compiled.template.selected_files,
+                "custom_nodes": [],
+            },
+            trusted=True,
+        )
+        session.add(revision)
+        session.flush()
+        definition.current_revision_id = revision.id
+        return revision
 
     async def _stop_task(self, job_id: str) -> None:
         """Stop the isolated transfer process before cancelling its controller task."""

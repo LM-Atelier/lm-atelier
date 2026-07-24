@@ -1,7 +1,8 @@
 from __future__ import annotations
 
+import asyncio
 import logging
-from contextlib import asynccontextmanager
+from contextlib import asynccontextmanager, suppress
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -13,6 +14,7 @@ from fastapi.staticfiles import StaticFiles
 from starlette.middleware.trustedhost import TrustedHostMiddleware
 
 from . import __version__
+from .adapters.comfyui import ComfyUIAdapter
 from .api import router
 from .artifacts import ArtifactStore
 from .backups import BackupManager
@@ -32,6 +34,7 @@ from .processes import ProcessSupervisor
 from .scheduler import ResourceScheduler
 from .security import SessionSecurity
 from .seed import seed_defaults
+from .worker_startup import restore_configured_workers
 
 logging.basicConfig(
     level=logging.INFO,
@@ -75,7 +78,12 @@ def build_services(settings: Settings) -> Services:
         artifacts=artifacts,
         engines=engines,
         catalog=HuggingFaceCatalog(settings),
-        downloads=DownloadManager(settings, events),
+        downloads=DownloadManager(
+            settings,
+            events,
+            media_adapter=engines.media if isinstance(engines.media, ComfyUIAdapter) else None,
+            processes=processes,
+        ),
         scheduler=scheduler,
         orchestrator=orchestrator,
         processes=processes,
@@ -115,7 +123,15 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             active_settings.host,
             active_settings.port,
         )
+        worker_restore = asyncio.create_task(
+            restore_configured_workers(services),
+            name="restore-configured-workers",
+        )
         yield
+        if not worker_restore.done():
+            worker_restore.cancel()
+            with suppress(asyncio.CancelledError):
+                await worker_restore
         await services.downloads.close()
         await services.orchestrator.close()
         await services.catalog.close()
@@ -147,7 +163,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
 
     @app.middleware("http")
     async def local_session(request: Request, call_next):  # type: ignore[no-untyped-def]
-        public = {"/api/session", "/api/health"}
+        public = {"/api/session", "/api/health", "/api/ready"}
         if request.url.path.startswith("/api") and request.url.path not in public:
             try:
                 services.security.validate_request(request)

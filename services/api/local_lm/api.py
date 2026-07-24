@@ -14,6 +14,7 @@ from starlette.responses import FileResponse
 from . import __version__
 from .capability_probe import probe_structured_tools
 from .catalog import HuggingFaceCatalog
+from .comfy_templates import ComfyTemplate, ComfyTemplateRegistry
 from .config import Settings
 from .credentials import CredentialVaultUnavailable
 from .custom_nodes import custom_node_dependency_errors
@@ -33,6 +34,7 @@ from .downloads import DownloadManager
 from .engines import EngineRegistry
 from .hardware import collect_system_info
 from .models import (
+    AppSetting,
     Artifact,
     Chat,
     CustomNodeInstall,
@@ -63,6 +65,7 @@ from .schemas import (
     CatalogDetail,
     CatalogPage,
     CatalogPreflight,
+    CatalogPreflightCheck,
     CatalogPreflightRequest,
     ChatCreate,
     ChatDetail,
@@ -122,6 +125,7 @@ from .settings_registry import (
     validate_settings,
     workflow_settings,
 )
+from .worker_startup import LAST_CHAT_PROFILE_KEY
 
 if TYPE_CHECKING:
     from .main import Services
@@ -168,6 +172,11 @@ async def health(request: Request, session: SessionDep) -> HealthOut:
         database=database_healthy,
         engines=capabilities,
     )
+
+
+@router.get("/ready")
+async def ready() -> dict[str, str]:
+    return {"version": __version__}
 
 
 @router.get("/credentials/huggingface", response_model=CredentialStatus)
@@ -341,9 +350,16 @@ async def load_chat_worker(profile_id: str, request: Request, session: SessionDe
     if not install:
         raise HTTPException(404, "profile model install not found")
     try:
-        return await _services(request).processes.load_chat(profile, install)
+        status = await _services(request).processes.load_chat(profile, install)
     except (OSError, RuntimeError, ValueError, TimeoutError) as exc:
         raise HTTPException(422, str(exc)) from exc
+    setting = session.get(AppSetting, LAST_CHAT_PROFILE_KEY)
+    if setting:
+        setting.value_json = profile.id
+    else:
+        session.add(AppSetting(key=LAST_CHAT_PROFILE_KEY, value_json=profile.id))
+    session.commit()
+    return status
 
 
 @router.post("/workers/media/start", response_model=WorkerStatus)
@@ -1029,11 +1045,138 @@ async def catalog_preflight(
         detail = CatalogDetail.model_validate(raw_detail)
     except Exception as exc:
         raise HTTPException(502, f"catalog request failed: {exc}") from exc
-    return assess_catalog_install(
-        detail,
-        payload,
+    system = collect_system_info(services.settings)
+    if (
+        payload.role == "chat"
+        or payload.engine != "comfyui"
+        or services.settings.media_engine != "comfyui"
+    ):
+        return assess_catalog_install(detail, payload, services.settings, system)
+
+    registry = ComfyTemplateRegistry(services.settings)
+    candidates = registry.matches(detail.model.remote_id, payload.role)
+    if not candidates:
+        result = assess_catalog_install(detail, payload, services.settings, system)
+        checks = [
+            *[check for check in result.checks if check.id != "selection"],
+            CatalogPreflightCheck(
+                id="workflow-template",
+                label="Automatic runtime setup",
+                status="block",
+                detail=(
+                    "The installed ComfyUI runtime does not yet advertise a compatible "
+                    "one-click workflow for this model."
+                ),
+            ),
+        ]
+        return result.model_copy(
+            update={
+                "source_remote_id": detail.model.remote_id,
+                "selected_files": [],
+                "expected_sha256": {},
+                "download_bytes": 0,
+                "can_install": False,
+                "checks": checks,
+            }
+        )
+
+    inspected: dict[tuple[str, str], CatalogDetail] = {}
+    viable: list[tuple[int, ComfyTemplate, CatalogDetail]] = []
+    best_score = candidates[0].score
+    for candidate in candidates:
+        if candidate.score != best_score:
+            break
+        key = (candidate.remote_id, candidate.revision)
+        resolved = inspected.get(key)
+        if not resolved:
+            try:
+                raw_resolved = await services.catalog.inspect(
+                    candidate.remote_id,
+                    candidate.revision,
+                    payload.role,
+                )
+                resolved = CatalogDetail.model_validate(raw_resolved)
+            except Exception:
+                continue
+            inspected[key] = resolved
+        files = {str(item.get("filename") or ""): item for item in resolved.files}
+        if not all(filename in files for filename in candidate.selected_files):
+            continue
+        size = sum(int(files[filename].get("size") or 0) for filename in candidate.selected_files)
+        viable.append((size, candidate, resolved))
+    if not viable:
+        result = assess_catalog_install(detail, payload, services.settings, system)
+        checks = [
+            *[check for check in result.checks if check.id != "selection"],
+            CatalogPreflightCheck(
+                id="workflow-template",
+                label="Automatic runtime setup",
+                status="block",
+                detail=(
+                    "ComfyUI advertises a matching workflow, but its complete safe model "
+                    "bundle is not available from the declared repository."
+                ),
+            ),
+        ]
+        return result.model_copy(
+            update={
+                "source_remote_id": detail.model.remote_id,
+                "selected_files": [],
+                "expected_sha256": {},
+                "download_bytes": 0,
+                "can_install": False,
+                "checks": checks,
+            }
+        )
+
+    _, template, resolved_detail = min(viable, key=lambda item: (item[0], item[1].id))
+    resolved_payload = payload.model_copy(
+        update={
+            "revision": template.revision,
+            "selected_files": template.selected_files,
+        }
+    )
+    result = assess_catalog_install(
+        resolved_detail,
+        resolved_payload,
         services.settings,
-        collect_system_info(services.settings),
+        system,
+    )
+    checks = [
+        *[
+            (
+                CatalogPreflightCheck(
+                    id="runtime",
+                    label="Runtime compatibility",
+                    status="pass",
+                    detail=(
+                        "The selected files match the official workflow shipped with "
+                        "the active ComfyUI runtime."
+                    ),
+                )
+                if check.id == "runtime"
+                else check
+            )
+            for check in result.checks
+        ],
+        CatalogPreflightCheck(
+            id="workflow-template",
+            label="Automatic runtime setup",
+            status="pass",
+            detail=(
+                "LM Atelier found a complete official ComfyUI model bundle and workflow; "
+                "both will be configured automatically."
+            ),
+        ),
+    ]
+    return result.model_copy(
+        update={
+            "source_remote_id": detail.model.remote_id,
+            "comfy_paths": template.comfy_paths,
+            "workflow_template_id": template.id,
+            "workflow_template_sha256": template.sha256,
+            "checks": checks,
+        }
     )
 
 

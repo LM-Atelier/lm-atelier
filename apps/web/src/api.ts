@@ -332,21 +332,29 @@ export const api = {
     request<Job>(`/api/recipes/${encodeURIComponent(recipeId)}/install`, { method: "POST" }),
   download: (
     remoteId: string,
+    sourceRemoteId: string | null,
     role: string,
     engine: string,
     revision: string,
     allowPatterns: string[] = [],
     expectedSha256: Record<string, string> = {},
+    comfyPaths: Record<string, string> = {},
+    workflowTemplateId: string | null = null,
+    workflowTemplateSha256: string | null = null,
   ) =>
     request<Job>("/api/downloads", {
       method: "POST",
       body: JSON.stringify({
         remote_id: remoteId,
+        source_remote_id: sourceRemoteId,
         revision,
         role,
         engine,
         allow_patterns: allowPatterns,
         expected_sha256: expectedSha256,
+        comfy_paths: comfyPaths,
+        workflow_template_id: workflowTemplateId,
+        workflow_template_sha256: workflowTemplateSha256,
       }),
     }),
   importModel: (payload: { name: string; role: string; engine: string; local_path: string }) =>

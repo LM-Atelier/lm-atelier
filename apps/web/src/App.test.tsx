@@ -755,6 +755,9 @@ describe("App", () => {
     fireEvent.click(await screen.findByText("Settings"));
     expect(screen.queryByText("Download redacted diagnostics")).not.toBeInTheDocument();
     expect(screen.queryByText("FFmpeg")).not.toBeInTheDocument();
+    expect(screen.queryByText("memory free")).not.toBeInTheDocument();
+    expect(screen.queryByText(/available$/)).not.toBeInTheDocument();
+    expect(screen.queryByText(/RAM is measured for the managed process tree/)).not.toBeInTheDocument();
   });
 
   it("shows installed-model storage and partial cleanup controls", async () => {
@@ -861,9 +864,13 @@ describe("App", () => {
     });
     vi.mocked(api.catalogPreflight).mockResolvedValue({
       remote_id: model.remote_id,
+      source_remote_id: null,
       revision: "main",
       selected_files: ["model-q4.gguf"],
       expected_sha256: { "model-q4.gguf": "a".repeat(64) },
+      comfy_paths: {},
+      workflow_template_id: null,
+      workflow_template_sha256: null,
       download_bytes: 1024,
       available_disk_bytes: 4096,
       estimated_ram_bytes: 2048,
@@ -891,11 +898,15 @@ describe("App", () => {
     ));
     await waitFor(() => expect(api.download).toHaveBeenCalledWith(
       model.remote_id,
+      null,
       "chat",
       "llama.cpp",
       "main",
       ["model-q4.gguf"],
       { "model-q4.gguf": "a".repeat(64) },
+      {},
+      null,
+      null,
     ));
   });
 
