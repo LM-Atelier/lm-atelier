@@ -40,6 +40,10 @@ _TRANSFER_ATTEMPTS = 3
 logger = logging.getLogger(__name__)
 
 
+def _template_workflow_name(template_id: str) -> str:
+    return f"ComfyUI template \u00b7 {template_id}"
+
+
 def download_worker_command() -> list[str]:
     if getattr(sys, "frozen", False):
         return [sys.executable, "--download-worker"]
@@ -612,7 +616,7 @@ class DownloadManager:
                     before = session.scalar(
                         select(WorkflowDefinition.current_revision_id).where(
                             WorkflowDefinition.name
-                            == f"ComfyUI template Â· {compiled.template.id}",
+                            == _template_workflow_name(compiled.template.id),
                             WorkflowDefinition.operation == compiled.template.operation,
                         )
                     )
@@ -675,7 +679,7 @@ class DownloadManager:
         compiled: CompiledComfyTemplate,
         install: ModelInstall,
     ) -> WorkflowRevision:
-        name = f"ComfyUI template · {compiled.template.id}"
+        name = _template_workflow_name(compiled.template.id)
         definition = session.scalar(
             select(WorkflowDefinition).where(
                 WorkflowDefinition.name == name,
