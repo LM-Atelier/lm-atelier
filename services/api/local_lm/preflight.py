@@ -16,7 +16,9 @@ from .schemas import (
 _BLOCKED_SUFFIXES = {".bin", ".pt", ".pth", ".ckpt", ".pkl", ".pickle"}
 
 
-def _automatic_selection(files: dict[str, dict[str, Any]], role: str) -> list[str]:
+def _automatic_selection(
+    files: dict[str, dict[str, Any]], role: str, system_memory_bytes: int
+) -> list[str]:
     if role == "chat":
         ggufs = [
             item
@@ -24,7 +26,48 @@ def _automatic_selection(files: dict[str, dict[str, Any]], role: str) -> list[st
             if name.lower().endswith(".gguf") and "mmproj" not in name.lower()
         ]
         if ggufs:
-            chosen = min(ggufs, key=lambda item: int(item.get("size") or 2**63 - 1))
+            quantization_priority = {
+                "q4_k_m": 0,
+                "q5_k_m": 1,
+                "q4_k_s": 2,
+                "q5_k_s": 3,
+                "q8_0": 4,
+                "q3_k_m": 5,
+                "q3_k_s": 6,
+                "q2_k": 7,
+            }
+
+            def estimated_loaded_size(item: dict[str, Any]) -> int:
+                size = int(item.get("size") or 2**63 - 1)
+                return int(size * 1.2) + 512 * 1024**2
+
+            def gguf_rank(item: dict[str, Any]) -> tuple[int, int]:
+                name = str(item.get("filename") or "").lower()
+                size = int(item.get("size") or 2**63 - 1)
+                quantization = next(
+                    (value for value in quantization_priority if value in name),
+                    None,
+                )
+                if quantization is None:
+                    return (len(quantization_priority), size)
+                return (quantization_priority[quantization], size)
+
+            recognized = [
+                item
+                for item in ggufs
+                if any(
+                    value in str(item.get("filename") or "").lower()
+                    for value in quantization_priority
+                )
+            ]
+            fitting = [
+                item for item in recognized if estimated_loaded_size(item) <= system_memory_bytes
+            ]
+            chosen = (
+                min(fitting, key=gguf_rank)
+                if fitting
+                else min(ggufs, key=lambda item: int(item.get("size") or 2**63 - 1))
+            )
             return [str(chosen["filename"])]
         return []
 
@@ -86,7 +129,7 @@ def assess_catalog_install(
     checks: list[CatalogPreflightCheck] = []
 
     if not selected:
-        selected = _automatic_selection(files, request.role)
+        selected = _automatic_selection(files, request.role, system.memory_total_bytes)
 
     missing = [name for name in selected if name not in files]
     unsafe_paths = [

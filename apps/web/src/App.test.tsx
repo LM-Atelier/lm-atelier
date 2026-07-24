@@ -455,7 +455,21 @@ describe("App", () => {
       parent_id: parentId,
       role,
       status: "complete" as const,
-      parts: [{ id: `${id}-part`, position: 0, type: "text" as const, text, artifact_id: null, metadata_json: {} }],
+      parts: [
+        { id: `${id}-part`, position: 0, type: "text" as const, text, artifact_id: null, metadata_json: {} },
+        ...(role === "assistant" ? [{
+          id: `${id}-metadata`,
+          position: 1,
+          type: "generation_metadata" as const,
+          text: null,
+          artifact_id: null,
+          metadata_json: {
+            provenance: {
+              model_selection: { mode: "auto", profile_name: "Code specialist" },
+            },
+          },
+        }] : []),
+      ],
       created_at: stamp,
       updated_at: stamp,
     });
@@ -490,6 +504,7 @@ describe("App", () => {
     expect(await screen.findByRole("heading", { name: "Edited answer" })).toBeInTheDocument();
     expect(screen.queryByText("Old follow-up")).not.toBeInTheDocument();
     expect(screen.queryByText("Old branch")).not.toBeInTheDocument();
+    expect(screen.getAllByText("Auto chose Code specialist")).toHaveLength(2);
     fireEvent.click(screen.getAllByText("Edit and branch").at(-1)!);
     expect(screen.getByDisplayValue("Edited question")).toBeInTheDocument();
   });

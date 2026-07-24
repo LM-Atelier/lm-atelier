@@ -7,6 +7,7 @@ from local_lm.catalog import HuggingFaceCatalog
 from local_lm.config import Settings
 from local_lm.domain import CompatibilityLevel
 from local_lm.downloads import DownloadManager
+from local_lm.preflight import _automatic_selection
 from local_lm.schemas import DownloadRequest
 
 
@@ -38,6 +39,21 @@ def test_default_chat_download_selects_smallest_gguf() -> None:
         [Sibling("large.gguf", 20), Sibling("small.gguf", 10), Sibling("README.md", 1)],
     )
     assert files == ["small.gguf"]
+
+
+def test_automatic_chat_selection_falls_back_to_smallest_when_none_fit_memory() -> None:
+    gib = 1024**3
+    files = {
+        "model-Q4_K_M.gguf": {
+            "filename": "model-Q4_K_M.gguf",
+            "size": 5 * gib,
+        },
+        "model-Q2_K.gguf": {
+            "filename": "model-Q2_K.gguf",
+            "size": 2 * gib,
+        },
+    }
+    assert _automatic_selection(files, "chat", 2 * gib) == ["model-Q2_K.gguf"]
 
 
 def test_explicit_download_patterns_are_honored() -> None:

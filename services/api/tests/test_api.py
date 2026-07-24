@@ -1225,22 +1225,24 @@ async def test_model_storage_cleanup_and_shared_path_deletion(
         },
     )
     assert profile.status_code == 201
+    chat = (await client.post("/api/chats", json={"title": "Cascade model"})).json()
+    selected = await client.patch(
+        f"/api/chats/{chat['id']}",
+        json={"active_chat_profile_id": profile.json()["id"]},
+    )
+    assert selected.status_code == 200
     assert (await client.delete(f"/api/models/{first.json()['id']}")).status_code == 409
-    assert (await client.delete(f"/api/profiles/{profile.json()['id']}")).status_code == 204
+    assert (
+        await client.delete(f"/api/models/{first.json()['id']}", params={"delete_profiles": True})
+    ).status_code == 204
     profiles = (await client.get("/api/profiles")).json()
-    automatic_profile = next(
-        item for item in profiles if item["model_install_id"] == first.json()["id"]
-    )
-    assert (await client.delete(f"/api/profiles/{automatic_profile['id']}")).status_code == 204
-
-    assert (await client.delete(f"/api/models/{first.json()['id']}")).status_code == 204
+    assert not any(item["model_install_id"] == first.json()["id"] for item in profiles)
+    updated_chat = (await client.get(f"/api/chats/{chat['id']}")).json()
+    assert updated_chat["active_chat_profile_id"] == "__auto__"
     assert (shared / "model.gguf").is_file()
-    remaining_profiles = (await client.get("/api/profiles")).json()
-    second_profile = next(
-        item for item in remaining_profiles if item["model_install_id"] == second.json()["id"]
-    )
-    assert (await client.delete(f"/api/profiles/{second_profile['id']}")).status_code == 204
-    assert (await client.delete(f"/api/models/{second.json()['id']}")).status_code == 204
+    assert (
+        await client.delete(f"/api/models/{second.json()['id']}", params={"delete_profiles": True})
+    ).status_code == 204
     assert not shared.exists()
 
     partial = settings.download_dir / "orphan.partial"
@@ -1399,6 +1401,45 @@ async def test_catalog_preflight_autoselects_smallest_gguf(
     assert response.json()["expected_sha256"] == {"small.gguf": "a" * 64}
     checksum = next(check for check in response.json()["checks"] if check["id"] == "checksum")
     assert checksum["status"] == "pass"
+
+
+async def test_catalog_preflight_prefers_balanced_gguf_quantization(
+    client: AsyncClient, monkeypatch
+) -> None:  # type: ignore[no-untyped-def]
+    async def inspect(
+        _catalog: HuggingFaceCatalog,
+        remote_id: str,
+        revision: str = "main",
+        requested_role: str | None = None,
+    ) -> dict:  # type: ignore[type-arg]
+        return {
+            "model": {
+                "remote_id": remote_id,
+                "name": "Quantized model",
+                "license_id": "apache-2.0",
+                "compatibility": "likely",
+                "compatibility_reasons": ["GGUF artifact detected"],
+            },
+            "revision": revision,
+            "files": [
+                {"filename": "model-Q2_K.gguf", "size": 1024, "sha256": "a" * 64},
+                {"filename": "model-Q4_K_M.gguf", "size": 2048, "sha256": "b" * 64},
+                {"filename": "model-Q8_0.gguf", "size": 4096, "sha256": "c" * 64},
+            ],
+        }
+
+    monkeypatch.setattr(HuggingFaceCatalog, "inspect", inspect)
+    response = await client.post(
+        "/api/catalog/owner/model/preflight",
+        json={
+            "revision": "abc123",
+            "role": "chat",
+            "engine": "llama.cpp",
+            "selected_files": [],
+        },
+    )
+    assert response.status_code == 200
+    assert response.json()["selected_files"] == ["model-Q4_K_M.gguf"]
 
 
 async def test_catalog_preflight_autoselects_safe_media_checkpoint(
