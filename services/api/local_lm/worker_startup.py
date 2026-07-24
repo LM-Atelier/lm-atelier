@@ -76,6 +76,9 @@ async def restore_configured_workers(services: Services) -> None:
         try:
             await services.processes.start_media()
             logger.info("Restored the configured media worker")
+            refreshed = await services.downloads.refresh_installed_media_workflows()
+            if refreshed:
+                logger.info("Refreshed %s installed media workflows", refreshed)
         except Exception:
             logger.exception("Could not restore the configured media worker")
 
