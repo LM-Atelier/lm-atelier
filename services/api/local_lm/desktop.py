@@ -11,6 +11,7 @@ import webbrowser
 from pathlib import Path
 
 from . import __version__
+from .runtime_config import configure_persisted_runtime
 
 _FALSE_VALUES = {"0", "false", "no", "off"}
 
@@ -37,6 +38,7 @@ def bundled_web_dir() -> Path | None:
 
 def configure_desktop_environment() -> None:
     os.environ.setdefault("LOCAL_LM_DATA_DIR", str(default_data_dir()))
+    configure_persisted_runtime(Path(os.environ["LOCAL_LM_DATA_DIR"]))
     os.environ.setdefault("LOCAL_LM_DEV", "false")
     if web_dir := bundled_web_dir():
         os.environ.setdefault("LOCAL_LM_WEB_DIST_DIR", str(web_dir))
@@ -44,7 +46,7 @@ def configure_desktop_environment() -> None:
 
 def _health_matches(url: str) -> bool:
     try:
-        with urllib.request.urlopen(f"{url}/api/health", timeout=1) as response:
+        with urllib.request.urlopen(f"{url}/api/ready", timeout=2) as response:
             payload = json.load(response)
     except (OSError, ValueError, urllib.error.URLError):
         return False

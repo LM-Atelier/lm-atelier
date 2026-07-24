@@ -97,11 +97,9 @@ function EmptyState({ icon, title, body }: { icon: React.ReactNode; title: strin
 
 function AtelierMark() {
   return (
-    <svg viewBox="0 0 32 32" role="img" aria-label="LM Atelier">
-      <path className="atelier-frame" d="M6 25 14.8 6h2.4L26 25M9.4 18h13.2" />
-      <path className="atelier-thread" d="M5 12c5.2-3.4 9.2 5.4 14.1 2.2C22 12.3 24.7 9.5 27 8" />
-      <circle cx="5" cy="12" r="1.5" />
-      <circle cx="27" cy="8" r="1.5" />
+    <svg viewBox="0 0 400 400" role="img" aria-label="LM Atelier">
+      <path className="lma-l" d="M43 20h64v300h169v60H43z" />
+      <path className="lma-ma" d="M125 20l118 109L356 20v360h-58v-92h-85l46-45h39v-82L164 303h-39z" />
     </svg>
   );
 }
@@ -714,12 +712,16 @@ function ModelsView() {
         throw new Error(blockers.join(" ") || "This model cannot be installed safely.");
       }
       return api.download(
-        model.remote_id,
+        preflight.remote_id,
+        preflight.source_remote_id,
         selectedRole,
         engine,
         preflight.revision,
         preflight.selected_files,
         preflight.expected_sha256,
+        preflight.comfy_paths,
+        preflight.workflow_template_id,
+        preflight.workflow_template_sha256,
       );
     },
     onSuccess: () => void client.invalidateQueries({ queryKey: ["jobs"] }),
@@ -757,7 +759,10 @@ function ModelsView() {
   const installedRemoteIds = new Set(
     installed.data
       ?.filter((model) => model.role === role)
-      ?.map((model) => model.manifest_json.remote_id)
+      ?.flatMap((model) => [
+        model.manifest_json.remote_id,
+        model.manifest_json.source_remote_id,
+      ])
       .filter((remoteId): remoteId is string => typeof remoteId === "string") ?? [],
   );
   const activeDownloadIds = new Set(
@@ -1115,7 +1120,7 @@ function SettingsView({ engines }: { engines: EngineCapabilities[] }) {
         {(credential.error || saveCredential.error || removeCredential.error) && <div className="callout error">{(credential.error || saveCredential.error || removeCredential.error)?.message}</div>}
       </section>
       <section><h2>Engines</h2><div className="engine-grid">{engines.map((engine) => <article className="engine-card" key={`${engine.engine}:${engine.roles.join()}`}><header><div className="model-icon"><Cpu /></div><div><h3>{engine.engine}</h3><p>{engine.roles.join(" · ")} · {engine.version}</p></div><StatusDot healthy={engine.healthy} /></header><div className="capability-list"><span>{engine.streaming ? "Streaming" : "Queued"}</span><span>{engine.tool_calling ? "Tool routing advertised" : "Workflow execution"}</span><span>{engine.settings.length} controls</span>{engine.roles.includes("chat") && <button className="secondary compact-button" onClick={() => toolProbe.mutate()} disabled={toolProbe.isPending}>{toolProbe.isPending ? "Testing…" : "Test structured tools"}</button>}</div></article>)}</div>{toolProbe.data && <div className={`callout ${toolProbe.data.passed ? "success" : "error"}`}>{toolProbe.data.passed ? `Structured tool schema passed on ${toolProbe.data.engine} ${toolProbe.data.version}.` : `Structured tool schema failed: ${toolProbe.data.error || "unknown response"}`}</div>}{toolProbe.error && <div className="callout error">{toolProbe.error.message}</div>}</section>
-      <section><h2>Machine</h2>{system.data && <div className="metric-grid"><div className="cpu-metric"><Cpu /><span><strong>{system.data.cpu_model}</strong><small>CPU model</small></span></div><div><Gauge /><span><strong>{formatBytes(system.data.memory_available_bytes)}</strong> memory free</span></div><div><HardDrive /><span><strong>{formatBytes(system.data.disk_free_bytes)}</strong> disk free</span></div></div>}<div className="device-list">{system.data?.devices.filter((device) => device.kind !== "cpu").map((device) => <div key={device.id}><span className="device-icon"><Cpu size={18} /></span><span><strong>{device.name}</strong><small>{device.backend} · {formatBytes(device.available_memory_bytes)} available</small></span></div>)}</div></section>
+      <section><h2>Machine</h2>{system.data && <div className="metric-grid"><div className="cpu-metric"><Cpu /><span><strong>{system.data.cpu_model}</strong><small>CPU model</small></span></div><div><HardDrive /><span><strong>{formatBytes(system.data.disk_free_bytes)}</strong> disk free</span></div></div>}<div className="device-list">{system.data?.devices.filter((device) => device.kind !== "cpu").map((device) => <div key={device.id}><span className="device-icon"><Cpu size={18} /></span><span><strong>{device.name}</strong><small>{device.backend}</small></span></div>)}</div></section>
       <section>
         <div className="detail-title"><div><h2>Model profiles</h2><p>Store load-time and request-time controls independently for every model.</p></div><button className="secondary" onClick={() => profileImport.current?.click()}>Import profile</button></div>
         <input ref={profileImport} hidden type="file" accept="application/json,.json" onChange={(event) => { void importBundle(event.target.files?.[0], "profile"); event.target.value = ""; }} />
@@ -1128,7 +1133,7 @@ function SettingsView({ engines }: { engines: EngineCapabilities[] }) {
         <div className="profile-table interactive">{presets.data?.map((preset) => <div key={preset.id}><span className="badge">{preset.role}</span><strong>{preset.name}{preset.is_default ? " · default" : ""}</strong><span>{Object.keys(preset.settings_json).length} overrides</span><button className="secondary compact-button" onClick={() => setSelectedPreset(preset)}>Edit</button></div>)}</div>
         {(createPreset.error || importError) && <div className="callout error">{createPreset.error?.message || importError}</div>}
       </section>
-      <section><h2>Workers</h2><div className="engine-grid">{workers.data?.map((worker) => { const busy = worker.active_jobs + worker.queued_jobs > 0; const busyTitle = busy ? "Wait for active and queued jobs before changing this worker" : undefined; return <article className="engine-card" key={worker.name}><header><div><h3>{worker.name} worker</h3><p>{worker.state === "ready" ? `Ready · PID ${worker.pid}` : worker.state === "starting" ? "Starting and checking health" : worker.state === "exited" ? `Exited · code ${worker.exit_code ?? "unknown"}` : "Stopped or externally managed"}</p></div><StatusDot healthy={worker.state === "ready"} /></header><div className="worker-metrics"><span><strong>{worker.active_jobs}</strong> active</span><span><strong>{worker.queued_jobs}</strong> queued</span><span><strong>{formatBytes(worker.current_memory_bytes)}</strong> current RAM</span><span><strong>{formatBytes(worker.peak_memory_bytes)}</strong> measured peak</span>{worker.estimated_memory_bytes != null && <span><strong>{formatBytes(worker.estimated_memory_bytes)}</strong> estimated load</span>}</div><div className="capability-list">{worker.name === "media" && !worker.running && <button className="secondary compact-button" disabled={busy || startMedia.isPending} title={busyTitle} onClick={() => startMedia.mutate()}>Start ComfyUI</button>}{worker.running && <button className="secondary compact-button" disabled={busy || stopWorker.isPending} title={busyTitle} onClick={() => stopWorker.mutate(worker.name)}>Unload</button>}</div></article>; })}</div><p className="muted runtime-note">RAM is measured for the managed process tree. Chat load estimates combine GGUF size with a conservative context allowance; actual CPU/GPU placement varies by backend and settings.</p>{(loadChat.error || startMedia.error || stopWorker.error) && <div className="callout error">{(loadChat.error || startMedia.error || stopWorker.error)?.message}</div>}</section>
+      <section><div className="detail-title"><div><h2>Workers</h2><p>Configured workers start automatically when LM Atelier opens.</p></div></div><div className="engine-grid">{workers.data?.map((worker) => { const busy = worker.active_jobs + worker.queued_jobs > 0; const busyTitle = busy ? "Wait for active and queued jobs before changing this worker" : undefined; return <article className="engine-card" key={worker.name}><header><div><h3>{worker.name} worker</h3><p>{worker.state === "ready" ? `Ready · PID ${worker.pid}` : worker.state === "starting" ? "Starting and checking health" : worker.state === "exited" ? `Exited · code ${worker.exit_code ?? "unknown"}` : "Stopped or externally managed"}</p></div><StatusDot healthy={worker.state === "ready"} /></header><div className="worker-metrics"><span><strong>{worker.active_jobs}</strong> active</span><span><strong>{worker.queued_jobs}</strong> queued</span><span><strong>{formatBytes(worker.current_memory_bytes)}</strong> current RAM</span><span><strong>{formatBytes(worker.peak_memory_bytes)}</strong> measured peak</span>{worker.estimated_memory_bytes != null && <span><strong>{formatBytes(worker.estimated_memory_bytes)}</strong> estimated load</span>}</div><div className="capability-list">{worker.name === "media" && !worker.running && <button className="secondary compact-button" disabled={busy || startMedia.isPending} title={busyTitle} onClick={() => startMedia.mutate()}>Start ComfyUI</button>}{worker.running && <button className="secondary compact-button" disabled={busy || stopWorker.isPending} title={busyTitle} onClick={() => stopWorker.mutate(worker.name)}>Unload</button>}</div></article>; })}</div>{(loadChat.error || startMedia.error || stopWorker.error) && <div className="callout error">{(loadChat.error || startMedia.error || stopWorker.error)?.message}</div>}</section>
       <section><div className="detail-title"><div><h2>Recovery backups</h2><p>Keep 7 daily and 4 weekly verified snapshots. Media is optional so routine backups stay bounded.</p></div><div className="row-actions"><button className="secondary" onClick={() => createBackup.mutate(false)}>Back up state</button><button className="secondary" onClick={() => createBackup.mutate(true)}>Back up with media</button></div></div><div className="profile-table">{backups.data?.map((backup) => <div key={backup.name}><strong>{backup.name}</strong><span>{formatBytes(backup.size_bytes + backup.media_size_bytes)}</span><span>{backup.sha256.slice(0, 12)}</span><span>{backup.media_included ? "State + media" : backup.verified ? "Verified" : "State"}</span></div>)}</div></section>
       {selectedProfile && <ProfileEditor profile={selectedProfile} engines={engines} onClose={() => setSelectedProfile(null)} />}
       {selectedPreset && <PresetEditor preset={selectedPreset} engines={engines} onClose={() => setSelectedPreset(null)} />}

@@ -39,7 +39,7 @@ package = [
 ]
 
 [project.scripts]
-lm-atelier = "local_lm.main:run"
+lm-atelier = "local_lm.desktop:main"
 local-lm = "local_lm.main:run"
 
 [tool.hatch.build.targets.wheel]

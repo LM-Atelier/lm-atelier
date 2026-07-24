@@ -5,6 +5,7 @@ import io
 import zipfile
 from collections.abc import AsyncIterator
 from datetime import UTC, datetime, timedelta
+from pathlib import Path
 from types import SimpleNamespace
 
 from httpx2 import AsyncClient
@@ -69,6 +70,12 @@ async def test_health_probes_the_database(client: AsyncClient, monkeypatch) -> N
     assert degraded.status_code == 200
     assert degraded.json()["status"] == "degraded"
     assert degraded.json()["database"] is False
+
+
+async def test_fast_readiness_probe_reports_version(client: AsyncClient) -> None:
+    response = await client.get("/api/ready")
+    assert response.status_code == 200
+    assert response.json() == {"version": __version__}
 
 
 async def test_project_and_chat_management_contract(client: AsyncClient) -> None:
@@ -895,6 +902,63 @@ async def test_project_pins_an_immutable_media_workflow_revision(client: AsyncCl
     )
     assert turn.status_code == 202
     assert turn.json()["run"]["workflow_revision_id"] == revision_id
+
+
+async def test_media_workflow_follows_the_selected_model_dependency(
+    client: AsyncClient, tmp_path: Path
+) -> None:
+    installs = []
+    for name in ("first-image-model", "second-image-model"):
+        model_dir = tmp_path / name
+        model_dir.mkdir()
+        (model_dir / f"{name}.safetensors").write_bytes(b"safe")
+        installs.append(
+            (
+                await client.post(
+                    "/api/models/import",
+                    json={
+                        "name": name,
+                        "role": "image",
+                        "engine": "mock",
+                        "local_path": str(model_dir),
+                    },
+                )
+            ).json()
+        )
+    profiles = (await client.get("/api/profiles")).json()
+    selected_profile = next(
+        profile for profile in profiles if profile["model_install_id"] == installs[0]["id"]
+    )
+    revisions = []
+    for index, install in enumerate(installs, start=1):
+        workflow = (
+            await client.post(
+                "/api/workflows",
+                json={
+                    "name": f"Model-specific image workflow {index}",
+                    "operation": "text_to_image",
+                    "engine": "mock",
+                    "api_graph": {"node": {"class_type": f"MockImage{index}"}},
+                    "dependencies": {"model_install_ids": [install["id"]]},
+                    "trusted": True,
+                },
+            )
+        ).json()
+        revisions.append(workflow["current_revision_id"])
+
+    chat = (await client.post("/api/chats", json={"title": "Dependency routing"})).json()
+    updated = await client.patch(
+        f"/api/chats/{chat['id']}",
+        json={"active_image_profile_id": selected_profile["id"]},
+    )
+    assert updated.status_code == 200
+    turn = await client.post(
+        f"/api/chats/{chat['id']}/turns",
+        json={"text": "Draw with the first model", "mode": "image"},
+    )
+
+    assert turn.status_code == 202
+    assert turn.json()["run"]["workflow_revision_id"] == revisions[0]
 
 
 async def test_pinned_workflow_schema_drives_generation_settings(client: AsyncClient) -> None:
