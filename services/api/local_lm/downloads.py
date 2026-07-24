@@ -4,6 +4,7 @@ import asyncio
 import fnmatch
 import hashlib
 import json
+import logging
 import os
 import re
 import shutil
@@ -18,7 +19,11 @@ from huggingface_hub import HfApi
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from .comfy_templates import ComfyTemplateRegistry, CompiledComfyTemplate
+from .comfy_templates import (
+    COMFY_TEMPLATE_COMPILER_VERSION,
+    ComfyTemplateRegistry,
+    CompiledComfyTemplate,
+)
 from .config import Settings
 from .domain import CompatibilityLevel, JobKind, JobStatus, new_id, utcnow
 from .events import EventBroker
@@ -32,6 +37,7 @@ if TYPE_CHECKING:
 
 _REMOTE_ID = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]*/[A-Za-z0-9][A-Za-z0-9_.-]*$")
 _TRANSFER_ATTEMPTS = 3
+logger = logging.getLogger(__name__)
 
 
 def download_worker_command() -> list[str]:
@@ -569,6 +575,58 @@ class DownloadManager:
             raise ValueError("; ".join(errors))
         return compiled
 
+    async def refresh_installed_media_workflows(self) -> int:
+        """Recompile installed catalog workflows after compiler improvements."""
+        if not self.media_adapter:
+            return 0
+        from .db import SessionLocal
+
+        object_info = await self.media_adapter.object_info()
+        refreshed = 0
+        with SessionLocal() as session:
+            installs = session.scalars(
+                select(ModelInstall).where(
+                    ModelInstall.active.is_(True),
+                    ModelInstall.engine == "comfyui",
+                    ModelInstall.role.in_(["image", "video"]),
+                )
+            ).all()
+            for install in installs:
+                template_id = install.manifest_json.get("workflow_template_id")
+                template_sha256 = install.manifest_json.get("workflow_template_sha256")
+                if not isinstance(template_id, str) or not template_id:
+                    continue
+                try:
+                    compiled = self.comfy_templates.compile(
+                        template_id,
+                        install.role,
+                        object_info,
+                    )
+                    if template_sha256 and compiled.template.sha256 != template_sha256:
+                        logger.warning(
+                            "Skipped changed ComfyUI template %s for model %s",
+                            template_id,
+                            install.id,
+                        )
+                        continue
+                    before = session.scalar(
+                        select(WorkflowDefinition.current_revision_id).where(
+                            WorkflowDefinition.name
+                            == f"ComfyUI template Â· {compiled.template.id}",
+                            WorkflowDefinition.operation == compiled.template.operation,
+                        )
+                    )
+                    revision = self._ensure_template_workflow(session, compiled, install)
+                    if revision.id != before:
+                        refreshed += 1
+                except (KeyError, TypeError, ValueError):
+                    logger.exception(
+                        "Could not refresh ComfyUI workflow for model %s",
+                        install.id,
+                    )
+            session.commit()
+        return refreshed
+
     @staticmethod
     def _deactivate_superseded_media_installs(
         session: Session,
@@ -639,7 +697,17 @@ class DownloadManager:
             if definition.current_revision_id
             else None
         )
-        if current and current.dependencies_json.get("template_sha256") == compiled.template.sha256:
+        declared_installs = (
+            {str(item) for item in current.dependencies_json.get("model_install_ids", [])}
+            if current and isinstance(current.dependencies_json.get("model_install_ids"), list)
+            else set()
+        )
+        if (
+            current
+            and current.dependencies_json.get("template_sha256") == compiled.template.sha256
+            and current.dependencies_json.get("compiler_version") == COMFY_TEMPLATE_COMPILER_VERSION
+            and install.id in declared_installs
+        ):
             return current
         version = max((item.version for item in definition.revisions), default=0) + 1
         revision = WorkflowRevision(
@@ -650,7 +718,8 @@ class DownloadManager:
             api_graph_json=compiled.api_graph,
             input_schema_json=compiled.input_schema,
             dependencies_json={
-                "model_install_ids": [install.id],
+                "model_install_ids": sorted({install.id, *declared_installs}),
+                "compiler_version": COMFY_TEMPLATE_COMPILER_VERSION,
                 "template_id": compiled.template.id,
                 "template_sha256": compiled.template.sha256,
                 "model_files": compiled.template.selected_files,

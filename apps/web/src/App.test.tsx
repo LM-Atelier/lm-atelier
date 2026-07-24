@@ -798,6 +798,64 @@ describe("App", () => {
     expect(screen.getByTitle("Delete installed model")).toBeEnabled();
   });
 
+  it("does not mark a catalog model installed from an inactive replacement", async () => {
+    const model = {
+      provider: "huggingface",
+      remote_id: "stabilityai/sdxl-turbo",
+      name: "sdxl-turbo",
+      author: "stabilityai",
+      pipeline_tag: "text-to-image",
+      tags: ["diffusers", "safetensors"],
+      downloads: 42,
+      likes: 3,
+      trending_score: 1,
+      created_at: "2026-07-22T00:00:00Z",
+      last_modified: "2026-07-22T00:00:00Z",
+      gated: false,
+      private: false,
+      library_name: "diffusers",
+      architecture: "sdxl",
+      formats: ["safetensors"],
+      quantizations: [],
+      parameter_count: null,
+      license_id: "openrail++",
+      total_size_bytes: 1024,
+      compatibility: "likely",
+      compatibility_reasons: ["safetensors artifact detected"],
+    };
+    vi.mocked(api.models).mockResolvedValue([
+      {
+        id: "model-inactive",
+        source_id: null,
+        name: "z_image_turbo",
+        role: "image",
+        engine: "comfyui",
+        local_path: "/models/z-image",
+        size_bytes: 2048,
+        compatibility: "likely",
+        manifest_json: {
+          remote_id: "Comfy-Org/z_image_turbo",
+          source_remote_id: model.remote_id,
+        },
+        active: false,
+        created_at: "2026-07-22T00:00:00Z",
+        updated_at: "2026-07-22T00:00:00Z",
+      },
+    ]);
+    vi.mocked(api.catalog).mockResolvedValue({ items: [model], next_cursor: null });
+    const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+    render(
+      <QueryClientProvider client={client}>
+        <App />
+      </QueryClientProvider>,
+    );
+
+    fireEvent.click(await screen.findByText("Model library"));
+    fireEvent.change(screen.getAllByRole("combobox")[0], { target: { value: "image" } });
+
+    expect(await screen.findByRole("button", { name: "Install" })).toBeEnabled();
+  });
+
   it("opens the advanced local model import form", async () => {
     const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
     render(

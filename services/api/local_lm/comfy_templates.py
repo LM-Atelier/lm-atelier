@@ -23,6 +23,7 @@ _GENERIC_TOKENS = {
     "template",
     "text",
     "to",
+    "turbo",
     "video",
     "workflow",
 }
@@ -52,8 +53,9 @@ _RUNTIME_PARAMETERS = {
     "steps": "steps",
     "width": "width",
 }
-_PRIMITIVE_WIDGET_TYPES = {"BOOLEAN", "FLOAT", "INT", "STRING"}
+_PRIMITIVE_WIDGET_TYPES = {"BOOLEAN", "COMBO", "FLOAT", "INT", "STRING"}
 _CONTROL_AFTER_GENERATE = {"decrement", "fixed", "increment", "randomize"}
+COMFY_TEMPLATE_COMPILER_VERSION = 2
 
 
 @dataclass(frozen=True)
@@ -115,10 +117,13 @@ class ComfyTemplateRegistry:
         source_tokens = _tokens(remote_id)
         matches: list[ComfyTemplate] = []
         for path in self._template_files():
-            template_role = _role_for_template(path.stem)
+            try:
+                raw = _read_json(path)
+            except (OSError, ValueError):
+                continue
+            template_role = _role_for_template(path.stem, raw)
             if template_role != role:
                 continue
-            raw = _read_json(path)
             dependencies = tuple(_model_dependencies(raw))
             if not dependencies:
                 continue
@@ -132,12 +137,18 @@ class ComfyTemplateRegistry:
             repository_tokens = _tokens(dependencies[0].remote_id)
             overlap = (template_tokens | repository_tokens) & source_tokens
             meaningful = overlap - _GENERIC_TOKENS
-            if not meaningful:
+            exact_repository = dependencies[0].remote_id.casefold() == remote_id.casefold()
+            if not exact_repository and not meaningful:
                 continue
             source_specialties = source_tokens & _SPECIALTY_TOKENS
             template_specialties = template_tokens & _SPECIALTY_TOKENS
             specialty_penalty = len(template_specialties - source_specialties) * 20
-            score = len(meaningful) * 20 + len(overlap) * 2 - specialty_penalty
+            score = (
+                (1_000 if exact_repository else 0)
+                + len(meaningful) * 20
+                + len(overlap) * 2
+                - specialty_penalty
+            )
             matches.append(
                 ComfyTemplate(
                     id=path.stem,
@@ -160,7 +171,7 @@ class ComfyTemplateRegistry:
             raw = _read_json(path)
             dependencies = tuple(_model_dependencies(raw))
             if (
-                _role_for_template(path.stem) != role
+                _role_for_template(path.stem, raw) != role
                 or not dependencies
                 or len({item.remote_id.lower() for item in dependencies}) != 1
                 or len({item.revision for item in dependencies}) != 1
@@ -263,11 +274,20 @@ def _tokens(value: str) -> set[str]:
     }
 
 
-def _role_for_template(template_id: str) -> str | None:
+def _role_for_template(template_id: str, value: dict[str, Any] | None = None) -> str | None:
     if template_id.startswith("image_"):
         return "image"
     if template_id.startswith("video_"):
         return "video"
+    if value:
+        node_types = {str(node.get("type") or "").casefold() for node in _all_nodes(value)}
+        if any(
+            "video" in node_type or node_type in {"saveanimatedwebp", "vhs_videocombine"}
+            for node_type in node_types
+        ):
+            return "video"
+        if node_types & {"previewimage", "saveimage"}:
+            return "image"
     return None
 
 
@@ -344,7 +364,7 @@ def _parse_huggingface_url(url: str) -> tuple[str, str, str] | None:
     if parsed.scheme != "https" or parsed.netloc.lower() != "huggingface.co":
         return None
     parts = [unquote(part) for part in parsed.path.strip("/").split("/")]
-    if len(parts) < 6 or parts[2] != "resolve":
+    if len(parts) < 5 or parts[2] != "resolve":
         return None
     owner, name, _, revision, *file_parts = parts
     if not owner or not name or not revision or not file_parts:
@@ -556,7 +576,12 @@ def _widget_default(spec: Any) -> Any:
     if isinstance(spec[0], list):
         return spec[0][0] if spec[0] else None
     if len(spec) > 1 and isinstance(spec[1], dict):
-        return spec[1].get("default")
+        options = spec[1]
+        if "default" in options:
+            return options["default"]
+        choices = options.get("options")
+        if spec[0] == "COMBO" and isinstance(choices, list) and choices:
+            return choices[0]
     return None
 
 
