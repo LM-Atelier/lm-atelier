@@ -15,10 +15,14 @@ icon_root="build/installer-assets"
 dist_root="build/pyinstaller-linux"
 work_root="build/pyinstaller-work-linux"
 staging_root="$(mktemp -d)"
-payload_path="$staging_root/payload.tar.gz"
+payload_path="$(mktemp)"
 header_path="$staging_root/installer.sh"
 installer="$output_root/LM-Atelier-Setup-$version-linux-x86_64.run"
-trap 'rm -rf "$staging_root"' EXIT
+cleanup() {
+  rm -rf "$staging_root"
+  rm -f "$payload_path"
+}
+trap cleanup EXIT
 
 npm run build
 .venv/bin/python scripts/build-icons.py --output-dir "$icon_root"
@@ -36,8 +40,6 @@ cp -R "$dist_root/lm-atelier/." "$staging_root/"
 install -m 755 packaging/linux/frozen-uninstall.sh "$staging_root/uninstall.sh"
 install -m 644 "$icon_root/lm-atelier.png" "$staging_root/lm-atelier.png"
 tar -C "$staging_root" \
-  --exclude="payload.tar.gz" \
-  --exclude="installer.sh" \
   --sort=name \
   --mtime="@0" \
   --owner=0 \
