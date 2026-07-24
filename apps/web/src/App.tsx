@@ -226,6 +226,11 @@ function MessageBubble({
   const [draft, setDraft] = useState(userText);
   const metadata = message.parts.find((part) => part.type === "generation_metadata")?.metadata_json;
   const context = metadata?.context as Record<string, unknown> | undefined;
+  const provenance = metadata?.provenance as Record<string, unknown> | undefined;
+  const modelSelection = provenance?.model_selection as Record<string, unknown> | undefined;
+  const autoProfileName = modelSelection?.mode === "auto"
+    ? String(modelSelection.profile_name ?? "")
+    : "";
   const usage = context?.usage as Record<string, unknown> | undefined;
   const inputTokens = Number(usage?.prompt_tokens ?? context?.input_tokens ?? 0);
   const contextLimit = Number(context?.context_limit ?? 0);
@@ -244,6 +249,7 @@ function MessageBubble({
         )}
         {message.role === "assistant" && message.status === "complete" && (
           <div className="message-meta">
+            {autoProfileName && <span>Auto chose {autoProfileName}</span>}
             {contextLimit > 0 && (
               <span>
                 Context {inputTokens.toLocaleString()} / {contextLimit.toLocaleString()} tokens
@@ -599,7 +605,23 @@ function ChatView({
   );
 }
 
-function ModelCard({ model, role, onDownload, pending }: { model: CatalogModel; role: string; onDownload: () => void; pending: boolean }) {
+function ModelCard({
+  model,
+  role,
+  onDownload,
+  status,
+}: {
+  model: CatalogModel;
+  role: string;
+  onDownload: () => void;
+  status: "idle" | "preparing" | "downloading" | "installed";
+}) {
+  const label = {
+    idle: "Install",
+    preparing: "Preparing…",
+    downloading: "Downloading…",
+    installed: "Installed",
+  }[status];
   return (
     <article className="model-card">
       <div className="model-icon">{role === "video" ? <Film /> : role === "image" ? <ImageIcon /> : <Bot />}</div>
@@ -608,7 +630,7 @@ function ModelCard({ model, role, onDownload, pending }: { model: CatalogModel; 
         <div className="badges"><span className={`badge ${model.compatibility}`}>{model.compatibility.replace("_", " ")}</span>{model.gated && <span className="badge">Gated</span>}{model.formats.slice(0, 2).map((format) => <span className="badge" key={format}>{format}</span>)}{model.quantizations.slice(0, 2).map((value) => <span className="badge" key={value}>{value}</span>)}</div>
         <small>{model.compatibility_reasons.join(" · ")}</small>
       </div>
-      <div className="model-stats"><span><Download size={14} />{model.downloads?.toLocaleString() ?? "—"}</span><button className="primary compact-button" onClick={onDownload} disabled={pending || model.compatibility === "unsupported"}>{pending ? "Preparing…" : "Install"}</button></div>
+      <div className="model-stats"><span><Download size={14} />{model.downloads?.toLocaleString() ?? "—"}</span><button className="primary compact-button" onClick={onDownload} disabled={status !== "idle" || model.compatibility === "unsupported"}>{label}</button></div>
     </article>
   );
 }
@@ -672,6 +694,7 @@ function ModelsView() {
   const catalogItems = useMemo(() => catalog.data?.pages.flatMap((page) => page.items) ?? [], [catalog.data]);
   const recipes = useQuery({ queryKey: ["recipes"], queryFn: api.recipes });
   const installed = useQuery({ queryKey: ["models"], queryFn: api.models });
+  const jobs = useQuery({ queryKey: ["jobs"], queryFn: api.jobs, refetchInterval: 3_000 });
   const storage = useQuery({ queryKey: ["model-storage"], queryFn: api.modelStorage });
   const profiles = useQuery({ queryKey: ["profiles"], queryFn: api.profiles });
   const download = useMutation({
@@ -710,13 +733,7 @@ function ModelsView() {
     onSuccess: () => void client.invalidateQueries({ queryKey: ["profiles"] }),
   });
   const deleteModel = useMutation({
-    mutationFn: async (modelId: string) => {
-      const attachedProfiles = profiles.data?.filter(
-        (profile) => profile.model_install_id === modelId,
-      ) ?? [];
-      for (const profile of attachedProfiles) await api.deleteProfile(profile.id);
-      return api.deleteModel(modelId);
-    },
+    mutationFn: (modelId: string) => api.deleteModel(modelId, true),
     onSuccess: () => {
       void client.invalidateQueries({ queryKey: ["models"] });
       void client.invalidateQueries({ queryKey: ["profiles"] });
@@ -737,6 +754,22 @@ function ModelsView() {
       void client.invalidateQueries({ queryKey: ["model-storage"] });
     },
   });
+  const installedRemoteIds = new Set(
+    installed.data
+      ?.filter((model) => model.role === role)
+      ?.map((model) => model.manifest_json.remote_id)
+      .filter((remoteId): remoteId is string => typeof remoteId === "string") ?? [],
+  );
+  const activeDownloadIds = new Set(
+    jobs.data
+      ?.filter((job) =>
+        job.kind === "download"
+        && job.payload_json.role === role
+        && ["queued", "running", "paused"].includes(job.status)
+      )
+      .map((job) => job.payload_json.remote_id)
+      .filter((remoteId): remoteId is string => typeof remoteId === "string") ?? [],
+  );
   return (
     <div className="page-view">
       <header className="page-header"><div><small>Model library</small><h1>Find the right local model</h1><p>Search Hugging Face, inspect compatibility, and manage downloads without leaving the app.</p></div><div className="storage-actions"><div className="storage-pill"><HardDrive size={17} />{storage.data?.installed_count ?? installed.data?.length ?? 0} installed · {formatBytes(storage.data?.installed_bytes)}</div><button className="secondary compact-button" onClick={() => setImportOpen(true)}><Folder size={16} />Import local</button><button className="secondary compact-button" disabled={!storage.data?.partial_download_count || cleanupDownloads.isPending} onClick={() => cleanupDownloads.mutate()}>Clean {storage.data?.partial_download_count ?? 0} partial</button></div></header>
@@ -757,7 +790,7 @@ function ModelsView() {
       {(download.error || deleteModel.error || cleanupDownloads.error) && <div className="callout error">{download.error?.message || deleteModel.error?.message || cleanupDownloads.error?.message}</div>}
       {catalog.isLoading && <div className="loading-line" />}
       {catalog.error && <div className="callout error">{catalog.error.message}</div>}
-      <div className="model-grid">{catalogItems.map((model) => <ModelCard key={model.remote_id} model={model} role={role} pending={download.isPending && download.variables?.model.remote_id === model.remote_id} onDownload={() => download.mutate({ model, selectedRole: role })} />)}</div>
+      <div className="model-grid">{catalogItems.map((model) => { const status = installedRemoteIds.has(model.remote_id) ? "installed" : activeDownloadIds.has(model.remote_id) ? "downloading" : download.isPending && download.variables?.model.remote_id === model.remote_id ? "preparing" : "idle"; return <ModelCard key={model.remote_id} model={model} role={role} status={status} onDownload={() => download.mutate({ model, selectedRole: role })} />; })}</div>
       {catalog.hasNextPage && <div className="load-more"><button className="secondary" disabled={catalog.isFetchingNextPage} onClick={() => void catalog.fetchNextPage()}>{catalog.isFetchingNextPage ? "Loading…" : "Load more models"}</button></div>}
       {importOpen && <div className="modal-backdrop"><div className="modal"><header><div><small>Advanced import</small><h2>Import a local model</h2></div><button className="icon-button" aria-label="Close local import" onClick={() => setImportOpen(false)}><X /></button></header><p>Register an existing model file or directory. Pickle-compatible formats are blocked; imported models are marked for advanced review.</p><label>Display name<input value={importName} onChange={(event) => setImportName(event.target.value)} /></label><label>Absolute local path<input value={importPath} onChange={(event) => setImportPath(event.target.value)} placeholder="/path/to/model.gguf" /></label><label>Role<select value={importRole} onChange={(event) => { const next = event.target.value; setImportRole(next); setImportEngine(next === "chat" ? "llama.cpp" : "comfyui"); }}><option value="chat">Chat</option><option value="image">Image</option><option value="video">Video</option></select></label><label>Runtime<select value={importEngine} onChange={(event) => setImportEngine(event.target.value)}><option value="llama.cpp">llama.cpp</option><option value="comfyui">ComfyUI</option></select></label>{importModel.error && <div className="callout error">{importModel.error.message}</div>}<footer><button className="secondary" onClick={() => setImportOpen(false)}>Cancel</button><button className="primary" disabled={!importName.trim() || !importPath.trim() || importModel.isPending} onClick={() => importModel.mutate()}>{importModel.isPending ? "Importing…" : "Import model"}</button></footer></div></div>}
     </div>
