@@ -68,11 +68,29 @@ class DownloadManager:
                 raise ValueError(f"unsupported ComfyUI model folder: {folder}")
             if path.is_absolute() or ".." in path.parts:
                 raise ValueError("ComfyUI model paths must be safe relative paths")
+        serialized_request = request.model_dump(mode="json")
+        active_statuses = {
+            JobStatus.QUEUED.value,
+            JobStatus.RUNNING.value,
+            JobStatus.PAUSED.value,
+        }
+        for existing in session.scalars(
+            select(Job)
+            .where(
+                Job.kind == JobKind.DOWNLOAD.value,
+                Job.status.in_(active_statuses),
+            )
+            .order_by(Job.created_at)
+        ).all():
+            if existing.payload_json == serialized_request:
+                if existing.status != JobStatus.PAUSED.value:
+                    self.start(existing.id)
+                return existing
         job = Job(
             kind=JobKind.DOWNLOAD.value,
             status=JobStatus.QUEUED.value,
             phase="queued",
-            payload_json=request.model_dump(mode="json"),
+            payload_json=serialized_request,
         )
         session.add(job)
         session.commit()

@@ -206,7 +206,11 @@ export const api = {
     request<CredentialStatus>("/api/credentials/huggingface", { method: "DELETE" }),
   models: () => request<ModelInstall[]>("/api/models"),
   modelStorage: () => request<ModelStorageInfo>("/api/models/storage"),
-  deleteModel: (id: string) => request<void>(`/api/models/${id}`, { method: "DELETE" }),
+  deleteModel: (id: string, deleteProfiles = false) =>
+    request<void>(
+      `/api/models/${id}?${new URLSearchParams({ delete_profiles: String(deleteProfiles) })}`,
+      { method: "DELETE" },
+    ),
   cleanupDownloads: () =>
     request<{ removed_count: number; reclaimed_bytes: number }>("/api/downloads/cleanup", {
       method: "POST",
