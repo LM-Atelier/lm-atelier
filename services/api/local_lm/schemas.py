@@ -502,9 +502,13 @@ class CatalogPreflightCheck(ApiModel):
 
 class CatalogPreflight(ApiModel):
     remote_id: str
+    source_remote_id: str | None = None
     revision: str
     selected_files: list[str]
     expected_sha256: dict[str, str] = Field(default_factory=dict)
+    comfy_paths: dict[str, str] = Field(default_factory=dict)
+    workflow_template_id: str | None = None
+    workflow_template_sha256: str | None = None
     download_bytes: int
     available_disk_bytes: int
     estimated_ram_bytes: int | None = None
@@ -515,6 +519,7 @@ class CatalogPreflight(ApiModel):
 
 class DownloadRequest(ApiModel):
     remote_id: str = Field(min_length=1, max_length=500)
+    source_remote_id: str | None = Field(default=None, min_length=1, max_length=500)
     revision: str = Field(default="main", min_length=1, max_length=200)
     role: Literal["chat", "image", "video"]
     engine: str = Field(min_length=1, max_length=32)
@@ -524,6 +529,8 @@ class DownloadRequest(ApiModel):
     recipe_version: int | None = None
     comfy_paths: dict[str, str] = Field(default_factory=dict)
     workflow_path: str | None = None
+    workflow_template_id: str | None = None
+    workflow_template_sha256: str | None = None
     default_settings: dict[str, Any] = Field(default_factory=dict)
 
 
