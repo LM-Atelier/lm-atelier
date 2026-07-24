@@ -174,6 +174,43 @@ def test_catalog_filters_and_rejects_external_cursors() -> None:
     with pytest.raises(ValueError, match="huggingface.co"):
         HuggingFaceCatalog._validated_cursor("https://example.com/api/models?cursor=secret")
 
+    old_model = model.model_copy(update={"last_modified": model.created_at})
+    assert (
+        HuggingFaceCatalog._filter_items(
+            [old_model],
+            compatibility=None,
+            file_format=None,
+            quantization=None,
+            license_id=None,
+            gated=None,
+            architecture=None,
+            updated_within_days=30,
+        )
+        == []
+    )
+
+
+async def test_catalog_uses_hugging_face_trending_order_and_update_age(tmp_path) -> None:
+    requests: list[httpx.Request] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        requests.append(request)
+        return httpx.Response(200, json=[])
+
+    catalog = HuggingFaceCatalog(Settings(data_dir=tmp_path))
+    await catalog.close()
+    catalog._client = httpx.AsyncClient(
+        base_url="https://huggingface.co",
+        transport=httpx.MockTransport(handler),
+    )
+    try:
+        await catalog.search(role="chat", sort="trending", updated_within_days=30)
+    finally:
+        await catalog.close()
+
+    assert requests[0].url.params["sort"] == "trendingScore"
+    assert requests[0].url.params["direction"] == "-1"
+
 
 async def test_catalog_detail_requests_live_blob_metadata(tmp_path) -> None:
     requests: list[httpx.Request] = []

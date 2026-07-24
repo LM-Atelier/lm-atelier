@@ -76,6 +76,15 @@ function formatBytes(value?: number | null): string {
   return `${size >= 10 || index === 0 ? size.toFixed(0) : size.toFixed(1)} ${units[index]}`;
 }
 
+function formatDate(value?: string | null): string {
+  if (!value) return "Update unknown";
+  return `Updated ${new Intl.DateTimeFormat(undefined, {
+    year: "numeric",
+    month: "short",
+    day: "numeric",
+  }).format(new Date(value))}`;
+}
+
 function downloadJson(value: unknown, filename: string): void {
   const url = URL.createObjectURL(new Blob([JSON.stringify(value, null, 2)], { type: "application/json" }));
   const anchor = document.createElement("a");
@@ -156,7 +165,7 @@ function MediaLibraryView() {
   return (
     <div className="page-view media-library">
       <header className="page-header">
-        <div><small>Local artifacts</small><h1>Media library</h1><p>Browse generated images and videos across every chat and project.</p></div>
+        <div><small>Local artifacts</small><h1>Media library</h1></div>
       </header>
       {storage.data && <section className={`artifact-storage-summary ${storage.data.warning ? "warning" : ""}`}>
         <div><strong>{formatBytes(storage.data.total_bytes)}</strong><small>{storage.data.total_count} stored artifacts</small></div>
@@ -278,16 +287,16 @@ function SettingControl({
   const fixed = field.choices.length === 1;
   if (field.type === "boolean") {
     return (
-      <label className="setting-row toggle-row">
-        <span><strong>{field.label}</strong><small>{field.help}</small></span>
+      <label className="setting-row toggle-row" title={field.help || undefined}>
+        <span><strong>{field.label}</strong>{fixed && field.help && <small>{field.help}</small>}</span>
         <input type="checkbox" checked={Boolean(value)} disabled={fixed} onChange={(event) => onChange(event.target.checked)} />
       </label>
     );
   }
   if (field.type === "enum") {
     return (
-      <label className="setting-row">
-        <span><strong>{field.label}</strong><small>{field.help}</small></span>
+      <label className="setting-row" title={field.help || undefined}>
+        <span><strong>{field.label}</strong>{fixed && field.help && <small>{field.help}</small>}</span>
         <select value={String(value ?? "")} disabled={fixed} onChange={(event) => onChange(event.target.value)}>
           {field.choices.map((choice) => <option key={String(choice)}>{String(choice)}</option>)}
         </select>
@@ -296,8 +305,8 @@ function SettingControl({
   }
   if (field.type === "number" || field.type === "integer") {
     return (
-      <label className="setting-row">
-        <span><strong>{field.label}</strong><small>{field.help}</small></span>
+      <label className="setting-row" title={field.help || undefined}>
+        <span><strong>{field.label}</strong>{fixed && field.help && <small>{field.help}</small>}</span>
         <input
           type="number"
           value={Number(value ?? field.default)}
@@ -312,8 +321,8 @@ function SettingControl({
   }
   if (field.type === "array" || field.type === "object") {
     return (
-      <label className="setting-row">
-        <span><strong>{field.label}</strong><small>{field.help}</small></span>
+      <label className="setting-row" title={field.help || undefined}>
+        <span><strong>{field.label}</strong>{fixed && field.help && <small>{field.help}</small>}</span>
         <textarea
           rows={3}
           disabled={fixed}
@@ -333,8 +342,8 @@ function SettingControl({
     );
   }
   return (
-    <label className="setting-row">
-      <span><strong>{field.label}</strong><small>{field.help}</small></span>
+    <label className="setting-row" title={field.help || undefined}>
+      <span><strong>{field.label}</strong>{fixed && field.help && <small>{field.help}</small>}</span>
       <input value={String(value ?? "")} disabled={fixed} onChange={(event) => onChange(event.target.value)} />
     </label>
   );
@@ -620,15 +629,24 @@ function ModelCard({
     downloading: "Downloading…",
     installed: "Installed",
   }[status];
+  const compatibilityLabel = {
+    likely: "One-click ready",
+    tested: "Tested",
+    advanced_import: "Advanced import",
+    unsupported: "Unsupported",
+  }[model.compatibility] ?? model.compatibility.replace("_", " ");
+  const actionLabel = status === "idle" && model.compatibility === "unsupported"
+    ? "No workflow"
+    : label;
   return (
     <article className="model-card">
       <div className="model-icon">{role === "video" ? <Film /> : role === "image" ? <ImageIcon /> : <Bot />}</div>
       <div className="model-copy">
         <h3>{model.name}</h3><p>{model.author} · {model.pipeline_tag || model.library_name || "model"}</p>
-        <div className="badges"><span className={`badge ${model.compatibility}`}>{model.compatibility.replace("_", " ")}</span>{model.gated && <span className="badge">Gated</span>}{model.formats.slice(0, 2).map((format) => <span className="badge" key={format}>{format}</span>)}{model.quantizations.slice(0, 2).map((value) => <span className="badge" key={value}>{value}</span>)}</div>
-        <small>{model.compatibility_reasons.join(" · ")}</small>
+        <div className="badges"><span className={`badge ${model.compatibility}`}>{compatibilityLabel}</span>{model.gated && <span className="badge">Gated</span>}{model.formats.slice(0, 2).map((format) => <span className="badge" key={format}>{format}</span>)}{model.quantizations.slice(0, 2).map((value) => <span className="badge" key={value}>{value}</span>)}</div>
+        <small>{formatDate(model.last_modified)}{model.compatibility_reasons.length ? ` · ${model.compatibility_reasons.join(" · ")}` : ""}</small>
       </div>
-      <div className="model-stats"><span><Download size={14} />{model.downloads?.toLocaleString() ?? "—"}</span><button className="primary compact-button" onClick={onDownload} disabled={status !== "idle" || model.compatibility === "unsupported"}>{label}</button></div>
+      <div className="model-stats">{model.trending_score != null && <span title="Hugging Face trending score"><Sparkles size={14} />{model.trending_score.toLocaleString()}</span>}<span><Download size={14} />{model.downloads?.toLocaleString() ?? "—"}</span><button className="primary compact-button" title={model.compatibility === "unsupported" ? model.compatibility_reasons.join(" ") : undefined} onClick={onDownload} disabled={status !== "idle" || model.compatibility === "unsupported"}>{actionLabel}</button></div>
     </article>
   );
 }
@@ -667,6 +685,7 @@ function ModelsView() {
   const [minParameters, setMinParameters] = useState("");
   const [maxParameters, setMaxParameters] = useState("");
   const [maxSizeGb, setMaxSizeGb] = useState("");
+  const [updatedWithinDays, setUpdatedWithinDays] = useState("");
   const [importOpen, setImportOpen] = useState(false);
   const [importName, setImportName] = useState("");
   const [importPath, setImportPath] = useState("");
@@ -682,6 +701,7 @@ function ModelsView() {
     min_parameters: minParameters ? String(Number(minParameters) * 1_000_000_000) : "",
     max_parameters: maxParameters ? String(Number(maxParameters) * 1_000_000_000) : "",
     max_size_bytes: maxSizeGb ? String(Number(maxSizeGb) * 1024 ** 3) : "",
+    updated_within_days: updatedWithinDays,
   };
   const catalog = useInfiniteQuery({
     queryKey: ["catalog", submitted, role, sort, catalogFilters],
@@ -689,7 +709,28 @@ function ModelsView() {
     initialPageParam: null as string | null,
     getNextPageParam: (page) => page.next_cursor ?? undefined,
   });
-  const catalogItems = useMemo(() => catalog.data?.pages.flatMap((page) => page.items) ?? [], [catalog.data]);
+  const rawCatalogItems = useMemo(() => catalog.data?.pages.flatMap((page) => page.items) ?? [], [catalog.data]);
+  const workflowModels = useQuery({
+    queryKey: ["workflow-catalog-models", role],
+    queryFn: () => api.workflowCatalogModels(role),
+    enabled: role === "image" || role === "video",
+  });
+  const readyModels = useMemo(() => {
+    const normalized = submitted.trim().toLowerCase();
+    return (workflowModels.data ?? []).filter((model) =>
+      !normalized
+      || model.remote_id.toLowerCase().includes(normalized)
+      || model.name.toLowerCase().includes(normalized)
+    );
+  }, [submitted, workflowModels.data]);
+  const readyRemoteIds = useMemo(
+    () => new Set((workflowModels.data ?? []).map((model) => model.remote_id)),
+    [workflowModels.data],
+  );
+  const catalogItems = useMemo(
+    () => rawCatalogItems.filter((model) => !readyRemoteIds.has(model.remote_id)),
+    [rawCatalogItems, readyRemoteIds],
+  );
   const recipes = useQuery({ queryKey: ["recipes"], queryFn: api.recipes });
   const installed = useQuery({ queryKey: ["models"], queryFn: api.models });
   const jobs = useQuery({ queryKey: ["jobs"], queryFn: api.jobs, refetchInterval: 3_000 });
@@ -775,27 +816,37 @@ function ModelsView() {
       .map((job) => job.payload_json.remote_id)
       .filter((remoteId): remoteId is string => typeof remoteId === "string") ?? [],
   );
+  const statusFor = (model: CatalogModel): "idle" | "preparing" | "downloading" | "installed" => (
+    installedRemoteIds.has(model.remote_id)
+      ? "installed"
+      : activeDownloadIds.has(model.remote_id)
+        ? "downloading"
+        : download.isPending && download.variables?.model.remote_id === model.remote_id
+          ? "preparing"
+          : "idle"
+  );
   return (
     <div className="page-view">
-      <header className="page-header"><div><small>Model library</small><h1>Find the right local model</h1><p>Search Hugging Face, inspect compatibility, and manage downloads without leaving the app.</p></div><div className="storage-actions"><div className="storage-pill"><HardDrive size={17} />{storage.data?.installed_count ?? installed.data?.length ?? 0} installed · {formatBytes(storage.data?.installed_bytes)}</div><button className="secondary compact-button" onClick={() => setImportOpen(true)}><Folder size={16} />Import local</button><button className="secondary compact-button" disabled={!storage.data?.partial_download_count || cleanupDownloads.isPending} onClick={() => cleanupDownloads.mutate()}>Clean {storage.data?.partial_download_count ?? 0} partial</button></div></header>
+      <header className="page-header"><div><small>Model library</small><h1>Find the right local model</h1></div><div className="storage-actions"><div className="storage-pill"><HardDrive size={17} />{storage.data?.installed_count ?? installed.data?.length ?? 0} installed · {formatBytes(storage.data?.installed_bytes)}</div><button className="secondary compact-button" onClick={() => setImportOpen(true)}><Folder size={16} />Import local</button><button className="secondary compact-button" disabled={!storage.data?.partial_download_count || cleanupDownloads.isPending} onClick={() => cleanupDownloads.mutate()}>Clean {storage.data?.partial_download_count ?? 0} partial</button></div></header>
       <section className="recipe-section">
-        <div className="section-heading"><div><small>Curated starting points</small><h2>Reference recipes</h2></div><p>Immutable revisions, exact safe files, conservative defaults, and hardware guidance. Certification follows real-device validation.</p></div>
+        <div className="section-heading"><div><small>Curated starting points</small><h2>Reference recipes</h2></div></div>
         {recipes.isLoading && <div className="loading-line" />}
         {recipes.error && <div className="callout error">{recipes.error.message}</div>}
         {installRecipe.error && <div className="callout error">{installRecipe.error.message}</div>}
         <div className="recipe-grid">{recipes.data?.map((recipe) => <RecipeCard key={recipe.id} recipe={recipe} pending={installRecipe.isPending && installRecipe.variables === recipe.id} onInstall={() => installRecipe.mutate(recipe.id)} />)}</div>
       </section>
+      {(role === "image" || role === "video") && readyModels.length > 0 && <section className="workflow-ready-models"><div className="section-heading"><div><small>Runtime verified</small><h2>One-click models</h2></div></div><div className="model-grid">{readyModels.map((model) => <ModelCard key={model.remote_id} model={model} role={role} status={statusFor(model)} onDownload={() => download.mutate({ model, selectedRole: role })} />)}</div></section>}
       <div className="toolbar">
         <form className="search-box" onSubmit={(event) => { event.preventDefault(); setSubmitted(query); }}><Search size={18} /><input value={query} onChange={(event) => setQuery(event.target.value)} placeholder="Search models" /></form>
         <select value={role} onChange={(event) => setRole(event.target.value)}><option value="chat">Chat</option><option value="image">Image</option><option value="video">Video</option></select>
-        <select value={sort} onChange={(event) => setSort(event.target.value)}><option value="trending">Trending</option><option value="downloads">Downloads</option><option value="likes">Likes</option><option value="newest">Newest</option><option value="updated">Recently updated</option><option value="compatible">Compatible first</option></select>
+        <select aria-label="Model order" value={sort} onChange={(event) => setSort(event.target.value)}><option value="trending">Trending on Hugging Face</option><option value="downloads">Downloads</option><option value="likes">Likes</option><option value="newest">Newest</option><option value="updated">Recently updated</option><option value="compatible">Compatible first</option></select>
       </div>
-      <div className="catalog-filters"><select aria-label="Compatibility filter" value={compatibility} onChange={(event) => setCompatibility(event.target.value)}><option value="">All compatibility</option><option value="likely">Likely compatible</option><option value="advanced_import">Advanced import</option><option value="unsupported">Unsupported</option></select><select aria-label="Format filter" value={fileFormat} onChange={(event) => setFileFormat(event.target.value)}><option value="">All formats</option><option value="gguf">GGUF</option><option value="safetensors">safetensors</option></select><select aria-label="Access filter" value={gated} onChange={(event) => setGated(event.target.value)}><option value="">All access</option><option value="open">Open</option><option value="gated">Gated</option></select><input aria-label="Quantization filter" placeholder="Quantization (Q4_K_M, FP8…)" value={quantization} onChange={(event) => setQuantization(event.target.value)} /><input aria-label="Architecture filter" placeholder="Architecture" value={architecture} onChange={(event) => setArchitecture(event.target.value)} /><input aria-label="License filter" placeholder="License" value={licenseId} onChange={(event) => setLicenseId(event.target.value)} /><input aria-label="Minimum parameters" type="number" min="0" placeholder="Min parameters (B)" value={minParameters} onChange={(event) => setMinParameters(event.target.value)} /><input aria-label="Maximum parameters" type="number" min="0" placeholder="Max parameters (B)" value={maxParameters} onChange={(event) => setMaxParameters(event.target.value)} /><input aria-label="Maximum download size" type="number" min="0" placeholder="Max download (GB)" value={maxSizeGb} onChange={(event) => setMaxSizeGb(event.target.value)} /></div>
+      <div className="catalog-filters"><select aria-label="Compatibility filter" value={compatibility} onChange={(event) => setCompatibility(event.target.value)}><option value="">All compatibility</option><option value="likely">One-click ready</option><option value="advanced_import">Advanced import</option><option value="unsupported">Unsupported</option></select><select aria-label="Last updated filter" value={updatedWithinDays} onChange={(event) => setUpdatedWithinDays(event.target.value)}><option value="">Updated any time</option><option value="7">Updated this week</option><option value="30">Updated this month</option><option value="90">Updated in 3 months</option><option value="365">Updated this year</option></select><select aria-label="Format filter" value={fileFormat} onChange={(event) => setFileFormat(event.target.value)}><option value="">All formats</option><option value="gguf">GGUF</option><option value="safetensors">safetensors</option></select><select aria-label="Access filter" value={gated} onChange={(event) => setGated(event.target.value)}><option value="">All access</option><option value="open">Open</option><option value="gated">Gated</option></select><input aria-label="Quantization filter" placeholder="Quantization (Q4_K_M, FP8…)" value={quantization} onChange={(event) => setQuantization(event.target.value)} /><input aria-label="Architecture filter" placeholder="Architecture" value={architecture} onChange={(event) => setArchitecture(event.target.value)} /><input aria-label="License filter" placeholder="License" value={licenseId} onChange={(event) => setLicenseId(event.target.value)} /><input aria-label="Minimum parameters" type="number" min="0" placeholder="Min parameters (B)" value={minParameters} onChange={(event) => setMinParameters(event.target.value)} /><input aria-label="Maximum parameters" type="number" min="0" placeholder="Max parameters (B)" value={maxParameters} onChange={(event) => setMaxParameters(event.target.value)} /><input aria-label="Maximum download size" type="number" min="0" placeholder="Max download (GB)" value={maxSizeGb} onChange={(event) => setMaxSizeGb(event.target.value)} /></div>
       {(installed.data?.length ?? 0) > 0 && <section><h2>Installed models</h2><div className="profile-table model-installs">{installed.data?.map((model) => { const bound = profiles.data?.some((profile) => profile.model_install_id === model.id) ?? false; return <div key={model.id}><span className="badge">{model.role}</span><strong>{model.name}</strong><span>{formatBytes(model.size_bytes)}</span><span className="row-actions"><button className="secondary compact-button" disabled={bound || createProfile.isPending} title={bound ? "This model is available in chats and Auto mode" : "Complete setup for this older model install"} onClick={() => createProfile.mutate(model)}>{bound ? "Ready to use" : "Finish setup"}</button><button className="secondary compact-button danger" disabled={deleteModel.isPending} title="Delete installed model" onClick={() => { if (window.confirm(`Delete ${model.name} and its model settings from local storage?`)) deleteModel.mutate(model.id); }}>Delete</button></span></div>; })}</div></section>}
       {(download.error || deleteModel.error || cleanupDownloads.error) && <div className="callout error">{download.error?.message || deleteModel.error?.message || cleanupDownloads.error?.message}</div>}
       {catalog.isLoading && <div className="loading-line" />}
       {catalog.error && <div className="callout error">{catalog.error.message}</div>}
-      <div className="model-grid">{catalogItems.map((model) => { const status = installedRemoteIds.has(model.remote_id) ? "installed" : activeDownloadIds.has(model.remote_id) ? "downloading" : download.isPending && download.variables?.model.remote_id === model.remote_id ? "preparing" : "idle"; return <ModelCard key={model.remote_id} model={model} role={role} status={status} onDownload={() => download.mutate({ model, selectedRole: role })} />; })}</div>
+      <div className="model-grid">{catalogItems.map((model) => <ModelCard key={model.remote_id} model={model} role={role} status={statusFor(model)} onDownload={() => download.mutate({ model, selectedRole: role })} />)}</div>
       {catalog.hasNextPage && <div className="load-more"><button className="secondary" disabled={catalog.isFetchingNextPage} onClick={() => void catalog.fetchNextPage()}>{catalog.isFetchingNextPage ? "Loading…" : "Load more models"}</button></div>}
       {importOpen && <div className="modal-backdrop"><div className="modal"><header><div><small>Advanced import</small><h2>Import a local model</h2></div><button className="icon-button" aria-label="Close local import" onClick={() => setImportOpen(false)}><X /></button></header><p>Register an existing model file or directory. Pickle-compatible formats are blocked; imported models are marked for advanced review.</p><label>Display name<input value={importName} onChange={(event) => setImportName(event.target.value)} /></label><label>Absolute local path<input value={importPath} onChange={(event) => setImportPath(event.target.value)} placeholder="/path/to/model.gguf" /></label><label>Role<select value={importRole} onChange={(event) => { const next = event.target.value; setImportRole(next); setImportEngine(next === "chat" ? "llama.cpp" : "comfyui"); }}><option value="chat">Chat</option><option value="image">Image</option><option value="video">Video</option></select></label><label>Runtime<select value={importEngine} onChange={(event) => setImportEngine(event.target.value)}><option value="llama.cpp">llama.cpp</option><option value="comfyui">ComfyUI</option></select></label>{importModel.error && <div className="callout error">{importModel.error.message}</div>}<footer><button className="secondary" onClick={() => setImportOpen(false)}>Cancel</button><button className="primary" disabled={!importName.trim() || !importPath.trim() || importModel.isPending} onClick={() => importModel.mutate()}>{importModel.isPending ? "Importing…" : "Import model"}</button></footer></div></div>}
     </div>
@@ -915,7 +966,7 @@ function WorkflowsView() {
   const currentRevision = selected?.revisions.find((revision) => revision.id === selected.current_revision_id);
   return (
     <div className="page-view">
-      <header className="page-header"><div><small>Workflow studio</small><h1>Media pipelines</h1><p>Version complete ComfyUI graphs and expose their inputs as reusable generation controls.</p></div><div className="storage-actions"><input ref={importInput} hidden type="file" accept="application/json,.json" onChange={(event) => { void importBundle(event.target.files?.[0]); event.target.value = ""; }} /><button className="secondary" onClick={() => importInput.current?.click()}>Import bundle</button><button className="primary" onClick={openCreate}><Plus size={17} />New workflow</button></div></header>
+      <header className="page-header"><div><small>Workflow studio</small><h1>Media pipelines</h1></div><div className="storage-actions"><input ref={importInput} hidden type="file" accept="application/json,.json" onChange={(event) => { void importBundle(event.target.files?.[0]); event.target.value = ""; }} /><button className="secondary" onClick={() => importInput.current?.click()}>Import bundle</button><button className="primary" onClick={openCreate}><Plus size={17} />New workflow</button></div></header>
       {(importBundleMutation.error || clone.error || restore.error || exportBundle.error || openInComfy.error) && <div className="callout error">{(importBundleMutation.error || clone.error || restore.error || exportBundle.error || openInComfy.error)?.message}</div>}
       {selected && <div className="storage-actions"><button className="secondary" onClick={() => openInComfy.mutate(selected.id)}>Download UI graph and open in ComfyUI</button></div>}
       <div className="workflow-layout">
@@ -986,8 +1037,8 @@ function ProfileEditor({
       <div className="modal settings-editor">
         <header><div><small>{profile.role} profile · {profile.engine}</small><h2>Edit profile</h2></div><button className="icon-button" onClick={onClose} aria-label="Close profile editor"><X /></button></header>
         <label>Profile name<input value={name} onChange={(event) => setName(event.target.value)} /></label>
-        <label>Best used for<textarea rows={3} value={useCase} onChange={(event) => setUseCase(event.target.value)} placeholder="For example: programming, code review, and technical explanations" /><small>Auto mode compares this description with each prompt.</small></label>
-        <label className="toggle-row"><span><strong>Default model</strong><small>Use this model when the chat selects Default.</small></span><input type="checkbox" checked={isDefault} onChange={(event) => setIsDefault(event.target.checked)} /></label>
+        <label>Best used for<textarea rows={3} value={useCase} onChange={(event) => setUseCase(event.target.value)} placeholder="Programming, code review, technical explanations" /></label>
+        <label className="toggle-row"><span><strong>Default model</strong></span><input type="checkbox" checked={isDefault} onChange={(event) => setIsDefault(event.target.checked)} /></label>
         <div className="segmented compact">
           {(["basic", "advanced", "expert"] as Visibility[]).map((level) => <button key={level} className={visibility === level ? "active" : ""} onClick={() => setVisibility(level)}>{level}</button>)}
         </div>
@@ -1033,7 +1084,7 @@ function PresetEditor({
       <div className="modal settings-editor">
         <header><div><small>{preset.role} generation preset</small><h2>Edit preset</h2></div><button className="icon-button" onClick={onClose} aria-label="Close preset editor"><X /></button></header>
         <label>Preset name<input value={name} onChange={(event) => setName(event.target.value)} /></label>
-        <label className="toggle-row"><span><strong>Default {preset.role} preset</strong><small>Apply these values automatically to new {preset.role} generations.</small></span><input type="checkbox" checked={isDefault} onChange={(event) => setIsDefault(event.target.checked)} /></label>
+        <label className="toggle-row"><span><strong>Default {preset.role} preset</strong></span><input type="checkbox" checked={isDefault} onChange={(event) => setIsDefault(event.target.checked)} /></label>
         <div className="segmented compact">{(["basic", "advanced", "expert"] as Visibility[]).map((level) => <button key={level} className={visibility === level ? "active" : ""} onClick={() => setVisibility(level)}>{level}</button>)}</div>
         <div className="settings-list embedded">{fields.map((field) => <div className="scoped-setting" key={`${field.scope}:${field.key}:${JSON.stringify(settings[field.key])}`}><span className="scope-label">{field.scope}</span><SettingControl field={field} value={settings[field.key] ?? field.default} onChange={(value) => setSettings({ ...settings, [field.key]: value })} /></div>)}</div>
         {error && <div className="callout error">{error.message}</div>}
@@ -1107,7 +1158,7 @@ function SettingsView({ engines }: { engines: EngineCapabilities[] }) {
   };
   return (
     <div className="page-view settings-page">
-      <header className="page-header"><div><small>Settings</small><h1>Models, runtimes, and recovery</h1><p>Manage private model access, generation behavior, local engines, and backups.</p></div></header>
+      <header className="page-header"><div><small>Settings</small><h1>Models, runtimes, and recovery</h1></div></header>
       <section>
         <div className="detail-title"><div><h2>Hugging Face access</h2><p>Private and gated model access is stored in your operating system credential vault. The token is never displayed after saving.</p></div><span className={`badge ${credential.data?.configured ? "tested" : ""}`}>{credential.data?.configured ? `Configured · ${credential.data.source.replace("credential_vault", "credential vault")}` : "Not configured"}</span></div>
         <div className="preset-create">
@@ -1122,7 +1173,7 @@ function SettingsView({ engines }: { engines: EngineCapabilities[] }) {
       <section><h2>Engines</h2><div className="engine-grid">{engines.map((engine) => <article className="engine-card" key={`${engine.engine}:${engine.roles.join()}`}><header><div className="model-icon"><Cpu /></div><div><h3>{engine.engine}</h3><p>{engine.roles.join(" · ")} · {engine.version}</p></div><StatusDot healthy={engine.healthy} /></header><div className="capability-list"><span>{engine.streaming ? "Streaming" : "Queued"}</span><span>{engine.tool_calling ? "Tool routing advertised" : "Workflow execution"}</span><span>{engine.settings.length} controls</span>{engine.roles.includes("chat") && <button className="secondary compact-button" onClick={() => toolProbe.mutate()} disabled={toolProbe.isPending}>{toolProbe.isPending ? "Testing…" : "Test structured tools"}</button>}</div></article>)}</div>{toolProbe.data && <div className={`callout ${toolProbe.data.passed ? "success" : "error"}`}>{toolProbe.data.passed ? `Structured tool schema passed on ${toolProbe.data.engine} ${toolProbe.data.version}.` : `Structured tool schema failed: ${toolProbe.data.error || "unknown response"}`}</div>}{toolProbe.error && <div className="callout error">{toolProbe.error.message}</div>}</section>
       <section><h2>Machine</h2>{system.data && <div className="metric-grid"><div className="cpu-metric"><Cpu /><span><strong>{system.data.cpu_model}</strong><small>CPU model</small></span></div><div><HardDrive /><span><strong>{formatBytes(system.data.disk_free_bytes)}</strong> disk free</span></div></div>}<div className="device-list">{system.data?.devices.filter((device) => device.kind !== "cpu").map((device) => <div key={device.id}><span className="device-icon"><Cpu size={18} /></span><span><strong>{device.name}</strong><small>{device.backend}</small></span></div>)}</div></section>
       <section>
-        <div className="detail-title"><div><h2>Model profiles</h2><p>Store load-time and request-time controls independently for every model.</p></div><button className="secondary" onClick={() => profileImport.current?.click()}>Import profile</button></div>
+        <div className="detail-title"><div><h2>Model profiles</h2></div><button className="secondary" onClick={() => profileImport.current?.click()}>Import profile</button></div>
         <input ref={profileImport} hidden type="file" accept="application/json,.json" onChange={(event) => { void importBundle(event.target.files?.[0], "profile"); event.target.value = ""; }} />
         <div className="profile-table interactive">{profiles.data?.map((profile: ModelProfile) => <div key={profile.id}><span className="badge">{profile.role}</span><strong>{profile.is_default ? "Default" : profile.name}{profile.is_default ? " · default" : ""}</strong><span title={profile.use_case}>{profile.use_case || "No Auto use case yet"}</span><span className="row-actions">{profile.role === "chat" && profile.model_install_id && <button className="secondary compact-button" disabled={chatWorkerBusy || loadChat.isPending} title={chatWorkerBusy ? "Wait for active and queued chat jobs before changing the worker" : "Load this chat profile"} onClick={() => loadChat.mutate(profile.id)}>Load</button>}<button className="secondary compact-button" onClick={() => setSelectedProfile(profile)}>Edit</button></span></div>)}</div>
       </section>
@@ -1133,7 +1184,7 @@ function SettingsView({ engines }: { engines: EngineCapabilities[] }) {
         <div className="profile-table interactive">{presets.data?.map((preset) => <div key={preset.id}><span className="badge">{preset.role}</span><strong>{preset.name}{preset.is_default ? " · default" : ""}</strong><span>{Object.keys(preset.settings_json).length} overrides</span><button className="secondary compact-button" onClick={() => setSelectedPreset(preset)}>Edit</button></div>)}</div>
         {(createPreset.error || importError) && <div className="callout error">{createPreset.error?.message || importError}</div>}
       </section>
-      <section><div className="detail-title"><div><h2>Workers</h2><p>Configured workers start automatically when LM Atelier opens.</p></div></div><div className="engine-grid">{workers.data?.map((worker) => { const busy = worker.active_jobs + worker.queued_jobs > 0; const busyTitle = busy ? "Wait for active and queued jobs before changing this worker" : undefined; return <article className="engine-card" key={worker.name}><header><div><h3>{worker.name} worker</h3><p>{worker.state === "ready" ? `Ready · PID ${worker.pid}` : worker.state === "starting" ? "Starting and checking health" : worker.state === "exited" ? `Exited · code ${worker.exit_code ?? "unknown"}` : "Stopped or externally managed"}</p></div><StatusDot healthy={worker.state === "ready"} /></header><div className="worker-metrics"><span><strong>{worker.active_jobs}</strong> active</span><span><strong>{worker.queued_jobs}</strong> queued</span><span><strong>{formatBytes(worker.current_memory_bytes)}</strong> current RAM</span><span><strong>{formatBytes(worker.peak_memory_bytes)}</strong> measured peak</span>{worker.estimated_memory_bytes != null && <span><strong>{formatBytes(worker.estimated_memory_bytes)}</strong> estimated load</span>}</div><div className="capability-list">{worker.name === "media" && !worker.running && <button className="secondary compact-button" disabled={busy || startMedia.isPending} title={busyTitle} onClick={() => startMedia.mutate()}>Start ComfyUI</button>}{worker.running && <button className="secondary compact-button" disabled={busy || stopWorker.isPending} title={busyTitle} onClick={() => stopWorker.mutate(worker.name)}>Unload</button>}</div></article>; })}</div>{(loadChat.error || startMedia.error || stopWorker.error) && <div className="callout error">{(loadChat.error || startMedia.error || stopWorker.error)?.message}</div>}</section>
+      <section><div className="detail-title"><div><h2>Workers</h2></div></div><div className="engine-grid">{workers.data?.map((worker) => { const busy = worker.active_jobs + worker.queued_jobs > 0; const busyTitle = busy ? "Wait for active and queued jobs before changing this worker" : undefined; return <article className="engine-card" key={worker.name}><header><div><h3>{worker.name} worker</h3><p>{worker.state === "ready" ? `Ready · PID ${worker.pid}` : worker.state === "starting" ? "Starting and checking health" : worker.state === "exited" ? `Exited · code ${worker.exit_code ?? "unknown"}` : "Stopped or externally managed"}</p></div><StatusDot healthy={worker.state === "ready"} /></header><div className="worker-metrics"><span><strong>{worker.active_jobs}</strong> active</span><span><strong>{worker.queued_jobs}</strong> queued</span><span><strong>{formatBytes(worker.current_memory_bytes)}</strong> current RAM</span><span><strong>{formatBytes(worker.peak_memory_bytes)}</strong> measured peak</span>{worker.estimated_memory_bytes != null && <span><strong>{formatBytes(worker.estimated_memory_bytes)}</strong> estimated load</span>}</div><div className="capability-list">{worker.name === "media" && !worker.running && <button className="secondary compact-button" disabled={busy || startMedia.isPending} title={busyTitle} onClick={() => startMedia.mutate()}>Start ComfyUI</button>}{worker.running && <button className="secondary compact-button" disabled={busy || stopWorker.isPending} title={busyTitle} onClick={() => stopWorker.mutate(worker.name)}>Unload</button>}</div></article>; })}</div>{(loadChat.error || startMedia.error || stopWorker.error) && <div className="callout error">{(loadChat.error || startMedia.error || stopWorker.error)?.message}</div>}</section>
       <section><div className="detail-title"><div><h2>Recovery backups</h2><p>Keep 7 daily and 4 weekly verified snapshots. Media is optional so routine backups stay bounded.</p></div><div className="row-actions"><button className="secondary" onClick={() => createBackup.mutate(false)}>Back up state</button><button className="secondary" onClick={() => createBackup.mutate(true)}>Back up with media</button></div></div><div className="profile-table">{backups.data?.map((backup) => <div key={backup.name}><strong>{backup.name}</strong><span>{formatBytes(backup.size_bytes + backup.media_size_bytes)}</span><span>{backup.sha256.slice(0, 12)}</span><span>{backup.media_included ? "State + media" : backup.verified ? "Verified" : "State"}</span></div>)}</div></section>
       {selectedProfile && <ProfileEditor profile={selectedProfile} engines={engines} onClose={() => setSelectedProfile(null)} />}
       {selectedPreset && <PresetEditor preset={selectedPreset} engines={engines} onClose={() => setSelectedPreset(null)} />}
@@ -1401,18 +1452,36 @@ export default function App() {
   });
   const deleteChat = useMutation({
     mutationFn: api.deleteChat,
+    onMutate: async (deletedId) => {
+      await client.cancelQueries({ queryKey: ["chats"] });
+      const previousChats = client.getQueryData<Chat[]>(["chats"]) ?? [];
+      const remainingChats = previousChats.filter((candidate) => candidate.id !== deletedId);
+      const previousCurrentChatId = currentChatId;
+      client.setQueryData<Chat[]>(["chats"], remainingChats);
+      if (currentChatId === deletedId) {
+        const nextChatId = remainingChats.find((candidate) => !candidate.archived)?.id ?? null;
+        setCurrentChatId(nextChatId);
+        if (nextChatId) localStorage.setItem("local-lm-chat", nextChatId);
+        else localStorage.removeItem("local-lm-chat");
+      }
+      client.removeQueries({ queryKey: ["chat", deletedId], exact: true });
+      return { previousChats, previousCurrentChatId };
+    },
     onSuccess: (_value, deletedId) => {
       setTurnSettingsByChat((current) => {
         const next = { ...current };
         delete next[deletedId];
         return next;
       });
-      if (currentChatId === deletedId) {
-        setCurrentChatId(null);
-        localStorage.removeItem("local-lm-chat");
-      }
-      void client.invalidateQueries({ queryKey: ["chats"] });
     },
+    onError: (_error, _deletedId, context) => {
+      if (!context) return;
+      client.setQueryData(["chats"], context.previousChats);
+      setCurrentChatId(context.previousCurrentChatId);
+      if (context.previousCurrentChatId) localStorage.setItem("local-lm-chat", context.previousCurrentChatId);
+      else localStorage.removeItem("local-lm-chat");
+    },
+    onSettled: () => void client.invalidateQueries({ queryKey: ["chats"] }),
   });
   const updateProject = useMutation({
     mutationFn: ({ id, values }: { id: string; values: Partial<Project> }) => api.updateProject(id, values),

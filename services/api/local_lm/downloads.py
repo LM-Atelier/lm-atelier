@@ -316,6 +316,7 @@ class DownloadManager:
     async def _download(self, job_id: str) -> None:
         from .db import SessionLocal
 
+        provisional_install_id: str | None = None
         try:
             async with self._semaphore:
                 with SessionLocal() as session:
@@ -476,55 +477,87 @@ class DownloadManager:
                             "workflow_template_sha256": request.workflow_template_sha256,
                             "default_settings": default_settings,
                         },
+                        active=compiled_template is None,
                     )
                     session.add(install)
                     session.flush()
-                    superseded_install_ids = (
-                        self._deactivate_superseded_media_installs(
-                            session,
-                            install,
-                            request.source_remote_id,
-                        )
-                        if compiled_template
-                        else []
-                    )
-                    profile = ensure_profile_for_install(
-                        session,
-                        install,
-                        default_settings=default_settings,
-                    )
+                    provisional_install_id = install.id if compiled_template else None
+                    profile = None
                     workflow_revision_id = None
-                    if compiled_template:
-                        workflow_revision = self._ensure_template_workflow(
+                    superseded_install_ids: list[str] = []
+                    if not compiled_template:
+                        profile = ensure_profile_for_install(
                             session,
-                            compiled_template,
                             install,
+                            default_settings=default_settings,
                         )
-                        workflow_revision_id = workflow_revision.id
                     job = session.get(Job, job_id)
                     if not job:
                         return
                     job.progress = 0.95
-                    job.phase = "activating"
-                    job.result_json = {
-                        "model_install_id": install.id,
-                        "profile_id": profile.id,
-                        "workflow_revision_id": workflow_revision_id,
-                        "superseded_model_install_ids": superseded_install_ids,
-                    }
+                    job.phase = "validating runtime" if compiled_template else "activating"
+                    if profile:
+                        job.result_json = {
+                            "model_install_id": install.id,
+                            "profile_id": profile.id,
+                            "workflow_revision_id": None,
+                            "superseded_model_install_ids": [],
+                        }
                     session.commit()
                     install_id = install.id
-                    profile_id = profile.id
+                    profile_id = profile.id if profile else None
 
                 if compiled_template:
                     if not self.processes or not self.media_adapter:
                         raise RuntimeError("automatic ComfyUI activation is unavailable")
-                    await self.processes.start_media()
+                    await self.processes.start_media(
+                        (destination, request.comfy_paths),
+                    )
+                    refreshed_object_info = await self.media_adapter.object_info()
+                    compiled_template = self.comfy_templates.compile(
+                        request.workflow_template_id or "",
+                        request.role,
+                        refreshed_object_info,
+                    )
+                    if compiled_template.template.sha256 != request.workflow_template_sha256:
+                        raise ValueError("ComfyUI template changed during installation")
                     validation_errors = await self.media_adapter.validate_workflow(
                         compiled_template.api_graph
                     )
                     if validation_errors:
                         raise ValueError("; ".join(validation_errors))
+                    with SessionLocal() as session:
+                        activated_install = session.get(ModelInstall, install_id)
+                        job = session.get(Job, job_id)
+                        if not activated_install or not job:
+                            return
+                        activated_install.active = True
+                        superseded_install_ids = self._deactivate_superseded_media_installs(
+                            session,
+                            activated_install,
+                            request.source_remote_id,
+                        )
+                        profile = ensure_profile_for_install(
+                            session,
+                            activated_install,
+                            default_settings=default_settings,
+                        )
+                        workflow_revision = self._ensure_template_workflow(
+                            session,
+                            compiled_template,
+                            activated_install,
+                        )
+                        workflow_revision_id = workflow_revision.id
+                        profile_id = profile.id
+                        job.phase = "activating"
+                        job.result_json = {
+                            "model_install_id": activated_install.id,
+                            "profile_id": profile.id,
+                            "workflow_revision_id": workflow_revision_id,
+                            "superseded_model_install_ids": superseded_install_ids,
+                        }
+                        session.commit()
+                    provisional_install_id = None
 
                 with SessionLocal() as session:
                     job = session.get(Job, job_id)
@@ -544,6 +577,10 @@ class DownloadManager:
             raise
         except Exception as exc:
             with SessionLocal() as session:
+                if provisional_install_id:
+                    failed_install = session.get(ModelInstall, provisional_install_id)
+                    if failed_install:
+                        failed_install.active = False
                 job = session.get(Job, job_id)
                 if job:
                     job.status = JobStatus.FAILED.value
@@ -551,6 +588,9 @@ class DownloadManager:
                     job.error = str(exc)
                     job.completed_at = utcnow()
                     session.commit()
+            if provisional_install_id and self.processes:
+                with suppress(Exception):
+                    await self.processes.start_media()
             await self.events.publish("download.failed", job_id, {"error": str(exc)})
 
     async def _prepare_comfy_template(
@@ -571,6 +611,7 @@ class DownloadManager:
             request.workflow_template_id,
             request.role,
             object_info,
+            validate_model_choices=False,
         )
         if compiled.template.sha256 != request.workflow_template_sha256:
             raise ValueError("ComfyUI template changed; run the install check again")
