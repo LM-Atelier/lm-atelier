@@ -15,6 +15,46 @@ from .platforms import assess_platform
 from .schemas import DeviceInfo, SystemInfo
 
 
+def _cpu_model() -> str:
+    system = platform.system()
+    if system == "Windows":
+        try:
+            import winreg
+
+            with winreg.OpenKey(
+                winreg.HKEY_LOCAL_MACHINE,
+                r"HARDWARE\DESCRIPTION\System\CentralProcessor\0",
+            ) as key:
+                value, _ = winreg.QueryValueEx(key, "ProcessorNameString")
+                if str(value).strip():
+                    return " ".join(str(value).split())
+        except (ImportError, OSError):
+            pass
+    elif system == "Linux":
+        try:
+            for line in Path("/proc/cpuinfo").read_text(encoding="utf-8").splitlines():
+                if line.lower().startswith(("model name", "hardware")) and ":" in line:
+                    value = line.split(":", 1)[1].strip()
+                    if value:
+                        return " ".join(value.split())
+        except OSError:
+            pass
+    elif system == "Darwin":
+        try:
+            result = subprocess.run(
+                ["sysctl", "-n", "machdep.cpu.brand_string"],
+                check=True,
+                capture_output=True,
+                text=True,
+                timeout=2,
+            )
+            if result.stdout.strip():
+                return " ".join(result.stdout.split())
+        except (OSError, subprocess.SubprocessError):
+            pass
+    return platform.processor() or platform.machine() or "CPU"
+
+
 def _run_json(command: list[str], timeout: float = 5) -> Any | None:
     try:
         result = subprocess.run(
@@ -109,13 +149,14 @@ def collect_system_info(settings: Settings) -> SystemInfo:
             pass
     memory = psutil.virtual_memory()
     disk = shutil.disk_usage(Path(settings.data_dir).resolve())
+    cpu_model = _cpu_model()
     devices = _nvidia_devices()
     known = {device.id for device in devices}
     devices.extend(device for device in _llama_devices() if device.id not in known)
     devices.append(
         DeviceInfo(
             id="cpu:0",
-            name=platform.processor() or platform.machine() or "CPU",
+            name=cpu_model,
             kind="cpu",
             total_memory_bytes=memory.total,
             available_memory_bytes=memory.available,
@@ -137,6 +178,7 @@ def collect_system_info(settings: Settings) -> SystemInfo:
         distribution_version=distribution_version,
         architecture=platform.machine(),
         python_version=sys.version.split()[0],
+        cpu_model=cpu_model,
         cpu_count=psutil.cpu_count(logical=True) or 1,
         memory_total_bytes=memory.total,
         memory_available_bytes=memory.available,

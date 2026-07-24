@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import logging
+import re
 import secrets
 import time
 from pathlib import Path
@@ -46,6 +47,7 @@ from .models import (
     WorkflowRevision,
 )
 from .processes import ProcessSupervisor
+from .profile_service import AUTO_PROFILE_ID
 from .routing import ModalityRouter, RouteConfirmationRequired
 from .scheduler import ResourceScheduler
 from .schemas import MessageOut, RunOut, TurnAccepted, TurnRequest, WorkerStatus
@@ -195,8 +197,13 @@ class ConversationOrchestrator:
                 plan.standalone_prompt = f"{prior_prompt}. Follow-up instruction: {request.text}"
         plan.input_artifact_ids = resolved_input_ids
 
-        profile_id = self._profile_for_operation(chat, plan.operation)
-        profile = session.get(ModelProfile, profile_id) if profile_id else None
+        profile, model_selection = self._profile_for_operation(
+            session,
+            chat,
+            plan.operation,
+            f"{request.text}\n{plan.standalone_prompt}",
+        )
+        profile_id = profile.id if profile else None
         workflow_revision = self._workflow_for_operation(
             session, plan.operation, project_id=chat.project_id
         )
@@ -293,6 +300,7 @@ class ConversationOrchestrator:
                 model_provenance = {
                     "profile_id": profile.id,
                     "profile_name": profile.name,
+                    "profile_use_case": profile.use_case,
                     "install_id": install.id,
                     "engine": install.engine,
                     "local_path": install.local_path,
@@ -334,6 +342,7 @@ class ConversationOrchestrator:
             settings_json=effective_settings,
             provenance_json={
                 "routing": plan.model_dump(mode="json"),
+                "model_selection": model_selection,
                 "input_artifact_ids": resolved_input_ids,
                 "model": model_provenance,
                 "preset": (
@@ -1137,13 +1146,110 @@ class ConversationOrchestrator:
                 messages.append({"role": message.role, "content": content})
         return messages
 
-    @staticmethod
-    def _profile_for_operation(chat: Chat, operation: Operation) -> str | None:
+    @classmethod
+    def _profile_for_operation(
+        cls,
+        session: Session,
+        chat: Chat,
+        operation: Operation,
+        prompt: str,
+    ) -> tuple[ModelProfile | None, dict[str, Any]]:
         if operation == Operation.TEXT:
-            return chat.active_chat_profile_id
-        if "image" in operation.value and "video" not in operation.value:
-            return chat.active_image_profile_id
-        return chat.active_video_profile_id
+            selected_id = chat.active_chat_profile_id
+        elif "image" in operation.value and "video" not in operation.value:
+            selected_id = chat.active_image_profile_id
+        else:
+            selected_id = chat.active_video_profile_id
+        role = cls._role_for_operation(operation)
+        profiles = list(
+            session.scalars(
+                select(ModelProfile)
+                .where(ModelProfile.role == role)
+                .order_by(ModelProfile.updated_at.desc(), ModelProfile.id)
+            ).all()
+        )
+
+        if selected_id and selected_id != AUTO_PROFILE_ID:
+            selected = next((profile for profile in profiles if profile.id == selected_id), None)
+            if selected:
+                return selected, {
+                    "mode": "explicit",
+                    "profile_id": selected.id,
+                    "profile_name": selected.name,
+                }
+
+        default = next((profile for profile in profiles if profile.is_default), None)
+        if selected_id != AUTO_PROFILE_ID:
+            return default, {
+                "mode": "default",
+                "profile_id": default.id if default else None,
+                "profile_name": default.name if default else None,
+            }
+
+        installed = [
+            profile
+            for profile in profiles
+            if profile.model_install_id
+            and (install := session.get(ModelInstall, profile.model_install_id))
+            and install.active
+        ]
+        candidates = installed or profiles
+        prompt_text = prompt.casefold()
+        prompt_terms = cls._selection_terms(prompt_text)
+        ranked: list[tuple[int, ModelProfile, list[str]]] = []
+        for profile in candidates:
+            use_case = profile.use_case.strip().casefold()
+            use_case_terms = cls._selection_terms(use_case)
+            matches = sorted(prompt_terms & use_case_terms)
+            score = len(matches) * 10
+            if use_case and use_case in prompt_text:
+                score += 25
+            score += len(prompt_terms & cls._selection_terms(profile.name.casefold()))
+            ranked.append((score, profile, matches))
+        ranked.sort(
+            key=lambda item: (
+                item[0],
+                item[1].is_default,
+                item[1].updated_at,
+                item[1].id,
+            ),
+            reverse=True,
+        )
+        if ranked:
+            score, selected, matches = ranked[0]
+        else:
+            score, selected, matches = 0, default, []
+        return selected, {
+            "mode": "auto",
+            "profile_id": selected.id if selected else None,
+            "profile_name": selected.name if selected else None,
+            "profile_use_case": selected.use_case if selected else "",
+            "score": score,
+            "matched_terms": matches,
+            "fallback": score == 0,
+        }
+
+    @staticmethod
+    def _selection_terms(value: str) -> set[str]:
+        stop_words = {
+            "about",
+            "and",
+            "are",
+            "for",
+            "from",
+            "into",
+            "model",
+            "that",
+            "the",
+            "this",
+            "use",
+            "with",
+        }
+        return {
+            term
+            for term in re.findall(r"[a-z0-9][a-z0-9+#.-]{2,}", value)
+            if term not in stop_words
+        }
 
     @classmethod
     def _default_preset(cls, session: Session, operation: Operation) -> GenerationPreset | None:

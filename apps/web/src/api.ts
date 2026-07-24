@@ -229,6 +229,7 @@ export const api = {
     id: string,
     values: {
       name?: string;
+      use_case?: string;
       load_settings?: Record<string, unknown>;
       request_settings?: Record<string, unknown>;
       is_default?: boolean;
