@@ -1,6 +1,8 @@
 param([switch]$PurgeData)
 $ErrorActionPreference = "Stop"
 $InstallRoot = if ($env:LM_ATELIER_INSTALL_ROOT) { $env:LM_ATELIER_INSTALL_ROOT } else { Join-Path $env:LOCALAPPDATA "LMAtelier" }
+$ShortcutPath = Join-Path ([Environment]::GetFolderPath("Programs")) "LM Atelier.lnk"
+Remove-Item -Force -ErrorAction SilentlyContinue $ShortcutPath
 Remove-Item -Recurse -Force -ErrorAction SilentlyContinue (Join-Path $InstallRoot "versions")
 Remove-Item -Force -ErrorAction SilentlyContinue (Join-Path $InstallRoot "current-version.txt"), (Join-Path $InstallRoot "previous-version.txt"), (Join-Path $InstallRoot "start-lm-atelier.ps1")
 if ($PurgeData) {
