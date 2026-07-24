@@ -28,14 +28,21 @@ Copy-Item (Join-Path $VersionRoot "packaging\windows\start-local-lm.ps1") (Join-
 
 $ProgramsRoot = [Environment]::GetFolderPath("Programs")
 $ShortcutPath = Join-Path $ProgramsRoot "LM Atelier.lnk"
-$PowerShell = (Get-Command powershell.exe -ErrorAction Stop).Source
+$ApplicationLauncher = Join-Path $VersionRoot "LM Atelier.exe"
 $ShortcutShell = New-Object -ComObject WScript.Shell
 $Shortcut = $ShortcutShell.CreateShortcut($ShortcutPath)
-$Shortcut.TargetPath = $PowerShell
-$Shortcut.Arguments = "-NoProfile -ExecutionPolicy Bypass -File `"$InstallRoot\start-lm-atelier.ps1`""
-$Shortcut.WorkingDirectory = $InstallRoot
+if (Test-Path -LiteralPath $ApplicationLauncher -PathType Leaf) {
+  $Shortcut.TargetPath = $ApplicationLauncher
+  $Shortcut.Arguments = ""
+  $Shortcut.WorkingDirectory = $VersionRoot
+  $Shortcut.IconLocation = "$ApplicationLauncher,0"
+} else {
+  $Shortcut.TargetPath = (Get-Command powershell.exe -ErrorAction Stop).Source
+  $Shortcut.Arguments = "-NoProfile -ExecutionPolicy Bypass -File `"$InstallRoot\start-lm-atelier.ps1`""
+  $Shortcut.WorkingDirectory = $InstallRoot
+  $Shortcut.IconLocation = "$VersionRoot\.venv\Scripts\lm-atelier.exe,0"
+}
 $Shortcut.Description = "Open LM Atelier"
-$Shortcut.IconLocation = "$VersionRoot\.venv\Scripts\lm-atelier.exe,0"
 $Shortcut.Save()
 
 Write-Host "LM Atelier $Version installed. Open LM Atelier from the Windows Start menu."

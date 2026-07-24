@@ -92,10 +92,16 @@ video output.
 
 ### Windows
 
-An installed release creates an **LM Atelier** entry in the Windows Start menu.
-Open it like any other application; it starts the local service and opens
-`http://127.0.0.1:12340` in the default browser. Users do not need to find a
-virtual environment or run the internal launcher script.
+Extract the Windows release ZIP. Its top-level folder contains two normal
+Windows applications:
+
+1. Double-click **Setup LM Atelier.exe** once to install or update.
+2. Double-click **LM Atelier.exe** for normal use.
+
+Setup also creates an **LM Atelier** entry in the Windows Start menu. Either
+launcher starts the local service and opens `http://127.0.0.1:12340` in the
+default browser. Users do not need to browse into `scripts`, `packaging`, or a
+virtual environment.
 
 For a source checkout that has already been set up, the generated Windows
 executable is:
@@ -117,12 +123,12 @@ Open `http://127.0.0.1:12340`. For frontend/backend hot reload, use
 `./scripts/dev.sh` and open the Vite URL it prints.
 
 Official release archives include the built web interface, so end users do not
-need Node.js. On Linux, run `packaging/linux/install.sh`; on Windows, run
-`packaging/windows/install.ps1` once and then launch **LM Atelier** from the
-Windows Start menu. Updates install side by side, rollback switches the active
-application version without touching data, and uninstall preserves data unless
-its explicit purge option is used. Maintainers can build both archive formats
-and checksums with `./scripts/package.sh`.
+need Node.js. On Linux, run `packaging/linux/install.sh`; on Windows, use the two
+top-level applications described above. Updates install side by side, rollback
+switches the active application version without touching data, and uninstall
+preserves data unless its explicit purge option is used. Maintainers build the
+Linux archive with `./scripts/package.sh` and the Windows ZIP plus checksums
+with `.\scripts\package.ps1`.
 
 Run every local quality gate with:
 
