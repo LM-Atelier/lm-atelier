@@ -6,7 +6,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Annotated, Any, Literal, cast
 
 from fastapi import APIRouter, Depends, File, HTTPException, Query, Request, Response, UploadFile
-from sqlalchemy import func, select, text
+from sqlalchemy import func, or_, select, text
 from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.orm import Session, selectinload
 from starlette.responses import FileResponse
@@ -1151,14 +1151,48 @@ async def import_model(payload: ModelImport, session: SessionDep) -> ModelInstal
 
 
 @router.delete("/models/{model_id}", status_code=204)
-async def delete_model(model_id: str, request: Request, session: SessionDep) -> Response:
+async def delete_model(
+    model_id: str,
+    request: Request,
+    session: SessionDep,
+    delete_profiles: bool = False,
+) -> Response:
     install = session.get(ModelInstall, model_id)
     if not install:
         raise HTTPException(404, "model not found")
-    if session.scalar(
-        select(func.count(ModelProfile.id)).where(ModelProfile.model_install_id == install.id)
-    ):
+    profiles = list(
+        session.scalars(
+            select(ModelProfile).where(ModelProfile.model_install_id == install.id)
+        ).all()
+    )
+    if profiles and not delete_profiles:
         raise HTTPException(409, "delete profiles that use this model before deleting it")
+    profile_ids = {profile.id for profile in profiles}
+    if profile_ids and any(
+        worker.running and worker.profile_id in profile_ids
+        for worker in _services(request).processes.statuses()
+    ):
+        raise HTTPException(409, "unload the active worker before deleting this model")
+    if profile_ids:
+        affected_chats = session.scalars(
+            select(Chat).where(
+                or_(
+                    Chat.active_chat_profile_id.in_(profile_ids),
+                    Chat.active_image_profile_id.in_(profile_ids),
+                    Chat.active_video_profile_id.in_(profile_ids),
+                )
+            )
+        ).all()
+        for chat in affected_chats:
+            if chat.active_chat_profile_id in profile_ids:
+                chat.active_chat_profile_id = AUTO_PROFILE_ID
+            if chat.active_image_profile_id in profile_ids:
+                chat.active_image_profile_id = AUTO_PROFILE_ID
+            if chat.active_video_profile_id in profile_ids:
+                chat.active_video_profile_id = AUTO_PROFILE_ID
+        for profile in profiles:
+            session.delete(profile)
+        session.flush()
     model_root = _services(request).settings.model_dir.resolve()
     path = Path(install.local_path).resolve()
     siblings = session.scalars(

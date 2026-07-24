@@ -71,6 +71,26 @@ it("sends turn overrides with edited branches and regenerated responses", async 
   });
 });
 
+it("requests transactional profile cleanup when deleting an installed model", async () => {
+  const fetchMock = vi.fn()
+    .mockResolvedValueOnce(
+      new Response(JSON.stringify({ csrf_token: "csrf" }), {
+        status: 200,
+        headers: { "content-type": "application/json" },
+      }),
+    )
+    .mockResolvedValueOnce(new Response(null, { status: 204 }));
+  vi.stubGlobal("fetch", fetchMock);
+
+  const { api } = await import("./api");
+  await api.deleteModel("model-1", true);
+
+  expect(fetchMock.mock.calls[1][0]).toBe(
+    "/api/models/model-1?delete_profiles=true",
+  );
+  expect(fetchMock.mock.calls[1][1]?.method).toBe("DELETE");
+});
+
 it("retries session initialization after a transient startup failure", async () => {
   const fetchMock = vi.fn()
     .mockRejectedValueOnce(new Error("service is starting"))

@@ -14,6 +14,7 @@ from local_lm.domain import JobKind, JobStatus
 from local_lm.downloads import DownloadManager
 from local_lm.events import EventBroker
 from local_lm.models import Job
+from local_lm.schemas import DownloadRequest
 
 
 class FakeWorker:
@@ -42,6 +43,38 @@ class FakeCompletedWorker(FakeWorker):
         self.payload = payload
         self.returncode = 0
         return json.dumps({"path": "C:/models/model.gguf"}).encode(), b""
+
+
+def test_duplicate_active_download_requests_reuse_the_existing_job(
+    settings: Settings,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    settings.prepare()
+    configure_database(settings)
+    init_db()
+    manager = DownloadManager(settings, EventBroker())
+    monkeypatch.setattr(manager, "start", lambda _job_id: None)
+    request = DownloadRequest(
+        remote_id="owner/model",
+        revision="abc123",
+        role="chat",
+        engine="llama.cpp",
+        allow_patterns=["model-Q4_K_M.gguf"],
+    )
+    starts: list[str] = []
+    with SessionLocal() as session:
+        monkeypatch.setattr(manager, "start", starts.append)
+        first = manager.create(session, request)
+        second = manager.create(session, request)
+        first.status = JobStatus.PAUSED.value
+        session.commit()
+        starts.clear()
+        paused = manager.create(session, request)
+        jobs = list(session.query(Job).all())
+    assert second.id == first.id
+    assert paused.id == first.id
+    assert starts == []
+    assert len(jobs) == 1
 
 
 async def test_stop_task_terminates_transfer_process_before_controller(
