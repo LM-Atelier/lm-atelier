@@ -205,8 +205,16 @@ class ConversationOrchestrator:
         )
         profile_id = profile.id if profile else None
         workflow_revision = self._workflow_for_operation(
-            session, plan.operation, project_id=chat.project_id
+            session,
+            plan.operation,
+            project_id=chat.project_id,
+            model_install_id=profile.model_install_id if profile else None,
         )
+        if plan.operation != Operation.TEXT and not workflow_revision:
+            raise ValueError(
+                "No ready workflow matches the active media engine. Install a supported "
+                "image or video model and LM Atelier will configure it automatically."
+            )
         fields = workflow_settings(
             self._fields_for_operation(plan.operation),
             workflow_revision.input_schema_json if workflow_revision else None,
@@ -1342,9 +1350,13 @@ class ConversationOrchestrator:
             return JobKind.VIDEO
         return JobKind.IMAGE
 
-    @staticmethod
     def _workflow_for_operation(
-        session: Session, operation: Operation, *, project_id: str | None = None
+        self,
+        session: Session,
+        operation: Operation,
+        *,
+        project_id: str | None = None,
+        model_install_id: str | None = None,
     ) -> WorkflowRevision | None:
         if operation == Operation.TEXT:
             return None
@@ -1364,14 +1376,32 @@ class ConversationOrchestrator:
                 )
                 if revision and definition and definition.operation == operation.value:
                     return revision
-        definition = session.scalar(
+        definitions = session.scalars(
             select(WorkflowDefinition)
             .where(WorkflowDefinition.operation == operation.value)
-            .order_by(WorkflowDefinition.created_at)
-        )
-        if not definition or not definition.current_revision_id:
-            return None
-        return session.get(WorkflowRevision, definition.current_revision_id)
+            .order_by(WorkflowDefinition.created_at.desc())
+        ).all()
+        generic: list[WorkflowRevision] = []
+        for definition in definitions:
+            if not definition.current_revision_id:
+                continue
+            revision = session.get(WorkflowRevision, definition.current_revision_id)
+            if not revision or not self._workflow_matches_engine(revision):
+                continue
+            dependencies = revision.dependencies_json.get("model_install_ids")
+            declared_installs = (
+                {str(item) for item in dependencies} if isinstance(dependencies, list) else set()
+            )
+            if declared_installs:
+                if model_install_id in declared_installs:
+                    return revision
+                continue
+            generic.append(revision)
+        return generic[0] if generic else None
+
+    def _workflow_matches_engine(self, revision: WorkflowRevision) -> bool:
+        engine = self.engines.settings.media_engine
+        return revision.engine == engine and (engine == "mock" or bool(revision.api_graph_json))
 
     @staticmethod
     def _context_messages(session: Session, run: Run) -> list[dict[str, str]]:

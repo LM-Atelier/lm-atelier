@@ -107,9 +107,7 @@ class ComfyUIAdapter:
         if not workflow:
             return ["workflow graph is empty"]
         try:
-            response = await self._client.get("/object_info", timeout=10)
-            response.raise_for_status()
-            node_types = response.json()
+            node_types = await self.object_info()
         except (httpx.HTTPError, ValueError) as exc:
             return [f"could not inspect ComfyUI nodes: {exc}"]
         errors: list[str] = []
@@ -123,6 +121,14 @@ class ComfyUIAdapter:
             elif class_type not in node_types:
                 errors.append(f"node {node_id} requires missing type {class_type}")
         return errors
+
+    async def object_info(self) -> dict[str, Any]:
+        response = await self._client.get("/object_info", timeout=10)
+        response.raise_for_status()
+        value = response.json()
+        if not isinstance(value, dict):
+            raise ValueError("ComfyUI object metadata must be an object")
+        return value
 
     @staticmethod
     def _compile(value: Any, parameters: dict[str, Any]) -> Any:

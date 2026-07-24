@@ -23,6 +23,7 @@ def seed_defaults(session: Session, settings: Settings) -> None:
             session.add(ModelProfile(name=name, role=role, engine=engine, is_default=True))
 
     session.flush()
+    _reconcile_media_install_replacements(session)
     for install in session.scalars(select(ModelInstall).where(ModelInstall.active.is_(True))).all():
         ensure_profile_for_install(
             session,
@@ -65,3 +66,37 @@ def seed_defaults(session: Session, settings: Settings) -> None:
             session.flush()
             definition.current_revision_id = revision.id
     session.commit()
+
+
+def _reconcile_media_install_replacements(session: Session) -> None:
+    installs = list(
+        session.scalars(
+            select(ModelInstall)
+            .where(ModelInstall.engine == "comfyui", ModelInstall.active.is_(True))
+            .order_by(ModelInstall.created_at.desc(), ModelInstall.id.desc())
+        ).all()
+    )
+    claimed_sources: set[tuple[str, str, str]] = set()
+    for install in installs:
+        template_id = install.manifest_json.get("workflow_template_id")
+        source_remote_id = install.manifest_json.get("source_remote_id")
+        if not template_id or not isinstance(source_remote_id, str):
+            continue
+        key = (install.role, install.engine, source_remote_id.casefold())
+        if key in claimed_sources:
+            install.active = False
+            continue
+        claimed_sources.add(key)
+        for candidate in installs:
+            if candidate.id == install.id or not candidate.active:
+                continue
+            identities = {
+                str(candidate.manifest_json.get("remote_id") or "").casefold(),
+                str(candidate.manifest_json.get("source_remote_id") or "").casefold(),
+            }
+            if (
+                candidate.role == install.role
+                and candidate.engine == install.engine
+                and source_remote_id.casefold() in identities
+            ):
+                candidate.active = False

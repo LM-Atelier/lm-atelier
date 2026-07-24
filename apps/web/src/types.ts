@@ -310,9 +310,13 @@ export interface CatalogDetail {
 
 export interface CatalogPreflight {
   remote_id: string;
+  source_remote_id: string | null;
   revision: string;
   selected_files: string[];
   expected_sha256: Record<string, string>;
+  comfy_paths: Record<string, string>;
+  workflow_template_id: string | null;
+  workflow_template_sha256: string | null;
   download_bytes: number;
   available_disk_bytes: number;
   estimated_ram_bytes: number | null;

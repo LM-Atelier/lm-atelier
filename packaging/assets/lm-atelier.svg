@@ -1,15 +1,5 @@
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 256 256">
-  <defs>
-    <linearGradient id="background" x1="48" y1="32" x2="208" y2="224" gradientUnits="userSpaceOnUse">
-      <stop stop-color="#302b4b"/>
-      <stop offset="1" stop-color="#171922"/>
-    </linearGradient>
-  </defs>
-  <rect width="256" height="256" rx="62" fill="url(#background)"/>
-  <path d="M57 199 116 57h24l59 142M78 153h100" fill="none" stroke="#d9d4ff"
-        stroke-width="15" stroke-linecap="round" stroke-linejoin="round"/>
-  <path d="M48 103c40-27 68 43 108 18 25-16 42-38 60-49" fill="none"
-        stroke="#aaa1ff" stroke-width="13" stroke-linecap="round"/>
-  <circle cx="48" cy="103" r="12" fill="#8074e8"/>
-  <circle cx="216" cy="72" r="12" fill="#8074e8"/>
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 400 400" role="img" aria-label="LM Atelier">
+  <rect width="400" height="400" rx="80" fill="#12110f"/>
+  <path d="M43 20h64v300h169v60H43z" fill="#efe7d8"/>
+  <path d="M125 20l118 109L356 20v360h-58v-92h-85l46-45h39v-82L164 303h-39z" fill="#315a9a"/>
 </svg>
