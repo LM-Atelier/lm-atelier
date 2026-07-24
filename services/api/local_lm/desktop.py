@@ -50,7 +50,7 @@ def _health_matches(url: str) -> bool:
             payload = json.load(response)
     except (OSError, ValueError, urllib.error.URLError):
         return False
-    return payload.get("version") == __version__
+    return isinstance(payload, dict) and payload.get("version") == __version__
 
 
 def _browser_enabled() -> bool:

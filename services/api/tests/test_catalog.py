@@ -184,6 +184,7 @@ async def test_catalog_detail_requests_live_blob_metadata(tmp_path) -> None:
             200,
             json={
                 "id": "owner/Model-8B-GGUF",
+                "sha": "resolved-commit",
                 "pipeline_tag": "text-generation",
                 "tags": ["gguf", "q4_k_m"],
                 "siblings": [
@@ -211,6 +212,7 @@ async def test_catalog_detail_requests_live_blob_metadata(tmp_path) -> None:
     assert requests[0].url.params["revision"] == "main"
     assert requests[0].url.params["blobs"] == "true"
     assert "files_metadata" not in requests[0].url.params
+    assert detail["revision"] == "resolved-commit"
     assert detail["files"] == [
         {
             "filename": "Model-8B-Q4_K_M.gguf",
