@@ -29,6 +29,12 @@ _REMOTE_ID = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]*/[A-Za-z0-9][A-Za-z0-9_.-]*
 _TRANSFER_ATTEMPTS = 3
 
 
+def download_worker_command() -> list[str]:
+    if getattr(sys, "frozen", False):
+        return [sys.executable, "--download-worker"]
+    return [sys.executable, "-m", "local_lm.download_worker"]
+
+
 class DownloadManager:
     def __init__(self, settings: Settings, events: EventBroker) -> None:
         self.settings = settings
@@ -538,7 +544,7 @@ class DownloadManager:
         environment = os.environ.copy()
         environment["HF_HUB_DISABLE_PROGRESS_BARS"] = "1"
         process = subprocess.Popen(
-            [sys.executable, "-m", "local_lm.download_worker"],
+            download_worker_command(),
             stdin=subprocess.PIPE,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,

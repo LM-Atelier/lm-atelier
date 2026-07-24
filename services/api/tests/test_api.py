@@ -9,6 +9,7 @@ from types import SimpleNamespace
 
 from httpx2 import AsyncClient
 
+from local_lm import __version__
 from local_lm.adapters.base import ChatEvent, ChatRequest
 from local_lm.adapters.mock import MockChatAdapter
 from local_lm.catalog import HuggingFaceCatalog
@@ -56,6 +57,7 @@ async def test_health_probes_the_database(client: AsyncClient, monkeypatch) -> N
     healthy = await client.get("/api/health")
     assert healthy.status_code == 200
     assert healthy.json()["database"] is True
+    assert healthy.json()["version"] == __version__
 
     def fail_probe(*_args, **_kwargs):  # type: ignore[no-untyped-def]
         from sqlalchemy.exc import OperationalError

@@ -194,7 +194,7 @@ app = create_app()
 def run() -> None:
     settings = get_settings()
     uvicorn.run(
-        "local_lm.main:app",
+        "local_lm.main:app" if settings.dev else app,
         host=settings.host,
         port=settings.port,
         reload=settings.dev,
