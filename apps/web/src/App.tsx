@@ -62,6 +62,7 @@ type View = "chat" | "media" | "models" | "workflows" | "settings";
 type Visibility = "basic" | "advanced" | "expert";
 
 const visibilityRank: Record<Visibility, number> = { basic: 0, advanced: 1, expert: 2 };
+const AUTO_PROFILE_ID = "__auto__";
 
 function formatBytes(value?: number | null): string {
   if (value == null) return "Unknown";
@@ -91,6 +92,17 @@ function EmptyState({ icon, title, body }: { icon: React.ReactNode; title: strin
       <h2>{title}</h2>
       <p>{body}</p>
     </div>
+  );
+}
+
+function AtelierMark() {
+  return (
+    <svg viewBox="0 0 32 32" role="img" aria-label="LM Atelier">
+      <path className="atelier-frame" d="M6 25 14.8 6h2.4L26 25M9.4 18h13.2" />
+      <path className="atelier-thread" d="M5 12c5.2-3.4 9.2 5.4 14.1 2.2C22 12.3 24.7 9.5 27 8" />
+      <circle cx="5" cy="12" r="1.5" />
+      <circle cx="27" cy="8" r="1.5" />
+    </svg>
   );
 }
 
@@ -563,7 +575,9 @@ function ChatView({
         <div className="chat-profile-selectors">
           {(["chat", "image", "video"] as const).map((role) => {
             const field = `active_${role}_profile_id` as "active_chat_profile_id" | "active_image_profile_id" | "active_video_profile_id";
-            return <label key={role}><span>{role}</span><select value={chat[field] ?? ""} onChange={(event) => onProfile(field, event.target.value || null)}><option value="">Default</option>{profiles.filter((profile) => profile.role === role).map((profile) => <option key={profile.id} value={profile.id}>{profile.name}</option>)}</select></label>;
+            const selected = profiles.find((profile) => profile.id === chat[field]);
+            const value = selected?.is_default ? "" : chat[field] ?? "";
+            return <label key={role}><span>{role}</span><select value={value} title={`Choose the ${role} model for this chat`} onChange={(event) => onProfile(field, event.target.value || null)}><option value={AUTO_PROFILE_ID}>Auto</option><option value="">Default</option>{profiles.filter((profile) => profile.role === role && !profile.is_default).map((profile) => <option key={profile.id} value={profile.id}>{profile.name}</option>)}</select></label>;
           })}
           <button className="icon-button"><MoreHorizontal /></button>
         </div>
@@ -594,7 +608,7 @@ function ModelCard({ model, role, onDownload, pending }: { model: CatalogModel; 
         <div className="badges"><span className={`badge ${model.compatibility}`}>{model.compatibility.replace("_", " ")}</span>{model.gated && <span className="badge">Gated</span>}{model.formats.slice(0, 2).map((format) => <span className="badge" key={format}>{format}</span>)}{model.quantizations.slice(0, 2).map((value) => <span className="badge" key={value}>{value}</span>)}</div>
         <small>{model.compatibility_reasons.join(" · ")}</small>
       </div>
-      <div className="model-stats"><span><Download size={14} />{model.downloads?.toLocaleString() ?? "—"}</span><button className="primary compact-button" onClick={onDownload} disabled={pending}>{pending ? "Queued" : "Choose files"}</button></div>
+      <div className="model-stats"><span><Download size={14} />{model.downloads?.toLocaleString() ?? "—"}</span><button className="primary compact-button" onClick={onDownload} disabled={pending || model.compatibility === "unsupported"}>{pending ? "Preparing…" : "Install"}</button></div>
     </article>
   );
 }
@@ -633,9 +647,6 @@ function ModelsView() {
   const [minParameters, setMinParameters] = useState("");
   const [maxParameters, setMaxParameters] = useState("");
   const [maxSizeGb, setMaxSizeGb] = useState("");
-  const [detailModel, setDetailModel] = useState<CatalogModel | null>(null);
-  const [revision, setRevision] = useState("main");
-  const [selectedFiles, setSelectedFiles] = useState<string[]>([]);
   const [importOpen, setImportOpen] = useState(false);
   const [importName, setImportName] = useState("");
   const [importPath, setImportPath] = useState("");
@@ -659,19 +670,36 @@ function ModelsView() {
     getNextPageParam: (page) => page.next_cursor ?? undefined,
   });
   const catalogItems = useMemo(() => catalog.data?.pages.flatMap((page) => page.items) ?? [], [catalog.data]);
-  const detail = useQuery({ queryKey: ["catalog-detail", detailModel?.remote_id, role, revision], queryFn: () => api.catalogDetail(detailModel!.remote_id, role, revision), enabled: Boolean(detailModel) });
-  const preflight = useQuery({
-    queryKey: ["catalog-preflight", detailModel?.remote_id, role, revision, selectedFiles],
-    queryFn: () => api.catalogPreflight(detailModel!.remote_id, role, role === "chat" ? "llama.cpp" : "comfyui", revision, selectedFiles),
-    enabled: Boolean(detailModel && detail.data),
-  });
   const recipes = useQuery({ queryKey: ["recipes"], queryFn: api.recipes });
   const installed = useQuery({ queryKey: ["models"], queryFn: api.models });
   const storage = useQuery({ queryKey: ["model-storage"], queryFn: api.modelStorage });
   const profiles = useQuery({ queryKey: ["profiles"], queryFn: api.profiles });
   const download = useMutation({
-    mutationFn: ({ remoteId, revision: selectedRevision, files, expectedSha256 }: { remoteId: string; revision: string; files: string[]; expectedSha256: Record<string, string> }) => api.download(remoteId, role, role === "chat" ? "llama.cpp" : "comfyui", selectedRevision, files, expectedSha256),
-    onSuccess: () => { setDetailModel(null); setSelectedFiles([]); void client.invalidateQueries({ queryKey: ["jobs"] }); },
+    mutationFn: async ({ model, selectedRole }: { model: CatalogModel; selectedRole: string }) => {
+      const engine = selectedRole === "chat" ? "llama.cpp" : "comfyui";
+      const preflight = await api.catalogPreflight(
+        model.remote_id,
+        selectedRole,
+        engine,
+        "main",
+        [],
+      );
+      if (!preflight.can_install) {
+        const blockers = preflight.checks
+          .filter((check) => check.status === "block")
+          .map((check) => check.detail);
+        throw new Error(blockers.join(" ") || "This model cannot be installed safely.");
+      }
+      return api.download(
+        model.remote_id,
+        selectedRole,
+        engine,
+        preflight.revision,
+        preflight.selected_files,
+        preflight.expected_sha256,
+      );
+    },
+    onSuccess: () => void client.invalidateQueries({ queryKey: ["jobs"] }),
   });
   const installRecipe = useMutation({
     mutationFn: (recipeId: string) => api.installRecipe(recipeId),
@@ -682,9 +710,16 @@ function ModelsView() {
     onSuccess: () => void client.invalidateQueries({ queryKey: ["profiles"] }),
   });
   const deleteModel = useMutation({
-    mutationFn: api.deleteModel,
+    mutationFn: async (modelId: string) => {
+      const attachedProfiles = profiles.data?.filter(
+        (profile) => profile.model_install_id === modelId,
+      ) ?? [];
+      for (const profile of attachedProfiles) await api.deleteProfile(profile.id);
+      return api.deleteModel(modelId);
+    },
     onSuccess: () => {
       void client.invalidateQueries({ queryKey: ["models"] });
+      void client.invalidateQueries({ queryKey: ["profiles"] });
       void client.invalidateQueries({ queryKey: ["model-storage"] });
     },
   });
@@ -718,13 +753,12 @@ function ModelsView() {
         <select value={sort} onChange={(event) => setSort(event.target.value)}><option value="trending">Trending</option><option value="downloads">Downloads</option><option value="likes">Likes</option><option value="newest">Newest</option><option value="updated">Recently updated</option><option value="compatible">Compatible first</option></select>
       </div>
       <div className="catalog-filters"><select aria-label="Compatibility filter" value={compatibility} onChange={(event) => setCompatibility(event.target.value)}><option value="">All compatibility</option><option value="likely">Likely compatible</option><option value="advanced_import">Advanced import</option><option value="unsupported">Unsupported</option></select><select aria-label="Format filter" value={fileFormat} onChange={(event) => setFileFormat(event.target.value)}><option value="">All formats</option><option value="gguf">GGUF</option><option value="safetensors">safetensors</option></select><select aria-label="Access filter" value={gated} onChange={(event) => setGated(event.target.value)}><option value="">All access</option><option value="open">Open</option><option value="gated">Gated</option></select><input aria-label="Quantization filter" placeholder="Quantization (Q4_K_M, FP8…)" value={quantization} onChange={(event) => setQuantization(event.target.value)} /><input aria-label="Architecture filter" placeholder="Architecture" value={architecture} onChange={(event) => setArchitecture(event.target.value)} /><input aria-label="License filter" placeholder="License" value={licenseId} onChange={(event) => setLicenseId(event.target.value)} /><input aria-label="Minimum parameters" type="number" min="0" placeholder="Min parameters (B)" value={minParameters} onChange={(event) => setMinParameters(event.target.value)} /><input aria-label="Maximum parameters" type="number" min="0" placeholder="Max parameters (B)" value={maxParameters} onChange={(event) => setMaxParameters(event.target.value)} /><input aria-label="Maximum download size" type="number" min="0" placeholder="Max download (GB)" value={maxSizeGb} onChange={(event) => setMaxSizeGb(event.target.value)} /></div>
-      {(installed.data?.length ?? 0) > 0 && <section><h2>Installed models</h2><div className="profile-table model-installs">{installed.data?.map((model) => { const bound = profiles.data?.some((profile) => profile.model_install_id === model.id) ?? false; return <div key={model.id}><span className="badge">{model.role}</span><strong>{model.name}</strong><span>{formatBytes(model.size_bytes)}</span><span className="row-actions"><button className="secondary compact-button" disabled={bound || createProfile.isPending} onClick={() => createProfile.mutate(model)}>{bound ? "Profile ready" : "Create profile"}</button><button className="secondary compact-button danger" disabled={bound || deleteModel.isPending} title={bound ? "Delete the model profile first" : "Delete installed model"} onClick={() => { if (window.confirm(`Delete ${model.name} from local storage?`)) deleteModel.mutate(model.id); }}>Delete</button></span></div>; })}</div></section>}
-      {(deleteModel.error || cleanupDownloads.error) && <div className="callout error">{deleteModel.error?.message || cleanupDownloads.error?.message}</div>}
+      {(installed.data?.length ?? 0) > 0 && <section><h2>Installed models</h2><div className="profile-table model-installs">{installed.data?.map((model) => { const bound = profiles.data?.some((profile) => profile.model_install_id === model.id) ?? false; return <div key={model.id}><span className="badge">{model.role}</span><strong>{model.name}</strong><span>{formatBytes(model.size_bytes)}</span><span className="row-actions"><button className="secondary compact-button" disabled={bound || createProfile.isPending} title={bound ? "This model is available in chats and Auto mode" : "Complete setup for this older model install"} onClick={() => createProfile.mutate(model)}>{bound ? "Ready to use" : "Finish setup"}</button><button className="secondary compact-button danger" disabled={deleteModel.isPending} title="Delete installed model" onClick={() => { if (window.confirm(`Delete ${model.name} and its model settings from local storage?`)) deleteModel.mutate(model.id); }}>Delete</button></span></div>; })}</div></section>}
+      {(download.error || deleteModel.error || cleanupDownloads.error) && <div className="callout error">{download.error?.message || deleteModel.error?.message || cleanupDownloads.error?.message}</div>}
       {catalog.isLoading && <div className="loading-line" />}
       {catalog.error && <div className="callout error">{catalog.error.message}</div>}
-      <div className="model-grid">{catalogItems.map((model) => <ModelCard key={model.remote_id} model={model} role={role} pending={download.isPending && download.variables?.remoteId === model.remote_id} onDownload={() => { setDetailModel(model); setRevision("main"); setSelectedFiles([]); }} />)}</div>
+      <div className="model-grid">{catalogItems.map((model) => <ModelCard key={model.remote_id} model={model} role={role} pending={download.isPending && download.variables?.model.remote_id === model.remote_id} onDownload={() => download.mutate({ model, selectedRole: role })} />)}</div>
       {catalog.hasNextPage && <div className="load-more"><button className="secondary" disabled={catalog.isFetchingNextPage} onClick={() => void catalog.fetchNextPage()}>{catalog.isFetchingNextPage ? "Loading…" : "Load more models"}</button></div>}
-      {detailModel && <div className="modal-backdrop"><div className="modal model-files"><header><div><small>Install preflight</small><h2>{detailModel.remote_id}</h2></div><button className="icon-button" onClick={() => setDetailModel(null)}><X /></button></header><div className="model-preflight-meta"><span><strong>{detail.data?.model.license_id ?? "Unknown"}</strong><small>License</small></span><span><strong>{detail.data?.model.architecture ?? "Unknown"}</strong><small>Architecture</small></span><span><strong>{formatBytes(detail.data?.model.total_size_bytes)}</strong><small>Repository size</small></span><span><strong>{detail.data?.model.gated ? "Gated" : "Open"}</strong><small>Access</small></span></div><label>Revision or commit SHA<input value={revision} onChange={(event) => { setRevision(event.target.value); setSelectedFiles([]); }} /></label><p>Select exact files. Chat installs may leave this empty to preselect the smallest GGUF; image and video installs require an explicit selection.</p><div className="file-picker">{detail.data?.files.map((file) => <label key={file.filename}><input type="checkbox" checked={selectedFiles.includes(file.filename)} onChange={(event) => setSelectedFiles((current) => event.target.checked ? [...current, file.filename] : current.filter((name) => name !== file.filename))} /><span><strong>{file.filename}</strong><small>{formatBytes(file.size)}</small></span></label>)}</div>{detail.error && <div className="callout error">{detail.error.message}</div>}{preflight.error && <div className="callout error">{preflight.error.message}</div>}{preflight.data && <div className="preflight-checks">{preflight.data.checks.map((check) => <div className={`preflight-check ${check.status}`} key={check.id}><span>{check.status}</span><div><strong>{check.label}</strong><small>{check.detail}</small></div></div>)}</div>}<footer><span>{formatBytes(preflight.data?.download_bytes)} selected · {formatBytes(preflight.data?.available_disk_bytes)} free</span><button className="primary" disabled={detail.isLoading || preflight.isLoading || !preflight.data?.can_install} onClick={() => download.mutate({ remoteId: detailModel.remote_id, revision, files: preflight.data?.selected_files ?? selectedFiles, expectedSha256: preflight.data?.expected_sha256 ?? {} })}>Queue download</button></footer></div></div>}
       {importOpen && <div className="modal-backdrop"><div className="modal"><header><div><small>Advanced import</small><h2>Import a local model</h2></div><button className="icon-button" aria-label="Close local import" onClick={() => setImportOpen(false)}><X /></button></header><p>Register an existing model file or directory. Pickle-compatible formats are blocked; imported models are marked for advanced review.</p><label>Display name<input value={importName} onChange={(event) => setImportName(event.target.value)} /></label><label>Absolute local path<input value={importPath} onChange={(event) => setImportPath(event.target.value)} placeholder="/path/to/model.gguf" /></label><label>Role<select value={importRole} onChange={(event) => { const next = event.target.value; setImportRole(next); setImportEngine(next === "chat" ? "llama.cpp" : "comfyui"); }}><option value="chat">Chat</option><option value="image">Image</option><option value="video">Video</option></select></label><label>Runtime<select value={importEngine} onChange={(event) => setImportEngine(event.target.value)}><option value="llama.cpp">llama.cpp</option><option value="comfyui">ComfyUI</option></select></label>{importModel.error && <div className="callout error">{importModel.error.message}</div>}<footer><button className="secondary" onClick={() => setImportOpen(false)}>Cancel</button><button className="primary" disabled={!importName.trim() || !importPath.trim() || importModel.isPending} onClick={() => importModel.mutate()}>{importModel.isPending ? "Importing…" : "Import model"}</button></footer></div></div>}
     </div>
   );
@@ -867,6 +901,7 @@ function ProfileEditor({
 }) {
   const client = useQueryClient();
   const [name, setName] = useState(profile.name);
+  const [useCase, setUseCase] = useState(profile.use_case);
   const [isDefault, setIsDefault] = useState(profile.is_default);
   const [loadSettings, setLoadSettings] = useState(profile.load_settings_json);
   const [requestSettings, setRequestSettings] = useState(profile.request_settings_json);
@@ -875,6 +910,7 @@ function ProfileEditor({
   const save = useMutation({
     mutationFn: () => api.updateProfile(profile.id, {
       name,
+      use_case: useCase,
       is_default: isDefault,
       load_settings: loadSettings,
       request_settings: requestSettings,
@@ -912,7 +948,8 @@ function ProfileEditor({
       <div className="modal settings-editor">
         <header><div><small>{profile.role} profile · {profile.engine}</small><h2>Edit profile</h2></div><button className="icon-button" onClick={onClose} aria-label="Close profile editor"><X /></button></header>
         <label>Profile name<input value={name} onChange={(event) => setName(event.target.value)} /></label>
-        <label className="toggle-row"><span><strong>Default {profile.role} profile</strong><small>Use this profile when a chat does not select another one.</small></span><input type="checkbox" checked={isDefault} onChange={(event) => setIsDefault(event.target.checked)} /></label>
+        <label>Best used for<textarea rows={3} value={useCase} onChange={(event) => setUseCase(event.target.value)} placeholder="For example: programming, code review, and technical explanations" /><small>Auto mode compares this description with each prompt.</small></label>
+        <label className="toggle-row"><span><strong>Default model</strong><small>Use this model when the chat selects Default.</small></span><input type="checkbox" checked={isDefault} onChange={(event) => setIsDefault(event.target.checked)} /></label>
         <div className="segmented compact">
           {(["basic", "advanced", "expert"] as Visibility[]).map((level) => <button key={level} className={visibility === level ? "active" : ""} onClick={() => setVisibility(level)}>{level}</button>)}
         </div>
@@ -979,7 +1016,6 @@ function SettingsView({ engines }: { engines: EngineCapabilities[] }) {
   const profileImport = useRef<HTMLInputElement>(null);
   const presetImport = useRef<HTMLInputElement>(null);
   const system = useQuery({ queryKey: ["system"], queryFn: api.system });
-  const platforms = useQuery({ queryKey: ["platforms"], queryFn: api.platforms });
   const profiles = useQuery({ queryKey: ["profiles"], queryFn: api.profiles });
   const presets = useQuery({ queryKey: ["presets"], queryFn: api.presets });
   const workers = useQuery({ queryKey: ["workers"], queryFn: api.workers, refetchInterval: 3_000 });
@@ -1002,15 +1038,6 @@ function SettingsView({ engines }: { engines: EngineCapabilities[] }) {
   const stopWorker = useMutation({ mutationFn: api.stopWorker, onSuccess: refreshWorkers });
   const createBackup = useMutation({ mutationFn: api.createBackup, onSuccess: () => void client.invalidateQueries({ queryKey: ["backups"] }) });
   const toolProbe = useMutation({ mutationFn: api.probeChatTools });
-  const diagnostics = useMutation({
-    mutationFn: api.createDiagnostics,
-    onSuccess: (artifact) => {
-      const link = document.createElement("a");
-      link.href = artifact.url;
-      link.download = "lm-atelier-diagnostics.zip";
-      link.click();
-    },
-  });
   const chatWorker = workers.data?.find((worker) => worker.name === "chat");
   const chatWorkerBusy = Boolean(
     chatWorker && chatWorker.active_jobs + chatWorker.queued_jobs > 0
@@ -1042,8 +1069,7 @@ function SettingsView({ engines }: { engines: EngineCapabilities[] }) {
   };
   return (
     <div className="page-view settings-page">
-      <header className="page-header"><div><small>System</small><h1>Runtime and diagnostics</h1><p>Capabilities are reported by each engine, so unsupported controls are never silently accepted.</p></div><button className="secondary" onClick={() => diagnostics.mutate()} disabled={diagnostics.isPending}>{diagnostics.isPending ? "Collecting…" : "Download redacted diagnostics"}</button></header>
-      {diagnostics.error && <div className="callout error">{diagnostics.error.message}</div>}
+      <header className="page-header"><div><small>Settings</small><h1>Models, runtimes, and recovery</h1><p>Manage private model access, generation behavior, local engines, and backups.</p></div></header>
       <section>
         <div className="detail-title"><div><h2>Hugging Face access</h2><p>Private and gated model access is stored in your operating system credential vault. The token is never displayed after saving.</p></div><span className={`badge ${credential.data?.configured ? "tested" : ""}`}>{credential.data?.configured ? `Configured · ${credential.data.source.replace("credential_vault", "credential vault")}` : "Not configured"}</span></div>
         <div className="preset-create">
@@ -1056,19 +1082,14 @@ function SettingsView({ engines }: { engines: EngineCapabilities[] }) {
         {(credential.error || saveCredential.error || removeCredential.error) && <div className="callout error">{(credential.error || saveCredential.error || removeCredential.error)?.message}</div>}
       </section>
       <section><h2>Engines</h2><div className="engine-grid">{engines.map((engine) => <article className="engine-card" key={`${engine.engine}:${engine.roles.join()}`}><header><div className="model-icon"><Cpu /></div><div><h3>{engine.engine}</h3><p>{engine.roles.join(" · ")} · {engine.version}</p></div><StatusDot healthy={engine.healthy} /></header><div className="capability-list"><span>{engine.streaming ? "Streaming" : "Queued"}</span><span>{engine.tool_calling ? "Tool routing advertised" : "Workflow execution"}</span><span>{engine.settings.length} controls</span>{engine.roles.includes("chat") && <button className="secondary compact-button" onClick={() => toolProbe.mutate()} disabled={toolProbe.isPending}>{toolProbe.isPending ? "Testing…" : "Test structured tools"}</button>}</div></article>)}</div>{toolProbe.data && <div className={`callout ${toolProbe.data.passed ? "success" : "error"}`}>{toolProbe.data.passed ? `Structured tool schema passed on ${toolProbe.data.engine} ${toolProbe.data.version}.` : `Structured tool schema failed: ${toolProbe.data.error || "unknown response"}`}</div>}{toolProbe.error && <div className="callout error">{toolProbe.error.message}</div>}</section>
-      <section><h2>Machine</h2>{system.data && <div className="metric-grid"><div><Cpu /><span><strong>{system.data.cpu_count}</strong> logical CPUs</span></div><div><Gauge /><span><strong>{formatBytes(system.data.memory_available_bytes)}</strong> memory free</span></div><div><HardDrive /><span><strong>{formatBytes(system.data.disk_free_bytes)}</strong> disk free</span></div><div><Film /><span><strong>{system.data.ffmpeg_available ? "Ready" : "Missing"}</strong> FFmpeg</span></div></div>}<div className="device-list">{system.data?.devices.map((device) => <div key={device.id}><span className="device-icon"><Cpu size={18} /></span><span><strong>{device.name}</strong><small>{device.backend} · {formatBytes(device.available_memory_bytes)} available</small></span></div>)}</div></section>
-      <section>
-        <div className="detail-title"><div><h2>Platform support</h2><p>Automated coverage and detected hardware are reported separately from physical certification.</p></div></div>
-        {system.data && <div className={`support-summary ${system.data.support.platform_status}`}><div><span className="badge">This machine</span><h3>{system.data.support.platform_label}</h3><p>{system.data.distribution} {system.data.distribution_version} · {system.data.support.accelerator_label}</p></div><div className="support-flags"><span className={`badge ${system.data.support.chat_ready ? "tested" : ""}`}>Chat {system.data.support.chat_ready ? "ready" : "constrained"}</span><span className={`badge ${system.data.support.reference_media_ready ? "tested" : ""}`}>Media {system.data.support.reference_media_ready ? "reference-capable" : "not certified"}</span><span className="badge">{system.data.support.certification_status.replace("-", " ")}</span></div><ul>{system.data.support.messages.map((message) => <li key={message}>{message}</li>)}</ul></div>}
-        <div className="platform-grid">{platforms.data?.map((entry) => <article className="platform-card" key={entry.id}><header><div><span className={`badge ${entry.status === "target" ? "likely" : ""}`}>{entry.status}</span><h3>{entry.name}</h3></div><Cpu size={18} /></header><p>{entry.accelerator} · {entry.workloads.join(" · ")}</p>{entry.vram_tiers_gb.length > 0 && <div className="capability-list">{entry.vram_tiers_gb.map((tier) => <span key={tier}>{tier} GB VRAM</span>)}</div>}<small>{entry.evidence}</small></article>)}</div>
-      </section>
+      <section><h2>Machine</h2>{system.data && <div className="metric-grid"><div className="cpu-metric"><Cpu /><span><strong>{system.data.cpu_model}</strong><small>{system.data.cpu_count} logical processors</small></span></div><div><Gauge /><span><strong>{formatBytes(system.data.memory_available_bytes)}</strong> memory free</span></div><div><HardDrive /><span><strong>{formatBytes(system.data.disk_free_bytes)}</strong> disk free</span></div></div>}<div className="device-list">{system.data?.devices.filter((device) => device.kind !== "cpu").map((device) => <div key={device.id}><span className="device-icon"><Cpu size={18} /></span><span><strong>{device.name}</strong><small>{device.backend} · {formatBytes(device.available_memory_bytes)} available</small></span></div>)}</div></section>
       <section>
         <div className="detail-title"><div><h2>Model profiles</h2><p>Store load-time and request-time controls independently for every model.</p></div><button className="secondary" onClick={() => profileImport.current?.click()}>Import profile</button></div>
         <input ref={profileImport} hidden type="file" accept="application/json,.json" onChange={(event) => { void importBundle(event.target.files?.[0], "profile"); event.target.value = ""; }} />
-        <div className="profile-table interactive">{profiles.data?.map((profile: ModelProfile) => <div key={profile.id}><span className="badge">{profile.role}</span><strong>{profile.name}{profile.is_default ? " · default" : ""}</strong><span>{profile.engine}</span><span className="row-actions">{profile.role === "chat" && profile.model_install_id && <button className="secondary compact-button" disabled={chatWorkerBusy || loadChat.isPending} title={chatWorkerBusy ? "Wait for active and queued chat jobs before changing the worker" : "Load this chat profile"} onClick={() => loadChat.mutate(profile.id)}>Load</button>}<button className="secondary compact-button" onClick={() => setSelectedProfile(profile)}>Edit</button></span></div>)}</div>
+        <div className="profile-table interactive">{profiles.data?.map((profile: ModelProfile) => <div key={profile.id}><span className="badge">{profile.role}</span><strong>{profile.is_default ? "Default" : profile.name}{profile.is_default ? " · default" : ""}</strong><span title={profile.use_case}>{profile.use_case || "No Auto use case yet"}</span><span className="row-actions">{profile.role === "chat" && profile.model_install_id && <button className="secondary compact-button" disabled={chatWorkerBusy || loadChat.isPending} title={chatWorkerBusy ? "Wait for active and queued chat jobs before changing the worker" : "Load this chat profile"} onClick={() => loadChat.mutate(profile.id)}>Load</button>}<button className="secondary compact-button" onClick={() => setSelectedProfile(profile)}>Edit</button></span></div>)}</div>
       </section>
       <section>
-        <div className="detail-title"><div><h2>Generation presets</h2><p>Reuse sampling and media-generation values across compatible models.</p></div><button className="secondary" onClick={() => presetImport.current?.click()}>Import preset</button></div>
+        <div className="detail-title"><div><h2>Generation presets</h2><p>Save reusable choices such as temperature, output length, dimensions, steps, and seed behavior.</p></div><button className="secondary" onClick={() => presetImport.current?.click()}>Import preset</button></div>
         <input ref={presetImport} hidden type="file" accept="application/json,.json" onChange={(event) => { void importBundle(event.target.files?.[0], "preset"); event.target.value = ""; }} />
         <div className="preset-create"><input aria-label="New preset name" placeholder="New preset name" value={presetName} onChange={(event) => setPresetName(event.target.value)} /><select aria-label="New preset role" value={presetRole} onChange={(event) => setPresetRole(event.target.value as GenerationPreset["role"])}><option value="chat">Chat</option><option value="image">Image</option><option value="video">Video</option></select><button className="primary" disabled={!presetName.trim() || createPreset.isPending} onClick={() => createPreset.mutate()}><Plus size={15} />Create preset</button></div>
         <div className="profile-table interactive">{presets.data?.map((preset) => <div key={preset.id}><span className="badge">{preset.role}</span><strong>{preset.name}{preset.is_default ? " · default" : ""}</strong><span>{Object.keys(preset.settings_json).length} overrides</span><button className="secondary compact-button" onClick={() => setSelectedPreset(preset)}>Edit</button></div>)}</div>
@@ -1131,7 +1152,6 @@ function Sidebar({
   chats,
   currentChatId,
   view,
-  connected,
   onChat,
   onView,
   onNewChat,
@@ -1147,7 +1167,6 @@ function Sidebar({
   chats: Chat[];
   currentChatId: string | null;
   view: View;
-  connected: boolean;
   onChat: (id: string) => void;
   onView: (view: View) => void;
   onNewChat: (projectId?: string | null) => void;
@@ -1176,7 +1195,7 @@ function Sidebar({
   const chatRow = (chat: Chat) => <div className="sidebar-chat-row" key={chat.id}><button className={`chat-main ${view === "chat" && currentChatId === chat.id ? "active" : ""}`} onClick={() => { onChat(chat.id); setMobileOpen(false); }}><MessageSquare size={14} /><span>{chat.title}</span>{chat.archived && <small>Archived</small>}</button><button className="inline-add" aria-label={`Manage ${chat.title}`} onClick={() => setManagedChat(chat)}><MoreHorizontal size={13} /></button></div>;
   return (
     <aside className={`sidebar ${mobileOpen ? "mobile-open" : ""}`}>
-      <div className="brand"><div className="brand-mark"><Sparkles /></div><span>LM Atelier</span><button className="icon-button mobile-menu" aria-label="Toggle navigation" aria-expanded={mobileOpen} onClick={() => setMobileOpen((open) => !open)}><Menu /></button></div>
+      <div className="brand"><div className="brand-mark"><AtelierMark /></div><span>LM Atelier<small>Local creative studio</small></span><button className="icon-button mobile-menu" aria-label="Toggle navigation" aria-expanded={mobileOpen} onClick={() => setMobileOpen((open) => !open)}><Menu /></button></div>
       <button className="new-chat" onClick={() => { onNewChat(null); setMobileOpen(false); }}><Plus size={18} />New chat</button>
       <nav className="primary-nav"><button className={view === "media" ? "active" : ""} onClick={() => { onView("media"); setMobileOpen(false); }}><ImageIcon />Media library</button><button className={view === "models" ? "active" : ""} onClick={() => { onView("models"); setMobileOpen(false); }}><Library />Model library</button><button className={view === "workflows" ? "active" : ""} onClick={() => { onView("workflows"); setMobileOpen(false); }}><WorkflowIcon />Workflows</button></nav>
       <div className="workspace-search"><Search size={14} /><input aria-label="Search projects and chats" placeholder="Search workspace" value={search} onChange={(event) => setSearch(event.target.value)} /><button className={showArchived ? "active" : ""} aria-pressed={showArchived} onClick={() => setShowArchived((value) => !value)}>Archived</button></div>
@@ -1211,7 +1230,7 @@ function Sidebar({
         </div>
         {unfiled.length > 0 && <div className="sidebar-section"><div className="section-title"><span>Chats</span></div><div className="chat-list standalone">{unfiled.map(chatRow)}</div></div>}
       </div>
-      <div className="sidebar-footer"><button className={view === "settings" ? "active" : ""} onClick={() => { onView("settings"); setMobileOpen(false); }}><Settings />Settings</button><div className="connection"><StatusDot healthy={connected} />{connected ? "Local service connected" : "Reconnecting…"}</div></div>
+      <div className="sidebar-footer"><button className={view === "settings" ? "active" : ""} onClick={() => { onView("settings"); setMobileOpen(false); }}><Settings />Settings</button></div>
       {managedChat && <ChatManager chat={managedChat} projects={projects} onClose={() => setManagedChat(null)} onSave={(values) => { onUpdateChat(managedChat.id, values); setManagedChat(null); }} onDelete={() => { onDeleteChat(managedChat.id); setManagedChat(null); }} />}
       {managedProject && <ProjectManager project={managedProject} onClose={() => setManagedProject(null)} onSave={(values) => { onUpdateProject(managedProject.id, values); setManagedProject(null); }} onDelete={() => { onDeleteProject(managedProject.id); setManagedProject(null); }} onExport={(includeMedia) => onExportProject(managedProject.id, includeMedia)} />}
     </aside>
@@ -1234,7 +1253,6 @@ export default function App() {
   const client = useQueryClient();
   const [view, setView] = useState<View>("chat");
   const [currentChatId, setCurrentChatId] = useState<string | null>(() => localStorage.getItem("local-lm-chat"));
-  const [connected, setConnected] = useState(false);
   const [liveText, setLiveText] = useState<Record<string, string>>({});
   const [turnSettingsByChat, setTurnSettingsByChat] = useState<Record<string, Record<string, unknown>>>({});
   const projects = useQuery({ queryKey: ["projects"], queryFn: () => api.projects(true) });
@@ -1263,6 +1281,11 @@ export default function App() {
           return;
         }
         if (event.type.includes("progress") || event.type.startsWith("download.")) void client.invalidateQueries({ queryKey: ["jobs"] });
+        if (event.type === "download.completed") {
+          void client.invalidateQueries({ queryKey: ["models"] });
+          void client.invalidateQueries({ queryKey: ["profiles"] });
+          void client.invalidateQueries({ queryKey: ["model-storage"] });
+        }
         if (["generation.progress", "generation.preview"].includes(event.type)) {
           scheduleMediaRefresh();
         }
@@ -1277,7 +1300,7 @@ export default function App() {
           window.setTimeout(() => setLiveText({}), 200);
         }
       },
-      setConnected,
+      () => undefined,
     ).then((cleanup) => { dispose = cleanup; });
     return () => {
       if (mediaRefresh !== undefined) window.clearTimeout(mediaRefresh);
@@ -1411,7 +1434,7 @@ export default function App() {
   return (
     <div className="app-shell">
       <a className="skip-link" href="#main-content">Skip to main content</a>
-      <Sidebar projects={allProjects} chats={allChats} currentChatId={currentChatId} view={view} connected={connected} onChat={(id) => { setCurrentChatId(id); localStorage.setItem("local-lm-chat", id); setView("chat"); }} onView={setView} onNewChat={(projectId) => createChat.mutate(projectId)} onNewProject={() => { const name = window.prompt("Project name"); if (name?.trim()) createProject.mutate(name.trim()); }} onExportProject={(id, includeMedia) => exportProject.mutate({ id, includeMedia })} onImportProject={(file) => importProject.mutate(file)} onUpdateChat={(id, values) => manageChat.mutate({ id, values })} onDeleteChat={(id) => deleteChat.mutate(id)} onUpdateProject={(id, values) => updateProject.mutate({ id, values })} onDeleteProject={(id) => deleteProject.mutate(id)} />
+      <Sidebar projects={allProjects} chats={allChats} currentChatId={currentChatId} view={view} onChat={(id) => { setCurrentChatId(id); localStorage.setItem("local-lm-chat", id); setView("chat"); }} onView={setView} onNewChat={(projectId) => createChat.mutate(projectId)} onNewProject={() => { const name = window.prompt("Project name"); if (name?.trim()) createProject.mutate(name.trim()); }} onExportProject={(id, includeMedia) => exportProject.mutate({ id, includeMedia })} onImportProject={(file) => importProject.mutate(file)} onUpdateChat={(id, values) => manageChat.mutate({ id, values })} onDeleteChat={(id) => deleteChat.mutate(id)} onUpdateProject={(id, values) => updateProject.mutate({ id, values })} onDeleteProject={(id) => deleteProject.mutate(id)} />
       <main id="main-content" tabIndex={-1}>{activeContent}</main>
       <JobsPanel />
       {(send.error || regenerate.error || branch.error || stop.error || createChat.error || createProject.error || importProject.error || manageChat.error || deleteChat.error || updateProject.error || deleteProject.error) && <div className="toast error"><X size={16} />{(send.error || regenerate.error || branch.error || stop.error || createChat.error || createProject.error || importProject.error || manageChat.error || deleteChat.error || updateProject.error || deleteProject.error)?.message}</div>}
