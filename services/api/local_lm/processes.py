@@ -96,7 +96,10 @@ class ProcessSupervisor:
         )
         return self.statuses()[0]
 
-    async def start_media(self) -> WorkerStatus:
+    async def start_media(
+        self,
+        provisional_model_paths: tuple[Path, dict[str, str]] | None = None,
+    ) -> WorkerStatus:
         executable = self.settings.comfy_executable
         directory = self.settings.comfy_directory
         if not executable or not directory:
@@ -111,6 +114,11 @@ class ProcessSupervisor:
         trusted_custom_nodes = await self._trusted_comfy_node_folders()
         output_directory = self.settings.comfy_output_dir.resolve()
         output_directory.mkdir(parents=True, exist_ok=True)
+        model_paths_config = (
+            self._write_comfy_model_paths(provisional_model_paths)
+            if provisional_model_paths
+            else self._write_comfy_model_paths()
+        )
         command = [
             str(executable.expanduser().resolve(strict=True)),
             str(entrypoint),
@@ -119,7 +127,7 @@ class ProcessSupervisor:
             "--port",
             str(parsed.port or 8188),
             "--extra-model-paths-config",
-            str(self._write_comfy_model_paths()),
+            str(model_paths_config),
             "--output-directory",
             str(output_directory),
             "--preview-method",
@@ -154,7 +162,10 @@ class ProcessSupervisor:
                 await manager.verify(install)
             return [install.installed_path for install in installs]
 
-    def _write_comfy_model_paths(self) -> Path:
+    def _write_comfy_model_paths(
+        self,
+        provisional_model_paths: tuple[Path, dict[str, str]] | None = None,
+    ) -> Path:
         from sqlalchemy import select
 
         from .db import SessionLocal
@@ -177,6 +188,16 @@ class ProcessSupervisor:
                 if signature in seen:
                     continue
                 seen.add(signature)
+                config[f"local_lm_{len(config) + 1}"] = {
+                    "base_path": base_path,
+                    **paths,
+                }
+        if provisional_model_paths:
+            provisional_root, raw_paths = provisional_model_paths
+            paths = self._validated_comfy_paths(raw_paths)
+            base_path = str(provisional_root.resolve())
+            signature = (base_path, tuple(sorted(paths.items())))
+            if paths and signature not in seen:
                 config[f"local_lm_{len(config) + 1}"] = {
                     "base_path": base_path,
                     **paths,

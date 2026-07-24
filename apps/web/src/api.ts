@@ -4,6 +4,7 @@ import type {
   ArtifactLibraryItem,
   ArtifactStorageInfo,
   BackupInfo,
+  CatalogModel,
   CatalogPage,
   CatalogDetail,
   CatalogPreflight,
@@ -315,6 +316,8 @@ export const api = {
     for (const [key, value] of Object.entries(filters)) if (value) parameters.set(key, value);
     return request<CatalogPage>(`/api/catalog?${parameters.toString()}`);
   },
+  workflowCatalogModels: (role: string) =>
+    request<CatalogModel[]>(`/api/catalog/workflow-models?${new URLSearchParams({ role })}`),
   catalogDetail: (remoteId: string, role: string, revision = "main") =>
     request<CatalogDetail>(`/api/catalog/${remoteId}?${new URLSearchParams({ role, revision })}`),
   catalogPreflight: (

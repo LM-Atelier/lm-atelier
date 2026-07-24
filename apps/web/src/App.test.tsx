@@ -169,6 +169,7 @@ vi.mock("./api", () => ({
     stopWorker: vi.fn(),
     createBackup: vi.fn(),
     catalog: vi.fn(),
+    workflowCatalogModels: vi.fn(),
     catalogDetail: vi.fn(),
     catalogPreflight: vi.fn(),
     recipes: vi.fn().mockResolvedValue([]),
@@ -208,6 +209,7 @@ describe("App", () => {
     vi.mocked(api.workers).mockResolvedValue([]);
     vi.mocked(api.models).mockResolvedValue([]);
     vi.mocked(api.catalog).mockResolvedValue({ items: [], next_cursor: null });
+    vi.mocked(api.workflowCatalogModels).mockResolvedValue([]);
     vi.mocked(api.workflows).mockResolvedValue([]);
     vi.mocked(api.customNodes).mockResolvedValue([]);
   });
@@ -281,6 +283,51 @@ describe("App", () => {
     fireEvent.click(screen.getByText("Save chat"));
     await waitFor(() => expect(vi.mocked(api.updateChat).mock.calls[0]?.[0]).toBe("chat-1"));
     expect(vi.mocked(api.updateChat).mock.calls[0]?.[1]).toMatchObject({ title: "Renamed notes", project_id: null, archived: true });
+  });
+
+  it("removes a deleted chat immediately while the API request is pending", async () => {
+    const stamp = "2026-07-22T00:00:00Z";
+    const chats = ["First chat", "Second chat"].map((title, index) => ({
+      id: `chat-${index + 1}`,
+      project_id: null,
+      title,
+      archived: false,
+      routing_mode: "auto" as const,
+      confirm_uncertain_media: false,
+      active_chat_profile_id: null,
+      active_image_profile_id: null,
+      active_video_profile_id: null,
+      active_head_message_id: null,
+      created_at: stamp,
+      updated_at: stamp,
+    }));
+    vi.mocked(api.chats).mockResolvedValue(chats);
+    vi.mocked(api.chat).mockImplementation(async (id) => ({
+      ...chats.find((chat) => chat.id === id)!,
+      messages: [],
+    }));
+    let finishDelete: (() => void) | undefined;
+    vi.mocked(api.deleteChat).mockImplementation(
+      () => new Promise<void>((resolve) => { finishDelete = resolve; }),
+    );
+    const confirm = vi.spyOn(window, "confirm").mockReturnValue(true);
+    const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+    render(
+      <QueryClientProvider client={client}>
+        <App />
+      </QueryClientProvider>,
+    );
+
+    fireEvent.click(await screen.findByRole("button", { name: "Manage First chat" }));
+    fireEvent.click(screen.getByRole("button", { name: "Delete chat" }));
+
+    await waitFor(() => {
+      expect(screen.queryByRole("button", { name: "Manage First chat" })).not.toBeInTheDocument();
+      expect(screen.getByRole("button", { name: "Manage Second chat" })).toBeInTheDocument();
+      expect(localStorage.getItem("local-lm-chat")).toBe("chat-2");
+    });
+    finishDelete?.();
+    confirm.mockRestore();
   });
 
   it("contains long chat lists in a dedicated workspace scroll region", async () => {
@@ -843,6 +890,7 @@ describe("App", () => {
       },
     ]);
     vi.mocked(api.catalog).mockResolvedValue({ items: [model], next_cursor: null });
+    vi.mocked(api.workflowCatalogModels).mockResolvedValue([model]);
     const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
     render(
       <QueryClientProvider client={client}>
@@ -853,7 +901,9 @@ describe("App", () => {
     fireEvent.click(await screen.findByText("Model library"));
     fireEvent.change(screen.getAllByRole("combobox")[0], { target: { value: "image" } });
 
+    expect(await screen.findByRole("heading", { name: "One-click models" })).toBeInTheDocument();
     expect(await screen.findByRole("button", { name: "Install" })).toBeEnabled();
+    expect(screen.getAllByText("sdxl-turbo")).toHaveLength(1);
   });
 
   it("opens the advanced local model import form", async () => {
@@ -883,10 +933,14 @@ describe("App", () => {
     );
     fireEvent.click(await screen.findByText("Model library"));
     expect(await screen.findByLabelText("Compatibility filter")).toBeInTheDocument();
+    expect(screen.getByLabelText("Last updated filter")).toBeInTheDocument();
     expect(screen.getByLabelText("Format filter")).toBeInTheDocument();
+    fireEvent.change(screen.getByLabelText("Last updated filter"), { target: { value: "30" } });
+    await waitFor(() => expect(vi.mocked(api.catalog).mock.calls.at(-1)?.[4]).toMatchObject({
+      updated_within_days: "30",
+    }));
     fireEvent.click(await screen.findByText("Load more models"));
-    await waitFor(() => expect(api.catalog).toHaveBeenCalledTimes(2));
-    expect(vi.mocked(api.catalog).mock.calls[1]?.[3]).toContain("cursor=next");
+    await waitFor(() => expect(vi.mocked(api.catalog).mock.calls.at(-1)?.[3]).toContain("cursor=next"));
   });
 
   it("preflights and queues a safe catalog model from one click", async () => {
