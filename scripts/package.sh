@@ -26,11 +26,8 @@ cp -R apps/web/dist "$bundle/apps/web/dist"
 
 tar -C "$staging" -czf "release/lm-atelier-$version.tar.gz" "lm-atelier-$version"
 (
-  cd "$staging"
-  zip -qr "$root/release/lm-atelier-$version.zip" "lm-atelier-$version"
-)
-(
   cd release
-  sha256sum "lm-atelier-$version.tar.gz" "lm-atelier-$version.zip" > SHA256SUMS
+  sha256sum "lm-atelier-$version.tar.gz" > SHA256SUMS
 )
-echo "Created release/lm-atelier-$version.tar.gz and release/lm-atelier-$version.zip"
+echo "Created release/lm-atelier-$version.tar.gz"
+echo "Build the Windows ZIP with scripts/package.ps1 on Windows."
