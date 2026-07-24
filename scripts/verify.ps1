@@ -84,7 +84,7 @@ for path in paths:
 
     Write-Host "==> Windows packaging syntax"
     $PowerShellErrors = @()
-    Get-ChildItem -LiteralPath "packaging/windows" -Filter "*.ps1" | ForEach-Object {
+    Get-ChildItem -LiteralPath "packaging/windows", "scripts" -Filter "*.ps1" | ForEach-Object {
         $Tokens = $null
         $Errors = $null
         [System.Management.Automation.Language.Parser]::ParseFile(
