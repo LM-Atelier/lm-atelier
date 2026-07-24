@@ -63,6 +63,7 @@ from .schemas import (
     ArtifactStorageInfo,
     BackupInfo,
     CatalogDetail,
+    CatalogModel,
     CatalogPage,
     CatalogPreflight,
     CatalogPreflightCheck,
@@ -990,16 +991,19 @@ async def catalog_search(
     min_parameters: int | None = Query(default=None, ge=0),
     max_parameters: int | None = Query(default=None, ge=0),
     max_size_bytes: int | None = Query(default=None, ge=0),
+    updated_within_days: int | None = Query(default=None, ge=1, le=3650),
 ) -> CatalogPage:
-    catalog: HuggingFaceCatalog = _services(request).catalog
+    services = _services(request)
+    catalog: HuggingFaceCatalog = services.catalog
     try:
-        return await catalog.search(
+        media_catalog = role in {"image", "video"} and services.settings.media_engine == "comfyui"
+        page = await catalog.search(
             query=query,
             role=role,
             sort=sort,
             limit=limit,
             cursor=cursor,
-            compatibility=compatibility,
+            compatibility=None if media_catalog else compatibility,
             file_format=file_format,
             quantization=quantization,
             license_id=license_id,
@@ -1008,11 +1012,69 @@ async def catalog_search(
             min_parameters=min_parameters,
             max_parameters=max_parameters,
             max_size_bytes=max_size_bytes,
+            updated_within_days=updated_within_days,
         )
+        if not media_catalog or role is None:
+            return page
+        registry = ComfyTemplateRegistry(services.settings)
+        items = []
+        for item in page.items:
+            ready = bool(registry.matches(item.remote_id, role))
+            items.append(
+                item.model_copy(
+                    update={
+                        "compatibility": "likely" if ready else "unsupported",
+                        "compatibility_reasons": (
+                            ["Official ComfyUI workflow available"]
+                            if ready
+                            else ["No official workflow declares this exact model repository"]
+                        ),
+                    }
+                )
+            )
+        if compatibility:
+            items = [item for item in items if item.compatibility == compatibility]
+        if sort == "compatible":
+            items.sort(
+                key=lambda item: (
+                    item.compatibility != "likely",
+                    -(item.downloads or 0),
+                )
+            )
+        return page.model_copy(update={"items": items})
     except ValueError as exc:
         raise HTTPException(422, f"invalid catalog request: {exc}") from exc
     except Exception as exc:
         raise HTTPException(502, f"catalog request failed: {exc}") from exc
+
+
+@router.get("/catalog/workflow-models", response_model=list[CatalogModel])
+async def workflow_catalog_models(request: Request, role: str) -> list[CatalogModel]:
+    if role not in {"image", "video"}:
+        return []
+    registry = ComfyTemplateRegistry(_services(request).settings)
+    repositories: dict[str, CatalogModel] = {}
+    for template in registry.available(role):
+        key = template.remote_id.casefold()
+        if key in repositories:
+            continue
+        remote_id = template.remote_id
+        repositories[key] = CatalogModel(
+            remote_id=remote_id,
+            name=remote_id.rsplit("/", 1)[-1],
+            author=remote_id.split("/", 1)[0],
+            pipeline_tag="text-to-image" if role == "image" else "text-to-video",
+            formats=sorted(
+                {
+                    Path(dependency.path).suffix.lower().lstrip(".")
+                    for dependency in template.dependencies
+                    if Path(dependency.path).suffix
+                }
+            ),
+            compatibility="likely",
+            compatibility_reasons=["Official ComfyUI workflow available"],
+        )
+    return sorted(repositories.values(), key=lambda item: item.remote_id.casefold())
 
 
 @router.get("/catalog/{owner}/{name}", response_model=CatalogDetail)
@@ -1245,7 +1307,11 @@ async def install_recipe(recipe_id: str, request: Request, session: SessionDep) 
 @router.get("/models", response_model=list[ModelInstallOut])
 async def list_models(session: SessionDep) -> list[ModelInstall]:
     return list(
-        session.scalars(select(ModelInstall).order_by(ModelInstall.updated_at.desc())).all()
+        session.scalars(
+            select(ModelInstall)
+            .where(ModelInstall.active.is_(True))
+            .order_by(ModelInstall.updated_at.desc())
+        ).all()
     )
 
 
@@ -1257,7 +1323,10 @@ async def model_storage(request: Request, session: SessionDep) -> ModelStorageIn
         installed_bytes=_path_size(settings.model_dir),
         partial_download_bytes=sum(_path_size(path) for path in partials),
         catalog_cache_bytes=_path_size(settings.catalog_cache_dir),
-        installed_count=session.scalar(select(func.count(ModelInstall.id))) or 0,
+        installed_count=session.scalar(
+            select(func.count(ModelInstall.id)).where(ModelInstall.active.is_(True))
+        )
+        or 0,
         partial_download_count=len(partials),
     )
 

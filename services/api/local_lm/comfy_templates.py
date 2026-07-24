@@ -3,43 +3,13 @@ from __future__ import annotations
 import hashlib
 import json
 import re
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 from urllib.parse import unquote, urlparse
 
 from .config import Settings
 
-_GENERIC_TOKENS = {
-    "comfy",
-    "comfyui",
-    "diffusion",
-    "huggingface",
-    "image",
-    "model",
-    "models",
-    "official",
-    "org",
-    "template",
-    "text",
-    "to",
-    "turbo",
-    "video",
-    "workflow",
-}
-_SPECIALTY_TOKENS = {
-    "control",
-    "controlnet",
-    "edit",
-    "fun",
-    "i2v",
-    "img2img",
-    "inpaint",
-    "lora",
-    "redux",
-    "union",
-    "upscale",
-}
 _RUNTIME_PARAMETERS = {
     "batch_size": "batch_size",
     "cfg": "cfg",
@@ -114,7 +84,13 @@ class ComfyTemplateRegistry:
         self.settings = settings
 
     def matches(self, remote_id: str, role: str) -> list[ComfyTemplate]:
-        source_tokens = _tokens(remote_id)
+        return [
+            replace(template, score=1_000)
+            for template in self.available(role)
+            if template.remote_id.casefold() == remote_id.casefold()
+        ]
+
+    def available(self, role: str) -> list[ComfyTemplate]:
         matches: list[ComfyTemplate] = []
         for path in self._template_files():
             try:
@@ -133,34 +109,18 @@ class ComfyTemplateRegistry:
                 continue
             if not _uses_only_core_nodes(raw):
                 continue
-            template_tokens = _tokens(path.stem)
-            repository_tokens = _tokens(dependencies[0].remote_id)
-            overlap = (template_tokens | repository_tokens) & source_tokens
-            meaningful = overlap - _GENERIC_TOKENS
-            exact_repository = dependencies[0].remote_id.casefold() == remote_id.casefold()
-            if not exact_repository and not meaningful:
-                continue
-            source_specialties = source_tokens & _SPECIALTY_TOKENS
-            template_specialties = template_tokens & _SPECIALTY_TOKENS
-            specialty_penalty = len(template_specialties - source_specialties) * 20
-            score = (
-                (1_000 if exact_repository else 0)
-                + len(meaningful) * 20
-                + len(overlap) * 2
-                - specialty_penalty
-            )
             matches.append(
                 ComfyTemplate(
                     id=path.stem,
                     path=path,
                     role=role,
                     operation=_operation_for_template(path.stem, role),
-                    score=score,
+                    score=0,
                     sha256=hashlib.sha256(path.read_bytes()).hexdigest(),
                     dependencies=dependencies,
                 )
             )
-        return sorted(matches, key=lambda item: (-item.score, item.id))
+        return sorted(matches, key=lambda item: item.id)
 
     def get(self, template_id: str, role: str) -> ComfyTemplate:
         if not re.fullmatch(r"[A-Za-z0-9_.-]+", template_id):
@@ -194,10 +154,16 @@ class ComfyTemplateRegistry:
         template_id: str,
         role: str,
         object_info: dict[str, Any],
+        *,
+        validate_model_choices: bool = True,
     ) -> CompiledComfyTemplate:
         template = self.get(template_id, role)
         ui_graph = _read_json(template.path)
-        api_graph, input_schema = _compile_ui_graph(ui_graph, object_info)
+        api_graph, input_schema = _compile_ui_graph(
+            ui_graph,
+            object_info,
+            validate_model_choices=validate_model_choices,
+        )
         output_nodes = [
             node_id
             for node_id, node in api_graph.items()
@@ -377,6 +343,8 @@ def _parse_huggingface_url(url: str) -> tuple[str, str, str] | None:
 def _compile_ui_graph(
     ui_graph: dict[str, Any],
     object_info: dict[str, Any],
+    *,
+    validate_model_choices: bool = True,
 ) -> tuple[dict[str, Any], dict[str, Any]]:
     definitions = {
         str(item.get("id")): item
@@ -482,7 +450,11 @@ def _compile_ui_graph(
             continue
         if int(node.get("mode") or 0) in {2, 4}:
             continue
-        inputs = _widget_values(node, node_info)
+        inputs = _widget_values(
+            node,
+            node_info,
+            validate_model_choices=validate_model_choices,
+        )
         for (target_id, input_name), connection in linked_inputs.items():
             if target_id == node_id:
                 inputs[input_name] = connection
@@ -530,7 +502,12 @@ def _normalize_link(value: Any) -> tuple[str, int, str, int] | None:
     return None
 
 
-def _widget_values(node: dict[str, Any], node_info: dict[str, Any]) -> dict[str, Any]:
+def _widget_values(
+    node: dict[str, Any],
+    node_info: dict[str, Any],
+    *,
+    validate_model_choices: bool = True,
+) -> dict[str, Any]:
     raw_values = node.get("widgets_values")
     values = list(raw_values) if isinstance(raw_values, list) else [raw_values]
     if raw_values is None:
@@ -546,8 +523,28 @@ def _widget_values(node: dict[str, Any], node_info: dict[str, Any]) -> dict[str,
             spec = definitions.get(name)
             if not _is_widget_spec(spec):
                 continue
+            spec = cast(list[Any], spec)
             if cursor < len(values):
-                result[str(name)] = values[cursor]
+                selected = values[cursor]
+                choices = (
+                    spec[0]
+                    if isinstance(spec[0], list)
+                    else (
+                        spec[1].get("options")
+                        if len(spec) > 1 and isinstance(spec[1], dict) and spec[0] == "COMBO"
+                        else None
+                    )
+                )
+                if (
+                    validate_model_choices
+                    and isinstance(choices, list)
+                    and choices
+                    and selected not in choices
+                ):
+                    raise ValueError(
+                        f"ComfyUI does not advertise the template value for {name}: {selected}"
+                    )
+                result[str(name)] = selected
                 cursor += 1
             else:
                 default = _widget_default(spec)

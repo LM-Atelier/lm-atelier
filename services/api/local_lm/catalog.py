@@ -5,7 +5,7 @@ import hashlib
 import json
 import os
 import re
-from datetime import datetime
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any, cast
 from urllib.parse import urlparse
@@ -26,7 +26,7 @@ SORTS = {
 
 _QUANTIZATION = re.compile(r"^(?:q\d(?:_[a-z0-9]+)*|i?q\d(?:_[a-z0-9]+)*|fp\d+|bf16)$", re.I)
 _PARAMETERS = re.compile(r"(?:^|[-_ ])(\d+(?:\.\d+)?)\s*([bmk])(?:$|[-_ ])", re.I)
-_CACHE_VERSION = 2
+_CACHE_VERSION = 3
 
 
 class HuggingFaceCatalog:
@@ -62,6 +62,7 @@ class HuggingFaceCatalog:
         min_parameters: int | None = None,
         max_parameters: int | None = None,
         max_size_bytes: int | None = None,
+        updated_within_days: int | None = None,
     ) -> CatalogPage:
         params: dict[str, Any] = {
             "search": query or None,
@@ -90,6 +91,7 @@ class HuggingFaceCatalog:
             min_parameters,
             max_parameters,
             max_size_bytes,
+            updated_within_days,
         )
         try:
             response = await self._client.get(url, params=None if cursor else params)
@@ -110,6 +112,7 @@ class HuggingFaceCatalog:
                 min_parameters=min_parameters,
                 max_parameters=max_parameters,
                 max_size_bytes=max_size_bytes,
+                updated_within_days=updated_within_days,
             )
             if sort == "compatible":
                 rank = {"tested": 0, "likely": 1, "advanced_import": 2, "unsupported": 3}
@@ -257,7 +260,13 @@ class HuggingFaceCatalog:
         min_parameters: int | None = None,
         max_parameters: int | None = None,
         max_size_bytes: int | None = None,
+        updated_within_days: int | None = None,
     ) -> list[CatalogModel]:
+        updated_after = (
+            datetime.now(UTC) - timedelta(days=updated_within_days)
+            if updated_within_days is not None
+            else None
+        )
         return [
             item
             for item in items
@@ -281,6 +290,10 @@ class HuggingFaceCatalog:
             and (
                 max_size_bytes is None
                 or (item.total_size_bytes is not None and item.total_size_bytes <= max_size_bytes)
+            )
+            and (
+                updated_after is None
+                or (item.last_modified is not None and item.last_modified >= updated_after)
             )
         ]
 
