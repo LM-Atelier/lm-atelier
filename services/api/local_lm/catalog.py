@@ -26,6 +26,7 @@ SORTS = {
 
 _QUANTIZATION = re.compile(r"^(?:q\d(?:_[a-z0-9]+)*|i?q\d(?:_[a-z0-9]+)*|fp\d+|bf16)$", re.I)
 _PARAMETERS = re.compile(r"(?:^|[-_ ])(\d+(?:\.\d+)?)\s*([bmk])(?:$|[-_ ])", re.I)
+_CACHE_VERSION = 2
 
 
 class HuggingFaceCatalog:
@@ -158,7 +159,7 @@ class HuggingFaceCatalog:
         model = self._normalize(payload, requested_role)
         result = {
             "model": model.model_dump(mode="json"),
-            "revision": revision,
+            "revision": str(payload.get("sha") or revision),
             "files": siblings,
         }
         self._write_cache(cache, json.dumps(result, default=str))
@@ -201,7 +202,9 @@ class HuggingFaceCatalog:
         return list(await asyncio.gather(*(hydrate(item) for item in items)))
 
     def _cache_path(self, *parts: object) -> Path:
-        key = hashlib.sha256(json.dumps(parts, sort_keys=True, default=str).encode()).hexdigest()
+        key = hashlib.sha256(
+            json.dumps((_CACHE_VERSION, parts), sort_keys=True, default=str).encode()
+        ).hexdigest()
         return self._cache_dir / f"{key}.json"
 
     @staticmethod
