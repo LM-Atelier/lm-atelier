@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import ctypes
 import json
 import logging
 import os
@@ -75,11 +76,12 @@ class ProcessSupervisor:
         if not executable:
             raise RuntimeError("LOCAL_LM_LLAMA_EXECUTABLE is not configured")
         model_path = self._gguf_path(Path(install.local_path), install.manifest_json)
+        launch_path = self._llama_model_path(model_path)
         parsed = urlparse(self.settings.llama_url)
         command = [
             str(executable.expanduser().resolve(strict=True)),
             "--model",
-            str(model_path),
+            str(launch_path),
             "--host",
             parsed.hostname or "127.0.0.1",
             "--port",
@@ -324,6 +326,32 @@ class ProcessSupervisor:
         if len(candidates) != 1:
             raise ValueError("the model install must resolve to exactly one GGUF file")
         return candidates[0]
+
+    @staticmethod
+    def _llama_model_path(path: Path) -> Path:
+        """Use the filesystem's short name when llama.cpp would exceed MAX_PATH."""
+        if os.name != "nt" or len(str(path)) < 240:
+            return path
+        kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)  # type: ignore[attr-defined]
+        get_short_path = kernel32.GetShortPathNameW
+        get_short_path.argtypes = [ctypes.c_wchar_p, ctypes.c_wchar_p, ctypes.c_uint32]
+        get_short_path.restype = ctypes.c_uint32
+        buffer = ctypes.create_unicode_buffer(32_768)
+        length = get_short_path(str(path), buffer, len(buffer))
+        if not length or length >= len(buffer):
+            error = ctypes.get_last_error()
+            raise OSError(
+                error,
+                "The model path is too long for llama.cpp and Windows could not create "
+                "a short path. Move the LM Atelier data folder closer to the drive root.",
+                str(path),
+            )
+        shortened = Path(buffer.value)
+        if len(str(shortened)) >= 260:
+            raise OSError(
+                "The model path remains too long for llama.cpp after Windows path shortening"
+            )
+        return shortened
 
     @staticmethod
     def _llama_load_arguments(settings: dict[str, Any]) -> list[str]:

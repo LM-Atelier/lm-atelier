@@ -5,6 +5,8 @@ import App from "./App";
 import { api, connectEvents } from "./api";
 import type { EngineCapabilities, SettingField } from "./types";
 
+const clipboardWrite = vi.fn();
+
 const imageSetting: SettingField = {
   key: "negative_prompt",
   label: "Negative prompt",
@@ -204,6 +206,11 @@ vi.mock("./api", () => ({
 describe("App", () => {
   beforeEach(() => {
     vi.clearAllMocks();
+    clipboardWrite.mockResolvedValue(undefined);
+    Object.defineProperty(navigator, "clipboard", {
+      configurable: true,
+      value: { writeText: clipboardWrite },
+    });
     localStorage.clear();
     vi.mocked(api.profiles).mockResolvedValue([]);
     vi.mocked(api.chats).mockResolvedValue([]);
@@ -320,6 +327,8 @@ describe("App", () => {
     );
 
     fireEvent.click(await screen.findByRole("button", { name: "Manage First chat" }));
+    expect(screen.getByText("Ask before Auto mode starts an image or video when the planner is unsure.")).toBeVisible();
+    fireEvent.click(screen.getByRole("checkbox", { name: /Delete generated media with chat/ }));
     fireEvent.click(screen.getByRole("button", { name: "Delete chat" }));
 
     await waitFor(() => {
@@ -327,6 +336,7 @@ describe("App", () => {
       expect(screen.getByRole("button", { name: "Manage Second chat" })).toBeInTheDocument();
       expect(localStorage.getItem("local-lm-chat")).toBe("chat-2");
     });
+    expect(vi.mocked(api.deleteChat)).toHaveBeenCalledWith("chat-1", true);
     finishDelete?.();
     confirm.mockRestore();
   });
@@ -743,6 +753,132 @@ describe("App", () => {
     );
     expect(await screen.findByAltText("Generation preview")).toBeInTheDocument();
     expect(screen.getByText("Generation preview")).toBeInTheDocument();
+  });
+
+  it("copies complete messages and fenced code blocks", async () => {
+    localStorage.setItem("local-lm-chat", "chat-copy");
+    const stamp = "2026-07-22T00:00:00Z";
+    const response = "Run this command:\n\n```powershell\nGet-Date\n```";
+    vi.mocked(api.chats).mockResolvedValue([{
+      id: "chat-copy",
+      project_id: null,
+      title: "Copy text",
+      archived: false,
+      routing_mode: "text",
+      confirm_uncertain_media: false,
+      active_chat_profile_id: null,
+      active_image_profile_id: null,
+      active_video_profile_id: null,
+      active_head_message_id: "assistant-copy",
+      created_at: stamp,
+      updated_at: stamp,
+    }]);
+    vi.mocked(api.chat).mockResolvedValue({
+      id: "chat-copy",
+      project_id: null,
+      title: "Copy text",
+      archived: false,
+      routing_mode: "text",
+      confirm_uncertain_media: false,
+      active_chat_profile_id: null,
+      active_image_profile_id: null,
+      active_video_profile_id: null,
+      active_head_message_id: "assistant-copy",
+      created_at: stamp,
+      updated_at: stamp,
+      messages: [
+        {
+          id: "user-copy",
+          chat_id: "chat-copy",
+          parent_id: null,
+          role: "user",
+          status: "complete",
+          parts: [{ id: "user-text", position: 0, type: "text", text: "Show a command", artifact_id: null, metadata_json: {} }],
+          created_at: stamp,
+          updated_at: stamp,
+        },
+        {
+          id: "assistant-copy",
+          chat_id: "chat-copy",
+          parent_id: "user-copy",
+          role: "assistant",
+          status: "complete",
+          parts: [{ id: "assistant-text", position: 0, type: "text", text: response, artifact_id: null, metadata_json: {} }],
+          created_at: stamp,
+          updated_at: stamp,
+        },
+      ],
+    });
+    const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+    render(
+      <QueryClientProvider client={client}>
+        <App />
+      </QueryClientProvider>,
+    );
+
+    fireEvent.click(await screen.findByRole("button", { name: "Copy assistant message" }));
+    await waitFor(() => expect(clipboardWrite).toHaveBeenCalledWith(response));
+
+    fireEvent.click(screen.getByRole("button", { name: "Copy code block" }));
+    await waitFor(() => expect(clipboardWrite).toHaveBeenCalledWith("Get-Date"));
+  });
+
+  it("shows the persisted chat startup phase before the first token", async () => {
+    localStorage.setItem("local-lm-chat", "chat-starting");
+    const stamp = new Date().toISOString();
+    const chat = {
+      id: "chat-starting",
+      project_id: null,
+      title: "Starting response",
+      archived: false,
+      routing_mode: "text" as const,
+      confirm_uncertain_media: false,
+      active_chat_profile_id: null,
+      active_image_profile_id: null,
+      active_video_profile_id: null,
+      active_head_message_id: "assistant-starting",
+      created_at: stamp,
+      updated_at: stamp,
+    };
+    vi.mocked(api.chats).mockResolvedValue([chat]);
+    vi.mocked(api.chat).mockResolvedValue({
+      ...chat,
+      messages: [
+        {
+          id: "user-starting",
+          chat_id: chat.id,
+          parent_id: null,
+          role: "user",
+          status: "complete",
+          parts: [{ id: "prompt", position: 0, type: "text", text: "Hello", artifact_id: null, metadata_json: {} }],
+          created_at: stamp,
+          updated_at: stamp,
+        },
+        {
+          id: "assistant-starting",
+          chat_id: chat.id,
+          parent_id: "user-starting",
+          role: "assistant",
+          status: "pending",
+          parts: [
+            { id: "empty-text", position: 0, type: "text", text: "", artifact_id: null, metadata_json: {} },
+            { id: "chat-progress", position: 1, type: "progress", text: "Preparing chat model", artifact_id: null, metadata_json: { activity: "chat", progress: 0, phase: "preparing chat model" } },
+          ],
+          created_at: stamp,
+          updated_at: stamp,
+        },
+      ],
+    });
+    const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+    render(
+      <QueryClientProvider client={client}>
+        <App />
+      </QueryClientProvider>,
+    );
+
+    const status = await screen.findByRole("status");
+    expect(status).toHaveTextContent(/Preparing chat model/);
+    expect(status).toHaveTextContent(/· 0s/);
   });
 
   it("shows managed worker queue and memory telemetry", async () => {
@@ -1339,6 +1475,42 @@ describe("App", () => {
     expect(screen.queryByText("Negative prompt")).not.toBeInTheDocument();
   });
 
+  it("shows an Auto submission while model routing is pending", async () => {
+    const stamp = "2026-07-22T00:00:00Z";
+    const chat = {
+      id: "chat-auto-routing",
+      project_id: null,
+      title: "Auto routing",
+      archived: false,
+      routing_mode: "auto" as const,
+      confirm_uncertain_media: false,
+      active_chat_profile_id: null,
+      active_image_profile_id: null,
+      active_video_profile_id: null,
+      active_head_message_id: null,
+      created_at: stamp,
+      updated_at: stamp,
+    };
+    localStorage.setItem("local-lm-chat", chat.id);
+    vi.mocked(api.chats).mockResolvedValue([chat]);
+    vi.mocked(api.chat).mockResolvedValue({ ...chat, messages: [] });
+    vi.mocked(api.sendTurn).mockReturnValue(new Promise(() => {}));
+    const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+    render(
+      <QueryClientProvider client={client}>
+        <App />
+      </QueryClientProvider>,
+    );
+
+    const composer = await screen.findByPlaceholderText(/Ask anything/);
+    fireEvent.change(composer, { target: { value: "Surprise me with a tiny story" } });
+    fireEvent.click(screen.getByRole("button", { name: "Send" }));
+
+    expect(await screen.findByText("Surprise me with a tiny story")).toBeVisible();
+    expect(screen.getByText("Choosing mode and model…")).toBeVisible();
+    expect(screen.getByRole("button", { name: "Preparing response" })).toBeDisabled();
+  });
+
   it("applies the pinned workflow schema to per-turn controls", async () => {
     const stamp = "2026-07-22T00:00:00Z";
     const project = {
@@ -1469,17 +1641,17 @@ describe("App", () => {
     fireEvent.change(screen.getByRole("spinbutton", { name: /Maximum output/ }), { target: { value: "4096" } });
     fireEvent.click(screen.getByRole("button", { name: "Close settings" }));
 
-    fireEvent.change(screen.getByPlaceholderText(/Ask anything/), { target: { value: "Count to 1000" } });
-    fireEvent.click(screen.getByRole("button", { name: "Send" }));
-    await waitFor(() => expect(api.sendTurn).toHaveBeenCalledWith(chat.id, "Count to 1000", "text", [], { max_tokens: 4096 }));
+    fireEvent.click(screen.getByRole("button", { name: "Regenerate response" }));
+    await waitFor(() => expect(api.regenerateMessage).toHaveBeenCalledWith(assistantMessage.id, { max_tokens: 4096 }));
 
     fireEvent.click(screen.getByText("Edit and branch"));
     fireEvent.change(screen.getByLabelText("Edit message"), { target: { value: "Count to 1000" } });
     fireEvent.click(screen.getByText("Send edited message"));
     await waitFor(() => expect(api.branchMessage).toHaveBeenCalledWith(userMessage.id, "Count to 1000", { max_tokens: 4096 }));
 
-    fireEvent.click(screen.getByRole("button", { name: "Regenerate response" }));
-    await waitFor(() => expect(api.regenerateMessage).toHaveBeenCalledWith(assistantMessage.id, { max_tokens: 4096 }));
+    fireEvent.change(screen.getByPlaceholderText(/Ask anything/), { target: { value: "Count to 1000" } });
+    fireEvent.click(screen.getByRole("button", { name: "Send" }));
+    await waitFor(() => expect(api.sendTurn).toHaveBeenCalledWith(chat.id, "Count to 1000", "text", [], { max_tokens: 4096 }));
   });
 
   it("keeps turn controls isolated to their chat", async () => {

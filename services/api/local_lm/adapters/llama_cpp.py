@@ -49,7 +49,11 @@ class LlamaCppAdapter:
         )
 
     async def count_tokens(self, messages: list[dict[str, Any]]) -> int:
-        payload = {"model": "local-model", "messages": messages}
+        payload = {
+            "model": "local-model",
+            "messages": messages,
+            "chat_template_kwargs": {"enable_thinking": False},
+        }
         try:
             response = await self._client.post(
                 "/v1/chat/completions/input_tokens", json=payload, timeout=10
@@ -105,6 +109,7 @@ class LlamaCppAdapter:
             "messages": request.messages,
             "stream": True,
             "stream_options": {"include_usage": True},
+            "chat_template_kwargs": {"enable_thinking": False},
             **self._request_settings(request.settings),
         }
         if request.tools:

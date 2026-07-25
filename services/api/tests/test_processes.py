@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 from pathlib import Path
 
 import pytest
@@ -40,6 +41,20 @@ def test_gguf_resolution_rejects_ambiguous_installs(tmp_path: Path) -> None:
     (tmp_path / "b.gguf").touch()
     with pytest.raises(ValueError, match="exactly one"):
         ProcessSupervisor._gguf_path(tmp_path, {})
+
+
+@pytest.mark.skipif(os.name != "nt", reason="Windows short-path behavior")
+def test_long_llama_model_path_uses_existing_short_name(tmp_path: Path) -> None:
+    model_dir = tmp_path / ("descriptive-model-" * 8)
+    model_dir.mkdir()
+    model_path = model_dir / (("quantized-model-" * 5) + ".gguf")
+    model_path.touch()
+    assert len(str(model_path)) >= 240
+
+    launch_path = ProcessSupervisor._llama_model_path(model_path)
+
+    assert len(str(launch_path)) < 260
+    assert os.path.samefile(launch_path, model_path)
 
 
 def test_chat_memory_estimate_includes_model_and_context_overhead() -> None:

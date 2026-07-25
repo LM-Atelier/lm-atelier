@@ -14,6 +14,7 @@ async def test_llama_adapter_uses_chat_template_token_count_endpoint() -> None:
         assert request.url.path == "/v1/chat/completions/input_tokens"
         payload = json.loads(request.content)
         assert payload["messages"] == [{"role": "user", "content": "Hello"}]
+        assert payload["chat_template_kwargs"] == {"enable_thinking": False}
         return httpx.Response(200, json={"input_tokens": 7})
 
     adapter = LlamaCppAdapter("http://llama.test")
@@ -49,6 +50,7 @@ async def test_llama_adapter_sends_tools_and_streams_structured_deltas() -> None
         payload = json.loads(request.content)
         assert payload["tool_choice"] == "auto"
         assert payload["tools"][0]["function"]["name"] == "choose_route"
+        assert payload["chat_template_kwargs"] == {"enable_thinking": False}
         stream = "".join(
             [
                 'data: {"choices":[{"delta":{"tool_calls":[{"index":0,"function":',

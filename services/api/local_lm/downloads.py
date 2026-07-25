@@ -364,9 +364,11 @@ class DownloadManager:
                     )
 
                 revision = str(info.sha or request.revision)
-                safe_name = request.remote_id.replace("/", "--")
                 staging = self.settings.download_dir / f"{job_id}.partial"
-                destination = self.settings.model_dir / safe_name / revision
+                destination = self.settings.model_dir / self._install_directory_name(
+                    request.remote_id,
+                    revision,
+                )
                 staging.mkdir(parents=True, exist_ok=True)
                 completed_bytes = 0
                 for index, filename in enumerate(filenames):
@@ -1012,6 +1014,12 @@ class DownloadManager:
             else:
                 os.replace(source, target)
         shutil.rmtree(staging, ignore_errors=True)
+
+    @staticmethod
+    def _install_directory_name(remote_id: str, revision: str) -> str:
+        """Keep managed model paths short while retaining identity in the database."""
+        identity = f"{remote_id}\0{revision}".encode()
+        return hashlib.sha256(identity).hexdigest()[:24]
 
     @staticmethod
     def _sha256_file(path: Path) -> str:

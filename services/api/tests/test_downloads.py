@@ -77,6 +77,19 @@ def test_duplicate_active_download_requests_reuse_the_existing_job(
     assert len(jobs) == 1
 
 
+def test_managed_model_directory_is_short_and_stable() -> None:
+    remote_id = "owner/" + ("very-descriptive-model-name-" * 8)
+    revision = "a" * 40
+
+    first = DownloadManager._install_directory_name(remote_id, revision)
+    second = DownloadManager._install_directory_name(remote_id, revision)
+    different = DownloadManager._install_directory_name(remote_id, "b" * 40)
+
+    assert first == second
+    assert first != different
+    assert len(first) == 24
+
+
 async def test_stop_task_terminates_transfer_process_before_controller(
     settings: Settings,
 ) -> None:
