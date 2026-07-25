@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, Mock
@@ -59,6 +60,39 @@ async def test_managed_chat_worker_is_aligned_to_the_run_profile(monkeypatch) ->
 
     assert result == aligned
     processes.load_chat.assert_awaited_once_with(profile, install)
+
+
+async def test_chat_planner_waits_for_media_handoff_resume() -> None:
+    ready = WorkerStatus(
+        name="chat",
+        state="ready",
+        managed=True,
+        running=True,
+        pid=12,
+        profile_id="profile-selected",
+    )
+    processes = SimpleNamespace(
+        settings=SimpleNamespace(
+            llama_executable=Path("llama-server"),
+            worker_startup_seconds=60,
+        ),
+        statuses=Mock(return_value=[ready]),
+    )
+    orchestrator = ConversationOrchestrator(
+        engines=SimpleNamespace(settings=SimpleNamespace(chat_engine="llama.cpp")),
+        artifacts=Mock(),
+        events=Mock(),
+        scheduler=Mock(),
+        processes=processes,
+    )
+    orchestrator._chat_planner_ready.clear()
+
+    waiting = asyncio.create_task(orchestrator._wait_for_chat_planner())
+    await asyncio.sleep(0)
+    assert not waiting.done()
+
+    orchestrator._chat_planner_ready.set()
+    await waiting
 
 
 def test_media_progress_preserves_the_latest_preview() -> None:

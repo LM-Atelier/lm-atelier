@@ -19,7 +19,16 @@ _VIDEO_CREATE = re.compile(
     re.IGNORECASE,
 )
 _DIRECT_IMAGE = re.compile(r"^\s*(?:draw|paint|illustrate|render)\b", re.IGNORECASE)
-_DIRECT_VIDEO = re.compile(r"^\s*(?:animate|make (?:this|that) move)\b", re.IGNORECASE)
+_DIRECT_VIDEO = re.compile(r"^\s*(?:animate|make (?:it|this|that) move)\b", re.IGNORECASE)
+_PRIOR_IMAGE_EDIT = re.compile(
+    r"^\s*(?:please\s+|now\s+)*(?:"
+    r"(?:make|change|turn|edit|modify|adjust)\s+(?:it|this|that|the\s+"
+    r"(?:image|picture|photo|illustration|artwork|logo|icon))\b|"
+    r"(?:add|remove|replace|recolor|crop|resize|brighten|darken|blur|sharpen|"
+    r"rotate|flip)\b"
+    r")",
+    re.IGNORECASE,
+)
 _DISCUSSION = re.compile(
     r"^\s*(?:explain|describe|compare|what|why|how|when|where|who|tell me about|write about)\b",
     re.IGNORECASE,
@@ -88,7 +97,10 @@ class ModalityRouter:
                     "Route the latest user message. A request to discuss, explain, write, or "
                     "analyze media is text; only route image/video when the user wants media "
                     "created or modified. Use prior-image context only for a clear visual "
-                    "follow-up. Always call choose_route and do not answer normally.\n"
+                    "follow-up. An assistant message beginning with 'Generated image' includes "
+                    "the source prompt as a semantic description of that image. Use it to resolve "
+                    "references such as 'it' and rewrite edits as complete standalone prompts. "
+                    "Always call choose_route and do not answer normally.\n"
                     f"Prior generated image available: {'yes' if has_prior_image else 'no'}."
                 ),
             }
@@ -177,6 +189,15 @@ class ModalityRouter:
                 input_artifact_ids,
                 "clear video creation request",
                 0.96,
+            )
+
+        if has_prior_image and _PRIOR_IMAGE_EDIT.search(normalized):
+            return self._media(
+                Operation.IMAGE_TO_IMAGE,
+                normalized,
+                input_artifact_ids,
+                "clear prior-image edit request",
+                0.97,
             )
 
         if _IMAGE_CREATE.search(normalized) or _DIRECT_IMAGE.search(normalized):

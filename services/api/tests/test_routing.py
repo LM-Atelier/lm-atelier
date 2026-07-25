@@ -21,6 +21,11 @@ class CapturingMockChatAdapter(MockChatAdapter):
             yield event
 
 
+class UnavailableChatAdapter(MockChatAdapter):
+    async def stream(self, request: ChatRequest) -> AsyncIterator[ChatEvent]:
+        yield ChatEvent(type="error", data={"error": "chat worker unavailable"})
+
+
 @pytest.mark.parametrize(
     ("text", "expected"),
     [
@@ -59,6 +64,32 @@ def test_image_input_selects_image_to_video() -> None:
         mode=RoutingMode.AUTO,
         input_artifact_ids=["sha256:example"],
     )
+    assert plan.operation == Operation.IMAGE_TO_VIDEO
+
+
+@pytest.mark.asyncio
+async def test_prior_image_edit_routes_without_a_model_planner() -> None:
+    plan = await ModalityRouter().plan_with_model(
+        adapter=UnavailableChatAdapter(),
+        text="Make it green",
+        mode=RoutingMode.AUTO,
+        input_artifact_ids=[],
+        has_prior_image=True,
+    )
+
+    assert plan.operation == Operation.IMAGE_TO_IMAGE
+    assert plan.confidence == 0.97
+    assert plan.reason == "clear prior-image edit request"
+
+
+def test_prior_image_motion_request_still_routes_to_video() -> None:
+    plan = ModalityRouter().plan(
+        text="Make it move",
+        mode=RoutingMode.AUTO,
+        input_artifact_ids=[],
+        has_prior_image=True,
+    )
+
     assert plan.operation == Operation.IMAGE_TO_VIDEO
 
 

@@ -18,7 +18,7 @@ from local_lm.config import Settings
 from local_lm.db import SessionLocal
 from local_lm.domain import JobStatus, utcnow
 from local_lm.downloads import DownloadManager
-from local_lm.models import Artifact, Chat, Job, Run
+from local_lm.models import Artifact, Chat, Job, Run, WorkflowDefinition
 from local_lm.orchestrator import ConversationOrchestrator
 
 
@@ -742,7 +742,10 @@ async def test_text_turn_after_image_keeps_alternating_chat_context(
         )
     assert routing_context == [
         {"role": "user", "content": "Create a reference image"},
-        {"role": "assistant", "content": "[Generated image]"},
+        {
+            "role": "assistant",
+            "content": 'Generated image from this prompt: "Create a reference image".',
+        },
     ]
 
     accepted = await client.post(
@@ -758,9 +761,46 @@ async def test_text_turn_after_image_keeps_alternating_chat_context(
         generation_context = ConversationOrchestrator._context_messages(session, run)
     assert generation_context == [
         {"role": "user", "content": "Create a reference image"},
-        {"role": "assistant", "content": "[Generated image]"},
+        {
+            "role": "assistant",
+            "content": 'Generated image from this prompt: "Create a reference image".',
+        },
         {"role": "user", "content": "Now answer a text question"},
     ]
+
+
+async def test_prior_image_edit_falls_back_to_accumulated_text_prompt(
+    client: AsyncClient,
+) -> None:
+    with SessionLocal() as session:
+        for workflow in session.query(WorkflowDefinition).filter_by(operation="image_to_image"):
+            session.delete(workflow)
+        session.commit()
+
+    chat = (await client.post("/api/chats", json={"title": "Semantic image edit"})).json()
+    first = await client.post(
+        f"/api/chats/{chat['id']}/turns",
+        json={"text": "Make me an image of an apple", "mode": "auto"},
+    )
+    assert first.status_code == 202
+    await wait_for_assistant(client, chat["id"], "image")
+
+    edited = await client.post(
+        f"/api/chats/{chat['id']}/turns",
+        json={"text": "Make it green", "mode": "auto"},
+    )
+    assert edited.status_code == 202
+    edited_run = await wait_for_run(client, edited.json()["run"]["id"])
+
+    assert edited_run["operation"] == "text_to_image"
+    assert edited_run["standalone_prompt"] == (
+        "Make me an image of an apple. Follow-up instruction: Make it green"
+    )
+    edited_message = await wait_for_assistant(client, chat["id"], "image")
+    image = next(part for part in edited_message["parts"] if part["type"] == "image")
+    assert image["artifact"]["metadata_json"]["semantic_description"] == (
+        "Make me an image of an apple. Follow-up instruction: Make it green"
+    )
 
 
 async def test_retention_cleanup_only_removes_expired_unreferenced_artifacts(

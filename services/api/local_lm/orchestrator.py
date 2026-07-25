@@ -132,6 +132,8 @@ class ConversationOrchestrator:
         self.processes = processes
         self.router = ModalityRouter()
         self._tasks: dict[str, asyncio.Task[None]] = {}
+        self._chat_planner_ready = asyncio.Event()
+        self._chat_planner_ready.set()
 
     def recover_interrupted(self) -> None:
         with SessionLocal() as session:
@@ -208,6 +210,8 @@ class ConversationOrchestrator:
 
         mode = request.mode or RoutingMode(chat.routing_mode)
         has_prior_image = self._has_prior_image(session, chat.id)
+        if mode == RoutingMode.AUTO:
+            await self._wait_for_chat_planner()
         plan = await self.router.plan_with_model(
             adapter=self.engines.chat,
             text=request.text,
@@ -225,6 +229,7 @@ class ConversationOrchestrator:
         ):
             raise RouteConfirmationRequired(plan)
         resolved_input_ids = list(request.input_artifact_ids)
+        prior_prompt: str | None = None
         if plan.operation in {Operation.IMAGE_TO_IMAGE, Operation.IMAGE_TO_VIDEO}:
             if not resolved_input_ids:
                 prior_image = self._latest_image(session, chat.id)
@@ -249,10 +254,25 @@ class ConversationOrchestrator:
             model_install_id=profile.model_install_id if profile else None,
         )
         if plan.operation != Operation.TEXT and not workflow_revision:
-            raise ValueError(
-                "No ready workflow matches the active media engine. Install a supported "
-                "image or video model and LM Atelier will configure it automatically."
-            )
+            semantic_fallback = {
+                Operation.IMAGE_TO_IMAGE: Operation.TEXT_TO_IMAGE,
+                Operation.IMAGE_TO_VIDEO: Operation.TEXT_TO_VIDEO,
+            }.get(plan.operation)
+            if semantic_fallback and not request.input_artifact_ids and prior_prompt:
+                plan.operation = semantic_fallback
+                plan.input_artifact_ids = []
+                resolved_input_ids = []
+                workflow_revision = self._workflow_for_operation(
+                    session,
+                    plan.operation,
+                    project_id=chat.project_id,
+                    model_install_id=profile.model_install_id if profile else None,
+                )
+            if not workflow_revision:
+                raise ValueError(
+                    "No ready workflow matches the active media engine. Install a supported "
+                    "image or video model and LM Atelier will configure it automatically."
+                )
         fields = workflow_settings(
             self._fields_for_operation(plan.operation),
             workflow_revision.input_schema_json if workflow_revision else None,
@@ -675,6 +695,32 @@ class ConversationOrchestrator:
             return status
         return await self.processes.load_chat(profile, install)
 
+    async def _wait_for_chat_planner(self) -> None:
+        if (
+            self.engines.settings.chat_engine != "llama.cpp"
+            or not self.processes.settings.llama_executable
+        ):
+            return
+        deadline = asyncio.get_running_loop().time() + min(
+            15.0,
+            float(self.processes.settings.worker_startup_seconds),
+        )
+        if not self._chat_planner_ready.is_set():
+            try:
+                await asyncio.wait_for(
+                    self._chat_planner_ready.wait(),
+                    timeout=max(0.0, deadline - asyncio.get_running_loop().time()),
+                )
+            except TimeoutError:
+                return
+        while True:
+            status = next(item for item in self.processes.statuses() if item.name == "chat")
+            if status.state != "starting":
+                return
+            if asyncio.get_running_loop().time() >= deadline:
+                return
+            await asyncio.sleep(0.2)
+
     async def _prepare_chat_context(
         self, session: Session, run: Run
     ) -> tuple[list[dict[str, str]], dict[str, Any], dict[str, Any]]:
@@ -734,7 +780,13 @@ class ConversationOrchestrator:
         if not chat_worker.running or not chat_worker.managed:
             return None
         profile_id = chat_worker.profile_id
-        await self.processes.stop("chat")
+        if profile_id:
+            self._chat_planner_ready.clear()
+        try:
+            await self.processes.stop("chat")
+        except Exception:
+            self._chat_planner_ready.set()
+            raise
         return profile_id
 
     async def _resume_chat_worker(self, profile_id: str) -> None:
@@ -751,6 +803,8 @@ class ConversationOrchestrator:
                 await self.processes.load_chat(profile, install)
         except Exception:
             logger.exception("Could not reload chat profile %s after media handoff", profile_id)
+        finally:
+            self._chat_planner_ready.set()
 
     async def _execute_media(self, job_id: str, run_id: str) -> None:
         with SessionLocal() as session:
@@ -881,6 +935,7 @@ class ConversationOrchestrator:
                     metadata={
                         **generated.metadata,
                         "run_id": run.id,
+                        "semantic_description": run.standalone_prompt,
                         "settings": run.settings_json,
                     },
                 )
@@ -1478,6 +1533,19 @@ class ConversationOrchestrator:
         if text:
             return text
 
+        prompt = ""
+        for part in message.parts:
+            if part.type != PartType.GENERATION_METADATA.value:
+                continue
+            provenance = part.metadata_json.get("provenance")
+            routing = provenance.get("routing") if isinstance(provenance, dict) else None
+            candidate = routing.get("standalone_prompt") if isinstance(routing, dict) else None
+            if isinstance(candidate, str) and candidate.strip():
+                prompt = " ".join(candidate.split())
+                if len(prompt) > 1_000:
+                    prompt = f"{prompt[:997]}..."
+                break
+
         media: list[str] = []
         for part_type, singular in (
             (PartType.IMAGE.value, "image"),
@@ -1486,7 +1554,10 @@ class ConversationOrchestrator:
             count = sum(part.type == part_type for part in message.parts)
             if count:
                 media.append(singular if count == 1 else f"{count} {singular}s")
-        return f"[Generated {' and '.join(media)}]" if media else ""
+        if not media:
+            return ""
+        summary = f"Generated {' and '.join(media)}"
+        return f'{summary} from this prompt: "{prompt}".' if prompt else f"{summary}."
 
     @staticmethod
     def _accepted_for_run(session: Session, run: Run) -> TurnAccepted:
