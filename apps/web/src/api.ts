@@ -132,7 +132,12 @@ export const api = {
     }),
   updateChat: (id: string, values: Partial<Chat>) =>
     request<Chat>(`/api/chats/${id}`, { method: "PATCH", body: JSON.stringify(values) }),
-  deleteChat: (id: string) => request<void>(`/api/chats/${id}`, { method: "DELETE" }),
+  deleteChat: (id: string, deleteGeneratedMedia = false) => {
+    const parameters = new URLSearchParams({
+      delete_generated_media: String(deleteGeneratedMedia),
+    });
+    return request<void>(`/api/chats/${id}?${parameters}`, { method: "DELETE" });
+  },
   sendTurn: async (
     chatId: string,
     text: string,

@@ -132,6 +132,8 @@ class ConversationOrchestrator:
         self.processes = processes
         self.router = ModalityRouter()
         self._tasks: dict[str, asyncio.Task[None]] = {}
+        self._chat_planner_ready = asyncio.Event()
+        self._chat_planner_ready.set()
 
     def recover_interrupted(self) -> None:
         with SessionLocal() as session:
@@ -208,14 +210,27 @@ class ConversationOrchestrator:
 
         mode = request.mode or RoutingMode(chat.routing_mode)
         has_prior_image = self._has_prior_image(session, chat.id)
-        plan = await self.router.plan_with_model(
-            adapter=self.engines.chat,
-            text=request.text,
-            mode=mode,
-            input_artifact_ids=request.input_artifact_ids,
-            has_prior_image=has_prior_image,
-            conversation=self._routing_context(session, chat, parent_message_id),
+        routing_context = self._routing_context(session, chat, parent_message_id)
+        planner_available = (
+            await self._chat_planner_available() if mode == RoutingMode.AUTO else True
         )
+        if planner_available:
+            plan = await self.router.plan_with_model(
+                adapter=self.engines.chat,
+                text=request.text,
+                mode=mode,
+                input_artifact_ids=request.input_artifact_ids,
+                has_prior_image=has_prior_image,
+                conversation=routing_context,
+            )
+        else:
+            plan = self.router.plan(
+                text=request.text,
+                mode=mode,
+                input_artifact_ids=request.input_artifact_ids,
+                has_prior_image=has_prior_image,
+                conversation=routing_context,
+            )
         if (
             mode == RoutingMode.AUTO
             and chat.confirm_uncertain_media
@@ -225,6 +240,7 @@ class ConversationOrchestrator:
         ):
             raise RouteConfirmationRequired(plan)
         resolved_input_ids = list(request.input_artifact_ids)
+        prior_prompt: str | None = None
         if plan.operation in {Operation.IMAGE_TO_IMAGE, Operation.IMAGE_TO_VIDEO}:
             if not resolved_input_ids:
                 prior_image = self._latest_image(session, chat.id)
@@ -249,10 +265,25 @@ class ConversationOrchestrator:
             model_install_id=profile.model_install_id if profile else None,
         )
         if plan.operation != Operation.TEXT and not workflow_revision:
-            raise ValueError(
-                "No ready workflow matches the active media engine. Install a supported "
-                "image or video model and LM Atelier will configure it automatically."
-            )
+            semantic_fallback = {
+                Operation.IMAGE_TO_IMAGE: Operation.TEXT_TO_IMAGE,
+                Operation.IMAGE_TO_VIDEO: Operation.TEXT_TO_VIDEO,
+            }.get(plan.operation)
+            if semantic_fallback and not request.input_artifact_ids and prior_prompt:
+                plan.operation = semantic_fallback
+                plan.input_artifact_ids = []
+                resolved_input_ids = []
+                workflow_revision = self._workflow_for_operation(
+                    session,
+                    plan.operation,
+                    project_id=chat.project_id,
+                    model_install_id=profile.model_install_id if profile else None,
+                )
+            if not workflow_revision:
+                raise ValueError(
+                    "No ready workflow matches the active media engine. Install a supported "
+                    "image or video model and LM Atelier will configure it automatically."
+                )
         fields = workflow_settings(
             self._fields_for_operation(plan.operation),
             workflow_revision.input_schema_json if workflow_revision else None,
@@ -312,7 +343,15 @@ class ConversationOrchestrator:
             parts=[MessagePart(position=0, type=PartType.TEXT.value, text=request.text)],
         )
         if plan.operation == Operation.TEXT:
-            initial_parts = [MessagePart(position=0, type=PartType.TEXT.value, text="")]
+            initial_parts = [
+                MessagePart(position=0, type=PartType.TEXT.value, text=""),
+                MessagePart(
+                    position=1,
+                    type=PartType.PROGRESS.value,
+                    text="Queued",
+                    metadata_json={"activity": "chat", "progress": 0, "phase": "queued"},
+                ),
+            ]
         else:
             initial_parts = [
                 MessagePart(
@@ -497,6 +536,12 @@ class ConversationOrchestrator:
                 run_id,
                 {"operation": run.operation, "prompt": run.standalone_prompt},
             )
+            if run.operation == Operation.TEXT.value:
+                await self._set_chat_phase(
+                    job_id,
+                    run_id,
+                    "Waiting for available compute",
+                )
             resume_chat_profile = await self._prepare_device_handoff(run.operation)
             try:
                 async with self.scheduler.lease("primary"):
@@ -519,7 +564,9 @@ class ConversationOrchestrator:
             await self._fail(job_id, run_id, detail)
 
     async def _execute_chat(self, job_id: str, run_id: str) -> None:
+        await self._set_chat_phase(job_id, run_id, "Preparing chat model")
         worker = await self._ensure_chat_worker(run_id)
+        await self._set_chat_phase(job_id, run_id, "Preparing conversation")
         with SessionLocal() as session:
             run = session.get(Run, run_id)
             if not run:
@@ -549,6 +596,7 @@ class ConversationOrchestrator:
             )
             assistant_id = run.assistant_message_id
 
+        await self._set_chat_phase(job_id, run_id, "Waiting for first token")
         accumulated = ""
         completion_metadata: dict[str, Any] = {}
         last_persisted_length = 0
@@ -568,7 +616,8 @@ class ConversationOrchestrator:
                     )
                     now = time.monotonic()
                     if (
-                        len(accumulated) - last_persisted_length >= 32
+                        last_persisted_length == 0
+                        or len(accumulated) - last_persisted_length >= 32
                         or now - last_persisted_at >= 0.25
                     ):
                         self._persist_streamed_text(assistant_id, accumulated)
@@ -598,6 +647,7 @@ class ConversationOrchestrator:
             job = session.get(Job, job_id)
             if not message or not run or not job:
                 return
+            self._remove_chat_progress(message)
             text_part = next(
                 (part for part in message.parts if part.type == PartType.TEXT.value), None
             )
@@ -652,6 +702,71 @@ class ConversationOrchestrator:
             session.commit()
         await self.events.publish("run.completed", run_id, {"job_id": job_id})
 
+    async def _set_chat_phase(self, job_id: str, run_id: str, label: str) -> None:
+        assistant_id = ""
+        with SessionLocal() as session:
+            job = session.get(Job, job_id)
+            run = session.get(Run, run_id)
+            if (
+                not job
+                or not run
+                or job.status
+                in {
+                    JobStatus.COMPLETE.value,
+                    JobStatus.FAILED.value,
+                    JobStatus.CANCELLED.value,
+                }
+            ):
+                return
+            assistant_id = run.assistant_message_id
+            job.phase = label.lower()
+            message = session.get(Message, assistant_id)
+            if message:
+                progress_part = next(
+                    (
+                        part
+                        for part in message.parts
+                        if part.type == PartType.PROGRESS.value
+                        and part.metadata_json.get("activity") == "chat"
+                    ),
+                    None,
+                )
+                if progress_part:
+                    progress_part.text = label
+                    progress_part.metadata_json = {
+                        "activity": "chat",
+                        "progress": 0,
+                        "phase": label.lower(),
+                    }
+                else:
+                    message.parts.append(
+                        MessagePart(
+                            position=max(
+                                (part.position for part in message.parts),
+                                default=-1,
+                            )
+                            + 1,
+                            type=PartType.PROGRESS.value,
+                            text=label,
+                            metadata_json={
+                                "activity": "chat",
+                                "progress": 0,
+                                "phase": label.lower(),
+                            },
+                        )
+                    )
+            session.commit()
+        await self.events.publish(
+            "run.progress",
+            run_id,
+            {
+                "assistant_message_id": assistant_id,
+                "job_id": job_id,
+                "phase": label.lower(),
+                "label": label,
+            },
+        )
+
     async def _ensure_chat_worker(self, run_id: str) -> WorkerStatus | None:
         if (
             self.engines.settings.chat_engine != "llama.cpp"
@@ -674,6 +789,17 @@ class ConversationOrchestrator:
         if status.running and status.state == "ready" and status.profile_id == profile.id:
             return status
         return await self.processes.load_chat(profile, install)
+
+    async def _chat_planner_available(self) -> bool:
+        if (
+            self.engines.settings.chat_engine != "llama.cpp"
+            or not self.processes.settings.llama_executable
+        ):
+            return True
+        if not self._chat_planner_ready.is_set():
+            return False
+        status = next(item for item in self.processes.statuses() if item.name == "chat")
+        return status.state != "starting"
 
     async def _prepare_chat_context(
         self, session: Session, run: Run
@@ -734,7 +860,13 @@ class ConversationOrchestrator:
         if not chat_worker.running or not chat_worker.managed:
             return None
         profile_id = chat_worker.profile_id
-        await self.processes.stop("chat")
+        if profile_id:
+            self._chat_planner_ready.clear()
+        try:
+            await self.processes.stop("chat")
+        except Exception:
+            self._chat_planner_ready.set()
+            raise
         return profile_id
 
     async def _resume_chat_worker(self, profile_id: str) -> None:
@@ -751,6 +883,8 @@ class ConversationOrchestrator:
                 await self.processes.load_chat(profile, install)
         except Exception:
             logger.exception("Could not reload chat profile %s after media handoff", profile_id)
+        finally:
+            self._chat_planner_ready.set()
 
     async def _execute_media(self, job_id: str, run_id: str) -> None:
         with SessionLocal() as session:
@@ -881,6 +1015,7 @@ class ConversationOrchestrator:
                     metadata={
                         **generated.metadata,
                         "run_id": run.id,
+                        "semantic_description": run.standalone_prompt,
                         "settings": run.settings_json,
                     },
                 )
@@ -993,6 +1128,7 @@ class ConversationOrchestrator:
                 preview_ids = self._temporary_preview_ids(message)
                 message.status = MessageStatus.FAILED.value
                 if run.operation == Operation.TEXT.value:
+                    self._remove_chat_progress(message)
                     error_part = next(
                         (part for part in message.parts if part.type == PartType.ERROR.value),
                         None,
@@ -1050,7 +1186,9 @@ class ConversationOrchestrator:
         if message:
             preview_ids = self._temporary_preview_ids(message)
             message.status = MessageStatus.CANCELLED.value
-            if run.operation != Operation.TEXT.value:
+            if run.operation == Operation.TEXT.value:
+                self._remove_chat_progress(message)
+            else:
                 self._replace_parts(
                     message,
                     [
@@ -1106,6 +1244,7 @@ class ConversationOrchestrator:
             message = session.get(Message, message_id)
             if not message:
                 return
+            ConversationOrchestrator._remove_chat_progress(message)
             text_part = next(
                 (part for part in message.parts if part.type == PartType.TEXT.value), None
             )
@@ -1117,6 +1256,15 @@ class ConversationOrchestrator:
                     [MessagePart(position=0, type=PartType.TEXT.value, text=text)],
                 )
             session.commit()
+
+    @staticmethod
+    def _remove_chat_progress(message: Message) -> None:
+        for part in list(message.parts):
+            if (
+                part.type == PartType.PROGRESS.value
+                and part.metadata_json.get("activity") == "chat"
+            ):
+                message.parts.remove(part)
 
     @staticmethod
     def _replace_parts(message: Message, parts: list[MessagePart]) -> None:
@@ -1187,7 +1335,7 @@ class ConversationOrchestrator:
             rows.append(message)
             current_id = message.parent_id
         for message in reversed(rows):
-            content = "\n".join(part.text for part in message.parts if part.text).strip()
+            content = ConversationOrchestrator._message_context_text(message)
             if content:
                 messages.append({"role": message.role, "content": content})
         return messages
@@ -1467,10 +1615,42 @@ class ConversationOrchestrator:
             current_id = message.parent_id
         rows.reverse()
         for message in rows:
-            text = "\n".join(part.text for part in message.parts if part.text).strip()
+            text = ConversationOrchestrator._message_context_text(message)
             if text:
                 messages.append({"role": message.role, "content": text})
         return messages
+
+    @staticmethod
+    def _message_context_text(message: Message) -> str:
+        text = "\n".join(part.text for part in message.parts if part.text).strip()
+        if text:
+            return text
+
+        prompt = ""
+        for part in message.parts:
+            if part.type != PartType.GENERATION_METADATA.value:
+                continue
+            provenance = part.metadata_json.get("provenance")
+            routing = provenance.get("routing") if isinstance(provenance, dict) else None
+            candidate = routing.get("standalone_prompt") if isinstance(routing, dict) else None
+            if isinstance(candidate, str) and candidate.strip():
+                prompt = " ".join(candidate.split())
+                if len(prompt) > 1_000:
+                    prompt = f"{prompt[:997]}..."
+                break
+
+        media: list[str] = []
+        for part_type, singular in (
+            (PartType.IMAGE.value, "image"),
+            (PartType.VIDEO.value, "video"),
+        ):
+            count = sum(part.type == part_type for part in message.parts)
+            if count:
+                media.append(singular if count == 1 else f"{count} {singular}s")
+        if not media:
+            return ""
+        summary = f"Generated {' and '.join(media)}"
+        return f'{summary} from this prompt: "{prompt}".' if prompt else f"{summary}."
 
     @staticmethod
     def _accepted_for_run(session: Session, run: Run) -> TurnAccepted:

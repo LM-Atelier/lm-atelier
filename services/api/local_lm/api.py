@@ -586,10 +586,17 @@ async def update_chat(chat_id: str, payload: dict[str, Any], session: SessionDep
 
 
 @router.delete("/chats/{chat_id}", status_code=204)
-async def delete_chat(chat_id: str, session: SessionDep) -> Response:
+async def delete_chat(
+    chat_id: str,
+    request: Request,
+    session: SessionDep,
+    delete_generated_media: bool = Query(False),
+) -> Response:
     chat = session.get(Chat, chat_id)
     if not chat:
         raise HTTPException(404, "chat not found")
+    if delete_generated_media:
+        _services(request).artifacts.delete_chat_generated_media(session, chat_id)
     session.delete(chat)
     session.commit()
     return Response(status_code=204)

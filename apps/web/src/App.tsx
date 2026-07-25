@@ -1,12 +1,14 @@
-import { useEffect, useMemo, useRef, useState } from "react";
+import { isValidElement, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { useInfiniteQuery, useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 import {
   Activity,
   Bot,
+  Check,
   ChevronDown,
   CircleStop,
+  Copy,
   Cpu,
   Download,
   Film,
@@ -15,6 +17,7 @@ import {
   HardDrive,
   Image as ImageIcon,
   Library,
+  LoaderCircle,
   Menu,
   MessageSquare,
   MoreHorizontal,
@@ -63,6 +66,7 @@ import type {
 
 type View = "chat" | "media" | "models" | "workflows" | "settings";
 type Visibility = "basic" | "advanced" | "expert";
+type PendingTurn = { text: string; mode: RoutingMode };
 
 const visibilityRank: Record<Visibility, number> = { basic: 0, advanced: 1, expert: 2 };
 const AUTO_PROFILE_ID = "__auto__";
@@ -221,10 +225,109 @@ function MediaLibraryView() {
   );
 }
 
+async function copyToClipboard(text: string): Promise<void> {
+  if (navigator.clipboard?.writeText) {
+    await navigator.clipboard.writeText(text);
+    return;
+  }
+  const textarea = document.createElement("textarea");
+  textarea.value = text;
+  textarea.style.position = "fixed";
+  textarea.style.opacity = "0";
+  document.body.appendChild(textarea);
+  textarea.select();
+  const copied = document.execCommand("copy");
+  textarea.remove();
+  if (!copied) throw new Error("Clipboard access is unavailable");
+}
+
+function CopyTextButton({
+  text,
+  label,
+  className,
+}: {
+  text: string;
+  label: string;
+  className?: string;
+}) {
+  const [copied, setCopied] = useState(false);
+  const resetTimer = useRef<number | undefined>(undefined);
+  useEffect(() => () => {
+    if (resetTimer.current !== undefined) window.clearTimeout(resetTimer.current);
+  }, []);
+  return (
+    <button
+      type="button"
+      className={className}
+      aria-label={copied ? `${label} copied` : label}
+      title={copied ? "Copied" : label}
+      onClick={() => {
+        void copyToClipboard(text).then(() => {
+          setCopied(true);
+          if (resetTimer.current !== undefined) window.clearTimeout(resetTimer.current);
+          resetTimer.current = window.setTimeout(() => setCopied(false), 1_500);
+        });
+      }}
+    >
+      {copied ? <Check size={13} /> : <Copy size={13} />}
+      <span>{copied ? "Copied" : "Copy"}</span>
+    </button>
+  );
+}
+
+function nodeText(node: ReactNode): string {
+  if (typeof node === "string" || typeof node === "number") return String(node);
+  if (Array.isArray(node)) return node.map(nodeText).join("");
+  if (isValidElement<{ children?: ReactNode }>(node)) return nodeText(node.props.children);
+  return "";
+}
+
+function MarkdownText({ text }: { text: string }) {
+  return (
+    <div className="message-text markdown">
+      <ReactMarkdown
+        remarkPlugins={[remarkGfm]}
+        components={{
+          pre: ({ children }) => {
+            const code = nodeText(children).replace(/\n$/, "");
+            return (
+              <div className="markdown-code-block">
+                {code && <CopyTextButton text={code} label="Copy code block" className="block-copy" />}
+                <pre>{children}</pre>
+              </div>
+            );
+          },
+        }}
+      >
+        {text}
+      </ReactMarkdown>
+    </div>
+  );
+}
+
+function PendingResponseStatus({ label, startedAt }: { label: string; startedAt: string }) {
+  const [seconds, setSeconds] = useState(
+    () => Math.max(0, Math.floor((Date.now() - Date.parse(startedAt)) / 1_000)),
+  );
+  useEffect(() => {
+    const timer = window.setInterval(
+      () => setSeconds(Math.max(0, Math.floor((Date.now() - Date.parse(startedAt)) / 1_000))),
+      1_000,
+    );
+    return () => window.clearInterval(timer);
+  }, [startedAt]);
+  return (
+    <div className="submission-progress pending-response" role="status">
+      <LoaderCircle size={17} />
+      <span>{label}<small aria-hidden="true"> · {seconds}s</small></span>
+    </div>
+  );
+}
+
 function PartView({ part, liveText, markdown = false }: { part: MessagePart; liveText?: string; markdown?: boolean }) {
   if (part.type === "text") {
     const text = liveText || part.text || "";
-    return markdown ? <div className="message-text markdown"><ReactMarkdown remarkPlugins={[remarkGfm]}>{text}</ReactMarkdown></div> : <div className="message-text">{text}</div>;
+    return markdown ? <MarkdownText text={text} /> : <div className="message-text">{text}</div>;
   }
   if (part.type === "image" || part.type === "video") return <ArtifactPart part={part} />;
   if (part.type === "progress") {
@@ -256,6 +359,21 @@ function MessageBubble({
 }) {
   const visibleParts = message.parts.filter((part) => part.type !== "generation_metadata");
   const userText = visibleParts.filter((part) => part.type === "text").map((part) => part.text || "").join("\n");
+  const copyableText = (liveText || userText).trim();
+  const chatProgress = visibleParts.find(
+    (part) => part.type === "progress" && part.metadata_json.activity === "chat",
+  );
+  const hasVisibleText = Boolean(copyableText);
+  const hasMediaProgress = visibleParts.some(
+    (part) => part.type === "progress" && part.metadata_json.activity !== "chat",
+  );
+  const showChatStartup = message.role === "assistant"
+    && message.status === "pending"
+    && !hasVisibleText
+    && (Boolean(chatProgress) || !hasMediaProgress);
+  const renderedParts = chatProgress
+    ? visibleParts.filter((part) => part.id !== chatProgress.id)
+    : visibleParts;
   const [editing, setEditing] = useState(false);
   const [draft, setDraft] = useState(userText);
   const metadata = message.parts.find((part) => part.type === "generation_metadata")?.metadata_json;
@@ -281,11 +399,12 @@ function MessageBubble({
     <article className={`message ${message.role}`}>
       <div className="avatar">{message.role === "user" ? "You" : <Bot size={19} />}</div>
       <div className="message-content">
-        {editing ? <div className="message-edit"><textarea aria-label="Edit message" rows={4} value={draft} onChange={(event) => setDraft(event.target.value)} /><div><button onClick={() => { setDraft(userText); setEditing(false); }}>Cancel</button><button className="primary" disabled={!draft.trim()} onClick={() => { onEdit?.(message.id, draft.trim()); setEditing(false); }}>Send edited message</button></div></div> : visibleParts.map((part) => <PartView key={part.id} part={part} liveText={liveText} markdown={message.role === "assistant"} />)}
+        {editing ? <div className="message-edit"><textarea aria-label="Edit message" rows={4} value={draft} onChange={(event) => setDraft(event.target.value)} /><div><button onClick={() => { setDraft(userText); setEditing(false); }}>Cancel</button><button className="primary" disabled={!draft.trim()} onClick={() => { onEdit?.(message.id, draft.trim()); setEditing(false); }}>Send edited message</button></div></div> : renderedParts.map((part) => <PartView key={part.id} part={part} liveText={liveText} markdown={message.role === "assistant"} />)}
         {liveText && !visibleParts.some((part) => part.type === "text") && (
-          <div className="message-text markdown"><ReactMarkdown remarkPlugins={[remarkGfm]}>{liveText}</ReactMarkdown></div>
+          <MarkdownText text={liveText} />
         )}
-        {message.role === "user" && message.status === "complete" && onEdit && !editing && <div className="message-meta"><button onClick={() => setEditing(true)}>Edit and branch</button></div>}
+        {showChatStartup && <PendingResponseStatus label={chatProgress?.text || "Starting chat"} startedAt={message.created_at} />}
+        {message.role === "user" && message.status === "complete" && !editing && (onEdit || copyableText) && <div className="message-meta">{onEdit && <button onClick={() => setEditing(true)}>Edit and branch</button>}{copyableText && <CopyTextButton text={copyableText} label="Copy user message" />}</div>}
         {message.role === "assistant" && message.status === "cancelled" && !visibleParts.some((part) => part.type === "error") && (
           <div className="message-meta"><span>Generation cancelled</span></div>
         )}
@@ -298,12 +417,16 @@ function MessageBubble({
                 {omitted > 0 ? ` · ${omitted} earlier message${omitted === 1 ? "" : "s"} omitted` : ""}
               </span>
             )}
+            {copyableText && <CopyTextButton text={copyableText} label="Copy assistant message" />}
             {onRegenerate && (
               <button onClick={() => onRegenerate(message.id)} aria-label="Regenerate response">
                 <RotateCcw size={13} /> Regenerate
               </button>
             )}
           </div>
+        )}
+        {message.role === "assistant" && message.status !== "complete" && copyableText && (
+          <div className="message-meta"><CopyTextButton text={copyableText} label="Copy assistant message" /></div>
         )}
       </div>
     </article>
@@ -444,6 +567,7 @@ function Composer({
   chat,
   engines,
   busy,
+  stoppable,
   settings,
   onSettings,
   onSend,
@@ -454,6 +578,7 @@ function Composer({
   chat: Chat;
   engines: EngineCapabilities[];
   busy: boolean;
+  stoppable: boolean;
   settings: Record<string, unknown>;
   onSettings: (settings: Record<string, unknown>) => void;
   onSend: (text: string, mode: RoutingMode, artifacts: string[], settings: Record<string, unknown>) => void;
@@ -530,7 +655,11 @@ function Composer({
               </label>
               <button className="icon-button" onClick={() => setSettingsOpen(true)} aria-label="Turn settings"><SlidersHorizontal size={18} /></button>
             </div>
-            {busy ? <button className="send-button stop" onClick={onStop} aria-label="Stop response"><CircleStop size={18} /></button> : <button className="send-button" disabled={!text.trim()} onClick={submit} aria-label="Send"><Send size={18} /></button>}
+            {busy
+              ? stoppable
+                ? <button className="send-button stop" onClick={onStop} aria-label="Stop response"><CircleStop size={18} /></button>
+                : <button className="send-button pending" disabled aria-label="Preparing response"><LoaderCircle size={18} /></button>
+              : <button className="send-button" disabled={!text.trim()} onClick={submit} aria-label="Send"><Send size={18} /></button>}
           </div>
         </div>
         <small className="composer-note">Local models can make mistakes. Generation stays on this machine.</small>
@@ -585,6 +714,7 @@ function ChatView({
   workflows,
   project,
   liveText,
+  pendingTurn,
   settings,
   onSettings,
   onSend,
@@ -599,6 +729,7 @@ function ChatView({
   workflows: Workflow[];
   project?: Project;
   liveText: Record<string, string>;
+  pendingTurn?: PendingTurn;
   settings: Record<string, unknown>;
   onSettings: (settings: Record<string, unknown>) => void;
   onSend: (text: string, mode: RoutingMode, artifacts: string[], settings: Record<string, unknown>) => void;
@@ -612,10 +743,11 @@ function ChatView({
     if (typeof endRef.current?.scrollIntoView === "function") {
       endRef.current.scrollIntoView({ behavior: "smooth" });
     }
-  }, [chat?.messages, liveText]);
+  }, [chat?.messages, liveText, pendingTurn]);
   if (!chat) return <EmptyState icon={<MessageSquare />} title="Start a local conversation" body="Create a chat, choose your models, and keep every response on your machine." />;
   const messages = activeBranchMessages(chat);
-  const busy = messages.some((message) => message.status === "pending");
+  const stoppable = messages.some((message) => message.status === "pending");
+  const busy = stoppable || Boolean(pendingTurn);
   return (
     <div className="chat-view">
       <div className="chat-header">
@@ -631,7 +763,7 @@ function ChatView({
         </div>
       </div>
       <div className="messages">
-        {messages.length === 0 ? (
+        {messages.length === 0 && !pendingTurn ? (
           <EmptyState icon={<Sparkles />} title="What should we make?" body="Ask a question or describe an image or video. Auto mode chooses the appropriate local model." />
         ) : messages.map((message) => <MessageBubble
           key={message.id}
@@ -640,9 +772,26 @@ function ChatView({
           onRegenerate={busy ? undefined : (messageId) => onRegenerate(messageId, settings)}
           onEdit={busy ? undefined : (messageId, text) => onEdit(messageId, text, settings)}
         />)}
+        {pendingTurn && (
+          <>
+            <article className="message user optimistic">
+              <div className="avatar">You</div>
+              <div className="message-content"><div className="message-text">{pendingTurn.text}</div></div>
+            </article>
+            <article className="message assistant optimistic" aria-live="polite">
+              <div className="avatar"><Bot size={19} /></div>
+              <div className="message-content">
+                <div className="submission-progress">
+                  <LoaderCircle size={17} />
+                  <span>{pendingTurn.mode === "auto" ? "Choosing mode and model…" : "Starting…"}</span>
+                </div>
+              </div>
+            </article>
+          </>
+        )}
         <div ref={endRef} />
       </div>
-      <Composer chat={chat} engines={engines} busy={busy} settings={settings} onSettings={onSettings} onSend={onSend} onStop={onStop} workflows={workflows} project={project} />
+      <Composer chat={chat} engines={engines} busy={busy} stoppable={stoppable} settings={settings} onSettings={onSettings} onSend={onSend} onStop={onStop} workflows={workflows} project={project} />
     </div>
   );
 }
@@ -1324,13 +1473,17 @@ function ChatManager({
   projects: Project[];
   onClose: () => void;
   onSave: (values: Partial<Chat>) => void;
-  onDelete: () => void;
+  onDelete: (deleteGeneratedMedia: boolean) => void;
 }) {
   const [title, setTitle] = useState(chat.title);
   const [projectId, setProjectId] = useState(chat.project_id ?? "");
   const [archived, setArchived] = useState(chat.archived);
   const [confirmUncertainMedia, setConfirmUncertainMedia] = useState(chat.confirm_uncertain_media);
-  return <div className="modal-backdrop"><div className="modal workspace-editor"><header><div><small>Conversation</small><h2>Manage chat</h2></div><button className="icon-button" aria-label="Close chat manager" onClick={onClose}><X /></button></header><label>Title<input value={title} onChange={(event) => setTitle(event.target.value)} /></label><label>Project<select value={projectId} onChange={(event) => setProjectId(event.target.value)}><option value="">Unfiled</option>{projects.filter((project) => !project.archived).map((project) => <option key={project.id} value={project.id}>{project.name}</option>)}</select></label><label className="toggle-row"><span><strong>Confirm uncertain media</strong><small>Ask before Auto mode starts an image or video when the planner is unsure.</small></span><input type="checkbox" checked={confirmUncertainMedia} onChange={(event) => setConfirmUncertainMedia(event.target.checked)} /></label><label className="toggle-row"><span><strong>Archived</strong><small>Hide this chat from the active workspace without deleting its history.</small></span><input type="checkbox" checked={archived} onChange={(event) => setArchived(event.target.checked)} /></label><footer className="editor-actions"><button className="secondary danger" onClick={() => { if (window.confirm(`Delete ${chat.title} and its history?`)) onDelete(); }}>Delete chat</button><button className="secondary" onClick={onClose}>Cancel</button><button className="primary" disabled={!title.trim()} onClick={() => onSave({ title: title.trim(), project_id: projectId || null, archived, confirm_uncertain_media: confirmUncertainMedia })}>Save chat</button></footer></div></div>;
+  const [deleteGeneratedMedia, setDeleteGeneratedMedia] = useState(false);
+  const deletePrompt = deleteGeneratedMedia
+    ? `Delete ${chat.title}, its history, and generated media used only by this chat?`
+    : `Delete ${chat.title} and its history?`;
+  return <div className="modal-backdrop"><div className="modal workspace-editor"><header><div><small>Conversation</small><h2>Manage chat</h2></div><button className="icon-button" aria-label="Close chat manager" onClick={onClose}><X /></button></header><label>Title<input value={title} onChange={(event) => setTitle(event.target.value)} /></label><label>Project<select value={projectId} onChange={(event) => setProjectId(event.target.value)}><option value="">Unfiled</option>{projects.filter((project) => !project.archived).map((project) => <option key={project.id} value={project.id}>{project.name}</option>)}</select></label><label className="toggle-row"><span className="toggle-copy"><strong>Confirm uncertain media</strong><small>Ask before Auto mode starts an image or video when the planner is unsure.</small></span><input type="checkbox" checked={confirmUncertainMedia} onChange={(event) => setConfirmUncertainMedia(event.target.checked)} /></label><label className="toggle-row"><span className="toggle-copy"><strong>Archived</strong><small>Hide this chat from the active workspace without deleting its history.</small></span><input type="checkbox" checked={archived} onChange={(event) => setArchived(event.target.checked)} /></label><label className="toggle-row delete-media-option"><span className="toggle-copy"><strong>Delete generated media with chat</strong><small>Permanently delete image and video outputs used only by this chat. Shared media is kept.</small></span><input type="checkbox" checked={deleteGeneratedMedia} onChange={(event) => setDeleteGeneratedMedia(event.target.checked)} /></label><footer className="editor-actions"><button className="secondary danger" onClick={() => { if (window.confirm(deletePrompt)) onDelete(deleteGeneratedMedia); }}>Delete chat</button><button className="secondary" onClick={onClose}>Cancel</button><button className="primary" disabled={!title.trim()} onClick={() => onSave({ title: title.trim(), project_id: projectId || null, archived, confirm_uncertain_media: confirmUncertainMedia })}>Save chat</button></footer></div></div>;
 }
 
 function ProjectManager({
@@ -1384,7 +1537,7 @@ function Sidebar({
   onExportProject: (id: string, includeMedia?: boolean) => void;
   onImportProject: (file: File) => void;
   onUpdateChat: (id: string, values: Partial<Chat>) => void;
-  onDeleteChat: (id: string) => void;
+  onDeleteChat: (id: string, deleteGeneratedMedia: boolean) => void;
   onUpdateProject: (id: string, values: Partial<Project>) => void;
   onDeleteProject: (id: string) => void;
 }) {
@@ -1441,7 +1594,7 @@ function Sidebar({
         {unfiled.length > 0 && <div className="sidebar-section"><div className="section-title"><span>Chats</span></div><div className="chat-list standalone">{unfiled.map(chatRow)}</div></div>}
       </div>
       <div className="sidebar-footer"><button className={view === "settings" ? "active" : ""} onClick={() => { onView("settings"); setMobileOpen(false); }}><Settings />Settings</button></div>
-      {managedChat && <ChatManager chat={managedChat} projects={projects} onClose={() => setManagedChat(null)} onSave={(values) => { onUpdateChat(managedChat.id, values); setManagedChat(null); }} onDelete={() => { onDeleteChat(managedChat.id); setManagedChat(null); }} />}
+      {managedChat && <ChatManager chat={managedChat} projects={projects} onClose={() => setManagedChat(null)} onSave={(values) => { onUpdateChat(managedChat.id, values); setManagedChat(null); }} onDelete={(deleteGeneratedMedia) => { onDeleteChat(managedChat.id, deleteGeneratedMedia); setManagedChat(null); }} />}
       {managedProject && <ProjectManager project={managedProject} onClose={() => setManagedProject(null)} onSave={(values) => { onUpdateProject(managedProject.id, values); setManagedProject(null); }} onDelete={() => { onDeleteProject(managedProject.id); setManagedProject(null); }} onExport={(includeMedia) => onExportProject(managedProject.id, includeMedia)} />}
     </aside>
   );
@@ -1491,6 +1644,7 @@ export default function App() {
           return;
         }
         if (event.type.includes("progress") || event.type.startsWith("download.")) void client.invalidateQueries({ queryKey: ["jobs"] });
+        if (event.type === "run.progress") void client.invalidateQueries({ queryKey: ["chat"] });
         if (event.type === "download.completed") {
           void client.invalidateQueries({ queryKey: ["models"] });
           void client.invalidateQueries({ queryKey: ["profiles"] });
@@ -1572,8 +1726,8 @@ export default function App() {
     },
   });
   const deleteChat = useMutation({
-    mutationFn: api.deleteChat,
-    onMutate: async (deletedId) => {
+    mutationFn: ({ id, deleteGeneratedMedia }: { id: string; deleteGeneratedMedia: boolean }) => api.deleteChat(id, deleteGeneratedMedia),
+    onMutate: async ({ id: deletedId }) => {
       await client.cancelQueries({ queryKey: ["chats"] });
       const previousChats = client.getQueryData<Chat[]>(["chats"]) ?? [];
       const remainingChats = previousChats.filter((candidate) => candidate.id !== deletedId);
@@ -1588,14 +1742,17 @@ export default function App() {
       client.removeQueries({ queryKey: ["chat", deletedId], exact: true });
       return { previousChats, previousCurrentChatId };
     },
-    onSuccess: (_value, deletedId) => {
+    onSuccess: (_value, { id: deletedId }) => {
       setTurnSettingsByChat((current) => {
         const next = { ...current };
         delete next[deletedId];
         return next;
       });
+      void client.invalidateQueries({ queryKey: ["artifacts"] });
+      void client.invalidateQueries({ queryKey: ["artifact-storage"] });
+      void client.invalidateQueries({ queryKey: ["jobs"] });
     },
-    onError: (_error, _deletedId, context) => {
+    onError: (_error, _deletedChat, context) => {
       if (!context) return;
       client.setQueryData(["chats"], context.previousChats);
       setCurrentChatId(context.previousCurrentChatId);
@@ -1654,7 +1811,7 @@ export default function App() {
     if (view === "models") return <ModelsView />;
     if (view === "workflows") return <WorkflowsView />;
     if (view === "settings") return <SettingsView engines={engines.data ?? []} />;
-    return <ChatView chat={chat.data} engines={engines.data ?? []} profiles={profiles.data ?? []} workflows={workflows.data ?? []} project={allProjects.find((item) => item.id === chat.data?.project_id)} liveText={liveText} settings={currentChatId ? turnSettingsByChat[currentChatId] ?? {} : {}} onSettings={(settings) => {
+    return <ChatView chat={chat.data} engines={engines.data ?? []} profiles={profiles.data ?? []} workflows={workflows.data ?? []} project={allProjects.find((item) => item.id === chat.data?.project_id)} liveText={liveText} pendingTurn={send.isPending && send.variables ? { text: send.variables.text, mode: send.variables.mode } : undefined} settings={currentChatId ? turnSettingsByChat[currentChatId] ?? {} : {}} onSettings={(settings) => {
       if (currentChatId) setTurnSettingsByChat((current) => ({ ...current, [currentChatId]: settings }));
     }} onProfile={(field, id) => updateChat.mutate({ [field]: id })} onRegenerate={(messageId, settings) => regenerate.mutate({ messageId, settings })} onEdit={(messageId, text, settings) => branch.mutate({ messageId, text, settings })} onStop={() => stop.mutate()} onSend={(text, mode, artifacts, settings) => send.mutate({ text, mode, artifacts, settings })} />;
   }, [view, engines.data, profiles.data, workflows.data, allProjects, chat.data, liveText, currentChatId, turnSettingsByChat, send, regenerate, branch, stop, updateChat]);
@@ -1662,7 +1819,7 @@ export default function App() {
   return (
     <div className="app-shell">
       <a className="skip-link" href="#main-content">Skip to main content</a>
-      <Sidebar projects={allProjects} chats={allChats} currentChatId={currentChatId} view={view} onChat={(id) => { setCurrentChatId(id); localStorage.setItem("local-lm-chat", id); setView("chat"); }} onView={setView} onNewChat={(projectId) => createChat.mutate(projectId)} onNewProject={() => { const name = window.prompt("Project name"); if (name?.trim()) createProject.mutate(name.trim()); }} onExportProject={(id, includeMedia) => exportProject.mutate({ id, includeMedia })} onImportProject={(file) => importProject.mutate(file)} onUpdateChat={(id, values) => manageChat.mutate({ id, values })} onDeleteChat={(id) => deleteChat.mutate(id)} onUpdateProject={(id, values) => updateProject.mutate({ id, values })} onDeleteProject={(id) => deleteProject.mutate(id)} />
+      <Sidebar projects={allProjects} chats={allChats} currentChatId={currentChatId} view={view} onChat={(id) => { setCurrentChatId(id); localStorage.setItem("local-lm-chat", id); setView("chat"); }} onView={setView} onNewChat={(projectId) => createChat.mutate(projectId)} onNewProject={() => { const name = window.prompt("Project name"); if (name?.trim()) createProject.mutate(name.trim()); }} onExportProject={(id, includeMedia) => exportProject.mutate({ id, includeMedia })} onImportProject={(file) => importProject.mutate(file)} onUpdateChat={(id, values) => manageChat.mutate({ id, values })} onDeleteChat={(id, deleteGeneratedMedia) => deleteChat.mutate({ id, deleteGeneratedMedia })} onUpdateProject={(id, values) => updateProject.mutate({ id, values })} onDeleteProject={(id) => deleteProject.mutate(id)} />
       <main id="main-content" tabIndex={-1}>{activeContent}</main>
       <JobsPanel />
       {(send.error || regenerate.error || branch.error || stop.error || createChat.error || createProject.error || importProject.error || manageChat.error || deleteChat.error || updateProject.error || deleteProject.error) && <div className="toast error"><X size={16} />{(send.error || regenerate.error || branch.error || stop.error || createChat.error || createProject.error || importProject.error || manageChat.error || deleteChat.error || updateProject.error || deleteProject.error)?.message}</div>}

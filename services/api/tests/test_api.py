@@ -18,7 +18,8 @@ from local_lm.config import Settings
 from local_lm.db import SessionLocal
 from local_lm.domain import JobStatus, utcnow
 from local_lm.downloads import DownloadManager
-from local_lm.models import Artifact, Job
+from local_lm.models import Artifact, Chat, Job, Run, WorkflowDefinition
+from local_lm.orchestrator import ConversationOrchestrator
 
 
 async def wait_for_assistant(client: AsyncClient, chat_id: str, expected_type: str) -> dict:  # type: ignore[type-arg]
@@ -488,6 +489,32 @@ async def test_turn_idempotency_returns_original_run(client: AsyncClient) -> Non
     assert first.json()["run"]["id"] == second.json()["run"]["id"]
 
 
+async def test_chat_turn_exposes_startup_status_until_text_arrives(
+    client: AsyncClient,
+) -> None:
+    chat = (await client.post("/api/chats", json={"title": "Startup status"})).json()
+    turn = await client.post(
+        f"/api/chats/{chat['id']}/turns",
+        json={"text": "Reply briefly", "mode": "text"},
+    )
+    assert turn.status_code == 202
+    accepted = turn.json()
+    progress = next(
+        part for part in accepted["assistant_message"]["parts"] if part["type"] == "progress"
+    )
+    assert progress["text"] == "Queued"
+    assert progress["metadata_json"] == {
+        "activity": "chat",
+        "progress": 0,
+        "phase": "queued",
+    }
+
+    await wait_for_run(client, accepted["run"]["id"])
+    assistant = (await client.get(f"/api/messages/{accepted['assistant_message']['id']}")).json()
+    assert any(part["type"] == "text" and part["text"] for part in assistant["parts"])
+    assert not any(part["type"] == "progress" for part in assistant["parts"])
+
+
 async def test_active_chat_run_can_be_cancelled_directly(client: AsyncClient) -> None:
     chat = (await client.post("/api/chats", json={"title": "Stop response"})).json()
     turn = await client.post(
@@ -721,6 +748,120 @@ async def test_media_library_reports_references_and_storage(client: AsyncClient)
     assert turn.status_code == 202
 
 
+async def test_text_turn_after_image_keeps_alternating_chat_context(
+    client: AsyncClient,
+) -> None:
+    chat = (await client.post("/api/chats", json={"title": "Mixed media context"})).json()
+    await client.post(
+        f"/api/chats/{chat['id']}/turns",
+        json={"text": "Create a reference image", "mode": "image"},
+    )
+    await wait_for_assistant(client, chat["id"], "image")
+
+    with SessionLocal() as session:
+        persisted_chat = session.get(Chat, chat["id"])
+        assert persisted_chat
+        routing_context = ConversationOrchestrator._routing_context(
+            session,
+            persisted_chat,
+            persisted_chat.active_head_message_id,
+        )
+    assert routing_context == [
+        {"role": "user", "content": "Create a reference image"},
+        {
+            "role": "assistant",
+            "content": 'Generated image from this prompt: "Create a reference image".',
+        },
+    ]
+
+    accepted = await client.post(
+        f"/api/chats/{chat['id']}/turns",
+        json={"text": "Now answer a text question", "mode": "text"},
+    )
+    assert accepted.status_code == 202
+    await wait_for_assistant(client, chat["id"], "text")
+
+    with SessionLocal() as session:
+        run = session.get(Run, accepted.json()["run"]["id"])
+        assert run
+        generation_context = ConversationOrchestrator._context_messages(session, run)
+    assert generation_context == [
+        {"role": "user", "content": "Create a reference image"},
+        {
+            "role": "assistant",
+            "content": 'Generated image from this prompt: "Create a reference image".',
+        },
+        {"role": "user", "content": "Now answer a text question"},
+    ]
+
+
+async def test_image_request_uses_referenced_text_from_the_active_chat_branch(
+    client: AsyncClient,
+) -> None:
+    chat = (await client.post("/api/chats", json={"title": "Story illustration"})).json()
+    story_request = "Write a short story about a silver fox crossing a glass city at dusk."
+    text_turn = await client.post(
+        f"/api/chats/{chat['id']}/turns",
+        json={"text": story_request, "mode": "text"},
+    )
+    assert text_turn.status_code == 202
+    story_message = await wait_for_assistant(client, chat["id"], "text")
+    story_text = "\n".join(
+        part["text"] for part in story_message["parts"] if part["type"] == "text"
+    ).strip()
+
+    image_turn = await client.post(
+        f"/api/chats/{chat['id']}/turns",
+        json={"text": "Make an image based on the previous story", "mode": "auto"},
+    )
+    assert image_turn.status_code == 202
+    image_run = image_turn.json()["run"]
+    assert image_run["operation"] == "text_to_image"
+    assert "Source chat text:" in image_run["standalone_prompt"]
+    assert story_request in image_run["standalone_prompt"]
+    assert story_text in image_run["standalone_prompt"]
+
+    image_message = await wait_for_assistant(client, chat["id"], "image")
+    image = next(part for part in image_message["parts"] if part["type"] == "image")
+    assert (
+        image["artifact"]["metadata_json"]["semantic_description"] == image_run["standalone_prompt"]
+    )
+
+
+async def test_prior_image_edit_falls_back_to_accumulated_text_prompt(
+    client: AsyncClient,
+) -> None:
+    with SessionLocal() as session:
+        for workflow in session.query(WorkflowDefinition).filter_by(operation="image_to_image"):
+            session.delete(workflow)
+        session.commit()
+
+    chat = (await client.post("/api/chats", json={"title": "Semantic image edit"})).json()
+    first = await client.post(
+        f"/api/chats/{chat['id']}/turns",
+        json={"text": "Make me an image of an apple", "mode": "auto"},
+    )
+    assert first.status_code == 202
+    await wait_for_assistant(client, chat["id"], "image")
+
+    edited = await client.post(
+        f"/api/chats/{chat['id']}/turns",
+        json={"text": "Make it green", "mode": "auto"},
+    )
+    assert edited.status_code == 202
+    edited_run = await wait_for_run(client, edited.json()["run"]["id"])
+
+    assert edited_run["operation"] == "text_to_image"
+    assert edited_run["standalone_prompt"] == (
+        "Make me an image of an apple. Follow-up instruction: Make it green"
+    )
+    edited_message = await wait_for_assistant(client, chat["id"], "image")
+    image = next(part for part in edited_message["parts"] if part["type"] == "image")
+    assert image["artifact"]["metadata_json"]["semantic_description"] == (
+        "Make me an image of an apple. Follow-up instruction: Make it green"
+    )
+
+
 async def test_retention_cleanup_only_removes_expired_unreferenced_artifacts(
     client: AsyncClient,
 ) -> None:
@@ -793,6 +934,70 @@ async def test_media_library_can_delete_a_referenced_artifact(client: AsyncClien
         part for item in detail["messages"] for part in item["parts"] if part["id"] == image["id"]
     )
     assert deleted_part["artifact_id"] is None
+
+
+async def test_chat_delete_can_remove_exclusive_generated_media(client: AsyncClient) -> None:
+    keep_chat = (await client.post("/api/chats", json={"title": "Keep media"})).json()
+    await client.post(
+        f"/api/chats/{keep_chat['id']}/turns",
+        json={"text": "Create an image to keep", "mode": "image"},
+    )
+    keep_message = await wait_for_assistant(client, keep_chat["id"], "image")
+    keep_artifact_id = next(
+        part["artifact_id"] for part in keep_message["parts"] if part["type"] == "image"
+    )
+
+    assert (await client.delete(f"/api/chats/{keep_chat['id']}")).status_code == 204
+    assert (await client.get(f"/api/artifacts/{keep_artifact_id}")).status_code == 200
+
+    delete_chat = (await client.post("/api/chats", json={"title": "Delete media"})).json()
+    await client.post(
+        f"/api/chats/{delete_chat['id']}/turns",
+        json={"text": "Create an image to remove", "mode": "image"},
+    )
+    delete_message = await wait_for_assistant(client, delete_chat["id"], "image")
+    delete_artifact_id = next(
+        part["artifact_id"] for part in delete_message["parts"] if part["type"] == "image"
+    )
+
+    deleted = await client.delete(
+        f"/api/chats/{delete_chat['id']}",
+        params={"delete_generated_media": True},
+    )
+    assert deleted.status_code == 204
+    assert (await client.get(f"/api/artifacts/{delete_artifact_id}")).status_code == 404
+
+
+async def test_chat_delete_keeps_generated_media_referenced_by_another_chat(
+    client: AsyncClient,
+) -> None:
+    source_chat = (await client.post("/api/chats", json={"title": "Source"})).json()
+    await client.post(
+        f"/api/chats/{source_chat['id']}/turns",
+        json={"text": "Create a shared image", "mode": "image"},
+    )
+    source_message = await wait_for_assistant(client, source_chat["id"], "image")
+    artifact_id = next(
+        part["artifact_id"] for part in source_message["parts"] if part["type"] == "image"
+    )
+
+    other_chat = (await client.post("/api/chats", json={"title": "Other"})).json()
+    attached = await client.post(
+        f"/api/chats/{other_chat['id']}/turns",
+        json={
+            "text": "Describe this image",
+            "mode": "text",
+            "input_artifact_ids": [artifact_id],
+        },
+    )
+    assert attached.status_code == 202
+
+    deleted = await client.delete(
+        f"/api/chats/{source_chat['id']}",
+        params={"delete_generated_media": True},
+    )
+    assert deleted.status_code == 204
+    assert (await client.get(f"/api/artifacts/{artifact_id}")).status_code == 200
 
 
 async def test_workflow_revisions_and_validation(client: AsyncClient) -> None:
