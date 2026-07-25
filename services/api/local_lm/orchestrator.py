@@ -63,6 +63,44 @@ from .settings_registry import (
 
 logger = logging.getLogger(__name__)
 
+SELECTION_TERM_ALIASES = {
+    "animation": "video",
+    "animations": "video",
+    "artwork": "image",
+    "cinematic": "video",
+    "coding": "code",
+    "debugging": "debug",
+    "developer": "code",
+    "development": "code",
+    "draw": "image",
+    "drawing": "image",
+    "fiction": "writing",
+    "illustration": "image",
+    "illustrations": "image",
+    "images": "image",
+    "motion": "video",
+    "narrative": "writing",
+    "photo": "image",
+    "photos": "image",
+    "photography": "image",
+    "picture": "image",
+    "pictures": "image",
+    "programming": "code",
+    "prose": "writing",
+    "software": "code",
+    "stories": "writing",
+    "story": "writing",
+    "storytelling": "writing",
+    "summarization": "summarize",
+    "summary": "summarize",
+    "translation": "translate",
+    "translator": "translate",
+    "troubleshooting": "debug",
+    "videos": "video",
+    "write": "writing",
+    "writer": "writing",
+}
+
 
 def _preview_media_type(content: bytes) -> str:
     if content.startswith(b"\x89PNG"):
@@ -1254,7 +1292,7 @@ class ConversationOrchestrator:
             "with",
         }
         return {
-            term
+            SELECTION_TERM_ALIASES.get(term, term)
             for term in re.findall(r"[a-z0-9][a-z0-9+#.-]{2,}", value)
             if term not in stop_words
         }

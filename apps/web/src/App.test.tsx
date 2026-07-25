@@ -514,7 +514,12 @@ describe("App", () => {
           artifact_id: null,
           metadata_json: {
             provenance: {
-              model_selection: { mode: "auto", profile_name: "Code specialist" },
+              model_selection: {
+                mode: "auto",
+                profile_name: "Code specialist",
+                matched_terms: ["code", "python"],
+                fallback: false,
+              },
             },
           },
         }] : []),
@@ -553,7 +558,7 @@ describe("App", () => {
     expect(await screen.findByRole("heading", { name: "Edited answer" })).toBeInTheDocument();
     expect(screen.queryByText("Old follow-up")).not.toBeInTheDocument();
     expect(screen.queryByText("Old branch")).not.toBeInTheDocument();
-    expect(screen.getAllByText("Auto chose Code specialist")).toHaveLength(2);
+    expect(screen.getAllByText("Auto chose Code specialist · matched code, python")).toHaveLength(2);
     fireEvent.click(screen.getAllByText("Edit and branch").at(-1)!);
     expect(screen.getByDisplayValue("Edited question")).toBeInTheDocument();
   });
@@ -844,6 +849,62 @@ describe("App", () => {
     expect(screen.getByText("Clean 2 partial")).toBeEnabled();
     expect(await screen.findByText("Local GGUF")).toBeInTheDocument();
     expect(screen.getByTitle("Delete installed model")).toBeEnabled();
+  });
+
+  it("edits Auto Mode use cases beside installed models", async () => {
+    vi.mocked(api.models).mockResolvedValue([
+      {
+        id: "model-use-case",
+        source_id: null,
+        name: "Local specialist",
+        role: "chat",
+        engine: "llama.cpp",
+        local_path: "/models/specialist.gguf",
+        size_bytes: 4096,
+        compatibility: "likely",
+        manifest_json: {},
+        active: true,
+        created_at: "2026-07-22T00:00:00Z",
+        updated_at: "2026-07-22T00:00:00Z",
+      },
+    ]);
+    const profile = {
+      id: "profile-use-case",
+      model_install_id: "model-use-case",
+      name: "Local specialist",
+      use_case: "General conversation",
+      role: "chat" as const,
+      engine: "llama.cpp",
+      load_settings_json: {},
+      request_settings_json: {},
+      is_default: false,
+    };
+    vi.mocked(api.profiles).mockResolvedValue([profile]);
+    vi.mocked(api.updateProfile).mockImplementation(async (_id, values) => {
+      const updated = { ...profile, use_case: values.use_case ?? profile.use_case };
+      vi.mocked(api.profiles).mockResolvedValue([updated]);
+      return updated;
+    });
+    const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+    render(
+      <QueryClientProvider client={client}>
+        <App />
+      </QueryClientProvider>,
+    );
+
+    fireEvent.click(await screen.findByText("Model library"));
+    expect(await screen.findByText("General conversation")).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "Edit use case" }));
+    fireEvent.change(screen.getByLabelText("Best uses for Local specialist"), {
+      target: { value: "Python programming and code review" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "Save" }));
+
+    await waitFor(() => expect(api.updateProfile).toHaveBeenCalledWith(
+      "profile-use-case",
+      { use_case: "Python programming and code review" },
+    ));
+    expect(await screen.findByText("Python programming and code review")).toBeInTheDocument();
   });
 
   it("does not mark a catalog model installed from an inactive replacement", async () => {
