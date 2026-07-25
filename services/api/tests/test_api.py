@@ -716,6 +716,7 @@ async def test_media_library_reports_references_and_storage(client: AsyncClient)
     storage = await client.get("/api/artifacts/storage")
     assert storage.status_code == 200
     assert storage.json()["referenced_count"] >= 1
+    assert storage.json()["retention_pending_count"] == 0
     assert storage.json()["retention_days"] == 30
     assert turn.status_code == 202
 
@@ -747,6 +748,51 @@ async def test_retention_cleanup_only_removes_expired_unreferenced_artifacts(
     assert cleaned.json()["removed_count"] == 1
     assert cleaned.json()["reclaimed_bytes"] == len(b"expired-orphan")
     assert (await client.get(f"/api/artifacts/{artifact_id}")).status_code == 404
+
+
+async def test_cleanup_marks_new_unreferenced_artifacts_for_recovery(
+    client: AsyncClient,
+) -> None:
+    uploaded = await client.post(
+        "/api/artifacts",
+        files={"file": ("orphan.png", b"new-orphan", "image/png")},
+    )
+    artifact_id = uploaded.json()["id"]
+
+    cleaned = await client.post("/api/artifacts/cleanup", json={"dry_run": False})
+    assert cleaned.status_code == 200
+    assert cleaned.json()["marked_count"] == 1
+    assert cleaned.json()["removed_count"] == 0
+
+    with SessionLocal() as session:
+        artifact = session.get(Artifact, artifact_id)
+        assert artifact
+        assert isinstance(artifact.metadata_json.get("unreferenced_at"), str)
+
+
+async def test_media_library_can_delete_a_referenced_artifact(client: AsyncClient) -> None:
+    chat = (await client.post("/api/chats", json={"title": "Delete media"})).json()
+    await client.post(
+        f"/api/chats/{chat['id']}/turns",
+        json={"text": "Create an image to delete", "mode": "image"},
+    )
+    message = await wait_for_assistant(client, chat["id"], "image")
+    image = next(part for part in message["parts"] if part["type"] == "image")
+    artifact_id = image["artifact_id"]
+
+    deleted = await client.delete(f"/api/artifacts/{artifact_id}")
+    assert deleted.status_code == 200
+    assert deleted.json()["artifact_id"] == artifact_id
+    assert deleted.json()["reference_count"] == 1
+    assert deleted.json()["removed_count"] == 1
+    assert deleted.json()["reclaimed_bytes"] > 0
+    assert (await client.get(f"/api/artifacts/{artifact_id}")).status_code == 404
+
+    detail = (await client.get(f"/api/chats/{chat['id']}")).json()
+    deleted_part = next(
+        part for item in detail["messages"] for part in item["parts"] if part["id"] == image["id"]
+    )
+    assert deleted_part["artifact_id"] is None
 
 
 async def test_workflow_revisions_and_validation(client: AsyncClient) -> None:

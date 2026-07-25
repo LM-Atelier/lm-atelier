@@ -93,6 +93,13 @@ class HuggingFaceCatalog:
             max_size_bytes,
             updated_within_days,
         )
+        fallback_cache = self._cache_path(
+            "search-fallback",
+            query,
+            role,
+            sort,
+            limit,
+        )
         try:
             response = await self._client.get(url, params=None if cursor else params)
             response.raise_for_status()
@@ -101,6 +108,12 @@ class HuggingFaceCatalog:
             if max_size_bytes is not None:
                 raw_items = await self._hydrate_file_sizes(raw_items, role)
             items = [self._normalize(item, role) for item in raw_items]
+            next_cursor = self._next_link(response)
+            if cursor is None:
+                self._write_cache(
+                    fallback_cache,
+                    CatalogPage(items=items, next_cursor=next_cursor).model_dump_json(),
+                )
             items = self._filter_items(
                 items,
                 compatibility=compatibility,
@@ -122,12 +135,45 @@ class HuggingFaceCatalog:
                         -(item.downloads or 0),
                     )
                 )
-            result = CatalogPage(items=items, next_cursor=self._next_link(response))
+            result = CatalogPage(items=items, next_cursor=next_cursor)
             self._write_cache(cache, result.model_dump_json())
             return result
         except (httpx.HTTPError, ValueError):
-            if cache.is_file():
-                return CatalogPage.model_validate_json(cache.read_text(encoding="utf-8"))
+            candidates = [(cache, False)]
+            if cursor is None:
+                candidates.append((fallback_cache, True))
+            for candidate, is_fallback in candidates:
+                cached = self._read_page_cache(candidate)
+                if cached is None:
+                    continue
+                items = self._filter_items(
+                    cached.items,
+                    compatibility=compatibility,
+                    file_format=file_format,
+                    quantization=quantization,
+                    license_id=license_id,
+                    gated=gated,
+                    architecture=architecture,
+                    min_parameters=min_parameters,
+                    max_parameters=max_parameters,
+                    max_size_bytes=max_size_bytes,
+                    updated_within_days=updated_within_days,
+                )
+                if sort == "compatible":
+                    rank = {"tested": 0, "likely": 1, "advanced_import": 2, "unsupported": 3}
+                    items.sort(
+                        key=lambda item: (
+                            rank.get(item.compatibility, 4),
+                            -(item.downloads or 0),
+                        )
+                    )
+                return cached.model_copy(
+                    update={
+                        "items": items,
+                        "next_cursor": None if is_fallback else cached.next_cursor,
+                        "stale": True,
+                    }
+                )
             raise
 
     async def inspect(
@@ -216,6 +262,15 @@ class HuggingFaceCatalog:
         temporary = path.with_suffix(".partial")
         temporary.write_text(content, encoding="utf-8")
         os.replace(temporary, path)
+
+    @staticmethod
+    def _read_page_cache(path: Path) -> CatalogPage | None:
+        if not path.is_file():
+            return None
+        try:
+            return CatalogPage.model_validate_json(path.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            return None
 
     @staticmethod
     def _pipeline_tag(role: str) -> str | None:

@@ -87,6 +87,7 @@ class ArtifactStorageInfo(ApiModel):
     temporary_count: int
     eligible_bytes: int
     eligible_count: int
+    retention_pending_count: int
     disk_free_bytes: int
     warning: bool
     retention_days: int
@@ -100,6 +101,13 @@ class ArtifactCleanupRequest(ApiModel):
 class ArtifactCleanupResult(ApiModel):
     dry_run: bool
     marked_count: int
+    removed_count: int
+    reclaimed_bytes: int
+
+
+class ArtifactDeleteResult(ApiModel):
+    artifact_id: str
+    reference_count: int
     removed_count: int
     reclaimed_bytes: int
 
@@ -478,6 +486,7 @@ class CatalogModel(ApiModel):
 class CatalogPage(ApiModel):
     items: list[CatalogModel]
     next_cursor: str | None = None
+    stale: bool = False
 
 
 class CatalogDetail(ApiModel):
