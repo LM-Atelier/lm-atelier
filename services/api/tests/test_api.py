@@ -1226,6 +1226,40 @@ async def test_auto_model_selection_matches_profile_use_case(client: AsyncClient
     assert {"python", "code"}.issubset(selection["matched_terms"])
 
 
+async def test_auto_model_selection_normalizes_common_intent_terms(client: AsyncClient) -> None:
+    technical = await client.post(
+        "/api/profiles",
+        json={
+            "name": "Technical specialist",
+            "use_case": "Software development and application architecture",
+            "role": "chat",
+            "engine": "mock",
+        },
+    )
+    assert technical.status_code == 201
+    visual = await client.post(
+        "/api/profiles",
+        json={
+            "name": "Visual specialist",
+            "use_case": "Illustration, photography, and artwork",
+            "role": "chat",
+            "engine": "mock",
+        },
+    )
+    assert visual.status_code == 201
+
+    chat = (await client.post("/api/chats", json={"title": "Intent aliases"})).json()
+    response = await client.post(
+        f"/api/chats/{chat['id']}/turns",
+        json={"text": "Help me code a small command-line tool", "mode": "text"},
+    )
+
+    assert response.status_code == 202
+    selection = response.json()["run"]["provenance_json"]["model_selection"]
+    assert selection["profile_id"] == technical.json()["id"]
+    assert "code" in selection["matched_terms"]
+
+
 async def test_preset_lifecycle_and_portable_bundle(client: AsyncClient) -> None:
     created = await client.post(
         "/api/presets",

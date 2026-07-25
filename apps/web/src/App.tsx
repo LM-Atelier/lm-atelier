@@ -50,6 +50,7 @@ import type {
   GenerationPresetBundle,
   Message,
   MessagePart,
+  ModelInstall,
   ModelProfile,
   ModelProfileBundle,
   Project,
@@ -264,6 +265,14 @@ function MessageBubble({
   const autoProfileName = modelSelection?.mode === "auto"
     ? String(modelSelection.profile_name ?? "")
     : "";
+  const autoMatchedTerms = modelSelection?.mode === "auto" && Array.isArray(modelSelection.matched_terms)
+    ? modelSelection.matched_terms.filter((term): term is string => typeof term === "string").slice(0, 3)
+    : [];
+  const autoSelectionDetail = autoMatchedTerms.length
+    ? ` · matched ${autoMatchedTerms.join(", ")}`
+    : modelSelection?.mode === "auto" && modelSelection.fallback
+      ? " · general fallback"
+      : "";
   const usage = context?.usage as Record<string, unknown> | undefined;
   const inputTokens = Number(usage?.prompt_tokens ?? context?.input_tokens ?? 0);
   const contextLimit = Number(context?.context_limit ?? 0);
@@ -282,7 +291,7 @@ function MessageBubble({
         )}
         {message.role === "assistant" && message.status === "complete" && (
           <div className="message-meta">
-            {autoProfileName && <span>Auto chose {autoProfileName}</span>}
+            {autoProfileName && <span>Auto chose {autoProfileName}{autoSelectionDetail}</span>}
             {contextLimit > 0 && (
               <span>
                 Context {inputTokens.toLocaleString()} / {contextLimit.toLocaleString()} tokens
@@ -696,6 +705,59 @@ function RecipeCard({ recipe, pending, onInstall }: { recipe: ReferenceRecipe; p
   );
 }
 
+function InstalledModelRow({
+  model,
+  profile,
+  creating,
+  deleting,
+  saving,
+  onCreate,
+  onDelete,
+  onSaveUseCase,
+}: {
+  model: ModelInstall;
+  profile?: ModelProfile;
+  creating: boolean;
+  deleting: boolean;
+  saving: boolean;
+  onCreate: () => void;
+  onDelete: () => void;
+  onSaveUseCase: (value: string) => Promise<boolean>;
+}) {
+  const [editing, setEditing] = useState(false);
+  const [draft, setDraft] = useState(profile?.use_case ?? "");
+  const startEditing = () => {
+    setDraft(profile?.use_case ?? "");
+    setEditing(true);
+  };
+  const save = async () => {
+    if (await onSaveUseCase(draft.trim())) setEditing(false);
+  };
+  return (
+    <div className={editing ? "editing" : ""}>
+      <span className="badge">{model.role}</span>
+      <span className="model-install-copy">
+        <strong>{model.name}</strong>
+        <small>{profile ? profile.use_case || "General use" : "Setup required"}</small>
+      </span>
+      <span className="model-install-size">{formatBytes(model.size_bytes)}</span>
+      <span className="row-actions">
+        {profile
+          ? <button className="secondary compact-button" onClick={startEditing} disabled={editing || saving}>Edit use case</button>
+          : <button className="secondary compact-button" disabled={creating} title="Complete setup for this older model install" onClick={onCreate}>Finish setup</button>}
+        <button className="secondary compact-button danger" disabled={deleting} title="Delete installed model" onClick={onDelete}>Delete</button>
+      </span>
+      {editing && profile && (
+        <form className="model-use-case-editor" onSubmit={(event) => { event.preventDefault(); void save(); }}>
+          <textarea aria-label={`Best uses for ${model.name}`} rows={2} value={draft} onChange={(event) => setDraft(event.target.value)} placeholder="Programming, illustration, cinematic video…" />
+          <button type="button" className="secondary compact-button" disabled={saving} onClick={() => setEditing(false)}>Cancel</button>
+          <button type="submit" className="primary compact-button" disabled={saving || draft.trim() === profile.use_case.trim()}>{saving ? "Saving…" : "Save"}</button>
+        </form>
+      )}
+    </div>
+  );
+}
+
 function ModelsView() {
   const client = useQueryClient();
   const [query, setQuery] = useState("");
@@ -802,6 +864,16 @@ function ModelsView() {
     mutationFn: api.createProfile,
     onSuccess: () => void client.invalidateQueries({ queryKey: ["profiles"] }),
   });
+  const updateUseCase = useMutation({
+    mutationFn: ({ profileId, useCase }: { profileId: string; useCase: string }) =>
+      api.updateProfile(profileId, { use_case: useCase }),
+    onSuccess: (updated) => {
+      client.setQueryData<ModelProfile[]>(["profiles"], (current) =>
+        current?.map((profile) => profile.id === updated.id ? updated : profile) ?? [updated],
+      );
+      void client.invalidateQueries({ queryKey: ["profiles"] });
+    },
+  });
   const deleteModel = useMutation({
     mutationFn: (modelId: string) => api.deleteModel(modelId, true),
     onSuccess: () => {
@@ -869,8 +941,29 @@ function ModelsView() {
         <select aria-label="Model order" value={sort} onChange={(event) => setSort(event.target.value)}><option value="trending">Trending on Hugging Face</option><option value="downloads">Downloads</option><option value="likes">Likes</option><option value="newest">Newest</option><option value="updated">Recently updated</option><option value="compatible">Compatible first</option></select>
       </div>
       <div className="catalog-filters"><select aria-label="Compatibility filter" value={compatibility} onChange={(event) => setCompatibility(event.target.value)}><option value="">All compatibility</option><option value="likely">One-click ready</option><option value="advanced_import">Advanced import</option><option value="unsupported">Unsupported</option></select><select aria-label="Last updated filter" value={updatedWithinDays} onChange={(event) => setUpdatedWithinDays(event.target.value)}><option value="">Updated any time</option><option value="7">Updated this week</option><option value="30">Updated this month</option><option value="90">Updated in 3 months</option><option value="365">Updated this year</option></select><select aria-label="Format filter" value={fileFormat} onChange={(event) => setFileFormat(event.target.value)}><option value="">All formats</option><option value="gguf">GGUF</option><option value="safetensors">safetensors</option></select><select aria-label="Access filter" value={gated} onChange={(event) => setGated(event.target.value)}><option value="">All access</option><option value="open">Open</option><option value="gated">Gated</option></select><input aria-label="Quantization filter" placeholder="Quantization (Q4_K_M, FP8…)" value={quantization} onChange={(event) => setQuantization(event.target.value)} /><input aria-label="Architecture filter" placeholder="Architecture" value={architecture} onChange={(event) => setArchitecture(event.target.value)} /><input aria-label="License filter" placeholder="License" value={licenseId} onChange={(event) => setLicenseId(event.target.value)} /><input aria-label="Minimum parameters" type="number" min="0" placeholder="Min parameters (B)" value={minParameters} onChange={(event) => setMinParameters(event.target.value)} /><input aria-label="Maximum parameters" type="number" min="0" placeholder="Max parameters (B)" value={maxParameters} onChange={(event) => setMaxParameters(event.target.value)} /><input aria-label="Maximum download size" type="number" min="0" placeholder="Max download (GB)" value={maxSizeGb} onChange={(event) => setMaxSizeGb(event.target.value)} /></div>
-      {(installed.data?.length ?? 0) > 0 && <section><h2>Installed models</h2><div className="profile-table model-installs">{installed.data?.map((model) => { const bound = profiles.data?.some((profile) => profile.model_install_id === model.id) ?? false; return <div key={model.id}><span className="badge">{model.role}</span><strong>{model.name}</strong><span>{formatBytes(model.size_bytes)}</span><span className="row-actions"><button className="secondary compact-button" disabled={bound || createProfile.isPending} title={bound ? "This model is available in chats and Auto mode" : "Complete setup for this older model install"} onClick={() => createProfile.mutate(model)}>{bound ? "Ready to use" : "Finish setup"}</button><button className="secondary compact-button danger" disabled={deleteModel.isPending} title="Delete installed model" onClick={() => { if (window.confirm(`Delete ${model.name} and its model settings from local storage?`)) deleteModel.mutate(model.id); }}>Delete</button></span></div>; })}</div></section>}
-      {(download.error || deleteModel.error || cleanupDownloads.error) && <div className="callout error">{download.error?.message || deleteModel.error?.message || cleanupDownloads.error?.message}</div>}
+      {(installed.data?.length ?? 0) > 0 && <section><h2>Installed models</h2><div className="profile-table model-installs">{installed.data?.map((model) => {
+        const profile = profiles.data?.find((candidate) => candidate.model_install_id === model.id);
+        return <InstalledModelRow
+          key={model.id}
+          model={model}
+          profile={profile}
+          creating={createProfile.isPending && createProfile.variables?.id === model.id}
+          deleting={deleteModel.isPending && deleteModel.variables === model.id}
+          saving={updateUseCase.isPending && updateUseCase.variables?.profileId === profile?.id}
+          onCreate={() => createProfile.mutate(model)}
+          onDelete={() => { if (window.confirm(`Delete ${model.name} and its model settings from local storage?`)) deleteModel.mutate(model.id); }}
+          onSaveUseCase={async (value) => {
+            if (!profile) return false;
+            try {
+              await updateUseCase.mutateAsync({ profileId: profile.id, useCase: value });
+              return true;
+            } catch {
+              return false;
+            }
+          }}
+        />;
+      })}</div></section>}
+      {(download.error || deleteModel.error || cleanupDownloads.error || updateUseCase.error) && <div className="callout error">{download.error?.message || deleteModel.error?.message || cleanupDownloads.error?.message || updateUseCase.error?.message}</div>}
       {catalog.isLoading && <div className="loading-line" />}
       {catalog.error && <div className="callout error action-callout"><span>{catalog.error.message}</span><button className="secondary compact-button" disabled={catalog.isFetching} onClick={() => void catalog.refetch()}>Retry</button></div>}
       {catalogIsStale && !catalog.error && <div className="callout warning action-callout"><span>Showing saved results while Hugging Face is unavailable.</span><button className="secondary compact-button" disabled={catalog.isFetching} onClick={() => void catalog.refetch()}>Refresh</button></div>}
