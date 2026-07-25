@@ -305,6 +305,40 @@ class ArtifactStore:
             session.flush()
         return marked_count, removed_count, reclaimed_bytes
 
+    def delete_library_artifact(
+        self,
+        session: Session,
+        artifact: Artifact,
+    ) -> tuple[int, int, int]:
+        if artifact.kind not in {ArtifactKind.IMAGE.value, ArtifactKind.VIDEO.value}:
+            raise ValueError("only image and video library artifacts can be deleted directly")
+
+        linked_ids = {
+            linked_id
+            for key in ("poster_artifact_id", "browser_proxy_artifact_id")
+            if isinstance((linked_id := artifact.metadata_json.get(key)), str)
+        }
+        parts = session.scalars(
+            select(MessagePart).where(MessagePart.artifact_id == artifact.id)
+        ).all()
+        for part in parts:
+            part.artifact_id = None
+        session.flush()
+
+        removed_count = 1
+        reclaimed_bytes = artifact.size_bytes
+        self._delete_artifact(session, artifact)
+
+        referenced = self.referenced_artifact_ids(session)
+        for linked_id in linked_ids:
+            linked = session.get(Artifact, linked_id)
+            if not linked or linked.id in referenced:
+                continue
+            removed_count += 1
+            reclaimed_bytes += linked.size_bytes
+            self._delete_artifact(session, linked)
+        return len(parts), removed_count, reclaimed_bytes
+
     def _delete_artifact(self, session: Session, artifact: Artifact) -> None:
         path = self.resolve(artifact)
         session.delete(artifact)
