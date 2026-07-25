@@ -1187,7 +1187,7 @@ class ConversationOrchestrator:
             rows.append(message)
             current_id = message.parent_id
         for message in reversed(rows):
-            content = "\n".join(part.text for part in message.parts if part.text).strip()
+            content = ConversationOrchestrator._message_context_text(message)
             if content:
                 messages.append({"role": message.role, "content": content})
         return messages
@@ -1467,10 +1467,26 @@ class ConversationOrchestrator:
             current_id = message.parent_id
         rows.reverse()
         for message in rows:
-            text = "\n".join(part.text for part in message.parts if part.text).strip()
+            text = ConversationOrchestrator._message_context_text(message)
             if text:
                 messages.append({"role": message.role, "content": text})
         return messages
+
+    @staticmethod
+    def _message_context_text(message: Message) -> str:
+        text = "\n".join(part.text for part in message.parts if part.text).strip()
+        if text:
+            return text
+
+        media: list[str] = []
+        for part_type, singular in (
+            (PartType.IMAGE.value, "image"),
+            (PartType.VIDEO.value, "video"),
+        ):
+            count = sum(part.type == part_type for part in message.parts)
+            if count:
+                media.append(singular if count == 1 else f"{count} {singular}s")
+        return f"[Generated {' and '.join(media)}]" if media else ""
 
     @staticmethod
     def _accepted_for_run(session: Session, run: Run) -> TurnAccepted:

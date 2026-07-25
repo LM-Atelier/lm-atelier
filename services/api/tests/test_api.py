@@ -18,7 +18,8 @@ from local_lm.config import Settings
 from local_lm.db import SessionLocal
 from local_lm.domain import JobStatus, utcnow
 from local_lm.downloads import DownloadManager
-from local_lm.models import Artifact, Job
+from local_lm.models import Artifact, Chat, Job, Run
+from local_lm.orchestrator import ConversationOrchestrator
 
 
 async def wait_for_assistant(client: AsyncClient, chat_id: str, expected_type: str) -> dict:  # type: ignore[type-arg]
@@ -719,6 +720,47 @@ async def test_media_library_reports_references_and_storage(client: AsyncClient)
     assert storage.json()["retention_pending_count"] == 0
     assert storage.json()["retention_days"] == 30
     assert turn.status_code == 202
+
+
+async def test_text_turn_after_image_keeps_alternating_chat_context(
+    client: AsyncClient,
+) -> None:
+    chat = (await client.post("/api/chats", json={"title": "Mixed media context"})).json()
+    await client.post(
+        f"/api/chats/{chat['id']}/turns",
+        json={"text": "Create a reference image", "mode": "image"},
+    )
+    await wait_for_assistant(client, chat["id"], "image")
+
+    with SessionLocal() as session:
+        persisted_chat = session.get(Chat, chat["id"])
+        assert persisted_chat
+        routing_context = ConversationOrchestrator._routing_context(
+            session,
+            persisted_chat,
+            persisted_chat.active_head_message_id,
+        )
+    assert routing_context == [
+        {"role": "user", "content": "Create a reference image"},
+        {"role": "assistant", "content": "[Generated image]"},
+    ]
+
+    accepted = await client.post(
+        f"/api/chats/{chat['id']}/turns",
+        json={"text": "Now answer a text question", "mode": "text"},
+    )
+    assert accepted.status_code == 202
+    await wait_for_assistant(client, chat["id"], "text")
+
+    with SessionLocal() as session:
+        run = session.get(Run, accepted.json()["run"]["id"])
+        assert run
+        generation_context = ConversationOrchestrator._context_messages(session, run)
+    assert generation_context == [
+        {"role": "user", "content": "Create a reference image"},
+        {"role": "assistant", "content": "[Generated image]"},
+        {"role": "user", "content": "Now answer a text question"},
+    ]
 
 
 async def test_retention_cleanup_only_removes_expired_unreferenced_artifacts(
