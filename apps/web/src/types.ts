@@ -42,6 +42,7 @@ export interface ArtifactStorageInfo {
   temporary_count: number;
   eligible_bytes: number;
   eligible_count: number;
+  retention_pending_count?: number;
   disk_free_bytes: number;
   warning: boolean;
   retention_days: number;
@@ -51,6 +52,13 @@ export interface ArtifactStorageInfo {
 export interface ArtifactCleanupResult {
   dry_run: boolean;
   marked_count: number;
+  removed_count: number;
+  reclaimed_bytes: number;
+}
+
+export interface ArtifactDeleteResult {
+  artifact_id: string;
+  reference_count: number;
   removed_count: number;
   reclaimed_bytes: number;
 }
@@ -300,6 +308,7 @@ export interface CatalogModel {
 export interface CatalogPage {
   items: CatalogModel[];
   next_cursor: string | null;
+  stale?: boolean;
 }
 
 export interface CatalogDetail {

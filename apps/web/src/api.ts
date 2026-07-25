@@ -1,6 +1,7 @@
 import type {
   AppEvent,
   ArtifactCleanupResult,
+  ArtifactDeleteResult,
   ArtifactLibraryItem,
   ArtifactStorageInfo,
   BackupInfo,
@@ -303,6 +304,10 @@ export const api = {
     request<ArtifactCleanupResult>("/api/artifacts/cleanup", {
       method: "POST",
       body: JSON.stringify({ dry_run: dryRun }),
+    }),
+  deleteArtifact: (artifactId: string) =>
+    request<ArtifactDeleteResult>(`/api/artifacts/${encodeURIComponent(artifactId)}`, {
+      method: "DELETE",
     }),
   catalog: (
     query: string,
