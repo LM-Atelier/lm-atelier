@@ -255,6 +255,8 @@ h1, h2, h3 { margin: 0; }
 .custom-node-list small { color: var(--muted); overflow-wrap: anywhere; }.custom-node-list details pre { max-width: 420px; max-height: 180px; overflow: auto; }
 .callout { border: 1px solid #3a424e; border-radius: 9px; padding: 10px 12px; margin: 12px 0; color: #c2c9d2; }
 .callout.success { border-color: #34694f; background: #183126; color: #9ee4c3; }
+.callout.warning { border-color: #765c38; background: #211b13; color: #e5c38f; }
+.action-callout { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
 
 .modal-backdrop { position: fixed; inset: 0; z-index: 30; display: grid; place-items: center; padding: 20px; background: #000a; backdrop-filter: blur(6px); }
 .modal { width: min(720px, 96vw); max-height: 92vh; overflow-y: auto; background: #14181f; border: 1px solid #343b47; border-radius: 15px; box-shadow: 0 30px 100px #000b; padding: 20px; }
@@ -346,7 +348,7 @@ h1, h2, h3 { margin: 0; }
 .gallery-card { min-width: 0; overflow: hidden; border: 1px solid var(--border); border-radius: 12px; background: #11151b; }
 .gallery-card > img, .gallery-card > video { width: 100%; height: 210px; display: block; object-fit: contain; background: #080a0d; }
 .gallery-card > div { display: grid; gap: 5px; padding: 11px; }.gallery-card strong { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 12px; }.gallery-card small { color: var(--muted); font-size: 10px; }
-.gallery-card span { display: flex; align-items: center; justify-content: space-between; gap: 8px; }.gallery-card a { color: #a9a0ff; font-size: 11px; }.gallery-card code { color: #68717e; font-size: 9px; }
+.gallery-card span { display: flex; align-items: center; gap: 8px; }.gallery-card a { color: #a9a0ff; font-size: 11px; }.gallery-card code { color: #68717e; font-size: 9px; margin-right: auto; }
 
 .jobs-panel { position: fixed; right: 16px; bottom: 16px; width: 310px; z-index: 15; border: 1px solid #353d48; border-radius: 12px; background: #151920eb; backdrop-filter: blur(12px); box-shadow: 0 16px 45px #0008; padding: 11px; }
 .jobs-panel > header { display: flex; align-items: center; gap: 7px; color: #c4cbd5; font-size: 12px; padding: 2px 3px 9px; }
