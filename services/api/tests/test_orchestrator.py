@@ -61,6 +61,36 @@ async def test_managed_chat_worker_is_aligned_to_the_run_profile(monkeypatch) ->
     processes.load_chat.assert_awaited_once_with(profile, install)
 
 
+async def test_chat_planner_falls_back_during_media_handoff() -> None:
+    ready = WorkerStatus(
+        name="chat",
+        state="ready",
+        managed=True,
+        running=True,
+        pid=12,
+        profile_id="profile-selected",
+    )
+    processes = SimpleNamespace(
+        settings=SimpleNamespace(
+            llama_executable=Path("llama-server"),
+            worker_startup_seconds=60,
+        ),
+        statuses=Mock(return_value=[ready]),
+    )
+    orchestrator = ConversationOrchestrator(
+        engines=SimpleNamespace(settings=SimpleNamespace(chat_engine="llama.cpp")),
+        artifacts=Mock(),
+        events=Mock(),
+        scheduler=Mock(),
+        processes=processes,
+    )
+    orchestrator._chat_planner_ready.clear()
+
+    assert await orchestrator._chat_planner_available() is False
+    orchestrator._chat_planner_ready.set()
+    assert await orchestrator._chat_planner_available() is True
+
+
 def test_media_progress_preserves_the_latest_preview() -> None:
     message = Message(chat_id="chat-1", role="assistant", status="pending")
     message.parts = [
@@ -88,3 +118,23 @@ def test_media_progress_preserves_the_latest_preview() -> None:
     assert parts[0].metadata_json == {"progress": 0.5, "phase": "sampling"}
     assert parts[1].artifact_id == "sha256:preview"
     assert parts[1].metadata_json == {"preview": True}
+
+
+def test_chat_progress_is_removed_without_discarding_text() -> None:
+    text = MessagePart(position=0, type="text", text="Partial response")
+    progress = MessagePart(
+        position=1,
+        type="progress",
+        text="Waiting for first token",
+        metadata_json={"activity": "chat", "phase": "waiting for first token"},
+    )
+    message = Message(
+        chat_id="chat-1",
+        role="assistant",
+        status="pending",
+        parts=[text, progress],
+    )
+
+    ConversationOrchestrator._remove_chat_progress(message)
+
+    assert message.parts == [text]
