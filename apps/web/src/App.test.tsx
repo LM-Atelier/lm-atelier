@@ -320,6 +320,8 @@ describe("App", () => {
     );
 
     fireEvent.click(await screen.findByRole("button", { name: "Manage First chat" }));
+    expect(screen.getByText("Ask before Auto mode starts an image or video when the planner is unsure.")).toBeVisible();
+    fireEvent.click(screen.getByRole("checkbox", { name: /Delete generated media with chat/ }));
     fireEvent.click(screen.getByRole("button", { name: "Delete chat" }));
 
     await waitFor(() => {
@@ -327,6 +329,7 @@ describe("App", () => {
       expect(screen.getByRole("button", { name: "Manage Second chat" })).toBeInTheDocument();
       expect(localStorage.getItem("local-lm-chat")).toBe("chat-2");
     });
+    expect(vi.mocked(api.deleteChat)).toHaveBeenCalledWith("chat-1", true);
     finishDelete?.();
     confirm.mockRestore();
   });

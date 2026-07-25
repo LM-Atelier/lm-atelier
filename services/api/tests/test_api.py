@@ -795,6 +795,70 @@ async def test_media_library_can_delete_a_referenced_artifact(client: AsyncClien
     assert deleted_part["artifact_id"] is None
 
 
+async def test_chat_delete_can_remove_exclusive_generated_media(client: AsyncClient) -> None:
+    keep_chat = (await client.post("/api/chats", json={"title": "Keep media"})).json()
+    await client.post(
+        f"/api/chats/{keep_chat['id']}/turns",
+        json={"text": "Create an image to keep", "mode": "image"},
+    )
+    keep_message = await wait_for_assistant(client, keep_chat["id"], "image")
+    keep_artifact_id = next(
+        part["artifact_id"] for part in keep_message["parts"] if part["type"] == "image"
+    )
+
+    assert (await client.delete(f"/api/chats/{keep_chat['id']}")).status_code == 204
+    assert (await client.get(f"/api/artifacts/{keep_artifact_id}")).status_code == 200
+
+    delete_chat = (await client.post("/api/chats", json={"title": "Delete media"})).json()
+    await client.post(
+        f"/api/chats/{delete_chat['id']}/turns",
+        json={"text": "Create an image to remove", "mode": "image"},
+    )
+    delete_message = await wait_for_assistant(client, delete_chat["id"], "image")
+    delete_artifact_id = next(
+        part["artifact_id"] for part in delete_message["parts"] if part["type"] == "image"
+    )
+
+    deleted = await client.delete(
+        f"/api/chats/{delete_chat['id']}",
+        params={"delete_generated_media": True},
+    )
+    assert deleted.status_code == 204
+    assert (await client.get(f"/api/artifacts/{delete_artifact_id}")).status_code == 404
+
+
+async def test_chat_delete_keeps_generated_media_referenced_by_another_chat(
+    client: AsyncClient,
+) -> None:
+    source_chat = (await client.post("/api/chats", json={"title": "Source"})).json()
+    await client.post(
+        f"/api/chats/{source_chat['id']}/turns",
+        json={"text": "Create a shared image", "mode": "image"},
+    )
+    source_message = await wait_for_assistant(client, source_chat["id"], "image")
+    artifact_id = next(
+        part["artifact_id"] for part in source_message["parts"] if part["type"] == "image"
+    )
+
+    other_chat = (await client.post("/api/chats", json={"title": "Other"})).json()
+    attached = await client.post(
+        f"/api/chats/{other_chat['id']}/turns",
+        json={
+            "text": "Describe this image",
+            "mode": "text",
+            "input_artifact_ids": [artifact_id],
+        },
+    )
+    assert attached.status_code == 202
+
+    deleted = await client.delete(
+        f"/api/chats/{source_chat['id']}",
+        params={"delete_generated_media": True},
+    )
+    assert deleted.status_code == 204
+    assert (await client.get(f"/api/artifacts/{artifact_id}")).status_code == 200
+
+
 async def test_workflow_revisions_and_validation(client: AsyncClient) -> None:
     created = await client.post(
         "/api/workflows",

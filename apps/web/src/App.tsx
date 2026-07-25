@@ -1324,13 +1324,17 @@ function ChatManager({
   projects: Project[];
   onClose: () => void;
   onSave: (values: Partial<Chat>) => void;
-  onDelete: () => void;
+  onDelete: (deleteGeneratedMedia: boolean) => void;
 }) {
   const [title, setTitle] = useState(chat.title);
   const [projectId, setProjectId] = useState(chat.project_id ?? "");
   const [archived, setArchived] = useState(chat.archived);
   const [confirmUncertainMedia, setConfirmUncertainMedia] = useState(chat.confirm_uncertain_media);
-  return <div className="modal-backdrop"><div className="modal workspace-editor"><header><div><small>Conversation</small><h2>Manage chat</h2></div><button className="icon-button" aria-label="Close chat manager" onClick={onClose}><X /></button></header><label>Title<input value={title} onChange={(event) => setTitle(event.target.value)} /></label><label>Project<select value={projectId} onChange={(event) => setProjectId(event.target.value)}><option value="">Unfiled</option>{projects.filter((project) => !project.archived).map((project) => <option key={project.id} value={project.id}>{project.name}</option>)}</select></label><label className="toggle-row"><span><strong>Confirm uncertain media</strong><small>Ask before Auto mode starts an image or video when the planner is unsure.</small></span><input type="checkbox" checked={confirmUncertainMedia} onChange={(event) => setConfirmUncertainMedia(event.target.checked)} /></label><label className="toggle-row"><span><strong>Archived</strong><small>Hide this chat from the active workspace without deleting its history.</small></span><input type="checkbox" checked={archived} onChange={(event) => setArchived(event.target.checked)} /></label><footer className="editor-actions"><button className="secondary danger" onClick={() => { if (window.confirm(`Delete ${chat.title} and its history?`)) onDelete(); }}>Delete chat</button><button className="secondary" onClick={onClose}>Cancel</button><button className="primary" disabled={!title.trim()} onClick={() => onSave({ title: title.trim(), project_id: projectId || null, archived, confirm_uncertain_media: confirmUncertainMedia })}>Save chat</button></footer></div></div>;
+  const [deleteGeneratedMedia, setDeleteGeneratedMedia] = useState(false);
+  const deletePrompt = deleteGeneratedMedia
+    ? `Delete ${chat.title}, its history, and generated media used only by this chat?`
+    : `Delete ${chat.title} and its history?`;
+  return <div className="modal-backdrop"><div className="modal workspace-editor"><header><div><small>Conversation</small><h2>Manage chat</h2></div><button className="icon-button" aria-label="Close chat manager" onClick={onClose}><X /></button></header><label>Title<input value={title} onChange={(event) => setTitle(event.target.value)} /></label><label>Project<select value={projectId} onChange={(event) => setProjectId(event.target.value)}><option value="">Unfiled</option>{projects.filter((project) => !project.archived).map((project) => <option key={project.id} value={project.id}>{project.name}</option>)}</select></label><label className="toggle-row"><span className="toggle-copy"><strong>Confirm uncertain media</strong><small>Ask before Auto mode starts an image or video when the planner is unsure.</small></span><input type="checkbox" checked={confirmUncertainMedia} onChange={(event) => setConfirmUncertainMedia(event.target.checked)} /></label><label className="toggle-row"><span className="toggle-copy"><strong>Archived</strong><small>Hide this chat from the active workspace without deleting its history.</small></span><input type="checkbox" checked={archived} onChange={(event) => setArchived(event.target.checked)} /></label><label className="toggle-row delete-media-option"><span className="toggle-copy"><strong>Delete generated media with chat</strong><small>Permanently delete image and video outputs used only by this chat. Shared media is kept.</small></span><input type="checkbox" checked={deleteGeneratedMedia} onChange={(event) => setDeleteGeneratedMedia(event.target.checked)} /></label><footer className="editor-actions"><button className="secondary danger" onClick={() => { if (window.confirm(deletePrompt)) onDelete(deleteGeneratedMedia); }}>Delete chat</button><button className="secondary" onClick={onClose}>Cancel</button><button className="primary" disabled={!title.trim()} onClick={() => onSave({ title: title.trim(), project_id: projectId || null, archived, confirm_uncertain_media: confirmUncertainMedia })}>Save chat</button></footer></div></div>;
 }
 
 function ProjectManager({
@@ -1384,7 +1388,7 @@ function Sidebar({
   onExportProject: (id: string, includeMedia?: boolean) => void;
   onImportProject: (file: File) => void;
   onUpdateChat: (id: string, values: Partial<Chat>) => void;
-  onDeleteChat: (id: string) => void;
+  onDeleteChat: (id: string, deleteGeneratedMedia: boolean) => void;
   onUpdateProject: (id: string, values: Partial<Project>) => void;
   onDeleteProject: (id: string) => void;
 }) {
@@ -1441,7 +1445,7 @@ function Sidebar({
         {unfiled.length > 0 && <div className="sidebar-section"><div className="section-title"><span>Chats</span></div><div className="chat-list standalone">{unfiled.map(chatRow)}</div></div>}
       </div>
       <div className="sidebar-footer"><button className={view === "settings" ? "active" : ""} onClick={() => { onView("settings"); setMobileOpen(false); }}><Settings />Settings</button></div>
-      {managedChat && <ChatManager chat={managedChat} projects={projects} onClose={() => setManagedChat(null)} onSave={(values) => { onUpdateChat(managedChat.id, values); setManagedChat(null); }} onDelete={() => { onDeleteChat(managedChat.id); setManagedChat(null); }} />}
+      {managedChat && <ChatManager chat={managedChat} projects={projects} onClose={() => setManagedChat(null)} onSave={(values) => { onUpdateChat(managedChat.id, values); setManagedChat(null); }} onDelete={(deleteGeneratedMedia) => { onDeleteChat(managedChat.id, deleteGeneratedMedia); setManagedChat(null); }} />}
       {managedProject && <ProjectManager project={managedProject} onClose={() => setManagedProject(null)} onSave={(values) => { onUpdateProject(managedProject.id, values); setManagedProject(null); }} onDelete={() => { onDeleteProject(managedProject.id); setManagedProject(null); }} onExport={(includeMedia) => onExportProject(managedProject.id, includeMedia)} />}
     </aside>
   );
@@ -1572,8 +1576,8 @@ export default function App() {
     },
   });
   const deleteChat = useMutation({
-    mutationFn: api.deleteChat,
-    onMutate: async (deletedId) => {
+    mutationFn: ({ id, deleteGeneratedMedia }: { id: string; deleteGeneratedMedia: boolean }) => api.deleteChat(id, deleteGeneratedMedia),
+    onMutate: async ({ id: deletedId }) => {
       await client.cancelQueries({ queryKey: ["chats"] });
       const previousChats = client.getQueryData<Chat[]>(["chats"]) ?? [];
       const remainingChats = previousChats.filter((candidate) => candidate.id !== deletedId);
@@ -1588,14 +1592,17 @@ export default function App() {
       client.removeQueries({ queryKey: ["chat", deletedId], exact: true });
       return { previousChats, previousCurrentChatId };
     },
-    onSuccess: (_value, deletedId) => {
+    onSuccess: (_value, { id: deletedId }) => {
       setTurnSettingsByChat((current) => {
         const next = { ...current };
         delete next[deletedId];
         return next;
       });
+      void client.invalidateQueries({ queryKey: ["artifacts"] });
+      void client.invalidateQueries({ queryKey: ["artifact-storage"] });
+      void client.invalidateQueries({ queryKey: ["jobs"] });
     },
-    onError: (_error, _deletedId, context) => {
+    onError: (_error, _deletedChat, context) => {
       if (!context) return;
       client.setQueryData(["chats"], context.previousChats);
       setCurrentChatId(context.previousCurrentChatId);
@@ -1662,7 +1669,7 @@ export default function App() {
   return (
     <div className="app-shell">
       <a className="skip-link" href="#main-content">Skip to main content</a>
-      <Sidebar projects={allProjects} chats={allChats} currentChatId={currentChatId} view={view} onChat={(id) => { setCurrentChatId(id); localStorage.setItem("local-lm-chat", id); setView("chat"); }} onView={setView} onNewChat={(projectId) => createChat.mutate(projectId)} onNewProject={() => { const name = window.prompt("Project name"); if (name?.trim()) createProject.mutate(name.trim()); }} onExportProject={(id, includeMedia) => exportProject.mutate({ id, includeMedia })} onImportProject={(file) => importProject.mutate(file)} onUpdateChat={(id, values) => manageChat.mutate({ id, values })} onDeleteChat={(id) => deleteChat.mutate(id)} onUpdateProject={(id, values) => updateProject.mutate({ id, values })} onDeleteProject={(id) => deleteProject.mutate(id)} />
+      <Sidebar projects={allProjects} chats={allChats} currentChatId={currentChatId} view={view} onChat={(id) => { setCurrentChatId(id); localStorage.setItem("local-lm-chat", id); setView("chat"); }} onView={setView} onNewChat={(projectId) => createChat.mutate(projectId)} onNewProject={() => { const name = window.prompt("Project name"); if (name?.trim()) createProject.mutate(name.trim()); }} onExportProject={(id, includeMedia) => exportProject.mutate({ id, includeMedia })} onImportProject={(file) => importProject.mutate(file)} onUpdateChat={(id, values) => manageChat.mutate({ id, values })} onDeleteChat={(id, deleteGeneratedMedia) => deleteChat.mutate({ id, deleteGeneratedMedia })} onUpdateProject={(id, values) => updateProject.mutate({ id, values })} onDeleteProject={(id) => deleteProject.mutate(id)} />
       <main id="main-content" tabIndex={-1}>{activeContent}</main>
       <JobsPanel />
       {(send.error || regenerate.error || branch.error || stop.error || createChat.error || createProject.error || importProject.error || manageChat.error || deleteChat.error || updateProject.error || deleteProject.error) && <div className="toast error"><X size={16} />{(send.error || regenerate.error || branch.error || stop.error || createChat.error || createProject.error || importProject.error || manageChat.error || deleteChat.error || updateProject.error || deleteProject.error)?.message}</div>}

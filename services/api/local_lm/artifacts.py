@@ -15,8 +15,8 @@ from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
 from .config import Settings
-from .domain import ArtifactKind
-from .models import Artifact, MessagePart
+from .domain import ArtifactKind, MessageRole, PartType
+from .models import Artifact, Message, MessagePart, Run
 
 
 class ArtifactStore:
@@ -338,6 +338,50 @@ class ArtifactStore:
             reclaimed_bytes += linked.size_bytes
             self._delete_artifact(session, linked)
         return len(parts), removed_count, reclaimed_bytes
+
+    def delete_chat_generated_media(self, session: Session, chat_id: str) -> int:
+        artifacts = (
+            session.scalars(
+                select(Artifact)
+                .join(MessagePart, MessagePart.artifact_id == Artifact.id)
+                .join(Message, Message.id == MessagePart.message_id)
+                .where(
+                    Message.chat_id == chat_id,
+                    Message.role == MessageRole.ASSISTANT.value,
+                    MessagePart.type.in_((PartType.IMAGE.value, PartType.VIDEO.value)),
+                    Artifact.kind.in_((ArtifactKind.IMAGE.value, ArtifactKind.VIDEO.value)),
+                )
+                .order_by(Artifact.created_at)
+            )
+            .unique()
+            .all()
+        )
+
+        external_run_artifact_ids = {
+            artifact_id
+            for provenance in session.scalars(
+                select(Run.provenance_json).where(Run.chat_id != chat_id)
+            )
+            for artifact_id in provenance.get("input_artifact_ids", [])
+            if isinstance(artifact_id, str)
+        }
+        removed = 0
+        for artifact in artifacts:
+            message_references_elsewhere = session.scalar(
+                select(func.count(MessagePart.id))
+                .join(Message, Message.id == MessagePart.message_id)
+                .where(
+                    MessagePart.artifact_id == artifact.id,
+                    Message.chat_id != chat_id,
+                )
+            )
+            if message_references_elsewhere or artifact.id in external_run_artifact_ids:
+                continue
+            _references, removed_count, _reclaimed_bytes = self.delete_library_artifact(
+                session, artifact
+            )
+            removed += removed_count
+        return removed
 
     def _delete_artifact(self, session: Session, artifact: Artifact) -> None:
         path = self.resolve(artifact)

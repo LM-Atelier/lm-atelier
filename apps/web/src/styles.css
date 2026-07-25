@@ -263,6 +263,11 @@ h1, h2, h3 { margin: 0; }
 .modal header, .modal footer { display: flex; align-items: center; justify-content: space-between; gap: 10px; }
 .modal h2 { font-size: 19px; }
 .modal label { display: grid; gap: 6px; margin: 15px 0; color: #aeb5c0; font-size: 12px; font-weight: 600; }
+.workspace-editor .toggle-row { grid-template-columns: minmax(0, 1fr) auto; align-items: start; column-gap: 18px; }
+.workspace-editor .toggle-copy { display: grid; gap: 4px; }
+.workspace-editor .toggle-copy small { color: var(--muted); font-weight: 400; line-height: 1.45; }
+.workspace-editor .toggle-row input { margin-top: 1px; }
+.workspace-editor .delete-media-option { margin-top: 22px; padding-top: 15px; border-top: 1px solid var(--border); }
 .modal textarea { resize: vertical; font: 12px/1.5 "SFMono-Regular", Consolas, monospace; }
 .modal footer { justify-content: flex-end; border-top: 1px solid var(--border); padding-top: 15px; }
 
