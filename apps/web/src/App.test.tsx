@@ -1342,6 +1342,42 @@ describe("App", () => {
     expect(screen.queryByText("Negative prompt")).not.toBeInTheDocument();
   });
 
+  it("shows an Auto submission while model routing is pending", async () => {
+    const stamp = "2026-07-22T00:00:00Z";
+    const chat = {
+      id: "chat-auto-routing",
+      project_id: null,
+      title: "Auto routing",
+      archived: false,
+      routing_mode: "auto" as const,
+      confirm_uncertain_media: false,
+      active_chat_profile_id: null,
+      active_image_profile_id: null,
+      active_video_profile_id: null,
+      active_head_message_id: null,
+      created_at: stamp,
+      updated_at: stamp,
+    };
+    localStorage.setItem("local-lm-chat", chat.id);
+    vi.mocked(api.chats).mockResolvedValue([chat]);
+    vi.mocked(api.chat).mockResolvedValue({ ...chat, messages: [] });
+    vi.mocked(api.sendTurn).mockReturnValue(new Promise(() => {}));
+    const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+    render(
+      <QueryClientProvider client={client}>
+        <App />
+      </QueryClientProvider>,
+    );
+
+    const composer = await screen.findByPlaceholderText(/Ask anything/);
+    fireEvent.change(composer, { target: { value: "Surprise me with a tiny story" } });
+    fireEvent.click(screen.getByRole("button", { name: "Send" }));
+
+    expect(await screen.findByText("Surprise me with a tiny story")).toBeVisible();
+    expect(screen.getByText("Choosing mode and model…")).toBeVisible();
+    expect(screen.getByRole("button", { name: "Preparing response" })).toBeDisabled();
+  });
+
   it("applies the pinned workflow schema to per-turn controls", async () => {
     const stamp = "2026-07-22T00:00:00Z";
     const project = {
@@ -1472,17 +1508,17 @@ describe("App", () => {
     fireEvent.change(screen.getByRole("spinbutton", { name: /Maximum output/ }), { target: { value: "4096" } });
     fireEvent.click(screen.getByRole("button", { name: "Close settings" }));
 
-    fireEvent.change(screen.getByPlaceholderText(/Ask anything/), { target: { value: "Count to 1000" } });
-    fireEvent.click(screen.getByRole("button", { name: "Send" }));
-    await waitFor(() => expect(api.sendTurn).toHaveBeenCalledWith(chat.id, "Count to 1000", "text", [], { max_tokens: 4096 }));
+    fireEvent.click(screen.getByRole("button", { name: "Regenerate response" }));
+    await waitFor(() => expect(api.regenerateMessage).toHaveBeenCalledWith(assistantMessage.id, { max_tokens: 4096 }));
 
     fireEvent.click(screen.getByText("Edit and branch"));
     fireEvent.change(screen.getByLabelText("Edit message"), { target: { value: "Count to 1000" } });
     fireEvent.click(screen.getByText("Send edited message"));
     await waitFor(() => expect(api.branchMessage).toHaveBeenCalledWith(userMessage.id, "Count to 1000", { max_tokens: 4096 }));
 
-    fireEvent.click(screen.getByRole("button", { name: "Regenerate response" }));
-    await waitFor(() => expect(api.regenerateMessage).toHaveBeenCalledWith(assistantMessage.id, { max_tokens: 4096 }));
+    fireEvent.change(screen.getByPlaceholderText(/Ask anything/), { target: { value: "Count to 1000" } });
+    fireEvent.click(screen.getByRole("button", { name: "Send" }));
+    await waitFor(() => expect(api.sendTurn).toHaveBeenCalledWith(chat.id, "Count to 1000", "text", [], { max_tokens: 4096 }));
   });
 
   it("keeps turn controls isolated to their chat", async () => {

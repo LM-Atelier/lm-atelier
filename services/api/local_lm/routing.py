@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import json
 import re
 from typing import Any
@@ -33,6 +34,7 @@ _DISCUSSION = re.compile(
     r"^\s*(?:explain|describe|compare|what|why|how|when|where|who|tell me about|write about)\b",
     re.IGNORECASE,
 )
+_UNCERTAIN = re.compile(r"\b(?:maybe|perhaps|possibly|might want to)\b", re.IGNORECASE)
 
 ROUTING_TOOL = {
     "type": "function",
@@ -62,6 +64,7 @@ ROUTING_TOOL = {
         },
     },
 }
+PLANNER_TIMEOUT_SECONDS = 8.0
 
 
 class RouteConfirmationRequired(ValueError):
@@ -89,6 +92,8 @@ class ModalityRouter:
         )
         if mode != RoutingMode.AUTO:
             return fallback
+        if fallback.confidence >= 0.94:
+            return fallback
 
         messages: list[dict[str, Any]] = [
             {
@@ -112,29 +117,30 @@ class ModalityRouter:
             run_id=new_id("route"),
             messages=messages,
             tools=[ROUTING_TOOL],
-            settings={"temperature": 0, "max_tokens": 256},
+            settings={"temperature": 0, "max_tokens": 96},
         )
         try:
-            async for event in adapter.stream(request):
-                if event.type == "error":
-                    return fallback
-                if event.type != "tool_delta":
-                    continue
-                for raw in event.data.get("tool_calls", []):
-                    if not isinstance(raw, dict):
+            async with asyncio.timeout(PLANNER_TIMEOUT_SECONDS):
+                async for event in adapter.stream(request):
+                    if event.type == "error":
+                        return fallback
+                    if event.type != "tool_delta":
                         continue
-                    index = int(raw.get("index", 0))
-                    call = calls.setdefault(index, {"name": "", "arguments": ""})
-                    function = raw.get("function") or {}
-                    if not isinstance(function, dict):
-                        continue
-                    if function.get("name"):
-                        call["name"] += str(function["name"])
-                    arguments = function.get("arguments")
-                    if isinstance(arguments, str):
-                        call["arguments"] += arguments
-                    elif isinstance(arguments, dict):
-                        call["arguments"] = json.dumps(arguments)
+                    for raw in event.data.get("tool_calls", []):
+                        if not isinstance(raw, dict):
+                            continue
+                        index = int(raw.get("index", 0))
+                        call = calls.setdefault(index, {"name": "", "arguments": ""})
+                        function = raw.get("function") or {}
+                        if not isinstance(function, dict):
+                            continue
+                        if function.get("name"):
+                            call["name"] += str(function["name"])
+                        arguments = function.get("arguments")
+                        if isinstance(arguments, str):
+                            call["arguments"] += arguments
+                        elif isinstance(arguments, dict):
+                            call["arguments"] = json.dumps(arguments)
         except Exception:
             return fallback
         if not calls:
@@ -188,7 +194,7 @@ class ModalityRouter:
                 normalized,
                 input_artifact_ids,
                 "clear video creation request",
-                0.96,
+                0.9 if _UNCERTAIN.search(normalized) else 0.96,
             )
 
         if has_prior_image and _PRIOR_IMAGE_EDIT.search(normalized):
@@ -207,7 +213,7 @@ class ModalityRouter:
                 normalized,
                 input_artifact_ids,
                 "clear image creation request",
-                0.96,
+                0.9 if _UNCERTAIN.search(normalized) else 0.96,
             )
 
         return self._text(normalized, "no clear media creation intent", 0.9)

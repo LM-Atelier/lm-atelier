@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 from collections.abc import AsyncIterator
 
 import pytest
@@ -24,6 +25,19 @@ class CapturingMockChatAdapter(MockChatAdapter):
 class UnavailableChatAdapter(MockChatAdapter):
     async def stream(self, request: ChatRequest) -> AsyncIterator[ChatEvent]:
         yield ChatEvent(type="error", data={"error": "chat worker unavailable"})
+
+
+class UnexpectedChatAdapter(MockChatAdapter):
+    async def stream(self, request: ChatRequest) -> AsyncIterator[ChatEvent]:
+        raise AssertionError(f"model planner should not run for {request.messages[-1]}")
+        yield
+
+
+class HangingChatAdapter(MockChatAdapter):
+    async def stream(self, request: ChatRequest) -> AsyncIterator[ChatEvent]:
+        del request
+        await asyncio.Event().wait()
+        yield ChatEvent(type="complete")
 
 
 @pytest.mark.parametrize(
@@ -102,7 +116,7 @@ async def test_structured_planner_preserves_text_discussion() -> None:
         input_artifact_ids=[],
     )
     assert plan.operation == Operation.TEXT
-    assert plan.reason.startswith("model planner:")
+    assert plan.reason == "question or discussion phrasing"
 
 
 @pytest.mark.asyncio
@@ -124,7 +138,7 @@ async def test_structured_planner_uses_one_system_message_for_template_compatibi
     adapter = CapturingMockChatAdapter()
     await ModalityRouter().plan_with_model(
         adapter=adapter,
-        text="Explain image generation",
+        text="Surprise me with something visual",
         mode=RoutingMode.AUTO,
         input_artifact_ids=[],
         has_prior_image=True,
@@ -135,3 +149,47 @@ async def test_structured_planner_uses_one_system_message_for_template_compatibi
     ]
     assert len(system_messages) == 1
     assert "Prior generated image available: yes." in system_messages[0]["content"]
+
+
+@pytest.mark.asyncio
+async def test_clear_auto_route_does_not_invoke_model_planner() -> None:
+    plan = await ModalityRouter().plan_with_model(
+        adapter=UnexpectedChatAdapter(),
+        text="Make me an image of an apple",
+        mode=RoutingMode.AUTO,
+        input_artifact_ids=[],
+    )
+
+    assert plan.operation == Operation.TEXT_TO_IMAGE
+    assert plan.reason == "clear image creation request"
+
+
+@pytest.mark.asyncio
+async def test_hedged_media_request_still_uses_model_planner() -> None:
+    plan = await ModalityRouter().plan_with_model(
+        adapter=MockChatAdapter(),
+        text="Maybe create an image of a quiet harbor",
+        mode=RoutingMode.AUTO,
+        input_artifact_ids=[],
+    )
+
+    assert plan.operation == Operation.TEXT_TO_IMAGE
+    assert plan.confidence == 0.6
+    assert plan.reason == "model planner: deterministic mock planner"
+
+
+@pytest.mark.asyncio
+async def test_ambiguous_auto_route_has_a_bounded_model_planner(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr("local_lm.routing.PLANNER_TIMEOUT_SECONDS", 0.01)
+
+    plan = await ModalityRouter().plan_with_model(
+        adapter=HangingChatAdapter(),
+        text="Surprise me",
+        mode=RoutingMode.AUTO,
+        input_artifact_ids=[],
+    )
+
+    assert plan.operation == Operation.TEXT
+    assert plan.reason == "no clear media creation intent"

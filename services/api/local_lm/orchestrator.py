@@ -210,16 +210,25 @@ class ConversationOrchestrator:
 
         mode = request.mode or RoutingMode(chat.routing_mode)
         has_prior_image = self._has_prior_image(session, chat.id)
-        if mode == RoutingMode.AUTO:
-            await self._wait_for_chat_planner()
-        plan = await self.router.plan_with_model(
-            adapter=self.engines.chat,
-            text=request.text,
-            mode=mode,
-            input_artifact_ids=request.input_artifact_ids,
-            has_prior_image=has_prior_image,
-            conversation=self._routing_context(session, chat, parent_message_id),
+        planner_available = (
+            await self._chat_planner_available() if mode == RoutingMode.AUTO else True
         )
+        if planner_available:
+            plan = await self.router.plan_with_model(
+                adapter=self.engines.chat,
+                text=request.text,
+                mode=mode,
+                input_artifact_ids=request.input_artifact_ids,
+                has_prior_image=has_prior_image,
+                conversation=self._routing_context(session, chat, parent_message_id),
+            )
+        else:
+            plan = self.router.plan(
+                text=request.text,
+                mode=mode,
+                input_artifact_ids=request.input_artifact_ids,
+                has_prior_image=has_prior_image,
+            )
         if (
             mode == RoutingMode.AUTO
             and chat.confirm_uncertain_media
@@ -695,31 +704,16 @@ class ConversationOrchestrator:
             return status
         return await self.processes.load_chat(profile, install)
 
-    async def _wait_for_chat_planner(self) -> None:
+    async def _chat_planner_available(self) -> bool:
         if (
             self.engines.settings.chat_engine != "llama.cpp"
             or not self.processes.settings.llama_executable
         ):
-            return
-        deadline = asyncio.get_running_loop().time() + min(
-            15.0,
-            float(self.processes.settings.worker_startup_seconds),
-        )
+            return True
         if not self._chat_planner_ready.is_set():
-            try:
-                await asyncio.wait_for(
-                    self._chat_planner_ready.wait(),
-                    timeout=max(0.0, deadline - asyncio.get_running_loop().time()),
-                )
-            except TimeoutError:
-                return
-        while True:
-            status = next(item for item in self.processes.statuses() if item.name == "chat")
-            if status.state != "starting":
-                return
-            if asyncio.get_running_loop().time() >= deadline:
-                return
-            await asyncio.sleep(0.2)
+            return False
+        status = next(item for item in self.processes.statuses() if item.name == "chat")
+        return status.state != "starting"
 
     async def _prepare_chat_context(
         self, session: Session, run: Run

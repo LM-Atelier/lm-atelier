@@ -15,6 +15,7 @@ import {
   HardDrive,
   Image as ImageIcon,
   Library,
+  LoaderCircle,
   Menu,
   MessageSquare,
   MoreHorizontal,
@@ -63,6 +64,7 @@ import type {
 
 type View = "chat" | "media" | "models" | "workflows" | "settings";
 type Visibility = "basic" | "advanced" | "expert";
+type PendingTurn = { text: string; mode: RoutingMode };
 
 const visibilityRank: Record<Visibility, number> = { basic: 0, advanced: 1, expert: 2 };
 const AUTO_PROFILE_ID = "__auto__";
@@ -444,6 +446,7 @@ function Composer({
   chat,
   engines,
   busy,
+  stoppable,
   settings,
   onSettings,
   onSend,
@@ -454,6 +457,7 @@ function Composer({
   chat: Chat;
   engines: EngineCapabilities[];
   busy: boolean;
+  stoppable: boolean;
   settings: Record<string, unknown>;
   onSettings: (settings: Record<string, unknown>) => void;
   onSend: (text: string, mode: RoutingMode, artifacts: string[], settings: Record<string, unknown>) => void;
@@ -530,7 +534,11 @@ function Composer({
               </label>
               <button className="icon-button" onClick={() => setSettingsOpen(true)} aria-label="Turn settings"><SlidersHorizontal size={18} /></button>
             </div>
-            {busy ? <button className="send-button stop" onClick={onStop} aria-label="Stop response"><CircleStop size={18} /></button> : <button className="send-button" disabled={!text.trim()} onClick={submit} aria-label="Send"><Send size={18} /></button>}
+            {busy
+              ? stoppable
+                ? <button className="send-button stop" onClick={onStop} aria-label="Stop response"><CircleStop size={18} /></button>
+                : <button className="send-button pending" disabled aria-label="Preparing response"><LoaderCircle size={18} /></button>
+              : <button className="send-button" disabled={!text.trim()} onClick={submit} aria-label="Send"><Send size={18} /></button>}
           </div>
         </div>
         <small className="composer-note">Local models can make mistakes. Generation stays on this machine.</small>
@@ -585,6 +593,7 @@ function ChatView({
   workflows,
   project,
   liveText,
+  pendingTurn,
   settings,
   onSettings,
   onSend,
@@ -599,6 +608,7 @@ function ChatView({
   workflows: Workflow[];
   project?: Project;
   liveText: Record<string, string>;
+  pendingTurn?: PendingTurn;
   settings: Record<string, unknown>;
   onSettings: (settings: Record<string, unknown>) => void;
   onSend: (text: string, mode: RoutingMode, artifacts: string[], settings: Record<string, unknown>) => void;
@@ -612,10 +622,11 @@ function ChatView({
     if (typeof endRef.current?.scrollIntoView === "function") {
       endRef.current.scrollIntoView({ behavior: "smooth" });
     }
-  }, [chat?.messages, liveText]);
+  }, [chat?.messages, liveText, pendingTurn]);
   if (!chat) return <EmptyState icon={<MessageSquare />} title="Start a local conversation" body="Create a chat, choose your models, and keep every response on your machine." />;
   const messages = activeBranchMessages(chat);
-  const busy = messages.some((message) => message.status === "pending");
+  const stoppable = messages.some((message) => message.status === "pending");
+  const busy = stoppable || Boolean(pendingTurn);
   return (
     <div className="chat-view">
       <div className="chat-header">
@@ -631,7 +642,7 @@ function ChatView({
         </div>
       </div>
       <div className="messages">
-        {messages.length === 0 ? (
+        {messages.length === 0 && !pendingTurn ? (
           <EmptyState icon={<Sparkles />} title="What should we make?" body="Ask a question or describe an image or video. Auto mode chooses the appropriate local model." />
         ) : messages.map((message) => <MessageBubble
           key={message.id}
@@ -640,9 +651,26 @@ function ChatView({
           onRegenerate={busy ? undefined : (messageId) => onRegenerate(messageId, settings)}
           onEdit={busy ? undefined : (messageId, text) => onEdit(messageId, text, settings)}
         />)}
+        {pendingTurn && (
+          <>
+            <article className="message user optimistic">
+              <div className="avatar">You</div>
+              <div className="message-content"><div className="message-text">{pendingTurn.text}</div></div>
+            </article>
+            <article className="message assistant optimistic" aria-live="polite">
+              <div className="avatar"><Bot size={19} /></div>
+              <div className="message-content">
+                <div className="submission-progress">
+                  <LoaderCircle size={17} />
+                  <span>{pendingTurn.mode === "auto" ? "Choosing mode and model…" : "Starting…"}</span>
+                </div>
+              </div>
+            </article>
+          </>
+        )}
         <div ref={endRef} />
       </div>
-      <Composer chat={chat} engines={engines} busy={busy} settings={settings} onSettings={onSettings} onSend={onSend} onStop={onStop} workflows={workflows} project={project} />
+      <Composer chat={chat} engines={engines} busy={busy} stoppable={stoppable} settings={settings} onSettings={onSettings} onSend={onSend} onStop={onStop} workflows={workflows} project={project} />
     </div>
   );
 }
@@ -1661,7 +1689,7 @@ export default function App() {
     if (view === "models") return <ModelsView />;
     if (view === "workflows") return <WorkflowsView />;
     if (view === "settings") return <SettingsView engines={engines.data ?? []} />;
-    return <ChatView chat={chat.data} engines={engines.data ?? []} profiles={profiles.data ?? []} workflows={workflows.data ?? []} project={allProjects.find((item) => item.id === chat.data?.project_id)} liveText={liveText} settings={currentChatId ? turnSettingsByChat[currentChatId] ?? {} : {}} onSettings={(settings) => {
+    return <ChatView chat={chat.data} engines={engines.data ?? []} profiles={profiles.data ?? []} workflows={workflows.data ?? []} project={allProjects.find((item) => item.id === chat.data?.project_id)} liveText={liveText} pendingTurn={send.isPending && send.variables ? { text: send.variables.text, mode: send.variables.mode } : undefined} settings={currentChatId ? turnSettingsByChat[currentChatId] ?? {} : {}} onSettings={(settings) => {
       if (currentChatId) setTurnSettingsByChat((current) => ({ ...current, [currentChatId]: settings }));
     }} onProfile={(field, id) => updateChat.mutate({ [field]: id })} onRegenerate={(messageId, settings) => regenerate.mutate({ messageId, settings })} onEdit={(messageId, text, settings) => branch.mutate({ messageId, text, settings })} onStop={() => stop.mutate()} onSend={(text, mode, artifacts, settings) => send.mutate({ text, mode, artifacts, settings })} />;
   }, [view, engines.data, profiles.data, workflows.data, allProjects, chat.data, liveText, currentChatId, turnSettingsByChat, send, regenerate, branch, stop, updateChat]);
