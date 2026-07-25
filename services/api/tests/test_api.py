@@ -769,6 +769,39 @@ async def test_text_turn_after_image_keeps_alternating_chat_context(
     ]
 
 
+async def test_image_request_uses_referenced_text_from_the_active_chat_branch(
+    client: AsyncClient,
+) -> None:
+    chat = (await client.post("/api/chats", json={"title": "Story illustration"})).json()
+    story_request = "Write a short story about a silver fox crossing a glass city at dusk."
+    text_turn = await client.post(
+        f"/api/chats/{chat['id']}/turns",
+        json={"text": story_request, "mode": "text"},
+    )
+    assert text_turn.status_code == 202
+    story_message = await wait_for_assistant(client, chat["id"], "text")
+    story_text = "\n".join(
+        part["text"] for part in story_message["parts"] if part["type"] == "text"
+    ).strip()
+
+    image_turn = await client.post(
+        f"/api/chats/{chat['id']}/turns",
+        json={"text": "Make an image based on the previous story", "mode": "auto"},
+    )
+    assert image_turn.status_code == 202
+    image_run = image_turn.json()["run"]
+    assert image_run["operation"] == "text_to_image"
+    assert "Source chat text:" in image_run["standalone_prompt"]
+    assert story_request in image_run["standalone_prompt"]
+    assert story_text in image_run["standalone_prompt"]
+
+    image_message = await wait_for_assistant(client, chat["id"], "image")
+    image = next(part for part in image_message["parts"] if part["type"] == "image")
+    assert (
+        image["artifact"]["metadata_json"]["semantic_description"] == image_run["standalone_prompt"]
+    )
+
+
 async def test_prior_image_edit_falls_back_to_accumulated_text_prompt(
     client: AsyncClient,
 ) -> None:

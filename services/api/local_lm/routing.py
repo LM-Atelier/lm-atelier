@@ -41,6 +41,32 @@ _TEXT_TASK = re.compile(
     re.IGNORECASE,
 )
 _UNCERTAIN = re.compile(r"\b(?:maybe|perhaps|possibly|might want to)\b", re.IGNORECASE)
+_TEXT_CONTEXT_REFERENCE = re.compile(
+    r"\b(?:(?:previous|prior|earlier|above|last|preceding)\s+"
+    r"(?:story|response|answer|message|text|description|scene|passage|poem|idea|"
+    r"concept|discussion|conversation)|"
+    r"(?:that|this|the)\s+(?:story|response|answer|message|text|description|scene|"
+    r"passage|poem|idea|concept|discussion|conversation)|"
+    r"what\s+(?:you|i|we)\s+(?:wrote|described|said)|"
+    r"(?:our|the)\s+(?:conversation|discussion)|"
+    r"(?:based on|inspired by|drawn from)\s+(?:that|this|it|what|the\s+"
+    r"(?:previous|prior|earlier|above|last)))\b",
+    re.IGNORECASE,
+)
+_CONTEXT_IMAGE_CREATE = re.compile(
+    r"\b(?:image|picture|illustration|artwork)\s+(?:of|from)\s+(?:it|that|this)\b|"
+    r"^\s*(?:illustrate|visuali[sz]e|depict)\s+(?:it|that|this)\b|"
+    r"\b(?:turn|make|convert)\s+(?:it|that|this)\s+(?:into|as)\s+(?:an?\s+)?"
+    r"(?:image|picture|illustration|artwork)\b",
+    re.IGNORECASE,
+)
+_CONTEXT_VIDEO_CREATE = re.compile(
+    r"\b(?:video|animation)\s+(?:of|from)\s+(?:it|that|this)\b|"
+    r"\b(?:turn|make|convert)\s+(?:it|that|this)\s+(?:into|as)\s+(?:an?\s+)?"
+    r"(?:video|animation)\b",
+    re.IGNORECASE,
+)
+_MEDIA_CONTEXT_SUMMARY = re.compile(r"^\s*Generated (?:image|video|\d+ images?|\d+ videos?)\b")
 
 ROUTING_TOOL = {
     "type": "function",
@@ -48,7 +74,8 @@ ROUTING_TOOL = {
         "name": "choose_route",
         "description": (
             "Choose whether the user wants a normal text answer, a generated image, or a "
-            "generated video. Resolve conversational media follow-ups into a standalone prompt."
+            "generated video. Resolve conversational media follow-ups into a standalone "
+            "prompt grounded in the referenced chat text."
         ),
         "parameters": {
             "type": "object",
@@ -95,10 +122,12 @@ class ModalityRouter:
             mode=mode,
             input_artifact_ids=input_artifact_ids,
             has_prior_image=has_prior_image,
+            conversation=conversation,
         )
+        referenced_text = self._referenced_text_context(text, conversation or [])
         if mode != RoutingMode.AUTO:
             return fallback
-        if fallback.confidence >= 0.94:
+        if fallback.confidence >= 0.94 and not referenced_text:
             return fallback
 
         messages: list[dict[str, Any]] = [
@@ -111,6 +140,10 @@ class ModalityRouter:
                     "follow-up. An assistant message beginning with 'Generated image' includes "
                     "the source prompt as a semantic description of that image. Use it to resolve "
                     "references such as 'it' and rewrite edits as complete standalone prompts. "
+                    "When media is requested from a previous story, response, description, or "
+                    "other chat text, extract its concrete visual subjects, setting, mood, and "
+                    "style into the standalone prompt; never leave an unresolved reference such "
+                    "as 'the previous story'. Keep the standalone prompt concise. "
                     "Always call choose_route and do not answer normally.\n"
                     f"Prior generated image available: {'yes' if has_prior_image else 'no'}."
                 ),
@@ -123,7 +156,7 @@ class ModalityRouter:
             run_id=new_id("route"),
             messages=messages,
             tools=[ROUTING_TOOL],
-            settings={"temperature": 0, "max_tokens": 96},
+            settings={"temperature": 0, "max_tokens": 192 if referenced_text else 96},
         )
         try:
             async with asyncio.timeout(PLANNER_TIMEOUT_SECONDS):
@@ -156,13 +189,32 @@ class ModalityRouter:
             return fallback
         try:
             arguments = json.loads(call["arguments"])
-            return self._from_tool(
+            plan = self._from_tool(
                 arguments,
                 fallback=fallback,
                 text=text,
                 input_artifact_ids=input_artifact_ids,
                 has_prior_image=has_prior_image,
             )
+            if (
+                referenced_text
+                and not input_artifact_ids
+                and fallback.operation in {Operation.TEXT_TO_IMAGE, Operation.TEXT_TO_VIDEO}
+                and plan.operation in {Operation.IMAGE_TO_IMAGE, Operation.IMAGE_TO_VIDEO}
+            ):
+                plan = plan.model_copy(
+                    update={
+                        "operation": fallback.operation,
+                        "input_artifact_ids": [],
+                    }
+                )
+            if (
+                referenced_text
+                and fallback.operation != Operation.TEXT
+                and plan.operation == Operation.TEXT
+            ):
+                return fallback
+            return self._with_text_context(plan, referenced_text)
         except (json.JSONDecodeError, TypeError, ValueError):
             return fallback
 
@@ -173,59 +225,130 @@ class ModalityRouter:
         mode: RoutingMode,
         input_artifact_ids: list[str],
         has_prior_image: bool = False,
+        conversation: list[dict[str, Any]] | None = None,
     ) -> RoutingPlan:
         normalized = text.strip()
+        referenced_text = self._referenced_text_context(text, conversation or [])
+
+        def grounded(plan: RoutingPlan) -> RoutingPlan:
+            return self._with_text_context(plan, referenced_text)
+
         if mode == RoutingMode.TEXT:
             return self._text(normalized, "explicit text mode", 1)
         if mode == RoutingMode.IMAGE:
             operation = Operation.IMAGE_TO_IMAGE if input_artifact_ids else Operation.TEXT_TO_IMAGE
-            return self._media(operation, normalized, input_artifact_ids, "explicit image mode", 1)
+            return grounded(
+                self._media(operation, normalized, input_artifact_ids, "explicit image mode", 1)
+            )
         if mode == RoutingMode.VIDEO:
             operation = Operation.IMAGE_TO_VIDEO if input_artifact_ids else Operation.TEXT_TO_VIDEO
-            return self._media(operation, normalized, input_artifact_ids, "explicit video mode", 1)
+            return grounded(
+                self._media(operation, normalized, input_artifact_ids, "explicit video mode", 1)
+            )
 
         if _DISCUSSION.search(normalized) and not re.search(
             r"\b(?:for me|now|instead)\b", normalized, re.IGNORECASE
         ):
             return self._text(normalized, "question or discussion phrasing", 0.94)
 
-        if _VIDEO_CREATE.search(normalized) or _DIRECT_VIDEO.search(normalized):
+        if (
+            _VIDEO_CREATE.search(normalized)
+            or _DIRECT_VIDEO.search(normalized)
+            or _CONTEXT_VIDEO_CREATE.search(normalized)
+        ):
             operation = (
                 Operation.IMAGE_TO_VIDEO
-                if input_artifact_ids or has_prior_image
+                if input_artifact_ids or (has_prior_image and not referenced_text)
                 else Operation.TEXT_TO_VIDEO
             )
-            return self._media(
-                operation,
-                normalized,
-                input_artifact_ids,
-                "clear video creation request",
-                0.9 if _UNCERTAIN.search(normalized) else 0.96,
+            return grounded(
+                self._media(
+                    operation,
+                    normalized,
+                    input_artifact_ids,
+                    "clear video creation request",
+                    0.9 if _UNCERTAIN.search(normalized) else 0.96,
+                )
             )
 
-        if has_prior_image and _PRIOR_IMAGE_EDIT.search(normalized):
-            return self._media(
-                Operation.IMAGE_TO_IMAGE,
-                normalized,
-                input_artifact_ids,
-                "clear prior-image edit request",
-                0.97,
+        if has_prior_image and not referenced_text and _PRIOR_IMAGE_EDIT.search(normalized):
+            return grounded(
+                self._media(
+                    Operation.IMAGE_TO_IMAGE,
+                    normalized,
+                    input_artifact_ids,
+                    "clear prior-image edit request",
+                    0.97,
+                )
             )
 
-        if _IMAGE_CREATE.search(normalized) or _DIRECT_IMAGE.search(normalized):
+        if (
+            _IMAGE_CREATE.search(normalized)
+            or _DIRECT_IMAGE.search(normalized)
+            or _CONTEXT_IMAGE_CREATE.search(normalized)
+        ):
             operation = Operation.IMAGE_TO_IMAGE if input_artifact_ids else Operation.TEXT_TO_IMAGE
-            return self._media(
-                operation,
-                normalized,
-                input_artifact_ids,
-                "clear image creation request",
-                0.9 if _UNCERTAIN.search(normalized) else 0.96,
+            return grounded(
+                self._media(
+                    operation,
+                    normalized,
+                    input_artifact_ids,
+                    "clear image creation request",
+                    0.9 if _UNCERTAIN.search(normalized) else 0.96,
+                )
             )
 
         if _TEXT_TASK.search(normalized):
             return self._text(normalized, "clear text task", 0.95)
 
         return self._text(normalized, "no clear media creation intent", 0.9)
+
+    @staticmethod
+    def _referenced_text_context(text: str, conversation: list[dict[str, Any]]) -> str | None:
+        if not (
+            _TEXT_CONTEXT_REFERENCE.search(text)
+            or _CONTEXT_IMAGE_CREATE.search(text)
+            or _CONTEXT_VIDEO_CREATE.search(text)
+        ):
+            return None
+
+        blocks: list[str] = []
+        remaining = 6_000
+        for message in reversed(conversation):
+            role = message.get("role")
+            content = message.get("content")
+            if role not in {"user", "assistant"} or not isinstance(content, str):
+                continue
+            content = content.strip()
+            if not content or _MEDIA_CONTEXT_SUMMARY.match(content):
+                continue
+            label = "Assistant" if role == "assistant" else "User"
+            block = f"{label}: {content}"
+            if len(block) > remaining:
+                block = block[: max(0, remaining - 3)].rstrip() + "..."
+            if not block:
+                break
+            blocks.append(block)
+            remaining -= len(block) + 2
+            if remaining <= 0 or len(blocks) >= 4:
+                break
+        if not blocks:
+            return None
+        return "\n\n".join(reversed(blocks))
+
+    @staticmethod
+    def _with_text_context(plan: RoutingPlan, referenced_text: str | None) -> RoutingPlan:
+        if not referenced_text or plan.operation == Operation.TEXT:
+            return plan
+        if referenced_text in plan.standalone_prompt:
+            return plan
+        return plan.model_copy(
+            update={
+                "standalone_prompt": (
+                    f"{plan.standalone_prompt.strip()}\n\nSource chat text:\n{referenced_text}"
+                )
+            }
+        )
 
     def _from_tool(
         self,

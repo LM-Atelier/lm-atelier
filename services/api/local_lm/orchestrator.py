@@ -210,6 +210,7 @@ class ConversationOrchestrator:
 
         mode = request.mode or RoutingMode(chat.routing_mode)
         has_prior_image = self._has_prior_image(session, chat.id)
+        routing_context = self._routing_context(session, chat, parent_message_id)
         planner_available = (
             await self._chat_planner_available() if mode == RoutingMode.AUTO else True
         )
@@ -220,7 +221,7 @@ class ConversationOrchestrator:
                 mode=mode,
                 input_artifact_ids=request.input_artifact_ids,
                 has_prior_image=has_prior_image,
-                conversation=self._routing_context(session, chat, parent_message_id),
+                conversation=routing_context,
             )
         else:
             plan = self.router.plan(
@@ -228,6 +229,7 @@ class ConversationOrchestrator:
                 mode=mode,
                 input_artifact_ids=request.input_artifact_ids,
                 has_prior_image=has_prior_image,
+                conversation=routing_context,
             )
         if (
             mode == RoutingMode.AUTO
