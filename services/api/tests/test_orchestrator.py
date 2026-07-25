@@ -118,3 +118,23 @@ def test_media_progress_preserves_the_latest_preview() -> None:
     assert parts[0].metadata_json == {"progress": 0.5, "phase": "sampling"}
     assert parts[1].artifact_id == "sha256:preview"
     assert parts[1].metadata_json == {"preview": True}
+
+
+def test_chat_progress_is_removed_without_discarding_text() -> None:
+    text = MessagePart(position=0, type="text", text="Partial response")
+    progress = MessagePart(
+        position=1,
+        type="progress",
+        text="Waiting for first token",
+        metadata_json={"activity": "chat", "phase": "waiting for first token"},
+    )
+    message = Message(
+        chat_id="chat-1",
+        role="assistant",
+        status="pending",
+        parts=[text, progress],
+    )
+
+    ConversationOrchestrator._remove_chat_progress(message)
+
+    assert message.parts == [text]

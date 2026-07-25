@@ -1,12 +1,14 @@
-import { useEffect, useMemo, useRef, useState } from "react";
+import { isValidElement, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { useInfiniteQuery, useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 import {
   Activity,
   Bot,
+  Check,
   ChevronDown,
   CircleStop,
+  Copy,
   Cpu,
   Download,
   Film,
@@ -223,10 +225,109 @@ function MediaLibraryView() {
   );
 }
 
+async function copyToClipboard(text: string): Promise<void> {
+  if (navigator.clipboard?.writeText) {
+    await navigator.clipboard.writeText(text);
+    return;
+  }
+  const textarea = document.createElement("textarea");
+  textarea.value = text;
+  textarea.style.position = "fixed";
+  textarea.style.opacity = "0";
+  document.body.appendChild(textarea);
+  textarea.select();
+  const copied = document.execCommand("copy");
+  textarea.remove();
+  if (!copied) throw new Error("Clipboard access is unavailable");
+}
+
+function CopyTextButton({
+  text,
+  label,
+  className,
+}: {
+  text: string;
+  label: string;
+  className?: string;
+}) {
+  const [copied, setCopied] = useState(false);
+  const resetTimer = useRef<number | undefined>(undefined);
+  useEffect(() => () => {
+    if (resetTimer.current !== undefined) window.clearTimeout(resetTimer.current);
+  }, []);
+  return (
+    <button
+      type="button"
+      className={className}
+      aria-label={copied ? `${label} copied` : label}
+      title={copied ? "Copied" : label}
+      onClick={() => {
+        void copyToClipboard(text).then(() => {
+          setCopied(true);
+          if (resetTimer.current !== undefined) window.clearTimeout(resetTimer.current);
+          resetTimer.current = window.setTimeout(() => setCopied(false), 1_500);
+        });
+      }}
+    >
+      {copied ? <Check size={13} /> : <Copy size={13} />}
+      <span>{copied ? "Copied" : "Copy"}</span>
+    </button>
+  );
+}
+
+function nodeText(node: ReactNode): string {
+  if (typeof node === "string" || typeof node === "number") return String(node);
+  if (Array.isArray(node)) return node.map(nodeText).join("");
+  if (isValidElement<{ children?: ReactNode }>(node)) return nodeText(node.props.children);
+  return "";
+}
+
+function MarkdownText({ text }: { text: string }) {
+  return (
+    <div className="message-text markdown">
+      <ReactMarkdown
+        remarkPlugins={[remarkGfm]}
+        components={{
+          pre: ({ children }) => {
+            const code = nodeText(children).replace(/\n$/, "");
+            return (
+              <div className="markdown-code-block">
+                {code && <CopyTextButton text={code} label="Copy code block" className="block-copy" />}
+                <pre>{children}</pre>
+              </div>
+            );
+          },
+        }}
+      >
+        {text}
+      </ReactMarkdown>
+    </div>
+  );
+}
+
+function PendingResponseStatus({ label, startedAt }: { label: string; startedAt: string }) {
+  const [seconds, setSeconds] = useState(
+    () => Math.max(0, Math.floor((Date.now() - Date.parse(startedAt)) / 1_000)),
+  );
+  useEffect(() => {
+    const timer = window.setInterval(
+      () => setSeconds(Math.max(0, Math.floor((Date.now() - Date.parse(startedAt)) / 1_000))),
+      1_000,
+    );
+    return () => window.clearInterval(timer);
+  }, [startedAt]);
+  return (
+    <div className="submission-progress pending-response" role="status">
+      <LoaderCircle size={17} />
+      <span>{label}<small aria-hidden="true"> · {seconds}s</small></span>
+    </div>
+  );
+}
+
 function PartView({ part, liveText, markdown = false }: { part: MessagePart; liveText?: string; markdown?: boolean }) {
   if (part.type === "text") {
     const text = liveText || part.text || "";
-    return markdown ? <div className="message-text markdown"><ReactMarkdown remarkPlugins={[remarkGfm]}>{text}</ReactMarkdown></div> : <div className="message-text">{text}</div>;
+    return markdown ? <MarkdownText text={text} /> : <div className="message-text">{text}</div>;
   }
   if (part.type === "image" || part.type === "video") return <ArtifactPart part={part} />;
   if (part.type === "progress") {
@@ -258,6 +359,21 @@ function MessageBubble({
 }) {
   const visibleParts = message.parts.filter((part) => part.type !== "generation_metadata");
   const userText = visibleParts.filter((part) => part.type === "text").map((part) => part.text || "").join("\n");
+  const copyableText = (liveText || userText).trim();
+  const chatProgress = visibleParts.find(
+    (part) => part.type === "progress" && part.metadata_json.activity === "chat",
+  );
+  const hasVisibleText = Boolean(copyableText);
+  const hasMediaProgress = visibleParts.some(
+    (part) => part.type === "progress" && part.metadata_json.activity !== "chat",
+  );
+  const showChatStartup = message.role === "assistant"
+    && message.status === "pending"
+    && !hasVisibleText
+    && (Boolean(chatProgress) || !hasMediaProgress);
+  const renderedParts = chatProgress
+    ? visibleParts.filter((part) => part.id !== chatProgress.id)
+    : visibleParts;
   const [editing, setEditing] = useState(false);
   const [draft, setDraft] = useState(userText);
   const metadata = message.parts.find((part) => part.type === "generation_metadata")?.metadata_json;
@@ -283,11 +399,12 @@ function MessageBubble({
     <article className={`message ${message.role}`}>
       <div className="avatar">{message.role === "user" ? "You" : <Bot size={19} />}</div>
       <div className="message-content">
-        {editing ? <div className="message-edit"><textarea aria-label="Edit message" rows={4} value={draft} onChange={(event) => setDraft(event.target.value)} /><div><button onClick={() => { setDraft(userText); setEditing(false); }}>Cancel</button><button className="primary" disabled={!draft.trim()} onClick={() => { onEdit?.(message.id, draft.trim()); setEditing(false); }}>Send edited message</button></div></div> : visibleParts.map((part) => <PartView key={part.id} part={part} liveText={liveText} markdown={message.role === "assistant"} />)}
+        {editing ? <div className="message-edit"><textarea aria-label="Edit message" rows={4} value={draft} onChange={(event) => setDraft(event.target.value)} /><div><button onClick={() => { setDraft(userText); setEditing(false); }}>Cancel</button><button className="primary" disabled={!draft.trim()} onClick={() => { onEdit?.(message.id, draft.trim()); setEditing(false); }}>Send edited message</button></div></div> : renderedParts.map((part) => <PartView key={part.id} part={part} liveText={liveText} markdown={message.role === "assistant"} />)}
         {liveText && !visibleParts.some((part) => part.type === "text") && (
-          <div className="message-text markdown"><ReactMarkdown remarkPlugins={[remarkGfm]}>{liveText}</ReactMarkdown></div>
+          <MarkdownText text={liveText} />
         )}
-        {message.role === "user" && message.status === "complete" && onEdit && !editing && <div className="message-meta"><button onClick={() => setEditing(true)}>Edit and branch</button></div>}
+        {showChatStartup && <PendingResponseStatus label={chatProgress?.text || "Starting chat"} startedAt={message.created_at} />}
+        {message.role === "user" && message.status === "complete" && !editing && (onEdit || copyableText) && <div className="message-meta">{onEdit && <button onClick={() => setEditing(true)}>Edit and branch</button>}{copyableText && <CopyTextButton text={copyableText} label="Copy user message" />}</div>}
         {message.role === "assistant" && message.status === "cancelled" && !visibleParts.some((part) => part.type === "error") && (
           <div className="message-meta"><span>Generation cancelled</span></div>
         )}
@@ -300,12 +417,16 @@ function MessageBubble({
                 {omitted > 0 ? ` · ${omitted} earlier message${omitted === 1 ? "" : "s"} omitted` : ""}
               </span>
             )}
+            {copyableText && <CopyTextButton text={copyableText} label="Copy assistant message" />}
             {onRegenerate && (
               <button onClick={() => onRegenerate(message.id)} aria-label="Regenerate response">
                 <RotateCcw size={13} /> Regenerate
               </button>
             )}
           </div>
+        )}
+        {message.role === "assistant" && message.status !== "complete" && copyableText && (
+          <div className="message-meta"><CopyTextButton text={copyableText} label="Copy assistant message" /></div>
         )}
       </div>
     </article>
@@ -1523,6 +1644,7 @@ export default function App() {
           return;
         }
         if (event.type.includes("progress") || event.type.startsWith("download.")) void client.invalidateQueries({ queryKey: ["jobs"] });
+        if (event.type === "run.progress") void client.invalidateQueries({ queryKey: ["chat"] });
         if (event.type === "download.completed") {
           void client.invalidateQueries({ queryKey: ["models"] });
           void client.invalidateQueries({ queryKey: ["profiles"] });

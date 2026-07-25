@@ -489,6 +489,32 @@ async def test_turn_idempotency_returns_original_run(client: AsyncClient) -> Non
     assert first.json()["run"]["id"] == second.json()["run"]["id"]
 
 
+async def test_chat_turn_exposes_startup_status_until_text_arrives(
+    client: AsyncClient,
+) -> None:
+    chat = (await client.post("/api/chats", json={"title": "Startup status"})).json()
+    turn = await client.post(
+        f"/api/chats/{chat['id']}/turns",
+        json={"text": "Reply briefly", "mode": "text"},
+    )
+    assert turn.status_code == 202
+    accepted = turn.json()
+    progress = next(
+        part for part in accepted["assistant_message"]["parts"] if part["type"] == "progress"
+    )
+    assert progress["text"] == "Queued"
+    assert progress["metadata_json"] == {
+        "activity": "chat",
+        "progress": 0,
+        "phase": "queued",
+    }
+
+    await wait_for_run(client, accepted["run"]["id"])
+    assistant = (await client.get(f"/api/messages/{accepted['assistant_message']['id']}")).json()
+    assert any(part["type"] == "text" and part["text"] for part in assistant["parts"])
+    assert not any(part["type"] == "progress" for part in assistant["parts"])
+
+
 async def test_active_chat_run_can_be_cancelled_directly(client: AsyncClient) -> None:
     chat = (await client.post("/api/chats", json={"title": "Stop response"})).json()
     turn = await client.post(

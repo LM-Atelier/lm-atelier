@@ -343,7 +343,15 @@ class ConversationOrchestrator:
             parts=[MessagePart(position=0, type=PartType.TEXT.value, text=request.text)],
         )
         if plan.operation == Operation.TEXT:
-            initial_parts = [MessagePart(position=0, type=PartType.TEXT.value, text="")]
+            initial_parts = [
+                MessagePart(position=0, type=PartType.TEXT.value, text=""),
+                MessagePart(
+                    position=1,
+                    type=PartType.PROGRESS.value,
+                    text="Queued",
+                    metadata_json={"activity": "chat", "progress": 0, "phase": "queued"},
+                ),
+            ]
         else:
             initial_parts = [
                 MessagePart(
@@ -528,6 +536,12 @@ class ConversationOrchestrator:
                 run_id,
                 {"operation": run.operation, "prompt": run.standalone_prompt},
             )
+            if run.operation == Operation.TEXT.value:
+                await self._set_chat_phase(
+                    job_id,
+                    run_id,
+                    "Waiting for available compute",
+                )
             resume_chat_profile = await self._prepare_device_handoff(run.operation)
             try:
                 async with self.scheduler.lease("primary"):
@@ -550,7 +564,9 @@ class ConversationOrchestrator:
             await self._fail(job_id, run_id, detail)
 
     async def _execute_chat(self, job_id: str, run_id: str) -> None:
+        await self._set_chat_phase(job_id, run_id, "Preparing chat model")
         worker = await self._ensure_chat_worker(run_id)
+        await self._set_chat_phase(job_id, run_id, "Preparing conversation")
         with SessionLocal() as session:
             run = session.get(Run, run_id)
             if not run:
@@ -580,6 +596,7 @@ class ConversationOrchestrator:
             )
             assistant_id = run.assistant_message_id
 
+        await self._set_chat_phase(job_id, run_id, "Waiting for first token")
         accumulated = ""
         completion_metadata: dict[str, Any] = {}
         last_persisted_length = 0
@@ -599,7 +616,8 @@ class ConversationOrchestrator:
                     )
                     now = time.monotonic()
                     if (
-                        len(accumulated) - last_persisted_length >= 32
+                        last_persisted_length == 0
+                        or len(accumulated) - last_persisted_length >= 32
                         or now - last_persisted_at >= 0.25
                     ):
                         self._persist_streamed_text(assistant_id, accumulated)
@@ -629,6 +647,7 @@ class ConversationOrchestrator:
             job = session.get(Job, job_id)
             if not message or not run or not job:
                 return
+            self._remove_chat_progress(message)
             text_part = next(
                 (part for part in message.parts if part.type == PartType.TEXT.value), None
             )
@@ -682,6 +701,71 @@ class ConversationOrchestrator:
                 )
             session.commit()
         await self.events.publish("run.completed", run_id, {"job_id": job_id})
+
+    async def _set_chat_phase(self, job_id: str, run_id: str, label: str) -> None:
+        assistant_id = ""
+        with SessionLocal() as session:
+            job = session.get(Job, job_id)
+            run = session.get(Run, run_id)
+            if (
+                not job
+                or not run
+                or job.status
+                in {
+                    JobStatus.COMPLETE.value,
+                    JobStatus.FAILED.value,
+                    JobStatus.CANCELLED.value,
+                }
+            ):
+                return
+            assistant_id = run.assistant_message_id
+            job.phase = label.lower()
+            message = session.get(Message, assistant_id)
+            if message:
+                progress_part = next(
+                    (
+                        part
+                        for part in message.parts
+                        if part.type == PartType.PROGRESS.value
+                        and part.metadata_json.get("activity") == "chat"
+                    ),
+                    None,
+                )
+                if progress_part:
+                    progress_part.text = label
+                    progress_part.metadata_json = {
+                        "activity": "chat",
+                        "progress": 0,
+                        "phase": label.lower(),
+                    }
+                else:
+                    message.parts.append(
+                        MessagePart(
+                            position=max(
+                                (part.position for part in message.parts),
+                                default=-1,
+                            )
+                            + 1,
+                            type=PartType.PROGRESS.value,
+                            text=label,
+                            metadata_json={
+                                "activity": "chat",
+                                "progress": 0,
+                                "phase": label.lower(),
+                            },
+                        )
+                    )
+            session.commit()
+        await self.events.publish(
+            "run.progress",
+            run_id,
+            {
+                "assistant_message_id": assistant_id,
+                "job_id": job_id,
+                "phase": label.lower(),
+                "label": label,
+            },
+        )
 
     async def _ensure_chat_worker(self, run_id: str) -> WorkerStatus | None:
         if (
@@ -1044,6 +1128,7 @@ class ConversationOrchestrator:
                 preview_ids = self._temporary_preview_ids(message)
                 message.status = MessageStatus.FAILED.value
                 if run.operation == Operation.TEXT.value:
+                    self._remove_chat_progress(message)
                     error_part = next(
                         (part for part in message.parts if part.type == PartType.ERROR.value),
                         None,
@@ -1101,7 +1186,9 @@ class ConversationOrchestrator:
         if message:
             preview_ids = self._temporary_preview_ids(message)
             message.status = MessageStatus.CANCELLED.value
-            if run.operation != Operation.TEXT.value:
+            if run.operation == Operation.TEXT.value:
+                self._remove_chat_progress(message)
+            else:
                 self._replace_parts(
                     message,
                     [
@@ -1157,6 +1244,7 @@ class ConversationOrchestrator:
             message = session.get(Message, message_id)
             if not message:
                 return
+            ConversationOrchestrator._remove_chat_progress(message)
             text_part = next(
                 (part for part in message.parts if part.type == PartType.TEXT.value), None
             )
@@ -1168,6 +1256,15 @@ class ConversationOrchestrator:
                     [MessagePart(position=0, type=PartType.TEXT.value, text=text)],
                 )
             session.commit()
+
+    @staticmethod
+    def _remove_chat_progress(message: Message) -> None:
+        for part in list(message.parts):
+            if (
+                part.type == PartType.PROGRESS.value
+                and part.metadata_json.get("activity") == "chat"
+            ):
+                message.parts.remove(part)
 
     @staticmethod
     def _replace_parts(message: Message, parts: list[MessagePart]) -> None:

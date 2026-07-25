@@ -109,8 +109,11 @@ h1, h2, h3 { margin: 0; }
 .markdown h1, .markdown h2, .markdown h3 { margin: 1em 0 .45em; line-height: 1.25; }
 .markdown h1 { font-size: 1.5em; }.markdown h2 { font-size: 1.3em; }.markdown h3 { font-size: 1.12em; }
 .markdown code { border-radius: 5px; background: #20252e; padding: 2px 5px; font: .88em/1.5 "SFMono-Regular", Consolas, monospace; }
-.markdown pre { overflow-x: auto; border: 1px solid #303744; border-radius: 10px; background: #101319; padding: 12px; }
+.markdown-code-block { position: relative; }
+.markdown-code-block pre { overflow-x: auto; border: 1px solid #303744; border-radius: 10px; background: #101319; padding: 38px 12px 12px; }
 .markdown pre code { background: transparent; padding: 0; }
+.block-copy { position: absolute; z-index: 1; top: 7px; right: 7px; display: inline-flex; align-items: center; gap: 5px; border: 1px solid #343b47; border-radius: 7px; background: #1b2028; color: #929ba8; padding: 4px 7px; font-size: 10px; cursor: pointer; }
+.block-copy:hover { border-color: #4a5566; color: #e1e5ec; }
 .markdown blockquote { border-left: 3px solid #315a9a; color: #bdb3a5; padding-left: 12px; }
 .markdown table { border-collapse: collapse; }.markdown th, .markdown td { border: 1px solid #343b47; padding: 6px 9px; text-align: left; }
 .markdown a { color: #9cb6db; }
@@ -123,6 +126,7 @@ h1, h2, h3 { margin: 0; }
 .message.optimistic { opacity: .82; }
 .submission-progress { display: flex; align-items: center; gap: 8px; color: #9ca6b5; font-size: 12px; }
 .submission-progress svg, .send-button.pending svg { animation: spin .9s linear infinite; }
+.pending-response small { color: #687383; font-size: 10px; }
 .message-error, .callout.error { border: 1px solid #8e4048; color: #ffb8be; background: #391c22; border-radius: 9px; padding: 11px 13px; white-space: pre-wrap; }
 .generation-progress { display: grid; grid-template-columns: 24px 1fr; gap: 10px; align-items: center; max-width: 420px; color: #c9cfda; }
 .generation-progress svg { color: var(--accent-2); animation: pulse 1.5s ease infinite; }
