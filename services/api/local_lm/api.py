@@ -58,6 +58,7 @@ from .routing import RouteConfirmationRequired
 from .schemas import (
     ArtifactCleanupRequest,
     ArtifactCleanupResult,
+    ArtifactDeleteResult,
     ArtifactLibraryItem,
     ArtifactOut,
     ArtifactStorageInfo,
@@ -883,7 +884,7 @@ async def artifact_storage(request: Request, session: SessionDep) -> ArtifactSto
     services = _services(request)
     artifacts = session.scalars(select(Artifact)).all()
     referenced = services.artifacts.referenced_artifact_ids(session)
-    _marked, eligible_count, eligible_bytes = services.artifacts.cleanup_retention(
+    retention_pending_count, eligible_count, eligible_bytes = services.artifacts.cleanup_retention(
         session,
         retention_days=services.settings.artifact_retention_days,
         temporary_hours=services.settings.temporary_retention_hours,
@@ -910,6 +911,7 @@ async def artifact_storage(request: Request, session: SessionDep) -> ArtifactSto
         temporary_count=len(temporary),
         eligible_bytes=eligible_bytes,
         eligible_count=eligible_count,
+        retention_pending_count=retention_pending_count,
         disk_free_bytes=disk_free,
         warning=disk_free < services.settings.storage_warning_free_bytes,
         retention_days=services.settings.artifact_retention_days,
@@ -935,6 +937,30 @@ async def cleanup_artifacts(
     return ArtifactCleanupResult(
         dry_run=payload.dry_run,
         marked_count=marked,
+        removed_count=removed,
+        reclaimed_bytes=reclaimed,
+    )
+
+
+@router.delete("/artifacts/{artifact_id}", response_model=ArtifactDeleteResult)
+async def delete_artifact(
+    artifact_id: str,
+    request: Request,
+    session: SessionDep,
+) -> ArtifactDeleteResult:
+    artifact = session.get(Artifact, artifact_id)
+    if not artifact:
+        raise HTTPException(404, "artifact not found")
+    try:
+        references, removed, reclaimed = _services(request).artifacts.delete_library_artifact(
+            session, artifact
+        )
+    except ValueError as exc:
+        raise HTTPException(409, str(exc)) from exc
+    session.commit()
+    return ArtifactDeleteResult(
+        artifact_id=artifact_id,
+        reference_count=references,
         removed_count=removed,
         reclaimed_bytes=reclaimed,
     )
@@ -1045,7 +1071,10 @@ async def catalog_search(
     except ValueError as exc:
         raise HTTPException(422, f"invalid catalog request: {exc}") from exc
     except Exception as exc:
-        raise HTTPException(502, f"catalog request failed: {exc}") from exc
+        raise HTTPException(
+            503,
+            "Hugging Face is temporarily unavailable. Check your connection and retry.",
+        ) from exc
 
 
 @router.get("/catalog/workflow-models", response_model=list[CatalogModel])
@@ -1089,7 +1118,10 @@ async def catalog_detail(
         detail = await _services(request).catalog.inspect(f"{owner}/{name}", revision, role)
         return CatalogDetail.model_validate(detail)
     except Exception as exc:
-        raise HTTPException(502, f"catalog request failed: {exc}") from exc
+        raise HTTPException(
+            503,
+            "Hugging Face is temporarily unavailable. Check your connection and retry.",
+        ) from exc
 
 
 @router.post("/catalog/{owner}/{name}/preflight", response_model=CatalogPreflight)
@@ -1106,7 +1138,10 @@ async def catalog_preflight(
         )
         detail = CatalogDetail.model_validate(raw_detail)
     except Exception as exc:
-        raise HTTPException(502, f"catalog request failed: {exc}") from exc
+        raise HTTPException(
+            503,
+            "Hugging Face is temporarily unavailable. Check your connection and retry.",
+        ) from exc
     system = collect_system_info(services.settings)
     if (
         payload.role == "chat"

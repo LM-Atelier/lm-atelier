@@ -87,6 +87,7 @@ vi.mock("./api", () => ({
     artifacts: vi.fn().mockResolvedValue([]),
     artifactStorage: vi.fn().mockResolvedValue({ total_bytes: 0, total_count: 0, referenced_bytes: 0, referenced_count: 0, unreferenced_bytes: 0, unreferenced_count: 0, temporary_bytes: 0, temporary_count: 0, eligible_bytes: 0, eligible_count: 0, disk_free_bytes: 1024, warning: false, retention_days: 30, temporary_retention_hours: 24 }),
     cleanupArtifacts: vi.fn(),
+    deleteArtifact: vi.fn(),
     sendTurn: vi.fn(),
     regenerateMessage: vi.fn(),
     branchMessage: vi.fn(),
@@ -1102,6 +1103,7 @@ describe("App", () => {
       temporary_count: 0,
       eligible_bytes: 0,
       eligible_count: 0,
+      retention_pending_count: 0,
       disk_free_bytes: 1024 ** 3,
       warning: false,
       retention_days: 30,
@@ -1116,7 +1118,58 @@ describe("App", () => {
     fireEvent.click(await screen.findByText("Media library"));
     expect(await screen.findByText("observatory.png")).toBeInTheDocument();
     expect(screen.getByText(/2\.0 KB · 1 reference/)).toBeInTheDocument();
-    expect(screen.getByText("Clean eligible")).toBeDisabled();
+    expect(screen.getByText("Run cleanup")).toBeDisabled();
+    vi.mocked(api.deleteArtifact).mockImplementation(async () => {
+      vi.mocked(api.artifacts).mockResolvedValue([]);
+      return {
+        artifact_id: "sha256:image",
+        reference_count: 1,
+        removed_count: 1,
+        reclaimed_bytes: 2048,
+      };
+    });
+    const confirm = vi.spyOn(window, "confirm").mockReturnValue(true);
+    fireEvent.click(screen.getByRole("button", { name: "Delete observatory.png" }));
+    expect(confirm).toHaveBeenCalledWith(
+      "Permanently delete observatory.png and remove 1 appearance from chats?",
+    );
+    await waitFor(() => expect(vi.mocked(api.deleteArtifact).mock.calls[0]?.[0]).toBe("sha256:image"));
+    await waitFor(() => expect(screen.queryByText("observatory.png")).not.toBeInTheDocument());
+  });
+
+  it("starts the recovery window when cleanup finds new unreferenced media", async () => {
+    vi.mocked(api.artifactStorage).mockResolvedValue({
+      total_bytes: 2048,
+      total_count: 1,
+      referenced_bytes: 0,
+      referenced_count: 0,
+      unreferenced_bytes: 2048,
+      unreferenced_count: 1,
+      temporary_bytes: 0,
+      temporary_count: 0,
+      eligible_bytes: 0,
+      eligible_count: 0,
+      retention_pending_count: 1,
+      disk_free_bytes: 1024 ** 3,
+      warning: false,
+      retention_days: 30,
+      temporary_retention_hours: 24,
+    });
+    vi.mocked(api.cleanupArtifacts).mockResolvedValue({
+      dry_run: false,
+      marked_count: 1,
+      removed_count: 0,
+      reclaimed_bytes: 0,
+    });
+    const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+    render(
+      <QueryClientProvider client={client}>
+        <App />
+      </QueryClientProvider>,
+    );
+    fireEvent.click(await screen.findByText("Media library"));
+    fireEvent.click(await screen.findByRole("button", { name: "Run cleanup" }));
+    expect(await screen.findByText("1 newly unreferenced artifact entered the 30-day recovery window.")).toBeInTheDocument();
   });
 
   it("isolates role-aware settings in profile and preset editors", async () => {

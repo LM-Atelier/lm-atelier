@@ -28,6 +28,7 @@ import {
   Settings,
   SlidersHorizontal,
   Sparkles,
+  Trash2,
   Upload,
   Workflow as WorkflowIcon,
   X,
@@ -40,6 +41,7 @@ import {
 } from "./settings";
 import type {
   AppEvent,
+  ArtifactLibraryItem,
   CatalogModel,
   Chat,
   ChatDetail,
@@ -162,6 +164,30 @@ function MediaLibraryView() {
       void client.invalidateQueries({ queryKey: ["artifact-storage"] });
     },
   });
+  const deleteArtifact = useMutation({
+    mutationFn: api.deleteArtifact,
+    onMutate: async (artifactId: string) => {
+      await client.cancelQueries({ queryKey: ["artifacts"] });
+      const previous = client.getQueriesData<ArtifactLibraryItem[]>({ queryKey: ["artifacts"] });
+      for (const [queryKey, items] of previous) {
+        client.setQueryData(
+          queryKey,
+          items?.filter((artifact) => artifact.id !== artifactId),
+        );
+      }
+      return { previous };
+    },
+    onError: (_error, _artifactId, context) => {
+      for (const [queryKey, items] of context?.previous ?? []) {
+        client.setQueryData(queryKey, items);
+      }
+    },
+    onSettled: () => {
+      void client.invalidateQueries({ queryKey: ["artifacts"] });
+      void client.invalidateQueries({ queryKey: ["artifact-storage"] });
+      void client.invalidateQueries({ queryKey: ["chat"] });
+    },
+  });
   return (
     <div className="page-view media-library">
       <header className="page-header">
@@ -172,14 +198,14 @@ function MediaLibraryView() {
         <div><strong>{formatBytes(storage.data.referenced_bytes)}</strong><small>{storage.data.referenced_count} referenced</small></div>
         <div><strong>{formatBytes(storage.data.disk_free_bytes)}</strong><small>disk available</small></div>
         <div><strong>{formatBytes(storage.data.eligible_bytes)}</strong><small>{storage.data.eligible_count} eligible for cleanup</small></div>
-        <button className="secondary" disabled={!storage.data.eligible_count || cleanup.isPending} onClick={() => cleanup.mutate()}>{cleanup.isPending ? "Cleaning…" : "Clean eligible"}</button>
+        <button className="secondary" disabled={(!storage.data.eligible_count && !(storage.data.retention_pending_count ?? 0)) || cleanup.isPending} onClick={() => cleanup.mutate()}>{cleanup.isPending ? "Cleaning…" : "Run cleanup"}</button>
       </section>}
       <div className="media-toolbar">
         <div className="workspace-search"><Search size={14} /><input aria-label="Search media" placeholder="Search filenames or hashes" value={search} onChange={(event) => setSearch(event.target.value)} /></div>
         <select aria-label="Media type" value={kind} onChange={(event) => setKind(event.target.value)}><option value="">Images and videos</option><option value="image">Images</option><option value="video">Videos</option></select>
       </div>
-      {cleanup.data && <div className="callout success">Removed {cleanup.data.removed_count} artifact{cleanup.data.removed_count === 1 ? "" : "s"} and reclaimed {formatBytes(cleanup.data.reclaimed_bytes)}. Newly unreferenced artifacts begin a {storage.data?.retention_days ?? 30}-day recovery window.</div>}
-      {cleanup.error && <div className="callout error">{cleanup.error.message}</div>}
+      {cleanup.data && <div className="callout success">{cleanup.data.removed_count > 0 && <>Removed {cleanup.data.removed_count} artifact{cleanup.data.removed_count === 1 ? "" : "s"} and reclaimed {formatBytes(cleanup.data.reclaimed_bytes)}. </>}{cleanup.data.marked_count > 0 ? `${cleanup.data.marked_count} newly unreferenced artifact${cleanup.data.marked_count === 1 ? "" : "s"} entered the ${storage.data?.retention_days ?? 30}-day recovery window.` : cleanup.data.removed_count === 0 ? "Nothing needed cleanup." : null}</div>}
+      {(cleanup.error || deleteArtifact.error) && <div className="callout error">{cleanup.error?.message || deleteArtifact.error?.message}</div>}
       {artifacts.data?.length ? <div className="media-grid">{artifacts.data.map((artifact) => {
         const source = `/api/artifacts/${encodeURIComponent(artifact.id)}/content`;
         const proxyId = typeof artifact.metadata_json.browser_proxy_artifact_id === "string" ? artifact.metadata_json.browser_proxy_artifact_id : null;
@@ -187,7 +213,7 @@ function MediaLibraryView() {
         const posterId = typeof artifact.metadata_json.poster_artifact_id === "string" ? artifact.metadata_json.poster_artifact_id : null;
         return <article className="gallery-card" key={artifact.id}>
           {artifact.kind === "image" ? <img src={source} alt={artifact.original_name ?? "Generated image"} loading="lazy" /> : <video src={playbackSource} poster={posterId ? `/api/artifacts/${encodeURIComponent(posterId)}/content` : undefined} controls preload="metadata" />}
-          <div><strong>{artifact.original_name ?? artifact.kind}</strong><small>{formatBytes(artifact.size_bytes)} · {artifact.reference_count} reference{artifact.reference_count === 1 ? "" : "s"}</small><span><a href={source} download>Download</a><code>{artifact.sha256.slice(0, 12)}</code></span></div>
+          <div><strong>{artifact.original_name ?? artifact.kind}</strong><small>{formatBytes(artifact.size_bytes)} · {artifact.reference_count} reference{artifact.reference_count === 1 ? "" : "s"}</small><span><a href={source} download>Download</a><code>{artifact.sha256.slice(0, 12)}</code><button className="icon-button danger" aria-label={`Delete ${artifact.original_name ?? artifact.kind}`} disabled={deleteArtifact.isPending && deleteArtifact.variables === artifact.id} title="Delete media" onClick={() => { const references = artifact.reference_count ? ` and remove ${artifact.reference_count} appearance${artifact.reference_count === 1 ? "" : "s"} from chats` : ""; if (window.confirm(`Permanently delete ${artifact.original_name ?? artifact.kind}${references}?`)) deleteArtifact.mutate(artifact.id); }}><Trash2 size={14} /></button></span></div>
         </article>;
       })}</div> : <EmptyState icon={<ImageIcon />} title="No generated media" body="Images and videos created in chat will appear here." />}
     </div>
@@ -731,6 +757,7 @@ function ModelsView() {
     () => rawCatalogItems.filter((model) => !readyRemoteIds.has(model.remote_id)),
     [rawCatalogItems, readyRemoteIds],
   );
+  const catalogIsStale = catalog.data?.pages.some((page) => page.stale) ?? false;
   const recipes = useQuery({ queryKey: ["recipes"], queryFn: api.recipes });
   const installed = useQuery({ queryKey: ["models"], queryFn: api.models });
   const jobs = useQuery({ queryKey: ["jobs"], queryFn: api.jobs, refetchInterval: 3_000 });
@@ -845,7 +872,8 @@ function ModelsView() {
       {(installed.data?.length ?? 0) > 0 && <section><h2>Installed models</h2><div className="profile-table model-installs">{installed.data?.map((model) => { const bound = profiles.data?.some((profile) => profile.model_install_id === model.id) ?? false; return <div key={model.id}><span className="badge">{model.role}</span><strong>{model.name}</strong><span>{formatBytes(model.size_bytes)}</span><span className="row-actions"><button className="secondary compact-button" disabled={bound || createProfile.isPending} title={bound ? "This model is available in chats and Auto mode" : "Complete setup for this older model install"} onClick={() => createProfile.mutate(model)}>{bound ? "Ready to use" : "Finish setup"}</button><button className="secondary compact-button danger" disabled={deleteModel.isPending} title="Delete installed model" onClick={() => { if (window.confirm(`Delete ${model.name} and its model settings from local storage?`)) deleteModel.mutate(model.id); }}>Delete</button></span></div>; })}</div></section>}
       {(download.error || deleteModel.error || cleanupDownloads.error) && <div className="callout error">{download.error?.message || deleteModel.error?.message || cleanupDownloads.error?.message}</div>}
       {catalog.isLoading && <div className="loading-line" />}
-      {catalog.error && <div className="callout error">{catalog.error.message}</div>}
+      {catalog.error && <div className="callout error action-callout"><span>{catalog.error.message}</span><button className="secondary compact-button" disabled={catalog.isFetching} onClick={() => void catalog.refetch()}>Retry</button></div>}
+      {catalogIsStale && !catalog.error && <div className="callout warning action-callout"><span>Showing saved results while Hugging Face is unavailable.</span><button className="secondary compact-button" disabled={catalog.isFetching} onClick={() => void catalog.refetch()}>Refresh</button></div>}
       <div className="model-grid">{catalogItems.map((model) => <ModelCard key={model.remote_id} model={model} role={role} status={statusFor(model)} onDownload={() => download.mutate({ model, selectedRole: role })} />)}</div>
       {catalog.hasNextPage && <div className="load-more"><button className="secondary" disabled={catalog.isFetchingNextPage} onClick={() => void catalog.fetchNextPage()}>{catalog.isFetchingNextPage ? "Loading…" : "Load more models"}</button></div>}
       {importOpen && <div className="modal-backdrop"><div className="modal"><header><div><small>Advanced import</small><h2>Import a local model</h2></div><button className="icon-button" aria-label="Close local import" onClick={() => setImportOpen(false)}><X /></button></header><p>Register an existing model file or directory. Pickle-compatible formats are blocked; imported models are marked for advanced review.</p><label>Display name<input value={importName} onChange={(event) => setImportName(event.target.value)} /></label><label>Absolute local path<input value={importPath} onChange={(event) => setImportPath(event.target.value)} placeholder="/path/to/model.gguf" /></label><label>Role<select value={importRole} onChange={(event) => { const next = event.target.value; setImportRole(next); setImportEngine(next === "chat" ? "llama.cpp" : "comfyui"); }}><option value="chat">Chat</option><option value="image">Image</option><option value="video">Video</option></select></label><label>Runtime<select value={importEngine} onChange={(event) => setImportEngine(event.target.value)}><option value="llama.cpp">llama.cpp</option><option value="comfyui">ComfyUI</option></select></label>{importModel.error && <div className="callout error">{importModel.error.message}</div>}<footer><button className="secondary" onClick={() => setImportOpen(false)}>Cancel</button><button className="primary" disabled={!importName.trim() || !importPath.trim() || importModel.isPending} onClick={() => importModel.mutate()}>{importModel.isPending ? "Importing…" : "Import model"}</button></footer></div></div>}

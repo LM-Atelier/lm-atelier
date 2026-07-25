@@ -212,6 +212,42 @@ async def test_catalog_uses_hugging_face_trending_order_and_update_age(tmp_path)
     assert requests[0].url.params["direction"] == "-1"
 
 
+async def test_catalog_uses_filtered_saved_results_during_an_outage(tmp_path) -> None:
+    online = [True]
+
+    def handler(_request: httpx.Request) -> httpx.Response:
+        if not online[0]:
+            raise httpx.ConnectError("offline")
+        return httpx.Response(
+            200,
+            json=[
+                {
+                    "id": "owner/Model-8B-GGUF",
+                    "pipeline_tag": "text-generation",
+                    "tags": ["gguf", "license:mit"],
+                }
+            ],
+        )
+
+    catalog = HuggingFaceCatalog(Settings(data_dir=tmp_path))
+    await catalog.close()
+    catalog._client = httpx.AsyncClient(
+        base_url="https://huggingface.co",
+        transport=httpx.MockTransport(handler),
+    )
+    try:
+        live = await catalog.search(role="chat", sort="trending")
+        online[0] = False
+        saved = await catalog.search(role="chat", sort="trending", license_id="mit")
+    finally:
+        await catalog.close()
+
+    assert live.stale is False
+    assert [item.remote_id for item in saved.items] == ["owner/Model-8B-GGUF"]
+    assert saved.stale is True
+    assert saved.next_cursor is None
+
+
 async def test_catalog_detail_requests_live_blob_metadata(tmp_path) -> None:
     requests: list[httpx.Request] = []
 
