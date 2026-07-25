@@ -34,6 +34,12 @@ _DISCUSSION = re.compile(
     r"^\s*(?:explain|describe|compare|what|why|how|when|where|who|tell me about|write about)\b",
     re.IGNORECASE,
 )
+_TEXT_TASK = re.compile(
+    r"^\s*(?:answer|reply|respond|say|write|draft|compose|summari[sz]e|translate|"
+    r"rewrite|proofread|review|analy[sz]e|list|count|calculate|compute|solve|"
+    r"brainstorm|code|program|create|generate)\b",
+    re.IGNORECASE,
+)
 _UNCERTAIN = re.compile(r"\b(?:maybe|perhaps|possibly|might want to)\b", re.IGNORECASE)
 
 ROUTING_TOOL = {
@@ -215,6 +221,9 @@ class ModalityRouter:
                 "clear image creation request",
                 0.9 if _UNCERTAIN.search(normalized) else 0.96,
             )
+
+        if _TEXT_TASK.search(normalized):
+            return self._text(normalized, "clear text task", 0.95)
 
         return self._text(normalized, "no clear media creation intent", 0.9)
 

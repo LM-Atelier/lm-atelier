@@ -165,6 +165,19 @@ async def test_clear_auto_route_does_not_invoke_model_planner() -> None:
 
 
 @pytest.mark.asyncio
+async def test_clear_text_task_does_not_invoke_model_planner() -> None:
+    plan = await ModalityRouter().plan_with_model(
+        adapter=UnexpectedChatAdapter(),
+        text="Reply with exactly: Auto ready",
+        mode=RoutingMode.AUTO,
+        input_artifact_ids=[],
+    )
+
+    assert plan.operation == Operation.TEXT
+    assert plan.reason == "clear text task"
+
+
+@pytest.mark.asyncio
 async def test_hedged_media_request_still_uses_model_planner() -> None:
     plan = await ModalityRouter().plan_with_model(
         adapter=MockChatAdapter(),
