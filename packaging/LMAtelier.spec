@@ -58,7 +58,6 @@ hiddenimports = collect_submodules("uvicorn")
 hiddenimports += collect_submodules("keyring.backends")
 hiddenimports += collect_submodules("local_lm.adapters")
 excluded_modules = [
-    "PIL",
     "_pytest",
     "fsspec.conftest",
     "mypy",
