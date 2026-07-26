@@ -25,7 +25,7 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 30
     env:
-      LOCAL_LM_DATA_DIR: ${{ runner.temp }}/local-lm-tests
+      LOCAL_LM_DATA_DIR: ${{ github.workspace }}/temp/local-lm-tests
       UV_PROJECT_ENVIRONMENT: ${{ github.workspace }}/.venv
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
