@@ -5,6 +5,7 @@ import io
 import json
 import zipfile
 from collections.abc import AsyncIterator
+from types import SimpleNamespace
 
 from httpx2 import AsyncClient
 from sqlalchemy import select
@@ -348,3 +349,65 @@ async def test_lora_image_regeneration_cancel_retry_revision_switch_and_export(
         for revision in imported_image["response_revisions"]
         if revision["sequence"] == 2
     )
+
+
+async def test_exhausted_media_storage_rejects_before_any_turn_is_written(
+    client: AsyncClient,
+    monkeypatch,
+) -> None:  # type: ignore[no-untyped-def]
+    monkeypatch.setattr(
+        "local_lm.orchestrator.shutil.disk_usage",
+        lambda _path: SimpleNamespace(free=0),
+    )
+    chat = (await client.post("/api/chats", json={"title": "No storage"})).json()
+    rejected = await client.post(
+        f"/api/chats/{chat['id']}/turns",
+        json={
+            "text": "Create an image of a clay teapot",
+            "mode": "image",
+        },
+    )
+    assert rejected.status_code == 422
+    assert "not enough free storage" in rejected.json()["detail"]
+    assert (await client.get(f"/api/chats/{chat['id']}")).json()["messages"] == []
+    assert (await client.get("/api/work-plans", params={"chat_id": chat["id"]})).json() == []
+
+
+async def test_media_oom_fails_truthfully_then_retries_without_duplicate_output(
+    client: AsyncClient,
+    monkeypatch,
+) -> None:  # type: ignore[no-untyped-def]
+    original_generate = MockMediaAdapter.generate
+
+    async def fail_with_oom(
+        _adapter: MockMediaAdapter,
+        _request: MediaRequest,
+    ) -> AsyncIterator[MediaEvent]:
+        raise RuntimeError("CUDA out of memory")
+        yield MediaEvent(type="complete")  # pragma: no cover
+
+    monkeypatch.setattr(MockMediaAdapter, "generate", fail_with_oom)
+    chat = (await client.post("/api/chats", json={"title": "OOM recovery"})).json()
+    accepted = await client.post(
+        f"/api/chats/{chat['id']}/turns",
+        json={"text": "Create one image of a copper lantern", "mode": "image"},
+    )
+    assert accepted.status_code == 202
+    run_id = accepted.json()["run"]["id"]
+    failed = await _wait_for_run(client, run_id, "failed")
+    assert failed["provenance_json"].get("outputs") in (None, [])
+    message_id = accepted.json()["assistant_message"]["id"]
+    failed_message = (await client.get(f"/api/messages/{message_id}")).json()
+    assert not any(part["type"] == "image" for part in failed_message["parts"])
+
+    monkeypatch.setattr(MockMediaAdapter, "generate", original_generate)
+    step_id = accepted.json()["run"]["work_step_id"]
+    retry = await client.post(f"/api/work-steps/{step_id}/retry")
+    assert retry.status_code == 200
+    completed = await _wait_for_run(client, run_id)
+    assert len(completed["provenance_json"]["outputs"]) == 1
+    completed_message = (await client.get(f"/api/messages/{message_id}")).json()
+    assert sum(part["type"] == "image" for part in completed_message["parts"]) == 1
+    with SessionLocal() as session:
+        job = session.scalar(select(Job).where(Job.run_id == run_id))
+        assert job and job.attempt == 2
