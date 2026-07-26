@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from pathlib import Path
 from types import SimpleNamespace
 
 from httpx2 import AsyncClient
@@ -21,6 +22,43 @@ async def test_missing_ffmpeg_leaves_incompatible_original_available(
     monkeypatch.setattr("local_lm.artifacts.shutil.which", lambda _name: None)
     artifact = SimpleNamespace(media_type="image/gif")
     assert await store.browser_video_proxy(artifact) is None  # type: ignore[arg-type]
+
+
+async def test_video_proxy_remains_file_backed_until_its_owner_discards_it(
+    settings,
+    monkeypatch,  # type: ignore[no-untyped-def]
+) -> None:
+    store = ArtifactStore(settings)
+    source = settings.data_dir / "source-video.mkv"
+    source.write_bytes(b"source")
+    proxy_content = b"file-backed-browser-proxy"
+
+    class FakeProcess:
+        returncode = 0
+
+        async def communicate(self) -> tuple[bytes, bytes]:
+            return b"", b""
+
+    async def create_process(*arguments, **_kwargs):  # type: ignore[no-untyped-def]
+        Path(arguments[-1]).write_bytes(proxy_content)
+        return FakeProcess()
+
+    monkeypatch.setattr("local_lm.artifacts.shutil.which", lambda _name: "ffmpeg")
+    monkeypatch.setattr("local_lm.artifacts.asyncio.create_subprocess_exec", create_process)
+    monkeypatch.setattr(store, "resolve", lambda _artifact: source)
+    artifact = SimpleNamespace(
+        media_type="video/x-matroska",
+        original_name="source.mkv",
+    )
+
+    staged = await store.browser_video_proxy(artifact)  # type: ignore[arg-type]
+
+    assert staged is not None
+    assert staged.path.parent == store.root
+    assert staged.path.read_bytes() == proxy_content
+    assert staged.original_name == "source.mkv.proxy.mp4"
+    staged.discard()
+    assert not staged.path.exists()
 
 
 async def test_artifact_content_supports_browser_byte_ranges(client: AsyncClient) -> None:
