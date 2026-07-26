@@ -2866,6 +2866,120 @@ describe("App", () => {
     ));
   });
 
+  it("shows ordered media output status with per-output controls", async () => {
+    const stamp = new Date().toISOString();
+    const chat = {
+      id: "chat-media-batch",
+      project_id: null,
+      title: "Media batch",
+      archived: false,
+      routing_mode: "image" as const,
+      confirm_uncertain_media: false,
+      active_chat_profile_id: null,
+      active_image_profile_id: null,
+      active_video_profile_id: null,
+      active_head_message_id: "assistant-output-2",
+      created_at: stamp,
+      updated_at: stamp,
+    };
+    const step = (ordinal: number, status: string) => ({
+      id: `step-${ordinal}`,
+      plan_id: "plan-media-batch",
+      run_id: `run-${ordinal}`,
+      ordinal,
+      display_group: "media_outputs",
+      operation: "text_to_image",
+      status,
+      prompt: "Blue apples",
+      profile_id: null,
+      workflow_revision_id: null,
+      settings_json: {},
+      input_bindings_json: [],
+      output_contract_json: [{ slot: `output-${ordinal}`, type: "image" }],
+      queue_class: "media_compute",
+      error: status === "cancelled" ? "Cancelled" : null,
+      created_at: stamp,
+      updated_at: stamp,
+    });
+    const plan = {
+      id: "plan-media-batch",
+      chat_id: chat.id,
+      idempotency_key: null,
+      source_action: "send",
+      persistence_scope: "durable" as const,
+      status: "queued",
+      context_head_message_id: null,
+      transcript_sequence: 1,
+      priority: 0,
+      planner_version: "media-outputs-v1",
+      failure_policy: "stop_dependents",
+      summary_json: {
+        assistant_message_id: "assistant-output-1",
+        assistant_message_ids: ["assistant-output-1", "assistant-output-2"],
+      },
+      steps: [step(1, "queued"), step(2, "cancelled")],
+      created_at: stamp,
+      updated_at: stamp,
+    };
+    localStorage.setItem("local-lm-chat", chat.id);
+    vi.mocked(api.chats).mockResolvedValue([chat]);
+    vi.mocked(api.chat).mockResolvedValue({
+      ...chat,
+      messages: [
+        {
+          id: "user-media-batch",
+          chat_id: chat.id,
+          parent_id: null,
+          role: "user",
+          status: "complete",
+          parts: [{ id: "prompt", position: 0, type: "text", text: "Two blue apples", artifact_id: null, metadata_json: {} }],
+          created_at: stamp,
+          updated_at: stamp,
+        },
+        {
+          id: "assistant-output-1",
+          chat_id: chat.id,
+          parent_id: "user-media-batch",
+          role: "assistant",
+          status: "pending",
+          parts: [{ id: "progress-1", position: 0, type: "progress", text: "Queued", artifact_id: null, metadata_json: {} }],
+          created_at: stamp,
+          updated_at: stamp,
+        },
+        {
+          id: "assistant-output-2",
+          chat_id: chat.id,
+          parent_id: "assistant-output-1",
+          role: "assistant",
+          status: "cancelled",
+          parts: [{ id: "progress-2", position: 0, type: "progress", text: "Cancelled", artifact_id: null, metadata_json: {} }],
+          created_at: stamp,
+          updated_at: stamp,
+        },
+      ],
+    });
+    vi.mocked(api.workPlans).mockResolvedValue([plan]);
+    vi.mocked(api.cancelWorkStep).mockReturnValue(new Promise(() => {}));
+    vi.mocked(api.retryWorkStep).mockReturnValue(new Promise(() => {}));
+    const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+    render(
+      <QueryClientProvider client={client}>
+        <App />
+      </QueryClientProvider>,
+    );
+
+    fireEvent.click(await screen.findByText("2 media outputs"));
+    expect(screen.getByText("1 queued · 1 cancelled")).toBeInTheDocument();
+    expect(screen.getByText("Output 1")).toBeInTheDocument();
+    expect(screen.getByText("Output 2")).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "Cancel output 1" }));
+    fireEvent.click(screen.getByRole("button", { name: "Retry output 2" }));
+    await waitFor(() => {
+      expect(api.cancelWorkStep).toHaveBeenCalledWith("step-1", expect.anything());
+      expect(api.retryWorkStep).toHaveBeenCalledWith("step-2", expect.anything());
+    });
+  });
+
   it("keeps a deferred turn and its pending state on the originating chat", async () => {
     const stamp = "2026-07-25T12:00:00Z";
     const makeChat = (id: string, title: string): Chat => ({

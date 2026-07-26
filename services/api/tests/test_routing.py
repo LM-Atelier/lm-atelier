@@ -116,6 +116,37 @@ def test_explicit_mode_always_wins() -> None:
 
 
 @pytest.mark.parametrize(
+    ("text", "mode", "expected"),
+    [
+        ("Create four variations of a lighthouse", RoutingMode.IMAGE, 4),
+        ("Generate 8 distinct clips of a sunrise", RoutingMode.VIDEO, 8),
+        ("Make one image of an apple", RoutingMode.IMAGE, 1),
+    ],
+)
+def test_media_output_count_is_parsed_deterministically(
+    text: str,
+    mode: RoutingMode,
+    expected: int,
+) -> None:
+    plan = ModalityRouter().plan(
+        text=text,
+        mode=mode,
+        input_artifact_ids=[],
+    )
+    assert plan.output_count == expected
+
+
+def test_numeric_text_request_does_not_create_multiple_outputs() -> None:
+    plan = ModalityRouter().plan(
+        text="List four options for a database index",
+        mode=RoutingMode.TEXT,
+        input_artifact_ids=[],
+    )
+    assert plan.operation == Operation.TEXT
+    assert plan.output_count == 1
+
+
+@pytest.mark.parametrize(
     ("mode", "text", "expected"),
     [
         (RoutingMode.IMAGE, "Make it green", Operation.IMAGE_TO_IMAGE),

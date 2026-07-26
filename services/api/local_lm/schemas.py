@@ -206,6 +206,7 @@ class TurnRequest(ApiModel):
     parent_message_id: str | None = None
     input_artifact_ids: list[str] = Field(default_factory=list, max_length=16)
     settings: dict[str, Any] = Field(default_factory=dict)
+    output_count: int | None = Field(default=None, ge=1, le=16)
     confirm_media: bool = False
     idempotency_key: str | None = Field(default=None, max_length=200)
 
@@ -222,6 +223,7 @@ class RoutingPlan(ApiModel):
     profile_id: str | None = None
     workflow_id: str | None = None
     parameter_overrides: dict[str, Any] = Field(default_factory=dict)
+    output_count: int = Field(default=1, ge=1, le=16)
     confidence: float = Field(ge=0, le=1)
     reason: str
 

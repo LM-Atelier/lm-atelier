@@ -59,6 +59,13 @@ class Settings(BaseSettings):
         ge=1024**2,
         le=16 * 1024**3,
     )
+    max_media_outputs_per_plan: int = Field(default=8, ge=1, le=16)
+    max_media_plan_work_units: int = Field(default=4_000_000_000, ge=1)
+    max_media_plan_estimated_bytes: int = Field(
+        default=8 * 1024**3,
+        ge=1024**2,
+        le=128 * 1024**3,
+    )
     max_project_import_bytes: int = Field(default=2 * 1024**3, ge=1024**2)
     max_project_archive_entries: int = Field(default=20_000, ge=10, le=100_000)
     artifact_retention_days: int = Field(default=30, ge=1, le=3650)
