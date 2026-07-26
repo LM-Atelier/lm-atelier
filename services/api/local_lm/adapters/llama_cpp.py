@@ -44,8 +44,6 @@ async def _bounded_response_json(response: httpx.Response) -> object:
 
 
 class LlamaCppAdapter:
-    supports_incognito = True
-
     def __init__(self, base_url: str, *, inactivity_seconds: float = 600) -> None:
         if inactivity_seconds <= 0:
             raise ValueError("llama.cpp inactivity timeout must be positive")
@@ -450,11 +448,6 @@ class LlamaCppAdapter:
             event.set()
         else:
             self._cancelled.add(run_id)
-
-    async def purge_run(self, run_id: str) -> None:
-        await self.cancel(run_id)
-        self._cancel_events.pop(run_id, None)
-        self._cancelled.discard(run_id)
 
     async def close(self) -> None:
         for event in self._cancel_events.values():

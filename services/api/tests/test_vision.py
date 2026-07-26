@@ -191,9 +191,6 @@ class _ObservationAdapter:
     async def cancel(self, run_id: str) -> None:
         del run_id
 
-    async def purge_run(self, run_id: str, *, scope_id: str | None = None) -> None:
-        del run_id, scope_id
-
 
 async def test_bridge_observation_is_query_specific_and_bounded(
     vision_store: tuple[Settings, ArtifactStore, Session],
@@ -216,8 +213,8 @@ async def test_bridge_observation_is_query_specific_and_bounded(
         visual,
         question="What color is the shape?",
         max_tokens=128,
-        persistence_scope="incognito",
-        scope_id="private-session",
+        persistence_scope="durable",
+        scope_id=None,
     )
 
     assert observation == "A red square is visible."

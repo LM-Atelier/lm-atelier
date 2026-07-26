@@ -68,63 +68,6 @@ it("confirms a bounded ordered plan without changing Auto mode", async () => {
   expect(retryBody.idempotency_key).toBe("ordered-key");
 });
 
-it("keeps the opaque private token in session storage and scopes content requests", async () => {
-  const fetchMock = vi.fn()
-    .mockResolvedValueOnce(
-      new Response(JSON.stringify({ csrf_token: "csrf" }), {
-        status: 200,
-        headers: { "content-type": "application/json" },
-      }),
-    )
-    .mockResolvedValueOnce(
-      new Response(JSON.stringify({
-        token: "scope_private_token",
-        event_epoch: "private-epoch",
-        event_sequence: 0,
-        disclosure: "Private session disclosure",
-      }), {
-        status: 200,
-        headers: { "content-type": "application/json" },
-      }),
-    )
-    .mockResolvedValueOnce(
-      new Response(JSON.stringify([]), {
-        status: 200,
-        headers: { "content-type": "application/json" },
-      }),
-    )
-    .mockResolvedValueOnce(
-      new Response(new Blob(["private image bytes"], { type: "image/png" }), {
-        status: 200,
-        headers: { "content-type": "image/png" },
-      }),
-    )
-    .mockResolvedValueOnce(new Response(null, { status: 204 }));
-  vi.stubGlobal("fetch", fetchMock);
-
-  const { api } = await import("./api");
-  await api.startIncognito();
-  expect(sessionStorage.getItem("lm-atelier-incognito-session")).toBe(
-    "scope_private_token",
-  );
-  expect(localStorage.length).toBe(0);
-  await api.chats();
-  await api.artifactBlob("sha256:private");
-  await api.endIncognito();
-
-  const startHeaders = new Headers(fetchMock.mock.calls[1][1]?.headers);
-  const chatHeaders = new Headers(fetchMock.mock.calls[2][1]?.headers);
-  const artifactHeaders = new Headers(fetchMock.mock.calls[3][1]?.headers);
-  const endHeaders = new Headers(fetchMock.mock.calls[4][1]?.headers);
-  expect(startHeaders.has("x-lm-atelier-incognito")).toBe(false);
-  expect(chatHeaders.get("x-lm-atelier-incognito")).toBe("scope_private_token");
-  expect(artifactHeaders.get("x-lm-atelier-incognito")).toBe("scope_private_token");
-  expect(endHeaders.get("x-lm-atelier-incognito")).toBe("scope_private_token");
-  expect(fetchMock.mock.calls[3][1]?.cache).toBe("no-store");
-  expect(sessionStorage.getItem("lm-atelier-incognito-session")).toBeNull();
-  expect(localStorage.length).toBe(0);
-});
-
 it("opens the event socket from the sequence returned by session initialization", async () => {
   const urls: string[] = [];
 
