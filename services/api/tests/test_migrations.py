@@ -46,8 +46,10 @@ def test_migrations_round_trip(tmp_path) -> None:  # type: ignore[no-untyped-def
     } <= tables
     assert {
         "active_head_message_id",
+        "active_vision_profile_id",
         "generation_settings_json",
         "generation_preset_ids_json",
+        "vision_settings_json",
     } <= chat_columns
     assert {
         "image_workflow_revision_id",
@@ -155,7 +157,8 @@ def test_sanitized_v017_database_upgrades_to_head_without_data_loss(tmp_path) ->
         chat = connection.execute(
             """
             SELECT title, active_head_message_id,
-                   generation_settings_json, generation_preset_ids_json
+                   generation_settings_json, generation_preset_ids_json,
+                   active_vision_profile_id, vision_settings_json
             FROM chats
             WHERE id = 'chat_v017'
             """
@@ -193,6 +196,12 @@ def test_sanitized_v017_database_upgrades_to_head_without_data_loss(tmp_path) ->
     assert chat["active_head_message_id"] == "assistant_v017"
     assert json.loads(chat["generation_settings_json"]) == {}
     assert json.loads(chat["generation_preset_ids_json"]) == {}
+    assert chat["active_vision_profile_id"] == "__auto__"
+    assert json.loads(chat["vision_settings_json"]) == {
+        "max_images": 4,
+        "max_video_frames": 6,
+        "include_prior_visual": True,
+    }
     assert run is not None
     assert run["chat_id"] == "chat_v017"
     assert run["idempotency_key"] == "legacy-idempotency-key"
@@ -222,17 +231,21 @@ def test_idempotency_migration_downgrade_preserves_cross_chat_runs(tmp_path) -> 
     with sqlite3.connect(database) as connection:
         connection.execute(
             """
-            INSERT INTO chats (
-                id, project_id, title, archived, routing_mode, confirm_uncertain_media,
-                active_chat_profile_id, active_image_profile_id, active_video_profile_id,
-                created_at, updated_at, active_head_message_id,
-                generation_settings_json, generation_preset_ids_json
-            )
-            SELECT
-                'chat_v017_other', project_id, 'Other synthetic chat', archived,
-                routing_mode, confirm_uncertain_media, active_chat_profile_id,
-                active_image_profile_id, active_video_profile_id, created_at, updated_at,
-                'assistant_v017_other', generation_settings_json, generation_preset_ids_json
+                INSERT INTO chats (
+                    id, project_id, title, archived, routing_mode, confirm_uncertain_media,
+                    active_chat_profile_id, active_vision_profile_id,
+                    active_image_profile_id, active_video_profile_id,
+                    created_at, updated_at, active_head_message_id,
+                    generation_settings_json, generation_preset_ids_json,
+                    vision_settings_json
+                )
+                SELECT
+                    'chat_v017_other', project_id, 'Other synthetic chat', archived,
+                    routing_mode, confirm_uncertain_media, active_chat_profile_id,
+                    active_vision_profile_id, active_image_profile_id, active_video_profile_id,
+                    created_at, updated_at, 'assistant_v017_other',
+                    generation_settings_json, generation_preset_ids_json,
+                    vision_settings_json
             FROM chats
             WHERE id = 'chat_v017'
             """

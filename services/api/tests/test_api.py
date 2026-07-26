@@ -236,7 +236,7 @@ async def test_model_readiness_requires_matching_capability_evidence(
                 launch_contract_version="worker-launch-v1",
                 workflow_contract_version=None,
                 hardware_class=current_hardware_class,
-                probe_version="activation-probe-v1",
+                probe_version="activation-probe-v2",
             )
         )
         session.commit()
@@ -388,7 +388,7 @@ async def test_inline_video_and_project_export(client: AsyncClient) -> None:
         assert "manifest.json" in bundle.namelist()
         assert any(name.startswith("artifacts/") for name in bundle.namelist())
         manifest = json.loads(bundle.read("manifest.json"))
-        assert manifest["version"] == 4
+        assert manifest["version"] == 5
         assert set(manifest["dependencies"]) == {"profiles", "presets", "workflows"}
 
     imported = await client.post(
@@ -757,7 +757,7 @@ async def test_project_v3_round_trip_remaps_portable_dependencies_in_a_fresh_dat
     ).json()
     archive = await client.get(exported["url"])
     manifest = project_manifest(archive.content)
-    assert manifest["version"] == 4
+    assert manifest["version"] == 5
     assert {item["source_id"] for item in manifest["dependencies"]["profiles"]} == {
         chat_profile["id"],
         image_profile["id"],
@@ -1691,8 +1691,25 @@ async def test_incognito_conversation_and_artifact_never_enter_durable_storage(
     app: FastAPI,
     client: AsyncClient,
     settings: Settings,
+    monkeypatch,
 ) -> None:
     marker = "INCOGNITO-MARKER-7c4ef64c"
+    observation_marker = "INCOGNITO-VISION-OBSERVATION-a91d8c2e"
+    original_capabilities = MockChatAdapter.capabilities
+
+    async def vision_capabilities(adapter: MockChatAdapter) -> EngineCapabilities:
+        capabilities = await original_capabilities(adapter)
+        return capabilities.model_copy(update={"input_modalities": ["text", "image"]})
+
+    async def private_stream(
+        _adapter: MockChatAdapter,
+        _request: ChatRequest,
+    ) -> AsyncIterator[ChatEvent]:
+        yield ChatEvent(type="delta", text=observation_marker)
+        yield ChatEvent(type="complete", data={"finish_reason": "stop"})
+
+    monkeypatch.setattr(MockChatAdapter, "capabilities", vision_capabilities)
+    monkeypatch.setattr(MockChatAdapter, "stream", private_stream)
     durable = (await client.post("/api/chats", json={"title": "Durable control"})).json()
     started = await client.post("/api/incognito/session")
     assert started.status_code == 201
@@ -1711,6 +1728,24 @@ async def test_incognito_conversation_and_artifact_never_enter_durable_storage(
         )
     ).json()
     await wait_for_run(client, accepted["run"]["id"])
+    private_image = await client.post(
+        "/api/artifacts",
+        files={"file": ("private-pixel.png", ONE_PIXEL_PNG, "image/png")},
+    )
+    assert private_image.status_code == 201
+    vision_turn = (
+        await client.post(
+            f"/api/chats/{private_chat['id']}/turns",
+            json={
+                "text": "Inspect this private image",
+                "mode": "text",
+                "input_artifact_ids": [private_image.json()["id"]],
+            },
+        )
+    ).json()
+    await wait_for_run(client, vision_turn["run"]["id"])
+    private_run = (await client.get(f"/api/runs/{vision_turn['run']['id']}")).json()
+    assert private_run["provenance_json"]["context"]["vision"]["visual_contents_inspected"] is True
     uploaded = await client.post(
         "/api/artifacts",
         files={"file": ("marker.txt", marker.encode(), "text/plain")},
@@ -1725,10 +1760,16 @@ async def test_incognito_conversation_and_artifact_never_enter_durable_storage(
     assert [chat["id"] for chat in durable_chats] == [durable["id"]]
     with SessionLocal() as session:
         assert not session.scalar(select(MessagePart).where(MessagePart.text.contains(marker)))
+        assert not session.scalar(
+            select(MessagePart).where(MessagePart.text.contains(observation_marker))
+        )
+        assert session.get(Run, vision_turn["run"]["id"]) is None
+        assert session.get(Artifact, private_image.json()["id"]) is None
     durable_artifact_bytes = b"".join(
         path.read_bytes() for path in settings.artifact_dir.rglob("*") if path.is_file()
     )
     assert marker.encode() not in durable_artifact_bytes
+    assert ONE_PIXEL_PNG not in durable_artifact_bytes
 
     client.headers[INCOGNITO_HEADER] = token
     ended = await client.delete("/api/incognito/session")
@@ -2565,13 +2606,15 @@ async def test_vision_chat_receives_verified_local_image_bytes(
     assert data_url.startswith(prefix)
     assert base64.b64decode(data_url.removeprefix(prefix)) == ONE_PIXEL_PNG
     run = (await client.get(f"/api/runs/{accepted.json()['run']['id']}")).json()
-    assert run["provenance_json"]["context"]["vision"] == {
-        "available": True,
-        "images_included": 1,
-        "artifact_ids": [artifact_id],
-        "bytes_included": len(ONE_PIXEL_PNG),
-        "images_skipped": 0,
-    }
+    vision = run["provenance_json"]["context"]["vision"]
+    assert vision["available"] is True
+    assert vision["mode"] == "direct"
+    assert vision["visual_contents_inspected"] is True
+    assert vision["images_included"] == 1
+    assert vision["artifact_ids"] == [artifact_id]
+    assert vision["bytes_included"] == len(ONE_PIXEL_PNG)
+    assert vision["images_skipped"] == 0
+    assert vision["artifact_hashes"] == {artifact_id: artifact_id.removeprefix("sha256:")}
 
 
 async def test_text_only_chat_never_receives_attached_image_bytes(
@@ -2614,8 +2657,12 @@ async def test_text_only_chat_never_receives_attached_image_bytes(
     run = (await client.get(f"/api/runs/{accepted.json()['run']['id']}")).json()
     assert run["provenance_json"]["context"]["vision"] == {
         "available": False,
+        "mode": "none",
+        "visual_contents_inspected": False,
         "images_included": 0,
         "artifact_ids": [],
+        "images_skipped": 1,
+        "reason": "No runtime-verified vision profile is available.",
     }
 
 
@@ -4455,7 +4502,7 @@ async def test_project_export_snapshots_local_preset_bindings(
     archive = await client.get(exported["url"])
     with zipfile.ZipFile(io.BytesIO(archive.content)) as bundle:
         manifest = json.loads(bundle.read("manifest.json"))
-    assert manifest["version"] == 4
+    assert manifest["version"] == 5
     assert manifest["project"]["generation_preset_ids_json"] == {"chat": preset["id"]}
     assert manifest["project"]["generation_settings_json"]["chat"] == {
         "temperature": 0.1,

@@ -22,6 +22,12 @@ GenerationPresetIdsByRole = dict[
 ]
 
 
+class VisionSettings(ApiModel):
+    max_images: int = Field(default=4, ge=1, le=16)
+    max_video_frames: int = Field(default=6, ge=3, le=16)
+    include_prior_visual: bool = True
+
+
 class ProjectCreate(ApiModel):
     name: str = Field(min_length=1, max_length=200)
     description: str = Field(default="", max_length=10_000)
@@ -63,6 +69,7 @@ class ChatCreate(ApiModel):
     routing_mode: RoutingMode = RoutingMode.AUTO
     generation_settings_json: GenerationSettingsByRole = Field(default_factory=dict)
     generation_preset_ids_json: GenerationPresetIdsByRole = Field(default_factory=dict)
+    vision_settings_json: VisionSettings = Field(default_factory=VisionSettings)
 
 
 class ChatUpdate(ApiModel):
@@ -72,10 +79,12 @@ class ChatUpdate(ApiModel):
     routing_mode: RoutingMode | None = None
     confirm_uncertain_media: bool | None = None
     active_chat_profile_id: str | None = None
+    active_vision_profile_id: str | None = None
     active_image_profile_id: str | None = None
     active_video_profile_id: str | None = None
     generation_settings_json: GenerationSettingsByRole | None = None
     generation_preset_ids_json: GenerationPresetIdsByRole | None = None
+    vision_settings_json: VisionSettings | None = None
 
 
 class ArtifactOut(ApiModel):
@@ -176,11 +185,13 @@ class ChatOut(ApiModel):
     routing_mode: str
     confirm_uncertain_media: bool
     active_chat_profile_id: str | None
+    active_vision_profile_id: str | None
     active_image_profile_id: str | None
     active_video_profile_id: str | None
     active_head_message_id: str | None
     generation_settings_json: GenerationSettingsByRole
     generation_preset_ids_json: GenerationPresetIdsByRole
+    vision_settings_json: VisionSettings
     created_at: datetime
     updated_at: datetime
 
@@ -227,6 +238,7 @@ class RunOut(ApiModel):
     status: str
     standalone_prompt: str
     profile_id: str | None
+    vision_profile_id: str | None
     workflow_revision_id: str | None
     settings_json: dict[str, Any]
     provenance_json: dict[str, Any]
@@ -473,6 +485,7 @@ class ModelProfileOut(ApiModel):
     load_settings_json: dict[str, Any]
     request_settings_json: dict[str, Any]
     is_default: bool
+    input_modalities: list[str] = Field(default_factory=lambda: ["text"])
     created_at: datetime
     updated_at: datetime
 

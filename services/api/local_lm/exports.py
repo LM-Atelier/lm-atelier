@@ -9,6 +9,7 @@ import zipfile
 from pathlib import Path, PurePosixPath
 from typing import IO, Any, cast
 
+from pydantic import ValidationError
 from sqlalchemy import event, select
 from sqlalchemy.orm import Session, selectinload
 
@@ -44,7 +45,7 @@ from .project_dependencies import (
     parse_dependency_manifest,
 )
 from .project_portability import has_local_path, redact_local_paths
-from .schemas import ChatDetail, ProjectOut, RunOut
+from .schemas import ChatDetail, ProjectOut, RunOut, VisionSettings
 
 _CAS_IMPORT_SESSION_KEY = "lm_atelier_project_import_cas"
 
@@ -186,6 +187,7 @@ class ProjectExporter:
             )
             for field, role in (
                 ("active_chat_profile_id", "chat"),
+                ("active_vision_profile_id", "chat"),
                 ("active_image_profile_id", "image"),
                 ("active_video_profile_id", "video"),
             ):
@@ -209,6 +211,12 @@ class ProjectExporter:
                 self._role_for_operation(operation),
                 allow_auto=False,
             )
+            record["vision_profile_id"] = self._portable_profile_reference(
+                run.vision_profile_id,
+                dependency_index,
+                "chat",
+                allow_auto=False,
+            )
             record["workflow_revision_id"] = self._portable_revision_reference(
                 run.workflow_revision_id,
                 dependency_index,
@@ -225,7 +233,7 @@ class ProjectExporter:
             run_records.append(record)
         manifest = {
             "format": "local-lm-project",
-            "version": 4,
+            "version": 5,
             "media_included": include_media,
             "project": project_record,
             "chats": chat_records,
@@ -276,7 +284,7 @@ class ProjectExporter:
                 original_name=f"{self._safe_name(project.name)}.lm-atelier.zip",
                 metadata={
                     "format": "local-lm-project",
-                    "version": 4,
+                    "version": 5,
                     "project_id": project.id,
                     "artifact_count": len(referenced),
                     "media_included": include_media,
@@ -404,6 +412,8 @@ class ProjectExporter:
                 allow_auto=False,
             )
 
+        self._portable_vision_provenance(provenance, dependencies)
+
         preset = provenance.get("preset")
         if isinstance(preset, dict):
             preset["id"] = self._portable_preset_reference(
@@ -447,7 +457,7 @@ class ProjectExporter:
             ):
                 worker.pop(local_only_key, None)
 
-        provenance["portable_schema_version"] = 1
+        provenance["portable_schema_version"] = 2
         if missing_artifact_count:
             provenance["unavailable_artifact_count"] = missing_artifact_count
         else:
@@ -496,6 +506,8 @@ class ProjectExporter:
                 role,
                 allow_auto=False,
             )
+
+        self._import_vision_provenance(provenance, dependencies)
 
         preset = provenance.get("preset")
         if isinstance(preset, dict):
@@ -549,7 +561,7 @@ class ProjectExporter:
             ):
                 worker.pop(local_only_key, None)
 
-        provenance["portable_schema_version"] = 1
+        provenance["portable_schema_version"] = 2
         if missing_artifact_count:
             provenance["unavailable_artifact_count"] = missing_artifact_count
         else:
@@ -557,6 +569,58 @@ class ProjectExporter:
         if has_local_path(provenance):
             raise ValueError("imported run provenance contains a local path")
         return provenance
+
+    def _portable_vision_provenance(
+        self,
+        provenance: dict[str, Any],
+        dependencies: DependencySourceIndex,
+    ) -> None:
+        context = provenance.get("context")
+        vision = context.get("vision") if isinstance(context, dict) else None
+        if not isinstance(vision, dict):
+            return
+        vision["profile_id"] = self._portable_profile_reference(
+            vision.get("profile_id"),
+            dependencies,
+            "chat",
+            allow_auto=False,
+        )
+        profile = vision.get("profile")
+        if isinstance(profile, dict):
+            profile.pop("install_id", None)
+            profile["profile_id"] = self._portable_profile_reference(
+                profile.get("profile_id"),
+                dependencies,
+                "chat",
+                allow_auto=False,
+            )
+
+    def _import_vision_provenance(
+        self,
+        provenance: dict[str, Any],
+        dependencies: ImportedDependencies | None,
+    ) -> None:
+        context = provenance.get("context")
+        vision = context.get("vision") if isinstance(context, dict) else None
+        if not isinstance(vision, dict):
+            return
+        vision["profile_id"] = self._import_profile_reference(
+            None,
+            dependencies,
+            vision.get("profile_id"),
+            "chat",
+            allow_auto=False,
+        )
+        profile = vision.get("profile")
+        if isinstance(profile, dict):
+            profile.pop("install_id", None)
+            profile["profile_id"] = self._import_profile_reference(
+                None,
+                dependencies,
+                profile.get("profile_id"),
+                "chat",
+                allow_auto=False,
+            )
 
     @classmethod
     def _remap_artifact_references(
@@ -716,7 +780,7 @@ class ProjectExporter:
             manifest.get("format") != "local-lm-project"
             or not isinstance(version, int)
             or isinstance(version, bool)
-            or version not in {1, 2, 3, 4}
+            or version not in {1, 2, 3, 4, 5}
         ):
             raise ValueError("unsupported project archive format")
         if not isinstance(manifest.get("project"), dict):
@@ -828,6 +892,14 @@ class ProjectExporter:
                 "chat",
                 allow_auto=True,
             )
+            if version >= 5:
+                self._validate_profile_source(
+                    chat_data.get("active_vision_profile_id"),
+                    dependencies,
+                    "chat",
+                    allow_auto=True,
+                )
+                self._validate_vision_settings(chat_data.get("vision_settings_json"))
             self._validate_profile_source(
                 chat_data.get("active_image_profile_id"),
                 dependencies,
@@ -1085,6 +1157,13 @@ class ProjectExporter:
                 self._role_for_operation(operation),
                 allow_auto=False,
             )
+            if version >= 5:
+                self._validate_profile_source(
+                    run_data.get("vision_profile_id"),
+                    dependencies,
+                    "chat",
+                    allow_auto=False,
+                )
             self._validate_revision_source(
                 run_data.get("workflow_revision_id"),
                 dependencies,
@@ -1141,6 +1220,7 @@ class ProjectExporter:
                 role,
                 allow_auto=False,
             )
+        self._validate_vision_provenance(value, dependencies)
         preset = value.get("preset")
         if isinstance(preset, dict):
             self._validate_preset_source(preset.get("id"), dependencies, role)
@@ -1167,6 +1247,30 @@ class ProjectExporter:
         )
         if supplied_workflow_id != expected_workflow_id:
             raise ValueError("project provenance has mismatched workflow identifiers")
+
+    def _validate_vision_provenance(
+        self,
+        provenance: dict[str, Any],
+        dependencies: DependencySourceIndex | None,
+    ) -> None:
+        context = provenance.get("context")
+        vision = context.get("vision") if isinstance(context, dict) else None
+        if not isinstance(vision, dict):
+            return
+        self._validate_profile_source(
+            vision.get("profile_id"),
+            dependencies,
+            "chat",
+            allow_auto=False,
+        )
+        profile = vision.get("profile")
+        if isinstance(profile, dict):
+            self._validate_profile_source(
+                profile.get("profile_id"),
+                dependencies,
+                "chat",
+                allow_auto=False,
+            )
 
     def _validate_artifact_records(self, records: list[Any], version: int) -> set[str]:
         artifact_ids: set[str] = set()
@@ -1299,6 +1403,19 @@ class ProjectExporter:
                 raise ValueError(
                     "project manifest references a generation preset with an incompatible role"
                 )
+
+    @staticmethod
+    def _validate_vision_settings(value: object) -> None:
+        if not isinstance(value, dict) or set(value) - {
+            "max_images",
+            "max_video_frames",
+            "include_prior_visual",
+        }:
+            raise ValueError("project manifest has invalid vision settings")
+        try:
+            VisionSettings.model_validate(value, strict=True)
+        except ValidationError as exc:
+            raise ValueError("project manifest has invalid vision settings") from exc
 
     @staticmethod
     def _validate_v3_archive_entries(
@@ -1496,6 +1613,14 @@ class ProjectExporter:
                     chat_data.get("active_chat_profile_id"),
                     "chat",
                 ),
+                active_vision_profile_id=self._import_profile_reference(
+                    session,
+                    dependencies,
+                    chat_data.get("active_vision_profile_id")
+                    if manifest["version"] >= 5
+                    else AUTO_PROFILE_ID,
+                    "chat",
+                ),
                 active_image_profile_id=self._import_profile_reference(
                     session,
                     dependencies,
@@ -1515,6 +1640,9 @@ class ProjectExporter:
                     session,
                     dependencies,
                     chat_data.get("generation_preset_ids_json"),
+                ),
+                vision_settings_json=self._vision_settings(
+                    chat_data.get("vision_settings_json") if manifest["version"] >= 5 else None
                 ),
             )
             session.add(chat)
@@ -1647,6 +1775,13 @@ class ProjectExporter:
                     dependencies,
                     run_data.get("profile_id"),
                     self._role_for_operation(operation),
+                    allow_auto=False,
+                ),
+                vision_profile_id=self._import_profile_reference(
+                    session,
+                    dependencies,
+                    run_data.get("vision_profile_id") if manifest["version"] >= 5 else None,
+                    "chat",
                     allow_auto=False,
                 ),
                 workflow_revision_id=self._import_workflow_revision(
@@ -1907,6 +2042,14 @@ class ProjectExporter:
                 }
             ),
         )
+
+    @staticmethod
+    def _vision_settings(value: Any) -> dict[str, Any]:
+        candidate = value if isinstance(value, dict) else {}
+        try:
+            return VisionSettings.model_validate(candidate, strict=True).model_dump(mode="json")
+        except ValidationError:
+            return VisionSettings().model_dump(mode="json")
 
     @staticmethod
     def _import_preset_bindings(

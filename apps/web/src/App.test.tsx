@@ -541,6 +541,81 @@ describe("App", () => {
     expect(vi.mocked(api.updateChat).mock.calls[0]?.[1]).toMatchObject({ title: "Renamed notes", project_id: null, archived: true });
   });
 
+  it("offers only runtime-verified vision profiles in the per-chat vision selector", async () => {
+    const stamp = "2026-07-22T00:00:00Z";
+    const chat = {
+      id: "chat-vision-selector",
+      project_id: null,
+      title: "Vision selector",
+      archived: false,
+      routing_mode: "text" as const,
+      confirm_uncertain_media: false,
+      active_chat_profile_id: null,
+      active_vision_profile_id: "__auto__",
+      active_image_profile_id: null,
+      active_video_profile_id: null,
+      active_head_message_id: null,
+      vision_settings_json: {
+        max_images: 4,
+        max_video_frames: 6,
+        include_prior_visual: true,
+      },
+      created_at: stamp,
+      updated_at: stamp,
+    };
+    vi.mocked(api.chats).mockResolvedValue([chat]);
+    vi.mocked(api.chat).mockResolvedValue({ ...chat, messages: [] });
+    vi.mocked(api.profiles).mockResolvedValue([
+      {
+        id: "profile-text-only",
+        model_install_id: "model-text-only",
+        name: "Text only",
+        use_case: "",
+        role: "chat",
+        engine: "mock",
+        load_settings_json: {},
+        request_settings_json: {},
+        input_modalities: ["text"],
+        is_default: false,
+      },
+      {
+        id: "profile-vision",
+        model_install_id: "model-vision",
+        name: "Visual observer",
+        use_case: "",
+        role: "chat",
+        engine: "mock",
+        load_settings_json: {},
+        request_settings_json: {},
+        input_modalities: ["text", "image"],
+        is_default: false,
+      },
+    ]);
+    vi.mocked(api.updateChat).mockResolvedValue({
+      ...chat,
+      active_vision_profile_id: "profile-vision",
+    });
+    const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+    render(
+      <QueryClientProvider client={client}>
+        <App />
+      </QueryClientProvider>,
+    );
+
+    const selector = await screen.findByRole("combobox", { name: "vision" });
+    expect(selector).toHaveValue("__auto__");
+    const optionNames = Array.from(selector.querySelectorAll("option"), (option) => option.textContent);
+    expect(optionNames).toContain("Visual observer");
+    expect(optionNames).not.toContain("Text only");
+    expect(optionNames).toContain("Off");
+
+    fireEvent.change(selector, { target: { value: "profile-vision" } });
+    await waitFor(() => expect(api.updateChat).toHaveBeenCalledWith(
+      chat.id,
+      { active_vision_profile_id: "profile-vision" },
+    ));
+  });
+
   it("removes a deleted chat immediately while the API request is pending", async () => {
     const stamp = "2026-07-22T00:00:00Z";
     const chats = ["First chat", "Second chat"].map((title, index) => ({
@@ -2030,6 +2105,80 @@ describe("App", () => {
     fireEvent.click(await screen.findByText("Model library"));
     expect(await screen.findByRole("heading", { name: "Model library" })).toBeInTheDocument();
     expect(screen.queryByRole("button", { name: "Clean 0 partial" })).not.toBeInTheDocument();
+  });
+
+  it("distinguishes installed text-only and vision-capable chat models", async () => {
+    const installedBase = {
+      source_id: null,
+      role: "chat" as const,
+      engine: "llama.cpp",
+      size_bytes: 4096,
+      compatibility: "likely",
+      manifest_json: {},
+      active: true,
+      readiness: "ready" as const,
+      capability_evidence: null,
+      created_at: "2026-07-22T00:00:00Z",
+      updated_at: "2026-07-22T00:00:00Z",
+    };
+    vi.mocked(api.models).mockResolvedValue([
+      {
+        ...installedBase,
+        id: "model-text",
+        name: "Text specialist",
+        local_path: "/models/text.gguf",
+      },
+      {
+        ...installedBase,
+        id: "model-vision",
+        name: "Visual observer",
+        local_path: "/models/vision.gguf",
+      },
+    ]);
+    vi.mocked(api.profiles).mockResolvedValue([
+      {
+        id: "profile-text",
+        model_install_id: "model-text",
+        name: "Text specialist",
+        use_case: "",
+        role: "chat",
+        engine: "llama.cpp",
+        load_settings_json: {},
+        request_settings_json: {},
+        is_default: false,
+        input_modalities: ["text"],
+      },
+      {
+        id: "profile-vision",
+        model_install_id: "model-vision",
+        name: "Visual observer",
+        use_case: "",
+        role: "chat",
+        engine: "llama.cpp",
+        load_settings_json: {},
+        request_settings_json: {},
+        is_default: false,
+        input_modalities: ["text", "image"],
+      },
+    ]);
+    const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+    render(
+      <QueryClientProvider client={client}>
+        <App />
+      </QueryClientProvider>,
+    );
+
+    fireEvent.click(await screen.findByText("Model library"));
+    const capability = await screen.findByRole("combobox", {
+      name: "Installed chat capability",
+    });
+    fireEvent.change(capability, { target: { value: "vision" } });
+    expect(screen.getByRole("button", { name: "Delete Visual observer" })).toBeEnabled();
+    expect(screen.queryByRole("button", { name: "Delete Text specialist" })).not.toBeInTheDocument();
+
+    fireEvent.change(capability, { target: { value: "text" } });
+    expect(screen.getByRole("button", { name: "Delete Text specialist" })).toBeEnabled();
+    expect(screen.queryByRole("button", { name: "Delete Visual observer" })).not.toBeInTheDocument();
   });
 
   it("edits Auto Mode use cases beside installed models", async () => {

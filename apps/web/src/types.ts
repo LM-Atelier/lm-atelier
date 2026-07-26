@@ -111,9 +111,11 @@ export interface Chat {
   routing_mode: RoutingMode;
   confirm_uncertain_media: boolean;
   active_chat_profile_id: string | null;
+  active_vision_profile_id?: string | null;
   active_image_profile_id: string | null;
   active_video_profile_id: string | null;
   active_head_message_id: string | null;
+  vision_settings_json?: Record<string, unknown>;
   generation_settings_json?: GenerationSettingsByRole;
   generation_preset_ids_json?: GenerationPresetIdsByRole;
   created_at: string;
@@ -136,6 +138,7 @@ export interface Run {
   status: string;
   standalone_prompt: string;
   profile_id: string | null;
+  vision_profile_id?: string | null;
   workflow_revision_id: string | null;
   settings_json: Record<string, unknown>;
   provenance_json: Record<string, unknown>;
@@ -288,6 +291,7 @@ export interface ModelProfile {
   load_settings_json: Record<string, unknown>;
   request_settings_json: Record<string, unknown>;
   is_default: boolean;
+  input_modalities?: string[];
 }
 
 export interface ModelProfileBundle {

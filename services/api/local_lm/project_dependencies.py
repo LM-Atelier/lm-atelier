@@ -156,12 +156,16 @@ def build_dependency_manifest(
         for chat in chats
         for value in (
             chat.active_chat_profile_id,
+            chat.active_vision_profile_id,
             chat.active_image_profile_id,
             chat.active_video_profile_id,
         )
         if isinstance(value, str) and value != AUTO_PROFILE_ID
     }
     profile_ids.update(run.profile_id for run in runs if isinstance(run.profile_id, str))
+    profile_ids.update(
+        run.vision_profile_id for run in runs if isinstance(run.vision_profile_id, str)
+    )
     profiles = [
         profile
         for profile_id in sorted(profile_ids)

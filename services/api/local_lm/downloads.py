@@ -76,6 +76,11 @@ _REMOTE_ID = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]*/[A-Za-z0-9][A-Za-z0-9_.-]*
 _TRANSFER_ATTEMPTS = 3
 _PROVISIONAL_INSTALL_KEY = "_provisional_install"
 logger = logging.getLogger(__name__)
+_VISION_PROBE_DATA_URL = (
+    "data:image/png;base64,"
+    "iVBORw0KGgoAAAANSUhEUgAAABAAAAAQCAIAAACQkWg2AAAAIUlEQVR4nGP8z0AaYCJRPcOo"
+    "BmIAE1GqkMCoBmIAyaEEAEAuAR9UPEsJAAAAAElFTkSuQmCC"
+)
 
 
 def _template_workflow_name(template_id: str) -> str:
@@ -1242,6 +1247,12 @@ class DownloadManager:
                     install,
                     default_settings=default_settings,
                 )
+                manifest_files = install.manifest_json.get("files")
+                projector_expected = any(
+                    isinstance(filename, str)
+                    and "mmproj" in PurePosixPath(filename).name.casefold()
+                    for filename in (manifest_files if isinstance(manifest_files, list) else [])
+                )
                 update_job_progress(
                     job,
                     stage="proving chat runtime",
@@ -1259,17 +1270,47 @@ class DownloadManager:
                 capabilities = await self.chat_adapter.capabilities()
                 if not capabilities.healthy:
                     raise RuntimeError("chat worker did not pass its health check")
+                advertised_modalities = getattr(capabilities, "input_modalities", ["text"])
+                input_modalities = list(
+                    dict.fromkeys(
+                        modality for modality in advertised_modalities if isinstance(modality, str)
+                    )
+                ) or ["text"]
+                if projector_expected and "image" not in input_modalities:
+                    raise RuntimeError(
+                        "the multimodal projector did not enable image input in llama.cpp"
+                    )
                 runtime_build = capabilities.version
-                token_count = await self.chat_adapter.count_tokens(
-                    [{"role": "user", "content": "Reply with OK."}]
-                )
+                probe_messages: list[dict[str, Any]] = [
+                    {
+                        "role": "user",
+                        "content": (
+                            [
+                                {
+                                    "type": "text",
+                                    "text": "Name the dominant color in this image.",
+                                },
+                                {
+                                    "type": "image_url",
+                                    "image_url": {
+                                        "url": _VISION_PROBE_DATA_URL,
+                                        "detail": "low",
+                                    },
+                                },
+                            ]
+                            if "image" in input_modalities
+                            else "Reply with OK."
+                        ),
+                    }
+                ]
+                token_count = await self.chat_adapter.count_tokens(probe_messages)
                 if token_count < 1:
                     raise RuntimeError("chat worker tokenizer did not accept the probe")
                 async with asyncio.timeout(120):
                     async for event in self.chat_adapter.stream(
                         ChatRequest(
                             run_id=new_id("activation-probe"),
-                            messages=[{"role": "user", "content": "Reply with OK."}],
+                            messages=probe_messages,
                             settings={
                                 "temperature": 0,
                                 "seed": 0,
@@ -1322,6 +1363,11 @@ class DownloadManager:
                         "probe": "minimal_chat_completion",
                         "tokenizer": "accepted",
                         "completion": "received",
+                        "input_modalities": input_modalities,
+                        "projector_expected": projector_expected,
+                        "vision_probe": (
+                            "bounded_image_completion" if "image" in input_modalities else None
+                        ),
                     },
                 )
                 job.result_json = {
