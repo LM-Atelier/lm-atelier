@@ -56,6 +56,42 @@ def test_queue_order_uses_priority_aging_and_stable_tickets(settings: Settings) 
     ]
 
 
+def test_peek_next_eligible_job_does_not_claim_or_change_it(settings: Settings) -> None:
+    settings.prepare()
+    configure_database(settings)
+    init_db()
+    now = utcnow()
+    with SessionLocal() as session:
+        session.add_all(
+            [
+                Job(
+                    id="job_second",
+                    status=JobStatus.QUEUED.value,
+                    queue_group="primary",
+                    queue_ticket="ticket-b",
+                    enqueued_at=now,
+                ),
+                Job(
+                    id="job_first",
+                    status=JobStatus.QUEUED.value,
+                    queue_group="primary",
+                    queue_ticket="ticket-a",
+                    enqueued_at=now,
+                ),
+            ]
+        )
+        session.commit()
+
+    scheduler = ResourceScheduler(session_factory=SessionLocal)
+
+    assert scheduler.peek_next_eligible_job("primary") == ("job_first", None)
+    with SessionLocal() as session:
+        job = session.get(Job, "job_first")
+        assert job is not None
+        assert job.status == JobStatus.QUEUED.value
+        assert job.claim_owner is None
+
+
 def test_dependent_step_is_not_dispatchable_until_dependency_completes(
     settings: Settings,
 ) -> None:

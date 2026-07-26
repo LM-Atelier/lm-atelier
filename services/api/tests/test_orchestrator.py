@@ -186,7 +186,54 @@ async def test_media_handoff_recycles_managed_comfy_before_chat_resume() -> None
 
     await orchestrator._complete_media_handoff("profile-chat")
 
-    assert order == ["stop media", "start media", "resume chat"]
+    assert order[0] == "stop media"
+    assert set(order[1:]) == {"start media", "resume chat"}
+
+
+async def test_media_handoff_preloads_the_next_queued_text_profile() -> None:
+    media = WorkerStatus(
+        name="media",
+        state="ready",
+        managed=True,
+        running=True,
+        pid=22,
+    )
+    next_run = SimpleNamespace(operation="text", profile_id="profile-next")
+
+    class FakeSession:
+        def __enter__(self):  # type: ignore[no-untyped-def]
+            return self
+
+        def __exit__(self, *_args):  # type: ignore[no-untyped-def]
+            return None
+
+        def get(self, model, identity):  # type: ignore[no-untyped-def]
+            if model is Run and identity == "run-next":
+                return next_run
+            return None
+
+    processes = SimpleNamespace(
+        statuses=Mock(return_value=[media]),
+        stop=AsyncMock(),
+        start_media=AsyncMock(),
+    )
+    scheduler = SimpleNamespace(
+        peek_next_eligible_job=Mock(return_value=("job-next", "run-next")),
+    )
+    orchestrator = ConversationOrchestrator(
+        engines=SimpleNamespace(settings=SimpleNamespace(media_engine="comfyui")),
+        artifacts=Mock(),
+        events=Mock(),
+        scheduler=scheduler,
+        processes=processes,
+        session_factory=FakeSession,
+    )
+    resume = AsyncMock()
+    orchestrator._resume_chat_worker = resume  # type: ignore[method-assign]
+
+    await orchestrator._complete_media_handoff("profile-previous")
+
+    resume.assert_awaited_once_with("profile-next")
 
 
 async def test_external_media_handoff_only_resumes_chat() -> None:

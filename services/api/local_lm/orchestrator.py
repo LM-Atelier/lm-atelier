@@ -2691,9 +2691,31 @@ class ConversationOrchestrator:
         finally:
             self._chat_planner_ready.set()
 
+    def _handoff_chat_profile_id(self, fallback_profile_id: str) -> str:
+        """Prefer the profile required by the next dispatchable text job."""
+
+        try:
+            candidate = self.scheduler.peek_next_eligible_job("primary")
+        except Exception:
+            logger.exception("Could not inspect the next job during media handoff")
+            return fallback_profile_id
+        if (
+            not isinstance(candidate, tuple)
+            or len(candidate) != 2
+            or not isinstance(candidate[1], str)
+        ):
+            return fallback_profile_id
+        with self.session_factory() as session:
+            run = session.get(Run, candidate[1])
+            if run and run.operation == Operation.TEXT.value and isinstance(run.profile_id, str):
+                return run.profile_id
+        return fallback_profile_id
+
     async def _complete_media_handoff(self, chat_profile_id: str) -> None:
         """Release retained Comfy state before restoring a managed chat model."""
 
+        selected_chat_profile_id = self._handoff_chat_profile_id(chat_profile_id)
+        recycle_managed_media = False
         try:
             media_worker = next(item for item in self.processes.statuses() if item.name == "media")
             if self.engines.settings.media_engine == "comfyui" and media_worker.managed:
@@ -2704,11 +2726,43 @@ class ConversationOrchestrator:
                 # both VRAM and host allocations while preserving the automatic
                 # Ready media service expected by the desktop application.
                 await self.processes.stop("media")
-                await self.processes.start_media()
+                recycle_managed_media = True
         except Exception:
             logger.exception("Could not recycle the media worker after device handoff")
-        finally:
-            await self._resume_chat_worker(chat_profile_id)
+
+        if not recycle_managed_media:
+            await self._resume_chat_worker(selected_chat_profile_id)
+            return
+
+        # ComfyUI startup does not load a generation model. Starting that empty
+        # service alongside the selected chat model avoids serial startup cost
+        # without recreating the oversubscribed model state that caused paging.
+        media_result, chat_result = await asyncio.gather(
+            self.processes.start_media(),
+            self._resume_chat_worker(selected_chat_profile_id),
+            return_exceptions=True,
+        )
+        for result in (media_result, chat_result):
+            if isinstance(result, asyncio.CancelledError):
+                raise result
+        if isinstance(media_result, BaseException):
+            logger.error(
+                "Could not restart the managed media worker after device handoff",
+                exc_info=(
+                    type(media_result),
+                    media_result,
+                    media_result.__traceback__,
+                ),
+            )
+        if isinstance(chat_result, BaseException):
+            logger.error(
+                "Could not restore the chat worker after device handoff",
+                exc_info=(
+                    type(chat_result),
+                    chat_result,
+                    chat_result.__traceback__,
+                ),
+            )
 
     async def _execute_media(self, job_id: str, run_id: str) -> None:
         if self.engines.settings.media_engine == "comfyui":

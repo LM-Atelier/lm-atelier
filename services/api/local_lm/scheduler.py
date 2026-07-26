@@ -317,6 +317,16 @@ class ResourceScheduler:
 
         return sorted((job for job in jobs if job.id not in blocked), key=rank)
 
+    def peek_next_eligible_job(self, group: str) -> tuple[str, str | None] | None:
+        """Return the next durable job without claiming or changing it."""
+
+        with self.session_factory() as session:
+            candidates = self._eligible_jobs(session, group, utcnow())
+            if not candidates:
+                return None
+            job = candidates[0]
+            return job.id, job.run_id
+
     @staticmethod
     def _blocking_steps(session: Session, work_step_id: str | None) -> list[str]:
         if not work_step_id:
