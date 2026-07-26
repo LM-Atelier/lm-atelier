@@ -234,10 +234,17 @@ async def test_media_handoff_preloads_the_next_queued_text_profile() -> None:
     orchestrator._resume_chat_worker = resume  # type: ignore[method-assign]
 
     await orchestrator._complete_media_handoff("profile-previous")
+
+    resume.assert_awaited_once_with("profile-next")
+    assert orchestrator._media_restart_after_chat_activity is True
+    processes.start_media.assert_not_awaited()
+
+    orchestrator._release_deferred_media_restart()
     if orchestrator._media_restart_task:
         await orchestrator._media_restart_task
 
-    resume.assert_awaited_once_with("profile-next")
+    assert orchestrator._media_restart_after_chat_activity is False
+    processes.start_media.assert_awaited_once()
 
 
 async def test_media_execution_awaits_inflight_handoff_restart() -> None:

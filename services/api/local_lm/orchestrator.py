@@ -183,6 +183,7 @@ class ConversationOrchestrator:
         self.vision = VisionContextService(engines.settings, artifacts)
         self._tasks: dict[str, asyncio.Task[None]] = {}
         self._media_restart_task: asyncio.Task[None] | None = None
+        self._media_restart_after_chat_activity = False
         self._chat_guards: dict[str, asyncio.Lock] = {}
         self._chat_planner_ready = asyncio.Event()
         self._chat_planner_ready.set()
@@ -1920,6 +1921,7 @@ class ConversationOrchestrator:
             self._media_restart_task.cancel()
             await asyncio.gather(self._media_restart_task, return_exceptions=True)
             self._media_restart_task = None
+        self._media_restart_after_chat_activity = False
 
     def stop_admission(self) -> None:
         self._admission_open = False
@@ -1987,6 +1989,8 @@ class ConversationOrchestrator:
                     else:
                         await self._execute_media(job_id, run_id)
                 finally:
+                    if operation == Operation.TEXT.value:
+                        self._release_deferred_media_restart()
                     if resume_chat_profile:
                         await self._complete_media_handoff(resume_chat_profile)
         except asyncio.CancelledError:
@@ -2043,6 +2047,7 @@ class ConversationOrchestrator:
         try:
             async for event in self.engines.chat.stream(request):
                 if event.type == "delta":
+                    self._release_deferred_media_restart()
                     accumulated += event.text
                     await self.events.publish(
                         "text.delta",
@@ -2696,30 +2701,30 @@ class ConversationOrchestrator:
         finally:
             self._chat_planner_ready.set()
 
-    def _handoff_chat_profile_id(self, fallback_profile_id: str) -> str:
+    def _handoff_chat_target(self, fallback_profile_id: str) -> tuple[str, bool]:
         """Prefer the profile required by the next dispatchable text job."""
 
         try:
             candidate = self.scheduler.peek_next_eligible_job("primary")
         except Exception:
             logger.exception("Could not inspect the next job during media handoff")
-            return fallback_profile_id
+            return fallback_profile_id, False
         if (
             not isinstance(candidate, tuple)
             or len(candidate) != 2
             or not isinstance(candidate[1], str)
         ):
-            return fallback_profile_id
+            return fallback_profile_id, False
         with self.session_factory() as session:
             run = session.get(Run, candidate[1])
             if run and run.operation == Operation.TEXT.value and isinstance(run.profile_id, str):
-                return run.profile_id
-        return fallback_profile_id
+                return run.profile_id, True
+        return fallback_profile_id, False
 
     async def _complete_media_handoff(self, chat_profile_id: str) -> None:
         """Release retained Comfy state before restoring a managed chat model."""
 
-        selected_chat_profile_id = self._handoff_chat_profile_id(chat_profile_id)
+        selected_chat_profile_id, queued_text_next = self._handoff_chat_target(chat_profile_id)
         recycle_managed_media = False
         try:
             media_worker = next(item for item in self.processes.statuses() if item.name == "media")
@@ -2743,7 +2748,10 @@ class ConversationOrchestrator:
         # CPU. Once chat is ready, warm the empty ComfyUI service in a tracked
         # background task so the queued text job can proceed immediately.
         await self._resume_chat_worker(selected_chat_profile_id)
-        self._schedule_media_restart()
+        if queued_text_next:
+            self._media_restart_after_chat_activity = True
+        else:
+            self._schedule_media_restart()
 
     def _schedule_media_restart(self) -> None:
         if self._media_restart_task and not self._media_restart_task.done():
@@ -2754,6 +2762,12 @@ class ConversationOrchestrator:
         )
         self._media_restart_task = task
         task.add_done_callback(self._media_restart_finished)
+
+    def _release_deferred_media_restart(self) -> None:
+        if not self._media_restart_after_chat_activity:
+            return
+        self._media_restart_after_chat_activity = False
+        self._schedule_media_restart()
 
     async def _restart_media_worker(self) -> None:
         try:
