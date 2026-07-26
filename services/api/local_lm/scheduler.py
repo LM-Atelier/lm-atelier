@@ -127,6 +127,13 @@ class ResourceScheduler:
                     None,
                 )
                 if position is None:
+                    failed_dependencies = self._failed_dependencies(
+                        session,
+                        job.work_step_id,
+                    )
+                    if failed_dependencies:
+                        joined = ", ".join(failed_dependencies)
+                        raise RuntimeError(f"Required work did not complete successfully: {joined}")
                     blocked_by = self._blocking_steps(session, job.work_step_id)
                     update_job_progress(
                         job,
@@ -244,15 +251,41 @@ class ResourceScheduler:
     def _blocking_steps(session: Session, work_step_id: str | None) -> list[str]:
         if not work_step_id:
             return []
-        dependencies = session.execute(
-            select(WorkStepDependency.depends_on_step_id, Job.status)
-            .outerjoin(Job, Job.work_step_id == WorkStepDependency.depends_on_step_id)
-            .where(WorkStepDependency.step_id == work_step_id)
+        dependencies = session.scalars(
+            select(WorkStepDependency.depends_on_step_id).where(
+                WorkStepDependency.step_id == work_step_id
+            )
         ).all()
         return [
             dependency_id
-            for dependency_id, status in dependencies
-            if status != JobStatus.COMPLETE.value
+            for dependency_id in dependencies
+            if (
+                (step := session.get(WorkStep, dependency_id)) is None
+                or step.status != JobStatus.COMPLETE.value
+            )
+        ]
+
+    @staticmethod
+    def _failed_dependencies(session: Session, work_step_id: str | None) -> list[str]:
+        if not work_step_id:
+            return []
+        dependency_ids = session.scalars(
+            select(WorkStepDependency.depends_on_step_id).where(
+                WorkStepDependency.step_id == work_step_id
+            )
+        ).all()
+        unsuccessful = {
+            JobStatus.FAILED.value,
+            JobStatus.CANCELLED.value,
+            JobStatus.INTERRUPTED.value,
+        }
+        return [
+            dependency_id
+            for dependency_id in dependency_ids
+            if (
+                (step := session.get(WorkStep, dependency_id)) is None
+                or step.status in unsuccessful
+            )
         ]
 
     async def _heartbeat(self, job_id: str, token: str) -> None:

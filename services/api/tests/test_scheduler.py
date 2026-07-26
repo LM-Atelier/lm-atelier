@@ -113,10 +113,15 @@ def test_dependent_step_is_not_dispatchable_until_dependency_completes(
         assert ResourceScheduler._blocking_steps(session, second.id) == [first.id]
 
         first_job.status = JobStatus.COMPLETE.value
+        first.status = JobStatus.COMPLETE.value
         session.flush()
 
         eligible = ResourceScheduler._eligible_jobs(session, "primary", now)
         assert [job.id for job in eligible] == [second_job.id]
+
+        first.status = JobStatus.CANCELLED.value
+        session.flush()
+        assert ResourceScheduler._failed_dependencies(session, second.id) == [first.id]
 
 
 def test_expired_foreign_claim_is_interrupted_without_replay(settings: Settings) -> None:

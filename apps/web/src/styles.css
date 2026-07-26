@@ -158,6 +158,8 @@ h1, h2, h3 { margin: 0; }
 .send-button { width: 34px; height: 34px; display: grid; place-items: center; border: 0; border-radius: 10px; background: var(--accent); cursor: pointer; }
 .send-button:disabled { background: #343a44; color: #727b88; cursor: default; }
 .send-button.stop { background: #923c48; }
+.composer-submit-actions { display: flex; align-items: center; gap: 6px; }
+.stop-and-send { min-height: 34px; padding: 0 10px; font-size: 11px; }
 .mode-select { height: 32px; border-radius: 9px; display: flex; align-items: center; gap: 4px; padding: 0 7px; background: var(--panel-3); color: #c5ccd6; }
 .mode-select select { appearance: none; border: 0; outline: 0; background: transparent; color: inherit; font-size: 12px; font-weight: 600; padding: 0; }
 .mode-select select option { background: var(--panel); }

@@ -117,7 +117,11 @@ def test_media_progress_preserves_the_latest_preview() -> None:
 
     assert [(part.position, part.type) for part in parts] == [(0, "progress"), (1, "image")]
     assert parts[0].text == "Sampling"
-    assert parts[0].metadata_json == {"progress": 0.5, "phase": "sampling"}
+    assert parts[0].metadata_json == {
+        "progress": 0.5,
+        "phase": "sampling",
+        "indeterminate": False,
+    }
     assert parts[1].artifact_id == "sha256:preview"
     assert parts[1].metadata_json == {"preview": True}
 

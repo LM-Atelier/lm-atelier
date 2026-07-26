@@ -25,7 +25,7 @@ import httpx
 from .config import Settings
 from .progress import reduce_progress
 from .runtime_config import persist_runtime_values
-from .schemas import RuntimeStatus
+from .schemas import ProgressV2, RuntimeStatus
 from .subprocess_env import subprocess_environment
 
 logger = logging.getLogger(__name__)
@@ -1327,19 +1327,24 @@ class RuntimeProvisioner:
             supported=supported,
             managed=managed,
             progress=progress,
-            progress_json=progress_json
-            or (
-                reduce_progress(
-                    self._runtime_progress(engine),
-                    stage="complete",
-                    stage_progress=1,
-                    overall_progress=1,
+            progress_json=ProgressV2.model_validate(progress_json)
+            if progress_json
+            else (
+                ProgressV2.model_validate(
+                    reduce_progress(
+                        self._runtime_progress(engine),
+                        stage="complete",
+                        stage_progress=1,
+                        overall_progress=1,
+                    )
                 )
                 if state == "ready"
-                else reduce_progress(
-                    self._runtime_progress(engine),
-                    stage=message.rstrip(".").lower(),
-                    indeterminate=True,
+                else ProgressV2.model_validate(
+                    reduce_progress(
+                        self._runtime_progress(engine),
+                        stage=message.rstrip(".").lower(),
+                        indeterminate=True,
+                    )
                 )
                 if state == "installing"
                 else None
