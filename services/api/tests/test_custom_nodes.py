@@ -3,12 +3,14 @@ from __future__ import annotations
 import asyncio
 
 import pytest
+from fastapi import FastAPI
 from httpx2 import AsyncClient
 from sqlalchemy.orm import Session
 
 from local_lm.custom_nodes import CustomNodeManager
+from local_lm.db import SessionLocal
 from local_lm.domain import new_id
-from local_lm.models import CustomNodeInstall
+from local_lm.models import CustomNodeInstall, Job
 
 
 def test_custom_node_sources_and_revisions_are_strictly_pinned(settings) -> None:  # type: ignore[no-untyped-def]
@@ -59,6 +61,41 @@ async def test_custom_node_timeout_kills_and_reaps_git_process(
         await CustomNodeManager._run("git", "--version", timeout=0.01)
     assert process.killed is True
     assert process.waited is True
+
+
+async def test_custom_node_git_does_not_inherit_credentials(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    captured: dict[str, object] = {}
+
+    class CompletedProcess:
+        returncode = 0
+
+        async def communicate(self) -> tuple[bytes, bytes]:
+            return b"git version", b""
+
+    async def create_process(*_args: str, **kwargs: object) -> CompletedProcess:
+        captured.update(kwargs)
+        return CompletedProcess()
+
+    monkeypatch.setenv("GITHUB_TOKEN", "github_private")
+    monkeypatch.setenv("GH_TOKEN", "gh_private")
+    monkeypatch.setenv("SSH_AUTH_SOCK", "private-agent")
+    monkeypatch.setenv("GIT_ASKPASS", "credential-helper")
+    monkeypatch.setattr(asyncio, "create_subprocess_exec", create_process)
+
+    assert await CustomNodeManager._run("git", "--version") == "git version"
+
+    environment = captured["env"]
+    assert isinstance(environment, dict)
+    assert environment["GIT_TERMINAL_PROMPT"] == "0"
+    assert environment["GIT_CONFIG_NOSYSTEM"] == "1"
+    assert environment["GIT_CONFIG_GLOBAL"]
+    assert environment["GIT_ASKPASS"] == ""
+    assert environment["SSH_ASKPASS"] == ""
+    assert "GITHUB_TOKEN" not in environment
+    assert "GH_TOKEN" not in environment
+    assert "SSH_AUTH_SOCK" not in environment
 
 
 async def test_custom_node_lifecycle_and_workflow_trust_gate(
@@ -155,3 +192,61 @@ async def test_custom_node_lifecycle_and_workflow_trust_gate(
     removed = await client.delete(f"/api/custom-nodes/{node['id']}")
     assert removed.status_code == 204
     assert (await client.get("/api/custom-nodes")).json() == []
+
+
+async def test_custom_node_change_rechecks_media_queue_inside_compute_lease(
+    app: FastAPI,
+    client: AsyncClient,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    verified = False
+
+    async def verify(_manager: CustomNodeManager, _install: CustomNodeInstall) -> None:
+        nonlocal verified
+        verified = True
+
+    monkeypatch.setattr(CustomNodeManager, "verify", verify)
+    with SessionLocal() as session:
+        session.add(
+            CustomNodeInstall(
+                id="node_lease_race",
+                name="Lease race",
+                source_url="https://github.com/example/lease-race.git",
+                revision="a" * 40,
+                installed_path="lm-atelier-node_lease-race",
+                tree_hash="b" * 40,
+                trusted=False,
+                active=True,
+                security_json={"review_required": True},
+            )
+        )
+        session.commit()
+
+    async with app.state.services.scheduler.lease("primary"):
+        trust = asyncio.create_task(
+            client.post(
+                "/api/custom-nodes/node_lease_race/trust",
+                json={"trusted": True},
+            )
+        )
+        await asyncio.sleep(0.03)
+        assert trust.done() is False
+        with SessionLocal() as session:
+            session.add(
+                Job(
+                    id="job_node_lease_race",
+                    kind="image",
+                    status="queued",
+                    phase="queued",
+                )
+            )
+            session.commit()
+
+    response = await asyncio.wait_for(trust, timeout=2)
+    assert response.status_code == 409
+    assert "active or queued job" in response.json()["detail"]
+    assert verified is False
+    with SessionLocal() as session:
+        node = session.get(CustomNodeInstall, "node_lease_race")
+        assert node
+        assert node.trusted is False

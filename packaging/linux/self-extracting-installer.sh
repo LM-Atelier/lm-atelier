@@ -5,6 +5,9 @@ version="@VERSION@"
 install_root="${LM_ATELIER_INSTALL_ROOT:-$HOME/.local/opt/lm-atelier}"
 data_root="${XDG_DATA_HOME:-$HOME/.local/share}/lm-atelier"
 launch=false
+managed_marker=".lm-atelier-install"
+launcher_path="$HOME/.local/bin/lm-atelier"
+desktop_path="$HOME/.local/share/applications/lm-atelier.desktop"
 
 usage() {
   cat <<EOF
@@ -18,6 +21,51 @@ Installs the application to:
 Application data is stored separately at:
   $data_root
 EOF
+}
+
+is_managed_install() {
+  local root="$1"
+  if [[ -f "$root/$managed_marker" ]] &&
+    grep -qx 'lm-atelier-managed-install-v1' "$root/$managed_marker"; then
+    return 0
+  fi
+  [[ -x "$root/lm-atelier" ]] &&
+    [[ -x "$root/uninstall.sh" ]] &&
+    [[ -f "$root/_internal/release-manifest.json" ]] &&
+    grep -q '"application": "LM Atelier"' "$root/_internal/release-manifest.json"
+}
+
+launcher_points_to_install() {
+  local path="$1"
+  local target
+  [[ -L "$path" ]] || return 1
+  target="$(readlink -- "$path")"
+  if [[ "$target" != /* ]]; then
+    target="$(dirname "$path")/$target"
+  fi
+  [[ "$(realpath -m -- "$target")" == "$(realpath -m -- "$install_root/lm-atelier")" ]]
+}
+
+is_managed_desktop_entry() {
+  local path="$1"
+  [[ -f "$path" ]] &&
+    [[ ! -L "$path" ]] &&
+    [[ "$(grep -c '^Exec=' "$path")" -eq 1 ]] &&
+    grep -Fxq '[Desktop Entry]' "$path" &&
+    grep -Fxq 'Type=Application' "$path" &&
+    grep -Fxq 'Name=LM Atelier' "$path" &&
+    grep -Fxq "Exec=\"$install_root/lm-atelier\"" "$path" &&
+    grep -Fxq "Icon=$install_root/lm-atelier.png" "$path" &&
+    {
+      grep -Fxq 'X-LM-Atelier-Managed=true' "$path" ||
+        {
+          # v0.1.x wrote this exact entry before adding an ownership marker.
+          grep -Fxq 'Comment=Local creative studio' "$path" &&
+            grep -Fxq 'Terminal=true' "$path" &&
+            grep -Fxq 'Categories=Graphics;Utility;' "$path" &&
+            grep -Fxq 'StartupNotify=true' "$path"
+        }
+    }
 }
 
 for argument in "$@"; do
@@ -57,6 +105,19 @@ case "$install_root" in
     exit 1
     ;;
 esac
+if [[ -e "$install_root" ]] && ! is_managed_install "$install_root"; then
+  echo "Refusing to replace a directory not managed by LM Atelier: $install_root" >&2
+  exit 1
+fi
+if [[ -e "$launcher_path" || -L "$launcher_path" ]] &&
+  ! launcher_points_to_install "$launcher_path"; then
+  echo "Refusing to replace a launcher not managed by this LM Atelier installation: $launcher_path" >&2
+  exit 1
+fi
+if [[ -e "$desktop_path" ]] && ! is_managed_desktop_entry "$desktop_path"; then
+  echo "Refusing to replace a desktop entry not managed by this LM Atelier installation: $desktop_path" >&2
+  exit 1
+fi
 
 payload_line="$(awk '/^__LM_ATELIER_PAYLOAD_BELOW__$/ { print NR + 1; exit }' "$0")"
 if [[ -z "$payload_line" ]]; then
@@ -83,6 +144,7 @@ trap cleanup EXIT
 tail -n +"$payload_line" "$0" | tar -xzf - -C "$partial_root"
 test -x "$partial_root/lm-atelier"
 test -x "$partial_root/uninstall.sh"
+test -f "$partial_root/$managed_marker"
 
 if [[ -e "$install_root" ]]; then
   mv "$install_root" "$backup_root"
@@ -91,7 +153,7 @@ mv "$partial_root" "$install_root"
 rm -rf "$backup_root"
 
 mkdir -p "$HOME/.local/bin" "$HOME/.local/share/applications"
-ln -sfn "$install_root/lm-atelier" "$HOME/.local/bin/lm-atelier"
+ln -sfn "$install_root/lm-atelier" "$launcher_path"
 printf '%s\n' \
   '[Desktop Entry]' \
   'Type=Application' \
@@ -102,10 +164,12 @@ printf '%s\n' \
   'Terminal=true' \
   'Categories=Graphics;Utility;' \
   'StartupNotify=true' \
-  > "$HOME/.local/share/applications/lm-atelier.desktop"
+  'X-LM-Atelier-Managed=true' \
+  > "$desktop_path"
 
 echo "LM Atelier $version installed at $install_root"
-echo "Run $HOME/.local/bin/lm-atelier or open LM Atelier from your application menu."
+echo "Run $launcher_path or open LM Atelier from your application menu."
+echo "Linux image/video require an externally configured compatible media engine and are not certified."
 if [[ "$launch" == true ]]; then
   exec "$install_root/lm-atelier"
 fi

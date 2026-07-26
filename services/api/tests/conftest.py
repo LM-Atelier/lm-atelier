@@ -4,6 +4,7 @@ from collections.abc import AsyncIterator
 
 import pytest
 import pytest_asyncio
+from fastapi import FastAPI
 from httpx2 import ASGITransport, AsyncClient
 
 from local_lm.config import Settings
@@ -20,9 +21,13 @@ def settings(tmp_path) -> Settings:  # type: ignore[no-untyped-def]
     )
 
 
+@pytest.fixture
+def app(settings: Settings) -> FastAPI:
+    return create_app(settings)
+
+
 @pytest_asyncio.fixture
-async def client(settings: Settings) -> AsyncIterator[AsyncClient]:
-    app = create_app(settings)
+async def client(app: FastAPI) -> AsyncIterator[AsyncClient]:
     async with app.router.lifespan_context(app):
         transport = ASGITransport(app=app)
         async with AsyncClient(transport=transport, base_url="http://testserver") as test_client:

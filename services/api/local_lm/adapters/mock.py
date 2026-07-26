@@ -10,6 +10,7 @@ from typing import Any
 from ..domain import Operation
 from ..schemas import EngineCapabilities
 from ..settings_registry import CHAT_SETTINGS, IMAGE_SETTINGS, VIDEO_SETTINGS
+from ..subprocess_env import subprocess_environment
 from .base import (
     ChatEvent,
     ChatRequest,
@@ -149,6 +150,7 @@ class MockMediaAdapter:
                 Operation.TEXT_TO_VIDEO.value,
                 Operation.IMAGE_TO_VIDEO.value,
             ],
+            input_modalities=["text", "image"],
             formats=["mock", "svg", "mp4"],
             devices=["cpu:0"],
             streaming=False,
@@ -236,6 +238,7 @@ class MockMediaAdapter:
                 "pipe:1",
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
+                env=subprocess_environment(),
             )
             stdout, _stderr = await process.communicate()
             if process.returncode == 0 and stdout:

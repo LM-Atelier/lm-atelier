@@ -5,6 +5,12 @@ from pathlib import PurePosixPath
 from typing import Any, Literal
 
 from .config import Settings
+from .gguf import (
+    GGUFSelectionError,
+    automatic_gguf_selection,
+    automatic_mmproj_selection,
+    validate_gguf_selection,
+)
 from .schemas import (
     CatalogDetail,
     CatalogPreflight,
@@ -17,65 +23,34 @@ _BLOCKED_SUFFIXES = {".bin", ".pt", ".pth", ".ckpt", ".pkl", ".pickle"}
 
 
 def _automatic_selection(
-    files: dict[str, dict[str, Any]], role: str, system_memory_bytes: int
+    files: dict[str, dict[str, Any]],
+    role: str,
+    system_memory_bytes: int,
+    auxiliary_kind: str | None = None,
 ) -> list[str]:
     if role == "chat":
-        ggufs = [
-            item
-            for name, item in files.items()
-            if name.lower().endswith(".gguf") and "mmproj" not in name.lower()
-        ]
-        if ggufs:
-            quantization_priority = {
-                "q4_k_m": 0,
-                "q5_k_m": 1,
-                "q4_k_s": 2,
-                "q5_k_s": 3,
-                "q8_0": 4,
-                "q3_k_m": 5,
-                "q3_k_s": 6,
-                "q2_k": 7,
-            }
-
-            def estimated_loaded_size(item: dict[str, Any]) -> int:
-                size = int(item.get("size") or 2**63 - 1)
-                return int(size * 1.2) + 512 * 1024**2
-
-            def gguf_rank(item: dict[str, Any]) -> tuple[int, int]:
-                name = str(item.get("filename") or "").lower()
-                size = int(item.get("size") or 2**63 - 1)
-                quantization = next(
-                    (value for value in quantization_priority if value in name),
-                    None,
-                )
-                if quantization is None:
-                    return (len(quantization_priority), size)
-                return (quantization_priority[quantization], size)
-
-            recognized = [
-                item
-                for item in ggufs
-                if any(
-                    value in str(item.get("filename") or "").lower()
-                    for value in quantization_priority
-                )
-            ]
-            fitting = [
-                item for item in recognized if estimated_loaded_size(item) <= system_memory_bytes
-            ]
-            chosen = (
-                min(fitting, key=gguf_rank)
-                if fitting
-                else min(ggufs, key=lambda item: int(item.get("size") or 2**63 - 1))
-            )
-            return [str(chosen["filename"])]
-        return []
+        try:
+            chat_primary = automatic_gguf_selection(files.values(), system_memory_bytes)
+            projector = automatic_mmproj_selection(files.values(), chat_primary)
+            return [*chat_primary, *([projector] if projector else [])]
+        except GGUFSelectionError:
+            return []
 
     safe_weights = [
         item for name, item in files.items() if PurePosixPath(name).suffix.lower() == ".safetensors"
     ]
     if not safe_weights:
         return []
+    if auxiliary_kind:
+        ranked = sorted(
+            safe_weights,
+            key=lambda item: (
+                auxiliary_kind not in str(item.get("filename") or "").casefold(),
+                -int(item.get("size") or 0),
+                str(item.get("filename") or ""),
+            ),
+        )
+        return [str(ranked[0]["filename"])]
     primary_markers = ("diffusion", "checkpoint", "model", "unet", "t2v", "i2v")
     dependency_markers = ("vae", "text_encoder", "text_encoders", "clip_vision")
 
@@ -124,12 +99,36 @@ def assess_catalog_install(
     settings: Settings,
     system: SystemInfo,
 ) -> CatalogPreflight:
+    resolved_revision = detail.revision
     files = {str(item.get("filename") or ""): item for item in detail.files}
-    selected = list(dict.fromkeys(request.selected_files))
+    requested_selected = list(request.selected_files)
+    selected = list(dict.fromkeys(requested_selected))
     checks: list[CatalogPreflightCheck] = []
+    selection_error: str | None = None
 
-    if not selected:
-        selected = _automatic_selection(files, request.role, system.memory_total_bytes)
+    normalized_requested = [name.casefold() for name in requested_selected]
+    if len(normalized_requested) != len(set(normalized_requested)):
+        selection_error = (
+            "The file selection contains duplicate paths. Run the install check again."
+        )
+    elif not selected:
+        try:
+            selected = (
+                automatic_gguf_selection(detail.files, system.memory_total_bytes)
+                if request.role == "chat"
+                else _automatic_selection(
+                    files,
+                    request.role,
+                    system.memory_total_bytes,
+                    request.auxiliary_kind,
+                )
+            )
+        except GGUFSelectionError as exc:
+            selection_error = str(exc)
+    if request.role == "chat" and selected and selection_error is None:
+        projector = automatic_mmproj_selection(detail.files, selected)
+        if projector and projector not in selected:
+            selected.append(projector)
 
     missing = [name for name in selected if name not in files]
     unsafe_paths = [
@@ -137,7 +136,45 @@ def assess_catalog_install(
         for name in selected
         if PurePosixPath(name).is_absolute() or ".." in PurePosixPath(name).parts
     ]
-    if not selected:
+    if (
+        request.role == "chat"
+        and selected
+        and not missing
+        and not unsafe_paths
+        and selection_error is None
+    ):
+        selected_names = set(selected)
+        selected_metadata = [
+            item for item in detail.files if str(item.get("filename") or "") in selected_names
+        ]
+        projectors = [
+            str(item.get("filename") or "")
+            for item in selected_metadata
+            if "mmproj" in PurePosixPath(str(item.get("filename") or "")).name.casefold()
+        ]
+        try:
+            primary = validate_gguf_selection(
+                selected_metadata,
+                require_split_metadata=True,
+            )
+            if len(projectors) > 1:
+                raise GGUFSelectionError(
+                    "The chat model selection contains multiple multimodal projectors."
+                )
+            selected = [*primary, *projectors]
+        except GGUFSelectionError as exc:
+            selection_error = str(exc)
+
+    if selection_error:
+        checks.append(
+            _check(
+                "selection",
+                "Automatic model selection",
+                "block",
+                selection_error,
+            )
+        )
+    elif not selected:
         checks.append(
             _check(
                 "selection",
@@ -323,18 +360,18 @@ def assess_catalog_install(
         _check(
             "revision",
             "Pinned revision",
-            "pass" if request.revision != "main" else "warn",
+            "pass" if resolved_revision != "main" else "warn",
             (
-                f"Install is pinned to {request.revision}."
-                if request.revision != "main"
-                else "The mutable main revision is selected; use a commit SHA for reproducibility."
+                f"Install is pinned to {resolved_revision}."
+                if resolved_revision != "main"
+                else "The catalog could not resolve main to an immutable commit."
             ),
         )
     )
 
     return CatalogPreflight(
         remote_id=detail.model.remote_id,
-        revision=request.revision,
+        revision=resolved_revision,
         selected_files=selected,
         expected_sha256=expected_sha256,
         download_bytes=download_bytes,
@@ -343,6 +380,7 @@ def assess_catalog_install(
         estimated_vram_bytes=estimated_vram,
         can_install=not any(check.status == "block" for check in checks),
         checks=checks,
+        auxiliary_kind=request.auxiliary_kind,
     )
 
 

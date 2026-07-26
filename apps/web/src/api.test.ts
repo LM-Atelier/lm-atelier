@@ -4,6 +4,68 @@ afterEach(() => {
   vi.useRealTimers();
   vi.unstubAllGlobals();
   vi.resetModules();
+  sessionStorage.clear();
+  localStorage.clear();
+});
+
+it("confirms a bounded ordered plan without changing Auto mode", async () => {
+  const confirm = vi.fn(() => true);
+  vi.stubGlobal("confirm", confirm);
+  const fetchMock = vi.fn()
+    .mockResolvedValueOnce(
+      new Response(JSON.stringify({ csrf_token: "csrf" }), {
+        status: 200,
+        headers: { "content-type": "application/json" },
+      }),
+    )
+    .mockResolvedValueOnce(
+      new Response(JSON.stringify({
+        detail: {
+          code: "ordered_plan_confirmation_required",
+          message: "Confirm the ordered multi-model plan.",
+          plan: {
+            planner_version: "ordered-work-v1",
+            steps: [
+              { id: "story", mode: "text", prompt: "Write", depends_on: [], inputs: [] },
+              { id: "image", mode: "image", prompt: "Draw", depends_on: ["story"], inputs: [] },
+              { id: "video", mode: "video", prompt: "Animate", depends_on: ["image"], inputs: [] },
+            ],
+          },
+          estimate: {
+            video_duration_seconds: 4,
+            estimated_bytes: 2 * 1024 ** 3,
+          },
+        },
+      }), {
+        status: 409,
+        headers: { "content-type": "application/json" },
+      }),
+    )
+    .mockResolvedValueOnce(
+      new Response(JSON.stringify({ accepted: true }), {
+        status: 202,
+        headers: { "content-type": "application/json" },
+      }),
+    );
+  vi.stubGlobal("fetch", fetchMock);
+
+  const { api } = await import("./api");
+  await api.sendTurn(
+    "chat-ordered",
+    "Write a story, then draw it, then animate it",
+    "auto",
+    [],
+    {},
+    "ordered-key",
+  );
+
+  expect(confirm).toHaveBeenCalledWith(
+    "3-step plan: text → image → video · about 4 seconds of video · up to 2 GB working space. Start it?",
+  );
+  const retryBody = JSON.parse(String(fetchMock.mock.calls[2][1]?.body));
+  expect(retryBody.mode).toBe("auto");
+  expect(retryBody.confirm_media).toBe(true);
+  expect(retryBody.idempotency_key).toBe("ordered-key");
 });
 
 it("opens the event socket from the sequence returned by session initialization", async () => {
@@ -57,18 +119,102 @@ it("sends turn overrides with edited branches and regenerated responses", async 
   vi.stubGlobal("fetch", fetchMock);
 
   const { api } = await import("./api");
-  await api.branchMessage("message-user", "Count to 1000", { max_tokens: 4096 });
+  await api.branchMessage(
+    "message-user",
+    "Count to 1000",
+    "text",
+    { max_tokens: 4096 },
+  );
   await api.regenerateMessage("message-assistant", { max_tokens: 4096 });
 
   expect(fetchMock.mock.calls[1][0]).toBe("/api/messages/message-user/branch");
   expect(JSON.parse(String(fetchMock.mock.calls[1][1]?.body))).toMatchObject({
     text: "Count to 1000",
+    mode: "text",
+    input_artifact_ids: [],
     settings: { max_tokens: 4096 },
   });
   expect(fetchMock.mock.calls[2][0]).toBe("/api/messages/message-assistant/regenerate");
   expect(JSON.parse(String(fetchMock.mock.calls[2][1]?.body))).toEqual({
     settings: { max_tokens: 4096 },
   });
+});
+
+it("uses the explicit stop-and-send endpoint and preserves its idempotency key", async () => {
+  const fetchMock = vi.fn()
+    .mockResolvedValueOnce(
+      new Response(JSON.stringify({ csrf_token: "csrf" }), {
+        status: 200,
+        headers: { "content-type": "application/json" },
+      }),
+    )
+    .mockResolvedValueOnce(
+      new Response(JSON.stringify({}), {
+        status: 202,
+        headers: { "content-type": "application/json" },
+      }),
+    );
+  vi.stubGlobal("fetch", fetchMock);
+
+  const { api } = await import("./api");
+  await api.stopAndSendTurn(
+    "chat/one",
+    "Use this instead",
+    "text",
+    [],
+    { max_tokens: 128 },
+    "client-turn-7",
+  );
+
+  expect(fetchMock.mock.calls[1][0]).toBe("/api/chats/chat/one/stop-and-send");
+  expect(JSON.parse(String(fetchMock.mock.calls[1][1]?.body))).toMatchObject({
+    text: "Use this instead",
+    mode: "text",
+    idempotency_key: "client-turn-7",
+  });
+});
+
+it("uses the recovery and unsuccessful-job action contracts", async () => {
+  const fetchMock = vi.fn()
+    .mockResolvedValueOnce(
+      new Response(JSON.stringify({ csrf_token: "csrf" }), {
+        status: 200,
+        headers: { "content-type": "application/json" },
+      }),
+    )
+    .mockResolvedValueOnce(
+      new Response(JSON.stringify({ id: "job/retry" }), {
+        status: 200,
+        headers: { "content-type": "application/json" },
+      }),
+    )
+    .mockResolvedValueOnce(
+      new Response(JSON.stringify({ name: "backup one.sqlite3" }), {
+        status: 200,
+        headers: { "content-type": "application/json" },
+      }),
+    )
+    .mockResolvedValueOnce(
+      new Response(JSON.stringify({ name: "backup one.sqlite3", restore_pending: true }), {
+        status: 200,
+        headers: { "content-type": "application/json" },
+      }),
+    )
+    .mockResolvedValueOnce(new Response(null, { status: 204 }));
+  vi.stubGlobal("fetch", fetchMock);
+
+  const { api } = await import("./api");
+  await api.retryJob("job/retry");
+  await api.verifyBackup("backup one.sqlite3");
+  await api.restoreBackup("backup one.sqlite3");
+  await api.deleteBackup("backup one.sqlite3");
+
+  expect(fetchMock.mock.calls.slice(1).map(([url, init]) => [url, init?.method])).toEqual([
+    ["/api/jobs/job%2Fretry/retry", "POST"],
+    ["/api/backups/backup%20one.sqlite3/verify", "POST"],
+    ["/api/backups/backup%20one.sqlite3/restore", "POST"],
+    ["/api/backups/backup%20one.sqlite3", "DELETE"],
+  ]);
 });
 
 it("requests transactional profile cleanup when deleting an installed model", async () => {
@@ -287,6 +433,59 @@ it("replays events from zero when the service sequence resets after a restart", 
   dispose();
 });
 
+it("replays from zero when a restarted service has already advanced beyond the old sequence", async () => {
+  vi.useFakeTimers();
+  const urls: string[] = [];
+  const sockets: FakeWebSocket[] = [];
+
+  class FakeWebSocket {
+    onopen: (() => void) | null = null;
+    onmessage: ((message: MessageEvent) => void) | null = null;
+    onclose: ((event: CloseEvent) => void) | null = null;
+
+    constructor(url: string) {
+      urls.push(url);
+      sockets.push(this);
+    }
+
+    close() {}
+  }
+
+  const fetchMock = vi.fn()
+    .mockResolvedValueOnce(
+      new Response(JSON.stringify({
+        csrf_token: "csrf-old",
+        event_epoch: "old-process",
+        event_sequence: 3,
+      }), {
+        status: 200,
+        headers: { "content-type": "application/json" },
+      }),
+    )
+    .mockResolvedValueOnce(
+      new Response(JSON.stringify({
+        csrf_token: "csrf-new",
+        event_epoch: "new-process",
+        event_sequence: 15,
+      }), {
+        status: 200,
+        headers: { "content-type": "application/json" },
+      }),
+    );
+  vi.stubGlobal("fetch", fetchMock);
+  vi.stubGlobal("WebSocket", FakeWebSocket);
+
+  const { connectEvents } = await import("./api");
+  const dispose = await connectEvents(vi.fn(), vi.fn());
+  expect(new URL(urls[0]).searchParams.get("after")).toBe("3");
+
+  sockets[0].onclose?.({ code: 1006 } as CloseEvent);
+  await vi.advanceTimersByTimeAsync(1_000);
+
+  expect(new URL(urls[1]).searchParams.get("after")).toBe("0");
+  dispose();
+});
+
 it("retains the last received sequence during a same-service reconnect", async () => {
   vi.useFakeTimers();
   const urls: string[] = [];
@@ -330,5 +529,50 @@ it("retains the last received sequence during a same-service reconnect", async (
   await vi.advanceTimersByTimeAsync(1_000);
 
   expect(new URL(urls[1]).searchParams.get("after")).toBe("12");
+  dispose();
+});
+
+it("notifies the client after each event socket reconnect, not the initial open", async () => {
+  vi.useFakeTimers();
+  const sockets: FakeWebSocket[] = [];
+
+  class FakeWebSocket {
+    onopen: (() => void) | null = null;
+    onmessage: ((message: MessageEvent) => void) | null = null;
+    onclose: ((event: CloseEvent) => void) | null = null;
+
+    constructor() {
+      sockets.push(this);
+    }
+
+    close() {}
+  }
+
+  const fetchMock = vi.fn()
+    .mockResolvedValueOnce(
+      new Response(JSON.stringify({ csrf_token: "csrf-old", event_sequence: 10 }), {
+        status: 200,
+        headers: { "content-type": "application/json" },
+      }),
+    )
+    .mockResolvedValueOnce(
+      new Response(JSON.stringify({ csrf_token: "csrf-new", event_sequence: 10 }), {
+        status: 200,
+        headers: { "content-type": "application/json" },
+      }),
+    );
+  vi.stubGlobal("fetch", fetchMock);
+  vi.stubGlobal("WebSocket", FakeWebSocket);
+
+  const { connectEvents } = await import("./api");
+  const onReconnect = vi.fn();
+  const dispose = await connectEvents(vi.fn(), vi.fn(), onReconnect);
+  sockets[0].onopen?.();
+  expect(onReconnect).not.toHaveBeenCalled();
+
+  sockets[0].onclose?.({ code: 1006 } as CloseEvent);
+  await vi.advanceTimersByTimeAsync(1_000);
+  sockets[1].onopen?.();
+  expect(onReconnect).toHaveBeenCalledTimes(1);
   dispose();
 });

@@ -4,37 +4,115 @@ import asyncio
 import hashlib
 import mimetypes
 import os
+import re
 import shutil
 import tempfile
+import uuid
 from contextlib import suppress
+from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from typing import IO
 
-from sqlalchemy import func, select
+from sqlalchemy import event, func, select
 from sqlalchemy.orm import Session
 
 from .config import Settings
 from .domain import ArtifactKind, MessageRole, PartType
-from .models import Artifact, Message, MessagePart, Run
+from .models import (
+    Artifact,
+    Message,
+    MessagePart,
+    ResponseRevision,
+    ResponseRevisionPart,
+    Run,
+)
+from .subprocess_env import subprocess_environment
+
+_SHA256 = re.compile(r"^[0-9a-f]{64}$")
+_STAGED_DELETION = re.compile(r"^(?P<digest>[0-9a-f]{64})\.[0-9a-f]{32}$")
+_MAX_VIDEO_POSTER_BYTES = 16 * 1024 * 1024
+
+
+@dataclass(frozen=True)
+class RetentionCleanupSummary:
+    marked_count: int
+    pending_count: int
+    removed_count: int
+    reclaimed_bytes: int
+
+
+@dataclass(frozen=True)
+class StagedArtifactFile:
+    path: Path
+    media_type: str
+    original_name: str
+
+    def discard(self) -> None:
+        self.path.unlink(missing_ok=True)
 
 
 class ArtifactStore:
-    def __init__(self, settings: Settings) -> None:
-        self.root = settings.artifact_dir.resolve()
+    def __init__(self, settings: Settings, *, root: Path | None = None) -> None:
+        self.root = (root or settings.artifact_dir).resolve()
         self.root.mkdir(parents=True, exist_ok=True)
+        self._verified_files: dict[Path, tuple[int, int]] = {}
 
     def _destination(self, digest: str) -> Path:
+        if not _SHA256.fullmatch(digest):
+            raise ValueError("invalid artifact digest")
         return self.root / digest[:2] / digest[2:4] / digest
 
     def _relative(self, path: Path) -> str:
         return path.relative_to(self.root).as_posix()
 
     def resolve(self, artifact: Artifact) -> Path:
-        path = (self.root / artifact.relative_path).resolve()
+        if artifact.id != f"sha256:{artifact.sha256}" or not _SHA256.fullmatch(artifact.sha256):
+            raise ValueError("artifact identity is invalid")
+        expected_relative = PurePosixPath(
+            artifact.sha256[:2],
+            artifact.sha256[2:4],
+            artifact.sha256,
+        )
+        if artifact.relative_path != expected_relative.as_posix():
+            raise ValueError("artifact path is not canonical")
+        candidate = self.root.joinpath(*expected_relative.parts)
+        cursor = self.root
+        for part in expected_relative.parts:
+            cursor /= part
+            if self._is_link(cursor):
+                raise ValueError("artifact path uses a filesystem link")
+        path = candidate.resolve()
         if self.root not in path.parents:
             raise ValueError("artifact path escapes store")
         return path
+
+    def verified_path(self, artifact: Artifact) -> Path:
+        path = self.resolve(artifact)
+        try:
+            stat_result = path.stat()
+        except OSError as exc:
+            raise FileNotFoundError(path) from exc
+        if not path.is_file() or stat_result.st_size != artifact.size_bytes:
+            raise ValueError("artifact file size does not match its record")
+        cached = self._verified_files.get(path)
+        fingerprint = (stat_result.st_size, stat_result.st_mtime_ns)
+        if cached != fingerprint:
+            digest = hashlib.sha256()
+            with path.open("rb") as source:
+                while chunk := source.read(1024 * 1024):
+                    digest.update(chunk)
+            if digest.hexdigest() != artifact.sha256:
+                raise ValueError("artifact file checksum does not match its record")
+            self._verified_files[path] = fingerprint
+        return path
+
+    def delivery_metadata(self, artifact: Artifact) -> tuple[Path, str, str]:
+        path = self.verified_path(artifact)
+        detected = self._detect_media_type(path)
+        if detected is None:
+            return path, "application/octet-stream", "attachment"
+        return path, detected, "inline"
 
     def ingest_path(
         self,
@@ -105,28 +183,52 @@ class ArtifactStore:
             sha256 = digest.hexdigest()
             existing = session.scalar(select(Artifact).where(Artifact.sha256 == sha256))
             if existing:
+                existing_path = self.resolve(existing)
+                changed = False
+                if not self._matches_file(existing_path, sha256, size):
+                    existing_path.parent.mkdir(parents=True, exist_ok=True)
+                    os.replace(temporary_name, existing_path)
+                    self._remember_verified(existing_path)
+                if existing.size_bytes != size:
+                    existing.size_bytes = size
+                    changed = True
+                sanitized_name = self._safe_original_name(existing.original_name)
+                if existing.original_name != sanitized_name:
+                    existing.original_name = sanitized_name
+                    changed = True
+                sanitized_media_type = self._safe_media_type(existing.media_type)
+                if existing.media_type != sanitized_media_type:
+                    existing.media_type = sanitized_media_type
+                    changed = True
                 if existing.metadata_json.get("temporary_preview") and not (metadata or {}).get(
                     "temporary_preview"
                 ):
                     existing.kind = kind.value
-                    existing.media_type = media_type or existing.media_type
-                    existing.original_name = original_name or existing.original_name
+                    existing.media_type = self._safe_media_type(media_type or existing.media_type)
+                    existing.original_name = (
+                        self._safe_original_name(original_name) or existing.original_name
+                    )
                     existing.metadata_json = metadata or {}
+                    changed = True
+                if changed:
                     session.flush()
                 return existing
 
             destination_path = self._destination(sha256)
             destination_path.parent.mkdir(parents=True, exist_ok=True)
-            if not destination_path.exists():
+            if self._is_link(destination_path):
+                raise ValueError("artifact destination uses a filesystem link")
+            if not self._matches_file(destination_path, sha256, size):
                 os.replace(temporary_name, destination_path)
+            self._remember_verified(destination_path)
             artifact = Artifact(
                 id=f"sha256:{sha256}",
                 sha256=sha256,
                 kind=kind.value,
-                media_type=media_type or "application/octet-stream",
+                media_type=self._safe_media_type(media_type),
                 size_bytes=size,
                 relative_path=self._relative(destination_path),
-                original_name=original_name,
+                original_name=self._safe_original_name(original_name),
                 metadata_json=metadata or {},
             )
             session.add(artifact)
@@ -162,17 +264,27 @@ class ArtifactStore:
                 "mjpeg",
                 "pipe:1",
                 stdout=asyncio.subprocess.PIPE,
-                stderr=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.DEVNULL,
+                env=subprocess_environment(),
             )
-            stdout, _stderr = await asyncio.wait_for(process.communicate(), timeout=30)
-        except (OSError, TimeoutError):
+            stdout = await self._bounded_stdout(
+                process,
+                maximum_bytes=_MAX_VIDEO_POSTER_BYTES,
+                timeout_seconds=30,
+            )
+        except asyncio.CancelledError:
+            if "process" in locals() and process.returncode is None:
+                process.kill()
+                await process.wait()
+            raise
+        except (OSError, TimeoutError, ValueError):
             if "process" in locals() and process.returncode is None:
                 process.kill()
                 await process.wait()
             return None
         return stdout if process.returncode == 0 and stdout else None
 
-    async def browser_video_proxy(self, artifact: Artifact) -> tuple[bytes, str, str] | None:
+    async def browser_video_proxy(self, artifact: Artifact) -> StagedArtifactFile | None:
         if artifact.media_type in {"video/mp4", "video/webm"}:
             return None
         executable = shutil.which("ffmpeg")
@@ -181,6 +293,7 @@ class ArtifactStore:
         fd, temporary_name = tempfile.mkstemp(prefix="video-proxy-", suffix=".mp4", dir=self.root)
         os.close(fd)
         temporary = Path(temporary_name)
+        retained = False
         try:
             process = await asyncio.create_subprocess_exec(
                 executable,
@@ -203,24 +316,54 @@ class ArtifactStore:
                 "-movflags",
                 "+faststart",
                 str(temporary),
-                stdout=asyncio.subprocess.PIPE,
-                stderr=asyncio.subprocess.PIPE,
+                stdout=asyncio.subprocess.DEVNULL,
+                stderr=asyncio.subprocess.DEVNULL,
+                env=subprocess_environment(),
             )
-            await asyncio.wait_for(process.communicate(), timeout=600)
+            await asyncio.wait_for(process.wait(), timeout=600)
             if process.returncode or not temporary.is_file() or temporary.stat().st_size == 0:
                 return None
-            return (
-                temporary.read_bytes(),
-                "video/mp4",
-                f"{artifact.original_name or 'video'}.proxy.mp4",
+            retained = True
+            return StagedArtifactFile(
+                path=temporary,
+                media_type="video/mp4",
+                original_name=f"{artifact.original_name or 'video'}.proxy.mp4",
             )
+        except asyncio.CancelledError:
+            if "process" in locals() and process.returncode is None:
+                process.kill()
+                await process.wait()
+            raise
         except (OSError, TimeoutError):
             if "process" in locals() and process.returncode is None:
                 process.kill()
                 await process.wait()
             return None
         finally:
-            temporary.unlink(missing_ok=True)
+            if not retained:
+                temporary.unlink(missing_ok=True)
+
+    @staticmethod
+    async def _bounded_stdout(
+        process: asyncio.subprocess.Process,
+        *,
+        maximum_bytes: int,
+        timeout_seconds: float,
+    ) -> bytes:
+        stdout = process.stdout
+        if stdout is None:
+            raise ValueError("media process did not expose output")
+
+        async def collect() -> bytes:
+            content = bytearray()
+            while chunk := await stdout.read(64 * 1024):
+                content.extend(chunk)
+                if len(content) > maximum_bytes:
+                    raise ValueError("media process output exceeded its configured limit")
+            await process.wait()
+            return bytes(content)
+
+        return await asyncio.wait_for(collect(), timeout=timeout_seconds)
 
     def delete_temporary_preview(self, session: Session, artifact_id: str) -> bool:
         artifact = session.get(Artifact, artifact_id)
@@ -232,15 +375,17 @@ class ArtifactStore:
             )
             or 0
         )
+        references += (
+            session.scalar(
+                select(func.count(ResponseRevisionPart.id)).where(
+                    ResponseRevisionPart.artifact_id == artifact_id
+                )
+            )
+            or 0
+        )
         if references:
             return False
-        path = self.resolve(artifact)
-        session.delete(artifact)
-        session.flush()
-        path.unlink(missing_ok=True)
-        for parent in (path.parent, path.parent.parent):
-            with suppress(OSError):
-                parent.rmdir()
+        self._delete_artifact(session, artifact)
         return True
 
     @staticmethod
@@ -252,6 +397,20 @@ class ArtifactStore:
             )
             if artifact_id
         }
+        referenced.update(
+            artifact_id
+            for artifact_id in session.scalars(
+                select(ResponseRevisionPart.artifact_id).where(
+                    ResponseRevisionPart.artifact_id.is_not(None)
+                )
+            )
+            if artifact_id
+        )
+        # Runs created before input references became message parts stored their
+        # attachments only in provenance. Keep those artifacts live until the
+        # legacy run is deleted or migrated through a project round trip.
+        for provenance in session.scalars(select(Run.provenance_json)):
+            referenced.update(ArtifactStore._provenance_input_ids(provenance))
         if not referenced:
             return referenced
         posters = session.scalars(select(Artifact).where(Artifact.id.in_(referenced))).all()
@@ -271,10 +430,13 @@ class ArtifactStore:
         temporary_hours: int,
         dry_run: bool,
         now: datetime | None = None,
-    ) -> tuple[int, int, int]:
+    ) -> RetentionCleanupSummary:
         current = now or datetime.now(UTC)
+        if not dry_run:
+            self._recover_staged_deletions(session)
         referenced = self.referenced_artifact_ids(session)
         marked_count = 0
+        pending_count = 0
         removed_count = 0
         reclaimed_bytes = 0
         for artifact in session.scalars(select(Artifact).order_by(Artifact.created_at)).all():
@@ -296,14 +458,27 @@ class ArtifactStore:
                 if not dry_run:
                     self._delete_artifact(session, artifact)
                 continue
-            if not temporary and not unreferenced_at:
-                marked_count += 1
-                if not dry_run:
-                    metadata["unreferenced_at"] = current.isoformat()
-                    artifact.metadata_json = metadata
+            if not temporary:
+                pending_count += 1
+                if not unreferenced_at:
+                    marked_count += 1
+                    if not dry_run:
+                        metadata["unreferenced_at"] = current.isoformat()
+                        artifact.metadata_json = metadata
         if not dry_run:
             session.flush()
-        return marked_count, removed_count, reclaimed_bytes
+        orphan_count, orphan_bytes = self._cleanup_orphan_files(
+            session,
+            current=current,
+            temporary_hours=temporary_hours,
+            dry_run=dry_run,
+        )
+        return RetentionCleanupSummary(
+            marked_count=marked_count,
+            pending_count=pending_count,
+            removed_count=removed_count + orphan_count,
+            reclaimed_bytes=reclaimed_bytes + orphan_bytes,
+        )
 
     def delete_library_artifact(
         self,
@@ -321,8 +496,13 @@ class ArtifactStore:
         parts = session.scalars(
             select(MessagePart).where(MessagePart.artifact_id == artifact.id)
         ).all()
+        revision_parts = session.scalars(
+            select(ResponseRevisionPart).where(ResponseRevisionPart.artifact_id == artifact.id)
+        ).all()
         for part in parts:
             part.artifact_id = None
+        for revision_part in revision_parts:
+            revision_part.artifact_id = None
         session.flush()
 
         removed_count = 1
@@ -337,11 +517,15 @@ class ArtifactStore:
             removed_count += 1
             reclaimed_bytes += linked.size_bytes
             self._delete_artifact(session, linked)
+        # Revision parts are internal snapshots of the same user-visible message
+        # reference. Clear them as well, but do not inflate the public reference
+        # count with implementation details.
         return len(parts), removed_count, reclaimed_bytes
 
     def delete_chat_generated_media(self, session: Session, chat_id: str) -> int:
-        artifacts = (
-            session.scalars(
+        artifacts_by_id = {
+            artifact.id: artifact
+            for artifact in session.scalars(
                 select(Artifact)
                 .join(MessagePart, MessagePart.artifact_id == Artifact.id)
                 .join(Message, Message.id == MessagePart.message_id)
@@ -355,16 +539,34 @@ class ArtifactStore:
             )
             .unique()
             .all()
-        )
-
-        external_run_artifact_ids = {
-            artifact_id
-            for provenance in session.scalars(
-                select(Run.provenance_json).where(Run.chat_id != chat_id)
-            )
-            for artifact_id in provenance.get("input_artifact_ids", [])
-            if isinstance(artifact_id, str)
         }
+        revision_artifacts = session.scalars(
+            select(Artifact)
+            .join(
+                ResponseRevisionPart,
+                ResponseRevisionPart.artifact_id == Artifact.id,
+            )
+            .join(
+                ResponseRevision,
+                ResponseRevision.id == ResponseRevisionPart.response_revision_id,
+            )
+            .join(Message, Message.id == ResponseRevision.message_id)
+            .where(
+                Message.chat_id == chat_id,
+                ResponseRevisionPart.type.in_((PartType.IMAGE.value, PartType.VIDEO.value)),
+                Artifact.kind.in_((ArtifactKind.IMAGE.value, ArtifactKind.VIDEO.value)),
+            )
+            .order_by(Artifact.created_at)
+        ).unique()
+        for artifact in revision_artifacts:
+            artifacts_by_id[artifact.id] = artifact
+        artifacts = sorted(artifacts_by_id.values(), key=lambda item: item.created_at)
+
+        external_run_artifact_ids: set[str] = set()
+        for provenance in session.scalars(
+            select(Run.provenance_json).where(Run.chat_id != chat_id)
+        ):
+            external_run_artifact_ids.update(self._provenance_input_ids(provenance))
         removed = 0
         for artifact in artifacts:
             message_references_elsewhere = session.scalar(
@@ -375,7 +577,23 @@ class ArtifactStore:
                     Message.chat_id != chat_id,
                 )
             )
-            if message_references_elsewhere or artifact.id in external_run_artifact_ids:
+            revision_references_elsewhere = session.scalar(
+                select(func.count(ResponseRevisionPart.id))
+                .join(
+                    ResponseRevision,
+                    ResponseRevision.id == ResponseRevisionPart.response_revision_id,
+                )
+                .join(Message, Message.id == ResponseRevision.message_id)
+                .where(
+                    ResponseRevisionPart.artifact_id == artifact.id,
+                    Message.chat_id != chat_id,
+                )
+            )
+            if (
+                message_references_elsewhere
+                or revision_references_elsewhere
+                or artifact.id in external_run_artifact_ids
+            ):
                 continue
             _references, removed_count, _reclaimed_bytes = self.delete_library_artifact(
                 session, artifact
@@ -384,13 +602,266 @@ class ArtifactStore:
         return removed
 
     def _delete_artifact(self, session: Session, artifact: Artifact) -> None:
-        path = self.resolve(artifact)
-        session.delete(artifact)
-        session.flush()
-        path.unlink(missing_ok=True)
+        try:
+            path = self.resolve(artifact)
+        except ValueError:
+            # Invalid metadata must never redirect deletion to another file.
+            session.delete(artifact)
+            session.flush()
+            return
+        staged: Path | None = None
+        if path.exists():
+            trash = self.root / ".delete-pending"
+            if self._is_link(trash):
+                raise ValueError("artifact deletion staging uses a filesystem link")
+            trash.mkdir(parents=True, exist_ok=True)
+            if not trash.is_dir() or trash.resolve().parent != self.root:
+                raise ValueError("artifact deletion staging escapes the store")
+            staged = trash / f"{artifact.sha256}.{uuid.uuid4().hex}"
+            os.replace(path, staged)
+            self._verified_files.pop(path, None)
+        try:
+            session.delete(artifact)
+            session.flush()
+        except Exception:
+            if staged is not None:
+                self._restore_staged_file(staged, path)
+            raise
+        if staged is not None:
+            self._register_staged_deletion(session, staged, path)
+
+    def _register_staged_deletion(
+        self,
+        session: Session,
+        staged: Path,
+        original: Path,
+    ) -> None:
+        def finalize(_session: Session) -> None:
+            with suppress(OSError):
+                staged.unlink(missing_ok=True)
+            self._prune_empty_parents(original)
+            with suppress(OSError):
+                staged.parent.rmdir()
+
+        def restore(_session: Session) -> None:
+            self._restore_staged_file(staged, original)
+
+        event.listen(session, "after_commit", finalize, once=True)
+        event.listen(session, "after_rollback", restore, once=True)
+
+    def _restore_staged_file(self, staged: Path, original: Path) -> None:
+        if not staged.exists():
+            return
+        original.parent.mkdir(parents=True, exist_ok=True)
+        if original.exists():
+            staged.unlink(missing_ok=True)
+        else:
+            os.replace(staged, original)
+            self._remember_verified(original)
+
+    def _recover_staged_deletions(self, session: Session) -> None:
+        trash = self.root / ".delete-pending"
+        if not trash.is_dir() or self._is_link(trash):
+            return
+        artifacts_by_sha = {
+            artifact.sha256: artifact for artifact in session.scalars(select(Artifact)).all()
+        }
+        for staged in trash.iterdir():
+            match = _STAGED_DELETION.fullmatch(staged.name)
+            if not match or (not staged.is_file() and not staged.is_symlink()):
+                continue
+            if self._is_link(staged):
+                staged.unlink(missing_ok=True)
+                continue
+            artifact = artifacts_by_sha.get(match.group("digest"))
+            if artifact is None:
+                staged.unlink(missing_ok=True)
+                continue
+            try:
+                original = self.resolve(artifact)
+            except ValueError:
+                continue
+            self._restore_staged_file(staged, original)
+        with suppress(OSError):
+            trash.rmdir()
+
+    def _cleanup_orphan_files(
+        self,
+        session: Session,
+        *,
+        current: datetime,
+        temporary_hours: int,
+        dry_run: bool,
+    ) -> tuple[int, int]:
+        indexed = {artifact.relative_path for artifact in session.scalars(select(Artifact)).all()}
+        removed_count = 0
+        reclaimed_bytes = 0
+        cutoff = current - timedelta(hours=temporary_hours)
+        for temporary in self.root.iterdir():
+            if (
+                not temporary.is_file()
+                or self._is_link(temporary)
+                or not (
+                    temporary.name.startswith("ingest-")
+                    or (temporary.name.startswith("video-proxy-") and temporary.suffix == ".mp4")
+                )
+            ):
+                continue
+            stat_result = temporary.stat()
+            modified = datetime.fromtimestamp(stat_result.st_mtime, UTC)
+            if modified > cutoff:
+                continue
+            removed_count += 1
+            reclaimed_bytes += stat_result.st_size
+            if not dry_run:
+                temporary.unlink(missing_ok=True)
+        for first in self.root.iterdir():
+            if (
+                not re.fullmatch(r"[0-9a-f]{2}", first.name)
+                or not first.is_dir()
+                or self._is_link(first)
+            ):
+                continue
+            for second in first.iterdir():
+                if (
+                    not re.fullmatch(r"[0-9a-f]{2}", second.name)
+                    or not second.is_dir()
+                    or self._is_link(second)
+                ):
+                    continue
+                for path in second.iterdir():
+                    is_restore_partial = bool(
+                        re.fullmatch(
+                            r"(?:[0-9a-f]{64}|\.[0-9a-f]{64}\.[^.]+)\.restore-partial",
+                            path.name,
+                        )
+                    )
+                    if is_restore_partial and path.is_file() and not self._is_link(path):
+                        stat_result = path.stat()
+                        modified = datetime.fromtimestamp(stat_result.st_mtime, UTC)
+                        if modified <= cutoff:
+                            removed_count += 1
+                            reclaimed_bytes += stat_result.st_size
+                            if not dry_run:
+                                path.unlink(missing_ok=True)
+                                self._prune_empty_parents(path)
+                        continue
+                    if (
+                        not _SHA256.fullmatch(path.name)
+                        or path.name[:2] != first.name
+                        or path.name[2:4] != second.name
+                        or self._is_link(path)
+                        or not path.is_file()
+                    ):
+                        continue
+                    if path.relative_to(self.root).as_posix() in indexed:
+                        continue
+                    stat_result = path.stat()
+                    modified = datetime.fromtimestamp(stat_result.st_mtime, UTC)
+                    if modified > cutoff:
+                        continue
+                    removed_count += 1
+                    reclaimed_bytes += stat_result.st_size
+                    if not dry_run:
+                        path.unlink(missing_ok=True)
+                        self._prune_empty_parents(path)
+        return removed_count, reclaimed_bytes
+
+    @staticmethod
+    def _safe_original_name(value: str | None) -> str | None:
+        if not value:
+            return None
+        basename = value.replace("\\", "/").rsplit("/", 1)[-1]
+        basename = "".join(character for character in basename if character.isprintable()).strip()
+        if basename in {"", ".", ".."}:
+            return None
+        return basename[:500]
+
+    @staticmethod
+    def _safe_media_type(value: str | None) -> str:
+        normalized = (value or "").split(";", 1)[0].strip().lower()
+        if len(normalized) <= 120 and re.fullmatch(
+            r"[a-z0-9!#$&^_.+-]+/[a-z0-9!#$&^_.+-]+",
+            normalized,
+        ):
+            return normalized
+        return "application/octet-stream"
+
+    @staticmethod
+    def _is_link(path: Path) -> bool:
+        try:
+            return path.is_symlink() or (hasattr(path, "is_junction") and path.is_junction())
+        except OSError:
+            return True
+
+    @staticmethod
+    def _matches_file(path: Path, digest_value: str, size: int) -> bool:
+        try:
+            if not path.is_file() or path.stat().st_size != size:
+                return False
+            digest = hashlib.sha256()
+            with path.open("rb") as source:
+                while chunk := source.read(1024 * 1024):
+                    digest.update(chunk)
+            return digest.hexdigest() == digest_value
+        except OSError:
+            return False
+
+    def _remember_verified(self, path: Path) -> None:
+        stat_result = path.stat()
+        self._verified_files[path] = (stat_result.st_size, stat_result.st_mtime_ns)
+
+    def _prune_empty_parents(self, path: Path) -> None:
         for parent in (path.parent, path.parent.parent):
             with suppress(OSError):
                 parent.rmdir()
+
+    @staticmethod
+    def _detect_media_type(path: Path) -> str | None:
+        with path.open("rb") as source:
+            header = source.read(4096)
+        stripped = header.lstrip(b"\xef\xbb\xbf \t\r\n")
+        if header.startswith(b"\x89PNG\r\n\x1a\n"):
+            return "image/png"
+        if header.startswith(b"\xff\xd8\xff"):
+            return "image/jpeg"
+        if header.startswith((b"GIF87a", b"GIF89a")):
+            return "image/gif"
+        if header.startswith(b"RIFF") and header[8:12] == b"WEBP":
+            return "image/webp"
+        if header.startswith(b"BM"):
+            return "image/bmp"
+        if header.startswith((b"II*\x00", b"MM\x00*")):
+            return "image/tiff"
+        if stripped.startswith(b"<svg") or (
+            stripped.startswith(b"<?xml") and b"<svg" in stripped[:2048]
+        ):
+            return "image/svg+xml"
+        if len(header) >= 12 and header[4:8] == b"ftyp":
+            brand = header[8:12]
+            if brand in {b"avif", b"avis"}:
+                return "image/avif"
+            if brand in {b"heic", b"heix", b"hevc", b"hevx", b"mif1", b"msf1"}:
+                return "image/heic"
+            if brand == b"qt  ":
+                return "video/quicktime"
+            return "video/mp4"
+        if header.startswith(b"\x1aE\xdf\xa3"):
+            return "video/webm"
+        if header.startswith(b"RIFF") and header[8:12] == b"AVI ":
+            return "video/x-msvideo"
+        if header.startswith((b"\x00\x00\x01\xba", b"\x00\x00\x01\xb3")):
+            return "video/mpeg"
+        return None
+
+    @staticmethod
+    def _provenance_input_ids(provenance: object) -> set[str]:
+        if not isinstance(provenance, dict):
+            return set()
+        artifact_ids = provenance.get("input_artifact_ids")
+        if not isinstance(artifact_ids, list):
+            return set()
+        return {artifact_id for artifact_id in artifact_ids if isinstance(artifact_id, str)}
 
     @staticmethod
     def _aware(value: datetime) -> datetime:

@@ -38,14 +38,20 @@ class CredentialStore:
     def state(self) -> CredentialState:
         if self.environment_token:
             return CredentialState(
-                configured=True, source="environment", vault_available=self._available()
+                configured=True,
+                source="environment",
+                vault_available=self.vault_available(),
             )
         value = self.token()
         return CredentialState(
             configured=bool(value),
             source="credential_vault" if value else "none",
-            vault_available=self._available(),
+            vault_available=self.vault_available(),
         )
+
+    def vault_available(self) -> bool:
+        """Report whether an OS credential backend is usable without reading a secret."""
+        return self._available()
 
     def set_token(self, token: str) -> None:
         if self.environment_token:

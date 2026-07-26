@@ -6,9 +6,9 @@ import json
 import os
 import re
 from datetime import UTC, datetime, timedelta
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from typing import Any, cast
-from urllib.parse import urlparse
+from urllib.parse import quote, urlparse
 
 import httpx
 
@@ -26,6 +26,7 @@ SORTS = {
 
 _QUANTIZATION = re.compile(r"^(?:q\d(?:_[a-z0-9]+)*|i?q\d(?:_[a-z0-9]+)*|fp\d+|bf16)$", re.I)
 _PARAMETERS = re.compile(r"(?:^|[-_ ])(\d+(?:\.\d+)?)\s*([bmk])(?:$|[-_ ])", re.I)
+_REMOTE_ID = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]*/[A-Za-z0-9][A-Za-z0-9_.-]*$")
 _CACHE_VERSION = 3
 
 
@@ -104,7 +105,12 @@ class HuggingFaceCatalog:
             response = await self._client.get(url, params=None if cursor else params)
             response.raise_for_status()
             payload = response.json()
-            raw_items = [item for item in payload if isinstance(item, dict)]
+            raw_items = [
+                item
+                for item in payload
+                if isinstance(item, dict)
+                and self._valid_remote_id(str(item.get("id") or item.get("modelId") or ""))
+            ]
             if max_size_bytes is not None:
                 raw_items = await self._hydrate_file_sizes(raw_items, role)
             items = [self._normalize(item, role) for item in raw_items]
@@ -179,6 +185,8 @@ class HuggingFaceCatalog:
     async def inspect(
         self, remote_id: str, revision: str = "main", requested_role: str | None = None
     ) -> dict[str, Any]:
+        if not self._valid_remote_id(remote_id):
+            raise ValueError("remote_id must be in owner/model form")
         cache = self._cache_path("detail", remote_id, revision, requested_role)
         try:
             response = await self._client.get(
@@ -212,6 +220,58 @@ class HuggingFaceCatalog:
             "files": siblings,
         }
         self._write_cache(cache, json.dumps(result, default=str))
+        return result
+
+    async def inspect_file_prefix(
+        self,
+        remote_id: str,
+        revision: str,
+        filename: str,
+        *,
+        max_bytes: int,
+    ) -> bytes:
+        """Fetch and cache a bounded immutable file prefix for static inspection."""
+
+        if not self._valid_remote_id(remote_id):
+            raise ValueError("remote_id must be in owner/model form")
+        if max_bytes < 1 or max_bytes > 16 * 1024 * 1024 + 8:
+            raise ValueError("metadata prefix size is outside the supported bounds")
+        path = PurePosixPath(filename.replace("\\", "/"))
+        if (
+            not filename
+            or len(filename) > 1_000
+            or path.is_absolute()
+            or any(part in {"", ".", ".."} or ":" in part for part in path.parts)
+        ):
+            raise ValueError("metadata filename must be a safe relative path")
+        if not revision or len(revision) > 200 or any(character < " " for character in revision):
+            raise ValueError("metadata revision is invalid")
+        cache = self._binary_cache_path(
+            "file-prefix",
+            remote_id,
+            revision,
+            path.as_posix(),
+            max_bytes,
+        )
+        if cache.is_file():
+            content = cache.read_bytes()
+            if len(content) <= max_bytes:
+                return content
+        encoded_path = "/".join(quote(part, safe="") for part in path.parts)
+        encoded_revision = quote(revision, safe="")
+        content_buffer = bytearray()
+        async with self._client.stream(
+            "GET",
+            f"/{remote_id}/resolve/{encoded_revision}/{encoded_path}",
+            headers={"range": f"bytes=0-{max_bytes - 1}"},
+        ) as response:
+            response.raise_for_status()
+            async for chunk in response.aiter_bytes():
+                content_buffer.extend(chunk)
+                if len(content_buffer) > max_bytes:
+                    raise ValueError("model metadata exceeds the inspection limit")
+        result = bytes(content_buffer)
+        self._write_binary_cache(cache, result)
         return result
 
     async def close(self) -> None:
@@ -256,11 +316,21 @@ class HuggingFaceCatalog:
         ).hexdigest()
         return self._cache_dir / f"{key}.json"
 
+    def _binary_cache_path(self, *parts: object) -> Path:
+        return self._cache_path(*parts).with_suffix(".bin")
+
     @staticmethod
     def _write_cache(path: Path, content: str) -> None:
         path.parent.mkdir(parents=True, exist_ok=True)
         temporary = path.with_suffix(".partial")
         temporary.write_text(content, encoding="utf-8")
+        os.replace(temporary, path)
+
+    @staticmethod
+    def _write_binary_cache(path: Path, content: bytes) -> None:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        temporary = path.with_suffix(".partial")
+        temporary.write_bytes(content)
         os.replace(temporary, path)
 
     @staticmethod
@@ -301,6 +371,10 @@ class HuggingFaceCatalog:
         if parsed.path != "/api/models":
             raise ValueError("catalog cursor path is invalid")
         return cursor
+
+    @staticmethod
+    def _valid_remote_id(remote_id: str) -> bool:
+        return bool(_REMOTE_ID.fullmatch(remote_id))
 
     @staticmethod
     def _filter_items(
@@ -467,4 +541,14 @@ class HuggingFaceCatalog:
             if pipeline_tag in {"text-to-video", "image-to-video"}:
                 return CompatibilityLevel.ADVANCED, ["video pipeline requires a verified workflow"]
             return CompatibilityLevel.ADVANCED, ["requires a verified ComfyUI recipe"]
+        if requested_role == "lora":
+            has_safetensors = any(name.endswith(".safetensors") for name in lower_files)
+            has_lora_marker = (
+                any("lora" in name for name in lower_files)
+                or "lora" in lower_tags
+                or "adapter" in lower_tags
+            )
+            if has_safetensors and has_lora_marker and not unsafe_note:
+                return CompatibilityLevel.LIKELY, ["data-only LoRA candidate"]
+            return CompatibilityLevel.ADVANCED, ["requires safetensors LoRA verification"]
         return CompatibilityLevel.ADVANCED, ["select a model role for compatibility guidance"]

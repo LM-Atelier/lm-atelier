@@ -1,19 +1,36 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import json
+import struct
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
 
 import pytest
 
+from local_lm.adapters.base import ChatEvent, ChatRequest, MediaRequest
 from local_lm.config import Settings
 from local_lm.db import SessionLocal, configure_database, init_db
 from local_lm.domain import JobKind, JobStatus
 from local_lm.downloads import DownloadManager
 from local_lm.events import EventBroker
-from local_lm.models import Job
+from local_lm.model_manifests import inspect_repository_metadata
+from local_lm.model_planner import (
+    media_workflow_contract_version,
+    persist_install_plan,
+    resolve_install_plan,
+)
+from local_lm.models import (
+    Job,
+    ModelAssetInstall,
+    ModelCapabilityEvidence,
+    ModelComponentManifest,
+    ModelInstall,
+    ModelProfile,
+)
+from local_lm.scheduler import ResourceScheduler
 from local_lm.schemas import DownloadRequest
 
 
@@ -21,6 +38,7 @@ class FakeWorker:
     def __init__(self) -> None:
         self.returncode: int | None = None
         self.terminated = False
+        self.pid = 123
 
     def terminate(self) -> None:
         self.terminated = True
@@ -43,6 +61,533 @@ class FakeCompletedWorker(FakeWorker):
         self.payload = payload
         self.returncode = 0
         return json.dumps({"path": "C:/models/model.gguf"}).encode(), b""
+
+
+class FakeBatchCompletedWorker(FakeCompletedWorker):
+    def communicate(self, payload: bytes) -> tuple[bytes, bytes]:
+        self.payload = payload
+        self.returncode = 0
+        request = json.loads(payload)
+        return (
+            json.dumps(
+                {"paths": {filename: f"C:/models/{filename}" for filename in request["files"]}}
+            ).encode(),
+            b"",
+        )
+
+
+class FakeProbeAdapter:
+    def __init__(self) -> None:
+        self.request: MediaRequest | None = None
+        self.timeout_seconds: float | None = None
+
+    async def probe_workflow(
+        self,
+        request: MediaRequest,
+        *,
+        timeout_seconds: float,
+    ) -> None:
+        self.request = request
+        self.timeout_seconds = timeout_seconds
+
+
+def gguf_bytes(architecture: str) -> bytes:
+    key = b"general.architecture"
+    value = architecture.encode()
+    return (
+        b"GGUF"
+        + struct.pack("<IQQ", 3, 1, 1)
+        + struct.pack("<Q", len(key))
+        + key
+        + struct.pack("<I", 8)
+        + struct.pack("<Q", len(value))
+        + value
+    )
+
+
+def safetensors_bytes(
+    tensor_names: list[str],
+    metadata: dict[str, str] | None = None,
+) -> bytes:
+    header = {
+        **{
+            name: {
+                "dtype": "F16",
+                "shape": [1],
+                "data_offsets": [index * 2, index * 2 + 2],
+            }
+            for index, name in enumerate(tensor_names)
+        },
+        "__metadata__": metadata or {},
+    }
+    encoded = json.dumps(header, separators=(",", ":")).encode()
+    return len(encoded).to_bytes(8, "little") + encoded
+
+
+async def test_planned_chat_activation_requires_completion_and_records_evidence(
+    settings: Settings,
+) -> None:
+    settings.prepare()
+    configure_database(settings)
+    init_db()
+
+    class FakeChatAdapter:
+        async def capabilities(self) -> object:
+            return SimpleNamespace(
+                healthy=True,
+                version="llama-test",
+                input_modalities=["text", "image"],
+            )
+
+        async def count_tokens(self, _messages: list[dict[str, Any]]) -> int:
+            return 4
+
+        async def stream(self, request: ChatRequest):  # type: ignore[no-untyped-def]
+            assert request.settings["max_tokens"] == 8
+            content = request.messages[0]["content"]
+            assert isinstance(content, list)
+            assert content[1]["type"] == "image_url"
+            yield ChatEvent(type="token", text="OK")
+            yield ChatEvent(type="complete")
+
+    class FakeProcesses:
+        def __init__(self) -> None:
+            self.loaded: list[str] = []
+            self.stopped: list[str] = []
+
+        def statuses(self) -> list[object]:
+            return [
+                SimpleNamespace(
+                    name="chat",
+                    running=False,
+                    profile_id=None,
+                )
+            ]
+
+        async def load_chat(
+            self,
+            profile: ModelProfile,
+            _install: ModelInstall,
+        ) -> None:
+            self.loaded.append(profile.id)
+
+        async def stop(self, name: str) -> None:
+            self.stopped.append(name)
+
+    processes = FakeProcesses()
+    manager = DownloadManager(
+        settings,
+        EventBroker(),
+        chat_adapter=FakeChatAdapter(),  # type: ignore[arg-type]
+        processes=processes,  # type: ignore[arg-type]
+    )
+    with SessionLocal() as session:
+        install = ModelInstall(
+            id="model_planned_chat",
+            name="Planned chat",
+            role="chat",
+            engine="llama.cpp",
+            local_path=str(settings.model_dir / "planned-chat"),
+            manifest_json={"files": ["model.gguf", "mmproj-model.gguf"]},
+            active=False,
+        )
+        profile = ModelProfile(
+            id="profile_planned_chat",
+            model_install_id=install.id,
+            name="Planned chat",
+            role="chat",
+            engine="llama.cpp",
+        )
+        session.add_all(
+            [
+                install,
+                profile,
+                Job(
+                    id="job_planned_chat",
+                    kind=JobKind.DOWNLOAD.value,
+                    status=JobStatus.RUNNING.value,
+                ),
+            ]
+        )
+        session.commit()
+
+    result = await manager._activate_chat_install(
+        job_id="job_planned_chat",
+        install_id="model_planned_chat",
+        default_settings={},
+        component_hashes={"model.gguf": "a" * 64},
+    )
+
+    assert result == "profile_planned_chat"
+    assert len(processes.loaded) == 1
+    assert processes.stopped == ["chat"]
+    with SessionLocal() as session:
+        assert session.get(ModelInstall, "model_planned_chat").active is True  # type: ignore[union-attr]
+        evidence = session.query(ModelCapabilityEvidence).one()
+        assert evidence.result == "ready"
+        assert evidence.runtime_build == "llama-test"
+        assert evidence.details_json["input_modalities"] == ["text", "image"]
+        assert evidence.details_json["projector_expected"] is True
+        assert evidence.details_json["vision_probe"] == "bounded_image_completion"
+
+
+async def test_failed_chat_probe_restores_the_previous_profile(
+    settings: Settings,
+) -> None:
+    settings.prepare()
+    configure_database(settings)
+    init_db()
+
+    class FailingChatAdapter:
+        async def capabilities(self) -> object:
+            return SimpleNamespace(
+                healthy=True,
+                version="llama-test",
+                input_modalities=["text"],
+            )
+
+        async def count_tokens(self, _messages: list[dict[str, Any]]) -> int:
+            return 4
+
+        async def stream(self, _request: ChatRequest):  # type: ignore[no-untyped-def]
+            raise RuntimeError("probe completion failed")
+            yield ChatEvent(type="complete")
+
+    class RestoringProcesses:
+        def __init__(self) -> None:
+            self.loaded: list[str] = []
+
+        def statuses(self) -> list[object]:
+            return [
+                SimpleNamespace(
+                    name="chat",
+                    running=True,
+                    profile_id="profile_previous",
+                )
+            ]
+
+        async def load_chat(
+            self,
+            profile: ModelProfile,
+            _install: ModelInstall,
+        ) -> None:
+            self.loaded.append(profile.id)
+
+        async def stop(self, _name: str) -> None:
+            raise AssertionError("a working prior profile should be restored")
+
+    processes = RestoringProcesses()
+    manager = DownloadManager(
+        settings,
+        EventBroker(),
+        chat_adapter=FailingChatAdapter(),  # type: ignore[arg-type]
+        processes=processes,  # type: ignore[arg-type]
+    )
+    with SessionLocal() as session:
+        previous = ModelInstall(
+            id="model_previous",
+            name="Previous",
+            role="chat",
+            engine="llama.cpp",
+            local_path=str(settings.model_dir / "previous"),
+            manifest_json={"files": ["previous.gguf"]},
+            active=True,
+        )
+        candidate = ModelInstall(
+            id="model_candidate",
+            name="Candidate",
+            role="chat",
+            engine="llama.cpp",
+            local_path=str(settings.model_dir / "candidate"),
+            manifest_json={"files": ["candidate.gguf"]},
+            active=False,
+        )
+        session.add_all(
+            [
+                previous,
+                candidate,
+                ModelProfile(
+                    id="profile_previous",
+                    model_install_id=previous.id,
+                    name="Previous",
+                    role="chat",
+                    engine="llama.cpp",
+                ),
+                Job(
+                    id="job_candidate",
+                    kind=JobKind.DOWNLOAD.value,
+                    status=JobStatus.RUNNING.value,
+                ),
+            ]
+        )
+        session.commit()
+
+    with pytest.raises(RuntimeError, match="probe completion failed"):
+        await manager._activate_chat_install(
+            job_id="job_candidate",
+            install_id="model_candidate",
+            default_settings={},
+            component_hashes={"candidate.gguf": "b" * 64},
+        )
+
+    assert len(processes.loaded) == 2
+    assert processes.loaded[-1] == "profile_previous"
+    with SessionLocal() as session:
+        assert session.get(ModelInstall, "model_candidate").active is False  # type: ignore[union-attr]
+        assert session.query(ModelCapabilityEvidence).count() == 0
+
+
+async def test_unknown_gguf_plan_installs_and_activates_with_one_request(
+    settings: Settings,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    settings.prepare()
+    configure_database(settings)
+    init_db()
+    content = gguf_bytes("future_architecture")
+    digest = hashlib.sha256(content).hexdigest()
+    inspection = inspect_repository_metadata(
+        {"weights.bin.gguf": content},
+        ["weights.bin.gguf"],
+        role="chat",
+    )
+    resolved = resolve_install_plan(
+        remote_id="synthetic/future-chat",
+        revision="c" * 40,
+        role="chat",
+        engine="llama.cpp",
+        selected_files=[
+            {
+                "filename": "weights.bin.gguf",
+                "size": len(content),
+                "sha256": digest,
+            }
+        ],
+        inspection=inspection,
+    )
+    with SessionLocal() as session:
+        plan = persist_install_plan(session, resolved)
+        session.commit()
+        request = DownloadRequest(
+            install_plan_id=plan.id,
+            remote_id=plan.remote_id,
+            revision=plan.revision,
+            role=plan.role,  # type: ignore[arg-type]
+            engine=plan.engine,
+            allow_patterns=["weights.bin.gguf"],
+            expected_sha256={"weights.bin.gguf": digest},
+        )
+        job = Job(
+            id="job_future_chat",
+            kind=JobKind.DOWNLOAD.value,
+            status=JobStatus.QUEUED.value,
+            payload_json=request.model_dump(mode="json"),
+        )
+        session.add(job)
+        session.commit()
+
+    class ChatAdapter:
+        async def capabilities(self) -> object:
+            return SimpleNamespace(
+                healthy=True,
+                version="llama-future",
+                input_modalities=["text"],
+            )
+
+        async def count_tokens(self, _messages: list[dict[str, Any]]) -> int:
+            return 3
+
+        async def stream(self, _request: ChatRequest):  # type: ignore[no-untyped-def]
+            yield ChatEvent(type="token", text="OK")
+            yield ChatEvent(type="complete")
+
+    class Processes:
+        runtimes = None
+
+        def statuses(self) -> list[object]:
+            return [SimpleNamespace(name="chat", running=False, profile_id=None)]
+
+        async def load_chat(
+            self,
+            _profile: ModelProfile,
+            _install: ModelInstall,
+        ) -> None:
+            return None
+
+        async def stop(self, _name: str) -> None:
+            return None
+
+    manager = DownloadManager(
+        settings,
+        EventBroker(),
+        chat_adapter=ChatAdapter(),  # type: ignore[arg-type]
+        processes=Processes(),  # type: ignore[arg-type]
+    )
+    manager._api = SimpleNamespace(
+        model_info=lambda *_args, **_kwargs: SimpleNamespace(
+            siblings=[
+                SimpleNamespace(
+                    rfilename="weights.bin.gguf",
+                    size=len(content),
+                    lfs={"sha256": digest},
+                )
+            ],
+            sha="c" * 40,
+            pipeline_tag="text-generation",
+            tags=["gguf"],
+            gated=False,
+        )
+    )  # type: ignore[assignment]
+
+    async def download_file(**kwargs: Any) -> str:
+        target = kwargs["staging"] / kwargs["filename"]
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_bytes(content)
+        return str(target)
+
+    monkeypatch.setattr(manager, "_download_file", download_file)
+    await manager._download("job_future_chat")
+
+    with SessionLocal() as session:
+        completed = session.get(Job, "job_future_chat")
+        installs = session.query(ModelInstall).all()
+        assert completed
+        assert completed.status == JobStatus.COMPLETE.value, completed.error
+        assert len(installs) == 1
+        assert installs[0].active is True
+        assert session.query(ModelProfile).count() == 1
+        assert session.query(ModelComponentManifest).count() == 1
+        assert session.query(ModelCapabilityEvidence).count() == 1
+
+
+async def test_lora_plan_installs_as_a_verified_auxiliary_asset(
+    settings: Settings,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    settings.prepare()
+    configure_database(settings)
+    init_db()
+    content = safetensors_bytes(
+        ["lora_unet_block.lora_down.weight"],
+        {
+            "ss_network_module": "networks.lora",
+            "ss_network_dim": "8",
+            "modelspec.trigger_phrase": "atelier ink",
+        },
+    )
+    digest = hashlib.sha256(content).hexdigest()
+    inspection = inspect_repository_metadata(
+        {"adapter.safetensors": content},
+        ["adapter.safetensors"],
+        role="image",
+    )
+    resolved = resolve_install_plan(
+        remote_id="synthetic/atelier-lora",
+        revision="d" * 40,
+        role="image",
+        engine="comfyui",
+        selected_files=[
+            {
+                "filename": "adapter.safetensors",
+                "size": len(content),
+                "sha256": digest,
+            }
+        ],
+        inspection=inspection,
+        comfy_paths={"loras": "."},
+        auxiliary_kind="lora",
+    )
+    with SessionLocal() as session:
+        plan = persist_install_plan(session, resolved)
+        session.commit()
+        request = DownloadRequest(
+            install_plan_id=plan.id,
+            remote_id=plan.remote_id,
+            revision=plan.revision,
+            role="image",
+            engine=plan.engine,
+            allow_patterns=["adapter.safetensors"],
+            expected_sha256={"adapter.safetensors": digest},
+            comfy_paths={"loras": "."},
+            auxiliary_kind="lora",
+        )
+        session.add(
+            Job(
+                id="job_atelier_lora",
+                kind=JobKind.DOWNLOAD.value,
+                status=JobStatus.QUEUED.value,
+                payload_json=request.model_dump(mode="json"),
+            )
+        )
+        session.commit()
+
+    class Processes:
+        def __init__(self) -> None:
+            self.started: list[tuple[Path, dict[str, str]]] = []
+            self.stopped: list[str] = []
+
+        def statuses(self) -> list[object]:
+            return [SimpleNamespace(name="media", running=False, profile_id=None)]
+
+        async def start_media(self, model_root: tuple[Path, dict[str, str]]) -> None:
+            self.started.append(model_root)
+
+        async def stop(self, name: str) -> None:
+            self.stopped.append(name)
+
+    class MediaAdapter:
+        def invalidate_object_info_cache(self) -> None:
+            return None
+
+        async def object_info(self) -> dict[str, object]:
+            return {"LoraLoader": {}}
+
+    processes = Processes()
+    manager = DownloadManager(
+        settings,
+        EventBroker(),
+        scheduler=ResourceScheduler(),
+        media_adapter=MediaAdapter(),  # type: ignore[arg-type]
+        processes=processes,  # type: ignore[arg-type]
+    )
+    manager._api = SimpleNamespace(
+        model_info=lambda *_args, **_kwargs: SimpleNamespace(
+            siblings=[
+                SimpleNamespace(
+                    rfilename="adapter.safetensors",
+                    size=len(content),
+                    lfs={"sha256": digest},
+                )
+            ],
+            sha="d" * 40,
+            pipeline_tag=None,
+            tags=["lora"],
+            gated=False,
+        )
+    )  # type: ignore[assignment]
+
+    async def download_file(**kwargs: Any) -> str:
+        target = kwargs["staging"] / kwargs["filename"]
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_bytes(content)
+        return str(target)
+
+    monkeypatch.setattr(manager, "_download_file", download_file)
+    await manager._download("job_atelier_lora")
+
+    with SessionLocal() as session:
+        job = session.get(Job, "job_atelier_lora")
+        asset = session.query(ModelAssetInstall).one()
+        stored_plan = session.get(type(plan), plan.id)
+        assert job and job.status == JobStatus.COMPLETE.value
+        assert asset.active is True
+        assert asset.verified_at is not None
+        assert asset.kind == "lora"
+        assert asset.manifest_json["sha256"] == digest
+        assert asset.manifest_json["comfy_name"] == "adapter.safetensors"
+        assert stored_plan and stored_plan.status == "activated"
+    assert processes.started[0][1] == {"loras": "."}
+    assert processes.stopped == ["media"]
 
 
 def test_duplicate_active_download_requests_reuse_the_existing_job(
@@ -90,6 +635,40 @@ def test_managed_model_directory_is_short_and_stable() -> None:
     assert len(first) == 24
 
 
+@pytest.mark.parametrize(
+    "filename",
+    ["../model.gguf", "/model.gguf", "C:/model.gguf", "folder\\model.gguf", ""],
+)
+def test_download_staging_rejects_unsafe_relative_filenames(filename: str) -> None:
+    assert DownloadManager._safe_relative_filename(filename) is False
+
+
+def test_staged_model_family_must_match_the_immutable_plan() -> None:
+    inspection = inspect_repository_metadata(
+        {"model.gguf": gguf_bytes("llama")},
+        ["model.gguf"],
+        role="chat",
+    )
+    plan = SimpleNamespace(
+        family="qwen",
+        artifacts_json=[
+            {
+                "path": "model.gguf",
+                "kind": "gguf_model",
+                "target_folder": "models",
+                "required": True,
+            }
+        ],
+    )
+
+    with pytest.raises(ValueError, match="family"):
+        DownloadManager._validate_staged_plan(  # type: ignore[arg-type]
+            plan,
+            inspection,
+            {"model.gguf": "a" * 64},
+        )
+
+
 async def test_stop_task_terminates_transfer_process_before_controller(
     settings: Settings,
 ) -> None:
@@ -119,12 +698,17 @@ async def test_download_worker_receives_token_over_stdin_not_command_line(
     manager = DownloadManager(settings, EventBroker())
     manager.settings.hf_token = "secret-token"
     workers: list[FakeCompletedWorker] = []
+    environments: list[dict[str, str]] = []
 
-    def fake_popen(command: list[str], **_kwargs: Any) -> FakeCompletedWorker:
+    def fake_popen(command: list[str], **kwargs: Any) -> FakeCompletedWorker:
         worker = FakeCompletedWorker(command)
         workers.append(worker)
+        environments.append(kwargs["env"])
         return worker
 
+    monkeypatch.setenv("LOCAL_LM_HF_TOKEN", "inherited-token")
+    monkeypatch.setenv("GITHUB_TOKEN", "inherited-github-token")
+    monkeypatch.setenv("AWS_SECRET_ACCESS_KEY", "inherited-cloud-token")
     monkeypatch.setattr("local_lm.downloads.subprocess.Popen", fake_popen)
     path = await manager._download_file(
         job_id="job_test",
@@ -138,7 +722,46 @@ async def test_download_worker_receives_token_over_stdin_not_command_line(
     assert workers[0].command[-2:] == ["-m", "local_lm.download_worker"]
     assert "secret-token" not in " ".join(workers[0].command)
     assert json.loads(workers[0].payload)["token"] == "secret-token"
+    assert environments[0]["HF_HUB_DISABLE_PROGRESS_BARS"] == "1"
+    assert "LOCAL_LM_HF_TOKEN" not in environments[0]
+    assert "GITHUB_TOKEN" not in environments[0]
+    assert "AWS_SECRET_ACCESS_KEY" not in environments[0]
     assert "job_test" not in manager._workers
+
+
+async def test_planned_components_use_one_bounded_parallel_worker(
+    settings: Settings,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    manager = DownloadManager(settings, EventBroker())
+    workers: list[FakeBatchCompletedWorker] = []
+
+    def fake_popen(command: list[str], **_kwargs: Any) -> FakeBatchCompletedWorker:
+        worker = FakeBatchCompletedWorker(command)
+        workers.append(worker)
+        return worker
+
+    monkeypatch.setattr("local_lm.downloads.subprocess.Popen", fake_popen)
+    paths = await manager._download_files_parallel(
+        job_id="job_batch",
+        remote_id="owner/model",
+        filenames=["model.gguf", "mmproj.gguf"],
+        revision="a" * 40,
+        staging=Path("C:/staging"),
+        completed_bytes=0,
+        total_size=None,
+        batch_size=20,
+        bytes_reused=0,
+    )
+
+    payload = json.loads(workers[0].payload)
+    assert payload["files"] == ["model.gguf", "mmproj.gguf"]
+    assert payload["max_workers"] == 2
+    assert paths == {
+        "model.gguf": "C:/models/model.gguf",
+        "mmproj.gguf": "C:/models/mmproj.gguf",
+    }
+    assert "job_batch" not in manager._workers
 
 
 async def test_download_file_retries_transient_worker_failures(
@@ -173,6 +796,65 @@ async def test_download_file_retries_transient_worker_failures(
     assert path == "C:/models/model.gguf"
     assert attempts == 3
     assert sleeps == [1, 2]
+
+
+async def test_verified_installed_component_is_reused_without_network_transfer(
+    settings: Settings,
+) -> None:
+    settings.prepare()
+    configure_database(settings)
+    init_db()
+    manager = DownloadManager(settings, EventBroker())
+    content = b"verified reusable model bytes"
+    digest = hashlib.sha256(content).hexdigest()
+    installed = settings.model_dir / "existing"
+    installed.mkdir(parents=True)
+    (installed / "model.gguf").write_bytes(content)
+    staging = settings.download_dir / f"plan-{'a' * 64}.partial"
+    staging.mkdir(parents=True)
+    (staging / "model.gguf").write_bytes(b"corrupt")
+    with SessionLocal() as session:
+        install = ModelInstall(
+            id="model_reuse",
+            name="Reusable",
+            role="chat",
+            engine="llama.cpp",
+            local_path=str(installed),
+            manifest_json={"files": ["model.gguf"]},
+            active=True,
+        )
+        session.add(install)
+        session.flush()
+        session.add(
+            ModelComponentManifest(
+                model_install_id=install.id,
+                kind="gguf_model",
+                relative_path="model.gguf",
+                target_folder="models",
+                sha256=digest,
+                size_bytes=len(content),
+                required=True,
+            )
+        )
+        session.commit()
+
+        candidates = manager._verified_reuse_candidates(
+            session,
+            staging=staging,
+            filename="model.gguf",
+            expected_sha256=digest,
+        )
+
+    reused = await manager._reuse_verified_file(
+        candidates=candidates,
+        staging=staging,
+        filename="model.gguf",
+        expected_sha256=digest,
+        expected_size=len(content),
+    )
+
+    assert reused == (staging / "model.gguf", len(content))
+    assert (staging / "model.gguf").read_bytes() == content
 
 
 async def test_transfer_monitor_reports_process_tree_bytes(
@@ -227,8 +909,545 @@ async def test_transfer_monitor_reports_process_tree_bytes(
         job = session.get(Job, "job_progress")
         assert job
         assert job.phase == "downloading model.safetensors"
-        assert job.progress == pytest.approx(0.45)
-    event = broker.since(0)[0]
-    assert event.type == "download.progress"
+        assert job.progress == pytest.approx(0.5)
+        assert job.progress_json["completed_units"] == 50
+        assert job.progress_json["total_units"] == 100
+        assert job.progress_json["unit"] == "bytes"
+    event = next(event for event in broker.since(0) if event.type == "download.progress")
     assert event.payload["downloaded_bytes"] == 50
     assert event.payload["file_size_bytes"] == 100
+    assert event.payload["total_bytes"] == 100
+
+
+async def test_adaptive_checkpoint_activation_runs_a_small_bounded_generation(
+    settings: Settings,
+) -> None:
+    adapter = FakeProbeAdapter()
+    manager = DownloadManager(
+        settings,
+        EventBroker(),
+        media_adapter=adapter,  # type: ignore[arg-type]
+    )
+    graph = {"loader": {"class_type": "CheckpointLoaderSimple", "inputs": {}}}
+
+    await manager._probe_adaptive_checkpoint(  # type: ignore[arg-type]
+        SimpleNamespace(api_graph=graph)
+    )
+
+    assert adapter.request
+    assert adapter.request.workflow == graph
+    assert adapter.request.operation == "text_to_image"
+    assert adapter.request.parameters == {
+        "width": 256,
+        "height": 256,
+        "batch_size": 1,
+        "seed": 0,
+        "steps": 1,
+        "cfg": 1.0,
+        "sampler": "euler",
+        "scheduler": "normal",
+        "denoise": 1.0,
+    }
+    assert adapter.timeout_seconds == 300
+
+
+async def test_media_activation_waits_for_the_shared_compute_lease(
+    settings: Settings,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    settings.prepare()
+    configure_database(settings)
+    init_db()
+    scheduler = ResourceScheduler()
+    started = asyncio.Event()
+
+    class FakeProcesses:
+        async def start_media(self, _model_paths: object = None) -> None:
+            started.set()
+
+    class FakeMediaAdapter:
+        async def object_info(self) -> dict[str, object]:
+            return {}
+
+        async def validate_workflow(self, _graph: dict[str, object]) -> list[str]:
+            return []
+
+    compiled = SimpleNamespace(
+        template=SimpleNamespace(
+            id="lease-image",
+            operation="text_to_image",
+            runtime_adaptive=False,
+            selected_files=["model.safetensors"],
+            sha256="a" * 64,
+        ),
+        ui_graph={},
+        api_graph={"loader": {"class_type": "CheckpointLoaderSimple", "inputs": {}}},
+        input_schema={},
+    )
+    manager = DownloadManager(
+        settings,
+        EventBroker(),
+        media_adapter=FakeMediaAdapter(),  # type: ignore[arg-type]
+        processes=FakeProcesses(),  # type: ignore[arg-type]
+        scheduler=scheduler,
+    )
+    monkeypatch.setattr(manager.comfy_templates, "compile", lambda *_args, **_kwargs: compiled)
+    destination = settings.model_dir / "lease-image"
+    destination.mkdir()
+    with SessionLocal() as session:
+        session.add(
+            ModelInstall(
+                id="model_lease_image",
+                name="Lease image",
+                role="image",
+                engine="comfyui",
+                local_path=str(destination),
+                manifest_json={"files": ["model.safetensors"]},
+                active=False,
+            )
+        )
+        session.add(
+            Job(
+                id="job_lease_image",
+                kind=JobKind.DOWNLOAD.value,
+                status=JobStatus.RUNNING.value,
+            )
+        )
+        session.commit()
+    request = DownloadRequest(
+        remote_id="owner/lease-image",
+        revision="main",
+        role="image",
+        engine="comfyui",
+        allow_patterns=["model.safetensors"],
+        comfy_paths={"checkpoints": "."},
+        workflow_template_id="lease-image",
+        workflow_template_sha256="a" * 64,
+    )
+
+    async with scheduler.lease("primary"):
+        activation = asyncio.create_task(
+            manager._activate_comfy_install(  # type: ignore[arg-type]
+                job_id="job_lease_image",
+                install_id="model_lease_image",
+                destination=destination,
+                request=request,
+                compiled=compiled,
+                default_settings={},
+            )
+        )
+        await asyncio.sleep(0.03)
+        assert started.is_set() is False
+
+    result = await asyncio.wait_for(activation, timeout=2)
+    assert result
+    assert started.is_set() is True
+    with SessionLocal() as session:
+        assert session.get(ModelInstall, "model_lease_image").active is True  # type: ignore[union-attr]
+
+
+async def test_planned_media_activation_requires_output_and_records_evidence(
+    settings: Settings,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    settings.prepare()
+    configure_database(settings)
+    init_db()
+
+    class Processes:
+        runtimes = None
+
+        async def start_media(self, _model_paths: object = None) -> None:
+            return None
+
+    class MediaAdapter:
+        def __init__(self) -> None:
+            self.probes = 0
+
+        async def object_info(self) -> dict[str, object]:
+            return {}
+
+        async def validate_workflow(self, _graph: dict[str, object]) -> list[str]:
+            return []
+
+        async def probe_workflow(
+            self,
+            _request: MediaRequest,
+            *,
+            timeout_seconds: float,
+        ) -> None:
+            assert timeout_seconds == 300
+            self.probes += 1
+
+        async def capabilities(self) -> object:
+            return SimpleNamespace(healthy=True, version="comfy-test")
+
+    compiled = SimpleNamespace(
+        template=SimpleNamespace(
+            id="planned-image",
+            operation="text_to_image",
+            runtime_adaptive=False,
+            selected_files=["model.safetensors"],
+            sha256="a" * 64,
+        ),
+        ui_graph={},
+        api_graph={"loader": {"class_type": "CheckpointLoaderSimple", "inputs": {}}},
+        input_schema={},
+    )
+    adapter = MediaAdapter()
+    manager = DownloadManager(
+        settings,
+        EventBroker(),
+        media_adapter=adapter,  # type: ignore[arg-type]
+        processes=Processes(),  # type: ignore[arg-type]
+    )
+    monkeypatch.setattr(manager.comfy_templates, "compile", lambda *_args, **_kwargs: compiled)
+    destination = settings.model_dir / "planned-image"
+    destination.mkdir()
+    with SessionLocal() as session:
+        session.add(
+            ModelInstall(
+                id="model_planned_image",
+                name="Planned image",
+                role="image",
+                engine="comfyui",
+                local_path=str(destination),
+                manifest_json={
+                    "files": ["model.safetensors"],
+                    "expected_sha256": {"model.safetensors": "b" * 64},
+                },
+                active=False,
+            )
+        )
+        session.add(
+            Job(
+                id="job_planned_image",
+                kind=JobKind.DOWNLOAD.value,
+                status=JobStatus.RUNNING.value,
+            )
+        )
+        session.commit()
+    request = DownloadRequest(
+        install_plan_id="plan_planned_image",
+        remote_id="owner/planned-image",
+        revision="main",
+        role="image",
+        engine="comfyui",
+        allow_patterns=["model.safetensors"],
+        comfy_paths={"checkpoints": "."},
+        workflow_template_id="planned-image",
+        workflow_template_sha256="a" * 64,
+    )
+
+    result = await manager._activate_comfy_install(  # type: ignore[arg-type]
+        job_id="job_planned_image",
+        install_id="model_planned_image",
+        destination=destination,
+        request=request,
+        compiled=compiled,
+        default_settings={},
+    )
+
+    assert result
+    assert adapter.probes == 1
+    with SessionLocal() as session:
+        install = session.get(ModelInstall, "model_planned_image")
+        evidence = session.query(ModelCapabilityEvidence).one()
+        assert install and install.active is True
+        assert evidence.result == "ready"
+        assert evidence.runtime_build == "comfy-test"
+        assert evidence.workflow_contract_version == media_workflow_contract_version("a" * 64)
+
+
+async def test_adaptive_activation_failure_is_removed_before_retry(
+    settings: Settings,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    settings.prepare()
+    configure_database(settings)
+    init_db()
+    compiled = SimpleNamespace(
+        template=SimpleNamespace(
+            id="adaptive-image",
+            operation="text_to_image",
+            runtime_adaptive=True,
+            selected_files=["model.safetensors"],
+            sha256="a" * 64,
+        ),
+        ui_graph={},
+        api_graph={"loader": {"class_type": "CheckpointLoaderSimple", "inputs": {}}},
+        input_schema={},
+    )
+
+    class FakeProcesses:
+        async def start_media(self, _model_paths: object = None) -> None:
+            return None
+
+    class FakeMediaAdapter:
+        async def object_info(self) -> dict[str, object]:
+            return {}
+
+        async def validate_workflow(self, _graph: dict[str, object]) -> list[str]:
+            return []
+
+    manager = DownloadManager(
+        settings,
+        EventBroker(),
+        media_adapter=FakeMediaAdapter(),  # type: ignore[arg-type]
+        processes=FakeProcesses(),  # type: ignore[arg-type]
+    )
+    info = SimpleNamespace(
+        siblings=[SimpleNamespace(rfilename="model.safetensors", size=4, lfs=None)],
+        sha="b" * 40,
+        pipeline_tag="text-to-image",
+        tags=[],
+        gated=False,
+    )
+    manager._api = SimpleNamespace(model_info=lambda *_args, **_kwargs: info)  # type: ignore[assignment]
+
+    async def prepare(_request: DownloadRequest) -> object:
+        return compiled
+
+    async def download_file(**kwargs: Any) -> str:
+        target = kwargs["staging"] / kwargs["filename"]
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_bytes(b"safe")
+        return str(target)
+
+    probe_attempts = 0
+
+    async def probe(_compiled: object) -> None:
+        nonlocal probe_attempts
+        probe_attempts += 1
+        if probe_attempts == 1:
+            raise RuntimeError("activation probe failed")
+
+    monkeypatch.setattr(manager, "_prepare_comfy_template", prepare)
+    monkeypatch.setattr(manager, "_download_file", download_file)
+    monkeypatch.setattr(manager, "_probe_adaptive_checkpoint", probe)
+    monkeypatch.setattr(manager, "_validate_standard_checkpoint_safetensors", lambda _path: None)
+    monkeypatch.setattr(manager.comfy_templates, "compile", lambda *_args, **_kwargs: compiled)
+    request = DownloadRequest(
+        remote_id="owner/adaptive",
+        revision="main",
+        role="image",
+        engine="comfyui",
+        allow_patterns=["model.safetensors"],
+        comfy_paths={"checkpoints": "."},
+        workflow_template_id="adaptive-image",
+        workflow_template_sha256="a" * 64,
+    )
+    with SessionLocal() as session:
+        job = Job(
+            id="job_adaptive_retry",
+            kind=JobKind.DOWNLOAD.value,
+            status=JobStatus.QUEUED.value,
+            payload_json=request.model_dump(mode="json"),
+        )
+        session.add(job)
+        session.commit()
+
+    await manager._download("job_adaptive_retry")
+
+    destination = settings.model_dir / manager._install_directory_name(
+        request.remote_id,
+        info.sha,
+    )
+    with SessionLocal() as session:
+        failed_job = session.get(Job, "job_adaptive_retry")
+        assert failed_job
+        assert failed_job.status == JobStatus.FAILED.value
+        assert failed_job.result_json == {}
+        assert session.query(ModelInstall).count() == 0
+        assert session.query(ModelProfile).count() == 0
+    assert not destination.exists()
+
+    starts: list[str] = []
+    monkeypatch.setattr(manager, "start", starts.append)
+    assert manager.resume("job_adaptive_retry") is True
+    assert starts == ["job_adaptive_retry"]
+    await manager._download("job_adaptive_retry")
+
+    with SessionLocal() as session:
+        completed_job = session.get(Job, "job_adaptive_retry")
+        installs = session.query(ModelInstall).all()
+        profiles = session.query(ModelProfile).all()
+        assert completed_job
+        assert completed_job.status == JobStatus.COMPLETE.value
+        assert len(installs) == 1
+        assert installs[0].active is True
+        assert len(profiles) == 1
+        assert profiles[0].model_install_id == installs[0].id
+    assert (destination / "model.safetensors").read_bytes() == b"safe"
+
+
+async def test_cancel_removes_provisional_install_and_abandoned_partial(
+    settings: Settings,
+) -> None:
+    settings.prepare()
+    configure_database(settings)
+    init_db()
+    scheduler = ResourceScheduler()
+    manager = DownloadManager(settings, EventBroker(), scheduler=scheduler)
+    destination = settings.model_dir / "provisional"
+    destination.mkdir(parents=True)
+    (destination / "model.safetensors").write_bytes(b"provisional")
+    partial = settings.download_dir / "job_cancel_provisional.partial"
+    partial.mkdir(parents=True)
+    (partial / "chunk").write_bytes(b"partial")
+    with SessionLocal() as session:
+        install = ModelInstall(
+            id="model_provisional",
+            name="Provisional",
+            role="image",
+            engine="comfyui",
+            local_path=str(destination),
+            manifest_json={"files": ["model.safetensors"]},
+            active=False,
+        )
+        session.add(install)
+        session.add(
+            Job(
+                id="job_cancel_provisional",
+                kind=JobKind.DOWNLOAD.value,
+                status=JobStatus.RUNNING.value,
+                result_json={
+                    "_provisional_install": {"model_install_id": install.id},
+                },
+            )
+        )
+        session.commit()
+
+    async with scheduler.lease("primary"):
+        cancellation = asyncio.create_task(manager.cancel("job_cancel_provisional"))
+        await asyncio.sleep(0.03)
+        assert cancellation.done() is False
+        assert destination.exists()
+
+    assert await asyncio.wait_for(cancellation, timeout=2) is True
+
+    with SessionLocal() as session:
+        job = session.get(Job, "job_cancel_provisional")
+        assert job
+        assert job.status == JobStatus.CANCELLED.value
+        assert job.result_json == {}
+        assert session.get(ModelInstall, "model_provisional") is None
+    assert not destination.exists()
+    assert not partial.exists()
+
+
+def test_provisional_cleanup_preserves_files_used_by_an_active_selection(
+    settings: Settings,
+) -> None:
+    settings.prepare()
+    configure_database(settings)
+    init_db()
+    manager = DownloadManager(settings, EventBroker())
+    destination = settings.model_dir / "shared"
+    destination.mkdir(parents=True)
+    (destination / "shared.safetensors").write_bytes(b"shared")
+    (destination / "failed.safetensors").write_bytes(b"failed")
+    with SessionLocal() as session:
+        session.add(
+            ModelInstall(
+                id="model_active",
+                name="Active",
+                role="image",
+                engine="comfyui",
+                local_path=str(destination),
+                manifest_json={"files": ["shared.safetensors"]},
+                active=True,
+            )
+        )
+        session.add(
+            ModelInstall(
+                id="model_failed",
+                name="Failed",
+                role="image",
+                engine="comfyui",
+                local_path=str(destination),
+                manifest_json={"files": ["shared.safetensors", "failed.safetensors"]},
+                active=False,
+            )
+        )
+        session.add(
+            Job(
+                id="job_failed_shared",
+                kind=JobKind.DOWNLOAD.value,
+                status=JobStatus.FAILED.value,
+                result_json={
+                    "_provisional_install": {"model_install_id": "model_failed"},
+                },
+            )
+        )
+        session.commit()
+
+    assert manager._cleanup_provisional_install("job_failed_shared") is True
+
+    with SessionLocal() as session:
+        assert session.get(ModelInstall, "model_active")
+        assert session.get(ModelInstall, "model_failed") is None
+    assert (destination / "shared.safetensors").read_bytes() == b"shared"
+    assert not (destination / "failed.safetensors").exists()
+
+
+def test_provisional_cleanup_removes_files_even_if_the_row_never_committed(
+    settings: Settings,
+) -> None:
+    settings.prepare()
+    configure_database(settings)
+    init_db()
+    manager = DownloadManager(settings, EventBroker())
+    destination = settings.model_dir / "uncommitted"
+    destination.mkdir(parents=True)
+    (destination / "model.safetensors").write_bytes(b"uncommitted")
+    with SessionLocal() as session:
+        session.add(
+            Job(
+                id="job_uncommitted",
+                kind=JobKind.DOWNLOAD.value,
+                status=JobStatus.FAILED.value,
+            )
+        )
+        session.commit()
+
+    assert (
+        manager._cleanup_provisional_install(
+            "job_uncommitted",
+            provisional_path=destination,
+            provisional_files=["model.safetensors"],
+        )
+        is True
+    )
+    assert not destination.exists()
+
+
+def test_partial_cleanup_reclaims_terminal_quarantine_but_skips_active_job(
+    settings: Settings,
+) -> None:
+    settings.prepare()
+    configure_database(settings)
+    init_db()
+    manager = DownloadManager(settings, EventBroker())
+    quarantine = settings.download_dir / ".discarded-installs"
+    terminal = quarantine / "job_terminal-discard_dead"
+    active = quarantine / "job_active-discard_live"
+    terminal.mkdir(parents=True)
+    active.mkdir()
+    (terminal / "model").write_bytes(b"terminal")
+    (active / "model").write_bytes(b"active")
+    with SessionLocal() as session:
+        session.add(
+            Job(
+                id="job_active",
+                kind=JobKind.DOWNLOAD.value,
+                status=JobStatus.RUNNING.value,
+            )
+        )
+        session.commit()
+        removed_count, reclaimed_bytes = manager.cleanup_partials(session)
+
+    assert removed_count == 1
+    assert reclaimed_bytes == len(b"terminal")
+    assert not terminal.exists()
+    assert (active / "model").read_bytes() == b"active"

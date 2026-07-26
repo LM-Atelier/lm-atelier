@@ -16,6 +16,7 @@ from sqlalchemy.orm import Session
 from .config import Settings
 from .domain import new_id
 from .models import CustomNodeInstall
+from .subprocess_env import git_subprocess_environment
 
 _COMMIT = re.compile(r"^[0-9a-fA-F]{40}$")
 
@@ -201,12 +202,11 @@ class CustomNodeManager:
 
     @staticmethod
     async def _run(*command: str, timeout: float = 180) -> str:
-        environment = {**os.environ, "GIT_TERMINAL_PROMPT": "0", "GIT_CONFIG_NOSYSTEM": "1"}
         process = await asyncio.create_subprocess_exec(
             *command,
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
-            env=environment,
+            env=git_subprocess_environment(),
         )
         try:
             stdout, stderr = await asyncio.wait_for(process.communicate(), timeout=timeout)
