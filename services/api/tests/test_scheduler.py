@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import asyncio
 from datetime import timedelta
+from typing import Any
 
 from local_lm.config import Settings
 from local_lm.db import SessionLocal, configure_database, init_db
@@ -161,3 +163,64 @@ def test_expired_foreign_claim_is_interrupted_without_replay(settings: Settings)
         assert abandoned.claim_owner is None
         assert abandoned.error == "The dispatcher lease expired before this job completed."
         assert local.status == JobStatus.RUNNING.value
+
+
+async def test_waiting_for_local_capacity_does_not_keep_a_database_session_open(
+    settings: Settings,
+) -> None:
+    settings.prepare()
+    configure_database(settings)
+    init_db()
+    now = utcnow()
+    with SessionLocal() as session:
+        session.add(
+            Job(
+                id="job_waiting_for_capacity",
+                status=JobStatus.QUEUED.value,
+                queue_group="primary",
+                queue_ticket="ticket-waiting",
+                enqueued_at=now,
+            )
+        )
+        session.commit()
+
+    opened = 0
+    closed = 0
+
+    class TrackedSession:
+        def __init__(self) -> None:
+            nonlocal opened
+            opened += 1
+            self.session = SessionLocal()
+
+        def __enter__(self) -> Any:
+            return self.session
+
+        def __exit__(self, *args: object) -> None:
+            nonlocal closed
+            self.session.close()
+            closed += 1
+
+    scheduler = ResourceScheduler(session_factory=TrackedSession)  # type: ignore[arg-type]
+    unavailable_slot = asyncio.Semaphore(0)
+    task = asyncio.create_task(
+        scheduler._acquire_job(
+            "job_waiting_for_capacity",
+            resource="interactive_compute",
+            group="primary",
+            priority=0,
+            capacity=1,
+            local_lock=unavailable_slot,
+        )
+    )
+    try:
+        for _ in range(20):
+            await asyncio.sleep(0)
+            if opened:
+                break
+        assert not task.done()
+        assert opened >= 1
+        assert opened == closed
+    finally:
+        task.cancel()
+        await asyncio.gather(task, return_exceptions=True)

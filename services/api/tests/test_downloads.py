@@ -838,13 +838,20 @@ async def test_verified_installed_component_is_reused_without_network_transfer(
         )
         session.commit()
 
-        reused = await manager._reuse_verified_file(
+        candidates = manager._verified_reuse_candidates(
             session,
             staging=staging,
             filename="model.gguf",
             expected_sha256=digest,
-            expected_size=len(content),
         )
+
+    reused = await manager._reuse_verified_file(
+        candidates=candidates,
+        staging=staging,
+        filename="model.gguf",
+        expected_sha256=digest,
+        expected_size=len(content),
+    )
 
     assert reused == (staging / "model.gguf", len(content))
     assert (staging / "model.gguf").read_bytes() == content

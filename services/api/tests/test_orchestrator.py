@@ -8,7 +8,7 @@ from unittest.mock import AsyncMock, Mock
 import pytest
 
 from local_lm.adapters.base import ChatEvent, MediaEvent
-from local_lm.models import Message, MessagePart, ModelInstall, ModelProfile, Run
+from local_lm.models import Job, Message, MessagePart, ModelInstall, ModelProfile, Run
 from local_lm.orchestrator import ConversationOrchestrator
 from local_lm.schemas import WorkerStatus
 
@@ -62,6 +62,90 @@ async def test_managed_chat_worker_is_aligned_to_the_run_profile() -> None:
 
     assert result == aligned
     processes.load_chat.assert_awaited_once_with(profile, install)
+
+
+async def test_engine_cancel_runs_after_the_database_session_closes() -> None:
+    job = SimpleNamespace(id="job-cancel", status="running", run_id="run-cancel")
+    run = SimpleNamespace(id="run-cancel", operation="text")
+    session_closed = False
+
+    class FakeSession:
+        def __enter__(self):  # type: ignore[no-untyped-def]
+            return self
+
+        def __exit__(self, *_args):  # type: ignore[no-untyped-def]
+            nonlocal session_closed
+            session_closed = True
+
+        def get(self, model, identity):  # type: ignore[no-untyped-def]
+            return {
+                (Job, "job-cancel"): job,
+                (Run, "run-cancel"): run,
+            }.get((model, identity))
+
+        def commit(self) -> None:
+            return None
+
+    async def cancel(run_id: str) -> None:
+        assert run_id == "run-cancel"
+        assert session_closed is True
+
+    engines = SimpleNamespace(
+        settings=SimpleNamespace(),
+        chat=SimpleNamespace(cancel=cancel),
+        media=SimpleNamespace(cancel=AsyncMock()),
+    )
+    orchestrator = ConversationOrchestrator(
+        engines=engines,
+        artifacts=Mock(),
+        events=SimpleNamespace(publish=AsyncMock()),
+        scheduler=SimpleNamespace(publish_job=AsyncMock()),
+        processes=Mock(),
+        session_factory=FakeSession,
+    )
+    orchestrator._mark_cancelled = Mock()  # type: ignore[method-assign]
+
+    assert await orchestrator.cancel("job-cancel") is True
+    orchestrator._mark_cancelled.assert_called_once()  # type: ignore[attr-defined]
+
+
+async def test_chat_worker_resume_runs_after_the_database_session_closes() -> None:
+    profile = SimpleNamespace(id="profile-resume", model_install_id="install-resume")
+    install = SimpleNamespace(id="install-resume")
+    session_closed = False
+
+    class FakeSession:
+        def __enter__(self):  # type: ignore[no-untyped-def]
+            return self
+
+        def __exit__(self, *_args):  # type: ignore[no-untyped-def]
+            nonlocal session_closed
+            session_closed = True
+
+        def get(self, model, identity):  # type: ignore[no-untyped-def]
+            return {
+                (ModelProfile, "profile-resume"): profile,
+                (ModelInstall, "install-resume"): install,
+            }.get((model, identity))
+
+        def expunge(self, _value) -> None:  # type: ignore[no-untyped-def]
+            return None
+
+    async def load_chat(selected_profile, selected_install):  # type: ignore[no-untyped-def]
+        assert session_closed is True
+        assert selected_profile is profile
+        assert selected_install is install
+
+    orchestrator = ConversationOrchestrator(
+        engines=SimpleNamespace(settings=SimpleNamespace()),
+        artifacts=Mock(),
+        events=Mock(),
+        scheduler=Mock(),
+        processes=SimpleNamespace(load_chat=load_chat),
+        session_factory=FakeSession,
+    )
+
+    await orchestrator._resume_chat_worker("profile-resume")
 
 
 async def test_chat_planner_falls_back_during_media_handoff() -> None:
@@ -125,6 +209,9 @@ async def test_vision_bridge_restores_the_text_profile_after_completion_or_cance
 
         def scalar(self, _statement):  # type: ignore[no-untyped-def]
             return "job-vision"
+
+        def in_transaction(self) -> bool:
+            return False
 
     async def stream(_request):  # type: ignore[no-untyped-def]
         if cancelled:

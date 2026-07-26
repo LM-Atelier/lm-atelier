@@ -1870,6 +1870,8 @@ class ConversationOrchestrator:
 
     async def cancel(self, job_id: str) -> bool:
         cancelled_task: asyncio.Task[None] | None = None
+        run_id: str | None = None
+        operation: str | None = None
         with self.session_factory() as session:
             job = session.get(Job, job_id)
             if not job or job.status in {
@@ -1880,20 +1882,29 @@ class ConversationOrchestrator:
                 return False
             if job.run_id:
                 run = session.get(Run, job.run_id)
-                if run and run.operation == Operation.TEXT.value:
-                    await self.engines.chat.cancel(run.id)
-                elif run:
-                    await self.engines.media.cancel(run.id)
+                if run:
+                    run_id = run.id
+                    operation = run.operation
             task = self._tasks.get(job_id)
             if task:
                 task.cancel()
                 cancelled_task = task
             self._mark_cancelled(session, job)
             session.commit()
+        if run_id:
+            try:
+                if operation == Operation.TEXT.value:
+                    await self.engines.chat.cancel(run_id)
+                else:
+                    await self.engines.media.cancel(run_id)
+            except Exception:
+                logger.warning(
+                    "Could not signal engine cancellation for run %s", run_id, exc_info=True
+                )
         if cancelled_task:
             await asyncio.gather(cancelled_task, return_exceptions=True)
         await self.scheduler.publish_job(job_id)
-        await self.events.publish("run.cancelled", job.run_id, {"job_id": job_id})
+        await self.events.publish("run.cancelled", run_id, {"job_id": job_id})
         return True
 
     async def close(self) -> None:
@@ -2245,8 +2256,10 @@ class ConversationOrchestrator:
         self, session: Session, run: Run
     ) -> tuple[list[dict[str, Any]], dict[str, Any], dict[str, Any]]:
         messages = self._context_messages(session, run)
+        self._commit_before_await(session)
         capabilities = await self.engines.chat_capabilities()
         candidates = self._visual_context_artifacts(session, run)
+        self._commit_before_await(session)
         direct_profile_selected = run.vision_profile_id == run.profile_id and bool(run.profile_id)
         if (
             self.engines.settings.chat_engine == "mock"
@@ -2262,8 +2275,10 @@ class ConversationOrchestrator:
             "visual_contents_inspected": False,
         }
         if candidates and vision_metadata["available"] and direct_profile_selected:
+            job_id = self._job_id_for_run(session, run)
+            self._commit_before_await(session)
             await self._set_chat_phase(
-                self._job_id_for_run(session, run),
+                job_id,
                 run.id,
                 "Preparing visual context",
             )
@@ -2320,6 +2335,7 @@ class ConversationOrchestrator:
         output_limit = min(requested_output, maximum_output)
         input_budget = max(64, context_limit - output_limit - safety_tokens)
 
+        self._commit_before_await(session)
         input_tokens = await self.engines.chat.count_tokens(messages)
         omitted = 0
         system_messages = 1 if messages and messages[0].get("role") == "system" else 0
@@ -2372,10 +2388,12 @@ class ConversationOrchestrator:
             if part.artifact_id and part.metadata_json.get("input_reference_source") == "explicit"
         }
         chat = session.get(Chat, run.chat_id)
+        vision_settings = dict(chat.vision_settings_json) if chat else {}
+        self._commit_before_await(session)
         visual = await self.vision.prepare(
             candidates,
             strict_artifact_ids=strict_ids,
-            vision_settings=chat.vision_settings_json if chat else {},
+            vision_settings=vision_settings,
         )
         if not visual.frames:
             posters = [
@@ -2390,10 +2408,11 @@ class ConversationOrchestrator:
                 and (poster := session.get(Artifact, poster_id)) is not None
             ]
             if posters:
+                self._commit_before_await(session)
                 poster_visual = await self.vision.prepare(
                     posters,
                     strict_artifact_ids=set(),
-                    vision_settings=chat.vision_settings_json if chat else {},
+                    vision_settings=vision_settings,
                 )
                 visual = PreparedVisualContext(
                     frames=poster_visual.frames,
@@ -2467,8 +2486,10 @@ class ConversationOrchestrator:
             "artifact_ids": [],
         }
         try:
+            job_id = self._job_id_for_run(session, run)
+            self._commit_before_await(session)
             await self._set_chat_phase(
-                self._job_id_for_run(session, run),
+                job_id,
                 run.id,
                 "Loading vision model",
             )
@@ -2504,8 +2525,10 @@ class ConversationOrchestrator:
             )
             if not metadata["visual_contents_inspected"]:
                 return "", metadata
+            job_id = self._job_id_for_run(session, run)
+            self._commit_before_await(session)
             await self._set_chat_phase(
-                self._job_id_for_run(session, run),
+                job_id,
                 run.id,
                 f"Analyzing {metadata['images_included']} visual frame"
                 f"{'' if metadata['images_included'] == 1 else 's'}",
@@ -2542,8 +2565,10 @@ class ConversationOrchestrator:
             metadata["completion"] = completion_metadata
             return observation, metadata
         finally:
+            job_id = self._job_id_for_run(session, run)
+            self._commit_before_await(session)
             await self._set_chat_phase(
-                self._job_id_for_run(session, run),
+                job_id,
                 run.id,
                 "Restoring chat model",
             )
@@ -2575,6 +2600,13 @@ class ConversationOrchestrator:
             select(Job.id).where(Job.run_id == run.id).order_by(Job.created_at.desc()).limit(1)
         )
         return job_id or ""
+
+    @staticmethod
+    def _commit_before_await(session: Session) -> None:
+        """Release SQLite state before an external or potentially long await."""
+
+        if session.in_transaction():
+            session.commit()
 
     @classmethod
     def _visual_context_artifacts(cls, session: Session, run: Run) -> list[Artifact]:
@@ -2651,7 +2683,9 @@ class ConversationOrchestrator:
                 )
                 if not profile or not install:
                     return
-                await self.processes.load_chat(profile, install)
+                session.expunge(profile)
+                session.expunge(install)
+            await self.processes.load_chat(profile, install)
         except Exception:
             logger.exception("Could not reload chat profile %s after media handoff", profile_id)
         finally:
