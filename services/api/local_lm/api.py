@@ -83,6 +83,7 @@ from .models import (
     WorkStep,
 )
 from .orchestrator import ConversationOrchestrator, ResponseRevisionConflict
+from .ordered_planning import OrderedPlanConfirmationRequired
 from .platforms import list_platform_matrix
 from .preflight import assess_catalog_install
 from .profile_service import (
@@ -945,6 +946,16 @@ async def _accept_turn(
                 "code": "route_confirmation_required",
                 "message": str(exc),
                 "plan": exc.plan.model_dump(mode="json"),
+            },
+        ) from exc
+    except OrderedPlanConfirmationRequired as exc:
+        raise HTTPException(
+            409,
+            detail={
+                "code": "ordered_plan_confirmation_required",
+                "message": str(exc),
+                "plan": exc.intent.model_dump(mode="json"),
+                "estimate": exc.estimate,
             },
         ) from exc
     except TimeoutError as exc:

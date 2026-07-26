@@ -61,6 +61,7 @@ class Settings(BaseSettings):
     )
     max_media_outputs_per_plan: int = Field(default=8, ge=1, le=16)
     max_media_plan_work_units: int = Field(default=4_000_000_000, ge=1)
+    max_media_plan_duration_seconds: int = Field(default=300, ge=1, le=3600)
     max_media_plan_estimated_bytes: int = Field(
         default=8 * 1024**3,
         ge=1024**2,

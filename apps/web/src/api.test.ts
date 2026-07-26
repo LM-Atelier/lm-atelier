@@ -8,6 +8,66 @@ afterEach(() => {
   localStorage.clear();
 });
 
+it("confirms a bounded ordered plan without changing Auto mode", async () => {
+  const confirm = vi.fn(() => true);
+  vi.stubGlobal("confirm", confirm);
+  const fetchMock = vi.fn()
+    .mockResolvedValueOnce(
+      new Response(JSON.stringify({ csrf_token: "csrf" }), {
+        status: 200,
+        headers: { "content-type": "application/json" },
+      }),
+    )
+    .mockResolvedValueOnce(
+      new Response(JSON.stringify({
+        detail: {
+          code: "ordered_plan_confirmation_required",
+          message: "Confirm the ordered multi-model plan.",
+          plan: {
+            planner_version: "ordered-work-v1",
+            steps: [
+              { id: "story", mode: "text", prompt: "Write", depends_on: [], inputs: [] },
+              { id: "image", mode: "image", prompt: "Draw", depends_on: ["story"], inputs: [] },
+              { id: "video", mode: "video", prompt: "Animate", depends_on: ["image"], inputs: [] },
+            ],
+          },
+          estimate: {
+            video_duration_seconds: 4,
+            estimated_bytes: 2 * 1024 ** 3,
+          },
+        },
+      }), {
+        status: 409,
+        headers: { "content-type": "application/json" },
+      }),
+    )
+    .mockResolvedValueOnce(
+      new Response(JSON.stringify({ accepted: true }), {
+        status: 202,
+        headers: { "content-type": "application/json" },
+      }),
+    );
+  vi.stubGlobal("fetch", fetchMock);
+
+  const { api } = await import("./api");
+  await api.sendTurn(
+    "chat-ordered",
+    "Write a story, then draw it, then animate it",
+    "auto",
+    [],
+    {},
+    "ordered-key",
+  );
+
+  expect(confirm).toHaveBeenCalledWith(
+    "3-step plan: text → image → video · about 4 seconds of video · up to 2 GB working space. Start it?",
+  );
+  const retryBody = JSON.parse(String(fetchMock.mock.calls[2][1]?.body));
+  expect(retryBody.mode).toBe("auto");
+  expect(retryBody.confirm_media).toBe(true);
+  expect(retryBody.idempotency_key).toBe("ordered-key");
+});
+
 it("keeps the opaque private token in session storage and scopes content requests", async () => {
   const fetchMock = vi.fn()
     .mockResolvedValueOnce(

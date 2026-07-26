@@ -131,6 +131,16 @@ const AUTHORITATIVE_QUERY_ROOTS = new Set([
   "workflow-catalog-models",
   "workflows",
 ]);
+
+function aggregateWorkPlanStatus(steps: WorkPlan["steps"]): string {
+  const statuses = steps.map((step) => step.status);
+  if (statuses.length === 0) return "queued";
+  for (const active of ["running", "queued", "paused", "blocked"]) {
+    if (statuses.includes(active)) return active;
+  }
+  if (statuses.every((status) => status === "complete")) return "complete";
+  return new Set(statuses).size === 1 ? statuses[0] ?? "queued" : "partial";
+}
 const DIALOG_FOCUSABLE = [
   "a[href]",
   "button:not([disabled])",
@@ -1231,6 +1241,7 @@ function MediaOutputPlan({
   onRetryStep: (stepId: string) => void;
 }) {
   const steps = [...plan.steps].sort((left, right) => left.ordinal - right.ordinal);
+  const ordered = plan.planner_version === "ordered-work-v1";
   const counts = steps.reduce<Record<string, number>>((current, step) => {
     current[step.status] = (current[step.status] ?? 0) + 1;
     return current;
@@ -1241,17 +1252,23 @@ function MediaOutputPlan({
   return (
     <details className="media-output-plan">
       <summary>
-        <span>{steps.length} media outputs</span>
+        <span>{ordered ? `${steps.length}-step plan` : `${steps.length} media outputs`}</span>
         <small>{summary}</small>
       </summary>
       <ol>
         {steps.map((step) => {
-          const cancellable = ["queued", "running", "paused"].includes(step.status);
+          const cancellable = ["queued", "running", "paused", "blocked"].includes(step.status);
           const retryable = ["failed", "cancelled", "interrupted"].includes(step.status);
+          const outputType = step.output_contract_json[0]?.type;
+          const typeLabel = typeof outputType === "string"
+            ? outputType[0].toUpperCase() + outputType.slice(1)
+            : "Work";
           return (
             <li key={step.id}>
               <span>
-                <strong>Output {step.ordinal}</strong>
+                <strong>
+                  {ordered ? `Step ${step.ordinal} · ${typeLabel}` : `Output ${step.ordinal}`}
+                </strong>
                 <small>{step.status.replace("_", " ")}</small>
                 {step.error && <small className="error-text">{step.error}</small>}
               </span>
@@ -3118,19 +3135,40 @@ export default function App() {
             if (snapshot.work_plan_id) {
               client.setQueriesData<WorkPlan[]>(
                 { queryKey: ["work-plans"] },
-                (current) => current?.map((plan) => (
-                  plan.id === snapshot.work_plan_id
-                    ? {
-                        ...plan,
-                        status: snapshot.status,
-                        steps: plan.steps.map((step) => (
-                          step.id === snapshot.work_step_id
-                            ? { ...step, status: snapshot.status, error: snapshot.error }
-                            : step
-                        )),
-                      }
-                    : plan
-                )),
+                (current) => current?.map((plan) => {
+                  if (plan.id !== snapshot.work_plan_id) return plan;
+                  const stepStatus = snapshot.progress_json?.stage
+                    ?.startsWith("blocked by")
+                    ? "blocked"
+                    : snapshot.status;
+                  const steps = plan.steps.map((step) => (
+                    step.id === snapshot.work_step_id
+                      ? {
+                          ...step,
+                          status: stepStatus,
+                          error: stepStatus === "blocked"
+                            ? "Waiting for required work to be retried."
+                            : snapshot.error,
+                        }
+                      : step
+                  ));
+                  const statusCounts = steps.reduce<Record<string, number>>(
+                    (counts, step) => ({
+                      ...counts,
+                      [step.status]: (counts[step.status] ?? 0) + 1,
+                    }),
+                    {},
+                  );
+                  return {
+                    ...plan,
+                    status: aggregateWorkPlanStatus(steps),
+                    summary_json: {
+                      ...plan.summary_json,
+                      status_counts: statusCounts,
+                    },
+                    steps,
+                  };
+                }),
               );
             }
           }

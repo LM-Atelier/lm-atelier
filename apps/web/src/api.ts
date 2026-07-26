@@ -242,6 +242,37 @@ export const api = {
       const estimate = overrides?._generation_estimate && typeof overrides._generation_estimate === "object" ? overrides._generation_estimate as Record<string, unknown> : null;
       const duration = typeof estimate?.duration_seconds === "number" ? `, about ${estimate.duration_seconds} seconds of output` : "";
       const intermediate = typeof estimate?.estimated_intermediate_bytes === "number" ? ` and up to ${Math.ceil(estimate.estimated_intermediate_bytes / 1024 ** 3)} GB of intermediate data` : "";
+      const orderedSteps = Array.isArray(plan?.steps)
+        ? plan.steps.filter((step): step is Record<string, unknown> => (
+          Boolean(step) && typeof step === "object"
+        ))
+        : [];
+      if (
+        error instanceof ApiError
+        && error.status === 409
+        && detail?.code === "ordered_plan_confirmation_required"
+        && orderedSteps.length >= 2
+      ) {
+        const sequence = orderedSteps
+          .map((step) => typeof step.mode === "string" ? step.mode : "work")
+          .join(" → ");
+        const orderedEstimate = detail.estimate && typeof detail.estimate === "object"
+          ? detail.estimate as Record<string, unknown>
+          : null;
+        const videoDuration = typeof orderedEstimate?.video_duration_seconds === "number"
+          && orderedEstimate.video_duration_seconds > 0
+          ? ` · about ${orderedEstimate.video_duration_seconds} seconds of video`
+          : "";
+        const workingBytes = typeof orderedEstimate?.estimated_bytes === "number"
+          && orderedEstimate.estimated_bytes > 0
+          ? ` · up to ${Math.ceil(orderedEstimate.estimated_bytes / 1024 ** 3)} GB working space`
+          : "";
+        if (window.confirm(
+          `${orderedSteps.length}-step plan: ${sequence}${videoDuration}${workingBytes}. Start it?`,
+        )) {
+          return submit("auto", true);
+        }
+      }
       if (
         error instanceof ApiError
         && error.status === 409
