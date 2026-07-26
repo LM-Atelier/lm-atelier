@@ -259,7 +259,7 @@ class HuggingFaceCatalog:
                 return content
         encoded_path = "/".join(quote(part, safe="") for part in path.parts)
         encoded_revision = quote(revision, safe="")
-        content = bytearray()
+        content_buffer = bytearray()
         async with self._client.stream(
             "GET",
             f"/{remote_id}/resolve/{encoded_revision}/{encoded_path}",
@@ -267,10 +267,10 @@ class HuggingFaceCatalog:
         ) as response:
             response.raise_for_status()
             async for chunk in response.aiter_bytes():
-                content.extend(chunk)
-                if len(content) > max_bytes:
+                content_buffer.extend(chunk)
+                if len(content_buffer) > max_bytes:
                     raise ValueError("model metadata exceeds the inspection limit")
-        result = bytes(content)
+        result = bytes(content_buffer)
         self._write_binary_cache(cache, result)
         return result
 

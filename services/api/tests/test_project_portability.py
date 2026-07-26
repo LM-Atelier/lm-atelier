@@ -24,6 +24,7 @@ from local_lm.models import (
     Run,
     WorkflowRevision,
 )
+from local_lm.profile_service import AUTO_PROFILE_ID
 from local_lm.project_portability import (
     LOCAL_PATH_REDACTION,
     has_local_path,
@@ -128,6 +129,165 @@ async def _media_project_archive(client: AsyncClient) -> tuple[bytes, str]:
     archive = await client.get(exported.json()["url"])
     manifest = _manifest(archive.content)
     return archive.content, str(manifest["artifacts"][0]["sha256"])
+
+
+async def test_project_vision_context_round_trip_and_legacy_defaults(
+    client: AsyncClient,
+    tmp_path: Path,
+) -> None:
+    profile = (
+        await client.post(
+            "/api/profiles",
+            json={
+                "name": "Portable vision profile",
+                "role": "chat",
+                "engine": "mock",
+            },
+        )
+    ).json()
+    project = (await client.post("/api/projects", json={"name": "Vision portable"})).json()
+    chat = (
+        await client.post(
+            "/api/chats",
+            json={"title": "Vision context", "project_id": project["id"]},
+        )
+    ).json()
+    accepted = await client.post(
+        f"/api/chats/{chat['id']}/turns",
+        json={"text": "Keep the visual context portable", "mode": "text"},
+    )
+    source_run = await _wait_for_run(client, accepted.json()["run"]["id"])
+
+    with SessionLocal() as session:
+        stored_chat = session.get(Chat, chat["id"])
+        stored_run = session.get(Run, source_run["id"])
+        assert stored_chat and stored_run
+        stored_chat.active_vision_profile_id = profile["id"]
+        stored_chat.vision_settings_json = {
+            "max_images": 2,
+            "max_video_frames": 5,
+            "include_prior_visual": False,
+        }
+        stored_run.vision_profile_id = profile["id"]
+        stored_run.provenance_json = {
+            **stored_run.provenance_json,
+            "context": {
+                **stored_run.provenance_json.get("context", {}),
+                "vision": {
+                    "mode": "bridge",
+                    "profile_id": profile["id"],
+                    "profile": {
+                        "profile_id": profile["id"],
+                        "profile_name": profile["name"],
+                        "install_id": "local-only-install",
+                    },
+                },
+            },
+        }
+        session.commit()
+
+    exported = await client.post(f"/api/projects/{project['id']}/export")
+    archive = await client.get(exported.json()["url"])
+    manifest = _manifest(archive.content)
+    assert manifest["version"] == 5
+    assert manifest["chats"][0]["active_vision_profile_id"] == profile["id"]
+    assert manifest["chats"][0]["vision_settings_json"] == {
+        "max_images": 2,
+        "max_video_frames": 5,
+        "include_prior_visual": False,
+    }
+    assert manifest["runs"][0]["vision_profile_id"] == profile["id"]
+    portable_vision = manifest["runs"][0]["provenance_json"]["context"]["vision"]
+    assert portable_vision["profile_id"] == profile["id"]
+    assert portable_vision["profile"]["profile_id"] == profile["id"]
+    assert "install_id" not in portable_vision["profile"]
+
+    legacy = json.loads(json.dumps(manifest))
+    legacy["version"] = 4
+    for chat_record in legacy["chats"]:
+        chat_record.pop("active_vision_profile_id", None)
+        chat_record.pop("vision_settings_json", None)
+    for run_record in legacy["runs"]:
+        run_record.pop("vision_profile_id", None)
+        context = run_record.get("provenance_json", {}).get("context")
+        if isinstance(context, dict):
+            context.pop("vision", None)
+    legacy_archive = _rewrite_archive(archive.content, legacy)
+
+    target_settings = Settings(
+        data_dir=tmp_path / "vision-portable-target",
+        dev=True,
+        chat_engine="mock",
+        media_engine="mock",
+    )
+    target_app = create_app(target_settings)
+    async with (
+        target_app.router.lifespan_context(target_app),
+        AsyncClient(
+            transport=ASGITransport(app=target_app),
+            base_url="http://testserver",
+        ) as target,
+    ):
+        session_response = await target.post("/api/session")
+        target.headers["x-local-lm-csrf"] = session_response.json()["csrf_token"]
+        imported = await target.post(
+            "/api/projects/import",
+            files={
+                "archive": (
+                    "vision-portable.lm-atelier.zip",
+                    archive.content,
+                    "application/zip",
+                )
+            },
+        )
+        assert imported.status_code == 201, imported.text
+        with SessionLocal() as session:
+            imported_chat = session.scalar(
+                select(Chat).where(Chat.project_id == imported.json()["id"])
+            )
+            assert imported_chat
+            imported_run = session.scalar(select(Run).where(Run.chat_id == imported_chat.id))
+            assert imported_run
+            assert imported_chat.active_vision_profile_id not in {
+                None,
+                AUTO_PROFILE_ID,
+                profile["id"],
+            }
+            assert imported_chat.vision_settings_json == {
+                "max_images": 2,
+                "max_video_frames": 5,
+                "include_prior_visual": False,
+            }
+            assert imported_run.vision_profile_id == imported_chat.active_vision_profile_id
+            imported_vision = imported_run.provenance_json["context"]["vision"]
+            assert imported_vision["profile_id"] == imported_run.vision_profile_id
+            assert imported_vision["profile"]["profile_id"] == imported_run.vision_profile_id
+
+        imported_legacy = await target.post(
+            "/api/projects/import",
+            files={
+                "archive": (
+                    "legacy-vision-defaults.lm-atelier.zip",
+                    legacy_archive,
+                    "application/zip",
+                )
+            },
+        )
+        assert imported_legacy.status_code == 201, imported_legacy.text
+        with SessionLocal() as session:
+            legacy_chat = session.scalar(
+                select(Chat).where(Chat.project_id == imported_legacy.json()["id"])
+            )
+            assert legacy_chat
+            legacy_run = session.scalar(select(Run).where(Run.chat_id == legacy_chat.id))
+            assert legacy_run
+            assert legacy_chat.active_vision_profile_id == AUTO_PROFILE_ID
+            assert legacy_chat.vision_settings_json == {
+                "max_images": 4,
+                "max_video_frames": 6,
+                "include_prior_visual": True,
+            }
+            assert legacy_run.vision_profile_id is None
 
 
 async def test_project_round_trip_redacts_paths_and_remaps_portable_identifiers(

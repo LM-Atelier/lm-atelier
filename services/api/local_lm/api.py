@@ -18,7 +18,7 @@ from sqlalchemy.orm import Session, selectinload
 from starlette.responses import FileResponse
 
 from . import __version__
-from .adapters.contracts import ADAPTER_CONTRACT_VERSION
+from .capability_evidence import current_capability_evidence, evidence_input_modalities
 from .capability_probe import probe_structured_tools
 from .catalog import HuggingFaceCatalog
 from .comfy_templates import (
@@ -48,7 +48,7 @@ from .engines import (
     EngineRegistry,
     EngineSchemaUnavailableError,
 )
-from .hardware import collect_system_info, hardware_capability_class
+from .hardware import collect_system_info
 from .incognito import (
     INCOGNITO_HEADER,
     IncognitoUnavailableError,
@@ -60,13 +60,7 @@ from .model_manifests import (
     ModelManifestError,
     inspect_repository_metadata,
 )
-from .model_planner import (
-    ACTIVATION_PROBE_VERSION,
-    LAUNCH_CONTRACT_VERSION,
-    media_workflow_contract_version,
-    persist_install_plan,
-    resolve_install_plan,
-)
+from .model_planner import persist_install_plan, resolve_install_plan
 from .models import (
     AppSetting,
     Artifact,
@@ -77,7 +71,6 @@ from .models import (
     Job,
     Message,
     MessagePart,
-    ModelCapabilityEvidence,
     ModelInstall,
     ModelProfile,
     Project,
@@ -798,7 +791,9 @@ async def create_chat(
         routing_mode=payload.routing_mode.value,
         generation_settings_json=values["generation_settings_json"],
         generation_preset_ids_json=values["generation_preset_ids_json"],
+        vision_settings_json=values["vision_settings_json"],
         active_chat_profile_id=AUTO_PROFILE_ID,
+        active_vision_profile_id=AUTO_PROFILE_ID,
         active_image_profile_id=AUTO_PROFILE_ID,
         active_video_profile_id=AUTO_PROFILE_ID,
     )
@@ -848,6 +843,7 @@ async def update_chat(
         raise HTTPException(404, "project not found")
     profile_fields = {
         "active_chat_profile_id": ModelRole.CHAT.value,
+        "active_vision_profile_id": ModelRole.CHAT.value,
         "active_image_profile_id": ModelRole.IMAGE.value,
         "active_video_profile_id": ModelRole.VIDEO.value,
     }
@@ -866,6 +862,23 @@ async def update_chat(
             role=profile.role,
             engine=profile.engine,
         )
+        if field == "active_vision_profile_id":
+            install = session.get(ModelInstall, profile.model_install_id)
+            evidence = (
+                current_capability_evidence(
+                    session,
+                    install,
+                    _services(request).settings,
+                    _services(request).runtimes,
+                )
+                if install
+                else None
+            )
+            if "image" not in evidence_input_modalities(evidence):
+                raise HTTPException(
+                    422,
+                    "active_vision_profile_id requires a runtime-verified vision profile",
+                )
     for key, value in values.items():
         setattr(chat, key, value)
     session.commit()
@@ -2287,57 +2300,18 @@ async def list_models(request: Request, session: SessionDep) -> list[ModelInstal
         ).all()
     )
     services = _services(request)
-    current_hardware_class = hardware_capability_class(services.settings)
-    runtime_statuses = {
-        "llama.cpp": services.runtimes.status("llama.cpp"),
-        "comfyui": services.runtimes.status("comfyui"),
-    }
-    evidence_by_install: dict[str, ModelCapabilityEvidence] = {}
-    for evidence in session.scalars(
-        select(ModelCapabilityEvidence)
-        .where(
-            ModelCapabilityEvidence.model_install_id.in_([install.id for install in installs]),
-            ModelCapabilityEvidence.result == "ready",
-        )
-        .order_by(ModelCapabilityEvidence.probed_at.desc())
-    ).all():
-        install = next(
-            (candidate for candidate in installs if candidate.id == evidence.model_install_id),
-            None,
-        )
-        if not install:
-            continue
-        expected_hashes = {
-            str(path): str(digest)
-            for path, digest in (install.manifest_json.get("expected_sha256") or {}).items()
-            if isinstance(path, str) and isinstance(digest, str)
-        }
-        template_sha256 = install.manifest_json.get("workflow_template_sha256")
-        expected_workflow = (
-            media_workflow_contract_version(template_sha256)
-            if isinstance(template_sha256, str)
-            else None
-        )
-        runtime_release = evidence.details_json.get("runtime_release")
-        current_runtime = runtime_statuses.get(install.engine)
+    evidence_by_install = {
+        install.id: evidence
+        for install in installs
         if (
-            evidence.adapter_contract_version != ADAPTER_CONTRACT_VERSION
-            or evidence.launch_contract_version != LAUNCH_CONTRACT_VERSION
-            or evidence.probe_version != ACTIVATION_PROBE_VERSION
-            or evidence.hardware_class != current_hardware_class
-            or evidence.component_hashes_json != expected_hashes
-            or evidence.workflow_contract_version != expected_workflow
-            or (
-                isinstance(runtime_release, str)
-                and (
-                    not current_runtime
-                    or current_runtime.state != "ready"
-                    or current_runtime.release != runtime_release
-                )
+            evidence := current_capability_evidence(
+                session,
+                install,
+                services.settings,
+                services.runtimes,
             )
-        ):
-            continue
-        evidence_by_install.setdefault(evidence.model_install_id, evidence)
+        )
+    }
     return [
         ModelInstallOut.model_validate(install).model_copy(
             update={
@@ -2481,6 +2455,7 @@ def _delete_model_locked(
             select(Chat).where(
                 or_(
                     Chat.active_chat_profile_id.in_(profile_ids),
+                    Chat.active_vision_profile_id.in_(profile_ids),
                     Chat.active_image_profile_id.in_(profile_ids),
                     Chat.active_video_profile_id.in_(profile_ids),
                 )
@@ -2489,6 +2464,8 @@ def _delete_model_locked(
         for chat in affected_chats:
             if chat.active_chat_profile_id in profile_ids:
                 chat.active_chat_profile_id = AUTO_PROFILE_ID
+            if chat.active_vision_profile_id in profile_ids:
+                chat.active_vision_profile_id = AUTO_PROFILE_ID
             if chat.active_image_profile_id in profile_ids:
                 chat.active_image_profile_id = AUTO_PROFILE_ID
             if chat.active_video_profile_id in profile_ids:
@@ -2971,7 +2948,11 @@ def _path_size(path: Path) -> int:
 
 
 @router.get("/profiles", response_model=list[ModelProfileOut])
-async def list_profiles(session: SessionDep, role: str | None = None) -> list[ModelProfile]:
+async def list_profiles(
+    request: Request,
+    session: SessionDep,
+    role: str | None = None,
+) -> list[ModelProfileOut]:
     statement = (
         select(ModelProfile)
         .outerjoin(ModelInstall, ModelInstall.id == ModelProfile.model_install_id)
@@ -2989,7 +2970,25 @@ async def list_profiles(session: SessionDep, role: str | None = None) -> list[Mo
     )
     if role:
         statement = statement.where(ModelProfile.role == role)
-    return list(session.scalars(statement).all())
+    services = _services(request)
+    results: list[ModelProfileOut] = []
+    for profile in session.scalars(statement).all():
+        evidence = None
+        if profile.model_install_id:
+            install = session.get(ModelInstall, profile.model_install_id)
+            if install:
+                evidence = current_capability_evidence(
+                    session,
+                    install,
+                    services.settings,
+                    services.runtimes,
+                )
+        results.append(
+            ModelProfileOut.model_validate(profile).model_copy(
+                update={"input_modalities": evidence_input_modalities(evidence)}
+            )
+        )
+    return results
 
 
 @router.post("/profiles", response_model=ModelProfileOut, status_code=201)

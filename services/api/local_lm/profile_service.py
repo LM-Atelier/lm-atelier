@@ -93,6 +93,7 @@ def _reset_profile_selections(session: Session, profile_ids: set[str]) -> None:
         select(Chat).where(
             or_(
                 Chat.active_chat_profile_id.in_(profile_ids),
+                Chat.active_vision_profile_id.in_(profile_ids),
                 Chat.active_image_profile_id.in_(profile_ids),
                 Chat.active_video_profile_id.in_(profile_ids),
             )
@@ -101,6 +102,8 @@ def _reset_profile_selections(session: Session, profile_ids: set[str]) -> None:
     for chat in chats:
         if chat.active_chat_profile_id in profile_ids:
             chat.active_chat_profile_id = AUTO_PROFILE_ID
+        if chat.active_vision_profile_id in profile_ids:
+            chat.active_vision_profile_id = AUTO_PROFILE_ID
         if chat.active_image_profile_id in profile_ids:
             chat.active_image_profile_id = AUTO_PROFILE_ID
         if chat.active_video_profile_id in profile_ids:

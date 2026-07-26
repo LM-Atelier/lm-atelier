@@ -75,11 +75,13 @@ class Chat(TimestampMixin, Base):
     routing_mode: Mapped[str] = mapped_column(String(16), default=RoutingMode.AUTO.value)
     confirm_uncertain_media: Mapped[bool] = mapped_column(Boolean, default=True)
     active_chat_profile_id: Mapped[str | None] = mapped_column(String(40), nullable=True)
+    active_vision_profile_id: Mapped[str | None] = mapped_column(String(40), nullable=True)
     active_image_profile_id: Mapped[str | None] = mapped_column(String(40), nullable=True)
     active_video_profile_id: Mapped[str | None] = mapped_column(String(40), nullable=True)
     active_head_message_id: Mapped[str | None] = mapped_column(String(40), nullable=True)
     generation_settings_json: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
     generation_preset_ids_json: Mapped[dict[str, str | None]] = mapped_column(JSON, default=dict)
+    vision_settings_json: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
 
     project: Mapped[Project | None] = relationship(back_populates="chats")
     messages: Mapped[list[Message]] = relationship(
@@ -255,6 +257,7 @@ class Run(TimestampMixin, Base):
     status: Mapped[str] = mapped_column(String(16), default=RunStatus.PENDING.value, index=True)
     standalone_prompt: Mapped[str] = mapped_column(Text, default="")
     profile_id: Mapped[str | None] = mapped_column(String(40), nullable=True)
+    vision_profile_id: Mapped[str | None] = mapped_column(String(40), nullable=True)
     workflow_revision_id: Mapped[str | None] = mapped_column(String(40), nullable=True)
     settings_json: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
     provenance_json: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)

@@ -1260,7 +1260,7 @@ function ChatView({
   onPreset: (presetId: string | null) => void;
   onMode: (mode: RoutingMode) => void;
   onSend: (text: string, mode: RoutingMode, artifacts: string[], settings: Record<string, unknown>) => void;
-  onProfile: (field: "active_chat_profile_id" | "active_image_profile_id" | "active_video_profile_id", id: string | null) => void;
+  onProfile: (field: "active_chat_profile_id" | "active_vision_profile_id" | "active_image_profile_id" | "active_video_profile_id", id: string | null) => void;
   onRegenerate: (messageId: string, settings: Record<string, unknown>) => void;
   onSelectRevision: (messageId: string, revisionId: string) => void;
   onEdit: (
@@ -1304,11 +1304,16 @@ function ChatView({
       <div className="chat-header">
         <div><small>{chat.project_id ? "Project chat" : "Unfiled chat"}</small><h1>{chat.title}</h1></div>
         <div className="chat-profile-selectors">
-          {(["chat", "image", "video"] as const).map((role) => {
-            const field = `active_${role}_profile_id` as "active_chat_profile_id" | "active_image_profile_id" | "active_video_profile_id";
+          {(["chat", "vision", "image", "video"] as const).map((role) => {
+            const field = `active_${role}_profile_id` as "active_chat_profile_id" | "active_vision_profile_id" | "active_image_profile_id" | "active_video_profile_id";
             const selected = profiles.find((profile) => profile.id === chat[field]);
-            const value = selected?.is_default ? "" : chat[field] ?? "";
-            return <label key={role}><span>{role}</span><select value={value} onChange={(event) => onProfile(field, event.target.value || null)}><option value={AUTO_PROFILE_ID}>Auto</option><option value="">Default</option>{profiles.filter((profile) => profile.role === role && !profile.is_default).map((profile) => <option key={profile.id} value={profile.id}>{profile.name}</option>)}</select></label>;
+            const value = role !== "vision" && selected?.is_default ? "" : chat[field] ?? "";
+            const options = profiles.filter((profile) => (
+              role === "vision"
+                ? profile.role === "chat" && profile.input_modalities?.includes("image")
+                : profile.role === role
+            ) && (role === "vision" || !profile.is_default));
+            return <label key={role}><span>{role}</span><select value={value} onChange={(event) => onProfile(field, event.target.value || null)}><option value={AUTO_PROFILE_ID}>Auto</option><option value="">{role === "vision" ? "Off" : "Default"}</option>{options.map((profile) => <option key={profile.id} value={profile.id}>{profile.name}</option>)}</select></label>;
           })}
         </div>
       </div>
@@ -1454,6 +1459,9 @@ function InstalledModelRow({
       <span className="model-install-copy">
         <strong>{model.name}</strong>
         <small>{model.readiness === "ready" ? "Runtime verified" : model.readiness === "unsupported" ? "Unsupported" : "Not runtime verified"}</small>
+        {model.role === "chat" && model.readiness === "ready" && profile?.input_modalities?.includes("text") && (
+          <small>{profile.input_modalities.includes("image") ? "Vision capable" : "Text only"}</small>
+        )}
         {profile?.use_case && <small>{profile.use_case}</small>}
       </span>
       <span className="model-install-size">{formatBytes(model.size_bytes)}</span>
@@ -1490,6 +1498,7 @@ function ModelsView() {
   const [maxParameters, setMaxParameters] = useState("");
   const [maxSizeGb, setMaxSizeGb] = useState("");
   const [updatedWithinDays, setUpdatedWithinDays] = useState("");
+  const [installedChatCapability, setInstalledChatCapability] = useState("");
   const [importOpen, setImportOpen] = useState(false);
   const [importName, setImportName] = useState("");
   const [importPath, setImportPath] = useState("");
@@ -1638,6 +1647,15 @@ function ModelsView() {
       .map((job) => job.payload_json.remote_id)
       .filter((remoteId): remoteId is string => typeof remoteId === "string") ?? [],
   );
+  const installedModels = (installed.data ?? []).filter((model) => {
+    if (!installedChatCapability) return true;
+    if (model.role !== "chat" || model.readiness !== "ready") return false;
+    const profile = profiles.data?.find((candidate) => candidate.model_install_id === model.id);
+    const modalities = profile?.input_modalities ?? [];
+    return installedChatCapability === "vision"
+      ? modalities.includes("image")
+      : modalities.includes("text") && !modalities.includes("image");
+  });
   const statusFor = (model: CatalogModel): "idle" | "preparing" | "downloading" | "installed" => (
     installedRemoteIds.has(model.remote_id)
       ? "installed"
@@ -1664,7 +1682,20 @@ function ModelsView() {
         <select aria-label="Model order" value={sort} onChange={(event) => setSort(event.target.value)}><option value="trending">Trending on Hugging Face</option><option value="downloads">Downloads</option><option value="likes">Likes</option><option value="newest">Newest</option><option value="updated">Recently updated</option><option value="compatible">Compatible first</option></select>
       </div>
       <div className="catalog-filters"><select aria-label="Compatibility filter" value={compatibility} onChange={(event) => setCompatibility(event.target.value)}><option value="">All compatibility</option><option value="likely">Automatic test available</option><option value="advanced_import">Advanced import</option><option value="unsupported">Unsupported</option></select><select aria-label="Last updated filter" value={updatedWithinDays} onChange={(event) => setUpdatedWithinDays(event.target.value)}><option value="">Updated any time</option><option value="7">Updated this week</option><option value="30">Updated this month</option><option value="90">Updated in 3 months</option><option value="365">Updated this year</option></select><select aria-label="Format filter" value={fileFormat} onChange={(event) => setFileFormat(event.target.value)}><option value="">All formats</option><option value="gguf">GGUF</option><option value="safetensors">safetensors</option></select><select aria-label="Access filter" value={gated} onChange={(event) => setGated(event.target.value)}><option value="">All access</option><option value="open">Open</option><option value="gated">Gated</option></select><input aria-label="Quantization filter" placeholder="Quantization (Q4_K_M, FP8…)" value={quantization} onChange={(event) => setQuantization(event.target.value)} /><input aria-label="Architecture filter" placeholder="Architecture" value={architecture} onChange={(event) => setArchitecture(event.target.value)} /><input aria-label="License filter" placeholder="License" value={licenseId} onChange={(event) => setLicenseId(event.target.value)} /><input aria-label="Minimum parameters" type="number" min="0" placeholder="Min parameters (B)" value={minParameters} onChange={(event) => setMinParameters(event.target.value)} /><input aria-label="Maximum parameters" type="number" min="0" placeholder="Max parameters (B)" value={maxParameters} onChange={(event) => setMaxParameters(event.target.value)} /><input aria-label="Maximum download size" type="number" min="0" placeholder="Max download (GB)" value={maxSizeGb} onChange={(event) => setMaxSizeGb(event.target.value)} /></div>
-      {(installed.data?.length ?? 0) > 0 && <section><h2>Installed models</h2><div className="profile-table model-installs">{installed.data?.map((model) => {
+      {(installed.data?.length ?? 0) > 0 && <section>
+        <div className="section-heading">
+          <h2>Installed models</h2>
+          <select
+            aria-label="Installed chat capability"
+            value={installedChatCapability}
+            onChange={(event) => setInstalledChatCapability(event.target.value)}
+          >
+            <option value="">All capabilities</option>
+            <option value="text">Text only</option>
+            <option value="vision">Vision capable</option>
+          </select>
+        </div>
+        <div className="profile-table model-installs">{installedModels.map((model) => {
         const profile = profiles.data?.find((candidate) => candidate.model_install_id === model.id);
         return <InstalledModelRow
           key={model.id}
@@ -1685,7 +1716,8 @@ function ModelsView() {
             }
           }}
         />;
-      })}</div></section>}
+        })}</div>
+      </section>}
       {(download.error || deleteModel.error || cleanupDownloads.error || updateUseCase.error) && <div className="callout error" role="alert">{download.error?.message || deleteModel.error?.message || cleanupDownloads.error?.message || updateUseCase.error?.message}</div>}
       {catalog.isLoading && <div className="loading-line" />}
       {catalog.error && <div className="callout error action-callout" role="alert"><span>{catalog.error.message}</span><button className="secondary compact-button" disabled={catalog.isFetching} onClick={() => void catalog.refetch()}>Retry</button></div>}

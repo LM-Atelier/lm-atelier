@@ -113,13 +113,20 @@ async def test_planned_chat_activation_requires_completion_and_records_evidence(
 
     class FakeChatAdapter:
         async def capabilities(self) -> object:
-            return SimpleNamespace(healthy=True, version="llama-test")
+            return SimpleNamespace(
+                healthy=True,
+                version="llama-test",
+                input_modalities=["text", "image"],
+            )
 
         async def count_tokens(self, _messages: list[dict[str, Any]]) -> int:
             return 4
 
         async def stream(self, request: ChatRequest):  # type: ignore[no-untyped-def]
             assert request.settings["max_tokens"] == 8
+            content = request.messages[0]["content"]
+            assert isinstance(content, list)
+            assert content[1]["type"] == "image_url"
             yield ChatEvent(type="token", text="OK")
             yield ChatEvent(type="complete")
 
@@ -161,7 +168,7 @@ async def test_planned_chat_activation_requires_completion_and_records_evidence(
             role="chat",
             engine="llama.cpp",
             local_path=str(settings.model_dir / "planned-chat"),
-            manifest_json={"files": ["model.gguf"]},
+            manifest_json={"files": ["model.gguf", "mmproj-model.gguf"]},
             active=False,
         )
         profile = ModelProfile(
@@ -199,6 +206,9 @@ async def test_planned_chat_activation_requires_completion_and_records_evidence(
         evidence = session.query(ModelCapabilityEvidence).one()
         assert evidence.result == "ready"
         assert evidence.runtime_build == "llama-test"
+        assert evidence.details_json["input_modalities"] == ["text", "image"]
+        assert evidence.details_json["projector_expected"] is True
+        assert evidence.details_json["vision_probe"] == "bounded_image_completion"
 
 
 async def test_failed_chat_probe_restores_the_previous_profile(
@@ -210,7 +220,11 @@ async def test_failed_chat_probe_restores_the_previous_profile(
 
     class FailingChatAdapter:
         async def capabilities(self) -> object:
-            return SimpleNamespace(healthy=True, version="llama-test")
+            return SimpleNamespace(
+                healthy=True,
+                version="llama-test",
+                input_modalities=["text"],
+            )
 
         async def count_tokens(self, _messages: list[dict[str, Any]]) -> int:
             return 4
@@ -354,7 +368,11 @@ async def test_unknown_gguf_plan_installs_and_activates_with_one_request(
 
     class ChatAdapter:
         async def capabilities(self) -> object:
-            return SimpleNamespace(healthy=True, version="llama-future")
+            return SimpleNamespace(
+                healthy=True,
+                version="llama-future",
+                input_modalities=["text"],
+            )
 
         async def count_tokens(self, _messages: list[dict[str, Any]]) -> int:
             return 3

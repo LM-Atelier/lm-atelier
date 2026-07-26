@@ -36,6 +36,24 @@ class Settings(BaseSettings):
     auto_unload_chat_for_media: bool = True
     hf_token: str | None = None
     max_upload_bytes: int = 100 * 1024 * 1024
+    vision_max_images: int = Field(default=4, ge=1, le=16)
+    vision_max_image_bytes: int = Field(
+        default=20 * 1024 * 1024,
+        ge=1024,
+        le=100 * 1024**2,
+    )
+    vision_max_total_bytes: int = Field(
+        default=32 * 1024 * 1024,
+        ge=1024,
+        le=256 * 1024**2,
+    )
+    vision_max_pixels: int = Field(default=40_000_000, ge=1_000_000, le=200_000_000)
+    vision_max_video_frames: int = Field(default=6, ge=3, le=16)
+    vision_max_video_duration_seconds: int = Field(default=3600, ge=1, le=86_400)
+    vision_max_frame_dimension: int = Field(default=1280, ge=256, le=4096)
+    vision_max_frame_bytes: int = Field(default=5 * 1024 * 1024, ge=64 * 1024, le=20 * 1024**2)
+    vision_sampler_timeout_seconds: int = Field(default=60, ge=5, le=300)
+    vision_bridge_max_tokens: int = Field(default=512, ge=64, le=2048)
     max_generated_output_bytes: int = Field(
         default=512 * 1024**2,
         ge=1024**2,

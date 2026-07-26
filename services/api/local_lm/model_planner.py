@@ -15,7 +15,7 @@ from .model_manifests import ModelManifestInspection
 from .models import InstallPlan
 
 INSTALL_RESOLVER_VERSION = "install-resolver-v1"
-ACTIVATION_PROBE_VERSION = "activation-probe-v1"
+ACTIVATION_PROBE_VERSION = "activation-probe-v2"
 LAUNCH_CONTRACT_VERSION = "worker-launch-v1"
 
 InstallCompatibility = Literal[

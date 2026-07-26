@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import asyncio
-import base64
 import hashlib
 import logging
 import re
@@ -18,6 +17,7 @@ from sqlalchemy.orm import Session, object_session, selectinload
 
 from .adapters.base import ChatRequest, MediaEvent, MediaRequest
 from .artifacts import ArtifactStore
+from .capability_evidence import current_capability_evidence, evidence_input_modalities
 from .custom_nodes import custom_node_dependency_errors
 from .db import SessionLocal
 from .domain import (
@@ -68,13 +68,11 @@ from .settings_registry import (
     validate_settings,
     workflow_settings,
 )
+from .vision import PreparedVisualContext, VisionContextService
 
 logger = logging.getLogger(__name__)
 
 IDEMPOTENCY_CLAIM_WAIT_SECONDS = 120.0
-MAX_VISION_IMAGES = 4
-MAX_VISION_IMAGE_BYTES = 20 * 1024 * 1024
-MAX_VISION_TOTAL_BYTES = 32 * 1024 * 1024
 MAX_PENDING_WORK_PER_CHAT = 32
 PENDING_OUTPUT_REFERENCE = re.compile(
     r"\b(?:"
@@ -84,12 +82,6 @@ PENDING_OUTPUT_REFERENCE = re.compile(
     r")\b",
     re.IGNORECASE,
 )
-VISION_MEDIA_TYPES = {
-    "image/gif",
-    "image/jpeg",
-    "image/png",
-    "image/webp",
-}
 
 
 class ResponseRevisionConflict(ValueError):
@@ -171,6 +163,7 @@ class ConversationOrchestrator:
         self.persistence_scope = persistence_scope
         self.scope_id = scope_id
         self.router = ModalityRouter()
+        self.vision = VisionContextService(engines.settings, artifacts)
         self._tasks: dict[str, asyncio.Task[None]] = {}
         self._chat_guards: dict[str, asyncio.Lock] = {}
         self._chat_planner_ready = asyncio.Event()
@@ -608,6 +601,12 @@ class ConversationOrchestrator:
             f"{request.text}\n{plan.standalone_prompt}",
         )
         profile_id = profile.id if profile else None
+        vision_profile = (
+            self._vision_profile_for_chat(session, chat, profile)
+            if plan.operation == Operation.TEXT
+            else None
+        )
+        vision_profile_id = vision_profile.id if vision_profile else None
         workflow_revision = self._workflow_for_operation(
             session,
             plan.operation,
@@ -895,6 +894,7 @@ class ConversationOrchestrator:
             status=RunStatus.QUEUED.value,
             standalone_prompt=plan.standalone_prompt,
             profile_id=profile_id,
+            vision_profile_id=vision_profile_id,
             workflow_revision_id=workflow_revision.id if workflow_revision else None,
             settings_json=effective_settings,
             provenance_json={
@@ -1526,13 +1526,70 @@ class ConversationOrchestrator:
     ) -> tuple[list[dict[str, Any]], dict[str, Any], dict[str, Any]]:
         messages = self._context_messages(session, run)
         capabilities = await self.engines.chat_capabilities()
+        candidates = self._visual_context_artifacts(session, run)
+        direct_profile_selected = run.vision_profile_id == run.profile_id and bool(run.profile_id)
+        if (
+            self.engines.settings.chat_engine == "mock"
+            and candidates
+            and "image" in capabilities.input_modalities
+        ):
+            direct_profile_selected = True
         vision_metadata: dict[str, Any] = {
             "available": "image" in capabilities.input_modalities,
             "images_included": 0,
             "artifact_ids": [],
+            "mode": "none",
+            "visual_contents_inspected": False,
         }
-        if vision_metadata["available"]:
-            messages, vision_metadata = self._attach_visual_context(session, run, messages)
+        if candidates and vision_metadata["available"] and direct_profile_selected:
+            await self._set_chat_phase(
+                self._job_id_for_run(session, run),
+                run.id,
+                "Preparing visual context",
+            )
+            messages, vision_metadata = await self._attach_visual_context(
+                session,
+                run,
+                messages,
+                candidates=candidates,
+            )
+            run.vision_profile_id = run.profile_id
+            vision_metadata.update(
+                {
+                    "mode": "direct",
+                    "profile_id": run.profile_id,
+                    "profile": self._vision_profile_provenance(session, run.profile_id),
+                    "visual_contents_inspected": bool(vision_metadata.get("images_included")),
+                }
+            )
+        elif candidates and direct_profile_selected:
+            raise RuntimeError(
+                "The verified vision profile did not expose image input after loading."
+            )
+        elif candidates and run.vision_profile_id and run.vision_profile_id != run.profile_id:
+            observation, bridge_metadata = await self._bridge_visual_context(
+                session,
+                run,
+                candidates,
+            )
+            vision_metadata = bridge_metadata
+            vision_metadata["profile"] = self._vision_profile_provenance(
+                session,
+                run.vision_profile_id,
+            )
+            if observation:
+                messages = self._append_vision_observation(
+                    messages,
+                    observation,
+                    run.vision_profile_id,
+                )
+        elif candidates:
+            vision_metadata.update(
+                {
+                    "reason": "No runtime-verified vision profile is available.",
+                    "images_skipped": len(candidates),
+                }
+            )
         profile = session.get(ModelProfile, run.profile_id) if run.profile_id else None
         context_limit = int(
             (profile.load_settings_json if profile else {}).get("context_length", 8192)
@@ -1579,101 +1636,225 @@ class ConversationOrchestrator:
         }
         return messages, request_settings, metadata
 
-    def _attach_visual_context(
+    async def _attach_visual_context(
         self,
         session: Session,
         run: Run,
         messages: list[dict[str, Any]],
+        *,
+        candidates: list[Artifact] | None = None,
     ) -> tuple[list[dict[str, Any]], dict[str, Any]]:
-        candidates = self._visual_context_artifacts(session, run)
-        user_index = next(
-            (
-                index
-                for index in range(len(messages) - 1, -1, -1)
-                if messages[index].get("role") == MessageRole.USER.value
-            ),
-            None,
+        candidates = candidates or self._visual_context_artifacts(session, run)
+        current = session.get(Message, run.user_message_id)
+        strict_ids = {
+            part.artifact_id
+            for part in (current.parts if current else [])
+            if part.artifact_id and part.metadata_json.get("input_reference_source") == "explicit"
+        }
+        chat = session.get(Chat, run.chat_id)
+        visual = await self.vision.prepare(
+            candidates,
+            strict_artifact_ids=strict_ids,
+            vision_settings=chat.vision_settings_json if chat else {},
         )
-        if user_index is None:
-            return messages, {
-                "available": True,
+        if not visual.frames:
+            posters = [
+                poster
+                for artifact in candidates
+                if artifact.id not in strict_ids
+                and artifact.media_type.casefold().startswith("video/")
+                and isinstance(
+                    poster_id := artifact.metadata_json.get("poster_artifact_id"),
+                    str,
+                )
+                and (poster := session.get(Artifact, poster_id)) is not None
+            ]
+            if posters:
+                poster_visual = await self.vision.prepare(
+                    posters,
+                    strict_artifact_ids=set(),
+                    vision_settings=chat.vision_settings_json if chat else {},
+                )
+                visual = PreparedVisualContext(
+                    frames=poster_visual.frames,
+                    skipped_artifact_ids=tuple(
+                        dict.fromkeys(
+                            (
+                                *visual.skipped_artifact_ids,
+                                *poster_visual.skipped_artifact_ids,
+                            )
+                        )
+                    ),
+                )
+        return self.vision.attach_to_latest_user(messages, visual), {
+            "available": True,
+            "images_included": len(visual.frames),
+            "artifact_ids": visual.inspected_artifact_ids,
+            "bytes_included": sum(len(frame.content) for frame in visual.frames),
+            "images_skipped": len(visual.skipped_artifact_ids),
+            "sampled_frame_timestamps": [
+                {
+                    "artifact_id": frame.artifact_id,
+                    "timestamp_seconds": frame.timestamp_seconds,
+                }
+                for frame in visual.frames
+                if frame.timestamp_seconds is not None
+            ],
+            **visual.provenance(),
+        }
+
+    async def _bridge_visual_context(
+        self,
+        session: Session,
+        run: Run,
+        candidates: list[Artifact],
+    ) -> tuple[str, dict[str, Any]]:
+        bridge_profile = session.get(ModelProfile, run.vision_profile_id)
+        bridge_install = (
+            session.get(ModelInstall, bridge_profile.model_install_id)
+            if bridge_profile and bridge_profile.model_install_id
+            else None
+        )
+        text_profile = session.get(ModelProfile, run.profile_id) if run.profile_id else None
+        text_install = (
+            session.get(ModelInstall, text_profile.model_install_id)
+            if text_profile and text_profile.model_install_id
+            else None
+        )
+        if not bridge_profile or not bridge_install:
+            return "", {
+                "available": False,
+                "mode": "none",
+                "visual_contents_inspected": False,
                 "images_included": 0,
                 "artifact_ids": [],
-                "bytes_included": 0,
                 "images_skipped": len(candidates),
+                "reason": "The selected vision profile is unavailable.",
             }
-        encoded: list[tuple[Artifact, str, str]] = []
-        total_bytes = 0
-        skipped = 0
-        for artifact in candidates:
-            if len(encoded) >= MAX_VISION_IMAGES:
-                skipped += 1
-                continue
-            try:
-                path, detected_type, _disposition = self.artifacts.delivery_metadata(artifact)
-                size = path.stat().st_size
-                if (
-                    detected_type not in VISION_MEDIA_TYPES
-                    or size > MAX_VISION_IMAGE_BYTES
-                    or total_bytes + size > MAX_VISION_TOTAL_BYTES
-                ):
-                    skipped += 1
-                    continue
-                content = path.read_bytes()
-                if (
-                    len(content) != artifact.size_bytes
-                    or hashlib.sha256(content).hexdigest() != artifact.sha256
-                ):
-                    skipped += 1
-                    continue
-            except (OSError, ValueError):
-                skipped += 1
-                continue
-            encoded.append(
-                (
-                    artifact,
-                    detected_type,
-                    base64.b64encode(content).decode("ascii"),
-                )
-            )
-            total_bytes += size
-
-        if encoded:
-            user_index = next(
-                (
-                    index
-                    for index in range(len(messages) - 1, -1, -1)
-                    if messages[index].get("role") == MessageRole.USER.value
-                ),
-                None,
-            )
-            if user_index is not None:
-                text = messages[user_index].get("content", "")
-                text = text if isinstance(text, str) else ""
-                messages[user_index] = {
-                    "role": MessageRole.USER.value,
-                    "content": [
-                        {"type": "text", "text": text},
-                        *[
-                            {
-                                "type": "image_url",
-                                "image_url": {
-                                    "url": f"data:{media_type};base64,{payload}",
-                                    "detail": "auto",
-                                },
-                            }
-                            for _artifact, media_type, payload in encoded
-                        ],
-                    ],
-                }
-
-        return messages, {
+        session.expunge(bridge_profile)
+        session.expunge(bridge_install)
+        if text_profile:
+            session.expunge(text_profile)
+        if text_install:
+            session.expunge(text_install)
+        observation = ""
+        metadata: dict[str, Any] = {
             "available": True,
-            "images_included": len(encoded),
-            "artifact_ids": [artifact.id for artifact, _media_type, _payload in encoded],
-            "bytes_included": total_bytes,
-            "images_skipped": skipped,
+            "mode": "bridge",
+            "profile_id": bridge_profile.id,
+            "visual_contents_inspected": False,
+            "images_included": 0,
+            "artifact_ids": [],
         }
+        try:
+            await self._set_chat_phase(
+                self._job_id_for_run(session, run),
+                run.id,
+                "Loading vision model",
+            )
+            await self.processes.load_chat(bridge_profile, bridge_install)
+            capabilities = await self.engines.chat_capabilities()
+            if "image" not in capabilities.input_modalities:
+                raise RuntimeError("the selected vision profile did not accept image input")
+            bridge_messages: list[dict[str, Any]] = [
+                {
+                    "role": MessageRole.USER.value,
+                    "content": (
+                        "Inspect the attached visual material for the user's request. "
+                        "Describe only relevant visible facts. If frames have timestamp labels, "
+                        "identify observations by those sampled timestamps and do not claim to "
+                        "have inspected unsampled portions.\n\n"
+                        f"User request: {run.standalone_prompt}"
+                    ),
+                }
+            ]
+            bridge_messages, metadata = await self._attach_visual_context(
+                session,
+                run,
+                bridge_messages,
+                candidates=candidates,
+            )
+            metadata.update(
+                {
+                    "available": True,
+                    "mode": "bridge",
+                    "profile_id": bridge_profile.id,
+                    "visual_contents_inspected": bool(metadata.get("images_included")),
+                }
+            )
+            if not metadata["visual_contents_inspected"]:
+                return "", metadata
+            await self._set_chat_phase(
+                self._job_id_for_run(session, run),
+                run.id,
+                f"Analyzing {metadata['images_included']} visual frame"
+                f"{'' if metadata['images_included'] == 1 else 's'}",
+            )
+            max_tokens = self.engines.settings.vision_bridge_max_tokens
+            completion_seen = False
+            completion_metadata: dict[str, Any] = {}
+            async with asyncio.timeout(180):
+                async for event in self.engines.chat.stream(
+                    ChatRequest(
+                        run_id=run.id,
+                        messages=bridge_messages,
+                        settings={"temperature": 0, "max_tokens": max_tokens},
+                        persistence_scope=self.persistence_scope,
+                        scope_id=self.scope_id,
+                    )
+                ):
+                    if event.type == "delta":
+                        observation += event.text
+                        if len(observation) > 16_000:
+                            raise RuntimeError("vision observation exceeded its safety limit")
+                    elif event.type == "error":
+                        raise RuntimeError(str(event.data.get("error") or "vision analysis failed"))
+                    elif event.type == "cancelled":
+                        raise asyncio.CancelledError
+                    elif event.type in {"usage", "complete"}:
+                        completion_metadata.update(event.data)
+                        completion_seen = completion_seen or event.type == "complete"
+            observation = observation.strip()
+            if not observation or not completion_seen:
+                raise RuntimeError("vision profile returned no observation")
+            metadata["observation_sha256"] = hashlib.sha256(observation.encode()).hexdigest()
+            metadata["observation_characters"] = len(observation)
+            metadata["completion"] = completion_metadata
+            return observation, metadata
+        finally:
+            await self._set_chat_phase(
+                self._job_id_for_run(session, run),
+                run.id,
+                "Restoring chat model",
+            )
+            if text_profile and text_install:
+                await self.processes.load_chat(text_profile, text_install)
+            else:
+                await self.processes.stop("chat")
+
+    @staticmethod
+    def _append_vision_observation(
+        messages: list[dict[str, Any]],
+        observation: str,
+        profile_id: str | None,
+    ) -> list[dict[str, Any]]:
+        attributed = {
+            "role": "system",
+            "content": (
+                "Attributed visual observation from the selected local vision profile "
+                f"({profile_id or 'unknown'}). Treat it as model-produced context, not as the "
+                f"user's words:\n{observation}"
+            ),
+        }
+        insert_at = 1 if messages and messages[0].get("role") == "system" else 0
+        return [*messages[:insert_at], attributed, *messages[insert_at:]]
+
+    @staticmethod
+    def _job_id_for_run(session: Session, run: Run) -> str:
+        job_id = session.scalar(
+            select(Job.id).where(Job.run_id == run.id).order_by(Job.created_at.desc()).limit(1)
+        )
+        return job_id or ""
 
     @classmethod
     def _visual_context_artifacts(cls, session: Session, run: Run) -> list[Artifact]:
@@ -1682,14 +1863,15 @@ class ConversationOrchestrator:
         current = session.get(Message, run.user_message_id)
         candidates: list[Artifact] = []
         for artifact in cls._message_input_artifacts(session, current) if current else []:
-            if artifact.media_type.casefold().startswith("video/"):
-                poster_id = artifact.metadata_json.get("poster_artifact_id")
-                poster = session.get(Artifact, poster_id) if isinstance(poster_id, str) else None
-                if poster:
-                    candidates.append(poster)
-                continue
             candidates.append(artifact)
         seen = {artifact.id for artifact in candidates}
+        chat = session.get(Chat, run.chat_id)
+        vision_settings = chat.vision_settings_json if chat else {}
+        if (
+            isinstance(vision_settings, dict)
+            and vision_settings.get("include_prior_visual") is False
+        ):
+            return candidates
 
         current_id = current.parent_id if current else None
         visited: set[str] = set()
@@ -1708,21 +1890,11 @@ class ConversationOrchestrator:
                 referenced = session.get(Artifact, part.artifact_id)
                 if not referenced:
                     continue
-                selected: Artifact | None = referenced
-                if part.type == PartType.VIDEO.value:
-                    poster_id = referenced.metadata_json.get("poster_artifact_id")
-                    selected = (
-                        session.get(Artifact, poster_id) if isinstance(poster_id, str) else None
-                    )
-                    if not selected:
-                        continue
-                if selected is None:
-                    continue
                 if (
                     part.type in {PartType.IMAGE.value, PartType.VIDEO.value}
-                    and selected.id not in seen
+                    and referenced.id not in seen
                 ):
-                    candidates.append(selected)
+                    candidates.append(referenced)
                     return candidates
             current_id = message.parent_id
         return candidates
@@ -2684,6 +2856,85 @@ class ConversationOrchestrator:
             "matched_terms": matches,
             "fallback": score == 0,
         }
+
+    def _profile_has_verified_vision(self, session: Session, profile: ModelProfile) -> bool:
+        if not profile.model_install_id:
+            return False
+        install = session.get(ModelInstall, profile.model_install_id)
+        if not install:
+            return False
+        evidence = current_capability_evidence(
+            session,
+            install,
+            self.engines.settings,
+            self.processes.runtimes,
+        )
+        return "image" in evidence_input_modalities(evidence)
+
+    @staticmethod
+    def _vision_profile_provenance(
+        session: Session,
+        profile_id: str | None,
+    ) -> dict[str, Any] | None:
+        profile = session.get(ModelProfile, profile_id) if profile_id else None
+        install = (
+            session.get(ModelInstall, profile.model_install_id)
+            if profile and profile.model_install_id
+            else None
+        )
+        source = (
+            session.get(ModelSource, install.source_id) if install and install.source_id else None
+        )
+        if not profile or not install:
+            return None
+        return {
+            "profile_id": profile.id,
+            "profile_name": profile.name,
+            "install_id": install.id,
+            "engine": install.engine,
+            "component_hashes": install.manifest_json.get("expected_sha256") or {},
+            "source": (
+                {
+                    "provider": source.provider,
+                    "remote_id": source.remote_id,
+                    "revision": source.revision,
+                }
+                if source
+                else None
+            ),
+        }
+
+    def _vision_profile_for_chat(
+        self,
+        session: Session,
+        chat: Chat,
+        text_profile: ModelProfile | None,
+    ) -> ModelProfile | None:
+        if text_profile and self._profile_has_verified_vision(session, text_profile):
+            return text_profile
+        profiles = list(
+            session.scalars(
+                select(ModelProfile)
+                .where(ModelProfile.role == "chat")
+                .order_by(ModelProfile.updated_at.desc(), ModelProfile.id)
+            ).all()
+        )
+        verified = [
+            profile
+            for profile in profiles
+            if profile.model_install_id
+            and (install := session.get(ModelInstall, profile.model_install_id))
+            and install.active
+            and self._profile_has_verified_vision(session, profile)
+        ]
+        selected_id = chat.active_vision_profile_id
+        if selected_id and selected_id != AUTO_PROFILE_ID:
+            return next((profile for profile in verified if profile.id == selected_id), None)
+        if selected_id == AUTO_PROFILE_ID:
+            return next((profile for profile in verified if profile.is_default), None) or (
+                verified[0] if verified else None
+            )
+        return None
 
     @staticmethod
     def _selection_terms(value: str) -> set[str]:
