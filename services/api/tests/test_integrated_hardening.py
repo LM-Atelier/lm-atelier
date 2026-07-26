@@ -8,7 +8,7 @@ from collections.abc import AsyncIterator
 from types import SimpleNamespace
 
 from httpx2 import AsyncClient
-from sqlalchemy import select
+from sqlalchemy import select, update
 
 from local_lm.adapters.base import MediaEvent, MediaRequest
 from local_lm.adapters.mock import MockMediaAdapter
@@ -411,3 +411,34 @@ async def test_media_oom_fails_truthfully_then_retries_without_duplicate_output(
     with SessionLocal() as session:
         job = session.scalar(select(Job).where(Job.run_id == run_id))
         assert job and job.attempt == 2
+
+
+async def test_video_postprocessing_never_holds_a_sqlite_write_transaction(
+    app,
+    client: AsyncClient,
+    monkeypatch,
+) -> None:  # type: ignore[no-untyped-def]
+    poster_checked = asyncio.Event()
+
+    async def poster_with_concurrent_progress_write(_artifact) -> None:  # type: ignore[no-untyped-def]
+        with SessionLocal() as concurrent:
+            concurrent.execute(
+                update(Job).where(Job.status == "running").values(updated_at=utcnow())
+            )
+            concurrent.commit()
+        poster_checked.set()
+        return None
+
+    monkeypatch.setattr(
+        app.state.services.artifacts,
+        "video_poster",
+        poster_with_concurrent_progress_write,
+    )
+    chat = (await client.post("/api/chats", json={"title": "Video transaction"})).json()
+    accepted = await client.post(
+        f"/api/chats/{chat['id']}/turns",
+        json={"text": "Create a short video of a turning gear", "mode": "video"},
+    )
+    assert accepted.status_code == 202
+    await _wait_for_run(client, accepted.json()["run"]["id"])
+    assert poster_checked.is_set()

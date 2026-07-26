@@ -2874,6 +2874,10 @@ class ConversationOrchestrator:
                         "settings": run.settings_json,
                     },
                 )
+                # Derived-video helpers can spend minutes in ffmpeg. Persist the
+                # content-addressed source before awaiting them so SQLite never
+                # carries a write transaction across external process work.
+                session.commit()
                 poster_artifact_id: str | None = None
                 proxy_artifact_id: str | None = None
                 if generated.kind == "video":
@@ -2899,6 +2903,10 @@ class ConversationOrchestrator:
                             **artifact.metadata_json,
                             "browser_proxy_artifact_id": proxy.id,
                         }
+                        # The poster helper awaits ffmpeg too. End the proxy
+                        # transaction first; incomplete derived artifacts remain
+                        # unreferenced and are handled by normal retention.
+                        session.commit()
                     poster_content = await self.artifacts.video_poster(playback_artifact)
                     if poster_content:
                         poster = self.artifacts.ingest_bytes(
