@@ -46,6 +46,8 @@ from .models import (
     ModelProfile,
     ModelSource,
     Project,
+    ResponseRevision,
+    ResponseRevisionPart,
     Run,
     TurnCreationClaim,
     WorkflowDefinition,
@@ -75,6 +77,11 @@ VISION_MEDIA_TYPES = {
     "image/png",
     "image/webp",
 }
+
+
+class ResponseRevisionConflict(ValueError):
+    """A stable response cannot accept the requested revision transition."""
+
 
 SELECTION_TERM_ALIASES = {
     "animation": "video",
@@ -215,6 +222,7 @@ class ConversationOrchestrator:
         request: TurnRequest,
         *,
         use_explicit_parent: bool = False,
+        replacement_message_id: str | None = None,
     ) -> TurnAccepted:
         async with self.chat_guard(chat_id):
             return await self._create_turn(
@@ -222,6 +230,7 @@ class ConversationOrchestrator:
                 chat_id,
                 request,
                 use_explicit_parent=use_explicit_parent,
+                replacement_message_id=replacement_message_id,
             )
 
     async def _create_turn(
@@ -231,6 +240,7 @@ class ConversationOrchestrator:
         request: TurnRequest,
         *,
         use_explicit_parent: bool = False,
+        replacement_message_id: str | None = None,
     ) -> TurnAccepted:
         # Never resolve an idempotency key until its URL-scoped chat has been
         # validated. Otherwise a key from one chat could disclose another
@@ -246,6 +256,7 @@ class ConversationOrchestrator:
                 chat_id,
                 request,
                 use_explicit_parent=use_explicit_parent,
+                replacement_message_id=replacement_message_id,
             )
 
         owner_token, replay = await self._claim_or_replay_turn(
@@ -272,6 +283,7 @@ class ConversationOrchestrator:
                 chat_id,
                 request,
                 use_explicit_parent=use_explicit_parent,
+                replacement_message_id=replacement_message_id,
             )
         finally:
             self._release_turn_claim(session, chat_id, key, owner_token)
@@ -360,10 +372,35 @@ class ConversationOrchestrator:
         request: TurnRequest,
         *,
         use_explicit_parent: bool = False,
+        replacement_message_id: str | None = None,
     ) -> TurnAccepted:
         chat = session.get(Chat, chat_id)
         if not chat:
             raise LookupError("chat not found")
+        replacement_message = (
+            session.get(Message, replacement_message_id) if replacement_message_id else None
+        )
+        if replacement_message_id and (
+            not replacement_message
+            or replacement_message.chat_id != chat_id
+            or replacement_message.role != MessageRole.ASSISTANT.value
+            or not replacement_message.transcript_visible
+        ):
+            raise LookupError("replacement assistant message not found in this chat")
+        if replacement_message:
+            if replacement_message.status != MessageStatus.COMPLETE.value:
+                raise ResponseRevisionConflict(
+                    "only a completed visible response can be regenerated"
+                )
+            pending_revision = session.scalar(
+                select(ResponseRevision.id).where(
+                    ResponseRevision.message_id == replacement_message.id,
+                    ResponseRevision.status == MessageStatus.PENDING.value,
+                )
+            )
+            if pending_revision:
+                raise ResponseRevisionConflict("this response is already being regenerated")
+            self._ensure_response_revision(session, replacement_message)
         parent_message_id = request.parent_message_id
         if parent_message_id:
             parent = session.get(Message, parent_message_id)
@@ -563,6 +600,7 @@ class ConversationOrchestrator:
             parent_id=parent_message_id,
             role=MessageRole.USER.value,
             status=MessageStatus.COMPLETE.value,
+            transcript_visible=replacement_message is None,
             parts=input_parts,
         )
         if plan.operation == Operation.TEXT:
@@ -589,12 +627,14 @@ class ConversationOrchestrator:
             parent_id=None,
             role=MessageRole.ASSISTANT.value,
             status=MessageStatus.PENDING.value,
+            transcript_visible=replacement_message is None,
             parts=initial_parts,
         )
         session.add_all([user_message, assistant_message])
         session.flush()
         assistant_message.parent_id = user_message.id
-        chat.active_head_message_id = assistant_message.id
+        if replacement_message is None:
+            chat.active_head_message_id = assistant_message.id
 
         model_provenance: dict[str, Any] | None = None
         if profile and profile.model_install_id:
@@ -676,10 +716,48 @@ class ConversationOrchestrator:
                 "workflow": workflow_provenance,
                 "resolved_settings": effective_settings,
                 "generation_estimate": generation_estimate,
+                **(
+                    {
+                        "response_replacement": {
+                            "message_id": replacement_message.id,
+                            "source_user_message_id": replacement_message.parent_id,
+                        }
+                    }
+                    if replacement_message
+                    else {}
+                ),
             },
         )
         session.add(run)
         session.flush()
+        if replacement_message:
+            latest_sequence = session.scalar(
+                select(ResponseRevision.sequence)
+                .where(ResponseRevision.message_id == replacement_message.id)
+                .order_by(ResponseRevision.sequence.desc())
+                .limit(1)
+            )
+            revision = ResponseRevision(
+                message_id=replacement_message.id,
+                run_id=run.id,
+                sequence=(latest_sequence or 0) + 1,
+                status=MessageStatus.PENDING.value,
+            )
+            session.add(revision)
+            try:
+                session.flush()
+            except IntegrityError as exc:
+                session.rollback()
+                raise ResponseRevisionConflict(
+                    "this response is already being regenerated"
+                ) from exc
+            run.provenance_json = {
+                **run.provenance_json,
+                "response_replacement": {
+                    **run.provenance_json["response_replacement"],
+                    "revision_id": revision.id,
+                },
+            }
         job = Job(
             kind=self._job_kind(plan.operation).value,
             status=JobStatus.QUEUED.value,
@@ -735,6 +813,15 @@ class ConversationOrchestrator:
                 )
             ]
         self._replace_parts(message, parts)
+        replacement = run.provenance_json.get("response_replacement")
+        if isinstance(replacement, dict):
+            revision_id = replacement.get("revision_id")
+            revision = (
+                session.get(ResponseRevision, revision_id) if isinstance(revision_id, str) else None
+            )
+            if revision and revision.run_id == run.id:
+                revision.status = MessageStatus.PENDING.value
+                revision.parts.clear()
         session.flush()
         for artifact_id in preview_ids:
             self.artifacts.delete_temporary_preview(session, artifact_id)
@@ -984,6 +1071,7 @@ class ConversationOrchestrator:
                 self._persist_streamed_text(assistant_id, accumulated.rstrip())
             raise
 
+        completed_assistant_id = assistant_id
         with SessionLocal() as session:
             message = session.get(Message, assistant_id)
             run = session.get(Run, run_id)
@@ -1042,8 +1130,21 @@ class ConversationOrchestrator:
                         metadata_json=metadata,
                     )
                 )
+            completed_assistant_id = self._finalize_response_revision(
+                session,
+                run,
+                message,
+                promote=True,
+            )
             session.commit()
-        await self.events.publish("run.completed", run_id, {"job_id": job_id})
+        await self.events.publish(
+            "run.completed",
+            run_id,
+            {
+                "job_id": job_id,
+                "assistant_message_id": completed_assistant_id,
+            },
+        )
 
     async def _set_chat_phase(self, job_id: str, run_id: str, label: str) -> None:
         assistant_id = ""
@@ -1520,6 +1621,7 @@ class ConversationOrchestrator:
             elif event.type == "complete":
                 completed_assets.extend(event.assets)
 
+        completed_assistant_id = assistant_id
         with SessionLocal() as session:
             message = session.get(Message, assistant_id)
             run = session.get(Run, run_id)
@@ -1627,6 +1729,12 @@ class ConversationOrchestrator:
                 )
             )
             self._replace_parts(message, parts)
+            completed_assistant_id = self._finalize_response_revision(
+                session,
+                run,
+                message,
+                promote=True,
+            )
             session.commit()
             if preview_artifact_id and preview_artifact_id not in artifact_ids:
                 self.artifacts.delete_temporary_preview(session, preview_artifact_id)
@@ -1635,7 +1743,14 @@ class ConversationOrchestrator:
             await self.events.publish(
                 "artifact.ready", run_id, {"artifact_id": artifact_id, "job_id": job_id}
             )
-        await self.events.publish("run.completed", run_id, {"job_id": job_id})
+        await self.events.publish(
+            "run.completed",
+            run_id,
+            {
+                "job_id": job_id,
+                "assistant_message_id": completed_assistant_id,
+            },
+        )
 
     async def _fail(self, job_id: str, run_id: str, error: str) -> None:
         with SessionLocal() as session:
@@ -1677,6 +1792,12 @@ class ConversationOrchestrator:
                         message,
                         [MessagePart(position=0, type=PartType.ERROR.value, text=error)],
                     )
+                self._finalize_response_revision(
+                    session,
+                    run,
+                    message,
+                    promote=False,
+                )
                 session.flush()
                 for artifact_id in preview_ids:
                     self.artifacts.delete_temporary_preview(session, artifact_id)
@@ -1725,6 +1846,12 @@ class ConversationOrchestrator:
                         )
                     ],
                 )
+            self._finalize_response_revision(
+                session,
+                run,
+                message,
+                promote=False,
+            )
             session.flush()
             for artifact_id in preview_ids:
                 self.artifacts.delete_temporary_preview(session, artifact_id)
@@ -1803,6 +1930,150 @@ class ConversationOrchestrator:
             # the unique (message_id, position) values.
             session.flush()
         message.parts.extend(parts)
+
+    @staticmethod
+    def _message_part_copy(part: MessagePart | ResponseRevisionPart) -> MessagePart:
+        return MessagePart(
+            position=part.position,
+            type=part.type,
+            text=part.text,
+            artifact_id=part.artifact_id,
+            metadata_json=dict(part.metadata_json),
+        )
+
+    @staticmethod
+    def _revision_part_copy(part: MessagePart) -> ResponseRevisionPart:
+        return ResponseRevisionPart(
+            position=part.position,
+            type=part.type,
+            text=part.text,
+            artifact_id=part.artifact_id,
+            metadata_json=dict(part.metadata_json),
+        )
+
+    def _ensure_response_revision(
+        self,
+        session: Session,
+        message: Message,
+    ) -> ResponseRevision:
+        if message.active_response_revision_id:
+            existing = session.get(ResponseRevision, message.active_response_revision_id)
+            if existing and existing.message_id == message.id:
+                return existing
+        source_run = session.scalar(
+            select(Run)
+            .where(Run.assistant_message_id == message.id)
+            .order_by(Run.created_at.asc(), Run.id.asc())
+            .limit(1)
+        )
+        revision = ResponseRevision(
+            message_id=message.id,
+            run_id=source_run.id if source_run else None,
+            sequence=max(
+                (item.sequence for item in message.response_revisions),
+                default=0,
+            )
+            + 1,
+            status=message.status,
+            parts=[self._revision_part_copy(part) for part in message.parts],
+        )
+        session.add(revision)
+        session.flush()
+        message.active_response_revision_id = revision.id
+        return revision
+
+    def _finalize_response_revision(
+        self,
+        session: Session,
+        run: Run,
+        staged_message: Message,
+        *,
+        promote: bool,
+    ) -> str:
+        replacement = run.provenance_json.get("response_replacement")
+        if not isinstance(replacement, dict):
+            revision = self._ensure_response_revision(session, staged_message)
+            revision.parts.clear()
+            session.flush()
+            revision.parts.extend(
+                self._revision_part_copy(part)
+                for part in sorted(staged_message.parts, key=lambda item: item.position)
+            )
+            revision.status = staged_message.status
+            return staged_message.id
+        message_id = replacement.get("message_id")
+        revision_id = replacement.get("revision_id")
+        if not isinstance(message_id, str) or not isinstance(revision_id, str):
+            return staged_message.id
+        message = session.get(Message, message_id)
+        target_revision = session.get(ResponseRevision, revision_id)
+        if (
+            not message
+            or not target_revision
+            or target_revision.message_id != message.id
+            or target_revision.run_id != run.id
+        ):
+            raise RuntimeError("response revision target is invalid")
+        target_revision.parts.clear()
+        session.flush()
+        target_revision.parts.extend(
+            self._revision_part_copy(part)
+            for part in sorted(staged_message.parts, key=lambda item: item.position)
+        )
+        target_revision.status = staged_message.status
+        if promote:
+            self._replace_parts(
+                message,
+                [
+                    self._message_part_copy(part)
+                    for part in sorted(target_revision.parts, key=lambda item: item.position)
+                ],
+            )
+            message.status = MessageStatus.COMPLETE.value
+            message.active_response_revision_id = target_revision.id
+        return message.id
+
+    def select_response_revision(
+        self,
+        session: Session,
+        message_id: str,
+        revision_id: str,
+    ) -> Message:
+        message = session.get(Message, message_id)
+        revision = session.get(ResponseRevision, revision_id)
+        if (
+            not message
+            or not message.transcript_visible
+            or message.role != MessageRole.ASSISTANT.value
+        ):
+            raise LookupError("assistant message not found")
+        if not revision or revision.message_id != message.id:
+            raise LookupError("response revision not found")
+        if revision.status != MessageStatus.COMPLETE.value:
+            raise ValueError("only a completed response revision can be selected")
+        self._replace_parts(
+            message,
+            [
+                self._message_part_copy(part)
+                for part in sorted(revision.parts, key=lambda item: item.position)
+            ],
+        )
+        message.status = MessageStatus.COMPLETE.value
+        message.active_response_revision_id = revision.id
+        session.commit()
+        selected = session.scalar(
+            select(Message)
+            .options(
+                selectinload(Message.parts).selectinload(MessagePart.artifact),
+                selectinload(Message.response_revisions)
+                .selectinload(ResponseRevision.parts)
+                .selectinload(ResponseRevisionPart.artifact),
+            )
+            .where(Message.id == message.id)
+        )
+        if not selected:
+            raise LookupError("assistant message not found")
+        return selected
 
     @staticmethod
     def _ancestor_messages(
@@ -2372,12 +2643,22 @@ class ConversationOrchestrator:
             raise LookupError("run not found")
         user_message = session.scalar(
             select(Message)
-            .options(selectinload(Message.parts).selectinload(MessagePart.artifact))
+            .options(
+                selectinload(Message.parts).selectinload(MessagePart.artifact),
+                selectinload(Message.response_revisions)
+                .selectinload(ResponseRevision.parts)
+                .selectinload(ResponseRevisionPart.artifact),
+            )
             .where(Message.id == refreshed.user_message_id)
         )
         assistant_message = session.scalar(
             select(Message)
-            .options(selectinload(Message.parts).selectinload(MessagePart.artifact))
+            .options(
+                selectinload(Message.parts).selectinload(MessagePart.artifact),
+                selectinload(Message.response_revisions)
+                .selectinload(ResponseRevision.parts)
+                .selectinload(ResponseRevisionPart.artifact),
+            )
             .where(Message.id == refreshed.assistant_message_id)
         )
         if not user_message or not assistant_message:

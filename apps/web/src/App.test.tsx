@@ -92,6 +92,7 @@ vi.mock("./api", () => ({
     deleteArtifact: vi.fn(),
     sendTurn: vi.fn(),
     regenerateMessage: vi.fn(),
+    selectResponseRevision: vi.fn(),
     branchMessage: vi.fn(),
     cancelChat: vi.fn(),
     jobs: vi.fn().mockResolvedValue([]),
@@ -2656,11 +2657,127 @@ describe("App", () => {
     fireEvent.click(screen.getByText("Edit and branch"));
     fireEvent.change(screen.getByLabelText("Edit message"), { target: { value: "Count to 1000" } });
     fireEvent.click(screen.getByText("Send edited message"));
-    await waitFor(() => expect(api.branchMessage).toHaveBeenCalledWith(userMessage.id, "Count to 1000", { max_tokens: 4096 }));
+    await waitFor(() => expect(api.branchMessage).toHaveBeenCalledWith(
+      userMessage.id,
+      "Count to 1000",
+      "text",
+      { max_tokens: 4096 },
+    ));
 
     fireEvent.change(screen.getByRole("textbox", { name: "Message" }), { target: { value: "Count to 1000" } });
     fireEvent.click(screen.getByRole("button", { name: "Send" }));
     await waitFor(() => expect(api.sendTurn).toHaveBeenCalledWith(chat.id, "Count to 1000", "text", [], { max_tokens: 4096 }));
+  });
+
+  it("switches completed response revisions without branching the chat", async () => {
+    const stamp = "2026-07-25T12:00:00Z";
+    const chat = {
+      id: "chat-revisions",
+      project_id: null,
+      title: "Response revisions",
+      archived: false,
+      routing_mode: "text" as const,
+      confirm_uncertain_media: false,
+      active_chat_profile_id: null,
+      active_image_profile_id: null,
+      active_video_profile_id: null,
+      active_head_message_id: "assistant-revisions",
+      created_at: stamp,
+      updated_at: stamp,
+    };
+    const userMessage = {
+      id: "user-revisions",
+      chat_id: chat.id,
+      parent_id: null,
+      role: "user" as const,
+      status: "complete" as const,
+      parts: [{
+        id: "user-revisions-part",
+        position: 0,
+        type: "text" as const,
+        text: "Write a response",
+        artifact_id: null,
+        metadata_json: {},
+      }],
+      created_at: stamp,
+      updated_at: stamp,
+    };
+    const firstPart = {
+      id: "revision-part-one",
+      position: 0,
+      type: "text" as const,
+      text: "First response",
+      artifact_id: null,
+      metadata_json: {},
+    };
+    const secondPart = {
+      id: "revision-part-two",
+      position: 0,
+      type: "text" as const,
+      text: "Second response",
+      artifact_id: null,
+      metadata_json: {},
+    };
+    const assistantMessage = {
+      id: "assistant-revisions",
+      chat_id: chat.id,
+      parent_id: userMessage.id,
+      role: "assistant" as const,
+      status: "complete" as const,
+      transcript_visible: true,
+      active_response_revision_id: "revision-two",
+      parts: [secondPart],
+      response_revisions: [
+        {
+          id: "revision-one",
+          message_id: "assistant-revisions",
+          run_id: "run-one",
+          sequence: 1,
+          status: "complete" as const,
+          parts: [firstPart],
+          created_at: stamp,
+          updated_at: stamp,
+        },
+        {
+          id: "revision-two",
+          message_id: "assistant-revisions",
+          run_id: "run-two",
+          sequence: 2,
+          status: "complete" as const,
+          parts: [secondPart],
+          created_at: stamp,
+          updated_at: stamp,
+        },
+      ],
+      created_at: stamp,
+      updated_at: stamp,
+    };
+    localStorage.setItem("local-lm-chat", chat.id);
+    vi.mocked(api.chats).mockResolvedValue([chat]);
+    vi.mocked(api.chat).mockResolvedValue({
+      ...chat,
+      messages: [userMessage, assistantMessage],
+    });
+    vi.mocked(api.selectResponseRevision).mockResolvedValue({
+      ...assistantMessage,
+      active_response_revision_id: "revision-one",
+      parts: [firstPart],
+    });
+    const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+    render(
+      <QueryClientProvider client={client}>
+        <App />
+      </QueryClientProvider>,
+    );
+
+    expect(await screen.findByText("Second response")).toBeVisible();
+    expect(screen.getByText("2 / 2")).toBeVisible();
+    fireEvent.click(screen.getByRole("button", { name: "Previous response revision" }));
+    await waitFor(() => expect(api.selectResponseRevision).toHaveBeenCalledWith(
+      assistantMessage.id,
+      "revision-one",
+    ));
+    expect(api.branchMessage).not.toHaveBeenCalled();
   });
 
   it("keeps turn controls isolated to their chat", async () => {

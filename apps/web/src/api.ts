@@ -18,6 +18,7 @@ import type {
   GenerationPreset,
   GenerationPresetBundle,
   Job,
+  Message,
   ModelInstall,
   ModelStorageInfo,
   ModelProfile,
@@ -192,10 +193,25 @@ export const api = {
       method: "POST",
       body: JSON.stringify({ settings }),
     }),
-  branchMessage: (messageId: string, text: string, settings: Record<string, unknown>) =>
+  selectResponseRevision: (messageId: string, revisionId: string) =>
+    request<Message>(`/api/messages/${messageId}/revisions/${revisionId}/select`, {
+      method: "POST",
+    }),
+  branchMessage: (
+    messageId: string,
+    text: string,
+    mode: RoutingMode,
+    settings: Record<string, unknown>,
+  ) =>
     request<TurnAccepted>(`/api/messages/${messageId}/branch`, {
       method: "POST",
-      body: JSON.stringify({ text, settings, idempotency_key: crypto.randomUUID() }),
+      body: JSON.stringify({
+        text,
+        mode,
+        input_artifact_ids: [],
+        settings,
+        idempotency_key: crypto.randomUUID(),
+      }),
     }),
   cancelChat: (chatId: string) =>
     request<Job>(`/api/chats/${chatId}/cancel`, { method: "POST" }),

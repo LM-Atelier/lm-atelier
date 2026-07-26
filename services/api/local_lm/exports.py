@@ -30,6 +30,8 @@ from .models import (
     Message,
     MessagePart,
     Project,
+    ResponseRevision,
+    ResponseRevisionPart,
     Run,
 )
 from .profile_service import AUTO_PROFILE_ID
@@ -106,7 +108,11 @@ class ProjectExporter:
             .options(
                 selectinload(Chat.messages)
                 .selectinload(Message.parts)
-                .selectinload(MessagePart.artifact)
+                .selectinload(MessagePart.artifact),
+                selectinload(Chat.messages)
+                .selectinload(Message.response_revisions)
+                .selectinload(ResponseRevision.parts)
+                .selectinload(ResponseRevisionPart.artifact),
             )
             .where(Chat.project_id == project_id)
             .order_by(Chat.created_at)
@@ -120,6 +126,10 @@ class ProjectExporter:
                 for part in message.parts:
                     if part.artifact:
                         referenced[part.artifact.id] = part.artifact
+                for revision in message.response_revisions:
+                    for revision_part in revision.parts:
+                        if revision_part.artifact:
+                            referenced[revision_part.artifact.id] = revision_part.artifact
         run_input_ids: set[str] = set()
         for run in runs:
             provenance = run.provenance_json if isinstance(run.provenance_json, dict) else {}
@@ -215,7 +225,7 @@ class ProjectExporter:
             run_records.append(record)
         manifest = {
             "format": "local-lm-project",
-            "version": 3,
+            "version": 4,
             "media_included": include_media,
             "project": project_record,
             "chats": chat_records,
@@ -266,7 +276,7 @@ class ProjectExporter:
                 original_name=f"{self._safe_name(project.name)}.lm-atelier.zip",
                 metadata={
                     "format": "local-lm-project",
-                    "version": 3,
+                    "version": 4,
                     "project_id": project.id,
                     "artifact_count": len(referenced),
                     "media_included": include_media,
@@ -303,38 +313,46 @@ class ProjectExporter:
         for message in messages:
             if not isinstance(message, dict):
                 continue
-            parts = message.get("parts")
-            if not isinstance(parts, list):
-                continue
-            for part in parts:
-                if not isinstance(part, dict):
-                    continue
-                embedded_artifact = part.get("artifact")
-                if isinstance(embedded_artifact, dict):
-                    embedded_artifact["original_name"] = redact_local_paths(
-                        embedded_artifact.get("original_name")
-                    )
-                    embedded_artifact["metadata_json"] = self._portable_artifact_metadata(
-                        embedded_artifact.get("metadata_json"),
-                        artifact_ids,
-                    )
-                metadata = part.get("metadata_json")
-                metadata = redact_local_paths(metadata) if isinstance(metadata, dict) else {}
-                source_run = runs.get(str(metadata.get("run_id")))
-                if source_run and isinstance(metadata.get("provenance"), dict):
-                    metadata["provenance"] = self._portable_provenance(
-                        metadata["provenance"],
-                        Operation(source_run.operation),
-                        dependencies,
-                        artifact_ids,
-                    )
-                metadata, _missing_count = self._remap_artifact_references(
-                    metadata,
-                    {artifact_id: artifact_id for artifact_id in artifact_ids},
-                    artifact_ids,
-                    strict=False,
+            part_groups: list[list[Any]] = []
+            if isinstance(message.get("parts"), list):
+                part_groups.append(message["parts"])
+            revisions = message.get("response_revisions")
+            if isinstance(revisions, list):
+                part_groups.extend(
+                    revision["parts"]
+                    for revision in revisions
+                    if isinstance(revision, dict) and isinstance(revision.get("parts"), list)
                 )
-                part["metadata_json"] = metadata
+            for parts in part_groups:
+                for part in parts:
+                    if not isinstance(part, dict):
+                        continue
+                    embedded_artifact = part.get("artifact")
+                    if isinstance(embedded_artifact, dict):
+                        embedded_artifact["original_name"] = redact_local_paths(
+                            embedded_artifact.get("original_name")
+                        )
+                        embedded_artifact["metadata_json"] = self._portable_artifact_metadata(
+                            embedded_artifact.get("metadata_json"),
+                            artifact_ids,
+                        )
+                    metadata = part.get("metadata_json")
+                    metadata = redact_local_paths(metadata) if isinstance(metadata, dict) else {}
+                    source_run = runs.get(str(metadata.get("run_id")))
+                    if source_run and isinstance(metadata.get("provenance"), dict):
+                        metadata["provenance"] = self._portable_provenance(
+                            metadata["provenance"],
+                            Operation(source_run.operation),
+                            dependencies,
+                            artifact_ids,
+                        )
+                    metadata, _missing_count = self._remap_artifact_references(
+                        metadata,
+                        {artifact_id: artifact_id for artifact_id in artifact_ids},
+                        artifact_ids,
+                        strict=False,
+                    )
+                    part["metadata_json"] = metadata
 
     def _portable_artifact_metadata(
         self,
@@ -619,14 +637,14 @@ class ProjectExporter:
                 self._validate_manifest(manifest)
                 dependency_model = (
                     parse_dependency_manifest(manifest.get("dependencies"))
-                    if manifest["version"] == 3
+                    if manifest["version"] >= 3
                     else None
                 )
                 dependency_index = (
                     dependency_source_index(dependency_model) if dependency_model else None
                 )
                 self._validate_record_graph(manifest, dependency_index)
-                if manifest["version"] == 3:
+                if manifest["version"] >= 3:
                     self._validate_v3_archive_entries(infos, manifest)
                 artifact_map = self._import_artifacts(
                     session,
@@ -698,7 +716,7 @@ class ProjectExporter:
             manifest.get("format") != "local-lm-project"
             or not isinstance(version, int)
             or isinstance(version, bool)
-            or version not in {1, 2, 3}
+            or version not in {1, 2, 3, 4}
         ):
             raise ValueError("unsupported project archive format")
         if not isinstance(manifest.get("project"), dict):
@@ -710,7 +728,7 @@ class ProjectExporter:
         media_included = manifest.get("media_included")
         if not isinstance(media_included, bool):
             raise ValueError("project manifest has an invalid media inclusion flag")
-        if version == 3 and not isinstance(manifest.get("dependencies"), dict):
+        if version >= 3 and not isinstance(manifest.get("dependencies"), dict):
             raise ValueError("project manifest is missing portable dependencies")
 
     @staticmethod
@@ -781,6 +799,11 @@ class ProjectExporter:
         part_ids: set[str] = set()
         parent_references: list[tuple[str, str, str]] = []
         active_heads: list[tuple[str, str]] = []
+        active_revision_references: list[tuple[str, str]] = []
+        revision_run_references: list[tuple[str, str, str]] = []
+        revision_runs_by_message: dict[str, set[str]] = {}
+        revision_ids: set[str] = set()
+        revision_messages: dict[str, str] = {}
         generation_metadata_runs: list[tuple[str, object]] = []
         for chat_data in manifest["chats"]:
             if not isinstance(chat_data, dict):
@@ -835,6 +858,8 @@ class ProjectExporter:
                     _message_status = MessageStatus(str(message_data.get("status")))
                 except ValueError as exc:
                     raise ValueError("project manifest has invalid message state") from exc
+                if version >= 4 and not isinstance(message_data.get("transcript_visible"), bool):
+                    raise ValueError("project manifest has invalid transcript visibility")
                 message_chats[message_id] = chat_id
                 message_roles[message_id] = role
                 parent_id = message_data.get("parent_id")
@@ -880,6 +905,116 @@ class ProjectExporter:
                             raise ValueError(
                                 "project manifest message references an undeclared artifact"
                             )
+                if version >= 4:
+                    revisions = message_data.get("response_revisions")
+                    if not isinstance(revisions, list) or len(revisions) > 1_000:
+                        raise ValueError("project manifest has invalid response revisions")
+                    seen_sequences: set[int] = set()
+                    for revision_data in revisions:
+                        if not isinstance(revision_data, dict):
+                            raise ValueError("project manifest has an invalid response revision")
+                        revision_id = self._text(
+                            revision_data.get("id"),
+                            "response revision id",
+                            40,
+                        )
+                        if revision_id in revision_ids:
+                            raise ValueError(
+                                "project manifest contains duplicate response revision ids"
+                            )
+                        revision_ids.add(revision_id)
+                        revision_messages[revision_id] = message_id
+                        if revision_data.get("message_id") != message_id:
+                            raise ValueError(
+                                "project response revision references a different message"
+                            )
+                        sequence = revision_data.get("sequence")
+                        if (
+                            isinstance(sequence, bool)
+                            or not isinstance(sequence, int)
+                            or sequence < 1
+                            or sequence in seen_sequences
+                        ):
+                            raise ValueError(
+                                "project manifest has an invalid response revision sequence"
+                            )
+                        seen_sequences.add(sequence)
+                        try:
+                            MessageStatus(str(revision_data.get("status")))
+                        except ValueError as exc:
+                            raise ValueError(
+                                "project manifest has invalid response revision state"
+                            ) from exc
+                        revision_run_id = revision_data.get("run_id")
+                        if revision_run_id is not None:
+                            validated_revision_run_id = self._text(
+                                revision_run_id,
+                                "response revision run id",
+                                40,
+                            )
+                            revision_run_references.append(
+                                (
+                                    revision_id,
+                                    chat_id,
+                                    validated_revision_run_id,
+                                )
+                            )
+                            revision_runs_by_message.setdefault(message_id, set()).add(
+                                validated_revision_run_id
+                            )
+                        revision_parts = revision_data.get("parts")
+                        if not isinstance(revision_parts, list) or len(revision_parts) > 10_000:
+                            raise ValueError("project manifest has invalid response revision parts")
+                        for expected_position, part_data in enumerate(revision_parts):
+                            if not isinstance(part_data, dict):
+                                raise ValueError(
+                                    "project manifest has an invalid response revision part"
+                                )
+                            position = part_data.get("position")
+                            if position is not None and (
+                                isinstance(position, bool)
+                                or not isinstance(position, int)
+                                or position != expected_position
+                            ):
+                                raise ValueError(
+                                    "project manifest has invalid response revision positions"
+                                )
+                            try:
+                                PartType(str(part_data.get("type")))
+                            except ValueError as exc:
+                                raise ValueError(
+                                    "project manifest has an invalid response revision part type"
+                                ) from exc
+                            self._optional_text(part_data.get("text"), 10_000_000)
+                            if not isinstance(part_data.get("metadata_json"), dict):
+                                raise ValueError(
+                                    "project response revision has invalid part metadata"
+                                )
+                            artifact_id = part_data.get("artifact_id")
+                            if (
+                                artifact_id is not None
+                                and self._text(
+                                    artifact_id,
+                                    "response revision artifact id",
+                                    80,
+                                )
+                                not in artifact_ids
+                            ):
+                                raise ValueError(
+                                    "project response revision references an undeclared artifact"
+                                )
+                    active_revision = message_data.get("active_response_revision_id")
+                    if active_revision is not None:
+                        active_revision_references.append(
+                            (
+                                message_id,
+                                self._text(
+                                    active_revision,
+                                    "active response revision id",
+                                    40,
+                                ),
+                            )
+                        )
             active_head = chat_data.get("active_head_message_id")
             if active_head is not None:
                 active_heads.append(
@@ -892,8 +1027,12 @@ class ProjectExporter:
         for chat_id, active_head in active_heads:
             if message_chats.get(active_head) != chat_id:
                 raise ValueError("project manifest has an invalid active chat head")
+        for message_id, active_revision_id in active_revision_references:
+            if revision_messages.get(active_revision_id) != message_id:
+                raise ValueError("project manifest has an invalid active response revision")
 
         run_ids: set[str] = set()
+        run_chats: dict[str, str] = {}
         assistant_message_ids: set[str] = set()
         runs_by_assistant_message: dict[str, str] = {}
         for run_data in manifest["runs"]:
@@ -904,6 +1043,7 @@ class ProjectExporter:
                 raise ValueError("project manifest contains duplicate run ids")
             run_ids.add(run_id)
             chat_id = self._text(run_data.get("chat_id"), "run chat id", 40)
+            run_chats[run_id] = chat_id
             user_message_id = self._text(run_data.get("user_message_id"), "run user message id", 40)
             assistant_message_id = self._text(
                 run_data.get("assistant_message_id"), "run assistant message id", 40
@@ -932,7 +1072,7 @@ class ProjectExporter:
                 run_data.get("provenance_json"), dict
             ):
                 raise ValueError("project manifest has invalid run settings or provenance")
-            if version == 3:
+            if version >= 3:
                 self._validate_portable_provenance(
                     run_data["provenance_json"],
                     operation,
@@ -950,11 +1090,25 @@ class ProjectExporter:
                 dependencies,
                 {operation.value},
             )
-        if version == 3:
+        if version >= 3:
             for message_id, supplied_run_id in generation_metadata_runs:
-                expected_run_id = runs_by_assistant_message.get(message_id)
-                if supplied_run_id is not None and supplied_run_id != expected_run_id:
+                if supplied_run_id is None:
+                    continue
+                if version >= 4:
+                    allowed_run_ids = set(revision_runs_by_message.get(message_id, set()))
+                    direct_run_id = runs_by_assistant_message.get(message_id)
+                    if direct_run_id:
+                        allowed_run_ids.add(direct_run_id)
+                    if supplied_run_id not in allowed_run_ids:
+                        raise ValueError(
+                            "project generation metadata references an incompatible run"
+                        )
+                elif supplied_run_id != runs_by_assistant_message.get(message_id):
                     raise ValueError("project generation metadata references an incompatible run")
+        if version >= 4:
+            for _revision_id, chat_id, run_id in revision_run_references:
+                if run_chats.get(run_id) != chat_id:
+                    raise ValueError("project response revision references an incompatible run")
 
     def _validate_portable_provenance(
         self,
@@ -1062,7 +1216,7 @@ class ProjectExporter:
             try:
                 ArtifactKind(str(record.get("kind")))
             except ValueError as exc:
-                if version == 3:
+                if version >= 3:
                     raise ValueError("project manifest has an invalid artifact kind") from exc
         return artifact_ids
 
@@ -1235,7 +1389,7 @@ class ProjectExporter:
                     metadata if isinstance(metadata, dict) else {},
                     planned_mappings,
                     declared_artifact_ids,
-                    strict=manifest["version"] == 3,
+                    strict=manifest["version"] >= 3,
                 )
                 try:
                     artifact = self.artifacts.ingest_stream(
@@ -1275,7 +1429,7 @@ class ProjectExporter:
         artifacts: dict[str, str],
         dependencies: ImportedDependencies | None,
     ) -> Project:
-        strict_portability = manifest["version"] == 3
+        strict_portability = manifest["version"] >= 3
         declared_artifact_ids = {
             str(record["id"])
             for record in manifest["artifacts"]
@@ -1380,6 +1534,7 @@ class ProjectExporter:
                     chat_id=chat.id,
                     role=MessageRole(str(message_data.get("role"))).value,
                     status=MessageStatus(str(message_data.get("status"))).value,
+                    transcript_visible=bool(message_data.get("transcript_visible", True)),
                 )
                 session.add(message)
                 session.flush()
@@ -1416,10 +1571,17 @@ class ProjectExporter:
                     if part_type == PartType.GENERATION_METADATA:
                         source_run = source_runs_by_assistant.get(old_message_id)
                         supplied_run_id = metadata.get("run_id")
-                        if source_run:
+                        if (
+                            manifest["version"] >= 4
+                            and isinstance(supplied_run_id, str)
+                            and supplied_run_id in source_runs
+                        ):
+                            generation_metadata_parts.append((part, supplied_run_id))
+                        elif source_run:
                             source_run_id = str(source_run["id"])
                             if (
                                 strict_portability
+                                and manifest["version"] < 4
                                 and supplied_run_id is not None
                                 and supplied_run_id != source_run_id
                             ):
@@ -1507,6 +1669,125 @@ class ProjectExporter:
             session.add(imported_run)
             session.flush()
             imported_runs[str(run_data["id"])] = imported_run
+        for chat_data in manifest["chats"]:
+            if not isinstance(chat_data, dict):
+                continue
+            for message_data in chat_data.get("messages", []):
+                if not isinstance(message_data, dict):
+                    continue
+                old_message_id = str(message_data.get("id"))
+                imported_message = message_map.get(old_message_id)
+                if not imported_message or imported_message.role != MessageRole.ASSISTANT.value:
+                    continue
+                if manifest["version"] >= 4:
+                    revision_map: dict[str, ResponseRevision] = {}
+                    revisions = message_data.get("response_revisions")
+                    if not isinstance(revisions, list):
+                        revisions = []
+                    for revision_data in revisions:
+                        if not isinstance(revision_data, dict):
+                            continue
+                        revision_source_run_id = revision_data.get("run_id")
+                        linked_run = (
+                            imported_runs.get(revision_source_run_id)
+                            if isinstance(revision_source_run_id, str)
+                            else None
+                        )
+                        source_status = MessageStatus(str(revision_data.get("status")))
+                        revision = ResponseRevision(
+                            message_id=imported_message.id,
+                            run_id=linked_run.id if linked_run else None,
+                            sequence=int(revision_data["sequence"]),
+                            status=(
+                                MessageStatus.FAILED.value
+                                if source_status == MessageStatus.PENDING
+                                else source_status.value
+                            ),
+                        )
+                        session.add(revision)
+                        session.flush()
+                        revision_map[str(revision_data["id"])] = revision
+                        revision_parts = revision_data.get("parts")
+                        if not isinstance(revision_parts, list):
+                            continue
+                        for part_data in revision_parts:
+                            if not isinstance(part_data, dict):
+                                continue
+                            old_artifact_id = part_data.get("artifact_id")
+                            metadata = part_data.get("metadata_json")
+                            metadata = (
+                                redact_local_paths(metadata) if isinstance(metadata, dict) else {}
+                            )
+                            metadata, _missing_artifact_count = self._remap_artifact_references(
+                                metadata,
+                                artifacts,
+                                declared_artifact_ids,
+                                strict=strict_portability,
+                            )
+                            metadata_run_id = metadata.get("run_id")
+                            resolved_metadata_run = (
+                                imported_runs.get(metadata_run_id)
+                                if isinstance(metadata_run_id, str)
+                                else None
+                            )
+                            if resolved_metadata_run:
+                                metadata["run_id"] = resolved_metadata_run.id
+                                if "provenance" in metadata:
+                                    metadata["provenance"] = resolved_metadata_run.provenance_json
+                            elif metadata_run_id is not None:
+                                metadata.pop("run_id", None)
+                                metadata.pop("provenance", None)
+                            imported_artifact_id = (
+                                artifacts.get(old_artifact_id)
+                                if isinstance(old_artifact_id, str)
+                                else None
+                            )
+                            if old_artifact_id and not imported_artifact_id:
+                                metadata["missing_import_artifact_id"] = old_artifact_id
+                            revision.parts.append(
+                                ResponseRevisionPart(
+                                    position=len(revision.parts),
+                                    type=PartType(str(part_data.get("type"))).value,
+                                    text=self._optional_text(
+                                        part_data.get("text"),
+                                        10_000_000,
+                                    ),
+                                    artifact_id=imported_artifact_id,
+                                    metadata_json=metadata,
+                                )
+                            )
+                    active_source_id = message_data.get("active_response_revision_id")
+                    active_revision = (
+                        revision_map.get(active_source_id)
+                        if isinstance(active_source_id, str)
+                        else None
+                    )
+                    if active_revision:
+                        imported_message.active_response_revision_id = active_revision.id
+                else:
+                    source_run = source_runs_by_assistant.get(old_message_id)
+                    legacy_imported_run = (
+                        imported_runs.get(str(source_run["id"])) if source_run else None
+                    )
+                    revision = ResponseRevision(
+                        message_id=imported_message.id,
+                        run_id=legacy_imported_run.id if legacy_imported_run else None,
+                        sequence=1,
+                        status=imported_message.status,
+                        parts=[
+                            ResponseRevisionPart(
+                                position=part.position,
+                                type=part.type,
+                                text=part.text,
+                                artifact_id=part.artifact_id,
+                                metadata_json=dict(part.metadata_json),
+                            )
+                            for part in imported_message.parts
+                        ],
+                    )
+                    session.add(revision)
+                    session.flush()
+                    imported_message.active_response_revision_id = revision.id
         for part, source_run_id in generation_metadata_parts:
             resolved_run = imported_runs.get(source_run_id)
             if not resolved_run:

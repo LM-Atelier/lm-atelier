@@ -586,11 +586,13 @@ function MessageBubble({
   liveText,
   onRegenerate,
   onEdit,
+  onSelectRevision,
 }: {
   message: Message;
   liveText?: string;
   onRegenerate?: (messageId: string) => void;
   onEdit?: (messageId: string, text: string) => void;
+  onSelectRevision?: (messageId: string, revisionId: string) => void;
 }) {
   const visibleParts = message.parts.filter((part) => part.type !== "generation_metadata");
   const userText = visibleParts.filter((part) => part.type === "text").map((part) => part.text || "").join("\n");
@@ -630,6 +632,18 @@ function MessageBubble({
   const inputTokens = Number(usage?.prompt_tokens ?? context?.input_tokens ?? 0);
   const contextLimit = Number(context?.context_limit ?? 0);
   const omitted = Number(context?.messages_omitted ?? 0);
+  const completedRevisions = (message.response_revisions ?? [])
+    .filter((revision) => revision.status === "complete")
+    .sort((left, right) => left.sequence - right.sequence);
+  const activeRevisionIndex = completedRevisions.findIndex(
+    (revision) => revision.id === message.active_response_revision_id,
+  );
+  const revisionIndex = activeRevisionIndex >= 0
+    ? activeRevisionIndex
+    : Math.max(0, completedRevisions.length - 1);
+  const regenerationPending = (message.response_revisions ?? []).some(
+    (revision) => revision.status === "pending",
+  );
   return (
     <article className={`message ${message.role}`}>
       <div className="avatar">{message.role === "user" ? "You" : <Bot size={19} />}</div>
@@ -653,6 +667,32 @@ function MessageBubble({
               </span>
             )}
             {copyableText && <CopyTextButton text={copyableText} label="Copy assistant message" />}
+            {regenerationPending && <span>Regenerating…</span>}
+            {completedRevisions.length > 1 && onSelectRevision && (
+              <span className="response-revision-controls">
+                <button
+                  disabled={revisionIndex <= 0}
+                  onClick={() => onSelectRevision(
+                    message.id,
+                    completedRevisions[revisionIndex - 1]!.id,
+                  )}
+                  aria-label="Previous response revision"
+                >
+                  Previous
+                </button>
+                <span>{revisionIndex + 1} / {completedRevisions.length}</span>
+                <button
+                  disabled={revisionIndex >= completedRevisions.length - 1}
+                  onClick={() => onSelectRevision(
+                    message.id,
+                    completedRevisions[revisionIndex + 1]!.id,
+                  )}
+                  aria-label="Next response revision"
+                >
+                  Next
+                </button>
+              </span>
+            )}
             {onRegenerate && (
               <button onClick={() => onRegenerate(message.id)} aria-label="Regenerate response">
                 <RotateCcw size={13} /> Regenerate
@@ -1057,8 +1097,11 @@ function Composer({
 }
 
 function activeBranchMessages(chat: ChatDetail): Message[] {
-  if (!chat.active_head_message_id) return chat.messages;
-  const byId = new Map(chat.messages.map((message) => [message.id, message]));
+  const visibleMessages = chat.messages.filter(
+    (message) => message.transcript_visible !== false,
+  );
+  if (!chat.active_head_message_id) return visibleMessages;
+  const byId = new Map(visibleMessages.map((message) => [message.id, message]));
   const lineage: Message[] = [];
   const visited = new Set<string>();
   let current = byId.get(chat.active_head_message_id);
@@ -1067,7 +1110,7 @@ function activeBranchMessages(chat: ChatDetail): Message[] {
     lineage.unshift(current);
     current = current.parent_id ? byId.get(current.parent_id) : undefined;
   }
-  return lineage.length > 0 ? lineage : chat.messages;
+  return lineage.length > 0 ? lineage : visibleMessages;
 }
 
 function workflowSchemaForTurn(
@@ -1111,6 +1154,7 @@ function ChatView({
   onSend,
   onProfile,
   onRegenerate,
+  onSelectRevision,
   onEdit,
   onStop,
 }: {
@@ -1130,7 +1174,13 @@ function ChatView({
   onSend: (text: string, mode: RoutingMode, artifacts: string[], settings: Record<string, unknown>) => void;
   onProfile: (field: "active_chat_profile_id" | "active_image_profile_id" | "active_video_profile_id", id: string | null) => void;
   onRegenerate: (messageId: string, settings: Record<string, unknown>) => void;
-  onEdit: (messageId: string, text: string, settings: Record<string, unknown>) => void;
+  onSelectRevision: (messageId: string, revisionId: string) => void;
+  onEdit: (
+    messageId: string,
+    text: string,
+    mode: RoutingMode,
+    settings: Record<string, unknown>,
+  ) => void;
   onStop: () => void;
 }) {
   const endRef = useRef<HTMLDivElement>(null);
@@ -1141,7 +1191,12 @@ function ChatView({
   }, [chat?.messages, liveText, pendingTurn]);
   if (!chat) return <EmptyState icon={<MessageSquare />} title="Start a local conversation" body="Create a chat and choose a model. Conversations stay on this machine." />;
   const messages = activeBranchMessages(chat);
-  const stoppable = messages.some((message) => message.status === "pending");
+  const stoppable = messages.some(
+    (message) => message.status === "pending"
+      || (message.response_revisions ?? []).some(
+        (revision) => revision.status === "pending",
+      ),
+  );
   const busy = stoppable || Boolean(pendingTurn);
   return (
     <div className="chat-view">
@@ -1167,9 +1222,11 @@ function ChatView({
             messageId,
             chat.routing_mode === "auto" ? {} : settings,
           )}
+          onSelectRevision={busy ? undefined : onSelectRevision}
           onEdit={busy ? undefined : (messageId, text) => onEdit(
             messageId,
             text,
+            chat.routing_mode,
             chat.routing_mode === "auto" ? {} : settings,
           )}
         />)}
@@ -2710,11 +2767,21 @@ export default function App() {
   const regenerate = useMutation({
     mutationFn: ({ messageId, settings }: { chatId: string; messageId: string; settings: Record<string, unknown> }) =>
       api.regenerateMessage(messageId, settings),
-    onSuccess: (accepted, { chatId }) => applyAcceptedTurn(chatId, accepted),
+    onSuccess: (_accepted, { chatId }) => {
+      void client.invalidateQueries({ queryKey: ["chat", chatId], exact: true });
+      void client.invalidateQueries({ queryKey: ["jobs"] });
+    },
+  });
+  const selectResponseRevision = useMutation({
+    mutationFn: ({ messageId, revisionId }: { chatId: string; messageId: string; revisionId: string }) =>
+      api.selectResponseRevision(messageId, revisionId),
+    onSuccess: (_message, { chatId }) => {
+      void client.invalidateQueries({ queryKey: ["chat", chatId], exact: true });
+    },
   });
   const branch = useMutation({
-    mutationFn: ({ messageId, text, settings }: { chatId: string; messageId: string; text: string; settings: Record<string, unknown> }) =>
-      api.branchMessage(messageId, text, settings),
+    mutationFn: ({ messageId, text, mode, settings }: { chatId: string; messageId: string; text: string; mode: RoutingMode; settings: Record<string, unknown> }) =>
+      api.branchMessage(messageId, text, mode, settings),
     onSuccess: (accepted, { chatId }) => applyAcceptedTurn(chatId, accepted),
   });
   const stop = useMutation({
@@ -2901,14 +2968,28 @@ export default function App() {
       persistActiveChat({ [field]: id });
     }} onRegenerate={(messageId, settings) => {
       if (displayedChat) regenerate.mutate({ chatId: displayedChat.id, messageId, settings });
-    }} onEdit={(messageId, text, settings) => {
-      if (displayedChat) branch.mutate({ chatId: displayedChat.id, messageId, text, settings });
+    }} onSelectRevision={(messageId, revisionId) => {
+      if (displayedChat) {
+        selectResponseRevision.mutate({
+          chatId: displayedChat.id,
+          messageId,
+          revisionId,
+        });
+      }
+    }} onEdit={(messageId, text, mode, settings) => {
+      if (displayedChat) branch.mutate({
+        chatId: displayedChat.id,
+        messageId,
+        text,
+        mode,
+        settings,
+      });
     }} onStop={() => {
       if (displayedChat) stop.mutate(displayedChat.id);
     }} onSend={(text, mode, artifacts, settings) => {
       if (displayedChat) send.mutate({ chatId: displayedChat.id, text, mode, artifacts, settings });
     }} />;
-  }, [view, engines.data, profiles.data, presets.data, workflows.data, allProjects, chat.data, chatDrafts, liveText, pendingTurns, send, regenerate, branch, stop, updateChat, client]);
+  }, [view, engines.data, profiles.data, presets.data, workflows.data, allProjects, chat.data, chatDrafts, liveText, pendingTurns, send, regenerate, selectResponseRevision, branch, stop, updateChat, client]);
 
   return (
     <div className="app-shell">
@@ -2916,7 +2997,7 @@ export default function App() {
       <Sidebar projects={allProjects} chats={allChats} engines={engines.data ?? []} presets={presets.data ?? []} workflows={workflows.data ?? []} currentChatId={activeChatId} view={view} onChat={(id) => { setCurrentChatId(id); localStorage.setItem("local-lm-chat", id); setView("chat"); focusMainContent(); }} onView={(nextView) => { setView(nextView); focusMainContent(); }} onNewChat={(projectId) => createChat.mutate(projectId)} onNewProject={() => { const name = window.prompt("Project name"); if (name?.trim()) createProject.mutate(name.trim()); }} onExportProject={(id, includeMedia) => exportProject.mutate({ id, includeMedia })} onImportProject={(file) => importProject.mutate(file)} onUpdateChat={(id, values) => manageChat.mutate({ id, values })} onDeleteChat={(id, deleteGeneratedMedia) => deleteChat.mutate({ id, deleteGeneratedMedia })} onUpdateProject={(id, values) => updateProject.mutate({ id, values })} onDeleteProject={(id) => deleteProject.mutate(id)} />
       <main id="main-content" tabIndex={-1}>{activeContent}</main>
       <JobsPanel />
-      {(send.error || regenerate.error || branch.error || stop.error || updateChat.error || createChat.error || createProject.error || importProject.error || manageChat.error || deleteChat.error || updateProject.error || deleteProject.error) && <div className="toast error" role="alert"><X size={16} />{(send.error || regenerate.error || branch.error || stop.error || updateChat.error || createChat.error || createProject.error || importProject.error || manageChat.error || deleteChat.error || updateProject.error || deleteProject.error)?.message}</div>}
+      {(send.error || regenerate.error || selectResponseRevision.error || branch.error || stop.error || updateChat.error || createChat.error || createProject.error || importProject.error || manageChat.error || deleteChat.error || updateProject.error || deleteProject.error) && <div className="toast error" role="alert"><X size={16} />{(send.error || regenerate.error || selectResponseRevision.error || branch.error || stop.error || updateChat.error || createChat.error || createProject.error || importProject.error || manageChat.error || deleteChat.error || updateProject.error || deleteProject.error)?.message}</div>}
     </div>
   );
 }

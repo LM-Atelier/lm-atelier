@@ -36,6 +36,8 @@ from local_lm.models import (
     MessagePart,
     ModelInstall,
     ModelProfile,
+    ResponseRevision,
+    ResponseRevisionPart,
     Run,
     TurnCreationClaim,
     WorkflowDefinition,
@@ -320,7 +322,7 @@ async def test_inline_video_and_project_export(client: AsyncClient) -> None:
         assert "manifest.json" in bundle.namelist()
         assert any(name.startswith("artifacts/") for name in bundle.namelist())
         manifest = json.loads(bundle.read("manifest.json"))
-        assert manifest["version"] == 3
+        assert manifest["version"] == 4
         assert set(manifest["dependencies"]) == {"profiles", "presets", "workflows"}
 
     imported = await client.post(
@@ -689,7 +691,7 @@ async def test_project_v3_round_trip_remaps_portable_dependencies_in_a_fresh_dat
     ).json()
     archive = await client.get(exported["url"])
     manifest = project_manifest(archive.content)
-    assert manifest["version"] == 3
+    assert manifest["version"] == 4
     assert {item["source_id"] for item in manifest["dependencies"]["profiles"]} == {
         chat_profile["id"],
         image_profile["id"],
@@ -1556,6 +1558,283 @@ async def test_editing_user_message_creates_new_active_branch(client: AsyncClien
     assert detail["active_head_message_id"] == payload["assistant_message"]["id"]
 
 
+async def test_editing_image_request_as_text_does_not_inherit_media_role(
+    client: AsyncClient,
+) -> None:
+    chat = (await client.post("/api/chats", json={"title": "Change edited mode"})).json()
+    original = await client.post(
+        f"/api/chats/{chat['id']}/turns",
+        json={
+            "text": "Create an image of a blue apple",
+            "mode": "image",
+            "settings": {"steps": 7},
+        },
+    )
+    assert original.status_code == 202
+    await wait_for_run(client, original.json()["run"]["id"])
+
+    branched = await client.post(
+        f"/api/messages/{original.json()['user_message']['id']}/branch",
+        json={
+            "text": "Explain why apples can look blue",
+            "mode": "text",
+            "input_artifact_ids": [],
+            "settings": {},
+        },
+    )
+    assert branched.status_code == 202
+    run = branched.json()["run"]
+    assert run["operation"] == "text"
+    assert run["workflow_revision_id"] is None
+    assert run["provenance_json"]["input_artifact_ids"] == []
+    assert "steps" not in run["settings_json"]
+
+
+async def test_regenerating_older_response_preserves_later_history_and_revisions(
+    client: AsyncClient,
+) -> None:
+    project = (await client.post("/api/projects", json={"name": "Revision project"})).json()
+    chat = (
+        await client.post(
+            "/api/chats",
+            json={"title": "Revision history", "project_id": project["id"]},
+        )
+    ).json()
+    first = await client.post(
+        f"/api/chats/{chat['id']}/turns",
+        json={"text": "Write the first answer", "mode": "text"},
+    )
+    assert first.status_code == 202
+    await wait_for_run(client, first.json()["run"]["id"])
+    first_assistant_id = first.json()["assistant_message"]["id"]
+
+    second = await client.post(
+        f"/api/chats/{chat['id']}/turns",
+        json={"text": "Write the later answer", "mode": "text"},
+    )
+    assert second.status_code == 202
+    await wait_for_run(client, second.json()["run"]["id"])
+    later_head = second.json()["assistant_message"]["id"]
+    before = (await client.get(f"/api/chats/{chat['id']}")).json()
+    visible_before = [
+        message["id"] for message in before["messages"] if message["transcript_visible"]
+    ]
+
+    regenerated = await client.post(
+        f"/api/messages/{first_assistant_id}/regenerate",
+        json={"settings": {}},
+    )
+    assert regenerated.status_code == 202
+    accepted = regenerated.json()
+    assert accepted["user_message"]["transcript_visible"] is False
+    assert accepted["assistant_message"]["transcript_visible"] is False
+    assert (await client.get(f"/api/chats/{chat['id']}")).json()[
+        "active_head_message_id"
+    ] == later_head
+    await wait_for_run(client, accepted["run"]["id"])
+
+    after = (await client.get(f"/api/chats/{chat['id']}")).json()
+    assert after["active_head_message_id"] == later_head
+    assert [
+        message["id"] for message in after["messages"] if message["transcript_visible"]
+    ] == visible_before
+    original = next(message for message in after["messages"] if message["id"] == first_assistant_id)
+    completed_revisions = [
+        revision for revision in original["response_revisions"] if revision["status"] == "complete"
+    ]
+    assert len(completed_revisions) == 2
+    assert original["active_response_revision_id"] == completed_revisions[-1]["id"]
+
+    latest_export = (await client.post(f"/api/projects/{project['id']}/export")).json()
+    latest_archive = await client.get(latest_export["url"])
+    latest_import = await client.post(
+        "/api/projects/import",
+        files={
+            "archive": (
+                "latest-revision-project.lm-atelier.zip",
+                latest_archive.content,
+                "application/zip",
+            )
+        },
+    )
+    assert latest_import.status_code == 201, latest_import.text
+    latest_imported_chat = (
+        await client.get("/api/chats", params={"project_id": latest_import.json()["id"]})
+    ).json()[0]
+    latest_imported_detail = (await client.get(f"/api/chats/{latest_imported_chat['id']}")).json()
+    latest_imported_first = next(
+        message
+        for message in latest_imported_detail["messages"]
+        if message["role"] == "assistant" and message["transcript_visible"]
+    )
+    assert latest_imported_first["active_response_revision_id"] == next(
+        revision["id"]
+        for revision in latest_imported_first["response_revisions"]
+        if revision["sequence"] == 2
+    )
+
+    selected = await client.post(
+        f"/api/messages/{first_assistant_id}/revisions/{completed_revisions[0]['id']}/select"
+    )
+    assert selected.status_code == 200
+    assert selected.json()["active_response_revision_id"] == completed_revisions[0]["id"]
+    assert (await client.get(f"/api/chats/{chat['id']}")).json()[
+        "active_head_message_id"
+    ] == later_head
+
+    exported = (await client.post(f"/api/projects/{project['id']}/export")).json()
+    archive = await client.get(exported["url"])
+    imported = await client.post(
+        "/api/projects/import",
+        files={
+            "archive": (
+                "revision-project.lm-atelier.zip",
+                archive.content,
+                "application/zip",
+            )
+        },
+    )
+    assert imported.status_code == 201, imported.text
+    imported_chat = (
+        await client.get("/api/chats", params={"project_id": imported.json()["id"]})
+    ).json()[0]
+    imported_detail = (await client.get(f"/api/chats/{imported_chat['id']}")).json()
+    imported_first = next(
+        message
+        for message in imported_detail["messages"]
+        if message["role"] == "assistant" and message["transcript_visible"]
+    )
+    assert len(imported_first["response_revisions"]) == 2
+    assert imported_first["active_response_revision_id"] == next(
+        revision["id"]
+        for revision in imported_first["response_revisions"]
+        if revision["sequence"] == 1
+    )
+
+
+async def test_failed_regeneration_keeps_the_selected_response(
+    client: AsyncClient,
+    monkeypatch,
+) -> None:  # type: ignore[no-untyped-def]
+    chat = (await client.post("/api/chats", json={"title": "Failed revision"})).json()
+    original = await client.post(
+        f"/api/chats/{chat['id']}/turns",
+        json={"text": "Write a durable answer", "mode": "text"},
+    )
+    assert original.status_code == 202
+    await wait_for_run(client, original.json()["run"]["id"])
+    message_id = original.json()["assistant_message"]["id"]
+    before = (await client.get(f"/api/messages/{message_id}")).json()
+    selected_before = before["active_response_revision_id"]
+    parts_before = [(part["type"], part["text"], part["artifact_id"]) for part in before["parts"]]
+
+    async def fail_after_delta(
+        _adapter: MockChatAdapter,
+        _request: ChatRequest,
+    ) -> AsyncIterator[ChatEvent]:
+        yield ChatEvent(type="delta", text="Replacement that must not be selected")
+        yield ChatEvent(type="error", data={"error": ""})
+
+    monkeypatch.setattr(MockChatAdapter, "stream", fail_after_delta)
+    regenerated = await client.post(
+        f"/api/messages/{message_id}/regenerate",
+        json={"settings": {}},
+    )
+    assert regenerated.status_code == 202
+    run_id = regenerated.json()["run"]["id"]
+    deadline = asyncio.get_running_loop().time() + 5
+    run = regenerated.json()["run"]
+    while asyncio.get_running_loop().time() < deadline:
+        run = (await client.get(f"/api/runs/{run_id}")).json()
+        if run["status"] == "failed":
+            break
+        await asyncio.sleep(0.03)
+    assert run["status"] == "failed"
+
+    after = (await client.get(f"/api/messages/{message_id}")).json()
+    assert after["active_response_revision_id"] == selected_before
+    assert [
+        (part["type"], part["text"], part["artifact_id"]) for part in after["parts"]
+    ] == parts_before
+    assert [revision["status"] for revision in after["response_revisions"]] == [
+        "complete",
+        "failed",
+    ]
+
+
+async def test_cancelled_regeneration_keeps_the_selected_response(
+    client: AsyncClient,
+) -> None:
+    chat = (await client.post("/api/chats", json={"title": "Cancelled revision"})).json()
+    original = await client.post(
+        f"/api/chats/{chat['id']}/turns",
+        json={"text": "Write a durable answer", "mode": "text"},
+    )
+    assert original.status_code == 202
+    await wait_for_run(client, original.json()["run"]["id"])
+    message_id = original.json()["assistant_message"]["id"]
+    before = (await client.get(f"/api/messages/{message_id}")).json()
+    selected_before = before["active_response_revision_id"]
+    parts_before = [(part["type"], part["text"], part["artifact_id"]) for part in before["parts"]]
+
+    regenerated = await client.post(
+        f"/api/messages/{message_id}/regenerate",
+        json={"settings": {}},
+    )
+    assert regenerated.status_code == 202
+    cancelled = await client.post(f"/api/chats/{chat['id']}/cancel")
+    assert cancelled.status_code == 200
+    assert cancelled.json()["status"] == "cancelled"
+
+    after = (await client.get(f"/api/messages/{message_id}")).json()
+    assert after["active_response_revision_id"] == selected_before
+    assert [
+        (part["type"], part["text"], part["artifact_id"]) for part in after["parts"]
+    ] == parts_before
+    assert [revision["status"] for revision in after["response_revisions"]] == [
+        "complete",
+        "cancelled",
+    ]
+
+
+async def test_regeneration_reuses_the_selected_revision_contract(
+    client: AsyncClient,
+) -> None:
+    chat = (await client.post("/api/chats", json={"title": "Selected contract"})).json()
+    original = await client.post(
+        f"/api/chats/{chat['id']}/turns",
+        json={
+            "text": "Write a stable answer",
+            "mode": "text",
+            "settings": {"temperature": 0.1},
+        },
+    )
+    assert original.status_code == 202
+    await wait_for_run(client, original.json()["run"]["id"])
+    message_id = original.json()["assistant_message"]["id"]
+
+    first_replacement = await client.post(
+        f"/api/messages/{message_id}/regenerate",
+        json={"settings": {"temperature": 0.25}},
+    )
+    assert first_replacement.status_code == 202
+    await wait_for_run(client, first_replacement.json()["run"]["id"])
+
+    second_replacement = await client.post(
+        f"/api/messages/{message_id}/regenerate",
+        json={"settings": {}},
+    )
+    assert second_replacement.status_code == 202
+    assert second_replacement.json()["run"]["settings_json"]["temperature"] == 0.25
+    duplicate = await client.post(
+        f"/api/messages/{message_id}/regenerate",
+        json={"settings": {}},
+    )
+    assert duplicate.status_code == 409
+    assert "already being regenerated" in duplicate.json()["detail"]
+    await wait_for_run(client, second_replacement.json()["run"]["id"])
+
+
 async def test_new_turn_uses_persisted_active_branch_head(client: AsyncClient) -> None:
     chat = (await client.post("/api/chats", json={"title": "Branch head"})).json()
     first = await client.post(
@@ -2078,6 +2357,45 @@ async def test_cleanup_marks_new_unreferenced_artifacts_for_recovery(
         artifact = session.get(Artifact, artifact_id)
         assert artifact
         assert isinstance(artifact.metadata_json.get("unreferenced_at"), str)
+
+
+async def test_retention_keeps_artifacts_referenced_only_by_response_revisions(
+    client: AsyncClient,
+) -> None:
+    chat = (await client.post("/api/chats", json={"title": "Retained revision"})).json()
+    turn = await client.post(
+        f"/api/chats/{chat['id']}/turns",
+        json={"text": "Create a revision owner", "mode": "text"},
+    )
+    assert turn.status_code == 202
+    await wait_for_run(client, turn.json()["run"]["id"])
+    message = (await client.get(f"/api/messages/{turn.json()['assistant_message']['id']}")).json()
+    uploaded = await client.post(
+        "/api/artifacts",
+        files={"file": ("retained.png", ONE_PIXEL_PNG, "image/png")},
+    )
+    artifact_id = uploaded.json()["id"]
+
+    with SessionLocal() as session:
+        revision = session.get(ResponseRevision, message["active_response_revision_id"])
+        artifact = session.get(Artifact, artifact_id)
+        assert revision and artifact
+        revision.parts.append(
+            ResponseRevisionPart(
+                position=len(revision.parts),
+                type="image",
+                artifact_id=artifact_id,
+            )
+        )
+        artifact.metadata_json = {
+            **artifact.metadata_json,
+            "unreferenced_at": (datetime.now(UTC) - timedelta(days=31)).isoformat(),
+        }
+        session.commit()
+
+    cleaned = await client.post("/api/artifacts/cleanup", json={"dry_run": False})
+    assert cleaned.status_code == 200
+    assert (await client.get(f"/api/artifacts/{artifact_id}")).status_code == 200
 
 
 async def test_media_library_can_delete_a_referenced_artifact(client: AsyncClient) -> None:
@@ -2653,6 +2971,7 @@ async def test_pinned_workflow_schema_drives_generation_settings(client: AsyncCl
     assert run["provenance_json"]["generation_estimate"]["width"] == 832
     assert run["provenance_json"]["generation_estimate"]["height"] == 480
 
+    await wait_for_run(client, run["id"])
     regenerated = await client.post(
         f"/api/messages/{run['assistant_message_id']}/regenerate",
         json={"settings": {}},
@@ -2777,6 +3096,7 @@ async def test_adapter_capability_settings_cover_profile_preset_scopes_and_turn_
     assert run["settings_json"]["adapter_cache"] is True
     assert run["settings_json"]["adapter_strength"] == 0.8
 
+    await wait_for_run(client, run["id"])
     regenerated = await client.post(
         f"/api/messages/{run['assistant_message_id']}/regenerate",
         json={"settings": {}},
@@ -2972,6 +3292,7 @@ async def test_pinned_workflow_revision_keeps_dynamic_capability_constraints(
     assert run["workflow_revision_id"] == pinned_revision
     assert run["settings_json"]["adapter_strength"] == 0.7
 
+    await wait_for_run(client, run["id"])
     regenerated = await client.post(
         f"/api/messages/{run['assistant_message_id']}/regenerate",
         json={"settings": {}},
@@ -3620,7 +3941,7 @@ async def test_project_export_snapshots_local_preset_bindings(
     archive = await client.get(exported["url"])
     with zipfile.ZipFile(io.BytesIO(archive.content)) as bundle:
         manifest = json.loads(bundle.read("manifest.json"))
-    assert manifest["version"] == 3
+    assert manifest["version"] == 4
     assert manifest["project"]["generation_preset_ids_json"] == {"chat": preset["id"]}
     assert manifest["project"]["generation_settings_json"]["chat"] == {
         "temperature": 0.1,

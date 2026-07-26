@@ -84,6 +84,20 @@ export interface Message {
   parent_id: string | null;
   role: "user" | "assistant" | "system" | "tool";
   status: "complete" | "pending" | "failed" | "cancelled";
+  transcript_visible?: boolean;
+  active_response_revision_id?: string | null;
+  parts: MessagePart[];
+  response_revisions?: ResponseRevision[];
+  created_at: string;
+  updated_at: string;
+}
+
+export interface ResponseRevision {
+  id: string;
+  message_id: string;
+  run_id: string | null;
+  sequence: number;
+  status: "complete" | "pending" | "failed" | "cancelled";
   parts: MessagePart[];
   created_at: string;
   updated_at: string;

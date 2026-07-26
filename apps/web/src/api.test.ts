@@ -57,12 +57,19 @@ it("sends turn overrides with edited branches and regenerated responses", async 
   vi.stubGlobal("fetch", fetchMock);
 
   const { api } = await import("./api");
-  await api.branchMessage("message-user", "Count to 1000", { max_tokens: 4096 });
+  await api.branchMessage(
+    "message-user",
+    "Count to 1000",
+    "text",
+    { max_tokens: 4096 },
+  );
   await api.regenerateMessage("message-assistant", { max_tokens: 4096 });
 
   expect(fetchMock.mock.calls[1][0]).toBe("/api/messages/message-user/branch");
   expect(JSON.parse(String(fetchMock.mock.calls[1][1]?.body))).toMatchObject({
     text: "Count to 1000",
+    mode: "text",
+    input_artifact_ids: [],
     settings: { max_tokens: 4096 },
   });
   expect(fetchMock.mock.calls[2][0]).toBe("/api/messages/message-assistant/regenerate");

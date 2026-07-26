@@ -19,7 +19,14 @@ from sqlalchemy.orm import Session
 
 from .config import Settings
 from .domain import ArtifactKind, MessageRole, PartType
-from .models import Artifact, Message, MessagePart, Run
+from .models import (
+    Artifact,
+    Message,
+    MessagePart,
+    ResponseRevision,
+    ResponseRevisionPart,
+    Run,
+)
 from .subprocess_env import subprocess_environment
 
 _SHA256 = re.compile(r"^[0-9a-f]{64}$")
@@ -318,6 +325,14 @@ class ArtifactStore:
             )
             or 0
         )
+        references += (
+            session.scalar(
+                select(func.count(ResponseRevisionPart.id)).where(
+                    ResponseRevisionPart.artifact_id == artifact_id
+                )
+            )
+            or 0
+        )
         if references:
             return False
         self._delete_artifact(session, artifact)
@@ -332,6 +347,15 @@ class ArtifactStore:
             )
             if artifact_id
         }
+        referenced.update(
+            artifact_id
+            for artifact_id in session.scalars(
+                select(ResponseRevisionPart.artifact_id).where(
+                    ResponseRevisionPart.artifact_id.is_not(None)
+                )
+            )
+            if artifact_id
+        )
         # Runs created before input references became message parts stored their
         # attachments only in provenance. Keep those artifacts live until the
         # legacy run is deleted or migrated through a project round trip.
@@ -422,8 +446,13 @@ class ArtifactStore:
         parts = session.scalars(
             select(MessagePart).where(MessagePart.artifact_id == artifact.id)
         ).all()
+        revision_parts = session.scalars(
+            select(ResponseRevisionPart).where(ResponseRevisionPart.artifact_id == artifact.id)
+        ).all()
         for part in parts:
             part.artifact_id = None
+        for revision_part in revision_parts:
+            revision_part.artifact_id = None
         session.flush()
 
         removed_count = 1
@@ -438,11 +467,15 @@ class ArtifactStore:
             removed_count += 1
             reclaimed_bytes += linked.size_bytes
             self._delete_artifact(session, linked)
+        # Revision parts are internal snapshots of the same user-visible message
+        # reference. Clear them as well, but do not inflate the public reference
+        # count with implementation details.
         return len(parts), removed_count, reclaimed_bytes
 
     def delete_chat_generated_media(self, session: Session, chat_id: str) -> int:
-        artifacts = (
-            session.scalars(
+        artifacts_by_id = {
+            artifact.id: artifact
+            for artifact in session.scalars(
                 select(Artifact)
                 .join(MessagePart, MessagePart.artifact_id == Artifact.id)
                 .join(Message, Message.id == MessagePart.message_id)
@@ -456,7 +489,28 @@ class ArtifactStore:
             )
             .unique()
             .all()
-        )
+        }
+        revision_artifacts = session.scalars(
+            select(Artifact)
+            .join(
+                ResponseRevisionPart,
+                ResponseRevisionPart.artifact_id == Artifact.id,
+            )
+            .join(
+                ResponseRevision,
+                ResponseRevision.id == ResponseRevisionPart.response_revision_id,
+            )
+            .join(Message, Message.id == ResponseRevision.message_id)
+            .where(
+                Message.chat_id == chat_id,
+                ResponseRevisionPart.type.in_((PartType.IMAGE.value, PartType.VIDEO.value)),
+                Artifact.kind.in_((ArtifactKind.IMAGE.value, ArtifactKind.VIDEO.value)),
+            )
+            .order_by(Artifact.created_at)
+        ).unique()
+        for artifact in revision_artifacts:
+            artifacts_by_id[artifact.id] = artifact
+        artifacts = sorted(artifacts_by_id.values(), key=lambda item: item.created_at)
 
         external_run_artifact_ids: set[str] = set()
         for provenance in session.scalars(
@@ -473,7 +527,23 @@ class ArtifactStore:
                     Message.chat_id != chat_id,
                 )
             )
-            if message_references_elsewhere or artifact.id in external_run_artifact_ids:
+            revision_references_elsewhere = session.scalar(
+                select(func.count(ResponseRevisionPart.id))
+                .join(
+                    ResponseRevision,
+                    ResponseRevision.id == ResponseRevisionPart.response_revision_id,
+                )
+                .join(Message, Message.id == ResponseRevision.message_id)
+                .where(
+                    ResponseRevisionPart.artifact_id == artifact.id,
+                    Message.chat_id != chat_id,
+                )
+            )
+            if (
+                message_references_elsewhere
+                or revision_references_elsewhere
+                or artifact.id in external_run_artifact_ids
+            ):
                 continue
             _references, removed_count, _reclaimed_bytes = self.delete_library_artifact(
                 session, artifact

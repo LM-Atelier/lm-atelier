@@ -29,6 +29,7 @@ from .domain import (
     CompatibilityLevel,
     JobKind,
     MessageRole,
+    MessageStatus,
     ModelRole,
     Operation,
     RoutingMode,
@@ -54,11 +55,13 @@ from .models import (
     ModelInstall,
     ModelProfile,
     Project,
+    ResponseRevision,
+    ResponseRevisionPart,
     Run,
     WorkflowDefinition,
     WorkflowRevision,
 )
-from .orchestrator import ConversationOrchestrator
+from .orchestrator import ConversationOrchestrator, ResponseRevisionConflict
 from .platforms import list_platform_matrix
 from .preflight import assess_catalog_install
 from .profile_service import (
@@ -705,7 +708,11 @@ async def get_chat(chat_id: str, session: SessionDep) -> Chat:
         .options(
             selectinload(Chat.messages)
             .selectinload(Message.parts)
-            .selectinload(MessagePart.artifact)
+            .selectinload(MessagePart.artifact),
+            selectinload(Chat.messages)
+            .selectinload(Message.response_revisions)
+            .selectinload(ResponseRevision.parts)
+            .selectinload(ResponseRevisionPart.artifact),
         )
         .where(Chat.id == chat_id)
     )
@@ -797,6 +804,7 @@ async def _accept_turn(
     payload: TurnRequest,
     *,
     use_explicit_parent: bool = False,
+    replacement_message_id: str | None = None,
 ) -> TurnAccepted:
     try:
         return await orchestrator.create_turn(
@@ -804,6 +812,7 @@ async def _accept_turn(
             chat_id,
             payload,
             use_explicit_parent=use_explicit_parent,
+            replacement_message_id=replacement_message_id,
         )
     except LookupError as exc:
         raise HTTPException(404, str(exc)) from exc
@@ -824,6 +833,8 @@ async def _accept_turn(
                 "message": str(exc),
             },
         ) from exc
+    except ResponseRevisionConflict as exc:
+        raise HTTPException(409, str(exc)) from exc
     except EngineNotConfiguredError as exc:
         raise HTTPException(409, str(exc)) from exc
     except EngineSchemaUnavailableError as exc:
@@ -836,7 +847,12 @@ async def _accept_turn(
 async def get_message(message_id: str, session: SessionDep) -> Message:
     message = session.scalar(
         select(Message)
-        .options(selectinload(Message.parts).selectinload(MessagePart.artifact))
+        .options(
+            selectinload(Message.parts).selectinload(MessagePart.artifact),
+            selectinload(Message.response_revisions)
+            .selectinload(ResponseRevision.parts)
+            .selectinload(ResponseRevisionPart.artifact),
+        )
         .where(Message.id == message_id)
     )
     if not message:
@@ -852,7 +868,33 @@ async def regenerate_message(
     session: SessionDep,
 ) -> TurnAccepted:
     orchestrator: ConversationOrchestrator = _services(request).orchestrator
-    prior_run = session.scalar(select(Run).where(Run.assistant_message_id == message_id))
+    source_assistant = session.get(Message, message_id)
+    if (
+        not source_assistant
+        or not source_assistant.transcript_visible
+        or source_assistant.status != MessageStatus.COMPLETE.value
+    ):
+        raise HTTPException(409, "only a completed visible response can be regenerated")
+    pending_revision = session.scalar(
+        select(ResponseRevision.id).where(
+            ResponseRevision.message_id == message_id,
+            ResponseRevision.status == MessageStatus.PENDING.value,
+        )
+    )
+    if pending_revision:
+        raise HTTPException(409, "this response is already being regenerated")
+    active_revision = (
+        session.get(ResponseRevision, source_assistant.active_response_revision_id)
+        if source_assistant.active_response_revision_id
+        else None
+    )
+    prior_run = (
+        session.get(Run, active_revision.run_id)
+        if active_revision and active_revision.run_id
+        else None
+    )
+    if not prior_run:
+        prior_run = session.scalar(select(Run).where(Run.assistant_message_id == message_id))
     if not prior_run:
         raise HTTPException(404, "assistant run not found")
     user_message = session.scalar(
@@ -898,7 +940,30 @@ async def regenerate_message(
         prior_run.chat_id,
         turn,
         use_explicit_parent=True,
+        replacement_message_id=message_id,
     )
+
+
+@router.post(
+    "/messages/{message_id}/revisions/{revision_id}/select",
+    response_model=MessageOut,
+)
+async def select_response_revision(
+    message_id: str,
+    revision_id: str,
+    request: Request,
+    session: SessionDep,
+) -> Message:
+    try:
+        return _services(request).orchestrator.select_response_revision(
+            session,
+            message_id,
+            revision_id,
+        )
+    except LookupError as exc:
+        raise HTTPException(404, str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(409, str(exc)) from exc
 
 
 @router.post("/messages/{message_id}/branch", response_model=TurnAccepted, status_code=202)
@@ -911,13 +976,23 @@ async def edit_and_branch(
     prior_run = session.scalar(select(Run).where(Run.user_message_id == source.id))
     updates: dict[str, Any] = {"parent_message_id": source.parent_id}
     if prior_run:
-        if payload.mode is None:
-            updates["mode"] = _mode_for_operation(Operation(prior_run.operation))
-        if not payload.input_artifact_ids:
+        prior_mode = _mode_for_operation(Operation(prior_run.operation))
+        mode_was_supplied = "mode" in payload.model_fields_set and payload.mode is not None
+        target_mode = payload.mode if mode_was_supplied else prior_mode
+        updates["mode"] = target_mode
+        same_explicit_role = mode_was_supplied and target_mode == prior_mode
+        legacy_inheritance = not mode_was_supplied
+        inherit_inputs = (legacy_inheritance and not payload.input_artifact_ids) or (
+            same_explicit_role and "input_artifact_ids" not in payload.model_fields_set
+        )
+        inherit_settings = (legacy_inheritance and not payload.settings) or (
+            same_explicit_role and "settings" not in payload.model_fields_set
+        )
+        if inherit_inputs:
             updates["input_artifact_ids"] = _services(
                 request
             ).orchestrator.input_artifact_ids_for_run(session, prior_run)
-        if not payload.settings:
+        if inherit_settings:
             prior_revision = (
                 session.get(WorkflowRevision, prior_run.workflow_revision_id)
                 if prior_run.workflow_revision_id
