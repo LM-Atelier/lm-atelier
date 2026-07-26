@@ -82,6 +82,10 @@ _OUTPUT_COUNT = re.compile(
     r"(?:images?|pictures?|videos?|clips?|variations?|versions?|options?|renders?)\b",
     re.IGNORECASE,
 )
+_PER_OUTPUT_DISTRIBUTOR = re.compile(
+    r"\b(?:with\s+)?each(?:\s+(?:one|image|picture|photo|video|clip))?\b\s*",
+    re.IGNORECASE,
+)
 _COUNT_WORDS = {
     "one": 1,
     "two": 2,
@@ -499,3 +503,30 @@ class ModalityRouter:
             return 1
         raw = match.group("count").casefold()
         return int(raw) if raw.isdigit() else _COUNT_WORDS[raw]
+
+    @staticmethod
+    def per_output_media_prompt(
+        prompt: str,
+        operation: Operation,
+        output_count: int,
+    ) -> str:
+        """Compile one engine prompt from a request for several media outputs."""
+
+        cleaned = prompt.strip()
+        if output_count <= 1 or operation == Operation.TEXT:
+            return cleaned
+        generation_prompt, separator, context = cleaned.partition("\n\nSource chat text:")
+        medium = (
+            "video" if operation in {Operation.TEXT_TO_VIDEO, Operation.IMAGE_TO_VIDEO} else "image"
+        )
+        generation_prompt, substitutions = _OUTPUT_COUNT.subn(
+            f"one {medium}",
+            generation_prompt,
+            count=1,
+        )
+        if not substitutions:
+            return cleaned
+        generation_prompt = _PER_OUTPUT_DISTRIBUTOR.sub("", generation_prompt)
+        generation_prompt = re.sub(r"[ \t]+", " ", generation_prompt)
+        generation_prompt = re.sub(r"\s+([,.;:!?])", r"\1", generation_prompt).strip()
+        return f"{generation_prompt}{separator}{context}" if separator else generation_prompt

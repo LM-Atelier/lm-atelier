@@ -136,6 +136,49 @@ def test_media_output_count_is_parsed_deterministically(
     assert plan.output_count == expected
 
 
+@pytest.mark.parametrize(
+    ("prompt", "operation", "expected"),
+    [
+        (
+            "Make me 5 images, each one showing a single blue cup",
+            Operation.TEXT_TO_IMAGE,
+            "Make me one image, showing a single blue cup",
+        ),
+        (
+            "Generate four variations of a lighthouse",
+            Operation.TEXT_TO_IMAGE,
+            "Generate one image of a lighthouse",
+        ),
+        (
+            "Create 3 clips, with each one showing a quiet lake",
+            Operation.TEXT_TO_VIDEO,
+            "Create one video, showing a quiet lake",
+        ),
+    ],
+)
+def test_multi_output_media_prompts_are_compiled_for_one_engine_output(
+    prompt: str,
+    operation: Operation,
+    expected: str,
+) -> None:
+    assert ModalityRouter.per_output_media_prompt(prompt, operation, 5) == expected
+
+
+def test_per_output_prompt_preserves_source_chat_text_verbatim() -> None:
+    prompt = (
+        "Make five images based on the previous story"
+        "\n\nSource chat text:\nThe wall displayed five images of a blue cup."
+    )
+    assert ModalityRouter.per_output_media_prompt(
+        prompt,
+        Operation.TEXT_TO_IMAGE,
+        5,
+    ) == (
+        "Make one image based on the previous story"
+        "\n\nSource chat text:\nThe wall displayed five images of a blue cup."
+    )
+
+
 def test_numeric_text_request_does_not_create_multiple_outputs() -> None:
     plan = ModalityRouter().plan(
         text="List four options for a database index",
