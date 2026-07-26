@@ -15,6 +15,8 @@ class ChatRequest:
     messages: list[dict[str, Any]]
     settings: dict[str, Any] = field(default_factory=dict)
     tools: list[dict[str, Any]] = field(default_factory=list)
+    persistence_scope: str = "durable"
+    scope_id: str | None = None
 
 
 @dataclass
@@ -26,8 +28,26 @@ class ChatEvent:
 
 def estimate_chat_tokens(messages: list[dict[str, Any]]) -> int:
     """Return a conservative fallback when an engine tokenizer is unavailable."""
-    characters = sum(len(str(message.get("content", ""))) for message in messages)
-    return max(1, math.ceil(characters / 3) + (6 * len(messages)))
+    characters = 0
+    images = 0
+    for message in messages:
+        content = message.get("content", "")
+        if isinstance(content, str):
+            characters += len(content)
+            continue
+        if not isinstance(content, list):
+            continue
+        for part in content:
+            if not isinstance(part, dict):
+                continue
+            if part.get("type") == "text" and isinstance(part.get("text"), str):
+                characters += len(part["text"])
+            elif part.get("type") == "image_url":
+                images += 1
+    # Image tokenization varies by projector and resolution. Reserve enough
+    # space to avoid treating a large base64 data URL as prose while still
+    # trimming conservatively when the engine's tokenizer routes are absent.
+    return max(1, math.ceil(characters / 3) + (6 * len(messages)) + (1024 * images))
 
 
 @dataclass
@@ -39,6 +59,8 @@ class MediaRequest:
     input_paths: list[Path]
     workflow: dict[str, Any]
     parameters: dict[str, Any]
+    persistence_scope: str = "durable"
+    scope_id: str | None = None
 
 
 @dataclass

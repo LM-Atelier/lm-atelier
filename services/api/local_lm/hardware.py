@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import json
 import platform
 import shutil
@@ -13,6 +14,7 @@ import psutil
 from .config import Settings
 from .platforms import assess_platform
 from .schemas import DeviceInfo, SystemInfo
+from .subprocess_env import subprocess_environment
 
 
 def _cpu_model() -> str:
@@ -47,6 +49,7 @@ def _cpu_model() -> str:
                 capture_output=True,
                 text=True,
                 timeout=2,
+                env=subprocess_environment(),
             )
             if result.stdout.strip():
                 return " ".join(result.stdout.split())
@@ -58,7 +61,12 @@ def _cpu_model() -> str:
 def _run_json(command: list[str], timeout: float = 5) -> Any | None:
     try:
         result = subprocess.run(
-            command, check=True, capture_output=True, text=True, timeout=timeout
+            command,
+            check=True,
+            capture_output=True,
+            text=True,
+            timeout=timeout,
+            env=subprocess_environment(),
         )
         return json.loads(result.stdout)
     except (OSError, subprocess.SubprocessError, json.JSONDecodeError):
@@ -80,6 +88,7 @@ def _nvidia_devices() -> list[DeviceInfo]:
             capture_output=True,
             text=True,
             timeout=5,
+            env=subprocess_environment(),
         )
     except (OSError, subprocess.SubprocessError):
         return []
@@ -188,3 +197,30 @@ def collect_system_info(settings: Settings) -> SystemInfo:
         devices=devices,
         support=support,
     )
+
+
+def hardware_capability_class(settings: Settings) -> str:
+    """Return a stable hardware key without volatile free-memory measurements."""
+
+    system = collect_system_info(settings)
+    stable_devices = sorted(
+        (
+            device.name,
+            device.kind,
+            device.backend,
+            device.total_memory_bytes,
+        )
+        for device in system.devices
+    )
+    payload = {
+        "platform": system.platform,
+        "release": system.distribution_version,
+        "architecture": system.architecture,
+        "cpu": system.cpu_model,
+        "memory": system.memory_total_bytes,
+        "devices": stable_devices,
+    }
+    digest = hashlib.sha256(
+        json.dumps(payload, sort_keys=True, separators=(",", ":")).encode()
+    ).hexdigest()[:24]
+    return f"{system.platform.casefold()}-{system.architecture.casefold()}-{digest}"

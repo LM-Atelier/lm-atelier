@@ -44,6 +44,7 @@ class PartType(StrEnum):
     TEXT = "text"
     IMAGE = "image"
     VIDEO = "video"
+    ATTACHMENT = "attachment"
     PROGRESS = "progress"
     ERROR = "error"
     GENERATION_METADATA = "generation_metadata"

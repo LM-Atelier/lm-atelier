@@ -1,0 +1,81 @@
+name: Bug report
+description: Report a reproducible LM Atelier problem.
+title: "[Bug]: "
+labels: []
+assignees: []
+body:
+  - type: checkboxes
+    id: checks
+    attributes:
+      label: Before submitting
+      options:
+        - label: I searched existing issues for this problem.
+          required: true
+        - label: I removed credentials and private chats, media, and logs.
+          required: true
+        - label: This is not a security vulnerability.
+          required: true
+  - type: input
+    id: version
+    attributes:
+      label: LM Atelier version
+      placeholder: Shown in the release name
+    validations:
+      required: true
+  - type: dropdown
+    id: install
+    attributes:
+      label: Installation
+      options:
+        - Windows installer
+        - Linux installer
+        - Source checkout
+        - Other
+    validations:
+      required: true
+  - type: input
+    id: system
+    attributes:
+      label: System
+      description: Operating system, CPU, GPU, RAM, and VRAM where relevant.
+      placeholder: Windows 11, CPU model, GPU model and VRAM, system RAM
+    validations:
+      required: true
+  - type: dropdown
+    id: area
+    attributes:
+      label: Area
+      options:
+        - Startup or installation
+        - Chat
+        - Image generation
+        - Video generation
+        - Auto Mode
+        - Model catalog or download
+        - Settings or storage
+        - Other
+    validations:
+      required: true
+  - type: textarea
+    id: problem
+    attributes:
+      label: What happened?
+      description: Include the exact error text when available.
+    validations:
+      required: true
+  - type: textarea
+    id: steps
+    attributes:
+      label: Reproduction steps
+      placeholder: |
+        1. Open ...
+        2. Select ...
+        3. Send ...
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected behavior
+    validations:
+      required: true

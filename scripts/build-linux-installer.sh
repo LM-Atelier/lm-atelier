@@ -18,6 +18,13 @@ staging_root="$(mktemp -d)"
 payload_path="$(mktemp)"
 header_path="$staging_root/installer.sh"
 installer="$output_root/LM-Atelier-Setup-$version-linux-x86_64.run"
+tar_version_output="$(tar --version)"
+tar_version_line="${tar_version_output%%$'\n'*}"
+tar_version="${tar_version_line##* }"
+if [[ -z "$tar_version" ]]; then
+  echo "Could not determine the GNU tar version." >&2
+  exit 1
+fi
 cleanup() {
   rm -rf "$staging_root"
   rm -f "$payload_path"
@@ -26,12 +33,26 @@ trap cleanup EXIT
 
 npm run build
 .venv/bin/python scripts/build-icons.py --output-dir "$icon_root"
+metadata_args=(
+  --installer-tool "GNU tar"
+  --installer-tool-version "$tar_version"
+)
+if [[ -n "${RELEASE_TAG:-}" ]]; then
+  metadata_args+=(--require-release-tag)
+fi
+.venv/bin/python scripts/build-release-metadata.py "${metadata_args[@]}"
 .venv/bin/python -m PyInstaller \
   --noconfirm \
   --clean \
   --distpath "$dist_root" \
   --workpath "$work_root" \
   packaging/LMAtelier.spec
+.venv/bin/python scripts/inventory-frozen-payload.py \
+  --payload-root "$dist_root/lm-atelier" \
+  --analysis-toc "$work_root/LMAtelier/Analysis-00.toc"
+.venv/bin/python scripts/inventory-frozen-payload.py \
+  --payload-root "$dist_root/lm-atelier" \
+  --verify-only
 .venv/bin/python scripts/smoke-frozen.py \
   "$dist_root/lm-atelier/lm-atelier" \
   --version "$version"
@@ -39,6 +60,7 @@ npm run build
 cp -R "$dist_root/lm-atelier/." "$staging_root/"
 install -m 755 packaging/linux/frozen-uninstall.sh "$staging_root/uninstall.sh"
 install -m 644 "$icon_root/lm-atelier.png" "$staging_root/lm-atelier.png"
+printf '%s\n' 'lm-atelier-managed-install-v1' > "$staging_root/.lm-atelier-install"
 tar -C "$staging_root" \
   --sort=name \
   --mtime="@0" \

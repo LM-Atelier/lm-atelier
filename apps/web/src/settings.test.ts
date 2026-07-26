@@ -101,4 +101,49 @@ describe("resolveWorkflowSettings", () => {
     expect(normalizeSettingsForFields({ frames: 49, imaginary: true }, fields)).toEqual({});
     expect(normalizeSettingsForFields({ frames: 81 }, fields)).toEqual({ frames: 81 });
   });
+
+  it("does not let workflow metadata weaken or replace engine controls", () => {
+    const boundedFrames = {
+      ...videoField,
+      minimum: 1,
+      maximum: 1024,
+    };
+    const fields = resolveWorkflowSettings(
+      [boundedFrames],
+      {
+        properties: {
+          frames: {
+            type: "integer",
+            default: 81,
+            minimum: 0,
+            maximum: 4096,
+          },
+        },
+      },
+    );
+
+    expect(fields[0]).toMatchObject({
+      type: "integer",
+      minimum: 1,
+      maximum: 1024,
+    });
+    expect(resolveWorkflowSettings(
+      [boundedFrames],
+      { properties: { frames: { type: "string", default: "many" } } },
+    )[0]).toEqual(boundedFrames);
+  });
+
+  it("does not expose runtime-reserved workflow bindings as user settings", () => {
+    const fields = resolveWorkflowSettings(
+      [imageField],
+      {
+        properties: {
+          prompt: { type: "string", default: "replacement" },
+          input_image_0: { type: "string", default: "replacement.png" },
+        },
+      },
+    );
+
+    expect(fields).toEqual([imageField]);
+  });
 });

@@ -1,20 +1,43 @@
 {
   "name": "lm-atelier",
   "version": "0.1.7",
+  "description": "Local-first chat, image, and video AI workspace with swappable models",
+  "author": "LM Atelier contributors",
+  "maintainers": [
+    {
+      "name": "ajccarlson"
+    }
+  ],
   "license": "Apache-2.0",
   "private": true,
+  "homepage": "https://github.com/ajccarlson/lm-atelier#readme",
+  "bugs": {
+    "url": "https://github.com/ajccarlson/lm-atelier/issues"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/ajccarlson/lm-atelier.git"
+  },
   "workspaces": [
     "apps/web"
   ],
   "scripts": {
     "dev:web": "npm --workspace @lm-atelier/web run dev",
     "build": "npm --workspace @lm-atelier/web run build",
+    "e2e": "npm run build && npm run e2e:typecheck && npm run e2e:run",
+    "e2e:install": "playwright install chromium",
+    "e2e:list": "playwright test --config playwright.config.ts --list",
+    "e2e:run": "node scripts/run-browser-e2e.mjs",
+    "e2e:typecheck": "tsc --noEmit --project e2e/tsconfig.json",
     "lint": "npm --workspace @lm-atelier/web run lint",
     "test": "npm --workspace @lm-atelier/web run test",
     "typecheck": "npm --workspace @lm-atelier/web run typecheck"
   },
   "engines": {
-    "node": ">=22"
+    "node": ">=22.13"
+  },
+  "devDependencies": {
+    "@playwright/test": "1.62.0"
   },
   "allowScripts": {
     "esbuild@0.28.1": true

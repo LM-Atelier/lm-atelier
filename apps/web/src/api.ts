@@ -1,4 +1,5 @@
 import type {
+  ApplicationInfo,
   AppEvent,
   ArtifactCleanupResult,
   ArtifactDeleteResult,
@@ -17,6 +18,8 @@ import type {
   GenerationPreset,
   GenerationPresetBundle,
   Job,
+  Message,
+  ModelAssetInstall,
   ModelInstall,
   ModelStorageInfo,
   ModelProfile,
@@ -25,6 +28,7 @@ import type {
   Project,
   ReferenceRecipe,
   RoutingMode,
+  RuntimeStatus,
   SystemInfo,
   ToolCapabilityProbe,
   TurnAccepted,
@@ -32,9 +36,12 @@ import type {
   WorkflowBundle,
   WorkflowRevision,
   WorkerStatus,
+  WorkPlan,
+  WorkStep,
 } from "./types";
 
 let csrfToken = "";
+let eventEpoch = "";
 let eventSequence = 0;
 let sessionPromise: Promise<void> | null = null;
 
@@ -63,8 +70,13 @@ async function ensureSession(): Promise<void> {
         credentials: "same-origin",
       });
       if (!response.ok) throw new Error("Could not initialize the local session");
-      const payload = (await response.json()) as { csrf_token: string; event_sequence?: number };
+      const payload = (await response.json()) as {
+        csrf_token: string;
+        event_epoch?: string;
+        event_sequence?: number;
+      };
       csrfToken = payload.csrf_token;
+      eventEpoch = payload.event_epoch ?? "";
       eventSequence = Math.max(0, payload.event_sequence ?? 0);
     })();
   }
@@ -144,9 +156,10 @@ export const api = {
     mode: RoutingMode,
     inputArtifactIds: string[],
     settings: Record<string, unknown>,
+    idempotencyKey: string = crypto.randomUUID(),
+    endpoint: string = "turns",
   ) => {
-    const idempotencyKey = crypto.randomUUID();
-    const submit = (selectedMode: RoutingMode, confirmed = false) => request<TurnAccepted>(`/api/chats/${chatId}/turns`, {
+    const submit = (selectedMode: RoutingMode, confirmed = false) => request<TurnAccepted>(`/api/chats/${chatId}/${endpoint}`, {
       method: "POST",
       body: JSON.stringify({
         text,
@@ -167,6 +180,37 @@ export const api = {
       const estimate = overrides?._generation_estimate && typeof overrides._generation_estimate === "object" ? overrides._generation_estimate as Record<string, unknown> : null;
       const duration = typeof estimate?.duration_seconds === "number" ? `, about ${estimate.duration_seconds} seconds of output` : "";
       const intermediate = typeof estimate?.estimated_intermediate_bytes === "number" ? ` and up to ${Math.ceil(estimate.estimated_intermediate_bytes / 1024 ** 3)} GB of intermediate data` : "";
+      const orderedSteps = Array.isArray(plan?.steps)
+        ? plan.steps.filter((step): step is Record<string, unknown> => (
+          Boolean(step) && typeof step === "object"
+        ))
+        : [];
+      if (
+        error instanceof ApiError
+        && error.status === 409
+        && detail?.code === "ordered_plan_confirmation_required"
+        && orderedSteps.length >= 2
+      ) {
+        const sequence = orderedSteps
+          .map((step) => typeof step.mode === "string" ? step.mode : "work")
+          .join(" → ");
+        const orderedEstimate = detail.estimate && typeof detail.estimate === "object"
+          ? detail.estimate as Record<string, unknown>
+          : null;
+        const videoDuration = typeof orderedEstimate?.video_duration_seconds === "number"
+          && orderedEstimate.video_duration_seconds > 0
+          ? ` · about ${orderedEstimate.video_duration_seconds} seconds of video`
+          : "";
+        const workingBytes = typeof orderedEstimate?.estimated_bytes === "number"
+          && orderedEstimate.estimated_bytes > 0
+          ? ` · up to ${Math.ceil(orderedEstimate.estimated_bytes / 1024 ** 3)} GB working space`
+          : "";
+        if (window.confirm(
+          `${orderedSteps.length}-step plan: ${sequence}${videoDuration}${workingBytes}. Start it?`,
+        )) {
+          return submit("auto", true);
+        }
+      }
       if (
         error instanceof ApiError
         && error.status === 409
@@ -179,20 +223,67 @@ export const api = {
       throw error;
     }
   },
+  stopAndSendTurn: (
+    chatId: string,
+    text: string,
+    mode: RoutingMode,
+    inputArtifactIds: string[],
+    settings: Record<string, unknown>,
+    idempotencyKey: string = crypto.randomUUID(),
+  ) => api.sendTurn(
+    chatId,
+    text,
+    mode,
+    inputArtifactIds,
+    settings,
+    idempotencyKey,
+    "stop-and-send",
+  ),
   regenerateMessage: (messageId: string, settings: Record<string, unknown>) =>
     request<TurnAccepted>(`/api/messages/${messageId}/regenerate`, {
       method: "POST",
       body: JSON.stringify({ settings }),
     }),
-  branchMessage: (messageId: string, text: string, settings: Record<string, unknown>) =>
+  selectResponseRevision: (messageId: string, revisionId: string) =>
+    request<Message>(`/api/messages/${messageId}/revisions/${revisionId}/select`, {
+      method: "POST",
+    }),
+  branchMessage: (
+    messageId: string,
+    text: string,
+    mode: RoutingMode,
+    settings: Record<string, unknown>,
+  ) =>
     request<TurnAccepted>(`/api/messages/${messageId}/branch`, {
       method: "POST",
-      body: JSON.stringify({ text, settings, idempotency_key: crypto.randomUUID() }),
+      body: JSON.stringify({
+        text,
+        mode,
+        input_artifact_ids: [],
+        settings,
+        idempotency_key: crypto.randomUUID(),
+      }),
     }),
   cancelChat: (chatId: string) =>
     request<Job>(`/api/chats/${chatId}/cancel`, { method: "POST" }),
   jobs: () => request<Job[]>("/api/jobs"),
+  workPlans: (chatId?: string) =>
+    request<WorkPlan[]>(
+      `/api/work-plans${chatId ? `?chat_id=${encodeURIComponent(chatId)}` : ""}`,
+    ),
+  workPlan: (id: string) => request<WorkPlan>(`/api/work-plans/${id}`),
+  workStep: (id: string) => request<WorkStep>(`/api/work-steps/${id}`),
+  cancelWorkPlan: (id: string) =>
+    request<WorkPlan>(`/api/work-plans/${id}/cancel`, { method: "POST" }),
+  retryWorkPlan: (id: string) =>
+    request<WorkPlan>(`/api/work-plans/${id}/retry`, { method: "POST" }),
+  cancelWorkStep: (id: string) =>
+    request<Job>(`/api/work-steps/${id}/cancel`, { method: "POST" }),
+  retryWorkStep: (id: string) =>
+    request<Job>(`/api/work-steps/${id}/retry`, { method: "POST" }),
   cancelJob: (id: string) => request<Job>(`/api/jobs/${id}/cancel`, { method: "POST" }),
+  retryJob: (id: string) =>
+    request<Job>(`/api/jobs/${encodeURIComponent(id)}/retry`, { method: "POST" }),
   pauseDownload: (id: string) =>
     request<Job>(`/api/downloads/${id}/pause`, { method: "POST" }),
   resumeDownload: (id: string) =>
@@ -201,6 +292,7 @@ export const api = {
   probeChatTools: () =>
     request<ToolCapabilityProbe>("/api/engines/chat/tool-probe", { method: "POST" }),
   system: () => request<SystemInfo>("/api/system"),
+  about: () => request<ApplicationInfo>("/api/about"),
   platforms: () => request<PlatformMatrixEntry[]>("/api/platforms"),
   createDiagnostics: () => request<{ url: string }>("/api/diagnostics", { method: "POST" }),
   credentialStatus: () => request<CredentialStatus>("/api/credentials/huggingface"),
@@ -223,7 +315,7 @@ export const api = {
       method: "POST",
     }),
   profiles: () => request<ModelProfile[]>("/api/profiles"),
-  createProfile: (model: ModelInstall) =>
+  createProfile: (model: ModelInstall, isDefault = false) =>
     request<ModelProfile>("/api/profiles", {
       method: "POST",
       body: JSON.stringify({
@@ -233,7 +325,7 @@ export const api = {
         model_install_id: model.id,
         load_settings: {},
         request_settings: {},
-        is_default: false,
+        is_default: isDefault,
       }),
     }),
   updateProfile: (
@@ -279,6 +371,9 @@ export const api = {
     request<GenerationPreset>("/api/presets/import", { method: "POST", body: JSON.stringify(bundle) }),
   deletePreset: (id: string) => request<void>(`/api/presets/${id}`, { method: "DELETE" }),
   workers: () => request<WorkerStatus[]>("/api/workers"),
+  runtimes: () => request<RuntimeStatus[]>("/api/runtimes"),
+  installRuntime: (engine: RuntimeStatus["engine"]) =>
+    request<RuntimeStatus>(`/api/runtimes/${engine}/install`, { method: "POST" }),
   loadChatWorker: (profileId: string) =>
     request<WorkerStatus>(`/api/workers/chat/load/${profileId}`, { method: "POST" }),
   startMediaWorker: () => request<WorkerStatus>("/api/workers/media/start", { method: "POST" }),
@@ -287,6 +382,12 @@ export const api = {
   backups: () => request<BackupInfo[]>("/api/backups"),
   createBackup: (includeMedia = false) =>
     request<BackupInfo>(`/api/backups?${new URLSearchParams({ include_media: String(includeMedia) })}`, { method: "POST" }),
+  verifyBackup: (name: string) =>
+    request<BackupInfo>(`/api/backups/${encodeURIComponent(name)}/verify`, { method: "POST" }),
+  restoreBackup: (name: string) =>
+    request<BackupInfo>(`/api/backups/${encodeURIComponent(name)}/restore`, { method: "POST" }),
+  deleteBackup: (name: string) =>
+    request<void>(`/api/backups/${encodeURIComponent(name)}`, { method: "DELETE" }),
   exportProject: (projectId: string, includeMedia = true) =>
     request<{ url: string }>(`/api/projects/${projectId}/export?${new URLSearchParams({ include_media: String(includeMedia) })}`, { method: "POST" }),
   importProject: async (file: File) => {
@@ -336,9 +437,16 @@ export const api = {
     engine: string,
     revision: string,
     selectedFiles: string[],
+    auxiliaryKind: string | null = null,
   ) => request<CatalogPreflight>(`/api/catalog/${remoteId}/preflight`, {
     method: "POST",
-    body: JSON.stringify({ role, engine, revision, selected_files: selectedFiles }),
+    body: JSON.stringify({
+      role,
+      engine,
+      revision,
+      selected_files: selectedFiles,
+      auxiliary_kind: auxiliaryKind,
+    }),
   }),
   recipes: () => request<ReferenceRecipe[]>("/api/recipes"),
   installRecipe: (recipeId: string) =>
@@ -354,6 +462,8 @@ export const api = {
     comfyPaths: Record<string, string> = {},
     workflowTemplateId: string | null = null,
     workflowTemplateSha256: string | null = null,
+    installPlanId: string | null = null,
+    auxiliaryKind: string | null = null,
   ) =>
     request<Job>("/api/downloads", {
       method: "POST",
@@ -368,8 +478,21 @@ export const api = {
         comfy_paths: comfyPaths,
         workflow_template_id: workflowTemplateId,
         workflow_template_sha256: workflowTemplateSha256,
+        install_plan_id: installPlanId,
+        auxiliary_kind: auxiliaryKind,
       }),
     }),
+  modelAssets: (kind?: string) =>
+    request<ModelAssetInstall[]>(
+      `/api/model-assets${kind ? `?${new URLSearchParams({ kind })}` : ""}`,
+    ),
+  updateModelAsset: (id: string, active: boolean) =>
+    request<ModelAssetInstall>(`/api/model-assets/${id}`, {
+      method: "PATCH",
+      body: JSON.stringify({ active }),
+    }),
+  deleteModelAsset: (id: string) =>
+    request<void>(`/api/model-assets/${id}`, { method: "DELETE" }),
   importModel: (payload: { name: string; role: string; engine: string; local_path: string }) =>
     request<ModelInstall>("/api/models/import", {
       method: "POST",
@@ -421,13 +544,16 @@ export const api = {
 export async function connectEvents(
   onEvent: (event: AppEvent) => void,
   onStatus: (connected: boolean) => void,
+  onReconnect?: () => void,
 ): Promise<() => void> {
   let closed = false;
   let opening = false;
   let socket: WebSocket | null = null;
   let retry: number | undefined;
+  let connectedEpoch = eventEpoch;
   let lastSequence = eventSequence;
   let sequenceInitialized = false;
+  let hasOpened = false;
 
   const scheduleRetry = () => {
     if (closed || retry !== undefined) return;
@@ -445,13 +571,21 @@ export async function connectEvents(
       if (closed) return;
       if (!sequenceInitialized) {
         lastSequence = eventSequence;
+        connectedEpoch = eventEpoch;
         sequenceInitialized = true;
+      } else if (eventEpoch && connectedEpoch && eventEpoch !== connectedEpoch) {
+        lastSequence = 0;
+        connectedEpoch = eventEpoch;
       } else if (eventSequence < lastSequence) {
         lastSequence = 0;
       }
       const scheme = window.location.protocol === "https:" ? "wss:" : "ws:";
       socket = new WebSocket(`${scheme}//${window.location.host}/api/events?after=${lastSequence}`);
-      socket.onopen = () => onStatus(true);
+      socket.onopen = () => {
+        onStatus(true);
+        if (hasOpened) onReconnect?.();
+        hasOpened = true;
+      };
       socket.onmessage = (message) => {
         const event = JSON.parse(message.data as string) as AppEvent;
         lastSequence = Math.max(lastSequence, event.sequence);

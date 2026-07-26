@@ -1,5 +1,8 @@
 #ifndef MyAppVersion
-  #define MyAppVersion "0.1.7"
+  #error MyAppVersion must be supplied by the release build
+#endif
+#ifndef MyFileVersion
+  #error MyFileVersion must be supplied by the release build
 #endif
 #ifndef MySourceDir
   #define MySourceDir "..\..\build\pyinstaller-windows\LM Atelier"
@@ -21,6 +24,7 @@ DefaultDirName={localappdata}\Programs\LM Atelier
 DefaultGroupName=LM Atelier
 DisableProgramGroupPage=yes
 PrivilegesRequired=lowest
+RedirectionGuard=yes
 ArchitecturesAllowed=x64compatible
 ArchitecturesInstallIn64BitMode=x64compatible
 OutputDir={#MyOutputDir}
@@ -32,10 +36,12 @@ SolidCompression=yes
 WizardStyle=modern
 CloseApplications=yes
 RestartApplications=no
-VersionInfoVersion={#MyAppVersion}
+VersionInfoVersion={#MyFileVersion}
+VersionInfoTextVersion={#MyAppVersion}
 VersionInfoDescription=LM Atelier installer
 VersionInfoProductName=LM Atelier
-VersionInfoProductVersion={#MyAppVersion}
+VersionInfoProductVersion={#MyFileVersion}
+VersionInfoProductTextVersion={#MyAppVersion}
 VersionInfoCompany=LM Atelier
 LicenseFile=..\..\LICENSE
 
@@ -51,3 +57,50 @@ Name: "desktopicon"; Description: "Create a desktop shortcut"; GroupDescription:
 
 [Run]
 Filename: "{app}\{#MyAppExeName}"; Description: "Open LM Atelier"; Flags: nowait postinstall skipifsilent
+
+[Code]
+var
+  PurgeDataCheckBox: TNewCheckBox;
+
+function UninstallParameterPresent(const Name: String): Boolean;
+var
+  Index: Integer;
+begin
+  Result := False;
+  for Index := 1 to ParamCount do
+  begin
+    if CompareText(ParamStr(Index), Name) = 0 then
+    begin
+      Result := True;
+      Exit;
+    end;
+  end;
+end;
+
+procedure InitializeUninstallProgressForm;
+begin
+  PurgeDataCheckBox := TNewCheckBox.Create(UninstallProgressForm);
+  PurgeDataCheckBox.Parent := UninstallProgressForm;
+  PurgeDataCheckBox.Left := UninstallProgressForm.StatusLabel.Left;
+  PurgeDataCheckBox.Top :=
+    UninstallProgressForm.StatusLabel.Top + UninstallProgressForm.StatusLabel.Height + 12;
+  PurgeDataCheckBox.Width := UninstallProgressForm.StatusLabel.Width;
+  PurgeDataCheckBox.Caption := 'Delete chats, media, models, settings, and other local data';
+  PurgeDataCheckBox.Checked := UninstallParameterPresent('/PURGEDATA');
+end;
+
+procedure CurUninstallStepChanged(CurrentStep: TUninstallStep);
+var
+  DataDirectory: String;
+begin
+  if (CurrentStep = usUninstall) and PurgeDataCheckBox.Checked then
+  begin
+    DataDirectory := ExpandConstant('{localappdata}\LMAtelier\data');
+    if not DelTree(DataDirectory, True, True, True) then
+      MsgBox(
+        'LM Atelier could not remove all local data from ' + DataDirectory + '.',
+        mbError,
+        MB_OK
+      );
+  end;
+end;
