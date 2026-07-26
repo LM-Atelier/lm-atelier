@@ -857,6 +857,7 @@ def test_frozen_installer_contracts_are_explicit() -> None:
     assert '"local_lm" / "capability_packs"' in spec
     assert '"__pycache__" not in source.parts' in spec
     assert 'source.suffix not in {".pyc", ".pyo"}' in spec
+    assert '"PIL",' not in spec
     assert "upx=False" in spec
     assert "upx=True" not in spec
     assert '"release-metadata" / "LICENSE"' in spec
