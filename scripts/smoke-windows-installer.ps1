@@ -19,10 +19,23 @@ function Invoke-Checked {
         [string]$Label,
         [Parameter(Mandatory)]
         [string]$FilePath,
-        [string[]]$ArgumentList = @()
+        [string[]]$ArgumentList = @(),
+        [switch]$WaitProcess
     )
 
     Write-Host "==> $Label"
+    if ($WaitProcess) {
+        $Process = Start-Process `
+            -FilePath $FilePath `
+            -ArgumentList $ArgumentList `
+            -Wait `
+            -PassThru `
+            -WindowStyle Hidden
+        if ($Process.ExitCode -ne 0) {
+            throw "$Label failed with exit code $($Process.ExitCode)."
+        }
+        return
+    }
     & $FilePath @ArgumentList
     if ($LASTEXITCODE -ne 0) {
         throw "$Label failed with exit code $LASTEXITCODE."
@@ -133,7 +146,8 @@ try {
     Invoke-Checked `
         "Silent installer execution" `
         $InitialInstaller `
-        $InstallArguments
+        $InstallArguments `
+        -WaitProcess
     $Application = Join-Path $InstallRoot "LM Atelier.exe"
     $Uninstaller = Join-Path $InstallRoot "unins000.exe"
     if (-not (Test-Path -LiteralPath $Application -PathType Leaf)) {
@@ -169,7 +183,8 @@ try {
         Invoke-Checked `
             "Upgrade from $PreviousVersion to $Version" `
             $InstallerPath `
-            $InstallArguments
+            $InstallArguments `
+            -WaitProcess
         if (-not (Test-Path -LiteralPath $DataMarker -PathType Leaf)) {
             throw "Version upgrade did not preserve local data."
         }
@@ -186,7 +201,11 @@ try {
             "--port", "$Port"
         )
     }
-    Invoke-Checked "In-place reinstall" $InstallerPath $InstallArguments
+    Invoke-Checked `
+        "In-place reinstall" `
+        $InstallerPath `
+        $InstallArguments `
+        -WaitProcess
     if (-not (Test-Path -LiteralPath $DataMarker -PathType Leaf)) {
         throw "In-place reinstall did not preserve local data."
     }
@@ -195,7 +214,7 @@ try {
         "/VERYSILENT",
         "/SUPPRESSMSGBOXES",
         "/NORESTART"
-    )
+    ) -WaitProcess
     if (Test-Path -LiteralPath $InstallRoot) {
         throw "The application directory remains after uninstall."
     }
@@ -207,14 +226,18 @@ try {
     }
 
     if ($AllowPurge) {
-        Invoke-Checked "Reinstall for explicit purge" $InstallerPath $InstallArguments
+        Invoke-Checked `
+            "Reinstall for explicit purge" `
+            $InstallerPath `
+            $InstallArguments `
+            -WaitProcess
         $Uninstaller = Join-Path $InstallRoot "unins000.exe"
         Invoke-Checked "Explicit data purge" $Uninstaller @(
             "/VERYSILENT",
             "/SUPPRESSMSGBOXES",
             "/NORESTART",
             "/PURGEDATA"
-        )
+        ) -WaitProcess
         if (Test-Path -LiteralPath $DefaultData) {
             throw "Explicit purge left the default data directory in place."
         }
