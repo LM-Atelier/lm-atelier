@@ -817,6 +817,34 @@ def test_workflow_policy_limits_release_write_permission_to_the_draft_job() -> N
     ]
 
 
+def test_workflow_policy_rejects_runner_context_in_job_environment() -> None:
+    namespace = runpy.run_path(str(ROOT / "scripts/validate-workflows.py"))
+    validate_environment_contexts = namespace["validate_environment_contexts"]
+    workflow_path = Path(".github/workflows/example.yml")
+
+    allowed = {
+        "env": {"ROOT": "${{ github.workspace }}/temp"},
+        "jobs": {
+            "test": {
+                "env": {"DATA": "${{ github.workspace }}/temp/data"},
+                "steps": [{"env": {"SCRATCH": "${{ runner.temp }}"}}],
+            }
+        },
+    }
+    denied = {
+        "jobs": {
+            "test": {
+                "env": {"DATA": "${{ runner.temp }}/data"},
+            }
+        }
+    }
+
+    assert validate_environment_contexts(workflow_path, allowed) == []
+    assert validate_environment_contexts(workflow_path, denied) == [
+        f"{workflow_path}: job test env DATA cannot use the runner context"
+    ]
+
+
 def test_public_repository_configuration_verifies_every_applied_control() -> None:
     script = (ROOT / "scripts/configure-public-repository.ps1").read_text()
 

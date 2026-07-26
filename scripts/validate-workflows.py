@@ -193,6 +193,29 @@ def validate_checkout_credentials(path: Path, workflow: dict[str, Any]) -> list[
     return errors
 
 
+def validate_environment_contexts(path: Path, workflow: dict[str, Any]) -> list[str]:
+    """Reject contexts GitHub does not expose to workflow- or job-level env."""
+
+    errors: list[str] = []
+    declarations: list[tuple[str, Any]] = [("workflow", workflow.get("env"))]
+    jobs = workflow.get("jobs")
+    if isinstance(jobs, dict):
+        declarations.extend(
+            (f"job {job_name}", job.get("env"))
+            for job_name, job in jobs.items()
+            if isinstance(job, dict)
+        )
+    for location, declaration in declarations:
+        if not isinstance(declaration, dict):
+            continue
+        for name, value in declaration.items():
+            if isinstance(value, str) and "${{ runner." in value:
+                errors.append(
+                    f"{path}: {location} env {name} cannot use the runner context"
+                )
+    return errors
+
+
 def validate_untrusted_triggers(path: Path, content: str) -> list[str]:
     errors: list[str] = []
     if PULL_REQUEST_TARGET.search(content):
@@ -227,6 +250,7 @@ def main() -> None:
         errors.extend(validate_permissions(path, workflow))
         errors.extend(validate_action_pins(path, content))
         errors.extend(validate_checkout_credentials(path, workflow))
+        errors.extend(validate_environment_contexts(path, workflow))
         errors.extend(validate_untrusted_triggers(path, content))
         workflow_actions.update(external_actions(content))
         print(path)
