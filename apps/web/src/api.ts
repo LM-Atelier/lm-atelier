@@ -315,7 +315,7 @@ export const api = {
       method: "POST",
     }),
   profiles: () => request<ModelProfile[]>("/api/profiles"),
-  createProfile: (model: ModelInstall) =>
+  createProfile: (model: ModelInstall, isDefault = false) =>
     request<ModelProfile>("/api/profiles", {
       method: "POST",
       body: JSON.stringify({
@@ -325,7 +325,7 @@ export const api = {
         model_install_id: model.id,
         load_settings: {},
         request_settings: {},
-        is_default: false,
+        is_default: isDefault,
       }),
     }),
   updateProfile: (

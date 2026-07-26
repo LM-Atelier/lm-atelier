@@ -1533,11 +1533,11 @@ describe("App", () => {
       </QueryClientProvider>,
     );
     fireEvent.click(await screen.findByText("Settings"));
-    expect(await screen.findByText(/Default.*default/)).toBeInTheDocument();
+    expect(await screen.findByText(/Local chat.*default/)).toBeInTheDocument();
     fireEvent.click(screen.getByRole("button", { name: "Edit profile: Local chat" }));
     expect(await screen.findByText("Edit profile")).toBeInTheDocument();
     expect(screen.getByDisplayValue("Local chat")).toBeInTheDocument();
-    expect(screen.getByText("Default model")).toBeInTheDocument();
+    expect(screen.getByText("Default chat model")).toBeInTheDocument();
     const detailLevel = screen.getByRole("group", { name: "Profile setting detail" });
     expect(detailLevel).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "basic" })).toHaveAttribute("aria-pressed", "true");
@@ -2222,6 +2222,60 @@ describe("App", () => {
       { use_case: "Python programming and code review" },
     ));
     expect(await screen.findByText("Python programming and code review")).toBeInTheDocument();
+  });
+
+  it("sets an installed model as the default for its type", async () => {
+    const model = {
+      id: "model-default-image",
+      source_id: null,
+      name: "Image specialist",
+      role: "image",
+      engine: "comfyui",
+      local_path: "/models/image-specialist",
+      size_bytes: 4096,
+      compatibility: "likely",
+      manifest_json: {},
+      active: true,
+      readiness: "ready" as const,
+      capability_evidence: null,
+      created_at: "2026-07-22T00:00:00Z",
+      updated_at: "2026-07-22T00:00:00Z",
+    };
+    const profile = {
+      id: "profile-default-image",
+      model_install_id: model.id,
+      name: model.name,
+      use_case: "",
+      role: "image" as const,
+      engine: model.engine,
+      load_settings_json: {},
+      request_settings_json: {},
+      is_default: false,
+    };
+    const updated = { ...profile, is_default: true };
+    vi.mocked(api.models).mockResolvedValue([model]);
+    vi.mocked(api.profiles).mockResolvedValue([profile]);
+    vi.mocked(api.updateProfile).mockImplementation(async () => {
+      vi.mocked(api.profiles).mockResolvedValue([updated]);
+      return updated;
+    });
+    const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+    render(
+      <QueryClientProvider client={client}>
+        <App />
+      </QueryClientProvider>,
+    );
+
+    fireEvent.click(await screen.findByText("Model library"));
+    fireEvent.click(await screen.findByRole("button", {
+      name: "Set Image specialist as default image model",
+    }));
+
+    await waitFor(() => expect(api.updateProfile).toHaveBeenCalledWith(
+      profile.id,
+      { is_default: true },
+    ));
+    expect(await screen.findByText("Default")).toBeInTheDocument();
   });
 
   it("does not mark a catalog model installed from an inactive replacement", async () => {
