@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import ast
+import asyncio
 from pathlib import Path
 from typing import Annotated
 
@@ -13,6 +14,7 @@ from local_lm.main import create_app
 from local_lm.security import (
     MAX_JSON_BODY_BYTES,
     MULTIPART_OVERHEAD_BYTES,
+    JsonBodyLimitMiddleware,
     SecurityHeadersMiddleware,
     SessionSecurity,
     UploadBodyLimitMiddleware,
@@ -185,6 +187,68 @@ async def test_json_request_body_limit_covers_streamed_bodies_without_content_le
     assert response.json()["detail"] == (
         f"JSON request body exceeds the {MAX_JSON_BODY_BYTES}-byte limit"
     )
+
+
+async def test_json_body_replay_waits_on_the_real_connection_after_the_body() -> None:
+    downstream_receive_started = asyncio.Event()
+    allow_disconnect = asyncio.Event()
+
+    async def downstream(scope, receive, send) -> None:  # type: ignore[no-untyped-def]
+        body = await receive()
+        assert body == {
+            "type": "http.request",
+            "body": b'{"ok":true}',
+            "more_body": False,
+        }
+        pending_receive = asyncio.create_task(receive())
+        await asyncio.wait_for(downstream_receive_started.wait(), timeout=0.5)
+        await asyncio.sleep(0)
+        assert not pending_receive.done()
+        allow_disconnect.set()
+        assert await pending_receive == {"type": "http.disconnect"}
+        await send({"type": "http.response.start", "status": 204, "headers": []})
+        await send({"type": "http.response.body", "body": b""})
+
+    middleware = JsonBodyLimitMiddleware(downstream)
+    source_messages: asyncio.Queue[dict[str, object]] = asyncio.Queue()
+    source_messages.put_nowait(
+        {
+            "type": "http.request",
+            "body": b'{"ok":true}',
+            "more_body": False,
+        }
+    )
+    receive_count = 0
+
+    async def receive() -> dict[str, object]:
+        nonlocal receive_count
+        receive_count += 1
+        if receive_count > 1:
+            downstream_receive_started.set()
+            await allow_disconnect.wait()
+            return {"type": "http.disconnect"}
+        message = await source_messages.get()
+        return message
+
+    sent: list[dict[str, object]] = []
+
+    async def send(message: dict[str, object]) -> None:
+        sent.append(message)
+
+    await middleware(
+        {
+            "type": "http",
+            "path": "/api/example",
+            "headers": [(b"content-type", b"application/json")],
+        },
+        receive,  # type: ignore[arg-type]
+        send,  # type: ignore[arg-type]
+    )
+
+    assert sent == [
+        {"type": "http.response.start", "status": 204, "headers": []},
+        {"type": "http.response.body", "body": b""},
+    ]
 
 
 async def test_upload_limit_rejects_streamed_multipart_before_endpoint_runs() -> None:

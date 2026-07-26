@@ -148,6 +148,106 @@ async def test_chat_worker_resume_runs_after_the_database_session_closes() -> No
     await orchestrator._resume_chat_worker("profile-resume")
 
 
+async def test_media_handoff_recycles_managed_comfy_before_chat_resume() -> None:
+    order: list[str] = []
+    media = WorkerStatus(
+        name="media",
+        state="ready",
+        managed=True,
+        running=True,
+        pid=22,
+    )
+
+    async def stop(name: str) -> None:
+        assert name == "media"
+        order.append("stop media")
+
+    async def start_media() -> None:
+        order.append("start media")
+
+    processes = SimpleNamespace(
+        statuses=Mock(return_value=[media]),
+        stop=stop,
+        start_media=start_media,
+    )
+    orchestrator = ConversationOrchestrator(
+        engines=SimpleNamespace(settings=SimpleNamespace(media_engine="comfyui")),
+        artifacts=Mock(),
+        events=Mock(),
+        scheduler=Mock(),
+        processes=processes,
+    )
+
+    async def resume(profile_id: str) -> None:
+        assert profile_id == "profile-chat"
+        order.append("resume chat")
+
+    orchestrator._resume_chat_worker = resume  # type: ignore[method-assign]
+
+    await orchestrator._complete_media_handoff("profile-chat")
+
+    assert order == ["stop media", "start media", "resume chat"]
+
+
+async def test_external_media_handoff_only_resumes_chat() -> None:
+    media = WorkerStatus(
+        name="media",
+        state="ready",
+        managed=False,
+        running=True,
+        pid=22,
+    )
+    processes = SimpleNamespace(
+        statuses=Mock(return_value=[media]),
+        stop=AsyncMock(),
+        start_media=AsyncMock(),
+    )
+    orchestrator = ConversationOrchestrator(
+        engines=SimpleNamespace(settings=SimpleNamespace(media_engine="comfyui")),
+        artifacts=Mock(),
+        events=Mock(),
+        scheduler=Mock(),
+        processes=processes,
+    )
+    resume = AsyncMock()
+    orchestrator._resume_chat_worker = resume  # type: ignore[method-assign]
+
+    await orchestrator._complete_media_handoff("profile-chat")
+
+    processes.stop.assert_not_awaited()
+    processes.start_media.assert_not_awaited()
+    resume.assert_awaited_once_with("profile-chat")
+
+
+async def test_media_recycle_failure_still_restores_chat() -> None:
+    media = WorkerStatus(
+        name="media",
+        state="ready",
+        managed=True,
+        running=True,
+        pid=22,
+    )
+    processes = SimpleNamespace(
+        statuses=Mock(return_value=[media]),
+        stop=AsyncMock(side_effect=RuntimeError("recycle failed")),
+        start_media=AsyncMock(),
+    )
+    orchestrator = ConversationOrchestrator(
+        engines=SimpleNamespace(settings=SimpleNamespace(media_engine="comfyui")),
+        artifacts=Mock(),
+        events=Mock(),
+        scheduler=Mock(),
+        processes=processes,
+    )
+    resume = AsyncMock()
+    orchestrator._resume_chat_worker = resume  # type: ignore[method-assign]
+
+    await orchestrator._complete_media_handoff("profile-chat")
+
+    processes.start_media.assert_not_awaited()
+    resume.assert_awaited_once_with("profile-chat")
+
+
 async def test_chat_planner_falls_back_during_media_handoff() -> None:
     ready = WorkerStatus(
         name="chat",

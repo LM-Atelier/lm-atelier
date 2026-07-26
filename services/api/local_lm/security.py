@@ -3,7 +3,6 @@ from __future__ import annotations
 import hashlib
 import hmac
 import secrets
-from collections.abc import AsyncIterator
 from pathlib import Path
 
 from fastapi import HTTPException, Request, Response, WebSocket, status
@@ -86,20 +85,30 @@ class JsonBodyLimitMiddleware:
             if not message.get("more_body", False):
                 break
 
-        messages = self._replay(bytes(body))
-        await self.app(scope, messages.__anext__, send)
+        replayed = False
+
+        async def replay_receive() -> Message:
+            nonlocal replayed
+            if not replayed:
+                replayed = True
+                return {
+                    "type": "http.request",
+                    "body": bytes(body),
+                    "more_body": False,
+                }
+            # Preserve the real connection lifecycle after replaying the body.
+            # Returning synthetic disconnect messages without awaiting the
+            # server receive channel can drive downstream listeners into a
+            # full-core hot loop for the rest of the application lifetime.
+            return await receive()
+
+        await self.app(scope, replay_receive, send)
 
     @staticmethod
     def _is_json(scope: Scope) -> bool:
         headers: dict[bytes, bytes] = dict(scope.get("headers", []))
         media_type = headers.get(b"content-type", b"").split(b";", 1)[0].strip().lower()
         return media_type == b"application/json" or media_type.endswith(b"+json")
-
-    @staticmethod
-    async def _replay(body: bytes) -> AsyncIterator[Message]:
-        yield {"type": "http.request", "body": body, "more_body": False}
-        while True:
-            yield {"type": "http.disconnect"}
 
     async def _reject(self, scope: Scope, receive: Receive, send: Send) -> None:
         response = JSONResponse(
