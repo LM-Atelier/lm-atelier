@@ -9,10 +9,12 @@ from sqlalchemy import (
     DateTime,
     Float,
     ForeignKey,
+    Index,
     Integer,
     String,
     Text,
     UniqueConstraint,
+    text,
 )
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
@@ -96,12 +98,25 @@ class Message(TimestampMixin, Base):
     )
     role: Mapped[str] = mapped_column(String(16), default=MessageRole.USER.value)
     status: Mapped[str] = mapped_column(String(16), default=MessageStatus.COMPLETE.value)
+    transcript_visible: Mapped[bool] = mapped_column(
+        Boolean,
+        default=True,
+        server_default="1",
+        index=True,
+    )
+    active_response_revision_id: Mapped[str | None] = mapped_column(String(40), nullable=True)
 
     chat: Mapped[Chat] = relationship(back_populates="messages")
     parts: Mapped[list[MessagePart]] = relationship(
         back_populates="message",
         cascade="all, delete-orphan",
         order_by="MessagePart.position",
+    )
+    response_revisions: Mapped[list[ResponseRevision]] = relationship(
+        back_populates="message",
+        cascade="all, delete-orphan",
+        order_by="ResponseRevision.sequence",
+        foreign_keys="ResponseRevision.message_id",
     )
 
 
@@ -155,6 +170,66 @@ class Run(TimestampMixin, Base):
     duration_ms: Mapped[int | None] = mapped_column(Integer, nullable=True)
 
     chat: Mapped[Chat] = relationship(back_populates="runs")
+
+
+class ResponseRevision(TimestampMixin, Base):
+    __tablename__ = "response_revisions"
+    __table_args__ = (
+        UniqueConstraint("message_id", "sequence", name="uq_response_revision_sequence"),
+        UniqueConstraint("run_id", name="uq_response_revision_run"),
+        Index(
+            "uq_response_revision_pending_message",
+            "message_id",
+            unique=True,
+            sqlite_where=text("status = 'pending'"),
+        ),
+    )
+
+    id: Mapped[str] = mapped_column(String(40), primary_key=True, default=lambda: new_id("rev"))
+    message_id: Mapped[str] = mapped_column(
+        ForeignKey("messages.id", ondelete="CASCADE"), index=True
+    )
+    run_id: Mapped[str | None] = mapped_column(
+        ForeignKey("runs.id", ondelete="SET NULL"), nullable=True, index=True
+    )
+    sequence: Mapped[int] = mapped_column(Integer)
+    status: Mapped[str] = mapped_column(String(16), default=MessageStatus.PENDING.value, index=True)
+
+    message: Mapped[Message] = relationship(
+        back_populates="response_revisions",
+        foreign_keys=[message_id],
+    )
+    parts: Mapped[list[ResponseRevisionPart]] = relationship(
+        back_populates="revision",
+        cascade="all, delete-orphan",
+        order_by="ResponseRevisionPart.position",
+    )
+
+
+class ResponseRevisionPart(TimestampMixin, Base):
+    __tablename__ = "response_revision_parts"
+    __table_args__ = (
+        UniqueConstraint(
+            "response_revision_id",
+            "position",
+            name="uq_response_revision_part_position",
+        ),
+    )
+
+    id: Mapped[str] = mapped_column(String(40), primary_key=True, default=lambda: new_id("revpart"))
+    response_revision_id: Mapped[str] = mapped_column(
+        ForeignKey("response_revisions.id", ondelete="CASCADE"), index=True
+    )
+    position: Mapped[int] = mapped_column(Integer)
+    type: Mapped[str] = mapped_column(String(32), default=PartType.TEXT.value)
+    text: Mapped[str | None] = mapped_column(Text, nullable=True)
+    artifact_id: Mapped[str | None] = mapped_column(
+        ForeignKey("artifacts.id", ondelete="SET NULL"), nullable=True
+    )
+    metadata_json: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
+
+    revision: Mapped[ResponseRevision] = relationship(back_populates="parts")
+    artifact: Mapped[Artifact | None] = relationship()
 
 
 class TurnCreationClaim(Base):

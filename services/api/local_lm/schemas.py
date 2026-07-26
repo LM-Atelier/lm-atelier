@@ -143,13 +143,27 @@ class MessagePartOut(ApiModel):
     artifact: ArtifactOut | None = None
 
 
+class ResponseRevisionOut(ApiModel):
+    id: str
+    message_id: str
+    run_id: str | None
+    sequence: int
+    status: str
+    parts: list[MessagePartOut]
+    created_at: datetime
+    updated_at: datetime
+
+
 class MessageOut(ApiModel):
     id: str
     chat_id: str
     parent_id: str | None
     role: str
     status: str
+    transcript_visible: bool
+    active_response_revision_id: str | None
     parts: list[MessagePartOut]
+    response_revisions: list[ResponseRevisionOut] = Field(default_factory=list)
     created_at: datetime
     updated_at: datetime
 
