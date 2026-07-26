@@ -74,6 +74,13 @@ class EventBroker:
     def since(self, sequence: int) -> list[EventOut]:
         return [event for event in self._history if event.sequence > sequence]
 
+    async def clear(self) -> None:
+        async with self._lock:
+            self._history.clear()
+            self._subscribers.clear()
+            self._sequence = 0
+            self._epoch = uuid.uuid4().hex
+
     @asynccontextmanager
     async def subscribe(self, after: int = 0) -> AsyncIterator[asyncio.Queue[EventOut]]:
         async with self._lock:

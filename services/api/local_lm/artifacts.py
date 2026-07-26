@@ -42,8 +42,8 @@ class RetentionCleanupSummary:
 
 
 class ArtifactStore:
-    def __init__(self, settings: Settings) -> None:
-        self.root = settings.artifact_dir.resolve()
+    def __init__(self, settings: Settings, *, root: Path | None = None) -> None:
+        self.root = (root or settings.artifact_dir).resolve()
         self.root.mkdir(parents=True, exist_ok=True)
         self._verified_files: dict[Path, tuple[int, int]] = {}
 

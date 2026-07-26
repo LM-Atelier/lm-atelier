@@ -5,7 +5,7 @@ import logging
 import os
 import shutil
 import stat
-from collections.abc import AsyncIterator
+from collections.abc import AsyncGenerator, AsyncIterator
 from contextlib import suppress
 from pathlib import Path, PurePosixPath
 from typing import TYPE_CHECKING, Annotated, Any, Literal, cast
@@ -43,6 +43,11 @@ from .engines import (
     EngineSchemaUnavailableError,
 )
 from .hardware import collect_system_info
+from .incognito import (
+    INCOGNITO_HEADER,
+    IncognitoUnavailableError,
+    is_incognito_scoped_path,
+)
 from .models import (
     AppSetting,
     Artifact,
@@ -103,6 +108,7 @@ from .schemas import (
     CustomNodeUpdateRequest,
     DownloadRequest,
     EngineCapabilities,
+    EventOut,
     HealthOut,
     JobOut,
     MessageOut,
@@ -158,8 +164,37 @@ if TYPE_CHECKING:
 SessionDep = Annotated[Session, Depends(get_session)]
 
 
+async def get_conversation_session(request: Request) -> AsyncGenerator[Session, None]:
+    services = cast("Services", request.app.state.services)
+    token = request.headers.get(INCOGNITO_HEADER)
+    manager = services.incognito
+    scope = manager.get(token) if token and manager else None
+    if token and not scope:
+        raise HTTPException(404, "private session not found")
+    if scope and manager and request.method not in {"GET", "HEAD"}:
+        await manager.refresh_shared_configuration(scope)
+    session = scope.session_factory() if scope else SessionLocal()
+    try:
+        yield session
+    finally:
+        session.close()
+
+
+ConversationSessionDep = Annotated[Session, Depends(get_conversation_session)]
+
+
 def _services(request: Request) -> Services:
-    return cast("Services", request.app.state.services)
+    services = cast("Services", request.app.state.services)
+    token = request.headers.get(INCOGNITO_HEADER)
+    if not token or (
+        not is_incognito_scoped_path(request.url.path)
+        and request.url.path != "/api/incognito/events"
+    ):
+        return services
+    scope = services.incognito.get(token) if services.incognito else None
+    if not scope:
+        raise HTTPException(404, "private session not found")
+    return cast("Services", scope.services)
 
 
 router = APIRouter(prefix="/api")
@@ -194,6 +229,51 @@ async def create_session(request: Request, response: Response) -> dict[str, str 
         "event_epoch": services.events.epoch,
         "event_sequence": services.events.sequence,
     }
+
+
+@router.post("/incognito/session", status_code=201)
+async def create_incognito_session(request: Request) -> dict[str, str | int]:
+    services = cast("Services", request.app.state.services)
+    if not services.incognito:
+        raise HTTPException(503, "private sessions are unavailable")
+    try:
+        scope = await services.incognito.start()
+    except IncognitoUnavailableError as exc:
+        raise HTTPException(409, str(exc)) from exc
+    return {
+        "token": scope.token,
+        "event_epoch": scope.services.events.epoch,
+        "event_sequence": scope.services.events.sequence,
+        "disclosure": (
+            "This conversation is kept out of LM Atelier history, media, backups, "
+            "exports, diagnostics, and long-lived browser storage. It is not forensic "
+            "erasure or network anonymity. Downloads and copies you explicitly make remain."
+        ),
+    }
+
+
+@router.delete("/incognito/session", status_code=204)
+async def end_incognito_session(request: Request) -> Response:
+    services = cast("Services", request.app.state.services)
+    token = request.headers.get(INCOGNITO_HEADER)
+    if not token or not services.incognito:
+        raise HTTPException(404, "private session not found")
+    try:
+        await services.incognito.end(token)
+    except LookupError as exc:
+        raise HTTPException(404, str(exc)) from exc
+    except RuntimeError as exc:
+        raise HTTPException(503, str(exc)) from exc
+    return Response(status_code=204)
+
+
+@router.get("/incognito/events", response_model=list[EventOut])
+async def incognito_events(
+    request: Request,
+    after: int = Query(default=0, ge=0),
+) -> list[EventOut]:
+    services = _services(request)
+    return services.events.since(after)
 
 
 @router.get("/health", response_model=HealthOut)
@@ -665,7 +745,7 @@ async def export_project(
 
 @router.get("/chats", response_model=list[ChatOut])
 async def list_chats(
-    session: SessionDep,
+    session: ConversationSessionDep,
     project_id: str | None = None,
     include_archived: bool = False,
     query: str = Query(default="", max_length=500),
@@ -684,7 +764,7 @@ async def list_chats(
 async def create_chat(
     payload: ChatCreate,
     request: Request,
-    session: SessionDep,
+    session: ConversationSessionDep,
 ) -> Chat:
     if payload.project_id and not session.get(Project, payload.project_id):
         raise HTTPException(404, "project not found")
@@ -707,7 +787,7 @@ async def create_chat(
 
 
 @router.get("/chats/{chat_id}", response_model=ChatDetail)
-async def get_chat(chat_id: str, session: SessionDep) -> Chat:
+async def get_chat(chat_id: str, session: ConversationSessionDep) -> Chat:
     chat = session.scalar(
         select(Chat)
         .options(
@@ -731,7 +811,7 @@ async def update_chat(
     chat_id: str,
     payload: ChatUpdate,
     request: Request,
-    session: SessionDep,
+    session: ConversationSessionDep,
 ) -> Chat:
     chat = session.get(Chat, chat_id)
     if not chat:
@@ -775,7 +855,7 @@ async def update_chat(
 async def delete_chat(
     chat_id: str,
     request: Request,
-    session: SessionDep,
+    session: ConversationSessionDep,
     delete_generated_media: bool = Query(False),
 ) -> Response:
     chat = session.get(Chat, chat_id)
@@ -796,7 +876,7 @@ async def delete_chat(
 
 @router.post("/chats/{chat_id}/turns", response_model=TurnAccepted, status_code=202)
 async def create_turn(
-    chat_id: str, payload: TurnRequest, request: Request, session: SessionDep
+    chat_id: str, payload: TurnRequest, request: Request, session: ConversationSessionDep
 ) -> TurnAccepted:
     orchestrator: ConversationOrchestrator = _services(request).orchestrator
     return await _accept_turn(orchestrator, session, chat_id, payload)
@@ -851,7 +931,7 @@ async def _accept_turn(
 
 
 @router.get("/messages/{message_id}", response_model=MessageOut)
-async def get_message(message_id: str, session: SessionDep) -> Message:
+async def get_message(message_id: str, session: ConversationSessionDep) -> Message:
     message = session.scalar(
         select(Message)
         .options(
@@ -872,7 +952,7 @@ async def regenerate_message(
     message_id: str,
     payload: RegenerateRequest,
     request: Request,
-    session: SessionDep,
+    session: ConversationSessionDep,
 ) -> TurnAccepted:
     orchestrator: ConversationOrchestrator = _services(request).orchestrator
     source_assistant = session.get(Message, message_id)
@@ -960,7 +1040,7 @@ async def select_response_revision(
     message_id: str,
     revision_id: str,
     request: Request,
-    session: SessionDep,
+    session: ConversationSessionDep,
 ) -> Message:
     try:
         return _services(request).orchestrator.select_response_revision(
@@ -976,7 +1056,10 @@ async def select_response_revision(
 
 @router.post("/messages/{message_id}/branch", response_model=TurnAccepted, status_code=202)
 async def edit_and_branch(
-    message_id: str, payload: TurnRequest, request: Request, session: SessionDep
+    message_id: str,
+    payload: TurnRequest,
+    request: Request,
+    session: ConversationSessionDep,
 ) -> TurnAccepted:
     source = session.get(Message, message_id)
     if not source or source.role != MessageRole.USER.value:
@@ -1044,7 +1127,7 @@ def _mode_for_operation(operation: Operation) -> RoutingMode:
 
 
 @router.get("/runs/{run_id}", response_model=RunOut)
-async def get_run(run_id: str, session: SessionDep) -> Run:
+async def get_run(run_id: str, session: ConversationSessionDep) -> Run:
     run = session.get(Run, run_id)
     if not run:
         raise HTTPException(404, "run not found")
@@ -1053,7 +1136,7 @@ async def get_run(run_id: str, session: SessionDep) -> Run:
 
 @router.get("/work-plans", response_model=list[WorkPlanOut])
 async def list_work_plans(
-    session: SessionDep,
+    session: ConversationSessionDep,
     chat_id: str | None = None,
     limit: int = Query(default=100, ge=1, le=500),
 ) -> list[WorkPlan]:
@@ -1069,7 +1152,7 @@ async def list_work_plans(
 
 
 @router.get("/work-plans/{plan_id}", response_model=WorkPlanOut)
-async def get_work_plan(plan_id: str, session: SessionDep) -> WorkPlan:
+async def get_work_plan(plan_id: str, session: ConversationSessionDep) -> WorkPlan:
     plan = session.scalar(
         select(WorkPlan).options(selectinload(WorkPlan.steps)).where(WorkPlan.id == plan_id)
     )
@@ -1079,7 +1162,7 @@ async def get_work_plan(plan_id: str, session: SessionDep) -> WorkPlan:
 
 
 @router.get("/work-steps/{step_id}", response_model=WorkStepOut)
-async def get_work_step(step_id: str, session: SessionDep) -> WorkStep:
+async def get_work_step(step_id: str, session: ConversationSessionDep) -> WorkStep:
     step = session.get(WorkStep, step_id)
     if not step:
         raise HTTPException(404, "work step not found")
@@ -1090,7 +1173,7 @@ async def get_work_step(step_id: str, session: SessionDep) -> WorkStep:
 async def cancel_work_plan(
     plan_id: str,
     request: Request,
-    session: SessionDep,
+    session: ConversationSessionDep,
 ) -> WorkPlan:
     plan = session.scalar(
         select(WorkPlan).options(selectinload(WorkPlan.steps)).where(WorkPlan.id == plan_id)
@@ -1124,7 +1207,7 @@ async def cancel_work_plan(
 async def cancel_work_step(
     step_id: str,
     request: Request,
-    session: SessionDep,
+    session: ConversationSessionDep,
 ) -> Job:
     job = session.scalar(select(Job).where(Job.work_step_id == step_id))
     if not job:
@@ -1136,7 +1219,7 @@ async def cancel_work_step(
 async def retry_work_plan(
     plan_id: str,
     request: Request,
-    session: SessionDep,
+    session: ConversationSessionDep,
 ) -> WorkPlan:
     plan = session.scalar(
         select(WorkPlan).options(selectinload(WorkPlan.steps)).where(WorkPlan.id == plan_id)
@@ -1170,7 +1253,7 @@ async def retry_work_plan(
 async def retry_work_step(
     step_id: str,
     request: Request,
-    session: SessionDep,
+    session: ConversationSessionDep,
 ) -> Job:
     job = session.scalar(select(Job).where(Job.work_step_id == step_id))
     if not job:
@@ -1180,7 +1263,7 @@ async def retry_work_step(
 
 @router.get("/jobs", response_model=list[JobOut])
 async def list_jobs(
-    session: SessionDep,
+    session: ConversationSessionDep,
     status: str | None = None,
     limit: int = Query(default=100, ge=1, le=500),
 ) -> list[Job]:
@@ -1191,7 +1274,11 @@ async def list_jobs(
 
 
 @router.post("/jobs/{job_id}/cancel", response_model=JobOut)
-async def cancel_job(job_id: str, request: Request, session: SessionDep) -> Job:
+async def cancel_job(
+    job_id: str,
+    request: Request,
+    session: ConversationSessionDep,
+) -> Job:
     job = session.get(Job, job_id)
     if not job:
         raise HTTPException(404, "job not found")
@@ -1209,7 +1296,11 @@ async def cancel_job(job_id: str, request: Request, session: SessionDep) -> Job:
 
 
 @router.post("/chats/{chat_id}/cancel", response_model=JobOut)
-async def cancel_active_chat_run(chat_id: str, request: Request, session: SessionDep) -> Job:
+async def cancel_active_chat_run(
+    chat_id: str,
+    request: Request,
+    session: ConversationSessionDep,
+) -> Job:
     if not session.get(Chat, chat_id):
         raise HTTPException(404, "chat not found")
     job = _current_chat_job(session, chat_id)
@@ -1234,7 +1325,7 @@ async def stop_and_send_turn(
     chat_id: str,
     payload: TurnRequest,
     request: Request,
-    session: SessionDep,
+    session: ConversationSessionDep,
 ) -> TurnAccepted:
     if not session.get(Chat, chat_id):
         raise HTTPException(404, "chat not found")
@@ -1279,7 +1370,11 @@ def _current_chat_job(session: Session, chat_id: str) -> Job | None:
 
 
 @router.post("/jobs/{job_id}/retry", response_model=JobOut)
-async def retry_job(job_id: str, request: Request, session: SessionDep) -> Job:
+async def retry_job(
+    job_id: str,
+    request: Request,
+    session: ConversationSessionDep,
+) -> Job:
     job = session.get(Job, job_id)
     if not job:
         raise HTTPException(404, "job not found")
@@ -1355,7 +1450,7 @@ async def retry_job(job_id: str, request: Request, session: SessionDep) -> Job:
 @router.post("/artifacts", response_model=ArtifactOut, status_code=201)
 async def upload_artifact(
     request: Request,
-    session: SessionDep,
+    session: ConversationSessionDep,
     file: Annotated[UploadFile, File()],
     kind: ArtifactKind = ArtifactKind.INPUT,
 ) -> ArtifactOut:
@@ -1381,7 +1476,7 @@ async def upload_artifact(
 
 @router.get("/artifacts", response_model=list[ArtifactLibraryItem])
 async def list_artifacts(
-    session: SessionDep,
+    session: ConversationSessionDep,
     kind: Literal["image", "video"] | None = None,
     chat_id: str | None = None,
     project_id: str | None = None,
@@ -1428,7 +1523,10 @@ async def list_artifacts(
 
 
 @router.get("/artifacts/storage", response_model=ArtifactStorageInfo)
-async def artifact_storage(request: Request, session: SessionDep) -> ArtifactStorageInfo:
+async def artifact_storage(
+    request: Request,
+    session: ConversationSessionDep,
+) -> ArtifactStorageInfo:
     services = _services(request)
     artifacts = session.scalars(select(Artifact)).all()
     referenced = services.artifacts.referenced_artifact_ids(session)
@@ -1471,7 +1569,7 @@ async def artifact_storage(request: Request, session: SessionDep) -> ArtifactSto
 async def cleanup_artifacts(
     payload: ArtifactCleanupRequest,
     request: Request,
-    session: SessionDep,
+    session: ConversationSessionDep,
 ) -> ArtifactCleanupResult:
     services = _services(request)
     cleanup = services.artifacts.cleanup_retention(
@@ -1495,7 +1593,7 @@ async def cleanup_artifacts(
 async def delete_artifact(
     artifact_id: str,
     request: Request,
-    session: SessionDep,
+    session: ConversationSessionDep,
 ) -> ArtifactDeleteResult:
     artifact = session.get(Artifact, artifact_id)
     if not artifact:
@@ -1516,7 +1614,10 @@ async def delete_artifact(
 
 
 @router.get("/artifacts/{artifact_id}", response_model=ArtifactOut)
-async def get_artifact(artifact_id: str, session: SessionDep) -> ArtifactOut:
+async def get_artifact(
+    artifact_id: str,
+    session: ConversationSessionDep,
+) -> ArtifactOut:
     artifact = session.get(Artifact, artifact_id)
     if not artifact:
         raise HTTPException(404, "artifact not found")
@@ -1526,7 +1627,11 @@ async def get_artifact(artifact_id: str, session: SessionDep) -> ArtifactOut:
 
 
 @router.get("/artifacts/{artifact_id}/content")
-async def artifact_content(artifact_id: str, request: Request, session: SessionDep) -> Response:
+async def artifact_content(
+    artifact_id: str,
+    request: Request,
+    session: ConversationSessionDep,
+) -> Response:
     artifact = session.get(Artifact, artifact_id)
     if not artifact:
         raise HTTPException(404, "artifact not found")
@@ -1541,7 +1646,11 @@ async def artifact_content(artifact_id: str, request: Request, session: SessionD
         content_disposition_type=disposition,
         stat_result=path.stat(),
         headers={
-            "Cache-Control": "private, max-age=31536000, immutable",
+            "Cache-Control": (
+                "no-store"
+                if request.headers.get(INCOGNITO_HEADER)
+                else "private, max-age=31536000, immutable"
+            ),
             "Content-Security-Policy": "sandbox; default-src 'none'",
             "Cross-Origin-Resource-Policy": "same-origin",
             "ETag": f'"{artifact.sha256}"',

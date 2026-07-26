@@ -48,6 +48,11 @@ class EngineRegistry:
                 settings.comfy_url,
                 inactivity_seconds=settings.comfy_inactivity_seconds,
                 managed_output_root=managed_output_root,
+                managed_temp_root=(
+                    settings.comfy_directory / "temp"
+                    if managed_output_root and settings.comfy_directory
+                    else None
+                ),
                 max_output_bytes=settings.max_generated_output_bytes,
                 stale_output_seconds=settings.temporary_retention_hours * 60 * 60,
             )

@@ -154,6 +154,23 @@ class ProcessSupervisor:
         self.runtimes = runtimes
         self._workers: dict[str, WorkerRecord] = {}
         self._locks = {"chat": asyncio.Lock(), "media": asyncio.Lock()}
+        self._private_output_suppression_depth = 0
+
+    @property
+    def private_output_suppressed(self) -> bool:
+        return self._private_output_suppression_depth > 0
+
+    def begin_private_session(self) -> None:
+        """Keep backend output from entering durable logs during private work."""
+        self._private_output_suppression_depth += 1
+        for record in self._workers.values():
+            record.stderr_tail.clear()
+
+    def end_private_session(self) -> None:
+        if self._private_output_suppression_depth > 0:
+            self._private_output_suppression_depth -= 1
+        for record in self._workers.values():
+            record.stderr_tail.clear()
 
     def statuses(self) -> list[WorkerStatus]:
         result: list[WorkerStatus] = []
@@ -486,6 +503,8 @@ class ProcessSupervisor:
                 return
             try:
                 while chunk := await stream.read(16 * 1024):
+                    if self.private_output_suppressed:
+                        continue
                     if stderr:
                         record.stderr_tail.extend(chunk)
                         overflow = len(record.stderr_tail) - WORKER_STDERR_TAIL_BYTES

@@ -22,6 +22,8 @@ from .base import (
 
 
 class MockChatAdapter:
+    supports_incognito = True
+
     def __init__(self) -> None:
         self._cancelled: set[str] = set()
 
@@ -131,11 +133,16 @@ class MockChatAdapter:
     async def cancel(self, run_id: str) -> None:
         self._cancelled.add(run_id)
 
+    async def purge_run(self, run_id: str) -> None:
+        self._cancelled.discard(run_id)
+
     async def close(self) -> None:
         self._cancelled.clear()
 
 
 class MockMediaAdapter:
+    supports_incognito = True
+
     def __init__(self) -> None:
         self._cancelled: set[str] = set()
 
@@ -259,6 +266,9 @@ class MockMediaAdapter:
 
     async def cancel(self, run_id: str) -> None:
         self._cancelled.add(run_id)
+
+    async def purge_run(self, run_id: str) -> None:
+        self._cancelled.discard(run_id)
 
     async def close(self) -> None:
         self._cancelled.clear()

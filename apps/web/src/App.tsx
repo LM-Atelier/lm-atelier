@@ -1,6 +1,9 @@
 import {
   Fragment,
+  createContext,
   isValidElement,
+  useContext,
+  useCallback,
   useEffect,
   useId,
   useMemo,
@@ -38,6 +41,7 @@ import {
   Search,
   Send,
   Settings,
+  Shield,
   SlidersHorizontal,
   Sparkles,
   Trash2,
@@ -92,6 +96,8 @@ type SendTurnVariables = PendingTurn & {
   settings: Record<string, unknown>;
   stopCurrent?: boolean;
 };
+
+const IncognitoContext = createContext(false);
 
 const visibilityRank: Record<Visibility, number> = { basic: 0, advanced: 1, expert: 2 };
 const AUTO_PROFILE_ID = "__auto__";
@@ -342,12 +348,44 @@ function StatusDot({ healthy, label }: { healthy: boolean; label?: string }) {
   );
 }
 
+function useArtifactSource(artifactId: string | null, incognito: boolean): string | null {
+  const [privateSource, setPrivateSource] = useState<{ id: string; url: string } | null>(null);
+  useEffect(() => {
+    if (!artifactId || !incognito) return;
+    let active = true;
+    let objectUrl: string | null = null;
+    void api.artifactBlob(artifactId).then((blob) => {
+      if (!active) return;
+      objectUrl = URL.createObjectURL(blob);
+      setPrivateSource({ id: artifactId, url: objectUrl });
+    }).catch(() => {
+      if (active) setPrivateSource(null);
+    });
+    return () => {
+      active = false;
+      if (objectUrl) URL.revokeObjectURL(objectUrl);
+    };
+  }, [artifactId, incognito]);
+  if (!artifactId) return null;
+  return incognito
+    ? privateSource?.id === artifactId ? privateSource.url : null
+    : `/api/artifacts/${encodeURIComponent(artifactId)}/content`;
+}
+
 function ArtifactPart({ part }: { part: MessagePart }) {
-  if (!part.artifact_id) return null;
+  const incognito = useContext(IncognitoContext);
   const proxyId = typeof part.metadata_json.browser_proxy_artifact_id === "string" ? part.metadata_json.browser_proxy_artifact_id : null;
-  const source = `/api/artifacts/${encodeURIComponent(proxyId ?? part.artifact_id)}/content`;
+  const posterId = typeof part.metadata_json.poster_artifact_id === "string"
+    ? part.metadata_json.poster_artifact_id
+    : null;
+  const source = useArtifactSource(proxyId ?? part.artifact_id, incognito);
+  const poster = useArtifactSource(posterId, incognito) ?? undefined;
+  if (!part.artifact_id) return null;
   const preview = Boolean(part.metadata_json.preview);
   const inputReference = part.metadata_json.input_reference === true;
+  if (!source) {
+    return <div className="submission-progress"><LoaderCircle size={16} />Loading private media</div>;
+  }
   if (part.type === "attachment") {
     const name = part.artifact?.original_name || "Attachment";
     return <a className="message-attachment" href={source} download><Paperclip size={14} />{name}</a>;
@@ -358,19 +396,17 @@ function ArtifactPart({ part }: { part: MessagePart }) {
         <img src={source} alt={preview ? "Generation preview" : inputReference ? "Attached image" : "Generated result"} loading="lazy" />
         <figcaption>
           <ImageIcon size={14} /> {preview ? "Generation preview" : inputReference ? "Attached image" : "Generated image"}
+          {!preview && <a href={source} download>Download</a>}
         </figcaption>
       </figure>
     );
   }
-  const posterId = typeof part.metadata_json.poster_artifact_id === "string"
-    ? part.metadata_json.poster_artifact_id
-    : null;
-  const poster = posterId ? `/api/artifacts/${encodeURIComponent(posterId)}/content` : undefined;
   return (
     <figure className="media-card">
       <video src={source} poster={poster} controls preload="metadata" />
       <figcaption>
         <Film size={14} /> {inputReference ? "Attached video" : "Generated video"}
+        <a href={source} download>Download</a>
       </figcaption>
     </figure>
   );
@@ -2579,8 +2615,11 @@ function Sidebar({
   workflows,
   currentChatId,
   view,
+  incognito,
+  incognitoPending,
   onChat,
   onView,
+  onToggleIncognito,
   onNewChat,
   onNewProject,
   onExportProject,
@@ -2597,8 +2636,11 @@ function Sidebar({
   workflows: Workflow[];
   currentChatId: string | null;
   view: View;
+  incognito: boolean;
+  incognitoPending: boolean;
   onChat: (id: string) => void;
   onView: (view: View) => void;
+  onToggleIncognito: () => void;
   onNewChat: (projectId?: string | null) => void;
   onNewProject: () => void;
   onExportProject: (id: string, includeMedia?: boolean) => void;
@@ -2623,11 +2665,12 @@ function Sidebar({
   return (
     <aside className={`sidebar ${mobileOpen ? "mobile-open" : ""}`}>
       <div className="brand"><div className="brand-mark"><AtelierMark /></div><span>LM Atelier<small>Local creative studio</small></span><button className="icon-button mobile-menu" aria-label="Toggle navigation" aria-expanded={mobileOpen} onClick={() => setMobileOpen((open) => !open)}><Menu /></button></div>
-      <button className="new-chat" onClick={() => { onNewChat(null); setMobileOpen(false); }}><Plus size={18} />New chat</button>
-      <nav className="primary-nav"><button className={view === "media" ? "active" : ""} aria-current={view === "media" ? "page" : undefined} onClick={() => { onView("media"); setMobileOpen(false); }}><ImageIcon />Media library</button><button className={view === "models" ? "active" : ""} aria-current={view === "models" ? "page" : undefined} onClick={() => { onView("models"); setMobileOpen(false); }}><Library />Model library</button><button className={view === "workflows" ? "active" : ""} aria-current={view === "workflows" ? "page" : undefined} onClick={() => { onView("workflows"); setMobileOpen(false); }}><WorkflowIcon />Workflows</button></nav>
+      <button className="new-chat" onClick={() => { onNewChat(null); setMobileOpen(false); }}><Plus size={18} />{incognito ? "New private chat" : "New chat"}</button>
+      <button className={`incognito-toggle ${incognito ? "active" : ""}`} disabled={incognitoPending} onClick={onToggleIncognito}><Shield size={16} />{incognito ? "End Incognito" : "Start Incognito"}</button>
+      <nav className="primary-nav">{!incognito && <button className={view === "media" ? "active" : ""} aria-current={view === "media" ? "page" : undefined} onClick={() => { onView("media"); setMobileOpen(false); }}><ImageIcon />Media library</button>}<button className={view === "models" ? "active" : ""} aria-current={view === "models" ? "page" : undefined} onClick={() => { onView("models"); setMobileOpen(false); }}><Library />Model library</button><button className={view === "workflows" ? "active" : ""} aria-current={view === "workflows" ? "page" : undefined} onClick={() => { onView("workflows"); setMobileOpen(false); }}><WorkflowIcon />Workflows</button></nav>
       <div className="workspace-search"><Search size={14} /><input aria-label="Search projects and chats" placeholder="Search workspace" value={search} onChange={(event) => setSearch(event.target.value)} /><button className={showArchived ? "active" : ""} aria-pressed={showArchived} onClick={() => setShowArchived((value) => !value)}>Archived</button></div>
       <div className="workspace-tree" role="region" aria-label="Projects and chats">
-        <div className="sidebar-section">
+        {!incognito && <div className="sidebar-section">
           <div className="section-title"><span>Projects</span><input ref={projectImport} hidden type="file" accept=".zip,.lm-atelier.zip,application/zip" onChange={(event) => { const file = event.target.files?.[0]; if (file) onImportProject(file); event.target.value = ""; }} /><button aria-label="Import project" onClick={() => projectImport.current?.click()}><Upload size={14} /></button><button aria-label="New project" onClick={onNewProject}><Plus size={15} /></button></div>
           {visibleProjects.map((project) => {
             const open = !closedProjects.has(project.id);
@@ -2654,10 +2697,10 @@ function Sidebar({
               </div>
             );
           })}
-        </div>
-        {unfiled.length > 0 && <div className="sidebar-section"><div className="section-title"><span>Chats</span></div><div className="chat-list standalone">{unfiled.map(chatRow)}</div></div>}
+        </div>}
+        {unfiled.length > 0 && <div className="sidebar-section"><div className="section-title"><span>{incognito ? "Incognito chats" : "Chats"}</span></div><div className="chat-list standalone">{unfiled.map(chatRow)}</div></div>}
       </div>
-      <div className="sidebar-footer"><button className={view === "settings" ? "active" : ""} aria-current={view === "settings" ? "page" : undefined} onClick={() => { onView("settings"); setMobileOpen(false); }}><Settings />Settings</button></div>
+      <div className="sidebar-footer">{incognito && <p className="incognito-disclosure">Chats and media are temporary. Models, settings, downloads, and files you save remain. Incognito is not forensic erasure or network anonymity.</p>}<button className={view === "settings" ? "active" : ""} aria-current={view === "settings" ? "page" : undefined} onClick={() => { onView("settings"); setMobileOpen(false); }}><Settings />Settings</button></div>
       {managedChat && <ChatManager chat={managedChat} projects={projects} onClose={() => setManagedChat(null)} onSave={(values) => { onUpdateChat(managedChat.id, values); setManagedChat(null); }} onDelete={(deleteGeneratedMedia) => { onDeleteChat(managedChat.id, deleteGeneratedMedia); setManagedChat(null); }} />}
       {managedProject && <ProjectManager project={managedProject} engines={engines} presets={presets} workflows={workflows} onClose={() => setManagedProject(null)} onSave={(values) => { onUpdateProject(managedProject.id, values); setManagedProject(null); }} onDelete={() => { onDeleteProject(managedProject.id); setManagedProject(null); }} onExport={(includeMedia) => onExportProject(managedProject.id, includeMedia)} />}
     </aside>
@@ -2716,8 +2759,10 @@ function jobProgressText(job: Job): string {
 
 function JobsPanel() {
   const client = useQueryClient();
+  const incognito = useContext(IncognitoContext);
+  const issueStorage = incognito ? sessionStorage : localStorage;
   const [dismissedBefore, setDismissedBefore] = useState(() => {
-    const saved = Number(localStorage.getItem(DISMISSED_JOB_ISSUES_KEY));
+    const saved = Number(issueStorage.getItem(DISMISSED_JOB_ISSUES_KEY));
     return Number.isFinite(saved) && saved > 0 ? saved : 0;
   });
   const jobs = useQuery({ queryKey: ["jobs"], queryFn: api.jobs, refetchInterval: 3_000 });
@@ -2740,7 +2785,7 @@ function JobsPanel() {
         .filter((updatedAt) => Number.isFinite(updatedAt)),
     );
     const cutoff = newestIssue > 0 ? newestIssue : Date.now();
-    localStorage.setItem(DISMISSED_JOB_ISSUES_KEY, String(cutoff));
+    issueStorage.setItem(DISMISSED_JOB_ISSUES_KEY, String(cutoff));
     setDismissedBefore(cutoff);
   };
   if (!active.length && !recentUnsuccessful.length) return null;
@@ -2848,12 +2893,19 @@ function JobsPanel() {
 
 export default function App() {
   const client = useQueryClient();
+  const [incognito, setIncognito] = useState(api.hasIncognitoSession);
   const [view, setView] = useState<View>("chat");
-  const [currentChatId, setCurrentChatId] = useState<string | null>(() => localStorage.getItem("local-lm-chat"));
+  const [currentChatId, setCurrentChatId] = useState<string | null>(() => (
+    api.hasIncognitoSession() ? null : localStorage.getItem("local-lm-chat")
+  ));
   const [liveText, setLiveText] = useState<Record<string, string>>({});
   const [chatDrafts, setChatDrafts] = useState<Record<string, Partial<Chat>>>({});
   const [pendingTurns, setPendingTurns] = useState<Record<string, PendingTurn[]>>({});
-  const projects = useQuery({ queryKey: ["projects"], queryFn: () => api.projects(true) });
+  const projects = useQuery({
+    queryKey: ["projects"],
+    queryFn: () => api.projects(true),
+    enabled: !incognito,
+  });
   const chats = useQuery({ queryKey: ["chats"], queryFn: () => api.chats(null, true) });
   const firstActiveChatId = chats.data?.find((candidate) => !candidate.archived)?.id ?? null;
   const activeChatId = currentChatId ?? firstActiveChatId;
@@ -2868,6 +2920,29 @@ export default function App() {
   const profiles = useQuery({ queryKey: ["profiles"], queryFn: api.profiles });
   const presets = useQuery({ queryKey: ["presets"], queryFn: api.presets });
   const workflows = useQuery({ queryKey: ["workflows"], queryFn: api.workflows });
+  const clearConversationCache = useCallback(() => {
+    for (const key of ["chats", "chat", "jobs", "work-plans", "artifacts", "artifact-storage"]) {
+      client.removeQueries({ queryKey: [key] });
+    }
+    setLiveText({});
+    setPendingTurns({});
+    setChatDrafts({});
+    client.getMutationCache().clear();
+  }, [client]);
+
+  useEffect(() => {
+    if (!incognito) return;
+    void api.validateIncognito()
+      .then((valid) => {
+        if (!valid) {
+          clearConversationCache();
+          setIncognito(false);
+          setCurrentChatId(localStorage.getItem("local-lm-chat"));
+          void client.invalidateQueries({ queryKey: ["chats"] });
+        }
+      })
+      .catch(() => undefined);
+  }, [clearConversationCache, client, incognito]);
 
   useEffect(() => {
     let dispose: (() => void) | undefined;
@@ -2964,11 +3039,58 @@ export default function App() {
       if (authoritativeRefresh !== undefined) window.clearTimeout(authoritativeRefresh);
       dispose?.();
     };
-  }, [client]);
+  }, [client, incognito]);
 
   const createChat = useMutation({
     mutationFn: (projectId?: string | null) => api.createChat(projectId),
-    onSuccess: (created) => { setCurrentChatId(created.id); localStorage.setItem("local-lm-chat", created.id); setView("chat"); focusMainContent(); void client.invalidateQueries({ queryKey: ["chats"] }); },
+    onSuccess: (created) => {
+      setCurrentChatId(created.id);
+      if (!incognito) localStorage.setItem("local-lm-chat", created.id);
+      setView("chat");
+      focusMainContent();
+      void client.invalidateQueries({ queryKey: ["chats"] });
+    },
+  });
+  const startIncognito = useMutation({
+    mutationFn: async () => {
+      const scope = await api.startIncognito();
+      try {
+        const created = await api.createChat(null);
+        return { scope, created };
+      } catch (error) {
+        await api.endIncognito().catch(() => undefined);
+        throw error;
+      }
+    },
+    onSuccess: ({ created }) => {
+      clearConversationCache();
+      setIncognito(true);
+      setCurrentChatId(created.id);
+      setView("chat");
+      client.setQueryData<Chat[]>(["chats"], [created]);
+      focusMainContent();
+    },
+    onError: () => {
+      clearConversationCache();
+      if (api.hasIncognitoSession()) {
+        setIncognito(true);
+        setCurrentChatId(null);
+        setView("chat");
+      }
+      void client.invalidateQueries({ queryKey: ["chats"] });
+      void client.invalidateQueries({ queryKey: ["jobs"] });
+    },
+  });
+  const endIncognito = useMutation({
+    mutationFn: api.endIncognito,
+    onSuccess: () => {
+      clearConversationCache();
+      setIncognito(false);
+      setCurrentChatId(localStorage.getItem("local-lm-chat"));
+      setView("chat");
+      void client.invalidateQueries({ queryKey: ["chats"] });
+      void client.invalidateQueries({ queryKey: ["jobs"] });
+    },
   });
   const createProject = useMutation({
     mutationFn: api.createProject,
@@ -3118,8 +3240,10 @@ export default function App() {
       if (activeChatId === deletedId) {
         const nextChatId = remainingChats.find((candidate) => !candidate.archived)?.id ?? null;
         setCurrentChatId(nextChatId);
-        if (nextChatId) localStorage.setItem("local-lm-chat", nextChatId);
-        else localStorage.removeItem("local-lm-chat");
+        if (!incognito) {
+          if (nextChatId) localStorage.setItem("local-lm-chat", nextChatId);
+          else localStorage.removeItem("local-lm-chat");
+        }
       }
       client.removeQueries({ queryKey: ["chat", deletedId], exact: true });
       return { previousChats, previousCurrentChatId };
@@ -3138,8 +3262,10 @@ export default function App() {
       if (!context) return;
       client.setQueryData(["chats"], context.previousChats);
       setCurrentChatId(context.previousCurrentChatId);
-      if (context.previousCurrentChatId) localStorage.setItem("local-lm-chat", context.previousCurrentChatId);
-      else localStorage.removeItem("local-lm-chat");
+      if (!incognito) {
+        if (context.previousCurrentChatId) localStorage.setItem("local-lm-chat", context.previousCurrentChatId);
+        else localStorage.removeItem("local-lm-chat");
+      }
     },
     onSettled: () => void client.invalidateQueries({ queryKey: ["chats"] }),
   });
@@ -3172,7 +3298,7 @@ export default function App() {
         const importedChat = client.getQueryData<Chat[]>(["chats"])?.find((item) => item.project_id === project.id);
         if (importedChat) {
           setCurrentChatId(importedChat.id);
-          localStorage.setItem("local-lm-chat", importedChat.id);
+          if (!incognito) localStorage.setItem("local-lm-chat", importedChat.id);
           setView("chat");
         }
       }, 100);
@@ -3272,12 +3398,22 @@ export default function App() {
   }, [view, engines.data, profiles.data, presets.data, workflows.data, allProjects, chat.data, chatDrafts, liveText, pendingTurns, workPlans.data, send, regenerate, selectResponseRevision, branch, stop, cancelWorkPlan, updateChat, client]);
 
   return (
-    <div className="app-shell">
-      <a className="skip-link" href="#main-content">Skip to main content</a>
-      <Sidebar projects={allProjects} chats={allChats} engines={engines.data ?? []} presets={presets.data ?? []} workflows={workflows.data ?? []} currentChatId={activeChatId} view={view} onChat={(id) => { setCurrentChatId(id); localStorage.setItem("local-lm-chat", id); setView("chat"); focusMainContent(); }} onView={(nextView) => { setView(nextView); focusMainContent(); }} onNewChat={(projectId) => createChat.mutate(projectId)} onNewProject={() => { const name = window.prompt("Project name"); if (name?.trim()) createProject.mutate(name.trim()); }} onExportProject={(id, includeMedia) => exportProject.mutate({ id, includeMedia })} onImportProject={(file) => importProject.mutate(file)} onUpdateChat={(id, values) => manageChat.mutate({ id, values })} onDeleteChat={(id, deleteGeneratedMedia) => deleteChat.mutate({ id, deleteGeneratedMedia })} onUpdateProject={(id, values) => updateProject.mutate({ id, values })} onDeleteProject={(id) => deleteProject.mutate(id)} />
-      <main id="main-content" tabIndex={-1}>{activeContent}</main>
-      <JobsPanel />
-      {(send.error || regenerate.error || selectResponseRevision.error || branch.error || stop.error || cancelWorkPlan.error || updateChat.error || createChat.error || createProject.error || importProject.error || manageChat.error || deleteChat.error || updateProject.error || deleteProject.error) && <div className="toast error" role="alert"><X size={16} />{(send.error || regenerate.error || selectResponseRevision.error || branch.error || stop.error || cancelWorkPlan.error || updateChat.error || createChat.error || createProject.error || importProject.error || manageChat.error || deleteChat.error || updateProject.error || deleteProject.error)?.message}</div>}
-    </div>
+    <IncognitoContext.Provider value={incognito}>
+      <div className={`app-shell ${incognito ? "incognito" : ""}`}>
+        <a className="skip-link" href="#main-content">Skip to main content</a>
+        <Sidebar projects={incognito ? [] : allProjects} chats={allChats} engines={engines.data ?? []} presets={presets.data ?? []} workflows={workflows.data ?? []} currentChatId={activeChatId} view={view} incognito={incognito} incognitoPending={startIncognito.isPending || endIncognito.isPending} onToggleIncognito={() => {
+          if (!incognito) {
+            startIncognito.mutate();
+            return;
+          }
+          if (window.confirm("End Incognito and permanently clear its chats and media?")) {
+            endIncognito.mutate();
+          }
+        }} onChat={(id) => { setCurrentChatId(id); if (!incognito) localStorage.setItem("local-lm-chat", id); setView("chat"); focusMainContent(); }} onView={(nextView) => { setView(nextView); focusMainContent(); }} onNewChat={(projectId) => createChat.mutate(projectId)} onNewProject={() => { const name = window.prompt("Project name"); if (name?.trim()) createProject.mutate(name.trim()); }} onExportProject={(id, includeMedia) => exportProject.mutate({ id, includeMedia })} onImportProject={(file) => importProject.mutate(file)} onUpdateChat={(id, values) => manageChat.mutate({ id, values })} onDeleteChat={(id, deleteGeneratedMedia) => deleteChat.mutate({ id, deleteGeneratedMedia })} onUpdateProject={(id, values) => updateProject.mutate({ id, values })} onDeleteProject={(id) => deleteProject.mutate(id)} />
+        <main id="main-content" tabIndex={-1}>{activeContent}</main>
+        <JobsPanel key={incognito ? "incognito-jobs" : "durable-jobs"} />
+        {(send.error || regenerate.error || selectResponseRevision.error || branch.error || stop.error || cancelWorkPlan.error || updateChat.error || createChat.error || startIncognito.error || endIncognito.error || createProject.error || importProject.error || manageChat.error || deleteChat.error || updateProject.error || deleteProject.error) && <div className="toast error" role="alert"><X size={16} />{(send.error || regenerate.error || selectResponseRevision.error || branch.error || stop.error || cancelWorkPlan.error || updateChat.error || createChat.error || startIncognito.error || endIncognito.error || createProject.error || importProject.error || manageChat.error || deleteChat.error || updateProject.error || deleteProject.error)?.message}</div>}
+      </div>
+    </IncognitoContext.Provider>
   );
 }

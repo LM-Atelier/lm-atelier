@@ -7,7 +7,7 @@ import logging
 import re
 import secrets
 import time
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Callable
 from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Any
@@ -157,21 +157,29 @@ class ConversationOrchestrator:
         events: EventBroker,
         scheduler: ResourceScheduler,
         processes: ProcessSupervisor,
+        *,
+        session_factory: Callable[[], Session] = SessionLocal,
+        persistence_scope: str = "durable",
+        scope_id: str | None = None,
     ) -> None:
         self.engines = engines
         self.artifacts = artifacts
         self.events = events
         self.scheduler = scheduler
         self.processes = processes
+        self.session_factory = session_factory
+        self.persistence_scope = persistence_scope
+        self.scope_id = scope_id
         self.router = ModalityRouter()
         self._tasks: dict[str, asyncio.Task[None]] = {}
         self._chat_guards: dict[str, asyncio.Lock] = {}
         self._chat_planner_ready = asyncio.Event()
         self._chat_planner_ready.set()
+        self._admission_open = True
 
     def recover_interrupted(self) -> None:
         queued: list[tuple[str, str]] = []
-        with SessionLocal() as session:
+        with self.session_factory() as session:
             # Turn-creation claims only live while one API process is planning.
             session.execute(delete(TurnCreationClaim))
             queued_jobs = session.scalars(
@@ -283,6 +291,8 @@ class ConversationOrchestrator:
         replacement_message_id: str | None = None,
         source_action: str = "send",
     ) -> TurnAccepted:
+        if not self._admission_open:
+            raise RuntimeError("This private session is ending and cannot accept new work.")
         async with self.chat_guard(chat_id):
             return await self._create_turn(
                 session,
@@ -810,7 +820,7 @@ class ConversationOrchestrator:
             chat_id=chat.id,
             idempotency_key=request.idempotency_key,
             source_action=source_action,
-            persistence_scope="durable",
+            persistence_scope=self.persistence_scope,
             status=JobStatus.QUEUED.value,
             context_head_message_id=context_head_message_id,
             transcript_sequence=transcript_sequence,
@@ -1070,7 +1080,7 @@ class ConversationOrchestrator:
             JobStatus.RUNNING.value,
             JobStatus.PAUSED.value,
         }
-        with SessionLocal() as session:
+        with self.session_factory() as session:
             rows = session.execute(
                 select(Job.id, Job.run_id, Job.status, Run.operation)
                 .join(Run, Job.run_id == Run.id)
@@ -1109,7 +1119,7 @@ class ConversationOrchestrator:
                     self._tasks.pop(job_id, None)
 
         cancelled: list[tuple[str, str]] = []
-        with SessionLocal() as session:
+        with self.session_factory() as session:
             for job_id, run_id, _status, _operation in rows:
                 job = session.get(Job, job_id)
                 if not job:
@@ -1141,7 +1151,7 @@ class ConversationOrchestrator:
 
     async def cancel(self, job_id: str) -> bool:
         cancelled_task: asyncio.Task[None] | None = None
-        with SessionLocal() as session:
+        with self.session_factory() as session:
             job = session.get(Job, job_id)
             if not job or job.status in {
                 JobStatus.COMPLETE.value,
@@ -1168,6 +1178,7 @@ class ConversationOrchestrator:
         return True
 
     async def close(self) -> None:
+        self._admission_open = False
         tasks = tuple(self._tasks.values())
         for task in tasks:
             task.cancel()
@@ -1175,9 +1186,12 @@ class ConversationOrchestrator:
             await asyncio.gather(*tasks, return_exceptions=True)
         self._tasks.clear()
 
+    def stop_admission(self) -> None:
+        self._admission_open = False
+
     async def _execute(self, job_id: str, run_id: str) -> None:
         try:
-            with SessionLocal() as session:
+            with self.session_factory() as session:
                 job = session.get(Job, job_id)
                 run = session.get(Run, run_id)
                 if not job or not run:
@@ -1194,7 +1208,7 @@ class ConversationOrchestrator:
                 group=group,
                 priority=priority,
             ):
-                with SessionLocal() as session:
+                with self.session_factory() as session:
                     job = session.get(Job, job_id)
                     run = session.get(Run, run_id)
                     if (
@@ -1240,7 +1254,7 @@ class ConversationOrchestrator:
                     if resume_chat_profile:
                         await self._resume_chat_worker(resume_chat_profile)
         except asyncio.CancelledError:
-            with SessionLocal() as session:
+            with self.session_factory() as session:
                 job = session.get(Job, job_id)
                 if job and job.status != JobStatus.CANCELLED.value:
                     self._mark_cancelled(session, job)
@@ -1254,7 +1268,7 @@ class ConversationOrchestrator:
         await self._set_chat_phase(job_id, run_id, "Preparing chat model")
         worker = await self._ensure_chat_worker(run_id)
         await self._set_chat_phase(job_id, run_id, "Preparing conversation")
-        with SessionLocal() as session:
+        with self.session_factory() as session:
             run = session.get(Run, run_id)
             if not run:
                 return
@@ -1280,6 +1294,8 @@ class ConversationOrchestrator:
                 run_id=run.id,
                 messages=messages,
                 settings=request_settings,
+                persistence_scope=self.persistence_scope,
+                scope_id=self.scope_id,
             )
             assistant_id = run.assistant_message_id
 
@@ -1329,7 +1345,7 @@ class ConversationOrchestrator:
             raise
 
         completed_assistant_id = assistant_id
-        with SessionLocal() as session:
+        with self.session_factory() as session:
             message = session.get(Message, assistant_id)
             run = session.get(Run, run_id)
             job = session.get(Job, job_id)
@@ -1406,7 +1422,7 @@ class ConversationOrchestrator:
 
     async def _set_chat_phase(self, job_id: str, run_id: str, label: str) -> None:
         assistant_id = ""
-        with SessionLocal() as session:
+        with self.session_factory() as session:
             job = session.get(Job, job_id)
             run = session.get(Run, run_id)
             if (
@@ -1478,7 +1494,7 @@ class ConversationOrchestrator:
     async def _ensure_chat_worker(self, run_id: str) -> WorkerStatus | None:
         if self.engines.settings.chat_engine != "llama.cpp":
             return None
-        with SessionLocal() as session:
+        with self.session_factory() as session:
             run = session.get(Run, run_id)
             profile = session.get(ModelProfile, run.profile_id) if run and run.profile_id else None
             install = (
@@ -1732,7 +1748,7 @@ class ConversationOrchestrator:
 
     async def _resume_chat_worker(self, profile_id: str) -> None:
         try:
-            with SessionLocal() as session:
+            with self.session_factory() as session:
                 profile = session.get(ModelProfile, profile_id)
                 install = (
                     session.get(ModelInstall, profile.model_install_id)
@@ -1751,7 +1767,7 @@ class ConversationOrchestrator:
         if self.engines.settings.media_engine == "comfyui":
             status = next(item for item in self.processes.statuses() if item.name == "media")
             if not status.running or status.state != "ready":
-                with SessionLocal() as session:
+                with self.session_factory() as session:
                     job = session.get(Job, job_id)
                     run = session.get(Run, run_id)
                     message = session.get(Message, run.assistant_message_id) if run else None
@@ -1783,7 +1799,7 @@ class ConversationOrchestrator:
                     },
                 )
                 await self.processes.start_media()
-        with SessionLocal() as session:
+        with self.session_factory() as session:
             run = session.get(Run, run_id)
             if not run:
                 return
@@ -1815,6 +1831,8 @@ class ConversationOrchestrator:
                 input_paths=input_paths,
                 workflow=workflow,
                 parameters=run.settings_json,
+                persistence_scope=self.persistence_scope,
+                scope_id=self.scope_id,
             )
             assistant_id = run.assistant_message_id
 
@@ -1822,7 +1840,7 @@ class ConversationOrchestrator:
         preview_artifact_id: str | None = None
         async for event in self.engines.media.generate(request):
             if event.type in {"progress", "queued"}:
-                with SessionLocal() as session:
+                with self.session_factory() as session:
                     job = session.get(Job, job_id)
                     message = session.get(Message, assistant_id)
                     if job and message:
@@ -1842,7 +1860,7 @@ class ConversationOrchestrator:
                 )
             elif event.type == "preview" and event.preview:
                 old_preview_id = preview_artifact_id
-                with SessionLocal() as session:
+                with self.session_factory() as session:
                     message = session.get(Message, assistant_id)
                     job = session.get(Job, job_id)
                     if message and job:
@@ -1904,7 +1922,7 @@ class ConversationOrchestrator:
                 completed_assets.extend(event.assets)
 
         completed_assistant_id = assistant_id
-        with SessionLocal() as session:
+        with self.session_factory() as session:
             message = session.get(Message, assistant_id)
             run = session.get(Run, run_id)
             job = session.get(Job, job_id)
@@ -2036,7 +2054,7 @@ class ConversationOrchestrator:
         )
 
     async def _fail(self, job_id: str, run_id: str, error: str) -> None:
-        with SessionLocal() as session:
+        with self.session_factory() as session:
             job = session.get(Job, job_id)
             run = session.get(Run, run_id)
             if not job or not run:
@@ -2202,9 +2220,8 @@ class ConversationOrchestrator:
             )
         return parts
 
-    @staticmethod
-    def _persist_streamed_text(message_id: str, text: str) -> None:
-        with SessionLocal() as session:
+    def _persist_streamed_text(self, message_id: str, text: str) -> None:
+        with self.session_factory() as session:
             message = session.get(Message, message_id)
             if not message:
                 return

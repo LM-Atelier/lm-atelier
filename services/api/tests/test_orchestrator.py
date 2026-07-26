@@ -12,7 +12,7 @@ from local_lm.orchestrator import ConversationOrchestrator
 from local_lm.schemas import WorkerStatus
 
 
-async def test_managed_chat_worker_is_aligned_to_the_run_profile(monkeypatch) -> None:  # type: ignore[no-untyped-def]
+async def test_managed_chat_worker_is_aligned_to_the_run_profile() -> None:
     run = SimpleNamespace(profile_id="profile-selected")
     profile = SimpleNamespace(id="profile-selected", model_install_id="install-selected")
     install = SimpleNamespace(id="install-selected")
@@ -34,7 +34,6 @@ async def test_managed_chat_worker_is_aligned_to_the_run_profile(monkeypatch) ->
         def expunge(self, _value) -> None:  # type: ignore[no-untyped-def]
             return None
 
-    monkeypatch.setattr("local_lm.orchestrator.SessionLocal", FakeSession)
     previous = WorkerStatus(
         name="chat",
         state="ready",
@@ -55,6 +54,7 @@ async def test_managed_chat_worker_is_aligned_to_the_run_profile(monkeypatch) ->
         events=Mock(),
         scheduler=Mock(),
         processes=processes,
+        session_factory=FakeSession,
     )
 
     result = await orchestrator._ensure_chat_worker("run-1")

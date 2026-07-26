@@ -43,6 +43,17 @@ let csrfToken = "";
 let eventEpoch = "";
 let eventSequence = 0;
 let sessionPromise: Promise<void> | null = null;
+const INCOGNITO_HEADER = "x-lm-atelier-incognito";
+
+export interface IncognitoSession {
+  token: string;
+  event_epoch: string;
+  event_sequence: number;
+  disclosure: string;
+}
+
+const INCOGNITO_STORAGE_KEY = "lm-atelier-incognito-session";
+let incognitoToken = sessionStorage.getItem(INCOGNITO_STORAGE_KEY) ?? "";
 
 function resetSession(): void {
   csrfToken = "";
@@ -94,6 +105,12 @@ async function request<T>(
 ): Promise<T> {
   if (path !== "/api/session") await ensureSession();
   const headers = new Headers(init.headers);
+  if (
+    incognitoToken
+    && !(path === "/api/incognito/session" && init.method?.toUpperCase() === "POST")
+  ) {
+    headers.set("x-lm-atelier-incognito", incognitoToken);
+  }
   if (init.body && !(init.body instanceof FormData)) headers.set("content-type", "application/json");
   if (init.method && !["GET", "HEAD"].includes(init.method.toUpperCase())) {
     headers.set("x-local-lm-csrf", csrfToken);
@@ -123,6 +140,52 @@ async function request<T>(
 
 export const api = {
   initialize: ensureSession,
+  hasIncognitoSession: () => Boolean(incognitoToken),
+  startIncognito: async (): Promise<IncognitoSession> => {
+    const scope = await request<IncognitoSession>(
+      "/api/incognito/session",
+      { method: "POST" },
+    );
+    incognitoToken = scope.token;
+    sessionStorage.setItem(INCOGNITO_STORAGE_KEY, scope.token);
+    eventEpoch = scope.event_epoch;
+    eventSequence = scope.event_sequence;
+    return scope;
+  },
+  validateIncognito: async () => {
+    if (!incognitoToken) return false;
+    try {
+      await request<AppEvent[]>("/api/incognito/events");
+      return true;
+    } catch (error) {
+      if (error instanceof ApiError && error.status === 404) {
+        incognitoToken = "";
+        sessionStorage.removeItem(INCOGNITO_STORAGE_KEY);
+        return false;
+      }
+      throw error;
+    }
+  },
+  endIncognito: async () => {
+    await request<void>("/api/incognito/session", { method: "DELETE" });
+    incognitoToken = "";
+    sessionStorage.removeItem(INCOGNITO_STORAGE_KEY);
+    eventEpoch = "";
+    eventSequence = 0;
+  },
+  incognitoEvents: (after: number) =>
+    request<AppEvent[]>(`/api/incognito/events?after=${Math.max(0, after)}`),
+  artifactBlob: async (artifactId: string) => {
+    await ensureSession();
+    const headers = new Headers();
+    if (incognitoToken) headers.set(INCOGNITO_HEADER, incognitoToken);
+    const response = await fetch(
+      `/api/artifacts/${encodeURIComponent(artifactId)}/content`,
+      { headers, credentials: "same-origin", cache: "no-store" },
+    );
+    if (!response.ok) throw new ApiError(response.status, undefined, "Could not load media");
+    return response.blob();
+  },
   projects: (includeArchived = false, query = "") =>
     request<Project[]>(`/api/projects?${new URLSearchParams({ include_archived: String(includeArchived), query })}`),
   createProject: (name: string) =>
@@ -492,6 +555,33 @@ export async function connectEvents(
   onStatus: (connected: boolean) => void,
   onReconnect?: () => void,
 ): Promise<() => void> {
+  if (incognitoToken) {
+    let closed = false;
+    let timer: number | undefined;
+    let lastSequence = 0;
+    const poll = async () => {
+      if (closed) return;
+      try {
+        const events = await api.incognitoEvents(lastSequence);
+        if (closed) return;
+        onStatus(true);
+        for (const event of events) {
+          lastSequence = Math.max(lastSequence, event.sequence);
+          onEvent(event);
+        }
+      } catch {
+        if (closed) return;
+        onStatus(false);
+        onReconnect?.();
+      }
+      if (!closed) timer = window.setTimeout(() => void poll(), 300);
+    };
+    void poll();
+    return () => {
+      closed = true;
+      if (timer !== undefined) window.clearTimeout(timer);
+    };
+  }
   let closed = false;
   let opening = false;
   let socket: WebSocket | null = null;
