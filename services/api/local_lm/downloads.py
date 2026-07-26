@@ -365,19 +365,17 @@ class DownloadManager:
             return "insufficient_storage"
         return "install_failed"
 
-    async def _reuse_verified_file(
+    def _verified_reuse_candidates(
         self,
         session: Session,
         *,
         staging: Path,
         filename: str,
         expected_sha256: str | None,
-        expected_size: int | None,
-    ) -> tuple[Path, int] | None:
-        """Reuse only bytes whose exact digest is already known and rechecked."""
-
+    ) -> list[Path]:
+        """Resolve trusted candidate paths without retaining ORM state."""
         if not expected_sha256:
-            return None
+            return []
         relative = PurePosixPath(filename)
         target = staging.joinpath(*relative.parts)
         candidates = [target]
@@ -402,7 +400,23 @@ class DownloadManager:
             ):
                 continue
             candidates.append(root.joinpath(*component_path.parts))
+        return candidates
 
+    async def _reuse_verified_file(
+        self,
+        *,
+        candidates: list[Path],
+        staging: Path,
+        filename: str,
+        expected_sha256: str | None,
+        expected_size: int | None,
+    ) -> tuple[Path, int] | None:
+        """Reuse only bytes whose exact digest is already known and rechecked."""
+
+        if not expected_sha256:
+            return None
+        relative = PurePosixPath(filename)
+        target = staging.joinpath(*relative.parts)
         for candidate in candidates:
             if not candidate.is_file() or candidate.is_symlink():
                 continue
@@ -829,13 +843,21 @@ class DownloadManager:
                 reused_by_file: dict[str, tuple[Path, int]] = {}
                 for filename in filenames:
                     with SessionLocal() as session:
-                        reused = await self._reuse_verified_file(
+                        candidates = self._verified_reuse_candidates(
                             session,
                             staging=staging,
                             filename=filename,
                             expected_sha256=resolved_sha256.get(filename),
-                            expected_size=file_sizes.get(filename) or None,
                         )
+                    # Digesting and copying a multi-gigabyte component must not
+                    # retain a SQLite read transaction for the duration.
+                    reused = await self._reuse_verified_file(
+                        candidates=candidates,
+                        staging=staging,
+                        filename=filename,
+                        expected_sha256=resolved_sha256.get(filename),
+                        expected_size=file_sizes.get(filename) or None,
+                    )
                     if reused:
                         reused_by_file[filename] = reused
                 reused_bytes = sum(size for _, size in reused_by_file.values())
@@ -1719,13 +1741,14 @@ class DownloadManager:
                     "superseded_model_install_ids": superseded_install_ids,
                 }
                 session.commit()
-                await self.scheduler.publish_job(job_id)
-                return (
+                result = (
                     compiled,
                     profile.id,
                     workflow_revision.id,
                     superseded_install_ids,
                 )
+            await self.scheduler.publish_job(job_id)
+            return result
 
     async def refresh_installed_media_workflows(self) -> int:
         """Recompile installed catalog workflows after compiler improvements."""

@@ -327,8 +327,10 @@ class ProcessSupervisor:
             )
             manager = CustomNodeManager(self.settings)
             for install in installs:
-                await manager.verify(install)
-            return [install.installed_path for install in installs]
+                session.expunge(install)
+        for install in installs:
+            await manager.verify(install)
+        return [install.installed_path for install in installs]
 
     def _write_comfy_model_paths(
         self,

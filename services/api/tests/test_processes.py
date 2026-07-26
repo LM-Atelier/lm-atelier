@@ -8,6 +8,7 @@ from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
 import pytest
+from sqlalchemy.orm import object_session
 
 from local_lm.custom_nodes import CustomNodeManager
 from local_lm.db import SessionLocal
@@ -623,6 +624,7 @@ async def test_media_whitelist_contains_only_active_verified_trusted_installs(
     verified: list[str] = []
 
     async def verify(_manager: CustomNodeManager, install: CustomNodeInstall) -> None:
+        assert object_session(install) is None
         verified.append(install.installed_path)
 
     monkeypatch.setattr(CustomNodeManager, "verify", verify)

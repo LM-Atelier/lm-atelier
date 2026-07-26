@@ -117,6 +117,7 @@ class ResourceScheduler:
             for expired_job_id in self._expire_foreign_claims(group):
                 await self._publish_job(expired_job_id)
             changed = False
+            should_try_claim = False
             with self.session_factory() as session:
                 job = session.get(Job, job_id)
                 if not job or job.status in _TERMINAL_STATUSES:
@@ -208,52 +209,81 @@ class ResourceScheduler:
                     )
                     or 0
                 )
-                if position is not None and position < max(0, capacity - active_claims):
-                    await local_lock.acquire()
-                    claimed = False
-                    try:
+                should_try_claim = position is not None and position < max(
+                    0, capacity - active_claims
+                )
+
+            if should_try_claim:
+                # A compute slot can remain occupied for minutes. Never keep a
+                # SQLite session (and its read transaction) open while waiting.
+                await local_lock.acquire()
+                claimed = False
+                try:
+                    with self.session_factory() as session:
+                        current = session.get(Job, job_id)
                         claimed_at = utcnow()
-                        result = cast(
-                            CursorResult[Any],
-                            session.execute(
-                                update(Job)
-                                .where(
-                                    Job.id == job_id,
-                                    Job.status == JobStatus.QUEUED.value,
-                                    Job.claim_owner.is_(None),
-                                )
-                                .values(
-                                    status=JobStatus.RUNNING.value,
-                                    claim_owner=token,
-                                    claim_expires_at=claimed_at + timedelta(seconds=_CLAIM_SECONDS),
-                                    heartbeat_at=claimed_at,
-                                    started_at=claimed_at,
-                                    attempt=Job.attempt + 1,
-                                )
+                        candidates = self._eligible_jobs(session, group, claimed_at)
+                        position = next(
+                            (
+                                index
+                                for index, candidate in enumerate(candidates)
+                                if current and candidate.id == current.id
                             ),
+                            None,
                         )
-                        if result.rowcount == 1:
-                            claimed_job = session.get(Job, job_id)
-                            if claimed_job:
-                                update_job_progress(
-                                    claimed_job,
-                                    stage="starting",
-                                    queue_resource=resource,
-                                    queue_position=0,
-                                    queue_length=len(candidates),
-                                    indeterminate=True,
-                                    now=claimed_at,
+                        active_claims = (
+                            session.scalar(
+                                select(func.count(Job.id)).where(
+                                    Job.queue_group == group,
+                                    Job.status == JobStatus.RUNNING.value,
+                                    Job.claim_owner.is_not(None),
                                 )
-                            session.commit()
-                            claimed = True
-                        else:
-                            session.rollback()
-                    finally:
-                        if not claimed:
-                            local_lock.release()
-                    if claimed:
-                        await self._publish_job(job_id)
-                        return token
+                            )
+                            or 0
+                        )
+                        if position is not None and position < max(0, capacity - active_claims):
+                            result = cast(
+                                CursorResult[Any],
+                                session.execute(
+                                    update(Job)
+                                    .where(
+                                        Job.id == job_id,
+                                        Job.status == JobStatus.QUEUED.value,
+                                        Job.claim_owner.is_(None),
+                                    )
+                                    .values(
+                                        status=JobStatus.RUNNING.value,
+                                        claim_owner=token,
+                                        claim_expires_at=claimed_at
+                                        + timedelta(seconds=_CLAIM_SECONDS),
+                                        heartbeat_at=claimed_at,
+                                        started_at=claimed_at,
+                                        attempt=Job.attempt + 1,
+                                    )
+                                ),
+                            )
+                            if result.rowcount == 1:
+                                claimed_job = session.get(Job, job_id)
+                                if claimed_job:
+                                    update_job_progress(
+                                        claimed_job,
+                                        stage="starting",
+                                        queue_resource=resource,
+                                        queue_position=0,
+                                        queue_length=len(candidates),
+                                        indeterminate=True,
+                                        now=claimed_at,
+                                    )
+                                session.commit()
+                                claimed = True
+                            else:
+                                session.rollback()
+                finally:
+                    if not claimed:
+                        local_lock.release()
+                if claimed:
+                    await self._publish_job(job_id)
+                    return token
 
             if changed:
                 await self._publish_job(job_id)
