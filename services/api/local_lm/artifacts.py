@@ -31,6 +31,7 @@ from .subprocess_env import subprocess_environment
 
 _SHA256 = re.compile(r"^[0-9a-f]{64}$")
 _STAGED_DELETION = re.compile(r"^(?P<digest>[0-9a-f]{64})\.[0-9a-f]{32}$")
+_MAX_VIDEO_POSTER_BYTES = 16 * 1024 * 1024
 
 
 @dataclass(frozen=True)
@@ -263,11 +264,20 @@ class ArtifactStore:
                 "mjpeg",
                 "pipe:1",
                 stdout=asyncio.subprocess.PIPE,
-                stderr=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.DEVNULL,
                 env=subprocess_environment(),
             )
-            stdout, _stderr = await asyncio.wait_for(process.communicate(), timeout=30)
-        except (OSError, TimeoutError):
+            stdout = await self._bounded_stdout(
+                process,
+                maximum_bytes=_MAX_VIDEO_POSTER_BYTES,
+                timeout_seconds=30,
+            )
+        except asyncio.CancelledError:
+            if "process" in locals() and process.returncode is None:
+                process.kill()
+                await process.wait()
+            raise
+        except (OSError, TimeoutError, ValueError):
             if "process" in locals() and process.returncode is None:
                 process.kill()
                 await process.wait()
@@ -306,11 +316,11 @@ class ArtifactStore:
                 "-movflags",
                 "+faststart",
                 str(temporary),
-                stdout=asyncio.subprocess.PIPE,
-                stderr=asyncio.subprocess.PIPE,
+                stdout=asyncio.subprocess.DEVNULL,
+                stderr=asyncio.subprocess.DEVNULL,
                 env=subprocess_environment(),
             )
-            await asyncio.wait_for(process.communicate(), timeout=600)
+            await asyncio.wait_for(process.wait(), timeout=600)
             if process.returncode or not temporary.is_file() or temporary.stat().st_size == 0:
                 return None
             retained = True
@@ -319,6 +329,11 @@ class ArtifactStore:
                 media_type="video/mp4",
                 original_name=f"{artifact.original_name or 'video'}.proxy.mp4",
             )
+        except asyncio.CancelledError:
+            if "process" in locals() and process.returncode is None:
+                process.kill()
+                await process.wait()
+            raise
         except (OSError, TimeoutError):
             if "process" in locals() and process.returncode is None:
                 process.kill()
@@ -327,6 +342,28 @@ class ArtifactStore:
         finally:
             if not retained:
                 temporary.unlink(missing_ok=True)
+
+    @staticmethod
+    async def _bounded_stdout(
+        process: asyncio.subprocess.Process,
+        *,
+        maximum_bytes: int,
+        timeout_seconds: float,
+    ) -> bytes:
+        stdout = process.stdout
+        if stdout is None:
+            raise ValueError("media process did not expose output")
+
+        async def collect() -> bytes:
+            content = bytearray()
+            while chunk := await stdout.read(64 * 1024):
+                content.extend(chunk)
+                if len(content) > maximum_bytes:
+                    raise ValueError("media process output exceeded its configured limit")
+            await process.wait()
+            return bytes(content)
+
+        return await asyncio.wait_for(collect(), timeout=timeout_seconds)
 
     def delete_temporary_preview(self, session: Session, artifact_id: str) -> bool:
         artifact = session.get(Artifact, artifact_id)
