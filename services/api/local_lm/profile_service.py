@@ -5,6 +5,7 @@ from collections.abc import Iterable
 from sqlalchemy import or_, select
 from sqlalchemy.orm import Session
 
+from .domain import new_id
 from .models import AppSetting, Chat, ModelInstall, ModelProfile
 from .schemas import SettingField
 from .settings_registry import (
@@ -162,6 +163,24 @@ def ensure_profile_for_install(
     if existing:
         return existing
 
+    profile = build_profile_for_install(
+        install,
+        default_settings=default_settings,
+        fields=fields,
+    )
+    session.add(profile)
+    session.flush()
+    return profile
+
+
+def build_profile_for_install(
+    install: ModelInstall,
+    *,
+    default_settings: dict[str, object] | None = None,
+    fields: Iterable[SettingField] | None = None,
+) -> ModelProfile:
+    """Build an unpersisted profile for a provisional activation probe."""
+
     profile_fields = (
         list(fields)
         if fields is not None
@@ -175,6 +194,7 @@ def ensure_profile_for_install(
     load_fields = [field for field in profile_fields if field.scope == "load"]
     request_fields = [field for field in profile_fields if field.scope != "load"]
     profile = ModelProfile(
+        id=new_id("profile"),
         name=install.name,
         use_case="",
         role=install.role,
@@ -184,6 +204,4 @@ def ensure_profile_for_install(
         request_settings_json=compatible_stored_settings(values, request_fields),
         is_default=False,
     )
-    session.add(profile)
-    session.flush()
     return profile

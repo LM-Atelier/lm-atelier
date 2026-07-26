@@ -1375,12 +1375,12 @@ function ModelCard({
 }) {
   const label = {
     idle: "Install",
-    preparing: "Preparing…",
+    preparing: "Checking model…",
     downloading: "Downloading…",
     installed: "Installed",
   }[status];
   const compatibilityLabel = {
-    likely: "One-click ready",
+    likely: "Automatic test available",
     tested: "Tested",
     advanced_import: "Advanced import",
     unsupported: "Unsupported",
@@ -1453,13 +1453,14 @@ function InstalledModelRow({
       <span className="badge">{model.role}</span>
       <span className="model-install-copy">
         <strong>{model.name}</strong>
-        <small>{profile ? profile.use_case || "General use" : "Setup required"}</small>
+        <small>{model.readiness === "ready" ? "Runtime verified" : model.readiness === "unsupported" ? "Unsupported" : "Not runtime verified"}</small>
+        {profile?.use_case && <small>{profile.use_case}</small>}
       </span>
       <span className="model-install-size">{formatBytes(model.size_bytes)}</span>
       <span className="row-actions">
         {profile
           ? <button className="secondary compact-button" aria-label={`Edit use case for ${model.name}`} onClick={startEditing} disabled={editing || saving}>Edit use case</button>
-          : <button className="secondary compact-button" aria-label={`Finish setup for ${model.name}`} disabled={creating} onClick={onCreate}>Finish setup</button>}
+          : <button className="secondary compact-button" aria-label={`Add ${model.name} to model selectors`} disabled={creating} onClick={onCreate}>Add to selectors</button>}
         <button className="secondary compact-button danger" aria-label={`Delete ${model.name}`} disabled={deleting} onClick={onDelete}>Delete</button>
       </span>
       {editing && profile && (
@@ -1556,6 +1557,12 @@ function ModelsView() {
           .map((check) => check.detail);
         throw new Error(blockers.join(" ") || "This model cannot be installed safely.");
       }
+      if (!preflight.install_plan || preflight.install_plan.compatibility !== "supported") {
+        throw new Error(
+          preflight.install_plan?.failure_reason
+          || "LM Atelier cannot safely activate this model with the current runtime.",
+        );
+      }
       return api.download(
         preflight.remote_id,
         preflight.source_remote_id,
@@ -1567,6 +1574,7 @@ function ModelsView() {
         preflight.comfy_paths,
         preflight.workflow_template_id,
         preflight.workflow_template_sha256,
+        preflight.install_plan?.id ?? null,
       );
     },
     onSuccess: () => void client.invalidateQueries({ queryKey: ["jobs"] }),
@@ -1649,13 +1657,13 @@ function ModelsView() {
         {installRecipe.error && <div className="callout error" role="alert">{installRecipe.error.message}</div>}
         <div className="recipe-grid">{recipes.data?.map((recipe) => <RecipeCard key={recipe.id} recipe={recipe} pending={installRecipe.isPending && installRecipe.variables === recipe.id} onInstall={() => installRecipe.mutate(recipe.id)} />)}</div>
       </section>
-      {(role === "image" || role === "video") && readyModels.length > 0 && <section className="workflow-ready-models"><div className="section-heading"><div><small>Runtime verified</small><h2>One-click models</h2></div></div><div className="model-grid">{readyModels.map((model) => <ModelCard key={model.remote_id} model={model} role={role} status={statusFor(model)} onDownload={() => download.mutate({ model, selectedRole: role })} />)}</div></section>}
+      {(role === "image" || role === "video") && readyModels.length > 0 && <section className="workflow-ready-models"><div className="section-heading"><div><small>Declarative workflow available</small><h2>Automatic setup candidates</h2></div></div><div className="model-grid">{readyModels.map((model) => <ModelCard key={model.remote_id} model={model} role={role} status={statusFor(model)} onDownload={() => download.mutate({ model, selectedRole: role })} />)}</div></section>}
       <div className="toolbar">
         <form className="search-box" onSubmit={(event) => { event.preventDefault(); setSubmitted(query); }}><Search size={18} /><input value={query} onChange={(event) => setQuery(event.target.value)} placeholder="Search models" /></form>
-        <select value={role} onChange={(event) => setRole(event.target.value)}><option value="chat">Chat</option><option value="image">Image</option><option value="video">Video</option></select>
+        <select aria-label="Model role" value={role} onChange={(event) => setRole(event.target.value)}><option value="chat">Chat</option><option value="image">Image</option><option value="video">Video</option></select>
         <select aria-label="Model order" value={sort} onChange={(event) => setSort(event.target.value)}><option value="trending">Trending on Hugging Face</option><option value="downloads">Downloads</option><option value="likes">Likes</option><option value="newest">Newest</option><option value="updated">Recently updated</option><option value="compatible">Compatible first</option></select>
       </div>
-      <div className="catalog-filters"><select aria-label="Compatibility filter" value={compatibility} onChange={(event) => setCompatibility(event.target.value)}><option value="">All compatibility</option><option value="likely">One-click ready</option><option value="advanced_import">Advanced import</option><option value="unsupported">Unsupported</option></select><select aria-label="Last updated filter" value={updatedWithinDays} onChange={(event) => setUpdatedWithinDays(event.target.value)}><option value="">Updated any time</option><option value="7">Updated this week</option><option value="30">Updated this month</option><option value="90">Updated in 3 months</option><option value="365">Updated this year</option></select><select aria-label="Format filter" value={fileFormat} onChange={(event) => setFileFormat(event.target.value)}><option value="">All formats</option><option value="gguf">GGUF</option><option value="safetensors">safetensors</option></select><select aria-label="Access filter" value={gated} onChange={(event) => setGated(event.target.value)}><option value="">All access</option><option value="open">Open</option><option value="gated">Gated</option></select><input aria-label="Quantization filter" placeholder="Quantization (Q4_K_M, FP8…)" value={quantization} onChange={(event) => setQuantization(event.target.value)} /><input aria-label="Architecture filter" placeholder="Architecture" value={architecture} onChange={(event) => setArchitecture(event.target.value)} /><input aria-label="License filter" placeholder="License" value={licenseId} onChange={(event) => setLicenseId(event.target.value)} /><input aria-label="Minimum parameters" type="number" min="0" placeholder="Min parameters (B)" value={minParameters} onChange={(event) => setMinParameters(event.target.value)} /><input aria-label="Maximum parameters" type="number" min="0" placeholder="Max parameters (B)" value={maxParameters} onChange={(event) => setMaxParameters(event.target.value)} /><input aria-label="Maximum download size" type="number" min="0" placeholder="Max download (GB)" value={maxSizeGb} onChange={(event) => setMaxSizeGb(event.target.value)} /></div>
+      <div className="catalog-filters"><select aria-label="Compatibility filter" value={compatibility} onChange={(event) => setCompatibility(event.target.value)}><option value="">All compatibility</option><option value="likely">Automatic test available</option><option value="advanced_import">Advanced import</option><option value="unsupported">Unsupported</option></select><select aria-label="Last updated filter" value={updatedWithinDays} onChange={(event) => setUpdatedWithinDays(event.target.value)}><option value="">Updated any time</option><option value="7">Updated this week</option><option value="30">Updated this month</option><option value="90">Updated in 3 months</option><option value="365">Updated this year</option></select><select aria-label="Format filter" value={fileFormat} onChange={(event) => setFileFormat(event.target.value)}><option value="">All formats</option><option value="gguf">GGUF</option><option value="safetensors">safetensors</option></select><select aria-label="Access filter" value={gated} onChange={(event) => setGated(event.target.value)}><option value="">All access</option><option value="open">Open</option><option value="gated">Gated</option></select><input aria-label="Quantization filter" placeholder="Quantization (Q4_K_M, FP8…)" value={quantization} onChange={(event) => setQuantization(event.target.value)} /><input aria-label="Architecture filter" placeholder="Architecture" value={architecture} onChange={(event) => setArchitecture(event.target.value)} /><input aria-label="License filter" placeholder="License" value={licenseId} onChange={(event) => setLicenseId(event.target.value)} /><input aria-label="Minimum parameters" type="number" min="0" placeholder="Min parameters (B)" value={minParameters} onChange={(event) => setMinParameters(event.target.value)} /><input aria-label="Maximum parameters" type="number" min="0" placeholder="Max parameters (B)" value={maxParameters} onChange={(event) => setMaxParameters(event.target.value)} /><input aria-label="Maximum download size" type="number" min="0" placeholder="Max download (GB)" value={maxSizeGb} onChange={(event) => setMaxSizeGb(event.target.value)} /></div>
       {(installed.data?.length ?? 0) > 0 && <section><h2>Installed models</h2><div className="profile-table model-installs">{installed.data?.map((model) => {
         const profile = profiles.data?.find((candidate) => candidate.model_install_id === model.id);
         return <InstalledModelRow

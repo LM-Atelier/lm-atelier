@@ -97,6 +97,7 @@ def build_services(settings: Settings) -> Services:
         downloads=DownloadManager(
             settings,
             events,
+            chat_adapter=engines.chat,
             media_adapter=engines.media if isinstance(engines.media, ComfyUIAdapter) else None,
             processes=processes,
             scheduler=scheduler,

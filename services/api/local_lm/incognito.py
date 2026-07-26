@@ -20,7 +20,10 @@ from .models import (
     AppSetting,
     CustomNodeInstall,
     GenerationPreset,
+    InstallPlan,
     Job,
+    ModelCapabilityEvidence,
+    ModelComponentManifest,
     ModelInstall,
     ModelProfile,
     ModelSource,
@@ -56,7 +59,10 @@ INCOGNITO_EXCLUDED_PREFIXES = (
 
 _SHARED_TABLES: tuple[Table, ...] = (
     cast(Table, ModelSource.__table__),
+    cast(Table, InstallPlan.__table__),
     cast(Table, ModelInstall.__table__),
+    cast(Table, ModelComponentManifest.__table__),
+    cast(Table, ModelCapabilityEvidence.__table__),
     cast(Table, ModelProfile.__table__),
     cast(Table, GenerationPreset.__table__),
     cast(Table, WorkflowDefinition.__table__),

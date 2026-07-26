@@ -26,6 +26,7 @@ from local_lm.config import Settings
 from local_lm.db import SessionLocal
 from local_lm.domain import JobStatus, utcnow
 from local_lm.downloads import DownloadManager
+from local_lm.hardware import hardware_capability_class
 from local_lm.incognito import INCOGNITO_HEADER
 from local_lm.main import create_app
 from local_lm.models import (
@@ -35,6 +36,7 @@ from local_lm.models import (
     Job,
     Message,
     MessagePart,
+    ModelCapabilityEvidence,
     ModelInstall,
     ModelProfile,
     ResponseRevision,
@@ -49,7 +51,13 @@ from local_lm.models import (
 from local_lm.orchestrator import ConversationOrchestrator
 from local_lm.runtime_provisioning import RuntimeProvisioner
 from local_lm.scheduler import ResourceScheduler
-from local_lm.schemas import EngineCapabilities, RuntimeStatus, SettingField, TurnRequest
+from local_lm.schemas import (
+    DownloadRequest,
+    EngineCapabilities,
+    RuntimeStatus,
+    SettingField,
+    TurnRequest,
+)
 
 ONE_PIXEL_PNG = base64.b64decode(
     "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII="
@@ -186,6 +194,60 @@ async def test_fast_readiness_probe_reports_version(client: AsyncClient) -> None
     response = await client.get("/api/ready")
     assert response.status_code == 200
     assert response.json() == {"version": __version__}
+
+
+async def test_model_readiness_requires_matching_capability_evidence(
+    client: AsyncClient,
+    settings: Settings,
+) -> None:
+    current_hardware_class = hardware_capability_class(settings)
+    with SessionLocal() as session:
+        verified = ModelInstall(
+            id="model_verified",
+            name="Verified",
+            role="chat",
+            engine="llama.cpp",
+            local_path="C:/models/verified",
+            manifest_json={
+                "files": ["verified.gguf"],
+                "expected_sha256": {"verified.gguf": "b" * 64},
+            },
+            active=True,
+        )
+        unverified = ModelInstall(
+            id="model_unverified",
+            name="Unverified",
+            role="chat",
+            engine="llama.cpp",
+            local_path="C:/models/unverified",
+            manifest_json={"files": ["unverified.gguf"]},
+            active=True,
+        )
+        session.add_all([verified, unverified])
+        session.flush()
+        session.add(
+            ModelCapabilityEvidence(
+                model_install_id=verified.id,
+                evidence_key="a" * 64,
+                result="ready",
+                component_hashes_json={"verified.gguf": "b" * 64},
+                runtime_build="llama-test",
+                adapter_contract_version=1,
+                launch_contract_version="worker-launch-v1",
+                workflow_contract_version=None,
+                hardware_class=current_hardware_class,
+                probe_version="activation-probe-v1",
+            )
+        )
+        session.commit()
+
+    response = await client.get("/api/models")
+    assert response.status_code == 200
+    models = {item["id"]: item for item in response.json()}
+    assert models["model_verified"]["readiness"] == "ready"
+    assert models["model_verified"]["capability_evidence"]["runtime_build"] == "llama-test"
+    assert models["model_unverified"]["readiness"] == "unverified"
+    assert models["model_unverified"]["capability_evidence"] is None
 
 
 async def test_about_reports_version_and_local_support_paths(
@@ -4922,6 +4984,8 @@ async def test_catalog_preflight_blocks_gated_unsafe_weights(
     assert response.status_code == 200
     payload = response.json()
     assert payload["can_install"] is False
+    assert payload["install_plan"]["compatibility"] == "unsupported"
+    assert payload["install_plan"]["failure_code"] is not None
     blocked = {check["id"] for check in payload["checks"] if check["status"] == "block"}
     assert {"weights", "access"}.issubset(blocked)
 
@@ -4964,6 +5028,21 @@ async def test_catalog_preflight_autoselects_smallest_gguf(
     assert response.json()["can_install"] is True
     assert response.json()["selected_files"] == ["small.gguf"]
     assert response.json()["expected_sha256"] == {"small.gguf": "a" * 64}
+    plan = response.json()["install_plan"]
+    assert plan["compatibility"] == "supported"
+    tampered = await client.post(
+        "/api/downloads",
+        json={
+            "install_plan_id": plan["id"],
+            "remote_id": "owner/model",
+            "revision": "abc123",
+            "role": "chat",
+            "engine": "llama.cpp",
+            "allow_patterns": ["large.gguf"],
+        },
+    )
+    assert tampered.status_code == 422
+    assert "immutable plan" in tampered.json()["detail"]
     checksum = next(check for check in response.json()["checks"] if check["id"] == "checksum")
     assert checksum["status"] == "pass"
 
@@ -5063,6 +5142,56 @@ async def test_catalog_preflight_selects_a_complete_split_gguf_set(
         "model-Q4_K_M-00001-of-00002.gguf": "a" * 64,
         "model-Q4_K_M-00002-of-00002.gguf": "b" * 64,
     }
+    assert payload["install_plan"]["compatibility"] == "supported"
+    assert len(payload["install_plan"]["plan_hash"]) == 64
+
+    captured: dict[str, DownloadRequest] = {}
+
+    def create_from_plan(
+        _manager: DownloadManager,
+        session: Session,
+        request: DownloadRequest,
+    ) -> Job:
+        captured["request"] = request
+        job = Job(
+            kind="download",
+            status="queued",
+            payload_json=request.model_dump(mode="json"),
+        )
+        session.add(job)
+        session.commit()
+        session.refresh(job)
+        return job
+
+    monkeypatch.setattr(DownloadManager, "create", create_from_plan)
+    accepted = await client.post(
+        "/api/downloads",
+        json={
+            "install_plan_id": payload["install_plan"]["id"],
+            "remote_id": payload["remote_id"],
+            "source_remote_id": payload["source_remote_id"],
+            "revision": payload["revision"],
+            "role": "chat",
+            "engine": "llama.cpp",
+            "allow_patterns": payload["selected_files"],
+            "expected_sha256": payload["expected_sha256"],
+            "comfy_paths": payload["comfy_paths"],
+            "workflow_template_id": payload["workflow_template_id"],
+            "workflow_template_sha256": payload["workflow_template_sha256"],
+        },
+    )
+    assert accepted.status_code == 202
+    assert captured["request"].install_plan_id == payload["install_plan"]["id"]
+
+    rejected = await client.post(
+        "/api/downloads",
+        json={
+            **captured["request"].model_dump(mode="json"),
+            "revision": "different-revision",
+        },
+    )
+    assert rejected.status_code == 422
+    assert "immutable plan" in rejected.json()["detail"]
 
 
 async def test_catalog_preflight_explains_an_incomplete_split_gguf_set(
