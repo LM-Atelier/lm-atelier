@@ -7,6 +7,7 @@ param(
     [string]$PreviousInstaller,
     [string]$PreviousVersion,
     [int]$Port = 12443,
+    [switch]$NoShellIntegration,
     [switch]$AllowPurge
 )
 
@@ -129,6 +130,9 @@ $InstallArguments = @(
     "/DIR=$InstallRoot",
     "/LOG=$InstallLog"
 )
+if ($NoShellIntegration) {
+    $InstallArguments += "/NOICONS"
+}
 
 try {
     $InitialInstaller = if ($PreviousInstallerPath) {
@@ -156,7 +160,10 @@ try {
     if (-not (Test-Path -LiteralPath $Uninstaller -PathType Leaf)) {
         throw "The installed uninstaller is missing: $Uninstaller"
     }
-    if (-not (Test-Path -LiteralPath $StartMenuShortcut -PathType Leaf)) {
+    if (
+        -not $NoShellIntegration -and
+        -not (Test-Path -LiteralPath $StartMenuShortcut -PathType Leaf)
+    ) {
         throw "The Start-menu shortcut was not created."
     }
 
@@ -221,7 +228,7 @@ try {
     if (-not (Test-Path -LiteralPath $DataMarker -PathType Leaf)) {
         throw "Ordinary uninstall did not preserve local data."
     }
-    if (Test-Path -LiteralPath $StartMenuShortcut) {
+    if (-not $NoShellIntegration -and (Test-Path -LiteralPath $StartMenuShortcut)) {
         throw "The Start-menu shortcut remains after uninstall."
     }
 
