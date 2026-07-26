@@ -21,6 +21,7 @@ import local_lm.api as api_module
 from local_lm import __version__
 from local_lm.adapters.base import ChatEvent, ChatRequest, MediaEvent, MediaRequest
 from local_lm.adapters.mock import MockChatAdapter, MockMediaAdapter
+from local_lm.auxiliary_assets import checkpoint_lora_extension
 from local_lm.catalog import HuggingFaceCatalog
 from local_lm.config import Settings
 from local_lm.db import SessionLocal
@@ -36,9 +37,11 @@ from local_lm.models import (
     Job,
     Message,
     MessagePart,
+    ModelAssetInstall,
     ModelCapabilityEvidence,
     ModelInstall,
     ModelProfile,
+    ModelSource,
     ResponseRevision,
     ResponseRevisionPart,
     Run,
@@ -361,6 +364,138 @@ async def test_project_chat_text_and_inline_image_flow(client: AsyncClient) -> N
     await wait_for_assistant(client, chat["id"], "video")
 
 
+async def test_image_turn_resolves_verified_lora_stack_and_provenance(
+    client: AsyncClient,
+) -> None:
+    with SessionLocal() as session:
+        definition = session.scalar(
+            select(WorkflowDefinition).where(WorkflowDefinition.operation == "text_to_image")
+        )
+        assert definition and definition.current_revision_id
+        revision = session.get(WorkflowRevision, definition.current_revision_id)
+        assert revision
+        graph = {
+            "1": {
+                "class_type": "CheckpointLoaderSimple",
+                "inputs": {"ckpt_name": "mock.safetensors"},
+            },
+            "2": {"class_type": "CLIPTextEncode", "inputs": {"clip": ["1", 1]}},
+            "3": {"class_type": "KSampler", "inputs": {"model": ["1", 0]}},
+        }
+        extension = checkpoint_lora_extension(graph)
+        assert extension
+        revision.api_graph_json = graph
+        revision.input_schema_json = {
+            "type": "object",
+            "properties": {
+                "loras": {
+                    "type": "array",
+                    "default": [],
+                    "maxItems": 8,
+                }
+            },
+        }
+        revision.dependencies_json = {"extensions": {"lora": extension}}
+        lora = ModelAssetInstall(
+            name="Ink",
+            kind="lora",
+            family="sdxl",
+            local_path="C:/managed/ink",
+            size_bytes=1024,
+            manifest_json={
+                "sha256": "a" * 64,
+                "comfy_name": "ink.safetensors",
+                "metadata": {"trigger_words": ["ink"]},
+            },
+            active=True,
+            verified_at=utcnow(),
+        )
+        session.add(lora)
+        session.commit()
+        lora_id = lora.id
+
+    listed = await client.get("/api/model-assets", params={"kind": "lora"})
+    assert listed.status_code == 200
+    assert [asset["id"] for asset in listed.json()] == [lora_id]
+    chat = (await client.post("/api/chats", json={"title": "LoRA run"})).json()
+    response = await client.post(
+        f"/api/chats/{chat['id']}/turns",
+        json={
+            "text": "Create an image of an ink workshop",
+            "mode": "image",
+            "settings": {
+                "loras": [
+                    {
+                        "asset_id": lora_id,
+                        "model_strength": 0.8,
+                        "clip_strength": 0.65,
+                        "enabled": True,
+                    }
+                ]
+            },
+        },
+    )
+    assert response.status_code == 202
+    run = await wait_for_run(client, response.json()["run"]["id"])
+    assert run["status"] == "complete"
+    auxiliary = run["provenance_json"]["auxiliary_assets"]
+    assert auxiliary["graph_transform_version"] == "lora-graph-v1"
+    assert len(auxiliary["effective_graph_sha256"]) == 64
+    assert auxiliary["lora_stack"] == [
+        {
+            "asset_id": lora_id,
+            "position": 0,
+            "name": "Ink",
+            "family": "sdxl",
+            "sha256": "a" * 64,
+            "comfy_name": "ink.safetensors",
+            "trigger_words": ["ink"],
+            "model_strength": 0.8,
+            "clip_strength": 0.65,
+            "enabled": True,
+        }
+    ]
+
+
+async def test_verified_model_asset_can_be_toggled_and_deleted_safely(
+    client: AsyncClient,
+    settings: Settings,
+) -> None:
+    asset_root = settings.model_dir / "asset-lifecycle"
+    asset_root.mkdir(parents=True)
+    (asset_root / "ink.safetensors").write_bytes(b"verified")
+    with SessionLocal() as session:
+        asset = ModelAssetInstall(
+            name="Lifecycle LoRA",
+            kind="lora",
+            family="sdxl",
+            local_path=str(asset_root),
+            size_bytes=8,
+            manifest_json={
+                "sha256": "d" * 64,
+                "comfy_name": "ink.safetensors",
+            },
+            active=True,
+            verified_at=utcnow(),
+        )
+        session.add(asset)
+        session.commit()
+        asset_id = asset.id
+
+    disabled = await client.patch(f"/api/model-assets/{asset_id}", json={"active": False})
+    assert disabled.status_code == 200
+    assert disabled.json()["active"] is False
+    enabled = await client.patch(f"/api/model-assets/{asset_id}", json={"active": True})
+    assert enabled.status_code == 200
+    assert enabled.json()["active"] is True
+
+    deleted = await client.delete(f"/api/model-assets/{asset_id}")
+    assert deleted.status_code == 204
+    assert not asset_root.exists()
+    with SessionLocal() as session:
+        assert session.get(ModelAssetInstall, asset_id) is None
+
+
 async def test_inline_video_and_project_export(client: AsyncClient) -> None:
     project = (await client.post("/api/projects", json={"name": "Film lab"})).json()
     chat = (
@@ -389,7 +524,7 @@ async def test_inline_video_and_project_export(client: AsyncClient) -> None:
         assert "manifest.json" in bundle.namelist()
         assert any(name.startswith("artifacts/") for name in bundle.namelist())
         manifest = json.loads(bundle.read("manifest.json"))
-        assert manifest["version"] == 5
+        assert manifest["version"] == 6
         assert set(manifest["dependencies"]) == {"profiles", "presets", "workflows"}
 
     imported = await client.post(
@@ -413,6 +548,116 @@ async def test_inline_video_and_project_export(client: AsyncClient) -> None:
         if part["type"] == "video"
     )
     assert imported_video["artifact_id"] == video_part["artifact_id"]
+
+
+async def test_project_archive_uses_immutable_auxiliary_requirements_without_weights(
+    client: AsyncClient,
+) -> None:
+    project = (await client.post("/api/projects", json={"name": "LoRA archive"})).json()
+    chat = (
+        await client.post(
+            "/api/chats",
+            json={"title": "Portable LoRA", "project_id": project["id"]},
+        )
+    ).json()
+    digest = "c" * 64
+    with SessionLocal() as session:
+        source = ModelSource(
+            provider="huggingface",
+            remote_id="atelier/ink-lora",
+            revision="immutable-revision",
+        )
+        session.add(source)
+        session.flush()
+        asset = ModelAssetInstall(
+            source_id=source.id,
+            name="Atelier Ink",
+            kind="lora",
+            family="sdxl",
+            local_path=r"C:\private-models\ink.safetensors",
+            size_bytes=12_345,
+            manifest_json={
+                "sha256": digest,
+                "metadata": {
+                    "network_type": "LoRA",
+                    "rank": 16,
+                    "trigger_words": ["ink wash"],
+                },
+            },
+            active=True,
+            verified_at=utcnow(),
+        )
+        session.add(asset)
+        session.flush()
+        chat_row = session.get(Chat, chat["id"])
+        assert chat_row
+        chat_row.generation_settings_json = {
+            "image": {
+                "loras": [
+                    {
+                        "asset_id": asset.id,
+                        "model_strength": 0.8,
+                        "clip_strength": 0.7,
+                        "enabled": True,
+                    }
+                ]
+            }
+        }
+        asset_id = asset.id
+        session.commit()
+
+    exported = await client.post(
+        f"/api/projects/{project['id']}/export",
+        params={"include_media": False},
+    )
+    archive_response = await client.get(exported.json()["url"])
+    with zipfile.ZipFile(io.BytesIO(archive_response.content)) as archive:
+        assert all(not name.endswith(".safetensors") for name in archive.namelist())
+        manifest = json.loads(archive.read("manifest.json"))
+    reference = f"auxiliary:lora:sha256:{digest}"
+    assert manifest["version"] == 6
+    assert manifest["auxiliary_requirements"] == [
+        {
+            "id": reference,
+            "kind": "lora",
+            "name": "Atelier Ink",
+            "family": "sdxl",
+            "sha256": digest,
+            "size_bytes": 12_345,
+            "metadata": {
+                "network_type": "LoRA",
+                "rank": 16,
+                "trigger_words": ["ink wash"],
+            },
+            "source": {
+                "provider": "huggingface",
+                "remote_id": "atelier/ink-lora",
+                "revision": "immutable-revision",
+            },
+        }
+    ]
+    assert (
+        manifest["chats"][0]["generation_settings_json"]["image"]["loras"][0]["asset_id"]
+        == reference
+    )
+    assert asset_id not in json.dumps(manifest)
+    assert "private-models" not in json.dumps(manifest)
+
+    imported = await client.post(
+        "/api/projects/import",
+        files={
+            "archive": (
+                "lora-project.lm-atelier.zip",
+                archive_response.content,
+                "application/zip",
+            )
+        },
+    )
+    assert imported.status_code == 201, imported.text
+    imported_chat = (
+        await client.get("/api/chats", params={"project_id": imported.json()["id"]})
+    ).json()[0]
+    assert imported_chat["generation_settings_json"]["image"]["loras"][0]["asset_id"] == asset_id
 
 
 async def test_metadata_only_project_export_import_marks_missing_media(
@@ -758,7 +1003,7 @@ async def test_project_v3_round_trip_remaps_portable_dependencies_in_a_fresh_dat
     ).json()
     archive = await client.get(exported["url"])
     manifest = project_manifest(archive.content)
-    assert manifest["version"] == 5
+    assert manifest["version"] == 6
     assert {item["source_id"] for item in manifest["dependencies"]["profiles"]} == {
         chat_profile["id"],
         image_profile["id"],
@@ -1129,7 +1374,6 @@ async def test_engine_api_isolates_media_settings_by_role(client: AsyncClient) -
         "scheduler",
         "denoise",
         "batch_size",
-        "loras",
     ]
     assert video_keys == [
         "seed",
@@ -5024,7 +5268,7 @@ async def test_project_export_snapshots_local_preset_bindings(
     archive = await client.get(exported["url"])
     with zipfile.ZipFile(io.BytesIO(archive.content)) as bundle:
         manifest = json.loads(bundle.read("manifest.json"))
-    assert manifest["version"] == 5
+    assert manifest["version"] == 6
     assert manifest["project"]["generation_preset_ids_json"] == {"chat": preset["id"]}
     assert manifest["project"]["generation_settings_json"]["chat"] == {
         "temperature": 0.1,

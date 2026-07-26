@@ -392,6 +392,20 @@ export interface ModelInstall {
   updated_at: string;
 }
 
+export interface ModelAssetInstall {
+  id: string;
+  source_id: string | null;
+  name: string;
+  kind: string;
+  family: string | null;
+  size_bytes: number;
+  manifest_json: Record<string, unknown>;
+  active: boolean;
+  verified_at: string | null;
+  created_at: string;
+  updated_at: string;
+}
+
 export interface ModelStorageInfo {
   installed_bytes: number;
   partial_download_bytes: number;
@@ -456,6 +470,7 @@ export interface CatalogPreflight {
   estimated_ram_bytes: number | null;
   estimated_vram_bytes: number | null;
   can_install: boolean;
+  auxiliary_kind?: string | null;
   install_plan: {
     id: string;
     plan_hash: string;

@@ -17,7 +17,7 @@ import psutil
 
 from .config import Settings
 from .gguf import GGUFSelectionError, automatic_mmproj_selection, validate_gguf_selection
-from .models import ModelInstall, ModelProfile
+from .models import ModelAssetInstall, ModelInstall, ModelProfile
 from .schemas import WorkerStatus
 from .subprocess_env import subprocess_environment
 
@@ -360,6 +360,29 @@ class ProcessSupervisor:
                     "base_path": base_path,
                     **paths,
                 }
+            assets = session.scalars(
+                select(ModelAssetInstall).where(ModelAssetInstall.active.is_(True))
+            ).all()
+            for asset in assets:
+                folder = {
+                    "lora": "loras",
+                    "vae": "vae",
+                    "controlnet": "controlnet",
+                    "upscaler": "upscale_models",
+                    "embedding": "embeddings",
+                    "ip_adapter": "ipadapter",
+                }.get(asset.kind)
+                if not folder:
+                    continue
+                base_path = str(Path(asset.local_path).resolve())
+                signature = (base_path, ((folder, "."),))
+                if signature in seen:
+                    continue
+                seen.add(signature)
+                config[f"local_lm_{len(config) + 1}"] = {
+                    "base_path": base_path,
+                    folder: ".",
+                }
         if provisional_model_paths:
             provisional_root, raw_paths = provisional_model_paths
             paths = self._validated_comfy_paths(raw_paths)
@@ -380,7 +403,18 @@ class ProcessSupervisor:
     def _validated_comfy_paths(value: object) -> dict[str, str]:
         if not isinstance(value, dict):
             return {}
-        allowed = {"checkpoints", "diffusion_models", "text_encoders", "vae", "clip_vision"}
+        allowed = {
+            "checkpoints",
+            "diffusion_models",
+            "text_encoders",
+            "vae",
+            "clip_vision",
+            "loras",
+            "controlnet",
+            "upscale_models",
+            "embeddings",
+            "ipadapter",
+        }
         result: dict[str, str] = {}
         for key, item in value.items():
             if key not in allowed or not isinstance(item, str):

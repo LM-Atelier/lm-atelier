@@ -189,7 +189,7 @@ async def test_project_vision_context_round_trip_and_legacy_defaults(
     exported = await client.post(f"/api/projects/{project['id']}/export")
     archive = await client.get(exported.json()["url"])
     manifest = _manifest(archive.content)
-    assert manifest["version"] == 5
+    assert manifest["version"] == 6
     assert manifest["chats"][0]["active_vision_profile_id"] == profile["id"]
     assert manifest["chats"][0]["vision_settings_json"] == {
         "max_images": 2,

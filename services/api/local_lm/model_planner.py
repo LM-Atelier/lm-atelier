@@ -119,13 +119,25 @@ def resolve_install_plan(
     workflow_template_sha256: str | None = None,
     comfy_paths: dict[str, str] | None = None,
     source_remote_id: str | None = None,
+    auxiliary_kind: str | None = None,
 ) -> ResolvedInstallPlan:
     metadata_by_path = {component.path: component for component in inspection.components}
     artifacts = tuple(
         PlannedArtifact(
             path=str(item["filename"]),
-            kind=metadata_by_path[str(item["filename"])].kind,
-            target_folder=metadata_by_path[str(item["filename"])].target_folder,
+            kind=auxiliary_kind or metadata_by_path[str(item["filename"])].kind,
+            target_folder=(
+                {
+                    "lora": "loras",
+                    "vae": "vae",
+                    "controlnet": "controlnet",
+                    "upscaler": "upscale_models",
+                    "embedding": "embeddings",
+                    "ip_adapter": "ipadapter",
+                }[auxiliary_kind]
+                if auxiliary_kind
+                else metadata_by_path[str(item["filename"])].target_folder
+            ),
             size_bytes=(
                 int(item["size"])
                 if isinstance(item.get("size"), int) and not isinstance(item["size"], bool)
@@ -138,7 +150,24 @@ def resolve_install_plan(
     compatibility: InstallCompatibility = "supported"
     failure_code = None
     failure_reason = None
-    if role == "chat":
+    if auxiliary_kind:
+        inspected_kinds = {metadata_by_path[str(item["filename"])].kind for item in selected_files}
+        if engine != "comfyui":
+            compatibility = "unsupported"
+            failure_code = "unsupported_auxiliary_engine"
+            failure_reason = "Auxiliary generation assets require ComfyUI."
+        elif auxiliary_kind != "lora":
+            compatibility = "unsupported"
+            failure_code = "auxiliary_kind_not_implemented"
+            failure_reason = (
+                f"{auxiliary_kind.replace('_', ' ').title()} installation is reserved "
+                "but is not enabled in this release."
+            )
+        elif inspected_kinds != {"lora"}:
+            compatibility = "unsupported"
+            failure_code = "auxiliary_kind_mismatch"
+            failure_reason = "The selected safetensors file is not a verified LoRA."
+    elif role == "chat":
         if engine != "llama.cpp" or not any(item.kind == "gguf_model" for item in artifacts):
             compatibility = "unsupported"
             failure_code = "unsupported_chat_layout"
@@ -178,10 +207,17 @@ def resolve_install_plan(
         ),
         "comfy_paths": comfy_paths or {},
         "source_remote_id": source_remote_id,
+        "auxiliary_kind": auxiliary_kind,
     }
     activation_probe = {
         "version": ACTIVATION_PROBE_VERSION,
-        "kind": "chat_completion" if role == "chat" else "media_output",
+        "kind": (
+            "auxiliary_graph"
+            if auxiliary_kind
+            else "chat_completion"
+            if role == "chat"
+            else "media_output"
+        ),
         "timeout_seconds": 120 if role == "chat" else 300,
         "required": compatibility == "supported",
     }

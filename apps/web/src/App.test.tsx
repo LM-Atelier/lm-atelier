@@ -168,6 +168,9 @@ vi.mock("./api", () => ({
     setHuggingFaceToken: vi.fn(),
     deleteHuggingFaceToken: vi.fn(),
     models: vi.fn(),
+    modelAssets: vi.fn().mockResolvedValue([]),
+    updateModelAsset: vi.fn(),
+    deleteModelAsset: vi.fn(),
     modelStorage: vi.fn().mockResolvedValue({ installed_bytes: 0, partial_download_bytes: 0, catalog_cache_bytes: 0, installed_count: 0, partial_download_count: 0 }),
     deleteModel: vi.fn(),
     cleanupDownloads: vi.fn(),
@@ -266,6 +269,7 @@ describe("App", () => {
     vi.mocked(api.workPlans).mockResolvedValue([]);
     vi.mocked(api.backups).mockResolvedValue([]);
     vi.mocked(api.models).mockResolvedValue([]);
+    vi.mocked(api.modelAssets).mockResolvedValue([]);
     vi.mocked(api.catalog).mockResolvedValue({ items: [], next_cursor: null });
     vi.mocked(api.workflowCatalogModels).mockResolvedValue([]);
     vi.mocked(api.workflows).mockResolvedValue([]);
@@ -1050,6 +1054,102 @@ describe("App", () => {
     fireEvent.keyDown(dialog, { key: "Escape" });
     expect(screen.queryByRole("dialog", { name: "Chat settings" })).not.toBeInTheDocument();
     expect(opener).toHaveFocus();
+  });
+
+  it("uses installed LoRAs through a picker instead of raw JSON", async () => {
+    const stamp = "2026-07-26T00:00:00Z";
+    const chat = {
+      id: "chat-lora",
+      project_id: null,
+      title: "LoRA controls",
+      archived: false,
+      routing_mode: "image" as const,
+      confirm_uncertain_media: false,
+      active_chat_profile_id: null,
+      active_vision_profile_id: null,
+      active_image_profile_id: null,
+      active_video_profile_id: null,
+      active_head_message_id: null,
+      generation_settings_json: {},
+      generation_preset_ids_json: {},
+      vision_settings_json: {},
+      created_at: stamp,
+      updated_at: stamp,
+    };
+    vi.mocked(api.chats).mockResolvedValue([chat]);
+    vi.mocked(api.chat).mockResolvedValue({ ...chat, messages: [] });
+    vi.mocked(api.engines).mockResolvedValue([roleAwareMediaEngine]);
+    vi.mocked(api.workflows).mockResolvedValue([{
+      id: "workflow-lora",
+      name: "LoRA image",
+      operation: "text_to_image",
+      description: "",
+      current_revision_id: "revision-lora",
+      revisions: [{
+        id: "revision-lora",
+        workflow_id: "workflow-lora",
+        version: 1,
+        engine: "comfyui",
+        engine_version: null,
+        ui_graph_json: {},
+        api_graph_json: {},
+        input_schema_json: {
+          type: "object",
+          properties: {
+            loras: { type: "array", title: "LoRAs", default: [], maxItems: 8 },
+          },
+        },
+        dependencies_json: {
+          extensions: { lora: { model: ["1", 0], clip: ["1", 1] } },
+        },
+        trusted: true,
+        created_at: stamp,
+      }],
+    }]);
+    vi.mocked(api.modelAssets).mockResolvedValue([{
+      id: "asset-ink",
+      source_id: "source-ink",
+      name: "Atelier Ink",
+      kind: "lora",
+      family: "sdxl",
+      size_bytes: 1024,
+      manifest_json: {
+        metadata: { trigger_words: ["ink wash"] },
+      },
+      active: true,
+      verified_at: stamp,
+      created_at: stamp,
+      updated_at: stamp,
+    }]);
+    vi.mocked(api.updateChat).mockImplementation(async (_id, values) => ({ ...chat, ...values }));
+    const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+    render(
+      <QueryClientProvider client={client}>
+        <App />
+      </QueryClientProvider>,
+    );
+
+    fireEvent.click(await screen.findByRole("button", { name: "Turn settings" }));
+    fireEvent.click(screen.getByRole("button", { name: "advanced" }));
+    const addLora = await screen.findByRole("button", { name: "Add LoRA" });
+    await waitFor(() => expect(addLora).toBeEnabled());
+    fireEvent.click(addLora);
+
+    expect(screen.getByRole("combobox", { name: "LoRA 1" })).toHaveDisplayValue("Atelier Ink");
+    expect(screen.getByLabelText("LoRA 1 model strength")).toHaveValue(1);
+    expect(screen.getByText("sdxl · ink wash")).toBeInTheDocument();
+    await waitFor(() => expect(api.updateChat).toHaveBeenCalledWith(chat.id, {
+      generation_settings_json: {
+        image: {
+          loras: [{
+            asset_id: "asset-ink",
+            model_strength: 1,
+            clip_strength: 1,
+            enabled: true,
+          }],
+        },
+      },
+    }));
   });
 
   it("resumes a paused model download from the job panel", async () => {
@@ -2424,6 +2524,91 @@ describe("App", () => {
       null,
       null,
       "plan-chat",
+    ));
+  });
+
+  it("preflights and queues a LoRA as a verified auxiliary asset", async () => {
+    const model = {
+      provider: "huggingface",
+      remote_id: "owner/atelier-ink-lora",
+      name: "atelier-ink-lora",
+      author: "owner",
+      pipeline_tag: null,
+      tags: ["lora", "safetensors"],
+      downloads: 42,
+      likes: 3,
+      trending_score: 1,
+      created_at: "2026-07-26T00:00:00Z",
+      last_modified: "2026-07-26T00:00:00Z",
+      gated: false,
+      private: false,
+      library_name: null,
+      architecture: "sdxl",
+      formats: ["safetensors"],
+      quantizations: [],
+      parameter_count: null,
+      license_id: "other",
+      total_size_bytes: 1024,
+      compatibility: "likely",
+      compatibility_reasons: ["data-only LoRA candidate"],
+    };
+    vi.mocked(api.catalog).mockResolvedValue({ items: [model], next_cursor: null });
+    vi.mocked(api.catalogPreflight).mockResolvedValue({
+      remote_id: model.remote_id,
+      source_remote_id: null,
+      revision: "main",
+      selected_files: ["atelier-ink.safetensors"],
+      expected_sha256: { "atelier-ink.safetensors": "a".repeat(64) },
+      comfy_paths: { loras: "." },
+      workflow_template_id: null,
+      workflow_template_sha256: null,
+      download_bytes: 1024,
+      available_disk_bytes: 4096,
+      estimated_ram_bytes: null,
+      estimated_vram_bytes: null,
+      can_install: true,
+      auxiliary_kind: "lora",
+      install_plan: {
+        id: "plan-lora",
+        plan_hash: "b".repeat(64),
+        compatibility: "supported",
+        family: "sdxl",
+        failure_code: null,
+        failure_reason: null,
+      },
+      checks: [],
+    });
+    const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+    render(
+      <QueryClientProvider client={client}>
+        <App />
+      </QueryClientProvider>,
+    );
+    fireEvent.click(await screen.findByText("Model library"));
+    fireEvent.change(screen.getByLabelText("Model role"), { target: { value: "lora" } });
+    fireEvent.click(await screen.findByText("Install"));
+
+    await waitFor(() => expect(api.catalogPreflight).toHaveBeenCalledWith(
+      model.remote_id,
+      "image",
+      "comfyui",
+      "main",
+      [],
+      "lora",
+    ));
+    await waitFor(() => expect(api.download).toHaveBeenCalledWith(
+      model.remote_id,
+      null,
+      "image",
+      "comfyui",
+      "main",
+      ["atelier-ink.safetensors"],
+      { "atelier-ink.safetensors": "a".repeat(64) },
+      { loras: "." },
+      null,
+      null,
+      "plan-lora",
+      "lora",
     ));
   });
 

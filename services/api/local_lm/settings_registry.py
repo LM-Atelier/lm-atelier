@@ -426,14 +426,6 @@ IMAGE_SETTINGS = [
         scope="workflow",
         visibility="advanced",
     ),
-    SettingField(
-        key="loras",
-        label="LoRA stack",
-        type="array",
-        default=[],
-        scope="workflow",
-        visibility="expert",
-    ),
 ]
 
 

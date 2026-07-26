@@ -16,6 +16,8 @@ import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 import {
   Activity,
+  ArrowDown,
+  ArrowUp,
   Bot,
   Check,
   ChevronDown,
@@ -772,6 +774,110 @@ function MessageBubble({
   );
 }
 
+type LoraSetting = {
+  asset_id: string;
+  model_strength: number;
+  clip_strength: number;
+  enabled: boolean;
+};
+
+function LoraStackControl({
+  value,
+  onChange,
+}: {
+  value: unknown;
+  onChange: (value: unknown) => void;
+}) {
+  const assets = useQuery({
+    queryKey: ["model-assets", "lora"],
+    queryFn: () => api.modelAssets("lora"),
+  });
+  const stack: LoraSetting[] = Array.isArray(value)
+    ? value.map((item) => (
+      item && typeof item === "object" && typeof (item as Record<string, unknown>).asset_id === "string"
+        ? {
+            asset_id: String((item as Record<string, unknown>).asset_id),
+            model_strength: Number((item as Record<string, unknown>).model_strength ?? 1),
+            clip_strength: Number((item as Record<string, unknown>).clip_strength ?? 1),
+            enabled: (item as Record<string, unknown>).enabled !== false,
+          }
+        : {
+            asset_id: "",
+            model_strength: 1,
+            clip_strength: 1,
+            enabled: false,
+          }
+    ))
+    : [];
+  const installed = assets.data?.filter((asset) => asset.active && asset.verified_at) ?? [];
+  const used = new Set(stack.map((item) => item.asset_id));
+  const addable = installed.find((asset) => !used.has(asset.id));
+  const update = (index: number, patch: Partial<LoraSetting>) => {
+    onChange(stack.map((item, candidate) => candidate === index ? { ...item, ...patch } : item));
+  };
+  const move = (index: number, offset: number) => {
+    const next = [...stack];
+    const target = index + offset;
+    if (target < 0 || target >= next.length) return;
+    [next[index], next[target]] = [next[target], next[index]];
+    onChange(next);
+  };
+  return (
+    <div className="setting-row lora-stack-control">
+      <span><strong>LoRAs</strong></span>
+      <div className="lora-stack">
+        {stack.map((item, index) => {
+          const asset = installed.find((candidate) => candidate.id === item.asset_id);
+          const metadata = asset?.manifest_json.metadata;
+          const triggerWords = metadata && typeof metadata === "object"
+            && Array.isArray((metadata as Record<string, unknown>).trigger_words)
+            ? (metadata as Record<string, unknown>).trigger_words as string[]
+            : [];
+          return (
+            <div className={`lora-stack-item${asset ? "" : " unavailable"}`} key={`${item.asset_id}:${index}`}>
+              <select
+                aria-label={`LoRA ${index + 1}`}
+                value={item.asset_id}
+                onChange={(event) => update(index, { asset_id: event.target.value })}
+              >
+                {!asset && <option value={item.asset_id}>{item.asset_id ? "Unavailable LoRA" : "Choose LoRA"}</option>}
+                {installed.map((candidate) => (
+                  <option value={candidate.id} key={candidate.id}>{candidate.name}</option>
+                ))}
+              </select>
+              <label>Model<input aria-label={`LoRA ${index + 1} model strength`} type="number" min="-4" max="4" step="0.05" value={item.model_strength} onChange={(event) => update(index, { model_strength: Number(event.target.value) })} /></label>
+              <label>CLIP<input aria-label={`LoRA ${index + 1} CLIP strength`} type="number" min="-4" max="4" step="0.05" value={item.clip_strength} onChange={(event) => update(index, { clip_strength: Number(event.target.value) })} /></label>
+              <label className="lora-enabled"><input aria-label={`Enable LoRA ${index + 1}`} type="checkbox" checked={item.enabled} onChange={(event) => update(index, { enabled: event.target.checked })} />On</label>
+              <span className="row-actions">
+                <button type="button" className="secondary compact-button" aria-label={`Move LoRA ${index + 1} up`} disabled={index === 0} onClick={() => move(index, -1)}><ArrowUp size={13} /></button>
+                <button type="button" className="secondary compact-button" aria-label={`Move LoRA ${index + 1} down`} disabled={index === stack.length - 1} onClick={() => move(index, 1)}><ArrowDown size={13} /></button>
+                <button type="button" className="secondary compact-button danger" aria-label={`Remove LoRA ${index + 1}`} onClick={() => onChange(stack.filter((_, candidate) => candidate !== index))}><X size={13} /></button>
+              </span>
+              {(asset?.family || triggerWords.length > 0) && <small>{[asset?.family, ...triggerWords.slice(0, 3)].filter(Boolean).join(" · ")}</small>}
+            </div>
+          );
+        })}
+        <button
+          type="button"
+          className="secondary compact-button"
+          disabled={!addable || stack.length >= 8}
+          onClick={() => addable && onChange([
+            ...stack,
+            {
+              asset_id: addable.id,
+              model_strength: 1,
+              clip_strength: 1,
+              enabled: true,
+            },
+          ])}
+        >
+          <Plus size={13} /> Add LoRA
+        </button>
+      </div>
+    </div>
+  );
+}
+
 function SettingControl({
   field,
   value,
@@ -782,6 +888,9 @@ function SettingControl({
   onChange: (value: unknown) => void;
 }) {
   const fixed = field.choices.length === 1;
+  if (field.key === "loras") {
+    return <LoraStackControl value={value} onChange={onChange} />;
+  }
   if (field.type === "boolean") {
     return (
       <label className="setting-row toggle-row" title={field.help || undefined}>
@@ -1501,7 +1610,7 @@ function ModelCard({
     : label;
   return (
     <article className="model-card">
-      <div className="model-icon">{role === "video" ? <Film /> : role === "image" ? <ImageIcon /> : <Bot />}</div>
+      <div className="model-icon">{role === "video" ? <Film /> : role === "image" || role === "lora" ? <ImageIcon /> : <Bot />}</div>
       <div className="model-copy">
         <h3>{model.name}</h3><p>{model.author} · {model.pipeline_tag || model.library_name || "model"}</p>
         <div className="badges"><span className={`badge ${model.compatibility}`}>{compatibilityLabel}</span>{model.gated && <span className="badge">Gated</span>}{model.formats.slice(0, 2).map((format) => <span className="badge" key={format}>{format}</span>)}{model.quantizations.slice(0, 2).map((value) => <span className="badge" key={value}>{value}</span>)}</div>
@@ -1653,19 +1762,31 @@ function ModelsView() {
   const catalogIsStale = catalog.data?.pages.some((page) => page.stale) ?? false;
   const recipes = useQuery({ queryKey: ["recipes"], queryFn: api.recipes });
   const installed = useQuery({ queryKey: ["models"], queryFn: api.models });
+  const modelAssets = useQuery({ queryKey: ["model-assets"], queryFn: () => api.modelAssets() });
   const jobs = useQuery({ queryKey: ["jobs"], queryFn: api.jobs, refetchInterval: 3_000 });
   const storage = useQuery({ queryKey: ["model-storage"], queryFn: api.modelStorage });
   const profiles = useQuery({ queryKey: ["profiles"], queryFn: api.profiles });
   const download = useMutation({
     mutationFn: async ({ model, selectedRole }: { model: CatalogModel; selectedRole: string }) => {
-      const engine = selectedRole === "chat" ? "llama.cpp" : "comfyui";
-      const preflight = await api.catalogPreflight(
-        model.remote_id,
-        selectedRole,
-        engine,
-        "main",
-        [],
-      );
+      const auxiliaryKind = selectedRole === "lora" ? "lora" : null;
+      const installRole = auxiliaryKind ? "image" : selectedRole;
+      const engine = installRole === "chat" ? "llama.cpp" : "comfyui";
+      const preflight = auxiliaryKind
+        ? await api.catalogPreflight(
+            model.remote_id,
+            installRole,
+            engine,
+            "main",
+            [],
+            auxiliaryKind,
+          )
+        : await api.catalogPreflight(
+            model.remote_id,
+            installRole,
+            engine,
+            "main",
+            [],
+          );
       if (!preflight.can_install) {
         const blockers = preflight.checks
           .filter((check) => check.status === "block")
@@ -1678,10 +1799,10 @@ function ModelsView() {
           || "LM Atelier cannot safely activate this model with the current runtime.",
         );
       }
-      return api.download(
+      const downloadArguments = [
         preflight.remote_id,
         preflight.source_remote_id,
-        selectedRole,
+        installRole,
         engine,
         preflight.revision,
         preflight.selected_files,
@@ -1690,7 +1811,10 @@ function ModelsView() {
         preflight.workflow_template_id,
         preflight.workflow_template_sha256,
         preflight.install_plan?.id ?? null,
-      );
+      ] as const;
+      return auxiliaryKind
+        ? api.download(...downloadArguments, auxiliaryKind)
+        : api.download(...downloadArguments);
     },
     onSuccess: () => void client.invalidateQueries({ queryKey: ["jobs"] }),
   });
@@ -1720,6 +1844,18 @@ function ModelsView() {
       void client.invalidateQueries({ queryKey: ["model-storage"] });
     },
   });
+  const updateModelAsset = useMutation({
+    mutationFn: ({ id, active }: { id: string; active: boolean }) =>
+      api.updateModelAsset(id, active),
+    onSuccess: () => void client.invalidateQueries({ queryKey: ["model-assets"] }),
+  });
+  const deleteModelAsset = useMutation({
+    mutationFn: api.deleteModelAsset,
+    onSuccess: () => {
+      void client.invalidateQueries({ queryKey: ["model-assets"] });
+      void client.invalidateQueries({ queryKey: ["model-storage"] });
+    },
+  });
   const cleanupDownloads = useMutation({
     mutationFn: api.cleanupDownloads,
     onSuccess: () => void client.invalidateQueries({ queryKey: ["model-storage"] }),
@@ -1735,19 +1871,28 @@ function ModelsView() {
     },
   });
   const installedRemoteIds = new Set(
-    installed.data
-      ?.filter((model) => model.role === role && model.active)
-      ?.flatMap((model) => [
-        model.manifest_json.remote_id,
-        model.manifest_json.source_remote_id,
-      ])
-      .filter((remoteId): remoteId is string => typeof remoteId === "string") ?? [],
+    (
+      role === "lora"
+        ? modelAssets.data
+          ?.filter((asset) => asset.kind === "lora" && asset.active)
+          .map((asset) => asset.manifest_json.remote_id)
+        : installed.data
+          ?.filter((model) => model.role === role && model.active)
+          ?.flatMap((model) => [
+            model.manifest_json.remote_id,
+            model.manifest_json.source_remote_id,
+          ])
+    )?.filter((remoteId): remoteId is string => typeof remoteId === "string") ?? [],
   );
   const activeDownloadIds = new Set(
     jobs.data
       ?.filter((job) =>
         job.kind === "download"
-        && job.payload_json.role === role
+        && (
+          role === "lora"
+            ? job.payload_json.auxiliary_kind === "lora"
+            : job.payload_json.role === role && !job.payload_json.auxiliary_kind
+        )
         && ["queued", "running", "paused"].includes(job.status)
       )
       .map((job) => job.payload_json.remote_id)
@@ -1784,7 +1929,7 @@ function ModelsView() {
       {(role === "image" || role === "video") && readyModels.length > 0 && <section className="workflow-ready-models"><div className="section-heading"><div><small>Declarative workflow available</small><h2>Automatic setup candidates</h2></div></div><div className="model-grid">{readyModels.map((model) => <ModelCard key={model.remote_id} model={model} role={role} status={statusFor(model)} onDownload={() => download.mutate({ model, selectedRole: role })} />)}</div></section>}
       <div className="toolbar">
         <form className="search-box" onSubmit={(event) => { event.preventDefault(); setSubmitted(query); }}><Search size={18} /><input value={query} onChange={(event) => setQuery(event.target.value)} placeholder="Search models" /></form>
-        <select aria-label="Model role" value={role} onChange={(event) => setRole(event.target.value)}><option value="chat">Chat</option><option value="image">Image</option><option value="video">Video</option></select>
+        <select aria-label="Model role" value={role} onChange={(event) => setRole(event.target.value)}><option value="chat">Chat</option><option value="image">Image</option><option value="video">Video</option><option value="lora">LoRA</option></select>
         <select aria-label="Model order" value={sort} onChange={(event) => setSort(event.target.value)}><option value="trending">Trending on Hugging Face</option><option value="downloads">Downloads</option><option value="likes">Likes</option><option value="newest">Newest</option><option value="updated">Recently updated</option><option value="compatible">Compatible first</option></select>
       </div>
       <div className="catalog-filters"><select aria-label="Compatibility filter" value={compatibility} onChange={(event) => setCompatibility(event.target.value)}><option value="">All compatibility</option><option value="likely">Automatic test available</option><option value="advanced_import">Advanced import</option><option value="unsupported">Unsupported</option></select><select aria-label="Last updated filter" value={updatedWithinDays} onChange={(event) => setUpdatedWithinDays(event.target.value)}><option value="">Updated any time</option><option value="7">Updated this week</option><option value="30">Updated this month</option><option value="90">Updated in 3 months</option><option value="365">Updated this year</option></select><select aria-label="Format filter" value={fileFormat} onChange={(event) => setFileFormat(event.target.value)}><option value="">All formats</option><option value="gguf">GGUF</option><option value="safetensors">safetensors</option></select><select aria-label="Access filter" value={gated} onChange={(event) => setGated(event.target.value)}><option value="">All access</option><option value="open">Open</option><option value="gated">Gated</option></select><input aria-label="Quantization filter" placeholder="Quantization (Q4_K_M, FP8…)" value={quantization} onChange={(event) => setQuantization(event.target.value)} /><input aria-label="Architecture filter" placeholder="Architecture" value={architecture} onChange={(event) => setArchitecture(event.target.value)} /><input aria-label="License filter" placeholder="License" value={licenseId} onChange={(event) => setLicenseId(event.target.value)} /><input aria-label="Minimum parameters" type="number" min="0" placeholder="Min parameters (B)" value={minParameters} onChange={(event) => setMinParameters(event.target.value)} /><input aria-label="Maximum parameters" type="number" min="0" placeholder="Max parameters (B)" value={maxParameters} onChange={(event) => setMaxParameters(event.target.value)} /><input aria-label="Maximum download size" type="number" min="0" placeholder="Max download (GB)" value={maxSizeGb} onChange={(event) => setMaxSizeGb(event.target.value)} /></div>
@@ -1824,7 +1969,26 @@ function ModelsView() {
         />;
         })}</div>
       </section>}
-      {(download.error || deleteModel.error || cleanupDownloads.error || updateUseCase.error) && <div className="callout error" role="alert">{download.error?.message || deleteModel.error?.message || cleanupDownloads.error?.message || updateUseCase.error?.message}</div>}
+      {(modelAssets.data?.length ?? 0) > 0 && <section>
+        <div className="section-heading"><h2>Installed workflow assets</h2></div>
+        <div className="profile-table model-installs">
+          {modelAssets.data?.map((asset) => (
+            <div key={asset.id}>
+              <span className="badge">{asset.kind.replace("_", " ")}</span>
+              <span className="model-install-copy">
+                <strong>{asset.name}</strong>
+                <small>{asset.active ? "Ready" : "Disabled"}{asset.family ? ` · ${asset.family}` : ""}</small>
+              </span>
+              <span className="model-install-size">{formatBytes(asset.size_bytes)}</span>
+              <span className="row-actions">
+                <button className="secondary compact-button" disabled={!asset.verified_at || updateModelAsset.isPending} onClick={() => updateModelAsset.mutate({ id: asset.id, active: !asset.active })}>{asset.active ? "Disable" : "Enable"}</button>
+                <button className="secondary compact-button danger" disabled={deleteModelAsset.isPending} onClick={() => window.confirm(`Delete ${asset.name}?`) && deleteModelAsset.mutate(asset.id)}>Delete</button>
+              </span>
+            </div>
+          ))}
+        </div>
+      </section>}
+      {(download.error || deleteModel.error || cleanupDownloads.error || updateUseCase.error || updateModelAsset.error || deleteModelAsset.error) && <div className="callout error" role="alert">{download.error?.message || deleteModel.error?.message || cleanupDownloads.error?.message || updateUseCase.error?.message || updateModelAsset.error?.message || deleteModelAsset.error?.message}</div>}
       {catalog.isLoading && <div className="loading-line" />}
       {catalog.error && <div className="callout error action-callout" role="alert"><span>{catalog.error.message}</span><button className="secondary compact-button" disabled={catalog.isFetching} onClick={() => void catalog.refetch()}>Retry</button></div>}
       {catalogIsStale && !catalog.error && <div className="callout warning action-callout" role="status"><span>Showing saved results while Hugging Face is unavailable.</span><button className="secondary compact-button" disabled={catalog.isFetching} onClick={() => void catalog.refetch()}>Refresh</button></div>}

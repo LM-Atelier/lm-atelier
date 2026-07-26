@@ -541,4 +541,14 @@ class HuggingFaceCatalog:
             if pipeline_tag in {"text-to-video", "image-to-video"}:
                 return CompatibilityLevel.ADVANCED, ["video pipeline requires a verified workflow"]
             return CompatibilityLevel.ADVANCED, ["requires a verified ComfyUI recipe"]
+        if requested_role == "lora":
+            has_safetensors = any(name.endswith(".safetensors") for name in lower_files)
+            has_lora_marker = (
+                any("lora" in name for name in lower_files)
+                or "lora" in lower_tags
+                or "adapter" in lower_tags
+            )
+            if has_safetensors and has_lora_marker and not unsafe_note:
+                return CompatibilityLevel.LIKELY, ["data-only LoRA candidate"]
+            return CompatibilityLevel.ADVANCED, ["requires safetensors LoRA verification"]
         return CompatibilityLevel.ADVANCED, ["select a model role for compatibility guidance"]

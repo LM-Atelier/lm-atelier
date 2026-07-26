@@ -24,6 +24,7 @@ from local_lm.model_planner import (
 )
 from local_lm.models import (
     Job,
+    ModelAssetInstall,
     ModelCapabilityEvidence,
     ModelComponentManifest,
     ModelInstall,
@@ -102,6 +103,25 @@ def gguf_bytes(architecture: str) -> bytes:
         + struct.pack("<Q", len(value))
         + value
     )
+
+
+def safetensors_bytes(
+    tensor_names: list[str],
+    metadata: dict[str, str] | None = None,
+) -> bytes:
+    header = {
+        **{
+            name: {
+                "dtype": "F16",
+                "shape": [1],
+                "data_offsets": [index * 2, index * 2 + 2],
+            }
+            for index, name in enumerate(tensor_names)
+        },
+        "__metadata__": metadata or {},
+    }
+    encoded = json.dumps(header, separators=(",", ":")).encode()
+    return len(encoded).to_bytes(8, "little") + encoded
 
 
 async def test_planned_chat_activation_requires_completion_and_records_evidence(
@@ -438,6 +458,136 @@ async def test_unknown_gguf_plan_installs_and_activates_with_one_request(
         assert session.query(ModelProfile).count() == 1
         assert session.query(ModelComponentManifest).count() == 1
         assert session.query(ModelCapabilityEvidence).count() == 1
+
+
+async def test_lora_plan_installs_as_a_verified_auxiliary_asset(
+    settings: Settings,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    settings.prepare()
+    configure_database(settings)
+    init_db()
+    content = safetensors_bytes(
+        ["lora_unet_block.lora_down.weight"],
+        {
+            "ss_network_module": "networks.lora",
+            "ss_network_dim": "8",
+            "modelspec.trigger_phrase": "atelier ink",
+        },
+    )
+    digest = hashlib.sha256(content).hexdigest()
+    inspection = inspect_repository_metadata(
+        {"adapter.safetensors": content},
+        ["adapter.safetensors"],
+        role="image",
+    )
+    resolved = resolve_install_plan(
+        remote_id="synthetic/atelier-lora",
+        revision="d" * 40,
+        role="image",
+        engine="comfyui",
+        selected_files=[
+            {
+                "filename": "adapter.safetensors",
+                "size": len(content),
+                "sha256": digest,
+            }
+        ],
+        inspection=inspection,
+        comfy_paths={"loras": "."},
+        auxiliary_kind="lora",
+    )
+    with SessionLocal() as session:
+        plan = persist_install_plan(session, resolved)
+        session.commit()
+        request = DownloadRequest(
+            install_plan_id=plan.id,
+            remote_id=plan.remote_id,
+            revision=plan.revision,
+            role="image",
+            engine=plan.engine,
+            allow_patterns=["adapter.safetensors"],
+            expected_sha256={"adapter.safetensors": digest},
+            comfy_paths={"loras": "."},
+            auxiliary_kind="lora",
+        )
+        session.add(
+            Job(
+                id="job_atelier_lora",
+                kind=JobKind.DOWNLOAD.value,
+                status=JobStatus.QUEUED.value,
+                payload_json=request.model_dump(mode="json"),
+            )
+        )
+        session.commit()
+
+    class Processes:
+        def __init__(self) -> None:
+            self.started: list[tuple[Path, dict[str, str]]] = []
+            self.stopped: list[str] = []
+
+        def statuses(self) -> list[object]:
+            return [SimpleNamespace(name="media", running=False, profile_id=None)]
+
+        async def start_media(self, model_root: tuple[Path, dict[str, str]]) -> None:
+            self.started.append(model_root)
+
+        async def stop(self, name: str) -> None:
+            self.stopped.append(name)
+
+    class MediaAdapter:
+        def invalidate_object_info_cache(self) -> None:
+            return None
+
+        async def object_info(self) -> dict[str, object]:
+            return {"LoraLoader": {}}
+
+    processes = Processes()
+    manager = DownloadManager(
+        settings,
+        EventBroker(),
+        scheduler=ResourceScheduler(),
+        media_adapter=MediaAdapter(),  # type: ignore[arg-type]
+        processes=processes,  # type: ignore[arg-type]
+    )
+    manager._api = SimpleNamespace(
+        model_info=lambda *_args, **_kwargs: SimpleNamespace(
+            siblings=[
+                SimpleNamespace(
+                    rfilename="adapter.safetensors",
+                    size=len(content),
+                    lfs={"sha256": digest},
+                )
+            ],
+            sha="d" * 40,
+            pipeline_tag=None,
+            tags=["lora"],
+            gated=False,
+        )
+    )  # type: ignore[assignment]
+
+    async def download_file(**kwargs: Any) -> str:
+        target = kwargs["staging"] / kwargs["filename"]
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_bytes(content)
+        return str(target)
+
+    monkeypatch.setattr(manager, "_download_file", download_file)
+    await manager._download("job_atelier_lora")
+
+    with SessionLocal() as session:
+        job = session.get(Job, "job_atelier_lora")
+        asset = session.query(ModelAssetInstall).one()
+        stored_plan = session.get(type(plan), plan.id)
+        assert job and job.status == JobStatus.COMPLETE.value
+        assert asset.active is True
+        assert asset.verified_at is not None
+        assert asset.kind == "lora"
+        assert asset.manifest_json["sha256"] == digest
+        assert asset.manifest_json["comfy_name"] == "adapter.safetensors"
+        assert stored_plan and stored_plan.status == "activated"
+    assert processes.started[0][1] == {"loras": "."}
+    assert processes.stopped == ["media"]
 
 
 def test_duplicate_active_download_requests_reuse_the_existing_job(

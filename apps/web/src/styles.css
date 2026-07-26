@@ -207,6 +207,13 @@ h1, h2, h3 { margin: 0; }
 .setting-row strong { font-size: 13px; }
 .setting-row small { color: var(--muted); line-height: 1.3; }
 .setting-row input, .setting-row select, .toolbar select, .modal input, .modal select, .modal textarea { width: 100%; color: #e8ebef; border: 1px solid var(--border); border-radius: 8px; background: var(--panel-2); padding: 8px 9px; outline: 0; }
+.lora-stack-control { align-items: flex-start; }
+.lora-stack { display: grid; gap: 9px; min-width: min(100%, 580px); }
+.lora-stack-item { display: grid; grid-template-columns: minmax(150px, 1fr) repeat(2, minmax(72px, .45fr)) auto auto; gap: 7px; align-items: end; padding: 10px; border: 1px solid var(--border); border-radius: 11px; background: color-mix(in srgb, var(--panel) 88%, transparent); }
+.lora-stack-item.unavailable { border-color: var(--danger); }
+.lora-stack-item label { display: grid; gap: 3px; color: var(--muted); font-size: 11px; }
+.lora-stack-item .lora-enabled { display: flex; align-items: center; align-self: center; }
+.lora-stack-item > small { grid-column: 1 / -1; }
 .toggle-row input { width: 38px; height: 20px; accent-color: var(--accent); justify-self: end; }
 .secondary { border: 1px solid var(--border); background: var(--panel-2); border-radius: 9px; color: #d5dae2; display: inline-flex; align-items: center; justify-content: center; gap: 7px; padding: 9px 13px; cursor: pointer; }
 .secondary:hover { background: var(--panel-3); }
@@ -508,4 +515,6 @@ h1, h2, h3 { margin: 0; }
   .project-defaults-heading { align-items: flex-start; }
   .project-defaults-heading .compact-button { white-space: nowrap; }
   .project-generation-defaults .setting-row { grid-template-columns: minmax(0, 1fr) 96px; }
+  .lora-stack-item { grid-template-columns: 1fr 1fr; }
+  .lora-stack-item > select, .lora-stack-item > .row-actions { grid-column: 1 / -1; }
 }

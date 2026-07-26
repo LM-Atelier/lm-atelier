@@ -102,6 +102,49 @@ def test_static_inspector_distinguishes_lora_from_primary_checkpoint() -> None:
     assert plan.failure_code == "auxiliary_asset_not_primary"
 
 
+def test_static_inspector_accepts_lora_only_as_a_typed_auxiliary_plan() -> None:
+    inspection = inspect_repository_metadata(
+        {
+            "adapter.safetensors": _safetensors(
+                ["lora_unet_block.lora_down.weight"],
+                {
+                    "ss_network_module": "networks.lora",
+                    "ss_network_dim": "16",
+                    "modelspec.trigger_phrase": "atelier ink, paper grain",
+                },
+            )
+        },
+        ["adapter.safetensors"],
+        role="image",
+    )
+    plan = resolve_install_plan(
+        remote_id="synthetic/unknown-adapter",
+        revision="a" * 40,
+        role="image",
+        engine="comfyui",
+        selected_files=[
+            {
+                "filename": "adapter.safetensors",
+                "size": 1_024,
+                "sha256": "b" * 64,
+            }
+        ],
+        inspection=inspection,
+        comfy_paths={"loras": "."},
+        auxiliary_kind="lora",
+    )
+
+    assert plan.compatibility == "supported"
+    assert plan.runtime_contract["auxiliary_kind"] == "lora"
+    assert plan.artifacts[0].target_folder == "loras"
+    assert inspection.components[0].metadata["network_type"] == "networks.lora"
+    assert inspection.components[0].metadata["rank"] == 16
+    assert inspection.components[0].metadata["trigger_words"] == [
+        "atelier ink",
+        "paper grain",
+    ]
+
+
 def test_media_plan_rejects_pickle_compatible_weight_formats() -> None:
     inspection = inspect_repository_metadata(
         {},
