@@ -1983,7 +1983,7 @@ class ConversationOrchestrator:
                         await self._execute_media(job_id, run_id)
                 finally:
                     if resume_chat_profile:
-                        await self._resume_chat_worker(resume_chat_profile)
+                        await self._complete_media_handoff(resume_chat_profile)
         except asyncio.CancelledError:
             with self.session_factory() as session:
                 job = session.get(Job, job_id)
@@ -2690,6 +2690,25 @@ class ConversationOrchestrator:
             logger.exception("Could not reload chat profile %s after media handoff", profile_id)
         finally:
             self._chat_planner_ready.set()
+
+    async def _complete_media_handoff(self, chat_profile_id: str) -> None:
+        """Release retained Comfy state before restoring a managed chat model."""
+
+        try:
+            media_worker = next(item for item in self.processes.statuses() if item.name == "media")
+            if self.engines.settings.media_engine == "comfyui" and media_worker.managed:
+                # ComfyUI retains model allocations after generation. Loading a
+                # large chat model alongside that cache can push Windows/WDDM
+                # into system-memory paging; the next media run then appears
+                # stalled before sampling. A managed worker recycle releases
+                # both VRAM and host allocations while preserving the automatic
+                # Ready media service expected by the desktop application.
+                await self.processes.stop("media")
+                await self.processes.start_media()
+        except Exception:
+            logger.exception("Could not recycle the media worker after device handoff")
+        finally:
+            await self._resume_chat_worker(chat_profile_id)
 
     async def _execute_media(self, job_id: str, run_id: str) -> None:
         if self.engines.settings.media_engine == "comfyui":
