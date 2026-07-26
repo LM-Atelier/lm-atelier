@@ -1479,6 +1479,9 @@ function ChatView({
         <div className="chat-profile-selectors">
           {(["chat", "vision", "image", "video"] as const).map((role) => {
             const field = `active_${role}_profile_id` as "active_chat_profile_id" | "active_vision_profile_id" | "active_image_profile_id" | "active_video_profile_id";
+            const defaultProfile = role === "vision"
+              ? undefined
+              : profiles.find((profile) => profile.role === role && profile.is_default);
             const selected = profiles.find((profile) => profile.id === chat[field]);
             const value = role !== "vision" && selected?.is_default ? "" : chat[field] ?? "";
             const options = profiles.filter((profile) => (
@@ -1486,7 +1489,7 @@ function ChatView({
                 ? profile.role === "chat" && profile.input_modalities?.includes("image")
                 : profile.role === role
             ) && (role === "vision" || !profile.is_default));
-            return <label key={role}><span>{role}</span><select value={value} onChange={(event) => onProfile(field, event.target.value || null)}><option value={AUTO_PROFILE_ID}>Auto</option><option value="">{role === "vision" ? "Off" : "Default"}</option>{options.map((profile) => <option key={profile.id} value={profile.id}>{profile.name}</option>)}</select></label>;
+            return <label key={role}><span>{role}</span><select value={value} onChange={(event) => onProfile(field, event.target.value || null)}><option value={AUTO_PROFILE_ID}>Auto</option><option value="">{role === "vision" ? "Off" : `Default${defaultProfile ? ` · ${defaultProfile.name}` : ""}`}</option>{options.map((profile) => <option key={profile.id} value={profile.id}>{profile.name}</option>)}</select></label>;
           })}
         </div>
       </div>
@@ -1619,18 +1622,22 @@ function InstalledModelRow({
   creating,
   deleting,
   saving,
+  defaulting,
   onCreate,
   onDelete,
   onSaveUseCase,
+  onSetDefault,
 }: {
   model: ModelInstall;
   profile?: ModelProfile;
   creating: boolean;
   deleting: boolean;
   saving: boolean;
+  defaulting: boolean;
   onCreate: () => void;
   onDelete: () => void;
   onSaveUseCase: (value: string) => Promise<boolean>;
+  onSetDefault: () => void;
 }) {
   const [editing, setEditing] = useState(false);
   const [draft, setDraft] = useState(profile?.use_case ?? "");
@@ -1654,6 +1661,9 @@ function InstalledModelRow({
       </span>
       <span className="model-install-size">{formatBytes(model.size_bytes)}</span>
       <span className="row-actions">
+        {profile?.is_default
+          ? <span className="badge tested">Default</span>
+          : <button className="secondary compact-button" aria-label={`Set ${model.name} as default ${model.role} model`} disabled={creating || defaulting} onClick={onSetDefault}>{defaulting ? "Setting..." : "Set default"}</button>}
         {profile
           ? <button className="secondary compact-button" aria-label={`Edit use case for ${model.name}`} onClick={startEditing} disabled={editing || saving}>Edit use case</button>
           : <button className="secondary compact-button" aria-label={`Add ${model.name} to model selectors`} disabled={creating} onClick={onCreate}>Add to selectors</button>}
@@ -1796,7 +1806,7 @@ function ModelsView() {
     onSuccess: () => void client.invalidateQueries({ queryKey: ["jobs"] }),
   });
   const createProfile = useMutation({
-    mutationFn: api.createProfile,
+    mutationFn: (model: ModelInstall) => api.createProfile(model),
     onSuccess: () => void client.invalidateQueries({ queryKey: ["profiles"] }),
   });
   const updateUseCase = useMutation({
@@ -1806,6 +1816,25 @@ function ModelsView() {
       client.setQueryData<ModelProfile[]>(["profiles"], (current) =>
         current?.map((profile) => profile.id === updated.id ? updated : profile) ?? [updated],
       );
+      void client.invalidateQueries({ queryKey: ["profiles"] });
+    },
+  });
+  const setDefaultModel = useMutation({
+    mutationFn: ({ model, profile }: { model: ModelInstall; profile?: ModelProfile }) =>
+      profile
+        ? api.updateProfile(profile.id, { is_default: true })
+        : api.createProfile(model, true),
+    onSuccess: (updated) => {
+      client.setQueryData<ModelProfile[]>(["profiles"], (current) => {
+        const siblings = (current ?? []).map((profile) => (
+          profile.role === updated.role
+            ? { ...profile, is_default: profile.id === updated.id }
+            : profile
+        ));
+        return siblings.some((profile) => profile.id === updated.id)
+          ? siblings
+          : [...siblings, updated];
+      });
       void client.invalidateQueries({ queryKey: ["profiles"] });
     },
   });
@@ -1928,6 +1957,7 @@ function ModelsView() {
           creating={createProfile.isPending && createProfile.variables?.id === model.id}
           deleting={deleteModel.isPending && deleteModel.variables === model.id}
           saving={updateUseCase.isPending && updateUseCase.variables?.profileId === profile?.id}
+          defaulting={setDefaultModel.isPending && setDefaultModel.variables?.model.id === model.id}
           onCreate={() => createProfile.mutate(model)}
           onDelete={() => { if (window.confirm(`Delete ${model.name} and its model settings from local storage?`)) deleteModel.mutate(model.id); }}
           onSaveUseCase={async (value) => {
@@ -1939,6 +1969,7 @@ function ModelsView() {
               return false;
             }
           }}
+          onSetDefault={() => setDefaultModel.mutate({ model, profile })}
         />;
         })}</div>
       </section>}
@@ -1961,7 +1992,7 @@ function ModelsView() {
           ))}
         </div>
       </section>}
-      {(download.error || deleteModel.error || cleanupDownloads.error || updateUseCase.error || updateModelAsset.error || deleteModelAsset.error) && <div className="callout error" role="alert">{download.error?.message || deleteModel.error?.message || cleanupDownloads.error?.message || updateUseCase.error?.message || updateModelAsset.error?.message || deleteModelAsset.error?.message}</div>}
+      {(download.error || deleteModel.error || cleanupDownloads.error || updateUseCase.error || setDefaultModel.error || updateModelAsset.error || deleteModelAsset.error) && <div className="callout error" role="alert">{download.error?.message || deleteModel.error?.message || cleanupDownloads.error?.message || updateUseCase.error?.message || setDefaultModel.error?.message || updateModelAsset.error?.message || deleteModelAsset.error?.message}</div>}
       {catalog.isLoading && <div className="loading-line" />}
       {catalog.error && <div className="callout error action-callout" role="alert"><span>{catalog.error.message}</span><button className="secondary compact-button" disabled={catalog.isFetching} onClick={() => void catalog.refetch()}>Retry</button></div>}
       {catalogIsStale && !catalog.error && <div className="callout warning action-callout" role="status"><span>Showing saved results while Hugging Face is unavailable.</span><button className="secondary compact-button" disabled={catalog.isFetching} onClick={() => void catalog.refetch()}>Refresh</button></div>}
@@ -2195,7 +2226,7 @@ function ProfileEditor({
     >
       <label>Profile name<input value={name} onChange={(event) => setName(event.target.value)} /></label>
       <label>Best used for<textarea rows={3} value={useCase} onChange={(event) => setUseCase(event.target.value)} placeholder="Programming, code review, technical explanations" /></label>
-      <label className="toggle-row"><span><strong>Default model</strong></span><input type="checkbox" checked={isDefault} onChange={(event) => setIsDefault(event.target.checked)} /></label>
+      <label className="toggle-row"><span><strong>Default {profile.role} model</strong><small>Used by chats set to Default. Auto uses it when no use case matches.</small></span><input type="checkbox" checked={isDefault} onChange={(event) => setIsDefault(event.target.checked)} /></label>
       <div className="segmented compact" role="group" aria-label="Profile setting detail">
         {(["basic", "advanced", "expert"] as Visibility[]).map((level) => <button type="button" key={level} className={visibility === level ? "active" : ""} aria-pressed={visibility === level} onClick={() => setVisibility(level)}>{level}</button>)}
       </div>
@@ -2517,6 +2548,11 @@ function SettingsView({ engines }: { engines: EngineCapabilities[] }) {
       void client.invalidateQueries({ queryKey: ["presets"] });
     },
   });
+  const setDefaultProfile = useMutation({
+    mutationFn: (profile: ModelProfile) =>
+      api.updateProfile(profile.id, { is_default: true }),
+    onSuccess: () => void client.invalidateQueries({ queryKey: ["profiles"] }),
+  });
   const importBundle = async (file: File | undefined, kind: "profile" | "preset") => {
     if (!file) return;
     setImportError("");
@@ -2557,7 +2593,8 @@ function SettingsView({ engines }: { engines: EngineCapabilities[] }) {
       <section>
         <div className="detail-title"><div><h2>Model profiles</h2></div><button className="secondary" onClick={() => profileImport.current?.click()}>Import profile</button></div>
         <input ref={profileImport} hidden type="file" accept="application/json,.json" onChange={(event) => { void importBundle(event.target.files?.[0], "profile"); event.target.value = ""; }} />
-        <div className="profile-table interactive">{profiles.data?.map((profile: ModelProfile) => <div key={profile.id}><span className="badge">{profile.role}</span><strong>{profile.is_default ? "Default" : profile.name}{profile.is_default ? " · default" : ""}</strong><span title={profile.use_case}>{profile.use_case || "No Auto use case yet"}</span><span className="row-actions">{profile.role === "chat" && profile.model_install_id && <button className="secondary compact-button" aria-label={`Load profile: ${profile.name}`} disabled={chatWorkerBusy || loadChat.isPending} title={chatWorkerBusy ? "Wait for active and queued chat jobs before changing the worker" : "Load this chat profile"} onClick={() => loadChat.mutate(profile.id)}>Load</button>}<button className="secondary compact-button" aria-label={`Edit profile: ${profile.name}`} onClick={() => setSelectedProfile(profile)}>Edit</button></span></div>)}</div>
+        <div className="profile-table interactive">{profiles.data?.map((profile: ModelProfile) => <div key={profile.id}><span className="badge">{profile.role}</span><strong>{profile.name}{profile.is_default ? " · default" : ""}</strong><span title={profile.use_case}>{profile.use_case || "No Auto use case yet"}</span><span className="row-actions">{!profile.is_default && <button className="secondary compact-button" aria-label={`Set ${profile.name} as default ${profile.role} model`} disabled={setDefaultProfile.isPending} onClick={() => setDefaultProfile.mutate(profile)}>Set default</button>}{profile.role === "chat" && profile.model_install_id && <button className="secondary compact-button" aria-label={`Load profile: ${profile.name}`} disabled={chatWorkerBusy || loadChat.isPending} title={chatWorkerBusy ? "Wait for active and queued jobs before changing the worker" : "Load this chat profile"} onClick={() => loadChat.mutate(profile.id)}>Load</button>}<button className="secondary compact-button" aria-label={`Edit profile: ${profile.name}`} onClick={() => setSelectedProfile(profile)}>Edit</button></span></div>)}</div>
+        {setDefaultProfile.error && <div className="callout error" role="alert">{setDefaultProfile.error.message}</div>}
       </section>
       <section>
         <div className="detail-title"><div><h2>Generation presets</h2><p>Reuse response length, sampling, image size, video length, and seed settings.</p></div><button className="secondary" onClick={() => presetImport.current?.click()}>Import preset</button></div>

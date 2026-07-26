@@ -4641,6 +4641,49 @@ async def test_profile_edit_clone_reset_and_portable_bundle(client: AsyncClient)
     assert invalid.status_code == 422
 
 
+async def test_profile_default_is_unique_per_role_and_drives_default_selection(
+    client: AsyncClient,
+) -> None:
+    image_default = next(
+        profile
+        for profile in (await client.get("/api/profiles?role=image")).json()
+        if profile["is_default"]
+    )
+    candidate = await client.post(
+        "/api/profiles",
+        json={
+            "name": "Preferred chat",
+            "role": "chat",
+            "engine": "mock",
+            "is_default": True,
+        },
+    )
+    assert candidate.status_code == 201
+    chat_profiles = (await client.get("/api/profiles?role=chat")).json()
+    assert [profile["id"] for profile in chat_profiles if profile["is_default"]] == [
+        candidate.json()["id"]
+    ]
+    refreshed_image = (await client.get("/api/profiles?role=image")).json()
+    assert next(profile for profile in refreshed_image if profile["id"] == image_default["id"])[
+        "is_default"
+    ]
+
+    chat = (await client.post("/api/chats", json={"title": "Use role default"})).json()
+    selected_default = await client.patch(
+        f"/api/chats/{chat['id']}",
+        json={"active_chat_profile_id": None},
+    )
+    assert selected_default.status_code == 200
+    response = await client.post(
+        f"/api/chats/{chat['id']}/turns",
+        json={"text": "Use the selected default model", "mode": "text"},
+    )
+    assert response.status_code == 202
+    selection = response.json()["run"]["provenance_json"]["model_selection"]
+    assert selection["mode"] == "default"
+    assert selection["profile_id"] == candidate.json()["id"]
+
+
 async def test_profiles_reject_inactive_missing_and_mismatched_installs(
     client: AsyncClient,
     settings: Settings,
