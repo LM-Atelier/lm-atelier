@@ -885,6 +885,7 @@ def test_frozen_installer_contracts_are_explicit() -> None:
     assert "installer-smoke-preserve" in windows_smoke
     assert "Start-Process" in windows_smoke
     assert "-WaitProcess" in windows_smoke
+    assert '$InstallArguments += "/NOICONS"' in windows_smoke
     assert "PreviousInstaller" in windows_smoke
     assert "Version upgrade did not preserve local data" in windows_smoke
     assert "/PURGEDATA" in windows_smoke
