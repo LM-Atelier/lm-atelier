@@ -54,12 +54,6 @@ button:focus-visible, a:focus-visible, input:focus-visible, textarea:focus-visib
 .new-chat { width: 100%; margin-bottom: 10px; }
 .new-chat:hover, .primary:hover { filter: brightness(1.1); transform: translateY(-1px); }
 .new-chat:disabled, .primary:disabled { opacity: .55; cursor: default; transform: none; }
-.incognito-toggle { width: 100%; display: flex; align-items: center; justify-content: center; gap: 8px; border: 1px solid #4f463a; border-radius: 9px; background: #1e1a16; color: #c9bcaa; padding: 8px 10px; cursor: pointer; }
-.incognito-toggle:hover { border-color: var(--terracotta-soft); color: var(--cream); }
-.incognito-toggle.active { border-color: #c47b5c; background: #41261d; color: #ffd8c5; box-shadow: inset 3px 0 var(--terracotta); }
-.incognito-toggle:disabled { opacity: .55; cursor: default; }
-.incognito .sidebar { border-right-color: #684333; background: linear-gradient(180deg, rgba(35, 25, 20, .99), rgba(18, 17, 15, .99)); }
-.incognito-disclosure { margin: 0 7px 8px; color: #aa9686; font-size: 9px; line-height: 1.45; }
 .primary-nav { border-bottom: 1px solid var(--border); padding: 5px 0 12px; margin-bottom: 12px; }
 .primary-nav button, .sidebar-footer > button { border: 0; background: transparent; color: #bcc3cf; border-radius: 8px; display: flex; width: 100%; align-items: center; gap: 10px; padding: 9px 10px; cursor: pointer; }
 .primary-nav button svg, .sidebar-footer > button svg { width: 17px; }

@@ -304,7 +304,9 @@ class ConversationOrchestrator:
         source_action: str = "send",
     ) -> TurnAccepted:
         if not self._admission_open:
-            raise RuntimeError("This private session is ending and cannot accept new work.")
+            raise RuntimeError(
+                "This conversation service is shutting down and cannot accept new work."
+            )
         async with self.chat_guard(chat_id):
             return await self._create_turn(
                 session,

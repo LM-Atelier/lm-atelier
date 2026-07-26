@@ -224,7 +224,7 @@ export interface WorkPlan {
   chat_id: string;
   idempotency_key: string | null;
   source_action: string;
-  persistence_scope: "durable" | "incognito";
+  persistence_scope: "durable";
   status: string;
   context_head_message_id: string | null;
   transcript_sequence: number;

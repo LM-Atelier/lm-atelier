@@ -29,11 +29,6 @@ from .downloads import DownloadManager
 from .engines import EngineRegistry
 from .events import EventBroker
 from .exports import ProjectExporter
-from .incognito import (
-    INCOGNITO_HEADER,
-    IncognitoLifecycleManager,
-    is_incognito_excluded_path,
-)
 from .instance_identity import INSTANCE_ID_HEADER, load_or_create_instance_identity
 from .orchestrator import ConversationOrchestrator
 from .processes import ProcessSupervisor
@@ -74,7 +69,6 @@ class Services:
     diagnostics: DiagnosticBundleBuilder
     custom_nodes: CustomNodeManager
     credentials: CredentialStore
-    incognito: IncognitoLifecycleManager | None = None
 
 
 def build_services(settings: Settings) -> Services:
@@ -111,13 +105,6 @@ def build_services(settings: Settings) -> Services:
         diagnostics=DiagnosticBundleBuilder(settings, artifacts),
         custom_nodes=CustomNodeManager(settings),
         credentials=credentials,
-    )
-    services.incognito = IncognitoLifecycleManager(
-        settings,
-        services.security,
-        engines,
-        processes,
-        scheduler,
     )
     return services
 
@@ -164,8 +151,6 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     @asynccontextmanager
     async def lifespan(app: FastAPI):  # type: ignore[no-untyped-def]
         upgrade_database(active_settings)
-        if services.incognito:
-            await services.incognito.sweep_stale_roots()
         with SessionLocal() as session:
             recover_model_delete_quarantines(
                 session,
@@ -205,11 +190,6 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             for task in (worker_restore, backup_maintenance):
                 with suppress(asyncio.CancelledError):
                     await task
-            if services.incognito:
-                try:
-                    await services.incognito.close()
-                except Exception:
-                    logger.exception("Could not completely purge the active incognito session")
             await services.downloads.close()
             await services.orchestrator.close()
             await services.runtimes.close()
@@ -261,21 +241,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 status_code = getattr(exc, "status_code", 401)
                 detail = getattr(exc, "detail", "authentication failed")
                 return JSONResponse({"detail": detail}, status_code=status_code)
-        if request.headers.get(INCOGNITO_HEADER) and is_incognito_excluded_path(request.url.path):
-            return JSONResponse(
-                {
-                    "detail": (
-                        "Projects, backups, exports, and diagnostics are unavailable "
-                        "during Incognito."
-                    )
-                },
-                status_code=409,
-                headers={"Cache-Control": "no-store", "Pragma": "no-cache"},
-            )
         response = await call_next(request)
-        if request.headers.get(INCOGNITO_HEADER):
-            response.headers["Cache-Control"] = "no-store"
-            response.headers["Pragma"] = "no-cache"
         if request.url.path == "/api/ready":
             response.headers[INSTANCE_ID_HEADER] = instance_identity
         return response

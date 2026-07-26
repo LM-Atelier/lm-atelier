@@ -50,11 +50,6 @@ from .engines import (
     EngineSchemaUnavailableError,
 )
 from .hardware import collect_system_info
-from .incognito import (
-    INCOGNITO_HEADER,
-    IncognitoUnavailableError,
-    is_incognito_scoped_path,
-)
 from .model_manifests import (
     MAX_METADATA_BYTES,
     MAX_WEIGHT_HEADER_BYTES,
@@ -125,7 +120,6 @@ from .schemas import (
     CustomNodeUpdateRequest,
     DownloadRequest,
     EngineCapabilities,
-    EventOut,
     HealthOut,
     JobOut,
     MessageOut,
@@ -185,15 +179,7 @@ SessionDep = Annotated[Session, Depends(get_session)]
 
 
 async def get_conversation_session(request: Request) -> AsyncGenerator[Session, None]:
-    services = cast("Services", request.app.state.services)
-    token = request.headers.get(INCOGNITO_HEADER)
-    manager = services.incognito
-    scope = manager.get(token) if token and manager else None
-    if token and not scope:
-        raise HTTPException(404, "private session not found")
-    if scope and manager and request.method not in {"GET", "HEAD"}:
-        await manager.refresh_shared_configuration(scope)
-    session = scope.session_factory() if scope else SessionLocal()
+    session = SessionLocal()
     try:
         yield session
     finally:
@@ -204,17 +190,7 @@ ConversationSessionDep = Annotated[Session, Depends(get_conversation_session)]
 
 
 def _services(request: Request) -> Services:
-    services = cast("Services", request.app.state.services)
-    token = request.headers.get(INCOGNITO_HEADER)
-    if not token or (
-        not is_incognito_scoped_path(request.url.path)
-        and request.url.path != "/api/incognito/events"
-    ):
-        return services
-    scope = services.incognito.get(token) if services.incognito else None
-    if not scope:
-        raise HTTPException(404, "private session not found")
-    return cast("Services", scope.services)
+    return cast("Services", request.app.state.services)
 
 
 router = APIRouter(prefix="/api")
@@ -249,51 +225,6 @@ async def create_session(request: Request, response: Response) -> dict[str, str 
         "event_epoch": services.events.epoch,
         "event_sequence": services.events.sequence,
     }
-
-
-@router.post("/incognito/session", status_code=201)
-async def create_incognito_session(request: Request) -> dict[str, str | int]:
-    services = cast("Services", request.app.state.services)
-    if not services.incognito:
-        raise HTTPException(503, "private sessions are unavailable")
-    try:
-        scope = await services.incognito.start()
-    except IncognitoUnavailableError as exc:
-        raise HTTPException(409, str(exc)) from exc
-    return {
-        "token": scope.token,
-        "event_epoch": scope.services.events.epoch,
-        "event_sequence": scope.services.events.sequence,
-        "disclosure": (
-            "This conversation is kept out of LM Atelier history, media, backups, "
-            "exports, diagnostics, and long-lived browser storage. It is not forensic "
-            "erasure or network anonymity. Downloads and copies you explicitly make remain."
-        ),
-    }
-
-
-@router.delete("/incognito/session", status_code=204)
-async def end_incognito_session(request: Request) -> Response:
-    services = cast("Services", request.app.state.services)
-    token = request.headers.get(INCOGNITO_HEADER)
-    if not token or not services.incognito:
-        raise HTTPException(404, "private session not found")
-    try:
-        await services.incognito.end(token)
-    except LookupError as exc:
-        raise HTTPException(404, str(exc)) from exc
-    except RuntimeError as exc:
-        raise HTTPException(503, str(exc)) from exc
-    return Response(status_code=204)
-
-
-@router.get("/incognito/events", response_model=list[EventOut])
-async def incognito_events(
-    request: Request,
-    after: int = Query(default=0, ge=0),
-) -> list[EventOut]:
-    services = _services(request)
-    return services.events.since(after)
 
 
 @router.get("/health", response_model=HealthOut)
@@ -1696,11 +1627,7 @@ async def artifact_content(
         content_disposition_type=disposition,
         stat_result=path.stat(),
         headers={
-            "Cache-Control": (
-                "no-store"
-                if request.headers.get(INCOGNITO_HEADER)
-                else "private, max-age=31536000, immutable"
-            ),
+            "Cache-Control": "private, max-age=31536000, immutable",
             "Content-Security-Policy": "sandbox; default-src 'none'",
             "Cross-Origin-Resource-Policy": "same-origin",
             "ETag": f'"{artifact.sha256}"',

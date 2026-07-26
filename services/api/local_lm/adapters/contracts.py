@@ -334,12 +334,6 @@ class GuardedChatAdapter:
         self._label = label
         self._inactivity_seconds = inactivity_seconds
 
-    @property
-    def supports_incognito(self) -> bool:
-        return getattr(self._adapter, "supports_incognito", False) is True and callable(
-            getattr(self._adapter, "purge_run", None)
-        )
-
     async def capabilities(self) -> EngineCapabilities:
         try:
             async with asyncio.timeout(10):
@@ -430,21 +424,6 @@ class GuardedChatAdapter:
                 f"The selected chat adapter {self._label} could not cancel the run."
             ) from None
 
-    async def purge_run(self, run_id: str) -> None:
-        if not self.supports_incognito:
-            raise AdapterContractError(
-                f"The selected chat adapter {self._label} does not support private sessions."
-            )
-        try:
-            async with asyncio.timeout(30):
-                await self._adapter.purge_run(run_id)
-        except asyncio.CancelledError:
-            raise
-        except Exception:
-            raise AdapterContractError(
-                f"The selected chat adapter {self._label} could not purge the private run."
-            ) from None
-
     async def close(self) -> None:
         try:
             async with asyncio.timeout(10):
@@ -482,12 +461,6 @@ class GuardedMediaAdapter:
         self._label = label
         self._max_output_bytes = max_output_bytes
         self._inactivity_seconds = inactivity_seconds
-
-    @property
-    def supports_incognito(self) -> bool:
-        return getattr(self._adapter, "supports_incognito", False) is True and callable(
-            getattr(self._adapter, "purge_run", None)
-        )
 
     async def capabilities(self) -> EngineCapabilities:
         try:
@@ -579,21 +552,6 @@ class GuardedMediaAdapter:
         except Exception:
             raise AdapterContractError(
                 f"The selected media adapter {self._label} could not cancel the run."
-            ) from None
-
-    async def purge_run(self, run_id: str) -> None:
-        if not self.supports_incognito:
-            raise AdapterContractError(
-                f"The selected media adapter {self._label} does not support private sessions."
-            )
-        try:
-            async with asyncio.timeout(30):
-                await self._adapter.purge_run(run_id)
-        except asyncio.CancelledError:
-            raise
-        except Exception:
-            raise AdapterContractError(
-                f"The selected media adapter {self._label} could not purge the private run."
             ) from None
 
     async def close(self) -> None:

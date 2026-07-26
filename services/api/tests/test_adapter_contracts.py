@@ -14,7 +14,6 @@ from local_lm.adapters.conformance import probe_chat_adapter, probe_media_adapte
 from local_lm.adapters.contracts import (
     AdapterContractError,
     GuardedChatAdapter,
-    GuardedMediaAdapter,
     capability_contract_errors,
 )
 from local_lm.adapters.discovery import AdapterLoadError, load_external_adapter
@@ -465,28 +464,3 @@ async def test_guarded_capability_errors_do_not_echo_third_party_exceptions() ->
     with pytest.raises(AdapterContractError) as captured:
         await adapter.capabilities()
     assert secret not in str(captured.value)
-
-
-async def test_guarded_adapters_require_and_bound_private_purge_contracts() -> None:
-    class MissingChatPurge:
-        supports_incognito = True
-
-    class BrokenChatPurge(MockChatAdapter):
-        async def purge_run(self, _run_id: str) -> None:
-            raise RuntimeError("PRIVATE-CHAT-PURGE-MARKER")
-
-    class BrokenMediaPurge(MockMediaAdapter):
-        async def purge_run(self, _run_id: str) -> None:
-            raise RuntimeError("PRIVATE-MEDIA-PURGE-MARKER")
-
-    missing = GuardedChatAdapter(MissingChatPurge(), "missing")  # type: ignore[arg-type]
-    chat = GuardedChatAdapter(BrokenChatPurge(), "broken-chat")
-    media = GuardedMediaAdapter(BrokenMediaPurge(), "broken-media", 1024)
-
-    assert missing.supports_incognito is False
-    with pytest.raises(AdapterContractError) as chat_error:
-        await chat.purge_run("private-run")
-    with pytest.raises(AdapterContractError) as media_error:
-        await media.purge_run("private-run")
-    assert "PRIVATE-CHAT-PURGE-MARKER" not in str(chat_error.value)
-    assert "PRIVATE-MEDIA-PURGE-MARKER" not in str(media_error.value)
