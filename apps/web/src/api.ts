@@ -19,6 +19,7 @@ import type {
   GenerationPresetBundle,
   Job,
   Message,
+  ModelAssetInstall,
   ModelInstall,
   ModelStorageInfo,
   ModelProfile,
@@ -499,9 +500,16 @@ export const api = {
     engine: string,
     revision: string,
     selectedFiles: string[],
+    auxiliaryKind: string | null = null,
   ) => request<CatalogPreflight>(`/api/catalog/${remoteId}/preflight`, {
     method: "POST",
-    body: JSON.stringify({ role, engine, revision, selected_files: selectedFiles }),
+    body: JSON.stringify({
+      role,
+      engine,
+      revision,
+      selected_files: selectedFiles,
+      auxiliary_kind: auxiliaryKind,
+    }),
   }),
   recipes: () => request<ReferenceRecipe[]>("/api/recipes"),
   installRecipe: (recipeId: string) =>
@@ -518,6 +526,7 @@ export const api = {
     workflowTemplateId: string | null = null,
     workflowTemplateSha256: string | null = null,
     installPlanId: string | null = null,
+    auxiliaryKind: string | null = null,
   ) =>
     request<Job>("/api/downloads", {
       method: "POST",
@@ -533,8 +542,20 @@ export const api = {
         workflow_template_id: workflowTemplateId,
         workflow_template_sha256: workflowTemplateSha256,
         install_plan_id: installPlanId,
+        auxiliary_kind: auxiliaryKind,
       }),
     }),
+  modelAssets: (kind?: string) =>
+    request<ModelAssetInstall[]>(
+      `/api/model-assets${kind ? `?${new URLSearchParams({ kind })}` : ""}`,
+    ),
+  updateModelAsset: (id: string, active: boolean) =>
+    request<ModelAssetInstall>(`/api/model-assets/${id}`, {
+      method: "PATCH",
+      body: JSON.stringify({ active }),
+    }),
+  deleteModelAsset: (id: string) =>
+    request<void>(`/api/model-assets/${id}`, { method: "DELETE" }),
   importModel: (payload: { name: string; role: string; engine: string; local_path: string }) =>
     request<ModelInstall>("/api/models/import", {
       method: "POST",

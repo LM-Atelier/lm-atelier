@@ -168,16 +168,64 @@ def _inspect_safetensors(path: PurePosixPath, content: bytes) -> InspectedCompon
     metadata = raw_metadata if isinstance(raw_metadata, dict) else {}
     kind = _safetensors_kind(tensor_names, metadata)
     family = _safetensors_family(tensor_names, metadata)
+    component_metadata: dict[str, Any] = {
+        "tensor_count": len(tensor_names),
+        "metadata_keys": sorted(str(key)[:200] for key in metadata)[:128],
+    }
+    if kind == "lora":
+        component_metadata.update(_lora_metadata(header, metadata))
     return InspectedComponent(
         path=path.as_posix(),
         kind=kind,
         target_folder=_target_folder_for_kind(kind),
         family=family,
-        metadata={
-            "tensor_count": len(tensor_names),
-            "metadata_keys": sorted(str(key)[:200] for key in metadata)[:128],
-        },
+        metadata=component_metadata,
     )
+
+
+def _lora_metadata(
+    header: Mapping[str, Any],
+    metadata: Mapping[str, Any],
+) -> dict[str, Any]:
+    network_type = next(
+        (
+            str(metadata[key])[:200]
+            for key in ("ss_network_module", "modelspec.architecture", "network_type")
+            if isinstance(metadata.get(key), str)
+        ),
+        "lora",
+    )
+    rank: int | None = None
+    declared_rank = metadata.get("ss_network_dim")
+    if isinstance(declared_rank, str) and declared_rank.isdigit():
+        rank = int(declared_rank)
+    elif isinstance(declared_rank, int) and not isinstance(declared_rank, bool):
+        rank = declared_rank
+    if rank is None:
+        ranks = {
+            int(shape[0])
+            for name, tensor in header.items()
+            if name != "__metadata__"
+            and "lora_down" in str(name).casefold()
+            and isinstance(tensor, dict)
+            and isinstance((shape := tensor.get("shape")), list)
+            and shape
+            and isinstance(shape[0], int)
+            and 0 < shape[0] <= 65_536
+        }
+        rank = min(ranks) if ranks else None
+    trigger_words: list[str] = []
+    for key in ("trigger_words", "modelspec.trigger_phrase"):
+        raw = metadata.get(key)
+        if isinstance(raw, str):
+            trigger_words.extend(
+                word.strip()[:100] for word in raw.replace("\n", ",").split(",") if word.strip()
+            )
+    return {
+        "network_type": network_type,
+        "rank": rank,
+        "trigger_words": list(dict.fromkeys(trigger_words))[:32],
+    }
 
 
 def _bounded_json_object_with_limit(content: bytes, limit: int) -> dict[str, Any]:

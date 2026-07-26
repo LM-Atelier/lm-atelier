@@ -29,6 +29,10 @@ def test_migrations_round_trip(tmp_path) -> None:  # type: ignore[no-untyped-def
         profile_columns = {
             row[1] for row in connection.execute("PRAGMA table_info(model_profiles)").fetchall()
         }
+        asset_columns = {
+            row[1]
+            for row in connection.execute("PRAGMA table_info(model_asset_installs)").fetchall()
+        }
         unique_run_indexes = {
             tuple(
                 column[2]
@@ -42,6 +46,7 @@ def test_migrations_round_trip(tmp_path) -> None:  # type: ignore[no-untyped-def
         "messages",
         "generation_presets",
         "custom_node_installs",
+        "model_asset_installs",
         "turn_creation_claims",
     } <= tables
     assert {
@@ -58,6 +63,17 @@ def test_migrations_round_trip(tmp_path) -> None:  # type: ignore[no-untyped-def
         "generation_preset_ids_json",
     } <= project_columns
     assert "use_case" in profile_columns
+    assert {
+        "source_id",
+        "name",
+        "kind",
+        "family",
+        "local_path",
+        "size_bytes",
+        "manifest_json",
+        "active",
+        "verified_at",
+    } <= asset_columns
     assert ("chat_id", "idempotency_key") in unique_run_indexes
     assert ("idempotency_key",) not in unique_run_indexes
 

@@ -421,6 +421,32 @@ class ModelInstall(TimestampMixin, Base):
     active: Mapped[bool] = mapped_column(Boolean, default=True)
 
 
+class ModelAssetInstall(TimestampMixin, Base):
+    __tablename__ = "model_asset_installs"
+
+    id: Mapped[str] = mapped_column(
+        String(40),
+        primary_key=True,
+        default=lambda: new_id("asset"),
+    )
+    source_id: Mapped[str | None] = mapped_column(
+        ForeignKey("model_sources.id", ondelete="SET NULL"),
+        nullable=True,
+        index=True,
+    )
+    name: Mapped[str] = mapped_column(String(300), index=True)
+    kind: Mapped[str] = mapped_column(String(40), index=True)
+    family: Mapped[str | None] = mapped_column(String(100), nullable=True, index=True)
+    local_path: Mapped[str] = mapped_column(Text)
+    size_bytes: Mapped[int] = mapped_column(Integer, default=0)
+    manifest_json: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
+    active: Mapped[bool] = mapped_column(Boolean, default=False, index=True)
+    verified_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True),
+        nullable=True,
+    )
+
+
 class ModelComponentManifest(TimestampMixin, Base):
     __tablename__ = "model_component_manifests"
     __table_args__ = (

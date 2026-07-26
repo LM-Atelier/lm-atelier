@@ -23,7 +23,10 @@ _BLOCKED_SUFFIXES = {".bin", ".pt", ".pth", ".ckpt", ".pkl", ".pickle"}
 
 
 def _automatic_selection(
-    files: dict[str, dict[str, Any]], role: str, system_memory_bytes: int
+    files: dict[str, dict[str, Any]],
+    role: str,
+    system_memory_bytes: int,
+    auxiliary_kind: str | None = None,
 ) -> list[str]:
     if role == "chat":
         try:
@@ -38,6 +41,16 @@ def _automatic_selection(
     ]
     if not safe_weights:
         return []
+    if auxiliary_kind:
+        ranked = sorted(
+            safe_weights,
+            key=lambda item: (
+                auxiliary_kind not in str(item.get("filename") or "").casefold(),
+                -int(item.get("size") or 0),
+                str(item.get("filename") or ""),
+            ),
+        )
+        return [str(ranked[0]["filename"])]
     primary_markers = ("diffusion", "checkpoint", "model", "unet", "t2v", "i2v")
     dependency_markers = ("vae", "text_encoder", "text_encoders", "clip_vision")
 
@@ -103,7 +116,12 @@ def assess_catalog_install(
             selected = (
                 automatic_gguf_selection(detail.files, system.memory_total_bytes)
                 if request.role == "chat"
-                else _automatic_selection(files, request.role, system.memory_total_bytes)
+                else _automatic_selection(
+                    files,
+                    request.role,
+                    system.memory_total_bytes,
+                    request.auxiliary_kind,
+                )
             )
         except GGUFSelectionError as exc:
             selection_error = str(exc)
@@ -362,6 +380,7 @@ def assess_catalog_install(
         estimated_vram_bytes=estimated_vram,
         can_install=not any(check.status == "block" for check in checks),
         checks=checks,
+        auxiliary_kind=request.auxiliary_kind,
     )
 
 

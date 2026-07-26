@@ -18,6 +18,7 @@ from sqlalchemy.orm import Session, selectinload
 from starlette.responses import FileResponse
 
 from . import __version__
+from .auxiliary_assets import COMFY_AUXILIARY_FOLDERS, validate_lora_workflow_contract
 from .capability_evidence import current_capability_evidence, evidence_input_modalities
 from .capability_probe import probe_structured_tools
 from .catalog import HuggingFaceCatalog
@@ -71,6 +72,7 @@ from .models import (
     Job,
     Message,
     MessagePart,
+    ModelAssetInstall,
     ModelInstall,
     ModelProfile,
     Project,
@@ -127,6 +129,8 @@ from .schemas import (
     HealthOut,
     JobOut,
     MessageOut,
+    ModelAssetOut,
+    ModelAssetUpdate,
     ModelCapabilityEvidenceOut,
     ModelImport,
     ModelInstallOut,
@@ -1963,6 +1967,7 @@ async def catalog_preflight(
             workflow_template_sha256=result.workflow_template_sha256,
             comfy_paths=result.comfy_paths,
             source_remote_id=result.source_remote_id,
+            auxiliary_kind=payload.auxiliary_kind,
         )
         if inspection_error:
             resolved = resolved.blocked(
@@ -1980,6 +1985,35 @@ async def catalog_preflight(
         plan = persist_install_plan(session, resolved)
         session.commit()
         return result.model_copy(update={"install_plan": plan})
+
+    if payload.auxiliary_kind:
+        if payload.role != "image":
+            result = assess_catalog_install(detail, payload, services.settings, system)
+            return await finalize(
+                result.model_copy(
+                    update={
+                        "can_install": False,
+                        "checks": [
+                            *result.checks,
+                            CatalogPreflightCheck(
+                                id="auxiliary-role",
+                                label="Asset role",
+                                status="block",
+                                detail="LoRA assets currently extend image workflows.",
+                            ),
+                        ],
+                    }
+                ),
+                detail,
+            )
+        return await finalize(
+            assess_catalog_install(detail, payload, services.settings, system).model_copy(
+                update={
+                    "comfy_paths": {COMFY_AUXILIARY_FOLDERS[payload.auxiliary_kind]: "."},
+                }
+            ),
+            detail,
+        )
 
     if (
         payload.role == "chat"
@@ -2235,6 +2269,7 @@ async def create_download(payload: DownloadRequest, request: Request, session: S
                 "comfy_paths": runtime.get("comfy_paths") or {},
                 "workflow_template_id": runtime.get("workflow_template_id"),
                 "workflow_template_sha256": runtime.get("workflow_template_sha256"),
+                "auxiliary_kind": runtime.get("auxiliary_kind"),
             }
             supplied = payload.model_dump()
             mismatched = [key for key, value in expected.items() if supplied.get(key) != value]
@@ -2346,6 +2381,192 @@ async def list_models(request: Request, session: SessionDep) -> list[ModelInstal
     ]
 
 
+@router.get("/model-assets", response_model=list[ModelAssetOut])
+async def list_model_assets(
+    session: SessionDep,
+    kind: str | None = None,
+) -> list[ModelAssetInstall]:
+    statement = select(ModelAssetInstall)
+    if kind:
+        if kind not in COMFY_AUXILIARY_FOLDERS:
+            raise HTTPException(422, "unsupported model asset kind")
+        statement = statement.where(ModelAssetInstall.kind == kind)
+    return list(
+        session.scalars(statement.order_by(ModelAssetInstall.name, ModelAssetInstall.id)).all()
+    )
+
+
+@router.patch("/model-assets/{asset_id}", response_model=ModelAssetOut)
+async def update_model_asset(
+    asset_id: str,
+    payload: ModelAssetUpdate,
+    request: Request,
+    session: SessionDep,
+) -> ModelAssetInstall:
+    services = _services(request)
+    asset = session.get(ModelAssetInstall, asset_id)
+    if not asset:
+        raise HTTPException(404, "model asset not found")
+    if payload.active and not asset.verified_at:
+        raise HTTPException(409, "only a verified model asset can be enabled")
+    async with services.scheduler.lease("primary"):
+        previous_active = asset.active
+        was_running = next(
+            worker.running for worker in services.processes.statuses() if worker.name == "media"
+        )
+        asset.active = payload.active
+        session.commit()
+        if was_running:
+            try:
+                await services.processes.start_media()
+            except Exception:
+                asset.active = previous_active
+                session.commit()
+                with suppress(Exception):
+                    await services.processes.start_media()
+                raise
+    session.refresh(asset)
+    return asset
+
+
+@router.delete("/model-assets/{asset_id}", status_code=204)
+async def delete_model_asset(
+    asset_id: str,
+    request: Request,
+    session: SessionDep,
+) -> Response:
+    services = _services(request)
+    async with services.scheduler.lease("primary"):
+        asset = session.get(ModelAssetInstall, asset_id)
+        if not asset:
+            raise HTTPException(404, "model asset not found")
+        was_running = next(
+            worker.running for worker in services.processes.statuses() if worker.name == "media"
+        )
+        deletion_error: BaseException | None = None
+        try:
+            if was_running:
+                await services.processes.stop("media")
+            quarantine = _delete_model_asset_locked(asset, services.settings.model_dir, session)
+            try:
+                await asyncio.to_thread(_finalize_model_quarantine, quarantine)
+            except Exception:
+                logger.warning(
+                    "Deleted auxiliary model files remain safely quarantined at %s",
+                    quarantine,
+                    exc_info=True,
+                )
+        except BaseException as exc:
+            deletion_error = exc
+            raise
+        finally:
+            if was_running and not next(
+                worker.running for worker in services.processes.statuses() if worker.name == "media"
+            ):
+                try:
+                    await services.processes.start_media()
+                except Exception:
+                    if deletion_error is None:
+                        raise
+                    logger.exception(
+                        "Could not restore the media worker after auxiliary deletion failed"
+                    )
+    return Response(status_code=204)
+
+
+def _delete_model_asset_locked(
+    asset: ModelAssetInstall,
+    model_dir: Path,
+    session: Session,
+) -> Path | None:
+    model_root = model_dir.resolve()
+    try:
+        path = _managed_model_path(model_root, asset.local_path)
+        recover_model_delete_quarantines(session, model_root, strict=True)
+    except ValueError as exc:
+        raise HTTPException(422, str(exc)) from exc
+    moves: list[tuple[Path, Path]] = []
+    quarantine: Path | None = None
+    commit_started = False
+    try:
+        session.flush()
+        if (
+            path is not None
+            and path.exists()
+            and not _model_asset_path_is_shared(
+                session,
+                asset,
+                model_root,
+                path,
+            )
+        ):
+            _ensure_model_tree_link_free(path)
+            quarantine = _new_model_quarantine(model_root, asset.id)
+            staged = quarantine / "payload"
+            os.replace(path, staged)
+            moves.append((staged, path))
+        session.delete(asset)
+        session.flush()
+        commit_started = True
+        session.commit()
+    except Exception:
+        with suppress(Exception):
+            session.rollback()
+        committed = _model_asset_delete_was_committed(asset.id) if commit_started else False
+        if committed is True:
+            return quarantine
+        if committed is None:
+            logger.error(
+                "Could not determine auxiliary deletion outcome; leaving files in quarantine %s",
+                quarantine,
+                exc_info=True,
+            )
+            raise
+        try:
+            _restore_model_moves(moves)
+        except Exception:
+            logger.exception(
+                "Auxiliary deletion rollback left recoverable files in quarantine %s",
+                quarantine,
+            )
+        else:
+            with suppress(Exception):
+                _finalize_model_quarantine(quarantine)
+        raise
+    return quarantine
+
+
+def _model_asset_path_is_shared(
+    session: Session,
+    asset: ModelAssetInstall,
+    model_root: Path,
+    path: Path,
+) -> bool:
+    candidates: list[ModelInstall | ModelAssetInstall] = [
+        *session.scalars(select(ModelInstall)).all(),
+        *session.scalars(select(ModelAssetInstall).where(ModelAssetInstall.id != asset.id)).all(),
+    ]
+    for candidate in candidates:
+        try:
+            sibling = _managed_model_path(model_root, candidate.local_path)
+        except ValueError:
+            return True
+        if sibling is not None and (
+            sibling == path or sibling in path.parents or path in sibling.parents
+        ):
+            return True
+    return False
+
+
+def _model_asset_delete_was_committed(asset_id: str) -> bool | None:
+    try:
+        with SessionLocal() as verification:
+            return verification.get(ModelAssetInstall, asset_id) is None
+    except Exception:
+        logger.exception("Could not verify the auxiliary model deletion database outcome")
+        return None
+
+
 @router.get("/models/storage", response_model=ModelStorageInfo)
 async def model_storage(request: Request, session: SessionDep) -> ModelStorageInfo:
     settings = _services(request).settings
@@ -2354,10 +2575,19 @@ async def model_storage(request: Request, session: SessionDep) -> ModelStorageIn
         installed_bytes=_path_size(settings.model_dir),
         partial_download_bytes=sum(_path_size(path) for path in partials),
         catalog_cache_bytes=_path_size(settings.catalog_cache_dir),
-        installed_count=session.scalar(
-            select(func.count(ModelInstall.id)).where(ModelInstall.active.is_(True))
+        installed_count=(
+            session.scalar(select(func.count(ModelInstall.id)).where(ModelInstall.active.is_(True)))
+            or 0
         )
-        or 0,
+        + (
+            session.scalar(
+                select(func.count(ModelAssetInstall.id)).where(
+                    ModelAssetInstall.active.is_(True),
+                    ModelAssetInstall.verified_at.is_not(None),
+                )
+            )
+            or 0
+        ),
         partial_download_count=len(partials),
     )
 
@@ -2901,7 +3131,11 @@ def recover_model_delete_quarantines(
                 or len(marker_model_id) > 200
             ):
                 raise ValueError("model deletion quarantine has an invalid owner")
-            install = session.get(ModelInstall, marker_model_id)
+            install: ModelInstall | ModelAssetInstall | None = session.get(
+                ModelInstall, marker_model_id
+            )
+            if install is None:
+                install = session.get(ModelAssetInstall, marker_model_id)
             if install is None:
                 _finalize_model_quarantine(quarantine)
                 continue
@@ -3527,6 +3761,14 @@ async def list_workflows(session: SessionDep) -> list[WorkflowDefinition]:
 
 @router.post("/workflows", response_model=WorkflowOut, status_code=201)
 async def create_workflow(payload: WorkflowCreate, session: SessionDep) -> WorkflowDefinition:
+    try:
+        validate_lora_workflow_contract(
+            payload.api_graph,
+            payload.input_schema,
+            payload.dependencies,
+        )
+    except ValueError as exc:
+        raise HTTPException(422, str(exc)) from exc
     definition = WorkflowDefinition(
         name=payload.name,
         operation=payload.operation.value,
@@ -3655,6 +3897,14 @@ async def create_workflow_revision(
     definition = session.get(WorkflowDefinition, workflow_id)
     if not definition:
         raise HTTPException(404, "workflow not found")
+    try:
+        validate_lora_workflow_contract(
+            payload.api_graph,
+            payload.input_schema,
+            payload.dependencies,
+        )
+    except ValueError as exc:
+        raise HTTPException(422, str(exc)) from exc
     version = (
         session.scalar(
             select(func.max(WorkflowRevision.version)).where(

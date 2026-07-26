@@ -701,6 +701,17 @@ class CatalogPreflightRequest(ApiModel):
     role: Literal["chat", "image", "video"]
     engine: str = Field(min_length=1, max_length=32)
     selected_files: list[str] = Field(default_factory=list, max_length=512)
+    auxiliary_kind: (
+        Literal[
+            "lora",
+            "vae",
+            "controlnet",
+            "upscaler",
+            "embedding",
+            "ip_adapter",
+        ]
+        | None
+    ) = None
 
 
 class CatalogPreflightCheck(ApiModel):
@@ -726,6 +737,7 @@ class CatalogPreflight(ApiModel):
     can_install: bool
     checks: list[CatalogPreflightCheck]
     install_plan: InstallPlanOut | None = None
+    auxiliary_kind: str | None = None
 
 
 class DownloadRequest(ApiModel):
@@ -744,6 +756,35 @@ class DownloadRequest(ApiModel):
     workflow_template_id: str | None = None
     workflow_template_sha256: str | None = None
     default_settings: dict[str, Any] = Field(default_factory=dict)
+    auxiliary_kind: (
+        Literal[
+            "lora",
+            "vae",
+            "controlnet",
+            "upscaler",
+            "embedding",
+            "ip_adapter",
+        ]
+        | None
+    ) = None
+
+
+class ModelAssetOut(ApiModel):
+    id: str
+    source_id: str | None
+    name: str
+    kind: str
+    family: str | None
+    size_bytes: int
+    manifest_json: dict[str, Any]
+    active: bool
+    verified_at: datetime | None
+    created_at: datetime
+    updated_at: datetime
+
+
+class ModelAssetUpdate(ApiModel):
+    active: bool
 
 
 class RecipeFile(ApiModel):

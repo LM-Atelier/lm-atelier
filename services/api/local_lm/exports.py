@@ -30,6 +30,8 @@ from .models import (
     GenerationPreset,
     Message,
     MessagePart,
+    ModelAssetInstall,
+    ModelSource,
     Project,
     ResponseRevision,
     ResponseRevisionPart,
@@ -48,6 +50,14 @@ from .project_portability import has_local_path, redact_local_paths
 from .schemas import ChatDetail, ProjectOut, RunOut, VisionSettings
 
 _CAS_IMPORT_SESSION_KEY = "lm_atelier_project_import_cas"
+_AUXILIARY_ASSET_KINDS = {
+    "lora",
+    "vae",
+    "controlnet",
+    "upscaler",
+    "embedding",
+    "ip_adapter",
+}
 
 
 class _ImportCasTransaction:
@@ -231,9 +241,15 @@ class ProjectExporter:
             )
             record["error"] = redact_local_paths(record["error"])
             run_records.append(record)
+        auxiliary_requirements, auxiliary_references = self._auxiliary_requirements(
+            session,
+            [project_record, *chat_records, *run_records],
+        )
+        for record in [project_record, *chat_records, *run_records]:
+            self._remap_auxiliary_asset_references(record, auxiliary_references)
         manifest = {
             "format": "local-lm-project",
-            "version": 5,
+            "version": 6,
             "media_included": include_media,
             "project": project_record,
             "chats": chat_records,
@@ -255,6 +271,7 @@ class ProjectExporter:
                 for artifact in sorted(referenced.values(), key=lambda item: item.id)
             ],
             "dependencies": dependency_manifest,
+            "auxiliary_requirements": auxiliary_requirements,
         }
         if has_local_path([record["provenance_json"] for record in run_records]):
             raise ValueError("project export contains a non-portable local path")
@@ -284,7 +301,7 @@ class ProjectExporter:
                 original_name=f"{self._safe_name(project.name)}.lm-atelier.zip",
                 metadata={
                     "format": "local-lm-project",
-                    "version": 5,
+                    "version": 6,
                     "project_id": project.id,
                     "artifact_count": len(referenced),
                     "media_included": include_media,
@@ -307,6 +324,188 @@ class ProjectExporter:
         if name in {"", ".", ".."}:
             name = artifact.sha256
         return f"artifacts/{artifact.sha256}/{name}"
+
+    @staticmethod
+    def _remap_auxiliary_asset_references(
+        value: object,
+        mappings: dict[str, str],
+    ) -> None:
+        stack = [value]
+        while stack:
+            current = stack.pop()
+            if isinstance(current, dict):
+                asset_id = current.get("asset_id")
+                if isinstance(asset_id, str) and asset_id in mappings:
+                    current["asset_id"] = mappings[asset_id]
+                stack.extend(current.values())
+            elif isinstance(current, list):
+                stack.extend(current)
+
+    @classmethod
+    def _auxiliary_requirements(
+        cls,
+        session: Session,
+        records: list[object],
+    ) -> tuple[list[dict[str, Any]], dict[str, str]]:
+        referenced_ids: set[str] = set()
+        stack = list(records)
+        while stack:
+            current = stack.pop()
+            if isinstance(current, dict):
+                asset_id = current.get("asset_id")
+                if isinstance(asset_id, str):
+                    referenced_ids.add(asset_id)
+                stack.extend(current.values())
+            elif isinstance(current, list):
+                stack.extend(current)
+        if not referenced_ids:
+            return [], {}
+
+        assets = session.scalars(
+            select(ModelAssetInstall).where(ModelAssetInstall.id.in_(referenced_ids))
+        ).all()
+        source_ids = {asset.source_id for asset in assets if asset.source_id}
+        sources = {
+            source.id: source
+            for source in (
+                session.scalars(select(ModelSource).where(ModelSource.id.in_(source_ids))).all()
+                if source_ids
+                else []
+            )
+        }
+        requirements: dict[str, dict[str, Any]] = {}
+        mappings: dict[str, str] = {}
+        for asset in sorted(assets, key=lambda item: item.id):
+            digest = asset.manifest_json.get("sha256")
+            if (
+                not isinstance(digest, str)
+                or len(digest) != 64
+                or any(character not in "0123456789abcdef" for character in digest)
+            ):
+                raise ValueError(
+                    f"auxiliary asset {asset.name!r} has no immutable verified checksum"
+                )
+            if asset.kind not in _AUXILIARY_ASSET_KINDS:
+                raise ValueError(f"auxiliary asset {asset.name!r} has an unsupported kind")
+            reference = f"auxiliary:{asset.kind}:sha256:{digest}"
+            source = sources.get(asset.source_id or "")
+            metadata = asset.manifest_json.get("metadata")
+            hints: dict[str, Any] = {}
+            if isinstance(metadata, dict):
+                network_type = metadata.get("network_type")
+                rank = metadata.get("rank")
+                trigger_words = metadata.get("trigger_words")
+                if isinstance(network_type, str):
+                    hints["network_type"] = network_type[:120]
+                if isinstance(rank, int) and not isinstance(rank, bool) and 0 < rank <= 1_000_000:
+                    hints["rank"] = rank
+                if isinstance(trigger_words, list):
+                    hints["trigger_words"] = [
+                        word[:200] for word in trigger_words[:100] if isinstance(word, str) and word
+                    ]
+            requirement: dict[str, Any] = {
+                "id": reference,
+                "kind": asset.kind,
+                "name": asset.name[:300],
+                "family": asset.family,
+                "sha256": digest,
+                "size_bytes": asset.size_bytes,
+                "metadata": hints,
+            }
+            if source:
+                requirement["source"] = {
+                    "provider": source.provider,
+                    "remote_id": source.remote_id,
+                    "revision": source.revision,
+                }
+            requirements.setdefault(reference, requirement)
+            mappings[asset.id] = reference
+        return [requirements[key] for key in sorted(requirements)], mappings
+
+    @staticmethod
+    def _validate_auxiliary_requirements(value: object) -> None:
+        if not isinstance(value, list) or len(value) > 1_000:
+            raise ValueError("project manifest has invalid auxiliary requirements")
+        seen_ids: set[str] = set()
+        seen_hashes: set[tuple[str, str]] = set()
+        for requirement in value:
+            if not isinstance(requirement, dict):
+                raise ValueError("project manifest has an invalid auxiliary requirement")
+            kind = requirement.get("kind")
+            digest = requirement.get("sha256")
+            reference = requirement.get("id")
+            if (
+                not isinstance(kind, str)
+                or kind not in _AUXILIARY_ASSET_KINDS
+                or not isinstance(digest, str)
+                or len(digest) != 64
+                or any(character not in "0123456789abcdef" for character in digest)
+                or reference != f"auxiliary:{kind}:sha256:{digest}"
+            ):
+                raise ValueError("project manifest has an invalid auxiliary requirement identity")
+            if reference in seen_ids or (kind, digest) in seen_hashes:
+                raise ValueError("project manifest has duplicate auxiliary requirements")
+            seen_ids.add(reference)
+            seen_hashes.add((kind, digest))
+            name = requirement.get("name")
+            family = requirement.get("family")
+            size_bytes = requirement.get("size_bytes")
+            metadata = requirement.get("metadata")
+            if (
+                not isinstance(name, str)
+                or not name
+                or len(name) > 300
+                or (family is not None and (not isinstance(family, str) or len(family) > 100))
+                or not isinstance(size_bytes, int)
+                or isinstance(size_bytes, bool)
+                or size_bytes < 0
+                or not isinstance(metadata, dict)
+            ):
+                raise ValueError("project manifest has invalid auxiliary requirement metadata")
+            source = requirement.get("source")
+            if source is not None and (
+                not isinstance(source, dict)
+                or not isinstance(source.get("provider"), str)
+                or not isinstance(source.get("remote_id"), str)
+                or not isinstance(source.get("revision"), str)
+                or len(source["provider"]) > 32
+                or len(source["remote_id"]) > 500
+                or len(source["revision"]) > 200
+            ):
+                raise ValueError("project manifest has an invalid auxiliary requirement source")
+
+    @staticmethod
+    def _resolve_auxiliary_requirements(
+        session: Session,
+        manifest: dict[str, Any],
+    ) -> dict[str, str]:
+        if manifest["version"] < 6:
+            return {}
+        requirements = manifest["auxiliary_requirements"]
+        identities = {
+            (str(requirement["kind"]), str(requirement["sha256"])): str(requirement["id"])
+            for requirement in requirements
+        }
+        if not identities:
+            return {}
+        candidates = session.scalars(
+            select(ModelAssetInstall).where(
+                ModelAssetInstall.kind.in_({kind for kind, _digest in identities}),
+                ModelAssetInstall.verified_at.is_not(None),
+            )
+        ).all()
+        resolved: dict[str, ModelAssetInstall] = {}
+        for candidate in candidates:
+            digest = candidate.manifest_json.get("sha256")
+            if not isinstance(digest, str):
+                continue
+            reference = identities.get((candidate.kind, digest))
+            if not reference:
+                continue
+            existing = resolved.get(reference)
+            if existing is None or (candidate.active and not existing.active):
+                resolved[reference] = candidate
+        return {reference: asset.id for reference, asset in resolved.items()}
 
     def _sanitize_exported_message_metadata(
         self,
@@ -708,6 +907,8 @@ class ProjectExporter:
                     dependency_source_index(dependency_model) if dependency_model else None
                 )
                 self._validate_record_graph(manifest, dependency_index)
+                auxiliary_mappings = self._resolve_auxiliary_requirements(session, manifest)
+                self._remap_auxiliary_asset_references(manifest, auxiliary_mappings)
                 if manifest["version"] >= 3:
                     self._validate_v3_archive_entries(infos, manifest)
                 artifact_map = self._import_artifacts(
@@ -780,7 +981,7 @@ class ProjectExporter:
             manifest.get("format") != "local-lm-project"
             or not isinstance(version, int)
             or isinstance(version, bool)
-            or version not in {1, 2, 3, 4, 5}
+            or version not in {1, 2, 3, 4, 5, 6}
         ):
             raise ValueError("unsupported project archive format")
         if not isinstance(manifest.get("project"), dict):
@@ -794,6 +995,8 @@ class ProjectExporter:
             raise ValueError("project manifest has an invalid media inclusion flag")
         if version >= 3 and not isinstance(manifest.get("dependencies"), dict):
             raise ValueError("project manifest is missing portable dependencies")
+        if version >= 6:
+            ProjectExporter._validate_auxiliary_requirements(manifest.get("auxiliary_requirements"))
 
     @staticmethod
     def _reject_json_constant(value: str) -> None:

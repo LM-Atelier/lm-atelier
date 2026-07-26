@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import copy
 import fnmatch
 import hashlib
 import json
@@ -21,6 +22,11 @@ from sqlalchemy.orm import Session
 
 from .adapters.base import ChatAdapter, ChatRequest, MediaRequest
 from .adapters.contracts import ADAPTER_CONTRACT_VERSION
+from .auxiliary_assets import (
+    COMFY_AUXILIARY_FOLDERS,
+    checkpoint_lora_extension,
+    validate_lora_workflow_contract,
+)
 from .comfy_templates import (
     COMFY_TEMPLATE_COMPILER_VERSION,
     ComfyTemplateRegistry,
@@ -50,6 +56,7 @@ from .model_planner import (
 from .models import (
     InstallPlan,
     Job,
+    ModelAssetInstall,
     ModelCapabilityEvidence,
     ModelComponentManifest,
     ModelInstall,
@@ -124,9 +131,17 @@ class DownloadManager:
             raise ValueError("remote_id must be in owner/model form")
         if request.source_remote_id and not _REMOTE_ID.fullmatch(request.source_remote_id):
             raise ValueError("source_remote_id must be in owner/model form")
+        if request.auxiliary_kind and not request.install_plan_id:
+            raise ValueError("auxiliary assets require a verified install plan")
         if request.role != "chat" and not request.comfy_paths:
             request = request.model_copy(
-                update={"comfy_paths": self._automatic_comfy_paths(request.allow_patterns)}
+                update={
+                    "comfy_paths": (
+                        {COMFY_AUXILIARY_FOLDERS[request.auxiliary_kind]: "."}
+                        if request.auxiliary_kind
+                        else self._automatic_comfy_paths(request.allow_patterns)
+                    )
+                }
             )
         if request.workflow_template_id:
             template = self.comfy_templates.validate_download(
@@ -152,6 +167,11 @@ class DownloadManager:
             "text_encoders",
             "vae",
             "clip_vision",
+            "loras",
+            "controlnet",
+            "upscale_models",
+            "embeddings",
+            "ipadapter",
         }
         for folder, relative_path in request.comfy_paths.items():
             path = PurePosixPath(relative_path)
@@ -218,6 +238,11 @@ class DownloadManager:
             "text_encoders",
             "vae",
             "clip_vision",
+            "loras",
+            "controlnet",
+            "upscale_models",
+            "embeddings",
+            "ipadapter",
         }
         paths: dict[str, str] = {}
         for filename in filenames:
@@ -286,21 +311,35 @@ class DownloadManager:
         actual = {item.path: (item.kind, item.target_folder) for item in inspection.components}
         if set(expected) != set(actual):
             raise ValueError("downloaded model components do not match the install plan")
+        auxiliary_kind = plan.runtime_contract_json.get("auxiliary_kind")
         for path, planned_contract in expected.items():
             inspected_contract = actual[path]
             # Filename-only planning intentionally starts conservatively. A
             # bounded real header may refine generic safe-tensor weights into
             # a more specific declarative component, but never into executable
             # or auxiliary content.
-            if planned_contract != inspected_contract and planned_contract[0] not in {
-                "checkpoint",
-                "unknown_safetensors",
-            }:
+            if auxiliary_kind and (
+                planned_contract[0] != auxiliary_kind or inspected_contract[0] != auxiliary_kind
+            ):
+                raise ValueError(f"downloaded auxiliary asset contract changed for {path}")
+            if (
+                not auxiliary_kind
+                and planned_contract != inspected_contract
+                and planned_contract[0] not in {"checkpoint", "unknown_safetensors"}
+            ):
                 raise ValueError(f"downloaded component contract changed for {path}")
-            if inspected_contract[0] in {"lora", "unknown_safetensors", "metadata"}:
+            if not auxiliary_kind and inspected_contract[0] in {
+                "lora",
+                "unknown_safetensors",
+                "metadata",
+            }:
                 raise ValueError(f"downloaded primary model component is unsupported: {path}")
             if path not in component_hashes:
                 raise ValueError(f"downloaded component could not be verified: {path}")
+        if auxiliary_kind:
+            if auxiliary_kind != "lora":
+                raise ValueError("this auxiliary asset kind is not enabled")
+            return
         kinds = {item.kind for item in inspection.components}
         if plan.role == "chat" and "gguf_model" not in kinds:
             raise ValueError("downloaded chat bundle has no primary GGUF model")
@@ -682,6 +721,7 @@ class DownloadManager:
         from .db import SessionLocal
 
         provisional_install_id: str | None = None
+        provisional_asset_id: str | None = None
         provisional_path: Path | None = None
         provisional_files: list[str] = []
         retained_staging: Path | None = None
@@ -995,6 +1035,120 @@ class DownloadManager:
                 )
                 default_settings = {**template_defaults, **request.default_settings}
 
+                if request.auxiliary_kind:
+                    if not inspection or len(inspection.components) != 1:
+                        raise ValueError("an auxiliary install must contain one verified component")
+                    component = inspection.components[0]
+                    with SessionLocal() as session:
+                        source = session.scalar(
+                            select(ModelSource).where(
+                                ModelSource.provider == "huggingface",
+                                ModelSource.remote_id == request.remote_id,
+                                ModelSource.revision == revision,
+                            )
+                        )
+                        if not source:
+                            source = ModelSource(
+                                provider="huggingface",
+                                remote_id=request.remote_id,
+                                revision=revision,
+                                metadata_json={
+                                    "pipeline_tag": info.pipeline_tag,
+                                    "tags": info.tags or [],
+                                    "gated": info.gated,
+                                },
+                            )
+                            session.add(source)
+                            session.flush()
+                        asset = ModelAssetInstall(
+                            id=new_id("asset"),
+                            source_id=source.id,
+                            name=request.remote_id.rsplit("/", 1)[-1],
+                            kind=request.auxiliary_kind,
+                            family=component.family or inspection.family,
+                            local_path=str(destination),
+                            size_bytes=installed_size,
+                            manifest_json={
+                                "remote_id": request.remote_id,
+                                "revision": revision,
+                                "files": filenames,
+                                "expected_sha256": resolved_sha256,
+                                "sha256": resolved_sha256[component.path],
+                                "comfy_name": component.path,
+                                "metadata": component.metadata,
+                                "comfy_paths": request.comfy_paths,
+                            },
+                            active=False,
+                        )
+                        session.add(asset)
+                        session.flush()
+                        provisional_asset_id = asset.id
+                        job = session.get(Job, job_id)
+                        if not job:
+                            return
+                        update_job_progress(
+                            job,
+                            stage="validating auxiliary asset",
+                            completed_units=completed_bytes if total_size else None,
+                            total_units=total_size or None,
+                            unit="bytes" if total_size else None,
+                            queue_resource="primary_compute",
+                            indeterminate=True,
+                        )
+                        job.result_json = {
+                            "_provisional_model_asset": {
+                                "model_asset_id": asset.id,
+                                "local_path": str(destination),
+                            }
+                        }
+                        session.commit()
+
+                    if not self.processes or not self.media_adapter:
+                        raise RuntimeError("automatic ComfyUI asset activation is unavailable")
+                    previous_media_running = next(
+                        status for status in self.processes.statuses() if status.name == "media"
+                    ).running
+                    async with self.scheduler.lease("primary"):
+                        await self.processes.start_media((destination, request.comfy_paths))
+                        self.media_adapter.invalidate_object_info_cache()
+                        object_info = await self.media_adapter.object_info()
+                        if request.auxiliary_kind == "lora" and "LoraLoader" not in object_info:
+                            raise RuntimeError(
+                                "The active ComfyUI runtime does not provide the core LoRA loader."
+                            )
+                        if not previous_media_running:
+                            await self.processes.stop("media")
+
+                    with SessionLocal() as session:
+                        activated_asset = session.get(ModelAssetInstall, provisional_asset_id)
+                        job = session.get(Job, job_id)
+                        if not activated_asset or not job:
+                            return
+                        activated_asset.active = True
+                        activated_asset.verified_at = utcnow()
+                        job.status = JobStatus.COMPLETE.value
+                        job.completed_at = utcnow()
+                        job.result_json = {"model_asset_id": activated_asset.id}
+                        completed_progress(job)
+                        if request.install_plan_id:
+                            completed_plan = session.get(InstallPlan, request.install_plan_id)
+                            if completed_plan:
+                                completed_plan.status = "activated"
+                                completed_plan.failure_code = None
+                                completed_plan.failure_reason = None
+                        session.commit()
+                        asset_id = activated_asset.id
+                    provisional_asset_id = None
+                    provisional_path = None
+                    provisional_files = []
+                    await self.scheduler.publish_job(job_id)
+                    await self.events.publish(
+                        "download.completed",
+                        job_id,
+                        {"model_asset_id": asset_id},
+                    )
+                    return
+
                 with SessionLocal() as session:
                     source = session.scalar(
                         select(ModelSource).where(
@@ -1038,6 +1192,7 @@ class DownloadManager:
                             "workflow_template_id": request.workflow_template_id,
                             "workflow_template_sha256": request.workflow_template_sha256,
                             "default_settings": default_settings,
+                            "family": inspection.family if inspection else None,
                         },
                         active=compiled_template is None and not request.install_plan_id,
                     )
@@ -1154,6 +1309,11 @@ class DownloadManager:
                     {"model_install_id": install_id, "profile_id": profile_id},
                 )
         except asyncio.CancelledError:
+            if provisional_asset_id:
+                with SessionLocal() as session:
+                    if stale_asset := session.get(ModelAssetInstall, provisional_asset_id):
+                        session.delete(stale_asset)
+                        session.commit()
             if retained_staging and provisional_path:
                 self._retain_verified_staging(
                     provisional_path,
@@ -1170,6 +1330,11 @@ class DownloadManager:
             raise
         except Exception as exc:
             try:
+                if provisional_asset_id:
+                    with SessionLocal() as session:
+                        if stale_asset := session.get(ModelAssetInstall, provisional_asset_id):
+                            session.delete(stale_asset)
+                            session.commit()
                 if retained_staging and provisional_path:
                     self._retain_verified_staging(
                         provisional_path,
@@ -1704,29 +1869,49 @@ class DownloadManager:
             if current and isinstance(current.dependencies_json.get("model_install_ids"), list)
             else set()
         )
+        lora_extension = checkpoint_lora_extension(compiled.api_graph)
+        current_extensions = current.dependencies_json.get("extensions") if current else None
+        current_lora_extension = (
+            current_extensions.get("lora") if isinstance(current_extensions, dict) else None
+        )
         if (
             current
             and current.dependencies_json.get("template_sha256") == compiled.template.sha256
             and current.dependencies_json.get("compiler_version") == COMFY_TEMPLATE_COMPILER_VERSION
             and install.id in declared_installs
+            and (not lora_extension or current_lora_extension == lora_extension)
         ):
             return current
         version = max((item.version for item in definition.revisions), default=0) + 1
+        input_schema = copy.deepcopy(compiled.input_schema)
+        if lora_extension:
+            properties = input_schema.setdefault("properties", {})
+            if isinstance(properties, dict):
+                properties["loras"] = {
+                    "type": "array",
+                    "title": "LoRAs",
+                    "description": "Optional verified LoRAs applied in order.",
+                    "default": [],
+                    "maxItems": 8,
+                }
+        dependencies = {
+            "model_install_ids": sorted({install.id, *declared_installs}),
+            "compiler_version": COMFY_TEMPLATE_COMPILER_VERSION,
+            "template_id": compiled.template.id,
+            "template_sha256": compiled.template.sha256,
+            "model_files": compiled.template.selected_files,
+            "custom_nodes": [],
+            "extensions": ({"lora": lora_extension} if lora_extension else {}),
+        }
+        validate_lora_workflow_contract(compiled.api_graph, input_schema, dependencies)
         revision = WorkflowRevision(
             workflow_id=definition.id,
             version=version,
             engine="comfyui",
             ui_graph_json=compiled.ui_graph,
             api_graph_json=compiled.api_graph,
-            input_schema_json=compiled.input_schema,
-            dependencies_json={
-                "model_install_ids": sorted({install.id, *declared_installs}),
-                "compiler_version": COMFY_TEMPLATE_COMPILER_VERSION,
-                "template_id": compiled.template.id,
-                "template_sha256": compiled.template.sha256,
-                "model_files": compiled.template.selected_files,
-                "custom_nodes": [],
-            },
+            input_schema_json=input_schema,
+            dependencies_json=dependencies,
             trusted=True,
         )
         session.add(revision)

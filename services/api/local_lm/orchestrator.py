@@ -19,6 +19,12 @@ from sqlalchemy.orm import Session, object_session, selectinload
 
 from .adapters.base import ChatRequest, MediaEvent, MediaRequest
 from .artifacts import ArtifactStore
+from .auxiliary_assets import (
+    LORA_GRAPH_TRANSFORM_VERSION,
+    resolve_lora_stack,
+    transform_lora_graph,
+    workflow_lora_extension,
+)
 from .capability_evidence import current_capability_evidence, evidence_input_modalities
 from .custom_nodes import custom_node_dependency_errors
 from .db import SessionLocal
@@ -743,6 +749,16 @@ class ConversationOrchestrator:
             ),
             turn_overrides=request_settings,
         )
+        lora_resolution = None
+        if plan.operation != Operation.TEXT and effective_settings.get("loras"):
+            if not workflow_revision:
+                raise ValueError("LoRA settings require a selected media workflow.")
+            lora_resolution = resolve_lora_stack(
+                session,
+                workflow_revision,
+                effective_settings["loras"],
+            )
+            effective_settings["loras"] = lora_resolution.settings
         effective_preset = preset_layers[-1] if preset_layers else None
         if plan.operation != Operation.TEXT and effective_settings.get("seed") == -1:
             effective_settings["seed"] = secrets.randbelow(2_147_483_648)
@@ -1055,6 +1071,15 @@ class ConversationOrchestrator:
                     "count": output_count,
                     "slot": output_slot,
                 },
+                "auxiliary_assets": (
+                    {
+                        "lora_stack": lora_resolution.provenance,
+                        "graph_transform_version": LORA_GRAPH_TRANSFORM_VERSION,
+                        "effective_graph_sha256": lora_resolution.graph_sha256,
+                    }
+                    if lora_resolution
+                    else None
+                ),
                 **(
                     {
                         "response_replacement": {
@@ -1340,6 +1365,16 @@ class ConversationOrchestrator:
                 ),
                 turn_overrides=step_overrides,
             )
+            lora_resolution = None
+            if operation != Operation.TEXT and effective_settings.get("loras"):
+                if not workflow_revision:
+                    raise ValueError("LoRA settings require a selected media workflow.")
+                lora_resolution = resolve_lora_stack(
+                    session,
+                    workflow_revision,
+                    effective_settings["loras"],
+                )
+                effective_settings["loras"] = lora_resolution.settings
             if operation != Operation.TEXT and effective_settings.get("seed") == -1:
                 effective_settings["seed"] = secrets.randbelow(2_147_483_648)
             estimate = (
@@ -1370,6 +1405,7 @@ class ConversationOrchestrator:
                     "effective_preset": preset_layers[-1] if preset_layers else None,
                     "estimate": estimate,
                     "generation_estimate": generation_estimate,
+                    "lora_resolution": lora_resolution,
                 }
             )
 
@@ -1617,6 +1653,15 @@ class ConversationOrchestrator:
                     "resolved_settings": resolved["settings"],
                     "generation_estimate": resolved["generation_estimate"],
                     "plan_step_estimate": resolved["estimate"],
+                    "auxiliary_assets": (
+                        {
+                            "lora_stack": resolved["lora_resolution"].provenance,
+                            "graph_transform_version": LORA_GRAPH_TRANSFORM_VERSION,
+                            "effective_graph_sha256": resolved["lora_resolution"].graph_sha256,
+                        }
+                        if resolved["lora_resolution"]
+                        else None
+                    ),
                 },
             )
             session.add(run)
@@ -2672,6 +2717,37 @@ class ConversationOrchestrator:
                     if dependency_errors:
                         raise RuntimeError("; ".join(dependency_errors))
                     workflow = revision.api_graph_json
+                    if run.settings_json.get("loras"):
+                        resolved_loras = resolve_lora_stack(
+                            session,
+                            revision,
+                            run.settings_json["loras"],
+                        )
+                        extension = workflow_lora_extension(revision)
+                        if not extension:
+                            raise RuntimeError(
+                                "The selected workflow no longer provides its LoRA extension."
+                            )
+                        workflow = transform_lora_graph(
+                            workflow,
+                            extension,
+                            [
+                                {
+                                    "comfy_name": item["comfy_name"],
+                                    "model_strength": item["model_strength"],
+                                    "clip_strength": item["clip_strength"],
+                                }
+                                for item in resolved_loras.provenance
+                                if item["enabled"]
+                            ],
+                        )
+                        expected_graph = (run.provenance_json.get("auxiliary_assets") or {}).get(
+                            "effective_graph_sha256"
+                        )
+                        if expected_graph != resolved_loras.graph_sha256:
+                            raise RuntimeError(
+                                "The effective LoRA graph changed after this run was queued."
+                            )
             request = MediaRequest(
                 run_id=run.id,
                 operation=run.operation,
