@@ -185,9 +185,11 @@ async def test_media_handoff_recycles_managed_comfy_before_chat_resume() -> None
     orchestrator._resume_chat_worker = resume  # type: ignore[method-assign]
 
     await orchestrator._complete_media_handoff("profile-chat")
+    if orchestrator._media_restart_task:
+        await orchestrator._media_restart_task
 
     assert order[0] == "stop media"
-    assert set(order[1:]) == {"start media", "resume chat"}
+    assert order[1:] == ["resume chat", "start media"]
 
 
 async def test_media_handoff_preloads_the_next_queued_text_profile() -> None:
@@ -232,8 +234,55 @@ async def test_media_handoff_preloads_the_next_queued_text_profile() -> None:
     orchestrator._resume_chat_worker = resume  # type: ignore[method-assign]
 
     await orchestrator._complete_media_handoff("profile-previous")
+    if orchestrator._media_restart_task:
+        await orchestrator._media_restart_task
 
     resume.assert_awaited_once_with("profile-next")
+
+
+async def test_media_execution_awaits_inflight_handoff_restart() -> None:
+    restart_release = asyncio.Event()
+    restart_entered = asyncio.Event()
+    start_calls = 0
+
+    async def start_media() -> None:
+        nonlocal start_calls
+        start_calls += 1
+        restart_entered.set()
+        await restart_release.wait()
+
+    processes = SimpleNamespace(
+        statuses=Mock(
+            return_value=[
+                WorkerStatus(
+                    name="media",
+                    state="ready",
+                    managed=True,
+                    running=True,
+                    pid=22,
+                )
+            ]
+        ),
+        start_media=start_media,
+    )
+    orchestrator = ConversationOrchestrator(
+        engines=SimpleNamespace(settings=SimpleNamespace()),
+        artifacts=Mock(),
+        events=Mock(),
+        scheduler=Mock(),
+        processes=processes,
+    )
+    orchestrator._schedule_media_restart()
+    await restart_entered.wait()
+    ensure_task = asyncio.create_task(orchestrator._ensure_media_worker())
+    await asyncio.sleep(0)
+
+    assert start_calls == 1
+
+    restart_release.set()
+    await ensure_task
+
+    assert start_calls == 1
 
 
 async def test_external_media_handoff_only_resumes_chat() -> None:
