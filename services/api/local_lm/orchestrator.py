@@ -2918,19 +2918,21 @@ class ConversationOrchestrator:
                     playback_artifact = artifact
                     proxy_result = await self.artifacts.browser_video_proxy(artifact)
                     if proxy_result:
-                        proxy_content, proxy_media_type, proxy_name = proxy_result
-                        proxy = self.artifacts.ingest_bytes(
-                            session,
-                            proxy_content,
-                            kind=ArtifactKind.OTHER,
-                            media_type=proxy_media_type,
-                            original_name=proxy_name,
-                            metadata={
-                                "run_id": run.id,
-                                "browser_proxy": True,
-                                "proxy_for": artifact.id,
-                            },
-                        )
+                        try:
+                            proxy = self.artifacts.ingest_path(
+                                session,
+                                proxy_result.path,
+                                kind=ArtifactKind.OTHER,
+                                media_type=proxy_result.media_type,
+                                original_name=proxy_result.original_name,
+                                metadata={
+                                    "run_id": run.id,
+                                    "browser_proxy": True,
+                                    "proxy_for": artifact.id,
+                                },
+                            )
+                        finally:
+                            proxy_result.discard()
                         proxy_artifact_id = proxy.id
                         playback_artifact = proxy
                         artifact.metadata_json = {

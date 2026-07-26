@@ -12,6 +12,7 @@ from sqlalchemy import select, update
 
 from local_lm.adapters.base import MediaEvent, MediaRequest
 from local_lm.adapters.mock import MockMediaAdapter
+from local_lm.artifacts import StagedArtifactFile
 from local_lm.auxiliary_assets import checkpoint_lora_extension
 from local_lm.db import SessionLocal
 from local_lm.domain import utcnow
@@ -442,3 +443,45 @@ async def test_video_postprocessing_never_holds_a_sqlite_write_transaction(
     assert accepted.status_code == 202
     await _wait_for_run(client, accepted.json()["run"]["id"])
     assert poster_checked.is_set()
+
+
+async def test_video_proxy_is_ingested_from_disk_and_staging_is_removed(
+    app,
+    client: AsyncClient,
+    monkeypatch,
+) -> None:  # type: ignore[no-untyped-def]
+    proxy_content = b"file-backed-proxy-output"
+    staged_path = app.state.services.artifacts.root / "owned-proxy-test.mp4"
+
+    async def staged_proxy(_artifact) -> StagedArtifactFile:  # type: ignore[no-untyped-def]
+        staged_path.write_bytes(proxy_content)
+        return StagedArtifactFile(
+            path=staged_path,
+            media_type="video/mp4",
+            original_name="owned-proxy.mp4",
+        )
+
+    async def no_poster(_artifact) -> None:  # type: ignore[no-untyped-def]
+        return None
+
+    monkeypatch.setattr(
+        app.state.services.artifacts,
+        "browser_video_proxy",
+        staged_proxy,
+    )
+    monkeypatch.setattr(app.state.services.artifacts, "video_poster", no_poster)
+    chat = (await client.post("/api/chats", json={"title": "File-backed proxy"})).json()
+    accepted = await client.post(
+        f"/api/chats/{chat['id']}/turns",
+        json={"text": "Create a short video of a blue wheel", "mode": "video"},
+    )
+    assert accepted.status_code == 202
+
+    run = await _wait_for_run(client, accepted.json()["run"]["id"])
+    proxy_id = run["provenance_json"]["outputs"][0]["browser_proxy_artifact_id"]
+
+    assert proxy_id
+    assert not staged_path.exists()
+    delivered = await client.get(f"/api/artifacts/{proxy_id}/content")
+    assert delivered.status_code == 200
+    assert delivered.content == proxy_content

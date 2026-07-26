@@ -41,6 +41,16 @@ class RetentionCleanupSummary:
     reclaimed_bytes: int
 
 
+@dataclass(frozen=True)
+class StagedArtifactFile:
+    path: Path
+    media_type: str
+    original_name: str
+
+    def discard(self) -> None:
+        self.path.unlink(missing_ok=True)
+
+
 class ArtifactStore:
     def __init__(self, settings: Settings, *, root: Path | None = None) -> None:
         self.root = (root or settings.artifact_dir).resolve()
@@ -264,7 +274,7 @@ class ArtifactStore:
             return None
         return stdout if process.returncode == 0 and stdout else None
 
-    async def browser_video_proxy(self, artifact: Artifact) -> tuple[bytes, str, str] | None:
+    async def browser_video_proxy(self, artifact: Artifact) -> StagedArtifactFile | None:
         if artifact.media_type in {"video/mp4", "video/webm"}:
             return None
         executable = shutil.which("ffmpeg")
@@ -273,6 +283,7 @@ class ArtifactStore:
         fd, temporary_name = tempfile.mkstemp(prefix="video-proxy-", suffix=".mp4", dir=self.root)
         os.close(fd)
         temporary = Path(temporary_name)
+        retained = False
         try:
             process = await asyncio.create_subprocess_exec(
                 executable,
@@ -302,10 +313,11 @@ class ArtifactStore:
             await asyncio.wait_for(process.communicate(), timeout=600)
             if process.returncode or not temporary.is_file() or temporary.stat().st_size == 0:
                 return None
-            return (
-                temporary.read_bytes(),
-                "video/mp4",
-                f"{artifact.original_name or 'video'}.proxy.mp4",
+            retained = True
+            return StagedArtifactFile(
+                path=temporary,
+                media_type="video/mp4",
+                original_name=f"{artifact.original_name or 'video'}.proxy.mp4",
             )
         except (OSError, TimeoutError):
             if "process" in locals() and process.returncode is None:
@@ -313,7 +325,8 @@ class ArtifactStore:
                 await process.wait()
             return None
         finally:
-            temporary.unlink(missing_ok=True)
+            if not retained:
+                temporary.unlink(missing_ok=True)
 
     def delete_temporary_preview(self, session: Session, artifact_id: str) -> bool:
         artifact = session.get(Artifact, artifact_id)
