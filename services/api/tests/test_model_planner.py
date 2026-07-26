@@ -40,6 +40,24 @@ def _gguf(fields: dict[str, str], *, tensors: int = 12) -> bytes:
     return bytes(payload)
 
 
+def _gguf_with_large_string_array(*, item_count: int, architecture: str) -> bytes:
+    payload = bytearray(b"GGUF")
+    payload.extend(struct.pack("<IQQ", 3, 12, 2))
+    array_key = b"tokenizer.ggml.tokens"
+    payload.extend(struct.pack("<Q", len(array_key)))
+    payload.extend(array_key)
+    payload.extend(struct.pack("<IIQ", 9, 8, item_count))
+    payload.extend(struct.pack("<Q", 0) * item_count)
+    architecture_key = b"general.architecture"
+    encoded_architecture = architecture.encode()
+    payload.extend(struct.pack("<Q", len(architecture_key)))
+    payload.extend(architecture_key)
+    payload.extend(struct.pack("<I", 8))
+    payload.extend(struct.pack("<Q", len(encoded_architecture)))
+    payload.extend(encoded_architecture)
+    return bytes(payload)
+
+
 def test_static_inspector_resolves_unknown_repository_by_config_and_headers() -> None:
     files = {
         "config.json": json.dumps(
@@ -204,6 +222,22 @@ def test_static_inspector_reads_gguf_architecture_without_filename_guessing() ->
     assert inspection.family == "qwen"
     assert plan.compatibility == "supported"
     assert plan.activation_probe["kind"] == "chat_completion"
+
+
+def test_static_inspector_skips_large_gguf_token_arrays_without_materializing_them() -> None:
+    inspection = inspect_repository_metadata(
+        {
+            "qwen.gguf": _gguf_with_large_string_array(
+                item_count=100_001,
+                architecture="qwen35",
+            )
+        },
+        ["qwen.gguf"],
+        role="chat",
+    )
+
+    assert inspection.architecture == "qwen35"
+    assert inspection.family == "qwen"
 
 
 def test_static_inspector_rejects_oversized_and_unsafe_metadata() -> None:

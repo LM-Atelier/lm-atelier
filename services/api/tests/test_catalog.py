@@ -74,6 +74,33 @@ def test_default_chat_download_includes_matching_multimodal_projector() -> None:
     ]
 
 
+def test_qwen36_chat_download_selects_main_model_and_vision_projector_only() -> None:
+    gib = 1024**3
+    request = DownloadRequest(
+        remote_id="ggml-org/Qwen3.6-27B-GGUF",
+        role="chat",
+        engine="llama.cpp",
+    )
+
+    files = DownloadManager._select_files(
+        request,
+        [
+            Sibling("Qwen3.6-27B-BF16.gguf", 53 * gib, "a" * 64),
+            Sibling("Qwen3.6-27B-Q4_K_M.gguf", 19 * gib, "b" * 64),
+            Sibling("Qwen3.6-27B-Q8_0.gguf", 28 * gib, "c" * 64),
+            Sibling("dflash-Qwen3.6-27B-Q8_0.gguf", 2 * gib, "d" * 64),
+            Sibling("mtp-Qwen3.6-27B-Q4_0.gguf", 2 * gib, "e" * 64),
+            Sibling("mmproj-Qwen3.6-27B-BF16.gguf", 1 * gib, "f" * 64),
+            Sibling("mmproj-Qwen3.6-27B-Q8_0.gguf", 700 * 1024**2, "1" * 64),
+        ],
+    )
+
+    assert files == [
+        "Qwen3.6-27B-Q4_K_M.gguf",
+        "mmproj-Qwen3.6-27B-BF16.gguf",
+    ]
+
+
 def test_chat_download_selects_every_shard_from_one_quantization() -> None:
     request = DownloadRequest(
         remote_id="owner/model",

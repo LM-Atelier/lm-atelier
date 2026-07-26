@@ -13,7 +13,7 @@ MAX_METADATA_BYTES = 1024 * 1024
 MAX_WEIGHT_HEADER_BYTES = 16 * 1024 * 1024
 MAX_METADATA_NODES = 100_000
 MAX_GGUF_FIELDS = 4_096
-MAX_GGUF_ARRAY_ITEMS = 100_000
+MAX_GGUF_NESTING = 8
 
 _GGUF_SCALAR_FORMATS = {
     0: "<B",
@@ -300,16 +300,18 @@ def _inspect_gguf(path: PurePosixPath, content: bytes) -> InspectedComponent:
     if field_count > MAX_GGUF_FIELDS:
         raise ModelManifestError("GGUF metadata has too many fields")
     fields: dict[str, Any] = {}
+    retained_fields = {
+        "general.architecture",
+        "general.name",
+        "general.type",
+        "clip.projector_type",
+    }
     for _ in range(field_count):
         key = cursor.string()
         value_type = cursor.scalar("<I")
-        value = _read_gguf_value(cursor, value_type)
-        if key in {
-            "general.architecture",
-            "general.name",
-            "general.type",
-            "clip.projector_type",
-        }:
+        retain = key in retained_fields
+        value = _read_gguf_value(cursor, value_type, retain=retain)
+        if retain:
             fields[key] = value
     architecture = _printable_metadata(fields.get("general.architecture"))
     projector = "mmproj" in path.name.casefold() or "clip.projector_type" in fields
@@ -339,6 +341,15 @@ class _BinaryCursor:
         self.position += length
         return result
 
+    @property
+    def remaining(self) -> int:
+        return len(self.content) - self.position
+
+    def skip(self, length: int) -> None:
+        if length < 0 or self.position + length > len(self.content):
+            raise ModelManifestError("weight header is truncated")
+        self.position += length
+
     def scalar(self, format_string: str) -> Any:
         size = struct.calcsize(format_string)
         return struct.unpack(format_string, self.read(size))[0]
@@ -352,19 +363,60 @@ class _BinaryCursor:
         except UnicodeDecodeError as exc:
             raise ModelManifestError("weight metadata string is invalid") from exc
 
+    def skip_string(self) -> None:
+        length = self.scalar("<Q")
+        if length > MAX_METADATA_BYTES:
+            raise ModelManifestError("weight metadata string exceeds the size limit")
+        self.skip(length)
 
-def _read_gguf_value(cursor: _BinaryCursor, value_type: int) -> Any:
+
+def _read_gguf_value(
+    cursor: _BinaryCursor,
+    value_type: int,
+    *,
+    retain: bool,
+    depth: int = 0,
+) -> Any:
+    if depth > MAX_GGUF_NESTING:
+        raise ModelManifestError("GGUF metadata arrays are nested too deeply")
     if value_type in _GGUF_SCALAR_FORMATS:
-        return cursor.scalar(_GGUF_SCALAR_FORMATS[value_type])
+        format_string = _GGUF_SCALAR_FORMATS[value_type]
+        if retain:
+            return cursor.scalar(format_string)
+        cursor.skip(struct.calcsize(format_string))
+        return None
     if value_type == 8:
-        return cursor.string()
+        if retain:
+            return cursor.string()
+        cursor.skip_string()
+        return None
     if value_type == 9:
         item_type = cursor.scalar("<I")
         item_count = cursor.scalar("<Q")
-        if item_count > MAX_GGUF_ARRAY_ITEMS:
-            raise ModelManifestError("GGUF metadata array exceeds the item limit")
-        values = [_read_gguf_value(cursor, item_type) for _ in range(item_count)]
-        return values[:128]
+        if item_type in _GGUF_SCALAR_FORMATS:
+            format_string = _GGUF_SCALAR_FORMATS[item_type]
+            item_size = struct.calcsize(format_string)
+            retained_count = min(item_count, 128) if retain else 0
+            values = [cursor.scalar(format_string) for _ in range(retained_count)]
+            cursor.skip((item_count - retained_count) * item_size)
+            return values if retain else None
+        if item_type not in {8, 9}:
+            raise ModelManifestError("GGUF metadata uses an unknown array item type")
+        minimum_item_size = 8 if item_type == 8 else 12
+        if item_count > cursor.remaining // minimum_item_size:
+            raise ModelManifestError("weight header is truncated")
+        values = []
+        for index in range(item_count):
+            keep = retain and index < 128
+            value = _read_gguf_value(
+                cursor,
+                item_type,
+                retain=keep,
+                depth=depth + 1,
+            )
+            if keep:
+                values.append(value)
+        return values if retain else None
     raise ModelManifestError("GGUF metadata uses an unknown value type")
 
 

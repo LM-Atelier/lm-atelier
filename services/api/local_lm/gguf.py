@@ -22,8 +22,8 @@ _QUANTIZATION_PRIORITY = {
     "q2_k": 7,
 }
 _MMPROJ_PRECISION_PRIORITY = {
-    "f16": 0,
-    "bf16": 1,
+    "bf16": 0,
+    "f16": 1,
     "q8_0": 2,
     "q6_k": 3,
     "q5_k_m": 4,
@@ -37,9 +37,9 @@ _IDENTITY_IGNORED_TOKENS = {
     "vision",
     "projector",
     *{
-        component
+        token
         for quantization in (*_QUANTIZATION_PRIORITY, *_MMPROJ_PRECISION_PRIORITY)
-        for component in quantization.split("_")
+        for token in re.findall(r"[a-z]+|\d+b?", quantization.casefold())
     },
 }
 
