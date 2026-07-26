@@ -3,7 +3,7 @@ from __future__ import annotations
 import asyncio
 import math
 import secrets
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Callable
 from contextlib import asynccontextmanager, suppress
 from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING, Any, cast
@@ -44,12 +44,19 @@ _TERMINAL_STATUSES = {
 class ResourceScheduler:
     """Durable job tickets plus legacy leases for non-job administration."""
 
-    def __init__(self, events: EventBroker | None = None) -> None:
-        self._locks: dict[str, asyncio.Semaphore] = {}
-        self._capacities: dict[str, int] = {}
+    def __init__(
+        self,
+        events: EventBroker | None = None,
+        *,
+        session_factory: Callable[[], Session] = SessionLocal,
+        resource_pool: ResourceScheduler | None = None,
+    ) -> None:
+        self._locks: dict[str, asyncio.Semaphore] = resource_pool._locks if resource_pool else {}
+        self._capacities: dict[str, int] = resource_pool._capacities if resource_pool else {}
         self._queue_events: dict[str, asyncio.Event] = {}
         self._owner = f"dispatcher_{secrets.token_hex(16)}"
         self._events = events
+        self.session_factory = session_factory
 
     @asynccontextmanager
     async def lease(self, device_id: str = "primary") -> AsyncIterator[None]:
@@ -109,7 +116,7 @@ class ResourceScheduler:
             for expired_job_id in self._expire_foreign_claims(group):
                 await self._publish_job(expired_job_id)
             changed = False
-            with SessionLocal() as session:
+            with self.session_factory() as session:
                 job = session.get(Job, job_id)
                 if not job or job.status in _TERMINAL_STATUSES:
                     raise asyncio.CancelledError
@@ -291,7 +298,7 @@ class ResourceScheduler:
     async def _heartbeat(self, job_id: str, token: str) -> None:
         while True:
             await asyncio.sleep(_HEARTBEAT_SECONDS)
-            with SessionLocal() as session:
+            with self.session_factory() as session:
                 now = utcnow()
                 result = cast(
                     CursorResult[Any],
@@ -317,7 +324,7 @@ class ResourceScheduler:
 
         now = utcnow()
         error = "The dispatcher lease expired before this job completed."
-        with SessionLocal() as session:
+        with self.session_factory() as session:
             jobs = session.scalars(
                 select(Job).where(
                     Job.queue_group == group,
@@ -386,7 +393,7 @@ class ResourceScheduler:
         return expired_ids
 
     async def _release_job(self, job_id: str, token: str, group: str) -> None:
-        with SessionLocal() as session:
+        with self.session_factory() as session:
             session.execute(
                 update(Job)
                 .where(Job.id == job_id, Job.claim_owner == token)
@@ -403,7 +410,7 @@ class ResourceScheduler:
     async def _publish_job(self, job_id: str) -> None:
         if not self._events:
             return
-        with SessionLocal() as session:
+        with self.session_factory() as session:
             job = session.get(Job, job_id)
             if not job:
                 return

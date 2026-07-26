@@ -777,3 +777,181 @@ def test_managed_output_cleanup_rejects_external_temporary_and_unsafe_paths(
     finally:
         asyncio.run(managed.close())
         asyncio.run(external.close())
+
+
+async def test_private_run_purge_removes_history_outputs_and_uploaded_inputs(
+    tmp_path: Path,
+) -> None:
+    output_root = tmp_path / "output"
+    temp_root = tmp_path / "temp"
+    output = output_root / "LMAtelier" / "private.png"
+    uploaded = temp_root / "lm-atelier" / "conditioning.png"
+    output.parent.mkdir(parents=True)
+    uploaded.parent.mkdir(parents=True)
+    output.write_bytes(b"private output")
+    uploaded.write_bytes(b"private input")
+    deleted_history: list[str] = []
+
+    async def comfy(request: httpx.Request) -> httpx.Response:
+        if request.method == "GET" and request.url.path == "/history/private-prompt":
+            return httpx.Response(
+                200,
+                json={
+                    "private-prompt": {
+                        "outputs": {
+                            "save": {
+                                "images": [
+                                    {
+                                        "filename": output.name,
+                                        "subfolder": "LMAtelier",
+                                        "type": "output",
+                                    }
+                                ],
+                            },
+                        },
+                    },
+                },
+            )
+        if request.method == "POST" and request.url.path == "/history":
+            deleted_history.append(request.read().decode())
+            return httpx.Response(200, json={})
+        if request.method == "POST" and request.url.path == "/interrupt":
+            return httpx.Response(200, json={})
+        raise AssertionError(f"unexpected ComfyUI request: {request.method} {request.url}")
+
+    adapter = ComfyUIAdapter(
+        "http://comfy.test",
+        managed_output_root=output_root,
+        managed_temp_root=temp_root,
+    )
+    await adapter._client.aclose()
+    adapter._client = httpx.AsyncClient(
+        base_url="http://comfy.test",
+        transport=httpx.MockTransport(comfy),
+    )
+    adapter._completed_jobs["private-run"] = "private-prompt"
+    adapter._uploads["private-run"] = ["lm-atelier/conditioning.png [temp]"]
+    try:
+        await adapter.purge_run("private-run")
+    finally:
+        await adapter.close()
+
+    assert not output.exists()
+    assert not uploaded.exists()
+    assert [json.loads(item) for item in deleted_history] == [{"delete": ["private-prompt"]}]
+    assert "private-run" not in adapter._completed_jobs
+    assert "private-run" not in adapter._uploads
+
+
+async def test_private_uploads_are_scoped_and_tracked_before_later_upload_failure(
+    tmp_path: Path,
+) -> None:
+    scope_id = f"scope_{'a' * 48}"
+    sources = [tmp_path / "first.png", tmp_path / "second.png"]
+    for source in sources:
+        source.write_bytes(b"\x89PNG\r\n\x1a\nprivate")
+    calls = 0
+
+    async def upload(request: httpx.Request) -> httpx.Response:
+        nonlocal calls
+        calls += 1
+        body = request.read()
+        assert f"lm-atelier/incognito/{scope_id}".encode() in body
+        if calls == 2:
+            return httpx.Response(500)
+        return httpx.Response(
+            200,
+            json={
+                "name": "first.png",
+                "subfolder": f"lm-atelier/incognito/{scope_id}",
+                "type": "temp",
+            },
+        )
+
+    adapter = ComfyUIAdapter("http://comfy.test")
+    await adapter._client.aclose()
+    adapter._client = httpx.AsyncClient(
+        base_url="http://comfy.test",
+        transport=httpx.MockTransport(upload),
+    )
+    request = MediaRequest(
+        run_id="private-partial-upload",
+        operation="image_to_image",
+        prompt="Synthetic private edit",
+        negative_prompt=None,
+        input_paths=sources,
+        workflow={},
+        parameters={},
+        persistence_scope="incognito",
+        scope_id=scope_id,
+    )
+    try:
+        with pytest.raises(httpx.HTTPStatusError):
+            await adapter._upload_inputs(request)
+    finally:
+        await adapter.close()
+
+    assert adapter._uploads[request.run_id] == [f"lm-atelier/incognito/{scope_id}/first.png [temp]"]
+
+
+async def test_stale_private_scope_cleanup_is_bounded_to_managed_roots(
+    tmp_path: Path,
+) -> None:
+    scope_id = f"scope_{'b' * 48}"
+    output_root = tmp_path / "output"
+    temp_root = tmp_path / "temp"
+    abandoned_output = output_root / "LMAtelier" / "abandoned.png"
+    private_input_root = temp_root / "lm-atelier" / "incognito" / scope_id
+    private_input = private_input_root / "conditioning.png"
+    durable_input = temp_root / "lm-atelier" / "durable.png"
+    for path in (abandoned_output, private_input, durable_input):
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_bytes(b"synthetic")
+    deleted_history: list[dict[str, Any]] = []
+
+    async def comfy(request: httpx.Request) -> httpx.Response:
+        if request.method == "GET" and request.url.path == "/history":
+            return httpx.Response(
+                200,
+                json={
+                    "private-prompt": {
+                        "prompt": [
+                            1,
+                            "private-prompt",
+                            {},
+                            {
+                                "lm_atelier_scope": scope_id,
+                            },
+                        ],
+                    },
+                    "durable-prompt": {
+                        "prompt": [2, "durable-prompt", {}, {}],
+                    },
+                },
+            )
+        if request.method == "GET" and request.url.path == "/history/private-prompt":
+            return httpx.Response(200, json={"private-prompt": {"outputs": {}}})
+        if request.method == "POST" and request.url.path == "/history":
+            deleted_history.append(json.loads(request.read()))
+            return httpx.Response(200, json={})
+        raise AssertionError(f"unexpected ComfyUI request: {request.method} {request.url}")
+
+    adapter = ComfyUIAdapter(
+        "http://comfy.test",
+        managed_output_root=output_root,
+        managed_temp_root=temp_root,
+    )
+    await adapter._client.aclose()
+    adapter._client = httpx.AsyncClient(
+        base_url="http://comfy.test",
+        transport=httpx.MockTransport(comfy),
+    )
+    try:
+        await adapter.purge_stale_scope_files(scope_id)
+    finally:
+        await adapter.close()
+
+    assert not abandoned_output.exists()
+    assert not private_input_root.exists()
+    assert durable_input.exists()
+    assert deleted_history == [{"delete": ["private-prompt"]}]

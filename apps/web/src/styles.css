@@ -54,6 +54,12 @@ button:focus-visible, a:focus-visible, input:focus-visible, textarea:focus-visib
 .new-chat { width: 100%; margin-bottom: 10px; }
 .new-chat:hover, .primary:hover { filter: brightness(1.1); transform: translateY(-1px); }
 .new-chat:disabled, .primary:disabled { opacity: .55; cursor: default; transform: none; }
+.incognito-toggle { width: 100%; display: flex; align-items: center; justify-content: center; gap: 8px; border: 1px solid #4f463a; border-radius: 9px; background: #1e1a16; color: #c9bcaa; padding: 8px 10px; cursor: pointer; }
+.incognito-toggle:hover { border-color: var(--terracotta-soft); color: var(--cream); }
+.incognito-toggle.active { border-color: #c47b5c; background: #41261d; color: #ffd8c5; box-shadow: inset 3px 0 var(--terracotta); }
+.incognito-toggle:disabled { opacity: .55; cursor: default; }
+.incognito .sidebar { border-right-color: #684333; background: linear-gradient(180deg, rgba(35, 25, 20, .99), rgba(18, 17, 15, .99)); }
+.incognito-disclosure { margin: 0 7px 8px; color: #aa9686; font-size: 9px; line-height: 1.45; }
 .primary-nav { border-bottom: 1px solid var(--border); padding: 5px 0 12px; margin-bottom: 12px; }
 .primary-nav button, .sidebar-footer > button { border: 0; background: transparent; color: #bcc3cf; border-radius: 8px; display: flex; width: 100%; align-items: center; gap: 10px; padding: 9px 10px; cursor: pointer; }
 .primary-nav button svg, .sidebar-footer > button svg { width: 17px; }
@@ -148,6 +154,7 @@ h1, h2, h3 { margin: 0; }
 .media-card.preview { border-color: var(--accent); opacity: .82; }
 .media-card.preview img { filter: saturate(.82); }
 .media-card figcaption { display: flex; align-items: center; gap: 7px; padding: 9px 12px; color: #858e9e; font-size: 12px; }
+.media-card figcaption a { margin-left: auto; color: var(--accent); }
 .composer-wrap { position: absolute; bottom: 0; left: 0; right: 0; padding: 35px max(24px, calc((100% - 860px) / 2)) 18px; background: linear-gradient(transparent, var(--bg) 28%); }
 .composer { background: var(--panel); border: 1px solid var(--border); border-radius: 16px; padding: 12px 13px 10px; box-shadow: 0 16px 50px #0007; }
 .composer:focus-within { border-color: #4269a8; box-shadow: 0 16px 50px #0007, 0 0 0 2px #315a9a26; }

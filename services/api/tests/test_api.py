@@ -26,6 +26,7 @@ from local_lm.config import Settings
 from local_lm.db import SessionLocal
 from local_lm.domain import JobStatus, utcnow
 from local_lm.downloads import DownloadManager
+from local_lm.incognito import INCOGNITO_HEADER
 from local_lm.main import create_app
 from local_lm.models import (
     Artifact,
@@ -1622,6 +1623,58 @@ async def test_chat_pending_admission_limit_is_bounded(
         assert "32 pending items" in rejected.json()["detail"]
 
     await wait_for_run(client, accepted["run"]["id"])
+
+
+async def test_incognito_conversation_and_artifact_never_enter_durable_storage(
+    app: FastAPI,
+    client: AsyncClient,
+    settings: Settings,
+) -> None:
+    marker = "INCOGNITO-MARKER-7c4ef64c"
+    durable = (await client.post("/api/chats", json={"title": "Durable control"})).json()
+    started = await client.post("/api/incognito/session")
+    assert started.status_code == 201
+    token = started.json()["token"]
+    assert "forensic erasure" in started.json()["disclosure"]
+    assert app.state.services.incognito
+    scope = app.state.services.incognito.require(token)
+    scope_root = scope.root
+
+    client.headers[INCOGNITO_HEADER] = token
+    private_chat = (await client.post("/api/chats", json={"title": "Private session"})).json()
+    accepted = (
+        await client.post(
+            f"/api/chats/{private_chat['id']}/turns",
+            json={"text": marker, "mode": "text"},
+        )
+    ).json()
+    await wait_for_run(client, accepted["run"]["id"])
+    uploaded = await client.post(
+        "/api/artifacts",
+        files={"file": ("marker.txt", marker.encode(), "text/plain")},
+    )
+    assert uploaded.status_code == 201
+    content = await client.get(f"/api/artifacts/{uploaded.json()['id']}/content")
+    assert content.content == marker.encode()
+    assert content.headers["cache-control"] == "no-store"
+
+    del client.headers[INCOGNITO_HEADER]
+    durable_chats = (await client.get("/api/chats?include_archived=true")).json()
+    assert [chat["id"] for chat in durable_chats] == [durable["id"]]
+    with SessionLocal() as session:
+        assert not session.scalar(select(MessagePart).where(MessagePart.text.contains(marker)))
+    durable_artifact_bytes = b"".join(
+        path.read_bytes() for path in settings.artifact_dir.rglob("*") if path.is_file()
+    )
+    assert marker.encode() not in durable_artifact_bytes
+
+    client.headers[INCOGNITO_HEADER] = token
+    ended = await client.delete("/api/incognito/session")
+    assert ended.status_code == 204
+    assert not scope_root.exists()
+    assert (await client.get(f"/api/chats/{private_chat['id']}")).status_code == 404
+    del client.headers[INCOGNITO_HEADER]
+    assert (await client.get(f"/api/chats/{durable['id']}")).status_code == 200
 
 
 async def test_active_chat_run_can_be_cancelled_directly(client: AsyncClient) -> None:

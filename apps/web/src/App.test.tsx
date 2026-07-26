@@ -75,6 +75,12 @@ const roleAwareMediaEngine: EngineCapabilities = {
 vi.mock("./api", () => ({
   api: {
     initialize: vi.fn().mockResolvedValue(undefined),
+    hasIncognitoSession: vi.fn().mockReturnValue(false),
+    startIncognito: vi.fn(),
+    validateIncognito: vi.fn().mockResolvedValue(true),
+    endIncognito: vi.fn(),
+    incognitoEvents: vi.fn().mockResolvedValue([]),
+    artifactBlob: vi.fn(),
     projects: vi.fn().mockResolvedValue([]),
     chats: vi.fn().mockResolvedValue([]),
     chat: vi.fn(),
@@ -232,6 +238,9 @@ describe("App", () => {
       value: { writeText: clipboardWrite },
     });
     localStorage.clear();
+    sessionStorage.clear();
+    vi.mocked(api.hasIncognitoSession).mockReturnValue(false);
+    vi.mocked(api.validateIncognito).mockResolvedValue(true);
     vi.mocked(api.projects).mockResolvedValue([]);
     vi.mocked(api.profiles).mockResolvedValue([]);
     vi.mocked(api.presets).mockResolvedValue([]);
@@ -284,6 +293,113 @@ describe("App", () => {
     fireEvent.click(modelLibrary);
     expect(modelLibrary).toHaveAttribute("aria-current", "page");
     await waitFor(() => expect(document.getElementById("main-content")).toHaveFocus());
+  });
+
+  it("starts a private chat without replacing the durable chat selection", async () => {
+    const stamp = "2026-07-26T00:00:00Z";
+    const privateChat: Chat = {
+      id: "private-chat",
+      project_id: null,
+      title: "New chat",
+      archived: false,
+      routing_mode: "auto",
+      confirm_uncertain_media: false,
+      active_chat_profile_id: null,
+      active_image_profile_id: null,
+      active_video_profile_id: null,
+      active_head_message_id: null,
+      created_at: stamp,
+      updated_at: stamp,
+    };
+    localStorage.setItem("local-lm-chat", "durable-chat");
+    vi.mocked(api.startIncognito).mockResolvedValue({
+      token: "opaque-private-token",
+      event_epoch: "private-epoch",
+      event_sequence: 0,
+      disclosure: "Private session disclosure",
+    });
+    vi.mocked(api.createChat).mockResolvedValue(privateChat);
+    vi.mocked(api.validateIncognito).mockResolvedValue(true);
+    vi.mocked(api.chat).mockImplementation(async (id) => ({
+      ...privateChat,
+      id,
+      messages: [],
+    }));
+
+    const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+    render(
+      <QueryClientProvider client={client}>
+        <App />
+      </QueryClientProvider>,
+    );
+
+    fireEvent.click(await screen.findByRole("button", { name: "Start Incognito" }));
+    expect(await screen.findByRole("button", { name: "End Incognito" })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "New private chat" })).toBeInTheDocument();
+    expect(screen.getByText(/Incognito is not forensic erasure/)).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Media library" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "New project" })).not.toBeInTheDocument();
+    expect(localStorage.getItem("local-lm-chat")).toBe("durable-chat");
+  });
+
+  it("ends a restored private session and returns to durable storage", async () => {
+    vi.mocked(api.hasIncognitoSession).mockReturnValue(true);
+    vi.mocked(api.validateIncognito).mockReturnValue(new Promise<boolean>(() => undefined));
+    vi.mocked(api.endIncognito).mockResolvedValue(undefined);
+    localStorage.setItem("local-lm-chat", "durable-chat");
+    const confirm = vi.spyOn(window, "confirm").mockReturnValue(true);
+    vi.mocked(api.chat).mockResolvedValue({
+      id: "durable-chat",
+      project_id: null,
+      title: "Durable chat",
+      archived: false,
+      routing_mode: "auto",
+      confirm_uncertain_media: false,
+      active_chat_profile_id: null,
+      active_image_profile_id: null,
+      active_video_profile_id: null,
+      active_head_message_id: null,
+      created_at: "2026-07-26T00:00:00Z",
+      updated_at: "2026-07-26T00:00:00Z",
+      messages: [],
+    });
+
+    const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+    render(
+      <QueryClientProvider client={client}>
+        <App />
+      </QueryClientProvider>,
+    );
+
+    fireEvent.click(await screen.findByRole("button", { name: "End Incognito" }));
+    expect(await screen.findByRole("button", { name: "Start Incognito" })).toBeInTheDocument();
+    expect(api.endIncognito).toHaveBeenCalledOnce();
+    expect(screen.queryByText(/Incognito is not forensic erasure/)).not.toBeInTheDocument();
+    expect(localStorage.getItem("local-lm-chat")).toBe("durable-chat");
+    confirm.mockRestore();
+  });
+
+  it("rolls back a private session when its initial chat cannot be created", async () => {
+    vi.mocked(api.startIncognito).mockResolvedValue({
+      token: "opaque-private-token",
+      event_epoch: "private-epoch",
+      event_sequence: 0,
+      disclosure: "Private session disclosure",
+    });
+    vi.mocked(api.createChat).mockRejectedValue(new Error("Could not create private chat"));
+    vi.mocked(api.endIncognito).mockResolvedValue(undefined);
+    const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+    render(
+      <QueryClientProvider client={client}>
+        <App />
+      </QueryClientProvider>,
+    );
+
+    fireEvent.click(await screen.findByRole("button", { name: "Start Incognito" }));
+
+    expect(await screen.findByRole("alert")).toHaveTextContent("Could not create private chat");
+    expect(api.endIncognito).toHaveBeenCalledOnce();
+    expect(screen.getByRole("button", { name: "Start Incognito" })).toBeInTheDocument();
   });
 
   it("refreshes the visible chat when media generation progress changes", async () => {

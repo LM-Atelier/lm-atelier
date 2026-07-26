@@ -15,6 +15,8 @@ class ChatRequest:
     messages: list[dict[str, Any]]
     settings: dict[str, Any] = field(default_factory=dict)
     tools: list[dict[str, Any]] = field(default_factory=list)
+    persistence_scope: str = "durable"
+    scope_id: str | None = None
 
 
 @dataclass
@@ -57,6 +59,8 @@ class MediaRequest:
     input_paths: list[Path]
     workflow: dict[str, Any]
     parameters: dict[str, Any]
+    persistence_scope: str = "durable"
+    scope_id: str | None = None
 
 
 @dataclass
@@ -79,6 +83,9 @@ class MediaEvent:
 
 
 class ChatAdapter(Protocol):
+    @property
+    def supports_incognito(self) -> bool: ...
+
     async def capabilities(self) -> EngineCapabilities: ...
 
     async def count_tokens(self, messages: list[dict[str, Any]]) -> int: ...
@@ -87,10 +94,15 @@ class ChatAdapter(Protocol):
 
     async def cancel(self, run_id: str) -> None: ...
 
+    async def purge_run(self, run_id: str) -> None: ...
+
     async def close(self) -> None: ...
 
 
 class MediaAdapter(Protocol):
+    @property
+    def supports_incognito(self) -> bool: ...
+
     async def capabilities(self) -> EngineCapabilities: ...
 
     async def validate_workflow(self, workflow: dict[str, Any]) -> list[str]: ...
@@ -98,5 +110,7 @@ class MediaAdapter(Protocol):
     def generate(self, request: MediaRequest) -> AsyncIterator[MediaEvent]: ...
 
     async def cancel(self, run_id: str) -> None: ...
+
+    async def purge_run(self, run_id: str) -> None: ...
 
     async def close(self) -> None: ...

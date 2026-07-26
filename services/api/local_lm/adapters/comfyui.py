@@ -4,6 +4,8 @@ import asyncio
 import json
 import logging
 import math
+import re
+import shutil
 import time
 from collections.abc import AsyncIterator
 from contextlib import suppress
@@ -26,6 +28,7 @@ logger = logging.getLogger(__name__)
 _CANCELLED = object()
 _MAX_COMFY_JSON_BYTES = 32 * 1024 * 1024
 _MAX_COMFY_OUTPUTS = 64
+_PRIVATE_SCOPE_ID = re.compile(r"^scope_[0-9a-f]{48}$")
 
 
 def _is_preview_image(content: bytes) -> bool:
@@ -64,6 +67,7 @@ class ComfyUIAdapter:
         *,
         inactivity_seconds: float = 600,
         managed_output_root: Path | None = None,
+        managed_temp_root: Path | None = None,
         max_output_bytes: int = 512 * 1024**2,
         stale_output_seconds: float = 24 * 60 * 60,
     ) -> None:
@@ -80,15 +84,24 @@ class ComfyUIAdapter:
         self.managed_output_root = (
             managed_output_root.expanduser().resolve() if managed_output_root else None
         )
+        self.managed_temp_root = (
+            managed_temp_root.expanduser().resolve() if managed_temp_root else None
+        )
         self._client = httpx.AsyncClient(
             base_url=self.base_url,
             timeout=httpx.Timeout(connect=10, read=120, write=120, pool=10),
             trust_env=False,
         )
         self._jobs: dict[str, str] = {}
+        self._completed_jobs: dict[str, str] = {}
+        self._uploads: dict[str, list[str]] = {}
         self._cancelled: set[str] = set()
         self._cancel_events: dict[str, asyncio.Event] = {}
         self._last_output_sweep = 0.0
+
+    @property
+    def supports_incognito(self) -> bool:
+        return self.managed_output_root is not None and self.managed_temp_root is not None
 
     async def capabilities(self) -> EngineCapabilities:
         healthy = False
@@ -208,6 +221,12 @@ class ComfyUIAdapter:
 
     async def _upload_inputs(self, request: MediaRequest) -> list[str]:
         uploaded: list[str] = []
+        upload_subfolder = "lm-atelier"
+        if request.persistence_scope == "incognito":
+            if not request.scope_id or not _PRIVATE_SCOPE_ID.fullmatch(request.scope_id):
+                raise ValueError("private media request has an invalid scope")
+            upload_subfolder = f"lm-atelier/incognito/{request.scope_id}"
+            self._uploads[request.run_id] = uploaded
         for index, path in enumerate(request.input_paths):
             content = await asyncio.to_thread(path.read_bytes)
             extension, media_type = self._image_format(content)
@@ -216,7 +235,7 @@ class ComfyUIAdapter:
                 "/upload/image",
                 data={
                     "type": "temp",
-                    "subfolder": "lm-atelier",
+                    "subfolder": upload_subfolder,
                     "overwrite": "true",
                 },
                 files={"image": (filename, content, media_type)},
@@ -243,8 +262,10 @@ class ComfyUIAdapter:
                 part in {"", ".", ".."} or ":" in part for part in subfolder_path.parts
             ):
                 raise ValueError("ComfyUI returned an invalid conditioning-image upload")
-            subfolder = "/".join(subfolder_path.parts)
-            reference = f"{subfolder}/{uploaded_name}" if subfolder else uploaded_name
+            response_subfolder = "/".join(subfolder_path.parts)
+            reference = (
+                f"{response_subfolder}/{uploaded_name}" if response_subfolder else uploaded_name
+            )
             if upload_type == "temp":
                 reference = f"{reference} [temp]"
             uploaded.append(reference)
@@ -266,6 +287,8 @@ class ComfyUIAdapter:
             **request.parameters,
         }
         uploaded = await self._upload_inputs(request)
+        if request.persistence_scope == "incognito":
+            self._uploads[request.run_id] = uploaded
         if uploaded:
             parameters["input_image"] = uploaded[0]
             parameters["input_images"] = uploaded
@@ -299,9 +322,17 @@ class ComfyUIAdapter:
                 close_timeout=10,
                 proxy=None,
             ) as socket:
+                prompt_payload: dict[str, Any] = {
+                    "prompt": graph,
+                    "client_id": client_id,
+                }
+                if request.persistence_scope == "incognito":
+                    prompt_payload["extra_data"] = {
+                        "lm_atelier_scope": request.scope_id,
+                    }
                 response = await self._client.post(
                     "/prompt",
-                    json={"prompt": graph, "client_id": client_id},
+                    json=prompt_payload,
                     timeout=30,
                 )
                 response.raise_for_status()
@@ -422,6 +453,8 @@ class ComfyUIAdapter:
             self._jobs.pop(request.run_id, None)
             self._cancel_events.pop(request.run_id, None)
             self._cancelled.discard(request.run_id)
+            if prompt_id and request.persistence_scope == "incognito":
+                self._completed_jobs[request.run_id] = prompt_id
             if prompt_id and not outputs_collected:
                 await self._cleanup_prompt_outputs(prompt_id)
 
@@ -617,7 +650,7 @@ class ComfyUIAdapter:
             raise ValueError(f"ComfyUI output has an invalid {name}")
         return value
 
-    async def _cleanup_prompt_outputs(self, prompt_id: str) -> None:
+    async def _cleanup_prompt_outputs(self, prompt_id: str, *, strict: bool = False) -> None:
         try:
             response = await self._client.get(f"/history/{prompt_id}", timeout=10)
             response.raise_for_status()
@@ -639,6 +672,8 @@ class ComfyUIAdapter:
             }
             await self._remove_managed_outputs(managed_paths)
         except Exception as exc:
+            if strict:
+                raise RuntimeError("ComfyUI could not purge private output files") from exc
             logger.debug(
                 "Could not inspect a failed ComfyUI output (%s)",
                 type(exc).__name__,
@@ -732,6 +767,115 @@ class ComfyUIAdapter:
             self._cancelled.add(run_id)
         if run_id in self._jobs:
             await self._interrupt_prompt()
+
+    async def purge_run(self, run_id: str) -> None:
+        if not self.supports_incognito:
+            raise RuntimeError("ComfyUI is not managed closely enough for private sessions")
+        await self.cancel(run_id)
+        prompt_id = self._jobs.get(run_id) or self._completed_jobs.get(run_id)
+        if prompt_id:
+            await self._cleanup_prompt_outputs(prompt_id, strict=True)
+            try:
+                response = await self._client.post(
+                    "/history",
+                    json={"delete": [prompt_id]},
+                    timeout=10,
+                )
+                response.raise_for_status()
+            except httpx.HTTPError as exc:
+                raise RuntimeError("ComfyUI could not purge private history") from exc
+        await self._purge_uploaded_inputs(run_id)
+        self._jobs.pop(run_id, None)
+        self._completed_jobs.pop(run_id, None)
+        self._cancel_events.pop(run_id, None)
+        self._cancelled.discard(run_id)
+
+    async def purge_stale_scope_files(self, scope_id: str) -> None:
+        """Remove app-managed files left by an interrupted private service session."""
+        if not _PRIVATE_SCOPE_ID.fullmatch(scope_id):
+            raise ValueError("invalid private scope")
+        prompt_ids = await self._private_history_prompt_ids(scope_id)
+        for prompt_id in prompt_ids:
+            await self._cleanup_prompt_outputs(prompt_id, strict=True)
+        if prompt_ids:
+            try:
+                response = await self._client.post(
+                    "/history",
+                    json={"delete": prompt_ids},
+                    timeout=10,
+                )
+                response.raise_for_status()
+            except httpx.HTTPError as exc:
+                raise RuntimeError("ComfyUI could not purge stale private history") from exc
+        if self.managed_temp_root:
+            private_root = (
+                self.managed_temp_root / "lm-atelier" / "incognito" / scope_id
+            ).resolve()
+            private_root.relative_to(self.managed_temp_root)
+            if private_root.exists():
+                await asyncio.to_thread(shutil.rmtree, private_root)
+        if self.managed_output_root and self.managed_output_root.exists():
+            # LM Atelier copies completed outputs into its artifact store and
+            # removes the ComfyUI source. Before normal restart recovery, every
+            # remaining file in this app-specific output root is abandoned.
+            await asyncio.to_thread(shutil.rmtree, self.managed_output_root)
+            self.managed_output_root.mkdir(parents=True)
+
+    async def _private_history_prompt_ids(self, scope_id: str) -> list[str]:
+        try:
+            response = await self._client.get("/history", timeout=10)
+            response.raise_for_status()
+        except httpx.ConnectError:
+            return []
+        if len(response.content) > _MAX_COMFY_JSON_BYTES:
+            raise RuntimeError("ComfyUI history is too large to purge safely")
+        try:
+            payload = response.json()
+        except ValueError as exc:
+            raise RuntimeError("ComfyUI returned malformed history") from exc
+        if not isinstance(payload, dict):
+            raise RuntimeError("ComfyUI returned malformed history")
+        prompt_ids: list[str] = []
+        for raw_prompt_id, record in payload.items():
+            if (
+                not isinstance(raw_prompt_id, str)
+                or not raw_prompt_id
+                or len(raw_prompt_id) > 200
+                or not isinstance(record, dict)
+            ):
+                continue
+            prompt = record.get("prompt")
+            extra_data = (
+                prompt[3]
+                if isinstance(prompt, list) and len(prompt) > 3 and isinstance(prompt[3], dict)
+                else record.get("extra_data")
+            )
+            if isinstance(extra_data, dict) and extra_data.get("lm_atelier_scope") == scope_id:
+                prompt_ids.append(raw_prompt_id)
+        return prompt_ids
+
+    async def _purge_uploaded_inputs(self, run_id: str) -> None:
+        root = self.managed_temp_root
+        references = self._uploads.get(run_id, [])
+        if root is None:
+            if references:
+                raise RuntimeError("ComfyUI private input storage is not managed")
+            self._uploads.pop(run_id, None)
+            return
+        for reference in references:
+            clean = reference.removesuffix(" [temp]")
+            path = PurePosixPath(clean.replace("\\", "/"))
+            if path.is_absolute() or any(
+                part in {"", ".", ".."} or ":" in part for part in path.parts
+            ):
+                raise RuntimeError("ComfyUI returned an unsafe private input path")
+            candidate = root.joinpath(*path.parts).resolve()
+            try:
+                candidate.relative_to(root)
+                await asyncio.to_thread(candidate.unlink, missing_ok=True)
+            except (OSError, ValueError) as exc:
+                raise RuntimeError("ComfyUI could not purge private input files") from exc
+        self._uploads.pop(run_id, None)
 
     async def _interrupt_prompt(self) -> None:
         try:

@@ -16,6 +16,7 @@ from local_lm.processes import (
     WORKER_STDERR_DISPLAY_CHARS,
     WORKER_STDERR_TAIL_BYTES,
     ProcessSupervisor,
+    WorkerRecord,
     _RotatingWorkerLog,
 )
 
@@ -126,6 +127,35 @@ def test_worker_log_rotation_enforces_file_and_retention_bounds(tmp_path: Path) 
     assert all(path.stat().st_size <= 32 for path in retained)
     assert not log_path.with_name("chat-worker.log.3").exists()
     assert sum(path.stat().st_size for path in retained) <= 32 * 3
+
+
+async def test_private_session_suppresses_worker_logs_and_diagnostic_tail(
+    settings,
+) -> None:  # type: ignore[no-untyped-def]
+    settings.prepare()
+    supervisor = ProcessSupervisor(settings)
+    stdout = asyncio.StreamReader()
+    stderr = asyncio.StreamReader()
+    marker = b"PRIVATE-WORKER-MARKER-19f25a"
+    stdout.feed_data(marker)
+    stdout.feed_eof()
+    stderr.feed_data(marker)
+    stderr.feed_eof()
+    log_path = settings.log_dir / "private-worker.log"
+    record = WorkerRecord(
+        name="chat",
+        process=SimpleNamespace(stdout=stdout, stderr=stderr),  # type: ignore[arg-type]
+        command=[],
+        log=_RotatingWorkerLog(log_path),
+    )
+
+    supervisor.begin_private_session()
+    await supervisor._capture_process_output(record)
+    supervisor.end_private_session()
+
+    assert supervisor.private_output_suppressed is False
+    assert record.stderr_tail == b""
+    assert marker not in log_path.read_bytes()
 
 
 async def test_startup_exit_retains_redacted_stderr_and_actionable_status(
