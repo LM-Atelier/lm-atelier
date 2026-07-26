@@ -870,6 +870,59 @@ describe("App", () => {
     await waitFor(() => expect(vi.mocked(api.retryJob).mock.calls[0]?.[0]).toBe("job-5"));
   });
 
+  it("clears recent job issues without deleting history and keeps them hidden", async () => {
+    const dismissedJob = {
+      id: "job-dismissed",
+      kind: "image",
+      status: "failed",
+      run_id: "run-dismissed",
+      progress: 0.5,
+      phase: "loading",
+      payload_json: {},
+      result_json: {},
+      error: "old loader failure",
+      attempt: 1,
+      cancellable: false,
+      created_at: "2026-07-24T00:00:00Z",
+      updated_at: "2026-07-24T00:00:00Z",
+    };
+    vi.mocked(api.jobs).mockResolvedValue([dismissedJob]);
+    const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+    const firstRender = render(
+      <QueryClientProvider client={client}>
+        <App />
+      </QueryClientProvider>,
+    );
+
+    fireEvent.click(await screen.findByRole("button", { name: "Clear recent job issues" }));
+    await waitFor(() => expect(screen.queryByText("old loader failure")).not.toBeInTheDocument());
+    expect(localStorage.getItem("lm-atelier-dismissed-job-issues-before")).toBe(
+      String(Date.parse(dismissedJob.updated_at)),
+    );
+    expect(api.retryJob).not.toHaveBeenCalled();
+    firstRender.unmount();
+
+    const newJob = {
+      ...dismissedJob,
+      id: "job-new",
+      run_id: "run-new",
+      error: "new loader failure",
+      updated_at: "2026-07-25T00:00:00Z",
+    };
+    vi.mocked(api.jobs).mockResolvedValue([dismissedJob, newJob]);
+    const refreshedClient = new QueryClient({
+      defaultOptions: { queries: { retry: false } },
+    });
+    render(
+      <QueryClientProvider client={refreshedClient}>
+        <App />
+      </QueryClientProvider>,
+    );
+
+    expect(await screen.findByText("new loader failure")).toBeInTheDocument();
+    expect(screen.queryByText("old loader failure")).not.toBeInTheDocument();
+  });
+
   it("shows useful machine details without platform-status clutter", async () => {
     const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
     render(
