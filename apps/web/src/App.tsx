@@ -91,6 +91,7 @@ type SendTurnVariables = PendingTurn & {
 const visibilityRank: Record<Visibility, number> = { basic: 0, advanced: 1, expert: 2 };
 const AUTO_PROFILE_ID = "__auto__";
 const RECENT_UNSUCCESSFUL_JOB_LIMIT = 3;
+const DISMISSED_JOB_ISSUES_KEY = "lm-atelier-dismissed-job-issues-before";
 const PRIOR_VISUAL_EDIT = /^\s*(?:please\s+|now\s+)*(?:(?:make|change|turn|edit|modify|adjust)\s+(?:it|this|that|the\s+(?:image|picture|photo|illustration|artwork|logo|icon))\b|(?:add|remove|replace|recolor|crop|resize|brighten|darken|blur|sharpen|rotate|flip)\b)/i;
 const PRIOR_VISUAL_SOURCE = /\b(?:previous|prior|earlier|last|above)\s+(?:image|picture|photo|illustration|artwork|logo|icon)\b|^\s*(?:please\s+|now\s+)*(?:use|reuse|remix|restyle|transform|redo|recreate|continue)\b.*\b(?:it|this|that|the\s+(?:image|picture|photo|illustration|artwork|logo|icon))\b/i;
 const DIRECT_PRIOR_VIDEO = /^\s*(?:animate|make (?:it|this|that) move)\b/i;
@@ -2469,6 +2470,10 @@ function Sidebar({
 
 function JobsPanel() {
   const client = useQueryClient();
+  const [dismissedBefore, setDismissedBefore] = useState(() => {
+    const saved = Number(localStorage.getItem(DISMISSED_JOB_ISSUES_KEY));
+    return Number.isFinite(saved) && saved > 0 ? saved : 0;
+  });
   const jobs = useQuery({ queryKey: ["jobs"], queryFn: api.jobs, refetchInterval: 3_000 });
   const refresh = () => void client.invalidateQueries({ queryKey: ["jobs"] });
   const cancel = useMutation({ mutationFn: api.cancelJob, onSuccess: refresh });
@@ -2478,8 +2483,20 @@ function JobsPanel() {
   const active = jobs.data?.filter((job) => ["queued", "running", "paused"].includes(job.status)) ?? [];
   const recentUnsuccessful = (jobs.data ?? [])
     .filter((job) => ["failed", "cancelled", "interrupted"].includes(job.status))
+    .filter((job) => Date.parse(job.updated_at) > dismissedBefore)
     .sort((left, right) => Date.parse(right.updated_at) - Date.parse(left.updated_at))
     .slice(0, RECENT_UNSUCCESSFUL_JOB_LIMIT);
+  const clearRecentIssues = () => {
+    const newestIssue = Math.max(
+      dismissedBefore,
+      ...recentUnsuccessful
+        .map((job) => Date.parse(job.updated_at))
+        .filter((updatedAt) => Number.isFinite(updatedAt)),
+    );
+    const cutoff = newestIssue > 0 ? newestIssue : Date.now();
+    localStorage.setItem(DISMISSED_JOB_ISSUES_KEY, String(cutoff));
+    setDismissedBefore(cutoff);
+  };
   if (!active.length && !recentUnsuccessful.length) return null;
   return (
     <aside className="jobs-panel" aria-label="Jobs">
@@ -2490,6 +2507,15 @@ function JobsPanel() {
             ? `${active.length} active job${active.length === 1 ? "" : "s"}`
             : "Recent job issues"}
         </span>
+        {recentUnsuccessful.length > 0 && (
+          <button
+            className="jobs-clear"
+            aria-label="Clear recent job issues"
+            onClick={clearRecentIssues}
+          >
+            Clear
+          </button>
+        )}
       </header>
       {active.map((job) => (
         <div className="job-row" key={job.id}>
