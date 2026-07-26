@@ -305,6 +305,57 @@ describe("App", () => {
     });
   });
 
+  it("applies durable job snapshots immediately without waiting for polling", async () => {
+    const stamp = "2026-07-26T00:00:00Z";
+    const queued = {
+      id: "job-live",
+      kind: "download",
+      status: "queued",
+      run_id: null,
+      progress: 0,
+      phase: "queued",
+      payload_json: {},
+      result_json: {},
+      error: null,
+      attempt: 0,
+      cancellable: true,
+      created_at: stamp,
+      updated_at: stamp,
+    };
+    vi.mocked(api.jobs).mockResolvedValue([queued]);
+    const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+    const invalidate = vi.spyOn(client, "invalidateQueries");
+    render(
+      <QueryClientProvider client={client}>
+        <App />
+      </QueryClientProvider>,
+    );
+    expect(await screen.findByText("queued")).toBeInTheDocument();
+    const onEvent = vi.mocked(connectEvents).mock.calls.at(-1)?.[0];
+    invalidate.mockClear();
+
+    act(() => {
+      onEvent?.({
+        sequence: 2,
+        type: "job.progress",
+        entity_id: queued.id,
+        payload: {
+          job: {
+            ...queued,
+            status: "running",
+            phase: "downloading model",
+            progress: 0.25,
+            updated_at: "2026-07-26T00:00:01Z",
+          },
+        },
+        created_at: "2026-07-26T00:00:01Z",
+      });
+    });
+
+    expect(await screen.findByText("downloading model · 25%")).toBeInTheDocument();
+    expect(invalidate).not.toHaveBeenCalledWith({ queryKey: ["jobs"] });
+  });
+
   it("coalesces reconnect and replay-gap reconciliation across authoritative data", async () => {
     const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
     const invalidate = vi.spyOn(client, "invalidateQueries");
@@ -832,6 +883,97 @@ describe("App", () => {
     );
     fireEvent.click(await screen.findByRole("button", { name: "Resume download" }));
     await waitFor(() => expect(vi.mocked(api.resumeDownload).mock.calls[0]?.[0]).toBe("download-1"));
+  });
+
+  it("shows truthful structured progress without a forced minimum percentage", async () => {
+    const stamp = new Date().toISOString();
+    vi.mocked(api.jobs).mockResolvedValue([
+      {
+        id: "download-progress",
+        kind: "download",
+        status: "running",
+        run_id: null,
+        progress: 0.73,
+        phase: "downloading",
+        progress_json: {
+          version: 2,
+          stage: "downloading",
+          stage_progress: 0.73,
+          overall_progress: null,
+          completed_units: 730,
+          total_units: 1_000,
+          unit: "bytes",
+          bytes_reused: 0,
+          rate_bytes_per_second: 40 * 1024 * 1024,
+          eta_seconds: 7,
+          file_index: 1,
+          file_count: 1,
+          queue_resource: "network",
+          queue_position: null,
+          queue_length: null,
+          blocked_by: [],
+          indeterminate: false,
+          updated_at: stamp,
+        },
+        payload_json: {},
+        result_json: {},
+        error: null,
+        attempt: 1,
+        cancellable: true,
+        created_at: stamp,
+        updated_at: stamp,
+      },
+      {
+        id: "queued-indeterminate",
+        kind: "image",
+        status: "queued",
+        run_id: "run-queued",
+        progress: 0,
+        phase: "queued",
+        progress_json: {
+          version: 2,
+          stage: "queued",
+          stage_progress: null,
+          overall_progress: null,
+          completed_units: null,
+          total_units: null,
+          unit: null,
+          bytes_reused: 0,
+          rate_bytes_per_second: null,
+          eta_seconds: null,
+          file_index: null,
+          file_count: null,
+          queue_resource: "media_compute",
+          queue_position: 2,
+          queue_length: 3,
+          blocked_by: [],
+          indeterminate: true,
+          updated_at: stamp,
+        },
+        payload_json: {},
+        result_json: {},
+        error: null,
+        attempt: 0,
+        cancellable: true,
+        created_at: stamp,
+        updated_at: stamp,
+      },
+    ]);
+    const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+    render(
+      <QueryClientProvider client={client}>
+        <App />
+      </QueryClientProvider>,
+    );
+
+    expect(await screen.findByText("downloading · 73% · 40 MB/s · about 7 sec"))
+      .toBeInTheDocument();
+    expect(screen.getByRole("progressbar", { name: "download progress" }))
+      .toHaveAttribute("aria-valuenow", "73");
+    expect(screen.getByText("queued · 2 ahead")).toBeInTheDocument();
+    const indeterminate = screen.getByRole("progressbar", { name: "image progress" });
+    expect(indeterminate).not.toHaveAttribute("aria-valuenow");
+    expect(indeterminate.firstElementChild).toHaveClass("indeterminate");
   });
 
   it("shows a bounded list of unsuccessful jobs and retries one", async () => {

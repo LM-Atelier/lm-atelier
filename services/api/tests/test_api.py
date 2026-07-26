@@ -1319,6 +1319,87 @@ async def test_chat_turn_exposes_startup_status_until_text_arrives(
     assert not any(part["type"] == "progress" for part in assistant["parts"])
 
 
+async def test_legacy_turn_creates_one_durable_work_plan_and_step(
+    client: AsyncClient,
+) -> None:
+    chat = (await client.post("/api/chats", json={"title": "Durable plan"})).json()
+    turn = await client.post(
+        f"/api/chats/{chat['id']}/turns",
+        json={
+            "text": "Create one durable step",
+            "mode": "text",
+            "idempotency_key": "durable-plan-key",
+        },
+    )
+    assert turn.status_code == 202
+    accepted = turn.json()
+    plan_id = accepted["run"]["work_plan_id"]
+    step_id = accepted["run"]["work_step_id"]
+    assert plan_id
+    assert step_id
+    await wait_for_run(client, accepted["run"]["id"])
+
+    plan = await client.get(f"/api/work-plans/{plan_id}")
+    assert plan.status_code == 200
+    assert plan.json()["source_action"] == "send"
+    assert plan.json()["status"] == "complete"
+    assert plan.json()["transcript_sequence"] == 1
+    assert len(plan.json()["steps"]) == 1
+    assert plan.json()["steps"][0]["id"] == step_id
+    assert plan.json()["steps"][0]["run_id"] == accepted["run"]["id"]
+    assert plan.json()["steps"][0]["status"] == "complete"
+
+    step = await client.get(f"/api/work-steps/{step_id}")
+    assert step.status_code == 200
+    assert step.json()["queue_class"] == "interactive_compute"
+    jobs = (await client.get("/api/jobs")).json()
+    job = next(item for item in jobs if item["run_id"] == accepted["run"]["id"])
+    assert job["work_plan_id"] == plan_id
+    assert job["work_step_id"] == step_id
+    assert job["progress_json"]["version"] == 2
+    assert job["progress_json"]["overall_progress"] == 1
+
+    replay = await client.post(
+        f"/api/chats/{chat['id']}/turns",
+        json={
+            "text": "Create one durable step",
+            "mode": "text",
+            "idempotency_key": "durable-plan-key",
+        },
+    )
+    assert replay.status_code == 202
+    assert replay.json()["run"]["id"] == accepted["run"]["id"]
+    assert replay.json()["run"]["work_plan_id"] == plan_id
+    listed = (await client.get("/api/work-plans", params={"chat_id": chat["id"]})).json()
+    assert [item["id"] for item in listed] == [plan_id]
+
+
+async def test_turn_remains_truthfully_queued_until_compute_lease(
+    app: FastAPI,
+    client: AsyncClient,
+) -> None:
+    chat = (await client.post("/api/chats", json={"title": "Queue truth"})).json()
+    async with app.state.services.scheduler.lease("primary"):
+        response = await client.post(
+            f"/api/chats/{chat['id']}/turns",
+            json={"text": "Wait for the real lease", "mode": "text"},
+        )
+        assert response.status_code == 202
+        accepted = response.json()
+        await asyncio.sleep(0.05)
+        run = (await client.get(f"/api/runs/{accepted['run']['id']}")).json()
+        jobs = (await client.get("/api/jobs")).json()
+        job = next(item for item in jobs if item["run_id"] == run["id"])
+        assert run["status"] == "queued"
+        assert run["started_at"] is None
+        assert job["status"] == "queued"
+        assert job["started_at"] is None
+        assert job["progress_json"]["stage"] == "queued"
+        assert job["progress_json"]["queue_position"] == 0
+
+    await wait_for_run(client, accepted["run"]["id"])
+
+
 async def test_active_chat_run_can_be_cancelled_directly(client: AsyncClient) -> None:
     chat = (await client.post("/api/chats", json={"title": "Stop response"})).json()
     turn = await client.post(
@@ -1445,6 +1526,53 @@ async def test_restart_recovery_preserves_partial_text_and_appends_error(
         ("error", "The application restarted before this job completed."),
     ]
     assert not any(part["type"] == "progress" for part in assistant["parts"])
+
+
+async def test_restart_recovery_requeues_work_that_never_started(
+    client: AsyncClient,
+    app: FastAPI,
+    monkeypatch,
+) -> None:  # type: ignore[no-untyped-def]
+    chat = (await client.post("/api/chats", json={"title": "Queued recovery"})).json()
+    turn = (
+        await client.post(
+            f"/api/chats/{chat['id']}/turns",
+            json={"text": "Remain queued", "mode": "text"},
+        )
+    ).json()
+    await wait_for_run(client, turn["run"]["id"])
+    with SessionLocal() as session:
+        run = session.get(Run, turn["run"]["id"])
+        job = session.scalar(select(Job).where(Job.run_id == turn["run"]["id"]))
+        assert run and job
+        run.status = "queued"
+        run.started_at = None
+        run.completed_at = None
+        job.status = JobStatus.QUEUED.value
+        job.started_at = None
+        job.completed_at = None
+        job.claim_owner = "stale-dispatcher"
+        session.commit()
+        job_id = job.id
+
+    restarted: list[tuple[str, str]] = []
+    monkeypatch.setattr(
+        app.state.services.orchestrator,
+        "start",
+        lambda candidate_job_id, candidate_run_id: restarted.append(
+            (candidate_job_id, candidate_run_id)
+        ),
+    )
+
+    app.state.services.orchestrator.recover_interrupted()
+
+    with SessionLocal() as session:
+        recovered = session.get(Job, job_id)
+        assert recovered
+        assert recovered.status == JobStatus.QUEUED.value
+        assert recovered.claim_owner is None
+        assert recovered.progress_json["stage"] == "queued"
+    assert restarted == [(job_id, turn["run"]["id"])]
 
 
 async def test_retry_clears_stale_error_before_dispatch(

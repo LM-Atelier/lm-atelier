@@ -253,11 +253,14 @@ async def test_transfer_monitor_reports_process_tree_bytes(
         job = session.get(Job, "job_progress")
         assert job
         assert job.phase == "downloading model.safetensors"
-        assert job.progress == pytest.approx(0.45)
-    event = broker.since(0)[0]
-    assert event.type == "download.progress"
+        assert job.progress == pytest.approx(0.5)
+        assert job.progress_json["completed_units"] == 50
+        assert job.progress_json["total_units"] == 100
+        assert job.progress_json["unit"] == "bytes"
+    event = next(event for event in broker.since(0) if event.type == "download.progress")
     assert event.payload["downloaded_bytes"] == 50
     assert event.payload["file_size_bytes"] == 100
+    assert event.payload["total_bytes"] == 100
 
 
 async def test_adaptive_checkpoint_activation_runs_a_small_bounded_generation(

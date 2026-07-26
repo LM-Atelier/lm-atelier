@@ -221,6 +221,8 @@ class RunOut(ApiModel):
     chat_id: str
     user_message_id: str
     assistant_message_id: str
+    work_plan_id: str | None
+    work_step_id: str | None
     operation: str
     status: str
     standalone_prompt: str
@@ -242,13 +244,44 @@ class TurnAccepted(ApiModel):
     assistant_message: MessageOut
 
 
+class ProgressV2(ApiModel):
+    version: Literal[2] = 2
+    stage: str
+    stage_progress: float | None = Field(default=None, ge=0, le=1)
+    overall_progress: float | None = Field(default=None, ge=0, le=1)
+    completed_units: int | None = Field(default=None, ge=0)
+    total_units: int | None = Field(default=None, ge=0)
+    unit: str | None = None
+    bytes_reused: int = Field(default=0, ge=0)
+    rate_bytes_per_second: float | None = Field(default=None, ge=0)
+    eta_seconds: int | None = Field(default=None, ge=0)
+    file_index: int | None = Field(default=None, ge=1)
+    file_count: int | None = Field(default=None, ge=1)
+    queue_resource: str | None = None
+    queue_position: int | None = Field(default=None, ge=0)
+    queue_length: int | None = Field(default=None, ge=0)
+    blocked_by: list[str] = Field(default_factory=list)
+    indeterminate: bool = False
+    updated_at: datetime
+
+
 class JobOut(ApiModel):
     id: str
     kind: str
     status: str
     run_id: str | None
+    work_plan_id: str | None
+    work_step_id: str | None
     progress: float
     phase: str
+    progress_json: dict[str, Any]
+    queue_resource: str | None
+    queue_group: str | None
+    queue_priority: int
+    queue_ticket: str | None
+    enqueued_at: datetime | None
+    claim_expires_at: datetime | None
+    heartbeat_at: datetime | None
     payload_json: dict[str, Any]
     result_json: dict[str, Any]
     error: str | None
@@ -256,6 +289,44 @@ class JobOut(ApiModel):
     cancellable: bool
     started_at: datetime | None
     completed_at: datetime | None
+    created_at: datetime
+    updated_at: datetime
+
+
+class WorkStepOut(ApiModel):
+    id: str
+    plan_id: str
+    run_id: str | None
+    ordinal: int
+    display_group: str | None
+    operation: str
+    status: str
+    prompt: str
+    profile_id: str | None
+    workflow_revision_id: str | None
+    settings_json: dict[str, Any]
+    input_bindings_json: list[dict[str, Any]]
+    output_contract_json: list[dict[str, Any]]
+    queue_class: str
+    error: str | None
+    created_at: datetime
+    updated_at: datetime
+
+
+class WorkPlanOut(ApiModel):
+    id: str
+    chat_id: str
+    idempotency_key: str | None
+    source_action: str
+    persistence_scope: str
+    status: str
+    context_head_message_id: str | None
+    transcript_sequence: int
+    priority: int
+    planner_version: str
+    failure_policy: str
+    summary_json: dict[str, Any]
+    steps: list[WorkStepOut]
     created_at: datetime
     updated_at: datetime
 
@@ -746,6 +817,7 @@ class RuntimeStatus(ApiModel):
     supported: bool
     managed: bool = False
     progress: float = 0
+    progress_json: ProgressV2 | None = None
     downloaded_bytes: int = 0
     size_bytes: int | None = None
     distribution: str

@@ -140,6 +140,90 @@ class MessagePart(TimestampMixin, Base):
     artifact: Mapped[Artifact | None] = relationship()
 
 
+class WorkPlan(TimestampMixin, Base):
+    __tablename__ = "work_plans"
+    __table_args__ = (
+        UniqueConstraint(
+            "chat_id",
+            "transcript_sequence",
+            name="uq_work_plan_transcript_sequence",
+        ),
+        UniqueConstraint(
+            "chat_id",
+            "idempotency_key",
+            name="uq_work_plan_chat_id_idempotency_key",
+        ),
+    )
+
+    id: Mapped[str] = mapped_column(String(40), primary_key=True, default=lambda: new_id("plan"))
+    chat_id: Mapped[str] = mapped_column(ForeignKey("chats.id", ondelete="CASCADE"), index=True)
+    idempotency_key: Mapped[str | None] = mapped_column(String(200), nullable=True)
+    source_action: Mapped[str] = mapped_column(String(32), default="send")
+    persistence_scope: Mapped[str] = mapped_column(String(16), default="durable")
+    status: Mapped[str] = mapped_column(String(16), default=JobStatus.QUEUED.value, index=True)
+    context_head_message_id: Mapped[str | None] = mapped_column(
+        ForeignKey("messages.id", ondelete="SET NULL"),
+        nullable=True,
+    )
+    transcript_sequence: Mapped[int] = mapped_column(Integer)
+    priority: Mapped[int] = mapped_column(Integer, default=0)
+    planner_version: Mapped[str] = mapped_column(String(32), default="legacy-turn-v1")
+    failure_policy: Mapped[str] = mapped_column(String(32), default="stop_dependents")
+    summary_json: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
+
+    steps: Mapped[list[WorkStep]] = relationship(
+        back_populates="plan",
+        cascade="all, delete-orphan",
+        order_by="WorkStep.ordinal",
+    )
+
+
+class WorkStep(TimestampMixin, Base):
+    __tablename__ = "work_steps"
+    __table_args__ = (
+        UniqueConstraint("plan_id", "ordinal", name="uq_work_step_ordinal"),
+        UniqueConstraint("run_id", name="uq_work_step_run"),
+    )
+
+    id: Mapped[str] = mapped_column(String(40), primary_key=True, default=lambda: new_id("step"))
+    plan_id: Mapped[str] = mapped_column(
+        ForeignKey("work_plans.id", ondelete="CASCADE"),
+        index=True,
+    )
+    run_id: Mapped[str | None] = mapped_column(
+        ForeignKey("runs.id", ondelete="SET NULL"),
+        nullable=True,
+        index=True,
+    )
+    ordinal: Mapped[int] = mapped_column(Integer)
+    display_group: Mapped[str | None] = mapped_column(String(80), nullable=True)
+    operation: Mapped[str] = mapped_column(String(32))
+    status: Mapped[str] = mapped_column(String(16), default=JobStatus.QUEUED.value, index=True)
+    prompt: Mapped[str] = mapped_column(Text, default="")
+    profile_id: Mapped[str | None] = mapped_column(String(40), nullable=True)
+    workflow_revision_id: Mapped[str | None] = mapped_column(String(40), nullable=True)
+    settings_json: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
+    input_bindings_json: Mapped[list[dict[str, Any]]] = mapped_column(JSON, default=list)
+    output_contract_json: Mapped[list[dict[str, Any]]] = mapped_column(JSON, default=list)
+    queue_class: Mapped[str] = mapped_column(String(32), default="interactive_compute")
+    error: Mapped[str | None] = mapped_column(Text, nullable=True)
+
+    plan: Mapped[WorkPlan] = relationship(back_populates="steps")
+
+
+class WorkStepDependency(Base):
+    __tablename__ = "work_step_dependencies"
+
+    step_id: Mapped[str] = mapped_column(
+        ForeignKey("work_steps.id", ondelete="CASCADE"),
+        primary_key=True,
+    )
+    depends_on_step_id: Mapped[str] = mapped_column(
+        ForeignKey("work_steps.id", ondelete="CASCADE"),
+        primary_key=True,
+    )
+
+
 class Run(TimestampMixin, Base):
     __tablename__ = "runs"
     __table_args__ = (
@@ -156,6 +240,16 @@ class Run(TimestampMixin, Base):
     user_message_id: Mapped[str] = mapped_column(ForeignKey("messages.id", ondelete="CASCADE"))
     assistant_message_id: Mapped[str] = mapped_column(
         ForeignKey("messages.id", ondelete="CASCADE"), unique=True
+    )
+    work_plan_id: Mapped[str | None] = mapped_column(
+        ForeignKey("work_plans.id", ondelete="SET NULL"),
+        nullable=True,
+        index=True,
+    )
+    work_step_id: Mapped[str | None] = mapped_column(
+        ForeignKey("work_steps.id", ondelete="SET NULL"),
+        nullable=True,
+        unique=True,
     )
     operation: Mapped[str] = mapped_column(String(32), default=Operation.TEXT.value)
     status: Mapped[str] = mapped_column(String(16), default=RunStatus.PENDING.value, index=True)
@@ -389,8 +483,29 @@ class Job(TimestampMixin, Base):
     run_id: Mapped[str | None] = mapped_column(
         ForeignKey("runs.id", ondelete="SET NULL"), nullable=True, index=True
     )
+    work_plan_id: Mapped[str | None] = mapped_column(
+        ForeignKey("work_plans.id", ondelete="SET NULL"),
+        nullable=True,
+        index=True,
+    )
+    work_step_id: Mapped[str | None] = mapped_column(
+        ForeignKey("work_steps.id", ondelete="SET NULL"),
+        nullable=True,
+        index=True,
+    )
     progress: Mapped[float] = mapped_column(Float, default=0.0)
     phase: Mapped[str] = mapped_column(String(120), default="queued")
+    progress_json: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
+    queue_resource: Mapped[str | None] = mapped_column(String(32), nullable=True, index=True)
+    queue_group: Mapped[str | None] = mapped_column(String(32), nullable=True, index=True)
+    queue_priority: Mapped[int] = mapped_column(Integer, default=0, index=True)
+    queue_ticket: Mapped[str | None] = mapped_column(String(80), nullable=True, index=True)
+    enqueued_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    claim_owner: Mapped[str | None] = mapped_column(String(80), nullable=True, index=True)
+    claim_expires_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    heartbeat_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     payload_json: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
     result_json: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
     error: Mapped[str | None] = mapped_column(Text, nullable=True)

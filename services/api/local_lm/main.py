@@ -78,7 +78,7 @@ def build_services(settings: Settings) -> Services:
     artifacts = ArtifactStore(settings)
     runtimes = RuntimeProvisioner(settings)
     engines = EngineRegistry(settings)
-    scheduler = ResourceScheduler()
+    scheduler = ResourceScheduler(events)
     processes = ProcessSupervisor(settings, runtimes)
     orchestrator = ConversationOrchestrator(engines, artifacts, events, scheduler, processes)
     return Services(

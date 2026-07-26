@@ -52,9 +52,12 @@ from .models import (
     TurnCreationClaim,
     WorkflowDefinition,
     WorkflowRevision,
+    WorkPlan,
+    WorkStep,
 )
 from .processes import ProcessSupervisor
 from .profile_service import AUTO_PROFILE_ID
+from .progress import completed_progress, update_job_progress
 from .routing import ModalityRouter, RouteConfirmationRequired
 from .scheduler import ResourceScheduler
 from .schemas import MessageOut, RunOut, TurnAccepted, TurnRequest, WorkerStatus
@@ -157,18 +160,48 @@ class ConversationOrchestrator:
         self._chat_planner_ready.set()
 
     def recover_interrupted(self) -> None:
+        queued: list[tuple[str, str]] = []
         with SessionLocal() as session:
-            # Claims only live while an API process is planning a new turn. Any
-            # surviving row belongs to a process that can no longer finish it.
+            # Turn-creation claims only live while one API process is planning.
             session.execute(delete(TurnCreationClaim))
-            jobs = session.scalars(
-                select(Job).where(Job.status.in_([JobStatus.RUNNING.value, JobStatus.QUEUED.value]))
+            queued_jobs = session.scalars(
+                select(Job).where(Job.status == JobStatus.QUEUED.value)
             ).all()
-            for job in jobs:
+            for job in queued_jobs:
+                job.claim_owner = None
+                job.claim_expires_at = None
+                job.heartbeat_at = None
+                update_job_progress(
+                    job,
+                    stage="queued",
+                    queue_resource=job.queue_resource,
+                    indeterminate=True,
+                )
+                if job.run_id:
+                    run = session.get(Run, job.run_id)
+                    if run:
+                        run.status = RunStatus.QUEUED.value
+                        self._set_work_status(session, run, JobStatus.QUEUED.value)
+                        queued.append((job.id, run.id))
+
+            # A running backend operation cannot be proven safe to replay after
+            # its process disappears. Preserve partial output and interrupt it.
+            running_jobs = session.scalars(
+                select(Job).where(Job.status == JobStatus.RUNNING.value)
+            ).all()
+            for job in running_jobs:
                 job.status = JobStatus.INTERRUPTED.value
-                job.phase = "interrupted by application restart"
                 job.error = "The application restarted before this job completed."
                 job.completed_at = utcnow()
+                job.claim_owner = None
+                job.claim_expires_at = None
+                job.heartbeat_at = None
+                update_job_progress(
+                    job,
+                    stage="interrupted by application restart",
+                    queue_resource=job.queue_resource,
+                    indeterminate=True,
+                )
                 if job.run_id:
                     run = session.get(Run, job.run_id)
                     if run and run.status not in {
@@ -179,6 +212,12 @@ class ConversationOrchestrator:
                         run.status = RunStatus.FAILED.value
                         run.error = job.error
                         run.completed_at = utcnow()
+                        self._set_work_status(
+                            session,
+                            run,
+                            JobStatus.INTERRUPTED.value,
+                            error=job.error,
+                        )
                         message = session.get(Message, run.assistant_message_id)
                         if message:
                             message.status = MessageStatus.FAILED.value
@@ -214,6 +253,8 @@ class ConversationOrchestrator:
                             for artifact_id in preview_ids:
                                 self.artifacts.delete_temporary_preview(session, artifact_id)
             session.commit()
+        for job_id, run_id in queued:
+            self.start(job_id, run_id)
 
     async def create_turn(
         self,
@@ -223,6 +264,7 @@ class ConversationOrchestrator:
         *,
         use_explicit_parent: bool = False,
         replacement_message_id: str | None = None,
+        source_action: str = "send",
     ) -> TurnAccepted:
         async with self.chat_guard(chat_id):
             return await self._create_turn(
@@ -231,6 +273,7 @@ class ConversationOrchestrator:
                 request,
                 use_explicit_parent=use_explicit_parent,
                 replacement_message_id=replacement_message_id,
+                source_action=source_action,
             )
 
     async def _create_turn(
@@ -241,6 +284,7 @@ class ConversationOrchestrator:
         *,
         use_explicit_parent: bool = False,
         replacement_message_id: str | None = None,
+        source_action: str = "send",
     ) -> TurnAccepted:
         # Never resolve an idempotency key until its URL-scoped chat has been
         # validated. Otherwise a key from one chat could disclose another
@@ -257,6 +301,7 @@ class ConversationOrchestrator:
                 request,
                 use_explicit_parent=use_explicit_parent,
                 replacement_message_id=replacement_message_id,
+                source_action=source_action,
             )
 
         owner_token, replay = await self._claim_or_replay_turn(
@@ -284,6 +329,7 @@ class ConversationOrchestrator:
                 request,
                 use_explicit_parent=use_explicit_parent,
                 replacement_message_id=replacement_message_id,
+                source_action=source_action,
             )
         finally:
             self._release_turn_claim(session, chat_id, key, owner_token)
@@ -332,10 +378,25 @@ class ConversationOrchestrator:
         chat_id: str,
         idempotency_key: str,
     ) -> Run | None:
+        planned = session.scalar(
+            select(Run)
+            .join(WorkStep, WorkStep.id == Run.work_step_id)
+            .join(WorkPlan, WorkPlan.id == WorkStep.plan_id)
+            .where(
+                WorkPlan.chat_id == chat_id,
+                WorkPlan.idempotency_key == idempotency_key,
+            )
+            .order_by(WorkStep.ordinal)
+            .limit(1)
+        )
+        if planned:
+            return planned
+        # Legacy rows created before work plans remain replayable.
         return session.scalar(
             select(Run).where(
                 Run.chat_id == chat_id,
                 Run.idempotency_key == idempotency_key,
+                Run.work_plan_id.is_(None),
             )
         )
 
@@ -373,6 +434,7 @@ class ConversationOrchestrator:
         *,
         use_explicit_parent: bool = False,
         replacement_message_id: str | None = None,
+        source_action: str = "send",
     ) -> TurnAccepted:
         chat = session.get(Chat, chat_id)
         if not chat:
@@ -677,11 +739,79 @@ class ConversationOrchestrator:
             else None
         )
 
+        transcript_sequence = (
+            session.scalar(
+                select(WorkPlan.transcript_sequence)
+                .where(WorkPlan.chat_id == chat.id)
+                .order_by(WorkPlan.transcript_sequence.desc())
+                .limit(1)
+            )
+            or 0
+        ) + 1
+        queue_class = "interactive_compute" if plan.operation == Operation.TEXT else "media_compute"
+        work_plan = WorkPlan(
+            chat_id=chat.id,
+            idempotency_key=request.idempotency_key,
+            source_action=source_action,
+            persistence_scope="durable",
+            status=JobStatus.QUEUED.value,
+            context_head_message_id=parent_message_id,
+            transcript_sequence=transcript_sequence,
+            priority=10 if plan.operation == Operation.TEXT else 0,
+            planner_version="legacy-turn-v1",
+            failure_policy="stop_dependents",
+            summary_json={
+                "operation": plan.operation.value,
+                "step_count": 1,
+                "source_action": source_action,
+            },
+        )
+        input_bindings: list[dict[str, Any]] = [
+            {
+                "type": "explicit_artifact"
+                if artifact_id in explicit_ids
+                else "response_revision.artifact",
+                "artifact_id": artifact_id,
+            }
+            for artifact_id in resolved_input_ids
+        ]
+        if parent_message_id:
+            input_bindings.insert(
+                0,
+                {
+                    "type": "context_text",
+                    "context_head_message_id": parent_message_id,
+                },
+            )
+        output_type = (
+            "text"
+            if plan.operation == Operation.TEXT
+            else "video"
+            if plan.operation in {Operation.TEXT_TO_VIDEO, Operation.IMAGE_TO_VIDEO}
+            else "image"
+        )
+        work_step = WorkStep(
+            plan=work_plan,
+            ordinal=1,
+            operation=plan.operation.value,
+            status=JobStatus.QUEUED.value,
+            prompt=plan.standalone_prompt,
+            profile_id=profile_id,
+            workflow_revision_id=workflow_revision.id if workflow_revision else None,
+            settings_json=effective_settings,
+            input_bindings_json=input_bindings,
+            output_contract_json=[{"slot": "response", "type": output_type}],
+            queue_class=queue_class,
+        )
+        session.add(work_plan)
+        session.flush()
         run = Run(
             idempotency_key=request.idempotency_key,
             chat_id=chat.id,
             user_message_id=user_message.id,
             assistant_message_id=assistant_message.id,
+            work_plan_id=work_plan.id,
+            work_step_id=work_step.id,
             operation=plan.operation.value,
             status=RunStatus.QUEUED.value,
             standalone_prompt=plan.standalone_prompt,
@@ -730,6 +860,7 @@ class ConversationOrchestrator:
         )
         session.add(run)
         session.flush()
+        work_step.run_id = run.id
         if replacement_message:
             latest_sequence = session.scalar(
                 select(ResponseRevision.sequence)
@@ -762,15 +893,41 @@ class ConversationOrchestrator:
             kind=self._job_kind(plan.operation).value,
             status=JobStatus.QUEUED.value,
             run_id=run.id,
+            work_plan_id=work_plan.id,
+            work_step_id=work_step.id,
             progress=0,
             phase="queued",
+            queue_resource=queue_class,
+            queue_group="primary",
+            queue_priority=work_plan.priority,
+            queue_ticket=run.id,
+            enqueued_at=utcnow(),
             payload_json={"operation": plan.operation.value},
+        )
+        update_job_progress(
+            job,
+            stage="queued",
+            queue_resource=queue_class,
+            queue_position=0,
+            queue_length=1,
+            indeterminate=True,
         )
         session.add(job)
         if chat.title == "New chat":
             chat.title = request.text.strip().replace("\n", " ")[:72] or "New chat"
         session.commit()
         accepted = self._accepted_for_run(session, run)
+        await self.events.publish(
+            "work_plan.created",
+            work_plan.id,
+            {
+                "plan_id": work_plan.id,
+                "step_id": work_step.id,
+                "run_id": run.id,
+                "job_id": job.id,
+                "chat_id": chat.id,
+            },
+        )
         self.start(job.id, run.id)
         return accepted
 
@@ -822,6 +979,7 @@ class ConversationOrchestrator:
             if revision and revision.run_id == run.id:
                 revision.status = MessageStatus.PENDING.value
                 revision.parts.clear()
+        self._set_work_status(session, run, JobStatus.QUEUED.value)
         session.flush()
         for artifact_id in preview_ids:
             self.artifacts.delete_temporary_preview(session, artifact_id)
@@ -894,6 +1052,7 @@ class ConversationOrchestrator:
             session.commit()
 
         for job_id, run_id in cancelled:
+            await self.scheduler.publish_job(job_id)
             await self.events.publish("run.cancelled", run_id, {"job_id": job_id})
 
     def _task_is_active(self, job_id: str) -> bool:
@@ -935,6 +1094,7 @@ class ConversationOrchestrator:
             session.commit()
         if cancelled_task:
             await asyncio.gather(cancelled_task, return_exceptions=True)
+        await self.scheduler.publish_job(job_id)
         await self.events.publish("run.cancelled", job.run_id, {"job_id": job_id})
         return True
 
@@ -953,35 +1113,63 @@ class ConversationOrchestrator:
                 run = session.get(Run, run_id)
                 if not job or not run:
                     return
-                job.status = JobStatus.RUNNING.value
-                job.phase = "starting"
-                job.started_at = utcnow()
-                job.attempt += 1
-                run.status = RunStatus.RUNNING.value
-                run.started_at = utcnow()
-                session.commit()
-            await self.events.publish("run.created", run_id, {"job_id": job_id})
-            await self.events.publish(
-                "plan.selected",
-                run_id,
-                {"operation": run.operation, "prompt": run.standalone_prompt},
-            )
-            if run.operation == Operation.TEXT.value:
-                await self._set_chat_phase(
-                    job_id,
-                    run_id,
-                    "Waiting for available compute",
+                operation = run.operation
+                resource = job.queue_resource or (
+                    "interactive_compute" if operation == Operation.TEXT.value else "media_compute"
                 )
-            resume_chat_profile = await self._prepare_device_handoff(run.operation)
-            try:
-                async with self.scheduler.lease("primary"):
-                    if run.operation == Operation.TEXT.value:
+                group = job.queue_group or "primary"
+                priority = job.queue_priority
+            async with self.scheduler.job_lease(
+                job_id,
+                resource=resource,
+                group=group,
+                priority=priority,
+            ):
+                with SessionLocal() as session:
+                    job = session.get(Job, job_id)
+                    run = session.get(Run, run_id)
+                    if (
+                        not job
+                        or not run
+                        or job.status
+                        in {
+                            JobStatus.CANCELLED.value,
+                            JobStatus.FAILED.value,
+                            JobStatus.INTERRUPTED.value,
+                        }
+                    ):
+                        return
+                    run.status = RunStatus.RUNNING.value
+                    run.started_at = job.started_at or utcnow()
+                    self._set_work_status(session, run, JobStatus.RUNNING.value)
+                    session.commit()
+                    event_payload = {
+                        "job_id": job_id,
+                        "plan_id": run.work_plan_id,
+                        "step_id": run.work_step_id,
+                    }
+                    operation = run.operation
+                    prompt = run.standalone_prompt
+                await self.events.publish("run.created", run_id, event_payload)
+                await self.events.publish(
+                    "plan.selected",
+                    run_id,
+                    {
+                        "operation": operation,
+                        "prompt": prompt,
+                        "plan_id": event_payload["plan_id"],
+                        "step_id": event_payload["step_id"],
+                    },
+                )
+                resume_chat_profile = await self._prepare_device_handoff(operation)
+                try:
+                    if operation == Operation.TEXT.value:
                         await self._execute_chat(job_id, run_id)
                     else:
                         await self._execute_media(job_id, run_id)
-            finally:
-                if resume_chat_profile:
-                    await self._resume_chat_worker(resume_chat_profile)
+                finally:
+                    if resume_chat_profile:
+                        await self._resume_chat_worker(resume_chat_profile)
         except asyncio.CancelledError:
             with SessionLocal() as session:
                 job = session.get(Job, job_id)
@@ -1137,6 +1325,7 @@ class ConversationOrchestrator:
                 promote=True,
             )
             session.commit()
+        await self.scheduler.publish_job(job_id)
         await self.events.publish(
             "run.completed",
             run_id,
@@ -1163,7 +1352,12 @@ class ConversationOrchestrator:
             ):
                 return
             assistant_id = run.assistant_message_id
-            job.phase = label.lower()
+            update_job_progress(
+                job,
+                stage=label.lower(),
+                queue_resource=job.queue_resource,
+                indeterminate=True,
+            )
             message = session.get(Message, assistant_id)
             if message:
                 progress_part = next(
@@ -1200,6 +1394,7 @@ class ConversationOrchestrator:
                         )
                     )
             session.commit()
+        await self.scheduler.publish_job(job_id)
         await self.events.publish(
             "run.progress",
             run_id,
@@ -1497,12 +1692,18 @@ class ConversationOrchestrator:
                             progress=0,
                             phase="preparing media runtime",
                         )
-                        job.phase = event.phase
+                        update_job_progress(
+                            job,
+                            stage=event.phase,
+                            queue_resource=job.queue_resource,
+                            indeterminate=True,
+                        )
                         self._replace_parts(
                             message,
                             self._media_progress_parts(message, event),
                         )
                         session.commit()
+                await self.scheduler.publish_job(job_id)
                 await self.events.publish(
                     "generation.progress",
                     run_id,
@@ -1556,10 +1757,15 @@ class ConversationOrchestrator:
                     job = session.get(Job, job_id)
                     message = session.get(Message, assistant_id)
                     if job and message:
-                        job.progress = event.progress
-                        job.phase = event.phase
+                        update_job_progress(
+                            job,
+                            stage=event.phase,
+                            stage_progress=event.progress,
+                            queue_resource=job.queue_resource,
+                        )
                         self._replace_parts(message, self._media_progress_parts(message, event))
                         session.commit()
+                await self.scheduler.publish_job(job_id)
                 await self.events.publish(
                     "generation.progress",
                     run_id,
@@ -1571,6 +1777,12 @@ class ConversationOrchestrator:
                     message = session.get(Message, assistant_id)
                     job = session.get(Job, job_id)
                     if message and job:
+                        update_job_progress(
+                            job,
+                            stage=event.phase or "preview",
+                            stage_progress=event.progress,
+                            queue_resource=job.queue_resource,
+                        )
                         preview = self.artifacts.ingest_bytes(
                             session,
                             event.preview,
@@ -1607,6 +1819,7 @@ class ConversationOrchestrator:
                         if old_preview_id and old_preview_id != preview.id:
                             self.artifacts.delete_temporary_preview(session, old_preview_id)
                             session.commit()
+                await self.scheduler.publish_job(job_id)
                 await self.events.publish(
                     "generation.preview",
                     run_id,
@@ -1739,6 +1952,7 @@ class ConversationOrchestrator:
             if preview_artifact_id and preview_artifact_id not in artifact_ids:
                 self.artifacts.delete_temporary_preview(session, preview_artifact_id)
                 session.commit()
+        await self.scheduler.publish_job(job_id)
         for artifact_id in artifact_ids:
             await self.events.publish(
                 "artifact.ready", run_id, {"artifact_id": artifact_id, "job_id": job_id}
@@ -1760,12 +1974,13 @@ class ConversationOrchestrator:
                 return
             now = utcnow()
             job.status = JobStatus.FAILED.value
-            job.phase = "failed"
             job.error = error
             job.completed_at = now
             run.status = RunStatus.FAILED.value
             run.error = error
             run.completed_at = now
+            self._set_work_status(session, run, JobStatus.FAILED.value, error=error)
+            update_job_progress(job, stage="failed", indeterminate=True, now=now)
             message = session.get(Message, run.assistant_message_id)
             if message:
                 preview_ids = self._temporary_preview_ids(message)
@@ -1802,6 +2017,7 @@ class ConversationOrchestrator:
                 for artifact_id in preview_ids:
                     self.artifacts.delete_temporary_preview(session, artifact_id)
             session.commit()
+        await self.scheduler.publish_job(job_id)
         await self.events.publish("run.failed", run_id, {"job_id": job_id, "error": error})
 
     def _complete(self, session: Session, run: Run, job: Job, result: dict[str, Any]) -> None:
@@ -1814,15 +2030,14 @@ class ConversationOrchestrator:
         if message:
             message.status = MessageStatus.COMPLETE.value
         job.status = JobStatus.COMPLETE.value
-        job.progress = 1
-        job.phase = "complete"
+        completed_progress(job, now=now)
         job.result_json = result
         job.completed_at = now
+        self._set_work_status(session, run, JobStatus.COMPLETE.value)
 
     def _mark_cancelled(self, session: Session, job: Job) -> None:
         now = utcnow()
         job.status = JobStatus.CANCELLED.value
-        job.phase = "cancelled"
         job.completed_at = now
         if not job.run_id:
             return
@@ -1831,6 +2046,8 @@ class ConversationOrchestrator:
             return
         run.status = RunStatus.CANCELLED.value
         run.completed_at = now
+        self._set_work_status(session, run, JobStatus.CANCELLED.value)
+        update_job_progress(job, stage="cancelled", indeterminate=True, now=now)
         message = session.get(Message, run.assistant_message_id)
         if message:
             preview_ids = self._temporary_preview_ids(message)
@@ -1855,6 +2072,24 @@ class ConversationOrchestrator:
             session.flush()
             for artifact_id in preview_ids:
                 self.artifacts.delete_temporary_preview(session, artifact_id)
+
+    @staticmethod
+    def _set_work_status(
+        session: Session,
+        run: Run,
+        status: str,
+        *,
+        error: str | None = None,
+    ) -> None:
+        if run.work_step_id:
+            step = session.get(WorkStep, run.work_step_id)
+            if step:
+                step.status = status
+                step.error = error
+        if run.work_plan_id:
+            plan = session.get(WorkPlan, run.work_plan_id)
+            if plan:
+                plan.status = status
 
     @staticmethod
     def _temporary_preview_ids(message: Message) -> list[str]:

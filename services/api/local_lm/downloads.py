@@ -36,6 +36,7 @@ from .gguf import (
 )
 from .models import Job, ModelInstall, ModelSource, WorkflowDefinition, WorkflowRevision
 from .profile_service import ensure_profile_for_install, retire_profiles_for_installs
+from .progress import completed_progress, update_job_progress
 from .scheduler import ResourceScheduler
 from .schemas import DownloadRequest
 from .subprocess_env import subprocess_environment
@@ -79,7 +80,6 @@ class DownloadManager:
         self._api = HfApi(token=settings.hf_token)
         self._tasks: dict[str, asyncio.Task[None]] = {}
         self._workers: dict[str, subprocess.Popen[bytes]] = {}
-        self._semaphore = asyncio.Semaphore(settings.max_concurrent_downloads)
 
     def set_token(self, token: str | None) -> None:
         self.settings.hf_token = token
@@ -147,8 +147,18 @@ class DownloadManager:
         job = Job(
             kind=JobKind.DOWNLOAD.value,
             status=JobStatus.QUEUED.value,
-            phase="queued",
+            queue_resource="network_transfer",
+            queue_group="network",
+            queue_priority=-10,
+            queue_ticket=new_id("ticket"),
+            enqueued_at=utcnow(),
             payload_json=serialized_request,
+        )
+        update_job_progress(
+            job,
+            stage="queued",
+            queue_resource="network_transfer",
+            indeterminate=True,
         )
         session.add(job)
         session.commit()
@@ -208,7 +218,18 @@ class DownloadManager:
             ).all()
             for job in jobs:
                 job.status = JobStatus.QUEUED.value
-                job.phase = "resuming"
+                job.error = None
+                job.completed_at = None
+                job.claim_owner = None
+                job.claim_expires_at = None
+                job.heartbeat_at = None
+                job.enqueued_at = utcnow()
+                update_job_progress(
+                    job,
+                    stage="resuming",
+                    queue_resource=job.queue_resource or "network_transfer",
+                    indeterminate=True,
+                )
             session.commit()
             job_ids = [job.id for job in jobs]
         for job_id in job_ids:
@@ -228,8 +249,13 @@ class DownloadManager:
             }:
                 return False
             job.status = JobStatus.CANCELLED.value
-            job.phase = "cancelled"
             job.completed_at = utcnow()
+            update_job_progress(
+                job,
+                stage="cancelled",
+                queue_resource=job.queue_resource,
+                indeterminate=True,
+            )
             session.commit()
         await self._stop_task(job_id)
         await self._cleanup_provisional_install_serialized(job_id)
@@ -250,7 +276,12 @@ class DownloadManager:
             ):
                 return False
             job.status = JobStatus.PAUSED.value
-            job.phase = "paused"
+            update_job_progress(
+                job,
+                stage="paused",
+                queue_resource=job.queue_resource,
+                indeterminate=True,
+            )
             session.commit()
         await self.events.publish("download.paused", job_id)
         return True
@@ -273,9 +304,19 @@ class DownloadManager:
                 return False
             retrying = job.status != JobStatus.PAUSED.value
             job.status = JobStatus.QUEUED.value
-            job.phase = "retry queued" if retrying else "resume queued"
             job.error = None
+            job.started_at = None
             job.completed_at = None
+            job.claim_owner = None
+            job.claim_expires_at = None
+            job.heartbeat_at = None
+            job.enqueued_at = utcnow()
+            update_job_progress(
+                job,
+                stage="retry queued" if retrying else "resume queued",
+                queue_resource=job.queue_resource or "network_transfer",
+                indeterminate=True,
+            )
             session.commit()
         self.start(job_id)
         return True
@@ -296,7 +337,13 @@ class DownloadManager:
             ).all()
             for job in jobs:
                 job.status = JobStatus.INTERRUPTED.value
-                job.phase = "interrupted by shutdown"
+                job.completed_at = utcnow()
+                update_job_progress(
+                    job,
+                    stage="interrupted by shutdown",
+                    queue_resource=job.queue_resource,
+                    indeterminate=True,
+                )
             session.commit()
 
     def cleanup_partials(self, session: Session) -> tuple[int, int]:
@@ -349,19 +396,28 @@ class DownloadManager:
         provisional_path: Path | None = None
         provisional_files: list[str] = []
         try:
-            async with self._semaphore:
+            async with self.scheduler.job_lease(
+                job_id,
+                resource="network_transfer",
+                group="network",
+                priority=-10,
+                capacity=self.settings.max_concurrent_downloads,
+            ):
                 with SessionLocal() as session:
                     job = session.get(Job, job_id)
                     if not job:
                         return
                     request = DownloadRequest.model_validate(job.payload_json)
-                    job.status = JobStatus.RUNNING.value
-                    job.phase = "inspecting"
-                    job.started_at = utcnow()
                     job.completed_at = None
                     job.error = None
-                    job.attempt += 1
+                    update_job_progress(
+                        job,
+                        stage="inspecting",
+                        queue_resource="network_transfer",
+                        indeterminate=True,
+                    )
                     session.commit()
+                await self.scheduler.publish_job(job_id)
                 await self.events.publish(
                     "download.started", job_id, {"remote_id": request.remote_id}
                 )
@@ -370,8 +426,14 @@ class DownloadManager:
                     with SessionLocal() as session:
                         job = session.get(Job, job_id)
                         if job:
-                            job.phase = "preparing media runtime"
+                            update_job_progress(
+                                job,
+                                stage="preparing media runtime",
+                                queue_resource=job.queue_resource,
+                                indeterminate=True,
+                            )
                             session.commit()
+                    await self.scheduler.publish_job(job_id)
                     async with self.scheduler.lease("primary"):
                         compiled_template = await self._prepare_comfy_template(request)
                 else:
@@ -418,8 +480,19 @@ class DownloadManager:
                         job = session.get(Job, job_id)
                         if not job or job.status == JobStatus.CANCELLED.value:
                             return
-                        job.phase = f"downloading {filename}"
+                        update_job_progress(
+                            job,
+                            stage=f"downloading {filename}",
+                            completed_units=completed_bytes,
+                            total_units=total_size or None,
+                            unit="bytes" if total_size else None,
+                            file_index=index + 1,
+                            file_count=len(filenames),
+                            queue_resource=job.queue_resource,
+                            indeterminate=not bool(total_size),
+                        )
                         session.commit()
+                    await self.scheduler.publish_job(job_id)
                     downloaded_path = await self._download_file(
                         job_id=job_id,
                         remote_id=request.remote_id,
@@ -435,34 +508,53 @@ class DownloadManager:
                         with SessionLocal() as session:
                             job = session.get(Job, job_id)
                             if job:
-                                job.phase = f"verifying {filename}"
+                                update_job_progress(
+                                    job,
+                                    stage=f"verifying {filename}",
+                                    completed_units=completed_bytes + file_sizes.get(filename, 0),
+                                    total_units=total_size or None,
+                                    unit="bytes" if total_size else None,
+                                    file_index=index + 1,
+                                    file_count=len(filenames),
+                                    queue_resource="disk",
+                                    indeterminate=True,
+                                )
                                 session.commit()
-                        actual_hash = await asyncio.to_thread(
-                            self._sha256_file, Path(downloaded_path)
-                        )
+                        await self.scheduler.publish_job(job_id)
+                        async with self.scheduler.lease("disk"):
+                            actual_hash = await asyncio.to_thread(
+                                self._sha256_file, Path(downloaded_path)
+                            )
                         if actual_hash != expected_hash:
                             raise ValueError(f"SHA-256 mismatch for {filename}")
                     with SessionLocal() as session:
                         job = session.get(Job, job_id)
                         if not job or job.status == JobStatus.CANCELLED.value:
                             return
-                        job.phase = f"downloaded {filename}"
                         completed_bytes += file_sizes.get(filename, 0)
-                        job.progress = (
-                            completed_bytes / total_size * 0.9
-                            if total_size
-                            else (index + 1) / len(filenames) * 0.9
+                        update_job_progress(
+                            job,
+                            stage=f"downloaded {filename}",
+                            completed_units=completed_bytes if total_size else index + 1,
+                            total_units=total_size if total_size else len(filenames),
+                            unit="bytes" if total_size else "files",
+                            file_index=index + 1,
+                            file_count=len(filenames),
+                            queue_resource=job.queue_resource,
                         )
                         session.commit()
+                    await self.scheduler.publish_job(job_id)
                     await self.events.publish(
                         "download.progress",
                         job_id,
                         {
                             "progress": (
-                                completed_bytes / total_size * 0.9
+                                completed_bytes / total_size
                                 if total_size
-                                else (index + 1) / len(filenames) * 0.9
+                                else (index + 1) / len(filenames)
                             ),
+                            "downloaded_bytes": completed_bytes if total_size else None,
+                            "total_bytes": total_size or None,
                             "filename": filename,
                         },
                     )
@@ -471,23 +563,34 @@ class DownloadManager:
                     with SessionLocal() as session:
                         job = session.get(Job, job_id)
                         if job:
-                            job.phase = "validating checkpoint structure"
+                            update_job_progress(
+                                job,
+                                stage="validating checkpoint structure",
+                                completed_units=completed_bytes if total_size else None,
+                                total_units=total_size or None,
+                                unit="bytes" if total_size else None,
+                                queue_resource="disk",
+                                indeterminate=True,
+                            )
                             session.commit()
+                    await self.scheduler.publish_job(job_id)
                     selected = PurePosixPath(compiled_template.template.selected_files[0])
                     checkpoint_path = staging.joinpath(*selected.parts)
-                    await asyncio.to_thread(
-                        self._validate_standard_checkpoint_safetensors,
-                        checkpoint_path,
-                    )
+                    async with self.scheduler.lease("disk"):
+                        await asyncio.to_thread(
+                            self._validate_standard_checkpoint_safetensors,
+                            checkpoint_path,
+                        )
 
                 destination.parent.mkdir(parents=True, exist_ok=True)
                 if compiled_template:
                     provisional_path = destination
                     provisional_files = list(filenames)
-                self._activate_staging(staging, destination)
-                installed_size = sum(
-                    path.stat().st_size for path in destination.rglob("*") if path.is_file()
-                )
+                async with self.scheduler.lease("disk"):
+                    self._activate_staging(staging, destination)
+                    installed_size = sum(
+                        path.stat().st_size for path in destination.rglob("*") if path.is_file()
+                    )
                 template_defaults = (
                     self._template_defaults(compiled_template) if compiled_template else {}
                 )
@@ -554,8 +657,15 @@ class DownloadManager:
                     job = session.get(Job, job_id)
                     if not job:
                         return
-                    job.progress = 0.95
-                    job.phase = "validating runtime" if compiled_template else "activating"
+                    update_job_progress(
+                        job,
+                        stage="validating runtime" if compiled_template else "activating",
+                        completed_units=completed_bytes if total_size else None,
+                        total_units=total_size or None,
+                        unit="bytes" if total_size else None,
+                        queue_resource="primary_compute" if compiled_template else "disk",
+                        indeterminate=True,
+                    )
                     if profile:
                         job.result_json = {
                             "model_install_id": install.id,
@@ -598,10 +708,10 @@ class DownloadManager:
                     if not job:
                         return
                     job.status = JobStatus.COMPLETE.value
-                    job.progress = 1
-                    job.phase = "complete"
                     job.completed_at = utcnow()
+                    completed_progress(job)
                     session.commit()
+                await self.scheduler.publish_job(job_id)
                 await self.events.publish(
                     "download.completed",
                     job_id,
@@ -629,10 +739,16 @@ class DownloadManager:
                 job = session.get(Job, job_id)
                 if job:
                     job.status = JobStatus.FAILED.value
-                    job.phase = "failed"
                     job.error = str(exc)
                     job.completed_at = utcnow()
+                    update_job_progress(
+                        job,
+                        stage="failed",
+                        queue_resource=job.queue_resource,
+                        indeterminate=True,
+                    )
                     session.commit()
+            await self.scheduler.publish_job(job_id)
             await self.events.publish("download.failed", job_id, {"error": str(exc)})
 
     async def _prepare_comfy_template(
@@ -732,8 +848,14 @@ class DownloadManager:
                 with SessionLocal() as session:
                     job = session.get(Job, job_id)
                     if job:
-                        job.phase = "probing checkpoint runtime"
+                        update_job_progress(
+                            job,
+                            stage="probing checkpoint runtime",
+                            queue_resource="primary_compute",
+                            indeterminate=True,
+                        )
                         session.commit()
+                await self.scheduler.publish_job(job_id)
                 await self._probe_adaptive_checkpoint(compiled)
             with SessionLocal() as session:
                 activated_install = session.get(ModelInstall, install_id)
@@ -756,7 +878,12 @@ class DownloadManager:
                     compiled,
                     activated_install,
                 )
-                job.phase = "activating"
+                update_job_progress(
+                    job,
+                    stage="activating",
+                    queue_resource="primary_compute",
+                    indeterminate=True,
+                )
                 job.result_json = {
                     "model_install_id": activated_install.id,
                     "profile_id": profile.id,
@@ -764,6 +891,7 @@ class DownloadManager:
                     "superseded_model_install_ids": superseded_install_ids,
                 }
                 session.commit()
+                await self.scheduler.publish_job(job_id)
                 return (
                     compiled,
                     profile.id,
@@ -1180,8 +1308,14 @@ class DownloadManager:
                 with SessionLocal() as session:
                     job = session.get(Job, job_id)
                     if job:
-                        job.phase = f"retrying {filename} ({attempt + 1}/{_TRANSFER_ATTEMPTS})"
+                        update_job_progress(
+                            job,
+                            stage=f"retrying {filename} ({attempt + 1}/{_TRANSFER_ATTEMPTS})",
+                            queue_resource=job.queue_resource,
+                            indeterminate=True,
+                        )
                         session.commit()
+                await self.scheduler.publish_job(job_id)
                 await self.events.publish(
                     "download.retrying",
                     job_id,
@@ -1299,27 +1433,32 @@ class DownloadManager:
             )
             if file_size:
                 maximum_transferred = min(maximum_transferred, file_size)
-            progress = (
-                min((completed_bytes + maximum_transferred) / total_size * 0.9, 0.9)
-                if total_size
-                else 0.0
-            )
+            transferred_bytes = completed_bytes + maximum_transferred
+            progress = min(transferred_bytes / total_size, 1.0) if total_size else 0.0
             if last_reported < 0 or progress - last_reported >= 0.001:
                 with SessionLocal() as session:
                     job = session.get(Job, job_id)
                     if not job or job.status != JobStatus.RUNNING.value:
                         return
-                    job.phase = f"downloading {filename}"
-                    job.progress = max(job.progress, progress)
+                    update_job_progress(
+                        job,
+                        stage=f"downloading {filename}",
+                        completed_units=transferred_bytes,
+                        total_units=total_size,
+                        unit="bytes",
+                        queue_resource=job.queue_resource,
+                    )
                     session.commit()
+                await self.scheduler.publish_job(job_id)
                 await self.events.publish(
                     "download.progress",
                     job_id,
                     {
                         "progress": progress,
                         "filename": filename,
-                        "downloaded_bytes": maximum_transferred,
+                        "downloaded_bytes": transferred_bytes,
                         "file_size_bytes": file_size,
+                        "total_bytes": total_size,
                     },
                 )
                 last_reported = progress
