@@ -19,8 +19,8 @@ from sqlalchemy.orm import Session
 
 import local_lm.api as api_module
 from local_lm import __version__
-from local_lm.adapters.base import ChatEvent, ChatRequest
-from local_lm.adapters.mock import MockChatAdapter
+from local_lm.adapters.base import ChatEvent, ChatRequest, MediaEvent, MediaRequest
+from local_lm.adapters.mock import MockChatAdapter, MockMediaAdapter
 from local_lm.catalog import HuggingFaceCatalog
 from local_lm.config import Settings
 from local_lm.db import SessionLocal
@@ -1543,6 +1543,259 @@ async def test_media_output_count_is_bounded_before_any_turn_is_written(
     assert (await client.get("/api/work-plans", params={"chat_id": chat["id"]})).json() == []
 
 
+async def test_ordered_text_image_video_text_plan_resolves_typed_outputs(
+    client: AsyncClient,
+) -> None:
+    chat = (await client.post("/api/chats", json={"title": "Ordered work"})).json()
+    payload = {
+        "text": (
+            "Write a short story about a paper boat, then create an image based on it, "
+            "then animate the image into a video, then summarize the video"
+        ),
+        "mode": "auto",
+        "ordered_settings": {
+            "chat": {"max_tokens": 64},
+            "image": {"width": 512},
+            "video": {"frames": 49},
+        },
+        "idempotency_key": "ordered-work-chain",
+    }
+    preview = await client.post(f"/api/chats/{chat['id']}/turns", json=payload)
+    assert preview.status_code == 409
+    assert preview.json()["detail"]["code"] == "ordered_plan_confirmation_required"
+    assert [step["mode"] for step in preview.json()["detail"]["plan"]["steps"]] == [
+        "text",
+        "image",
+        "video",
+        "text",
+    ]
+    assert preview.json()["detail"]["estimate"]["video_duration_seconds"] > 0
+    assert preview.json()["detail"]["estimate"]["estimated_bytes"] > 0
+    assert (await client.get(f"/api/chats/{chat['id']}")).json()["messages"] == []
+    response = await client.post(
+        f"/api/chats/{chat['id']}/turns",
+        json={**payload, "confirm_media": True},
+    )
+    assert response.status_code == 202
+    accepted = response.json()
+    plan_id = accepted["run"]["work_plan_id"]
+    plan = (await client.get(f"/api/work-plans/{plan_id}")).json()
+    assert plan["planner_version"] == "ordered-work-v1"
+    assert plan["failure_policy"] == "preserve_completed_block_dependents"
+    assert [step["operation"] for step in plan["steps"]] == [
+        "text",
+        "text_to_image",
+        "image_to_video",
+        "text",
+    ]
+    assert [step["ordinal"] for step in plan["steps"]] == [1, 2, 3, 4]
+    assert plan["summary_json"]["intent"]["planner_version"] == "ordered-work-v1"
+
+    for run_id in plan["summary_json"]["run_ids"]:
+        await wait_for_run(client, run_id)
+
+    with SessionLocal() as session:
+        steps = session.scalars(
+            select(WorkStep).where(WorkStep.plan_id == plan_id).order_by(WorkStep.ordinal)
+        ).all()
+        runs = [session.get(Run, step.run_id) for step in steps]
+        assert all(run is not None for run in runs)
+        assert runs[0].settings_json["max_tokens"] == 64
+        assert runs[1].settings_json["width"] == 512
+        assert "frames" not in runs[1].settings_json
+        assert runs[2].settings_json["frames"] == 49
+        assert runs[3].settings_json["max_tokens"] == 64
+        assert steps[0].input_bindings_json == []
+        assert steps[1].input_bindings_json == [
+            {"type": "step_output.text", "source_step_id": steps[0].id}
+        ]
+        assert steps[2].input_bindings_json == [
+            {"type": "step_output.artifact", "source_step_id": steps[1].id}
+        ]
+        assert steps[3].input_bindings_json == [
+            {"type": "step_output.artifact", "source_step_id": steps[2].id}
+        ]
+        assert (
+            runs[1].provenance_json["resolved_dependency_text"][0]["source_step_id"] == steps[0].id
+        )
+        image_artifact_ids = runs[2].provenance_json["resolved_dependency_artifact_ids"]
+        video_artifact_ids = runs[3].provenance_json["resolved_dependency_artifact_ids"]
+        assert len(image_artifact_ids) == 1
+        assert len(video_artifact_ids) == 1
+        image_artifact = session.get(Artifact, image_artifact_ids[0])
+        video_artifact = session.get(Artifact, video_artifact_ids[0])
+        assert image_artifact and image_artifact.media_type.startswith("image/")
+        assert video_artifact and video_artifact.media_type.startswith("video/")
+        for resolved_step, resolved_run in zip(steps, runs, strict=True):
+            assert resolved_run
+            if resolved_run.profile_id:
+                profile = session.get(ModelProfile, resolved_run.profile_id)
+                assert profile
+                expected_role = (
+                    "chat"
+                    if resolved_step.operation == "text"
+                    else "video"
+                    if "video" in resolved_step.operation
+                    else "image"
+                )
+                assert profile.role == expected_role
+
+    completed = (await client.get(f"/api/work-plans/{plan_id}")).json()
+    assert completed["status"] == "complete"
+    assert completed["summary_json"]["status_counts"] == {"complete": 4}
+
+
+async def test_ordered_plan_blocks_dependents_and_resumes_after_retry(
+    client: AsyncClient,
+    monkeypatch,
+) -> None:  # type: ignore[no-untyped-def]
+    original_stream = MockChatAdapter.stream
+
+    async def fail_first_step(
+        self: MockChatAdapter,
+        request: ChatRequest,
+    ) -> AsyncIterator[ChatEvent]:
+        del self, request
+        yield ChatEvent(type="error", data={"error": "Synthetic story failure"})
+
+    monkeypatch.setattr(MockChatAdapter, "stream", fail_first_step)
+    chat = (await client.post("/api/chats", json={"title": "Blocked chain"})).json()
+    response = await client.post(
+        f"/api/chats/{chat['id']}/turns",
+        json={
+            "text": (
+                "Write a short story, then create an image based on it, then describe the image"
+            ),
+            "mode": "auto",
+            "confirm_media": True,
+        },
+    )
+    assert response.status_code == 202
+    plan_id = response.json()["run"]["work_plan_id"]
+    deadline = asyncio.get_running_loop().time() + 5
+    blocked_plan: dict = {}
+    while asyncio.get_running_loop().time() < deadline:
+        blocked_plan = (await client.get(f"/api/work-plans/{plan_id}")).json()
+        if [step["status"] for step in blocked_plan["steps"]] == [
+            "failed",
+            "blocked",
+            "blocked",
+        ]:
+            break
+        await asyncio.sleep(0.03)
+    assert [step["status"] for step in blocked_plan["steps"]] == [
+        "failed",
+        "blocked",
+        "blocked",
+    ]
+    assert blocked_plan["status"] == "blocked"
+    assert blocked_plan["summary_json"]["status_counts"] == {
+        "blocked": 2,
+        "failed": 1,
+    }
+    jobs = (await client.get("/api/jobs")).json()
+    blocked_jobs = [
+        job for job in jobs if job["work_plan_id"] == plan_id and job["status"] == "queued"
+    ]
+    assert len(blocked_jobs) == 2
+    assert all(job["progress_json"]["blocked_by"] for job in blocked_jobs)
+
+    monkeypatch.setattr(MockChatAdapter, "stream", original_stream)
+    retry = await client.post(f"/api/work-steps/{blocked_plan['steps'][0]['id']}/retry")
+    assert retry.status_code == 200
+    for run_id in blocked_plan["summary_json"]["run_ids"]:
+        await wait_for_run(client, run_id)
+    completed = (await client.get(f"/api/work-plans/{plan_id}")).json()
+    assert completed["status"] == "complete"
+    assert completed["summary_json"]["status_counts"] == {"complete": 3}
+    jobs = (await client.get("/api/jobs")).json()
+    attempts = {
+        job["work_step_id"]: job["attempt"] for job in jobs if job["work_plan_id"] == plan_id
+    }
+    assert attempts[blocked_plan["steps"][0]["id"]] == 2
+    assert attempts[blocked_plan["steps"][1]["id"]] == 1
+    assert attempts[blocked_plan["steps"][2]["id"]] == 1
+
+
+async def test_ordered_retry_preserves_completed_predecessor(
+    client: AsyncClient,
+    monkeypatch,
+) -> None:  # type: ignore[no-untyped-def]
+    original_generate = MockMediaAdapter.generate
+
+    async def fail_media_step(
+        self: MockMediaAdapter,
+        request: MediaRequest,
+    ) -> AsyncIterator[MediaEvent]:
+        del self, request
+        raise RuntimeError("Synthetic media failure")
+        yield MediaEvent(type="complete")  # pragma: no cover
+
+    monkeypatch.setattr(MockMediaAdapter, "generate", fail_media_step)
+    chat = (await client.post("/api/chats", json={"title": "Preserved chain"})).json()
+    response = await client.post(
+        f"/api/chats/{chat['id']}/turns",
+        json={
+            "text": (
+                "Write a short scene, then create an image based on it, then describe the image"
+            ),
+            "mode": "auto",
+            "confirm_media": True,
+        },
+    )
+    plan_id = response.json()["run"]["work_plan_id"]
+    deadline = asyncio.get_running_loop().time() + 5
+    failed_plan: dict = {}
+    while asyncio.get_running_loop().time() < deadline:
+        failed_plan = (await client.get(f"/api/work-plans/{plan_id}")).json()
+        if [step["status"] for step in failed_plan["steps"]] == [
+            "complete",
+            "failed",
+            "blocked",
+        ]:
+            break
+        await asyncio.sleep(0.03)
+    assert [step["status"] for step in failed_plan["steps"]] == [
+        "complete",
+        "failed",
+        "blocked",
+    ]
+    first_message_id = failed_plan["summary_json"]["assistant_message_ids"][0]
+    first_message = (await client.get(f"/api/messages/{first_message_id}")).json()
+
+    monkeypatch.setattr(MockMediaAdapter, "generate", original_generate)
+    retry = await client.post(f"/api/work-steps/{failed_plan['steps'][1]['id']}/retry")
+    assert retry.status_code == 200
+    for run_id in failed_plan["summary_json"]["run_ids"]:
+        await wait_for_run(client, run_id)
+    assert (await client.get(f"/api/messages/{first_message_id}")).json() == first_message
+    jobs = (await client.get("/api/jobs")).json()
+    attempts = {
+        job["work_step_id"]: job["attempt"] for job in jobs if job["work_plan_id"] == plan_id
+    }
+    assert attempts[failed_plan["steps"][0]["id"]] == 1
+    assert attempts[failed_plan["steps"][1]["id"]] == 2
+    assert attempts[failed_plan["steps"][2]["id"]] == 1
+
+
+async def test_invalid_ordered_plan_settings_fail_before_writes(
+    client: AsyncClient,
+) -> None:
+    chat = (await client.post("/api/chats", json={"title": "Invalid ordered"})).json()
+    response = await client.post(
+        f"/api/chats/{chat['id']}/turns",
+        json={
+            "text": "Write a short story, then create an image based on it",
+            "mode": "auto",
+            "confirm_media": True,
+            "ordered_settings": {"image": {"arbitrary_node": "execute"}},
+        },
+    )
+    assert response.status_code == 422
+    assert (await client.get(f"/api/chats/{chat['id']}")).json()["messages"] == []
+    assert (await client.get("/api/work-plans", params={"chat_id": chat["id"]})).json() == []
+
+
 async def test_turn_remains_truthfully_queued_until_compute_lease(
     app: FastAPI,
     client: AsyncClient,
@@ -1883,6 +2136,42 @@ async def test_incognito_conversation_and_artifact_never_enter_durable_storage(
     assert (await client.get(f"/api/chats/{durable['id']}")).status_code == 200
 
 
+async def test_ordered_plan_remains_inside_incognito_scope(
+    app: FastAPI,
+    client: AsyncClient,
+) -> None:
+    started = await client.post("/api/incognito/session")
+    token = started.json()["token"]
+    scope = app.state.services.incognito.require(token)
+    scope_root = scope.root
+    client.headers[INCOGNITO_HEADER] = token
+    chat = (await client.post("/api/chats", json={"title": "Private ordered"})).json()
+    accepted = (
+        await client.post(
+            f"/api/chats/{chat['id']}/turns",
+            json={
+                "text": "Write a private scene, then create an image based on it",
+                "mode": "auto",
+                "confirm_media": True,
+            },
+        )
+    ).json()
+    plan = (await client.get(f"/api/work-plans/{accepted['run']['work_plan_id']}")).json()
+    for run_id in plan["summary_json"]["run_ids"]:
+        await wait_for_run(client, run_id)
+    private_run_ids = plan["summary_json"]["run_ids"]
+    private_plan_id = plan["id"]
+
+    del client.headers[INCOGNITO_HEADER]
+    with SessionLocal() as session:
+        assert session.get(WorkPlan, private_plan_id) is None
+        assert all(session.get(Run, run_id) is None for run_id in private_run_ids)
+    client.headers[INCOGNITO_HEADER] = token
+    assert (await client.delete("/api/incognito/session")).status_code == 204
+    assert not scope_root.exists()
+    del client.headers[INCOGNITO_HEADER]
+
+
 async def test_active_chat_run_can_be_cancelled_directly(client: AsyncClient) -> None:
     chat = (await client.post("/api/chats", json={"title": "Stop response"})).json()
     turn = await client.post(
@@ -2159,6 +2448,80 @@ async def test_restart_recovery_preserves_media_output_order(
     recovered = (await client.get(f"/api/work-plans/{plan_id}")).json()
     assert recovered["status"] == "queued"
     assert recovered["summary_json"]["status_counts"] == {"queued": 3}
+
+
+async def test_restart_recovery_does_not_replay_completed_ordered_steps(
+    client: AsyncClient,
+    app: FastAPI,
+    monkeypatch,
+) -> None:  # type: ignore[no-untyped-def]
+    chat = (await client.post("/api/chats", json={"title": "Ordered restart"})).json()
+    turn = (
+        await client.post(
+            f"/api/chats/{chat['id']}/turns",
+            json={
+                "text": (
+                    "Write a short scene, then create an image based on it, then describe the image"
+                ),
+                "mode": "auto",
+                "confirm_media": True,
+            },
+        )
+    ).json()
+    plan_id = turn["run"]["work_plan_id"]
+    plan = (await client.get(f"/api/work-plans/{plan_id}")).json()
+    for run_id in plan["summary_json"]["run_ids"]:
+        await wait_for_run(client, run_id)
+
+    first_message_id = plan["summary_json"]["assistant_message_ids"][0]
+    first_message = (await client.get(f"/api/messages/{first_message_id}")).json()
+    with SessionLocal() as session:
+        steps = session.scalars(
+            select(WorkStep).where(WorkStep.plan_id == plan_id).order_by(WorkStep.ordinal)
+        ).all()
+        assert len(steps) == 3
+        expected: list[tuple[str, str]] = []
+        for step in steps[1:]:
+            run = session.get(Run, step.run_id)
+            job = session.scalar(select(Job).where(Job.work_step_id == step.id))
+            assert run and job
+            step.status = JobStatus.QUEUED.value
+            step.error = None
+            run.status = JobStatus.QUEUED.value
+            run.started_at = None
+            run.completed_at = None
+            run.error = None
+            job.status = JobStatus.QUEUED.value
+            job.started_at = None
+            job.completed_at = None
+            job.error = None
+            job.claim_owner = "stale-dispatcher"
+            expected.append((job.id, run.id))
+        work_plan = session.get(WorkPlan, plan_id)
+        assert work_plan
+        work_plan.status = JobStatus.QUEUED.value
+        session.commit()
+
+    restarted: list[tuple[str, str]] = []
+    monkeypatch.setattr(
+        app.state.services.orchestrator,
+        "start",
+        lambda job_id, run_id: restarted.append((job_id, run_id)),
+    )
+    app.state.services.orchestrator.recover_interrupted()
+
+    assert restarted == expected
+    assert (await client.get(f"/api/messages/{first_message_id}")).json() == first_message
+    recovered = (await client.get(f"/api/work-plans/{plan_id}")).json()
+    assert [step["status"] for step in recovered["steps"]] == [
+        "complete",
+        "queued",
+        "queued",
+    ]
+    assert recovered["summary_json"]["status_counts"] == {
+        "complete": 1,
+        "queued": 2,
+    }
 
 
 async def test_retry_clears_stale_error_before_dispatch(

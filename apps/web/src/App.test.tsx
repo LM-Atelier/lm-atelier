@@ -2978,6 +2978,28 @@ describe("App", () => {
       expect(api.cancelWorkStep).toHaveBeenCalledWith("step-1", expect.anything());
       expect(api.retryWorkStep).toHaveBeenCalledWith("step-2", expect.anything());
     });
+    client.setQueryData(["work-plans", chat.id], [
+      {
+        ...plan,
+        planner_version: "ordered-work-v1",
+        steps: [
+          {
+            ...plan.steps[0],
+            operation: "text",
+            output_contract_json: [{ slot: "story", type: "text" }],
+          },
+          {
+            ...plan.steps[1],
+            operation: "text_to_image",
+            output_contract_json: [{ slot: "visual", type: "image" }],
+          },
+        ],
+      },
+    ]);
+    expect(await screen.findByText("2-step plan")).toBeInTheDocument();
+    fireEvent.click(screen.getByText("2-step plan"));
+    expect(screen.getByText("Step 1 · Text")).toBeInTheDocument();
+    expect(screen.getByText("Step 2 · Image")).toBeInTheDocument();
   });
 
   it("keeps a deferred turn and its pending state on the originating chat", async () => {

@@ -206,6 +206,7 @@ class TurnRequest(ApiModel):
     parent_message_id: str | None = None
     input_artifact_ids: list[str] = Field(default_factory=list, max_length=16)
     settings: dict[str, Any] = Field(default_factory=dict)
+    ordered_settings: dict[str, dict[str, Any]] = Field(default_factory=dict, max_length=3)
     output_count: int | None = Field(default=None, ge=1, le=16)
     confirm_media: bool = False
     idempotency_key: str | None = Field(default=None, max_length=200)
@@ -226,6 +227,31 @@ class RoutingPlan(ApiModel):
     output_count: int = Field(default=1, ge=1, le=16)
     confidence: float = Field(ge=0, le=1)
     reason: str
+
+
+class OrderedStepInput(ApiModel):
+    source_step_id: str = Field(
+        min_length=1,
+        max_length=40,
+        pattern=r"^[a-z][a-z0-9_]*$",
+    )
+    kind: Literal["text_context", "artifact"]
+
+
+class OrderedStepIntent(ApiModel):
+    id: str = Field(min_length=1, max_length=40, pattern=r"^[a-z][a-z0-9_]*$")
+    mode: Literal["text", "image", "video"]
+    prompt: str = Field(min_length=1, max_length=20_000)
+    depends_on: list[str] = Field(default_factory=list, max_length=8)
+    inputs: list[OrderedStepInput] = Field(default_factory=list, max_length=8)
+
+
+class OrderedWorkIntent(ApiModel):
+    planner_version: Literal["ordered-work-v1"] = "ordered-work-v1"
+    steps: list[OrderedStepIntent] = Field(min_length=2, max_length=8)
+    confidence: float = Field(ge=0, le=1)
+    reason: str = Field(min_length=1, max_length=1_000)
+    requires_confirmation: bool = False
 
 
 class RunOut(ApiModel):

@@ -25,7 +25,7 @@ from .models import (
 )
 from .progress import update_job_progress
 from .schemas import JobOut
-from .work_plans import plan_status_summary, refresh_plan_status
+from .work_plans import BLOCKED_WORK_STATUS, plan_status_summary, refresh_plan_status
 
 if TYPE_CHECKING:
     from .events import EventBroker
@@ -139,13 +139,32 @@ class ResourceScheduler:
                         session,
                         job.work_step_id,
                     )
-                    if failed_dependencies:
-                        joined = ", ".join(failed_dependencies)
-                        raise RuntimeError(f"Required work did not complete successfully: {joined}")
                     blocked_by = self._blocking_steps(session, job.work_step_id)
+                    step = session.get(WorkStep, job.work_step_id) if job.work_step_id else None
+                    plan = session.get(WorkPlan, job.work_plan_id) if job.work_plan_id else None
+                    if step:
+                        step.status = (
+                            BLOCKED_WORK_STATUS if failed_dependencies else JobStatus.QUEUED.value
+                        )
+                        step.error = (
+                            "Blocked by unsuccessful required work."
+                            if failed_dependencies
+                            else None
+                        )
+                    if plan:
+                        session.flush()
+                        refresh_plan_status(session, plan.id)
+                        plan.summary_json = {
+                            **plan.summary_json,
+                            "status_counts": plan_status_summary(session, plan.id),
+                        }
                     update_job_progress(
                         job,
-                        stage="waiting for dependencies",
+                        stage=(
+                            "blocked by unsuccessful dependency"
+                            if failed_dependencies
+                            else "waiting for dependencies"
+                        ),
                         queue_resource=resource,
                         queue_position=None,
                         queue_length=len(candidates),
@@ -154,6 +173,19 @@ class ResourceScheduler:
                         now=now,
                     )
                 else:
+                    step = session.get(WorkStep, job.work_step_id) if job.work_step_id else None
+                    if step and step.status == BLOCKED_WORK_STATUS:
+                        step.status = JobStatus.QUEUED.value
+                        step.error = None
+                        if job.work_plan_id:
+                            session.flush()
+                            refresh_plan_status(session, job.work_plan_id)
+                            plan = session.get(WorkPlan, job.work_plan_id)
+                            if plan:
+                                plan.summary_json = {
+                                    **plan.summary_json,
+                                    "status_counts": plan_status_summary(session, plan.id),
+                                }
                     update_job_progress(
                         job,
                         stage="queued",
@@ -286,6 +318,7 @@ class ResourceScheduler:
             JobStatus.FAILED.value,
             JobStatus.CANCELLED.value,
             JobStatus.INTERRUPTED.value,
+            BLOCKED_WORK_STATUS,
         }
         return [
             dependency_id

@@ -8,10 +8,12 @@ from sqlalchemy.orm import Session
 from .domain import JobStatus
 from .models import WorkPlan, WorkStep
 
+BLOCKED_WORK_STATUS = "blocked"
 _ACTIVE_ORDER = (
     JobStatus.RUNNING.value,
     JobStatus.QUEUED.value,
     JobStatus.PAUSED.value,
+    BLOCKED_WORK_STATUS,
 )
 
 

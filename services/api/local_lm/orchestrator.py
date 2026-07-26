@@ -58,12 +58,20 @@ from .models import (
     WorkStep,
     WorkStepDependency,
 )
+from .ordered_planning import OrderedPlanCompiler, OrderedPlanConfirmationRequired
 from .processes import ProcessSupervisor
 from .profile_service import AUTO_PROFILE_ID
 from .progress import completed_progress, update_job_progress
 from .routing import ModalityRouter, RouteConfirmationRequired
 from .scheduler import ResourceScheduler
-from .schemas import MessageOut, RunOut, TurnAccepted, TurnRequest, WorkerStatus
+from .schemas import (
+    MessageOut,
+    OrderedWorkIntent,
+    RunOut,
+    TurnAccepted,
+    TurnRequest,
+    WorkerStatus,
+)
 from .settings_registry import (
     compatible_stored_settings,
     resolve_generation_settings,
@@ -560,6 +568,50 @@ class ConversationOrchestrator:
             explicit_artifacts[artifact_id] = artifact
 
         mode = request.mode or RoutingMode(chat.routing_mode)
+        ordered_intent = None
+        if replacement_message is None:
+            ordered_intent = OrderedPlanCompiler.deterministic(
+                request.text,
+                mode,
+                has_media_input=bool(explicit_artifacts),
+            )
+            if (
+                ordered_intent is None
+                and mode == RoutingMode.AUTO
+                and await self._chat_planner_available()
+            ):
+                ordered_intent = await OrderedPlanCompiler.plan_with_model(
+                    adapter=self.engines.chat,
+                    text=request.text,
+                    mode=mode,
+                    conversation=self._routing_context(
+                        session,
+                        chat,
+                        context_head_message_id,
+                    ),
+                    has_media_input=bool(explicit_artifacts),
+                )
+        if (
+            ordered_intent
+            and chat.confirm_uncertain_media
+            and (ordered_intent.requires_confirmation or ordered_intent.confidence < 0.8)
+            and not request.confirm_media
+        ):
+            raise OrderedPlanConfirmationRequired(ordered_intent)
+        if ordered_intent:
+            return await self._create_ordered_turn(
+                session,
+                chat,
+                request,
+                ordered_intent,
+                parent_message_id=parent_message_id,
+                context_head_message_id=context_head_message_id,
+                pending_dependency_step_id=pending_dependency_step_id,
+                references_pending_output=references_pending_output,
+                explicit_artifacts=explicit_artifacts,
+                pending_count=pending_count or 0,
+                source_action=source_action,
+            )
         prior_image, prior_image_prompt = self._latest_image_context(
             session,
             chat.id,
@@ -744,7 +796,7 @@ class ConversationOrchestrator:
                     "This media request has an unsafe storage estimate. "
                     "Reduce the output count, resolution, or duration."
                 )
-            artifact_root = self.engines.settings.artifact_dir
+            artifact_root = self.artifacts.root
             artifact_root.mkdir(parents=True, exist_ok=True)
             available_bytes = shutil.disk_usage(artifact_root).free
             if media_plan_estimate["estimated_bytes"] > available_bytes:
@@ -1120,6 +1172,518 @@ class ConversationOrchestrator:
             self.start(queued_job.id, queued_run.id)
         return accepted
 
+    async def _create_ordered_turn(
+        self,
+        session: Session,
+        chat: Chat,
+        request: TurnRequest,
+        intent: OrderedWorkIntent,
+        *,
+        parent_message_id: str | None,
+        context_head_message_id: str | None,
+        pending_dependency_step_id: str | None,
+        references_pending_output: bool,
+        explicit_artifacts: dict[str, Artifact],
+        pending_count: int,
+        source_action: str,
+    ) -> TurnAccepted:
+        intent = OrderedPlanCompiler.validate(intent)
+        if pending_count + len(intent.steps) > MAX_PENDING_WORK_PER_CHAT:
+            raise ValueError(
+                f"This ordered request would exceed the limit of "
+                f"{MAX_PENDING_WORK_PER_CHAT} pending items in one chat."
+            )
+        if request.output_count not in {None, 1}:
+            raise ValueError(
+                "A heterogeneous ordered plan cannot multiply all steps. "
+                "Request variations in a separate media turn."
+            )
+        allowed_setting_roles = {"chat", "image", "video"}
+        unknown_setting_roles = set(request.ordered_settings) - allowed_setting_roles
+        if unknown_setting_roles:
+            raise ValueError("Ordered settings contain an unsupported role.")
+        if request.settings:
+            raise ValueError(
+                "Ordered plans accept role-specific ordered_settings, not shared settings."
+            )
+
+        explicit_ids = set(explicit_artifacts)
+        first_step = intent.steps[0]
+        first_explicit_images = [
+            artifact.id
+            for artifact in explicit_artifacts.values()
+            if artifact.media_type.casefold().startswith("image/")
+        ]
+        if (
+            first_step.mode in {"image", "video"}
+            and explicit_artifacts
+            and not first_explicit_images
+        ):
+            raise ValueError("The first media step requires an image-compatible input.")
+
+        resolved_steps: list[dict[str, Any]] = []
+        intent_by_id = {step.id: step for step in intent.steps}
+        total_work_units = 0
+        total_estimated_bytes = 0
+        total_video_duration_seconds = 0.0
+        project = session.get(Project, chat.project_id) if chat.project_id else None
+        for index, step_intent in enumerate(intent.steps):
+            artifact_source_modes = [
+                intent_by_id[binding.source_step_id].mode
+                for binding in step_intent.inputs
+                if binding.kind == "artifact"
+            ]
+            if step_intent.mode == "text":
+                operation = Operation.TEXT
+            elif step_intent.mode == "image":
+                operation = (
+                    Operation.IMAGE_TO_IMAGE
+                    if "image" in artifact_source_modes
+                    or (index == 0 and bool(first_explicit_images))
+                    else Operation.TEXT_TO_IMAGE
+                )
+            else:
+                operation = (
+                    Operation.IMAGE_TO_VIDEO
+                    if "image" in artifact_source_modes
+                    or (index == 0 and bool(first_explicit_images))
+                    else Operation.TEXT_TO_VIDEO
+                )
+
+            profile, model_selection = self._profile_for_operation(
+                session,
+                chat,
+                operation,
+                step_intent.prompt,
+            )
+            if profile and profile.model_install_id:
+                install = session.get(ModelInstall, profile.model_install_id)
+                if not install or not install.active:
+                    raise ValueError(
+                        f"Ordered step {index + 1} selected a model that is not ready."
+                    )
+            profile_id = profile.id if profile else None
+            vision_profile = (
+                self._vision_profile_for_chat(session, chat, profile)
+                if operation == Operation.TEXT
+                and (
+                    any(binding.kind == "artifact" for binding in step_intent.inputs)
+                    or (index == 0 and bool(explicit_artifacts))
+                )
+                else None
+            )
+            workflow_revision = self._workflow_for_operation(
+                session,
+                operation,
+                project_id=chat.project_id,
+                model_install_id=profile.model_install_id if profile else None,
+            )
+            if operation != Operation.TEXT and not workflow_revision:
+                raise ValueError(
+                    f"No ready workflow can perform ordered step {index + 1} ({operation.value})."
+                )
+            if workflow_revision:
+                if workflow_revision.engine == "comfyui" and not workflow_revision.trusted:
+                    raise ValueError(f"Ordered step {index + 1} selected an untrusted workflow.")
+                dependency_errors = custom_node_dependency_errors(
+                    session,
+                    workflow_revision.dependencies_json.get("custom_nodes"),
+                )
+                if dependency_errors:
+                    raise ValueError(
+                        f"Ordered step {index + 1} is not ready: " + "; ".join(dependency_errors)
+                    )
+            role = self._role_for_operation(operation)
+            engine = (
+                profile.engine
+                if profile
+                else workflow_revision.engine
+                if workflow_revision
+                else None
+            )
+            fields = workflow_settings(
+                await self.engines.settings_for_role(role, engine=engine),
+                workflow_revision.input_schema_json if workflow_revision else None,
+            )
+            request_fields = [field for field in fields if field.scope != "load"]
+            step_overrides = validate_settings(
+                request.ordered_settings.get(role, {}),
+                request_fields,
+            )
+            default_preset = self._default_preset(session, operation)
+            project_preset = self._bound_preset(session, project, role)
+            chat_preset = self._bound_preset(session, chat, role)
+            preset_layers = [
+                (scope, preset, compatible_stored_settings(preset.settings_json, request_fields))
+                for scope, preset in (
+                    ("default", default_preset),
+                    ("project", project_preset),
+                    ("chat", chat_preset),
+                )
+                if preset
+            ]
+            effective_settings = resolve_generation_settings(
+                fields,
+                request_fields=request_fields,
+                profile_defaults=(
+                    profile.load_settings_json if profile else {},
+                    profile.request_settings_json if profile else {},
+                    default_preset.settings_json if default_preset else {},
+                ),
+                project_defaults=(
+                    project_preset.settings_json if project_preset else {},
+                    self._scoped_generation_settings(project, role),
+                ),
+                chat_defaults=(
+                    chat_preset.settings_json if chat_preset else {},
+                    self._scoped_generation_settings(chat, role),
+                ),
+                turn_overrides=step_overrides,
+            )
+            if operation != Operation.TEXT and effective_settings.get("seed") == -1:
+                effective_settings["seed"] = secrets.randbelow(2_147_483_648)
+            estimate = (
+                self._media_plan_estimate(operation, effective_settings, 1)
+                if operation != Operation.TEXT
+                else None
+            )
+            generation_estimate = (
+                self._video_estimate(effective_settings) if "video" in operation.value else None
+            )
+            if estimate:
+                total_work_units += estimate["work_units"]
+                total_estimated_bytes += estimate["estimated_bytes"]
+            if generation_estimate:
+                total_video_duration_seconds += float(generation_estimate["duration_seconds"])
+            resolved_steps.append(
+                {
+                    "intent": step_intent,
+                    "operation": operation,
+                    "profile": profile,
+                    "profile_id": profile_id,
+                    "vision_profile_id": vision_profile.id if vision_profile else None,
+                    "workflow": workflow_revision,
+                    "role": role,
+                    "settings": effective_settings,
+                    "model_selection": model_selection,
+                    "preset_layers": preset_layers,
+                    "effective_preset": preset_layers[-1] if preset_layers else None,
+                    "estimate": estimate,
+                    "generation_estimate": generation_estimate,
+                }
+            )
+
+        if total_work_units > self.engines.settings.max_media_plan_work_units:
+            raise ValueError(
+                "This ordered plan is too large to queue safely. "
+                "Reduce its media steps, resolution, frames, or generation steps."
+            )
+        if total_estimated_bytes > self.engines.settings.max_media_plan_estimated_bytes:
+            raise ValueError("This ordered plan has an unsafe storage estimate.")
+        if total_video_duration_seconds > self.engines.settings.max_media_plan_duration_seconds:
+            raise ValueError("This ordered plan requests too much total video duration.")
+        plan_estimate: dict[str, int | float] = {
+            "step_count": len(intent.steps),
+            "work_units": total_work_units,
+            "video_duration_seconds": round(total_video_duration_seconds, 2),
+            "estimated_bytes": total_estimated_bytes,
+        }
+        if (
+            self.engines.settings.video_confirmation_work_units > 0
+            and total_work_units >= self.engines.settings.video_confirmation_work_units
+            and not request.confirm_media
+        ):
+            raise OrderedPlanConfirmationRequired(intent, estimate=plan_estimate)
+        artifact_root = self.artifacts.root
+        artifact_root.mkdir(parents=True, exist_ok=True)
+        available_bytes = shutil.disk_usage(artifact_root).free
+        if total_estimated_bytes > available_bytes:
+            raise ValueError("There is not enough free storage for this ordered plan.")
+        plan_estimate["available_bytes_at_admission"] = available_bytes
+
+        input_parts: list[MessagePart] = [
+            MessagePart(position=0, type=PartType.TEXT.value, text=request.text)
+        ]
+        for artifact in explicit_artifacts.values():
+            input_parts.append(
+                MessagePart(
+                    position=len(input_parts),
+                    type=self._input_part_type(artifact),
+                    artifact_id=artifact.id,
+                    metadata_json={
+                        "input_reference": True,
+                        "input_reference_source": "explicit",
+                    },
+                )
+            )
+        user_message = Message(
+            chat_id=chat.id,
+            parent_id=parent_message_id,
+            role=MessageRole.USER.value,
+            status=MessageStatus.COMPLETE.value,
+            parts=input_parts,
+        )
+        assistant_messages = [
+            Message(
+                chat_id=chat.id,
+                role=MessageRole.ASSISTANT.value,
+                status=MessageStatus.PENDING.value,
+                parts=self._initial_output_parts(step["operation"], 1, 1),
+            )
+            for step in resolved_steps
+        ]
+        session.add_all([user_message, *assistant_messages])
+        session.flush()
+        previous_message_id = user_message.id
+        for assistant_message in assistant_messages:
+            assistant_message.parent_id = previous_message_id
+            previous_message_id = assistant_message.id
+        chat.active_head_message_id = assistant_messages[-1].id
+
+        transcript_sequence = (
+            session.scalar(
+                select(WorkPlan.transcript_sequence)
+                .where(WorkPlan.chat_id == chat.id)
+                .order_by(WorkPlan.transcript_sequence.desc())
+                .limit(1)
+            )
+            or 0
+        ) + 1
+        work_plan = WorkPlan(
+            chat_id=chat.id,
+            idempotency_key=request.idempotency_key,
+            source_action=source_action,
+            persistence_scope=self.persistence_scope,
+            status=JobStatus.QUEUED.value,
+            context_head_message_id=context_head_message_id,
+            transcript_sequence=transcript_sequence,
+            priority=0,
+            planner_version=intent.planner_version,
+            failure_policy="preserve_completed_block_dependents",
+            summary_json={
+                "operation": "ordered",
+                "step_count": len(intent.steps),
+                "source_action": source_action,
+                "user_message_id": user_message.id,
+                "assistant_message_id": assistant_messages[0].id,
+                "assistant_message_ids": [message.id for message in assistant_messages],
+                "intent": intent.model_dump(mode="json"),
+                "plan_estimate": plan_estimate,
+                "status_counts": {"queued": len(intent.steps)},
+            },
+        )
+        session.add(work_plan)
+        session.flush()
+
+        database_steps_by_intent_id: dict[str, WorkStep] = {}
+        work_steps: list[WorkStep] = []
+        runs: list[Run] = []
+        jobs: list[Job] = []
+        for ordinal, (resolved, output_message) in enumerate(
+            zip(resolved_steps, assistant_messages, strict=True),
+            start=1,
+        ):
+            step_intent = resolved["intent"]
+            operation = resolved["operation"]
+            profile = resolved["profile"]
+            workflow_revision = resolved["workflow"]
+            input_bindings: list[dict[str, Any]] = []
+            if ordinal == 1:
+                input_bindings.extend(
+                    {
+                        "type": "explicit_artifact",
+                        "artifact_id": artifact_id,
+                    }
+                    for artifact_id in explicit_ids
+                )
+                if context_head_message_id:
+                    input_bindings.insert(
+                        0,
+                        {
+                            "type": "context_text",
+                            "context_head_message_id": context_head_message_id,
+                        },
+                    )
+            for binding in step_intent.inputs:
+                source_step = database_steps_by_intent_id[binding.source_step_id]
+                input_bindings.append(
+                    {
+                        "type": (
+                            "step_output.text"
+                            if binding.kind == "text_context"
+                            else "step_output.artifact"
+                        ),
+                        "source_step_id": source_step.id,
+                    }
+                )
+            output_type = step_intent.mode
+            work_step = WorkStep(
+                plan=work_plan,
+                ordinal=ordinal,
+                display_group="ordered_work",
+                operation=operation.value,
+                status=JobStatus.QUEUED.value,
+                prompt=step_intent.prompt,
+                profile_id=resolved["profile_id"],
+                workflow_revision_id=(workflow_revision.id if workflow_revision else None),
+                settings_json=resolved["settings"],
+                input_bindings_json=input_bindings,
+                output_contract_json=[
+                    {
+                        "slot": step_intent.id,
+                        "type": output_type,
+                        "index": ordinal,
+                        "count": len(intent.steps),
+                    }
+                ],
+                queue_class=(
+                    "interactive_compute" if operation == Operation.TEXT else "media_compute"
+                ),
+            )
+            session.add(work_step)
+            session.flush()
+            database_steps_by_intent_id[step_intent.id] = work_step
+            dependency_ids = [
+                database_steps_by_intent_id[dependency_id].id
+                for dependency_id in step_intent.depends_on
+            ]
+            if ordinal == 1 and references_pending_output and pending_dependency_step_id:
+                dependency_ids.append(pending_dependency_step_id)
+            session.add_all(
+                [
+                    WorkStepDependency(
+                        step_id=work_step.id,
+                        depends_on_step_id=dependency_id,
+                    )
+                    for dependency_id in dict.fromkeys(dependency_ids)
+                ]
+            )
+            model_provenance = self._model_provenance(session, profile)
+            workflow_provenance = (
+                {
+                    "definition_id": workflow_revision.workflow_id,
+                    "revision_id": workflow_revision.id,
+                    "version": workflow_revision.version,
+                    "engine": workflow_revision.engine,
+                    "engine_version": workflow_revision.engine_version,
+                    "trusted": workflow_revision.trusted,
+                    "dependencies": workflow_revision.dependencies_json,
+                }
+                if workflow_revision
+                else None
+            )
+            effective_preset = resolved["effective_preset"]
+            run = Run(
+                idempotency_key=request.idempotency_key if ordinal == 1 else None,
+                chat_id=chat.id,
+                user_message_id=user_message.id,
+                assistant_message_id=output_message.id,
+                work_plan_id=work_plan.id,
+                work_step_id=work_step.id,
+                operation=operation.value,
+                status=RunStatus.QUEUED.value,
+                standalone_prompt=step_intent.prompt,
+                profile_id=resolved["profile_id"],
+                vision_profile_id=resolved["vision_profile_id"],
+                workflow_revision_id=(workflow_revision.id if workflow_revision else None),
+                settings_json=resolved["settings"],
+                provenance_json={
+                    "planner_version": intent.planner_version,
+                    "compiled_step": step_intent.model_dump(mode="json"),
+                    "model_selection": resolved["model_selection"],
+                    "input_artifact_ids": (list(explicit_ids) if ordinal == 1 else []),
+                    "model": model_provenance,
+                    "preset": (
+                        {
+                            "id": effective_preset[1].id,
+                            "name": effective_preset[1].name,
+                            "role": effective_preset[1].role,
+                            "settings": effective_preset[2],
+                        }
+                        if effective_preset
+                        else None
+                    ),
+                    "preset_layers": [
+                        {
+                            "scope": scope,
+                            "id": preset.id,
+                            "name": preset.name,
+                            "role": preset.role,
+                            "settings": preset_settings,
+                        }
+                        for scope, preset, preset_settings in resolved["preset_layers"]
+                    ],
+                    "workflow": workflow_provenance,
+                    "resolved_settings": resolved["settings"],
+                    "generation_estimate": resolved["generation_estimate"],
+                    "plan_step_estimate": resolved["estimate"],
+                },
+            )
+            session.add(run)
+            session.flush()
+            work_step.run_id = run.id
+            job = Job(
+                kind=self._job_kind(operation).value,
+                status=JobStatus.QUEUED.value,
+                run_id=run.id,
+                work_plan_id=work_plan.id,
+                work_step_id=work_step.id,
+                progress=0,
+                phase="queued",
+                queue_resource=work_step.queue_class,
+                queue_group="primary",
+                queue_priority=0,
+                queue_ticket=f"{transcript_sequence:020d}:{ordinal:04d}:{run.id}",
+                enqueued_at=utcnow(),
+                payload_json={
+                    "operation": operation.value,
+                    "ordered_step_id": step_intent.id,
+                    "step_index": ordinal,
+                    "step_count": len(intent.steps),
+                },
+            )
+            update_job_progress(
+                job,
+                stage="queued",
+                queue_resource=work_step.queue_class,
+                queue_position=ordinal - 1,
+                queue_length=len(intent.steps),
+                blocked_by=dependency_ids,
+                indeterminate=True,
+            )
+            session.add(job)
+            work_steps.append(work_step)
+            runs.append(run)
+            jobs.append(job)
+
+        work_plan.summary_json = {
+            **work_plan.summary_json,
+            "step_ids": [step.id for step in work_steps],
+            "run_ids": [run.id for run in runs],
+            "job_ids": [job.id for job in jobs],
+        }
+        if chat.title == "New chat":
+            chat.title = request.text.strip().replace("\n", " ")[:72] or "New chat"
+        session.commit()
+        accepted = self._accepted_for_run(session, runs[0])
+        await self.events.publish(
+            "work_plan.created",
+            work_plan.id,
+            {
+                "plan_id": work_plan.id,
+                "step_id": work_steps[0].id,
+                "run_id": runs[0].id,
+                "job_id": jobs[0].id,
+                "step_ids": [step.id for step in work_steps],
+                "run_ids": [run.id for run in runs],
+                "job_ids": [job.id for job in jobs],
+                "chat_id": chat.id,
+            },
+        )
+        for queued_job, queued_run in zip(jobs, runs, strict=True):
+            self.start(queued_job.id, queued_run.id)
+        return accepted
+
     def start(self, job_id: str, run_id: str) -> None:
         if job_id in self._tasks and not self._tasks[job_id].done():
             return
@@ -1332,6 +1896,7 @@ class ConversationOrchestrator:
                         }
                     ):
                         return
+                    self._resolve_step_inputs(session, run)
                     run.status = RunStatus.RUNNING.value
                     run.started_at = job.started_at or utcnow()
                     self._set_work_status(session, run, JobStatus.RUNNING.value)
@@ -1971,9 +2536,11 @@ class ConversationOrchestrator:
         """Return explicit current inputs, then the newest prior branch visual."""
 
         current = session.get(Message, run.user_message_id)
-        candidates: list[Artifact] = []
-        for artifact in cls._message_input_artifacts(session, current) if current else []:
-            candidates.append(artifact)
+        candidates = [
+            artifact
+            for artifact_id in cls.input_artifact_ids_for_run(session, run)
+            if (artifact := session.get(Artifact, artifact_id)) is not None
+        ]
         seen = {artifact.id for artifact in candidates}
         chat = session.get(Chat, run.chat_id)
         vision_settings = chat.vision_settings_json if chat else {}
@@ -2356,6 +2923,9 @@ class ConversationOrchestrator:
                 message.status = MessageStatus.FAILED.value
                 if run.operation == Operation.TEXT.value:
                     self._remove_chat_progress(message)
+                    # Flush removed progress rows before reusing their positions
+                    # for a terminal error part.
+                    session.flush()
                     error_part = next(
                         (part for part in message.parts if part.type == PartType.ERROR.value),
                         None,
@@ -3168,6 +3738,40 @@ class ConversationOrchestrator:
             )
         ]
 
+    @staticmethod
+    def _model_provenance(
+        session: Session,
+        profile: ModelProfile | None,
+    ) -> dict[str, Any] | None:
+        if not profile or not profile.model_install_id:
+            return None
+        install = session.get(ModelInstall, profile.model_install_id)
+        source = (
+            session.get(ModelSource, install.source_id) if install and install.source_id else None
+        )
+        if not install:
+            return None
+        return {
+            "profile_id": profile.id,
+            "profile_name": profile.name,
+            "profile_use_case": profile.use_case,
+            "install_id": install.id,
+            "engine": install.engine,
+            "local_path": install.local_path,
+            "size_bytes": install.size_bytes,
+            "manifest": install.manifest_json,
+            "source": (
+                {
+                    "provider": source.provider,
+                    "remote_id": source.remote_id,
+                    "revision": source.revision,
+                    "metadata": source.metadata_json,
+                }
+                if source
+                else None
+            ),
+        }
+
     @classmethod
     def _media_plan_estimate(
         cls,
@@ -3303,15 +3907,113 @@ class ConversationOrchestrator:
             if user_message
             else []
         )
-        if durable_ids:
-            return list(dict.fromkeys(durable_ids))
         provenance = run.provenance_json if isinstance(run.provenance_json, dict) else {}
+        dependency_ids = provenance.get("resolved_dependency_artifact_ids")
+        resolved_dependency_ids = (
+            [value for value in dependency_ids if isinstance(value, str)]
+            if isinstance(dependency_ids, list)
+            else []
+        )
+        if durable_ids or resolved_dependency_ids:
+            return list(dict.fromkeys([*durable_ids, *resolved_dependency_ids]))
         legacy_ids = provenance.get("input_artifact_ids")
         if not isinstance(legacy_ids, list):
             return []
         return list(
             dict.fromkeys(artifact_id for artifact_id in legacy_ids if isinstance(artifact_id, str))
         )
+
+    @staticmethod
+    def _resolve_step_inputs(session: Session, run: Run) -> None:
+        if not run.work_step_id or not run.work_plan_id:
+            return
+        step = session.get(WorkStep, run.work_step_id)
+        if not step:
+            raise RuntimeError("The planned work step is missing.")
+        text_inputs: list[dict[str, str]] = []
+        artifact_ids: list[str] = []
+        for binding in step.input_bindings_json:
+            binding_type = binding.get("type")
+            if binding_type not in {"step_output.text", "step_output.artifact"}:
+                continue
+            source_step_id = binding.get("source_step_id")
+            if not isinstance(source_step_id, str):
+                raise RuntimeError("A planned step input is missing its source.")
+            source_step = session.get(WorkStep, source_step_id)
+            if (
+                not source_step
+                or source_step.plan_id != run.work_plan_id
+                or source_step.status != JobStatus.COMPLETE.value
+                or not source_step.run_id
+            ):
+                raise RuntimeError("A required planned step did not complete successfully.")
+            source_run = session.get(Run, source_step.run_id)
+            source_message = (
+                session.get(Message, source_run.assistant_message_id) if source_run else None
+            )
+            if (
+                not source_run
+                or source_run.chat_id != run.chat_id
+                or not source_message
+                or source_message.chat_id != run.chat_id
+            ):
+                raise RuntimeError("A planned step output crossed its chat boundary.")
+            if binding_type == "step_output.text":
+                text = "\n".join(
+                    part.text
+                    for part in sorted(source_message.parts, key=lambda value: value.position)
+                    if part.type == PartType.TEXT.value and part.text
+                ).strip()
+                if not text:
+                    raise RuntimeError("A required text step produced no usable text.")
+                if len(text) > 50_000:
+                    raise RuntimeError("A required text step exceeded the dependency budget.")
+                text_inputs.append({"source_step_id": source_step_id, "text": text})
+                continue
+            binding_artifact_ids: list[str] = []
+            for part in sorted(source_message.parts, key=lambda value: value.position):
+                if (
+                    not part.artifact_id
+                    or part.metadata_json.get("preview")
+                    or part.metadata_json.get("input_reference")
+                ):
+                    continue
+                artifact = session.get(Artifact, part.artifact_id)
+                if not artifact:
+                    continue
+                if run.operation in {
+                    Operation.IMAGE_TO_IMAGE.value,
+                    Operation.IMAGE_TO_VIDEO.value,
+                } and not artifact.media_type.casefold().startswith("image/"):
+                    continue
+                if (
+                    run.operation == Operation.TEXT.value
+                    and not artifact.media_type.casefold().startswith(("image/", "video/"))
+                ):
+                    continue
+                binding_artifact_ids.append(artifact.id)
+            if not binding_artifact_ids:
+                raise RuntimeError("A required media step produced no compatible artifact.")
+            artifact_ids.extend(binding_artifact_ids)
+
+        provenance = run.provenance_json if isinstance(run.provenance_json, dict) else {}
+        compiled_step = provenance.get("compiled_step")
+        compiled_prompt = compiled_step.get("prompt") if isinstance(compiled_step, dict) else None
+        base_prompt: str = (
+            compiled_prompt if isinstance(compiled_prompt, str) else run.standalone_prompt
+        )
+        if run.operation != Operation.TEXT.value and text_inputs:
+            context = "\n\n".join(
+                f"Output from {item['source_step_id']}:\n{item['text']}" for item in text_inputs
+            )
+            run.standalone_prompt = f"{base_prompt}\n\nUse this prior text as context:\n{context}"
+        else:
+            run.standalone_prompt = base_prompt
+        run.provenance_json = {
+            **provenance,
+            "resolved_dependency_text": text_inputs,
+            "resolved_dependency_artifact_ids": list(dict.fromkeys(artifact_ids)),
+        }
 
     @classmethod
     def _message_input_artifacts(
@@ -3389,6 +4091,26 @@ class ConversationOrchestrator:
             )
             if text:
                 messages.append({"role": message.role, "content": text})
+        provenance = run.provenance_json if isinstance(run.provenance_json, dict) else {}
+        compiled_step = provenance.get("compiled_step")
+        if run.operation == Operation.TEXT.value and isinstance(compiled_step, dict):
+            dependency_text = provenance.get("resolved_dependency_text")
+            if isinstance(dependency_text, list):
+                for item in dependency_text:
+                    if (
+                        isinstance(item, dict)
+                        and isinstance(item.get("text"), str)
+                        and item["text"].strip()
+                    ):
+                        messages.append(
+                            {
+                                "role": MessageRole.ASSISTANT.value,
+                                "content": item["text"].strip(),
+                            }
+                        )
+            step_prompt = compiled_step.get("prompt")
+            if isinstance(step_prompt, str) and step_prompt.strip():
+                messages.append({"role": MessageRole.USER.value, "content": step_prompt.strip()})
         return messages
 
     @staticmethod
