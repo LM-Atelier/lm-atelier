@@ -15,7 +15,7 @@ from starlette.middleware.trustedhost import TrustedHostMiddleware
 
 from . import __version__
 from .adapters.comfyui import ComfyUIAdapter
-from .api import router
+from .api import recover_model_delete_quarantines, router
 from .artifacts import ArtifactStore
 from .backups import BackupManager
 from .catalog import HuggingFaceCatalog
@@ -29,10 +29,17 @@ from .downloads import DownloadManager
 from .engines import EngineRegistry
 from .events import EventBroker
 from .exports import ProjectExporter
+from .instance_identity import INSTANCE_ID_HEADER, load_or_create_instance_identity
 from .orchestrator import ConversationOrchestrator
 from .processes import ProcessSupervisor
+from .runtime_provisioning import RuntimeProvisioner
 from .scheduler import ResourceScheduler
-from .security import SessionSecurity
+from .security import (
+    JsonBodyLimitMiddleware,
+    SecurityHeadersMiddleware,
+    SessionSecurity,
+    UploadBodyLimitMiddleware,
+)
 from .seed import seed_defaults
 from .worker_startup import restore_configured_workers
 
@@ -41,6 +48,7 @@ logging.basicConfig(
     format="%(asctime)s %(levelname)s %(name)s %(message)s",
 )
 logger = logging.getLogger("local_lm")
+AUTOMATIC_BACKUP_CHECK_INTERVAL_SECONDS = 60 * 60
 
 
 @dataclass
@@ -55,6 +63,7 @@ class Services:
     scheduler: ResourceScheduler
     orchestrator: ConversationOrchestrator
     processes: ProcessSupervisor
+    runtimes: RuntimeProvisioner
     backups: BackupManager
     exports: ProjectExporter
     diagnostics: DiagnosticBundleBuilder
@@ -67,9 +76,10 @@ def build_services(settings: Settings) -> Services:
     settings.hf_token = credentials.token()
     events = EventBroker(settings.event_history_size)
     artifacts = ArtifactStore(settings)
+    runtimes = RuntimeProvisioner(settings)
     engines = EngineRegistry(settings)
     scheduler = ResourceScheduler()
-    processes = ProcessSupervisor(settings)
+    processes = ProcessSupervisor(settings, runtimes)
     orchestrator = ConversationOrchestrator(engines, artifacts, events, scheduler, processes)
     return Services(
         settings=settings,
@@ -83,10 +93,12 @@ def build_services(settings: Settings) -> Services:
             events,
             media_adapter=engines.media if isinstance(engines.media, ComfyUIAdapter) else None,
             processes=processes,
+            scheduler=scheduler,
         ),
         scheduler=scheduler,
         orchestrator=orchestrator,
         processes=processes,
+        runtimes=runtimes,
         backups=BackupManager(settings),
         exports=ProjectExporter(settings, artifacts),
         diagnostics=DiagnosticBundleBuilder(settings, artifacts),
@@ -95,9 +107,41 @@ def build_services(settings: Settings) -> Services:
     )
 
 
+async def ensure_automatic_recovery_backup(backups: BackupManager) -> None:
+    """Create today's recovery point without blocking the API event loop."""
+
+    operation = asyncio.create_task(
+        asyncio.to_thread(backups.ensure_daily_backup),
+        name="automatic-recovery-backup-check",
+    )
+    try:
+        await asyncio.shield(operation)
+    except asyncio.CancelledError:
+        # A filesystem/SQLite transaction cannot be cancelled safely midway.
+        # Let the bounded operation finish before completing app shutdown.
+        with suppress(Exception):
+            await operation
+        raise
+    except Exception:
+        logger.exception("Could not maintain the automatic LM Atelier recovery backup")
+
+
+async def maintain_automatic_recovery_backups(
+    backups: BackupManager,
+    *,
+    interval_seconds: float = AUTOMATIC_BACKUP_CHECK_INTERVAL_SECONDS,
+) -> None:
+    if interval_seconds <= 0:
+        raise ValueError("automatic backup interval must be positive")
+    while True:
+        await asyncio.sleep(interval_seconds)
+        await ensure_automatic_recovery_backup(backups)
+
+
 def create_app(settings: Settings | None = None) -> FastAPI:
     active_settings = settings or get_settings()
     active_settings.prepare()
+    instance_identity = load_or_create_instance_identity(active_settings.data_dir)
     BackupManager(active_settings).apply_pending_restore()
     configure_database(active_settings)
     services = build_services(active_settings)
@@ -106,6 +150,10 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     async def lifespan(app: FastAPI):  # type: ignore[no-untyped-def]
         upgrade_database(active_settings)
         with SessionLocal() as session:
+            recover_model_delete_quarantines(
+                session,
+                active_settings.model_dir.resolve(),
+            )
             seed_defaults(session, active_settings)
             services.artifacts.cleanup_retention(
                 session,
@@ -114,7 +162,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 dry_run=False,
             )
             session.commit()
-        services.backups.prune()
+        await ensure_automatic_recovery_backup(services.backups)
         services.orchestrator.recover_interrupted()
         services.downloads.recover_interrupted()
         logger.info(
@@ -127,16 +175,25 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             restore_configured_workers(services),
             name="restore-configured-workers",
         )
-        yield
-        if not worker_restore.done():
-            worker_restore.cancel()
-            with suppress(asyncio.CancelledError):
-                await worker_restore
-        await services.downloads.close()
-        await services.orchestrator.close()
-        await services.catalog.close()
-        await services.engines.close()
-        await services.processes.close()
+        backup_maintenance = asyncio.create_task(
+            maintain_automatic_recovery_backups(services.backups),
+            name="maintain-automatic-recovery-backups",
+        )
+        try:
+            yield
+        finally:
+            for task in (worker_restore, backup_maintenance):
+                if not task.done():
+                    task.cancel()
+            for task in (worker_restore, backup_maintenance):
+                with suppress(asyncio.CancelledError):
+                    await task
+            await services.downloads.close()
+            await services.orchestrator.close()
+            await services.runtimes.close()
+            await services.catalog.close()
+            await services.engines.close()
+            await services.processes.close()
 
     app = FastAPI(
         title="LM Atelier API",
@@ -146,11 +203,15 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         lifespan=lifespan,
     )
     app.state.services = services
+    app.add_middleware(JsonBodyLimitMiddleware)
+    app.add_middleware(
+        UploadBodyLimitMiddleware,
+        artifact_max_bytes=active_settings.max_upload_bytes,
+        project_max_bytes=active_settings.max_project_import_bytes,
+    )
     app.add_middleware(
         TrustedHostMiddleware,
-        allowed_hosts=["*"]
-        if active_settings.allow_lan
-        else ["127.0.0.1", "localhost", "[::1]", "testserver", "testclient"],
+        allowed_hosts=["127.0.0.1", "localhost", "[::1]", "testserver", "testclient"],
     )
     if active_settings.dev:
         app.add_middleware(
@@ -164,6 +225,13 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     @app.middleware("http")
     async def local_session(request: Request, call_next):  # type: ignore[no-untyped-def]
         public = {"/api/session", "/api/health", "/api/ready"}
+        if request.url.path.startswith("/api"):
+            try:
+                services.security.validate_origin(request.headers.get("origin"))
+            except Exception as exc:
+                status_code = getattr(exc, "status_code", 403)
+                detail = getattr(exc, "detail", "untrusted browser origin")
+                return JSONResponse({"detail": detail}, status_code=status_code)
         if request.url.path.startswith("/api") and request.url.path not in public:
             try:
                 services.security.validate_request(request)
@@ -171,8 +239,13 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 status_code = getattr(exc, "status_code", 401)
                 detail = getattr(exc, "detail", "authentication failed")
                 return JSONResponse({"detail": detail}, status_code=status_code)
-        return await call_next(request)
+        response = await call_next(request)
+        if request.url.path == "/api/ready":
+            response.headers[INSTANCE_ID_HEADER] = instance_identity
+        return response
 
+    # Register this last so it wraps host, session, and body-limit rejections too.
+    app.add_middleware(SecurityHeadersMiddleware)
     app.include_router(router)
 
     @app.websocket("/api/events")

@@ -30,6 +30,14 @@ _PRIOR_IMAGE_EDIT = re.compile(
     r")",
     re.IGNORECASE,
 )
+_PRIOR_IMAGE_SOURCE = re.compile(
+    r"\b(?:previous|prior|earlier|last|above)\s+"
+    r"(?:image|picture|photo|illustration|artwork|logo|icon)\b|"
+    r"^\s*(?:please\s+|now\s+)*(?:use|reuse|remix|restyle|transform|redo|"
+    r"recreate|continue)\b.*\b(?:it|this|that|the\s+"
+    r"(?:image|picture|photo|illustration|artwork|logo|icon))\b",
+    re.IGNORECASE,
+)
 _DISCUSSION = re.compile(
     r"^\s*(?:explain|describe|compare|what|why|how|when|where|who|tell me about|write about)\b",
     re.IGNORECASE,
@@ -236,12 +244,34 @@ class ModalityRouter:
         if mode == RoutingMode.TEXT:
             return self._text(normalized, "explicit text mode", 1)
         if mode == RoutingMode.IMAGE:
-            operation = Operation.IMAGE_TO_IMAGE if input_artifact_ids else Operation.TEXT_TO_IMAGE
+            use_prior_image = bool(
+                has_prior_image
+                and not referenced_text
+                and (_PRIOR_IMAGE_EDIT.search(normalized) or _PRIOR_IMAGE_SOURCE.search(normalized))
+            )
+            operation = (
+                Operation.IMAGE_TO_IMAGE
+                if input_artifact_ids or use_prior_image
+                else Operation.TEXT_TO_IMAGE
+            )
             return grounded(
                 self._media(operation, normalized, input_artifact_ids, "explicit image mode", 1)
             )
         if mode == RoutingMode.VIDEO:
-            operation = Operation.IMAGE_TO_VIDEO if input_artifact_ids else Operation.TEXT_TO_VIDEO
+            use_prior_image = bool(
+                has_prior_image
+                and not referenced_text
+                and (
+                    _DIRECT_VIDEO.search(normalized)
+                    or _PRIOR_IMAGE_EDIT.search(normalized)
+                    or _PRIOR_IMAGE_SOURCE.search(normalized)
+                )
+            )
+            operation = (
+                Operation.IMAGE_TO_VIDEO
+                if input_artifact_ids or use_prior_image
+                else Operation.TEXT_TO_VIDEO
+            )
             return grounded(
                 self._media(operation, normalized, input_artifact_ids, "explicit video mode", 1)
             )
@@ -271,7 +301,11 @@ class ModalityRouter:
                 )
             )
 
-        if has_prior_image and not referenced_text and _PRIOR_IMAGE_EDIT.search(normalized):
+        if (
+            (has_prior_image or input_artifact_ids)
+            and not referenced_text
+            and _PRIOR_IMAGE_EDIT.search(normalized)
+        ):
             return grounded(
                 self._media(
                     Operation.IMAGE_TO_IMAGE,

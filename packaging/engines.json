@@ -1,12 +1,48 @@
 {
-  "schema_version": 1,
-  "updated_at": "2026-07-22",
+  "schema_version": 2,
+  "updated_at": "2026-07-25",
   "engines": {
     "llama.cpp": {
       "source": "https://github.com/ggml-org/llama.cpp",
       "pinned_release": "b9637",
       "distribution": "external",
+      "license": "MIT",
+      "security_status": "checksum-pinned",
       "required_executable": "llama-server",
+      "runtime_assets": {
+        "windows-x86_64": {
+          "url": "https://github.com/ggml-org/llama.cpp/releases/download/b9637/llama-b9637-bin-win-cpu-x64.zip",
+          "sha256": "f7783c2b8c007f95e710ac40f26a24861a80b603b0b739fc54d7c926a4716c1e",
+          "size_bytes": 16906751,
+          "required_free_bytes": 134217728,
+          "archive_type": "zip",
+          "executable": "llama-server.exe"
+        },
+        "windows-x86_64-nvidia": {
+          "url": "https://github.com/ggml-org/llama.cpp/releases/download/b9637/llama-b9637-bin-win-vulkan-x64.zip",
+          "sha256": "a353945604cffdac3d0d6da6392de78ca565a531a6f2ff3521f44b9b7c6e553f",
+          "size_bytes": 38556528,
+          "required_free_bytes": 268435456,
+          "archive_type": "zip",
+          "executable": "llama-server.exe"
+        },
+        "ubuntu-x86_64": {
+          "url": "https://github.com/ggml-org/llama.cpp/releases/download/b9637/llama-b9637-bin-ubuntu-x64.tar.gz",
+          "sha256": "a50ee14f021a9d8e92e30f622f7e3be1318ee1125bb9a9ba8d2025388df48743",
+          "size_bytes": 15512345,
+          "required_free_bytes": 134217728,
+          "archive_type": "tar.gz",
+          "executable": "build/bin/llama-server"
+        },
+        "ubuntu-x86_64-nvidia": {
+          "url": "https://github.com/ggml-org/llama.cpp/releases/download/b9637/llama-b9637-bin-ubuntu-vulkan-x64.tar.gz",
+          "sha256": "6ca268d758aae9e8518afa43042678e8b60b47f0d34df7d6efff4ca622c74313",
+          "size_bytes": 38391553,
+          "required_free_bytes": 268435456,
+          "archive_type": "tar.gz",
+          "executable": "build/bin/llama-server"
+        }
+      },
       "required_contract": [
         "GET /health",
         "POST /v1/chat/completions",
@@ -18,6 +54,130 @@
       "source": "https://github.com/Comfy-Org/ComfyUI",
       "pinned_release": "v0.28.0",
       "distribution": "external-gpl-3.0",
+      "license": "GPL-3.0-only",
+      "security_status": "checksum-pinned",
+      "security_review": {
+        "reviewed_at": "2026-07-25",
+        "release_is_immutable": true,
+        "package_audit": "OSV via pip-audit 2.10.1: no known vulnerabilities in 89 pinned Python distributions",
+        "upstream_advisories": [
+          "https://github.com/Comfy-Org/ComfyUI/security/advisories",
+          "https://github.com/pytorch/pytorch/security/advisories",
+          "https://docs.python.org/3.13/whatsnew/changelog.html"
+        ]
+      },
+      "runtime_assets": {
+        "windows-x86_64-nvidia-cu13": {
+          "url": "https://github.com/Comfy-Org/ComfyUI/releases/download/v0.28.0/ComfyUI_windows_portable_nvidia.7z",
+          "sha256": "797183fe6165b96a1800793cdc2110e4c62c45e8775647a7166fe8c6290e2fd9",
+          "size_bytes": 2092156323,
+          "required_free_bytes": 8589934592,
+          "max_uncompressed_bytes": 8589934592,
+          "max_entries": 200000,
+          "archive_type": "7z",
+          "executable": "ComfyUI_windows_portable/python_embeded/python.exe",
+          "directory": "ComfyUI_windows_portable/ComfyUI",
+          "dependency_inventory_count": 89,
+          "dependency_inventory_sha256": "f12087e3dfc278fc1f6521b6c61f8df03bdc9b0322df9c6464fb78a6dd08b69c",
+          "dependency_review": {
+            "file": "runtime-reviews/comfyui-v0.28.0.json",
+            "sha256": "138a1432a49fafe465ea74c1b38c8211dc3b0e0a9fc1ae1d237067e3c92861a5",
+            "asset_key": "windows-x86_64-nvidia-cu13"
+          },
+          "security_overlays": [
+            {
+              "name": "CPython 3.13.14 Windows embeddable security update",
+              "url": "https://www.python.org/ftp/python/3.13.14/python-3.13.14-embed-amd64.zip",
+              "sha256": "90b4e5b9898b72d744650524bff92377c367f44bd5fbd09e3148656c080ad907",
+              "size_bytes": 10964839,
+              "max_uncompressed_bytes": 67108864,
+              "max_entries": 64,
+              "archive_type": "zip",
+              "target_directory": "ComfyUI_windows_portable/python_embeded",
+              "compatibility_tag": "cp313-win_amd64-embeddable",
+              "license": "Python-2.0",
+              "license_file": "LICENSE.txt",
+              "expected_files": {
+                "_asyncio.pyd": "2d13fa4b5ef94464bb94e2ec613eceb5bbad70c8e7e05f0e8ef25f6078397cdc",
+                "_bz2.pyd": "76a33e2baa3880aa46290cc7d5810b3155c5e2f5a1cc7d3f7b751f6434144ada",
+                "_ctypes.pyd": "75687620596877b0dde462e74ae12140d695b3c78df3c6c099d55717768dde42",
+                "_decimal.pyd": "906964c01d04b360c316a2bb86d03d9ca9864e039baa01fa866815e6dce4a9b1",
+                "_elementtree.pyd": "98474a51706eaff41ec303e0ae3b91605fbf9112daad837007793e53f482f1c9",
+                "_hashlib.pyd": "5eb4a2aa9e28b49cb2a4f6ecee21f3c2b629b43a0709bad1d7e6204bac74eac2",
+                "_lzma.pyd": "f221ed5f1c2789aa357f3c2dc4cd22af134b4b91acb3fb78f9fa5f7f9a7b62e4",
+                "_multiprocessing.pyd": "c04d2822d62f675df86d748ee552918e6ef2de5659ad2ce91dda5e10ecf35fc7",
+                "_overlapped.pyd": "579438a55311bf39b32145b8dec7846bd6830dfa461345236a37cc0c833a4a51",
+                "_queue.pyd": "6d77d15d668cb5ddff53cff1479dffc97db5858451d4b98f6e60a23cfb529e01",
+                "_socket.pyd": "ba944001aa6b53350f8c64e93643742abf1a08dd07c7dbbc13996e7d4d8a9efa",
+                "_sqlite3.pyd": "ff76e7c20008fa59e8cd9c6bb8ec47f689a2cc2dc0c9b8ad9e19572b37b9d7db",
+                "_ssl.pyd": "1cf939510359f5aa3c5f51a0ad994d9b819f5603dd100872cd30a1e25cd83f05",
+                "_uuid.pyd": "e196b2a878b8a57976e9ab5d7610e35a85e2fe3043fd3952934a54b415bd2854",
+                "_wmi.pyd": "ca38a50c27413a5acfd14b30b0433fcf80a64ad0020e41aceeb3666f8439aba4",
+                "_zoneinfo.pyd": "ce3d9885aa50aed7e21a5ef90393d2bcad0f155999419fe9397a190180e39a0f",
+                "libcrypto-3.dll": "09499e186cf0e434ffa17ad153aa9a66d6048c54a2c03b823e2a06c49d9affe4",
+                "libffi-8.dll": "eff52743773eb550fcc6ce3efc37c85724502233b6b002a35496d828bd7b280a",
+                "libssl-3.dll": "28c395290279fa4f4f54a57b85cd66d853895f925fefb8f6fdebc0d8b1cdd07c",
+                "LICENSE.txt": "62bec384df47b0328307db41455ff6ea2559e5546b394ac69148561b21703120",
+                "pyexpat.pyd": "1037b8bfb0cd313119b09b4ee76ff85dffa49ba9a334f36013b8b871ad29d0e8",
+                "python.cat": "35f8624335b905870dabb441253bca9cc0a1f2d3b944ec8d12fb59d8ff1ba47f",
+                "python.exe": "ef8f51028ac5329641985112f8efb1c2d4c47c86b8011ddf7e6fae21e2b4e5a1",
+                "python3.dll": "16f109e8411bc08341497c87704b7cf0d22a2678f1e3a7dca416ea7bff995469",
+                "python313._pth": "35ddf94682ff9aa713a8d63557242ad00f3f28fdd39337f02c3bda4c0f791577",
+                "python313.dll": "3a7a6170ea840bf2a2a76d05b687b946fcdc8d0cfedfe159012b38f1e8959a7c",
+                "python313.zip": "080084107afc68721db190b71c2c344a348509687083629b5728f587ef3f8939",
+                "pythonw.exe": "95225ed035643523e8c586c11981e276541dce4949eb35cf8cf5741c824249d4",
+                "select.pyd": "a208997eb871b5c7785eb9bcc6a22ba8c43262255b59a3394fbe9912f38b4692",
+                "sqlite3.dll": "4b37aa9be1f66e27096da257d46fa680b74e47179f5d2137af82aeca9466d2ef",
+                "unicodedata.pyd": "7f8d28574732959cdb1188127fe3494c3618b602eede69c0a71846f0b5cc8a15",
+                "vcruntime140.dll": "052ad6a20d375957e82aa6a3c441ea548d89be0981516ca7eb306e063d5027f4",
+                "vcruntime140_1.dll": "6a99bc0128e0c7d6cbbf615fcc26909565e17d4ca3451b97f8987f9c6acbc6c8",
+                "winsound.pyd": "fa7d312f38852a3b7ba02e628e0d196a4cfd7b1743f48f8643cfb578294649c4"
+              },
+              "rewrite_files": {
+                "python313._pth": "../ComfyUI\npython313.zip\n.\nimport site\n"
+              }
+            }
+          ],
+          "runtime_probe": {
+            "python": "3.13.14",
+            "comfyui": "0.28.0",
+            "imports": [
+              "PIL",
+              "setuptools",
+              "torch",
+              "torchaudio",
+              "torchvision"
+            ],
+            "packages": {
+              "Pillow": "12.3.0",
+              "setuptools": "83.0.0",
+              "torch": "2.13.0+cu130",
+              "torchaudio": "2.11.0+cu130",
+              "torchvision": "0.28.0+cu130"
+            }
+          }
+        },
+        "windows-x86_64-nvidia-cu126": {
+          "url": "https://github.com/Comfy-Org/ComfyUI/releases/download/v0.28.0/ComfyUI_windows_portable_nvidia_cu126.7z",
+          "sha256": "6af1b60b6a1fad780b07871e4ff356ac04a1807755ee13c6050e3ec3a4157cc0",
+          "size_bytes": 2034160963,
+          "required_free_bytes": 8589934592,
+          "max_uncompressed_bytes": 8589934592,
+          "max_entries": 200000,
+          "archive_type": "7z",
+          "executable": "ComfyUI_windows_portable/python_embeded/python.exe",
+          "directory": "ComfyUI_windows_portable/ComfyUI",
+          "dependency_inventory_count": 89,
+          "dependency_inventory_sha256": "2917012ad55e024468a0e0ca2cf128db1cdac17d1d055008759f9842839e71c2",
+          "dependency_review": {
+            "file": "runtime-reviews/comfyui-v0.28.0.json",
+            "sha256": "138a1432a49fafe465ea74c1b38c8211dc3b0e0a9fc1ae1d237067e3c92861a5",
+            "asset_key": "windows-x86_64-nvidia-cu126"
+          },
+          "security_status": "blocked",
+          "security_message": "Automatic CUDA 12.6 setup is paused because the official portable asset embeds Python 3.12.10, while later Python 3.12 security releases have no official Windows binaries. Configure an independently audited external ComfyUI runtime to use this compatibility tier."
+        }
+      },
       "required_contract": [
         "GET /system_stats",
         "GET /object_info",

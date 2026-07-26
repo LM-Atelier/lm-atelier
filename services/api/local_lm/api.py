@@ -1,12 +1,17 @@
 from __future__ import annotations
 
+import asyncio
+import logging
+import os
 import shutil
+import stat
+from collections.abc import AsyncIterator
 from contextlib import suppress
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from typing import TYPE_CHECKING, Annotated, Any, Literal, cast
 
 from fastapi import APIRouter, Depends, File, HTTPException, Query, Request, Response, UploadFile
-from sqlalchemy import func, or_, select, text
+from sqlalchemy import and_, func, or_, select, text
 from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.orm import Session, selectinload
 from starlette.responses import FileResponse
@@ -18,7 +23,7 @@ from .comfy_templates import ComfyTemplate, ComfyTemplateRegistry
 from .config import Settings
 from .credentials import CredentialVaultUnavailable
 from .custom_nodes import custom_node_dependency_errors
-from .db import get_session
+from .db import SessionLocal, get_session
 from .domain import (
     ArtifactKind,
     CompatibilityLevel,
@@ -31,7 +36,11 @@ from .domain import (
     utcnow,
 )
 from .downloads import DownloadManager
-from .engines import EngineRegistry
+from .engines import (
+    EngineNotConfiguredError,
+    EngineRegistry,
+    EngineSchemaUnavailableError,
+)
 from .hardware import collect_system_info
 from .models import (
     AppSetting,
@@ -52,10 +61,17 @@ from .models import (
 from .orchestrator import ConversationOrchestrator
 from .platforms import list_platform_matrix
 from .preflight import assess_catalog_install
-from .profile_service import AUTO_PROFILE_ID, ensure_profile_for_install
+from .profile_service import (
+    AUTO_PROFILE_ID,
+    LAST_CHAT_PROFILE_KEY,
+    ensure_profile_for_install,
+    validate_profile_binding,
+    validate_profile_install,
+)
 from .recipes import get_reference_recipe, list_reference_recipes, recipe_download_request
 from .routing import RouteConfirmationRequired
 from .schemas import (
+    ApplicationInfo,
     ArtifactCleanupRequest,
     ArtifactCleanupResult,
     ArtifactDeleteResult,
@@ -72,6 +88,7 @@ from .schemas import (
     ChatCreate,
     ChatDetail,
     ChatOut,
+    ChatUpdate,
     CredentialSet,
     CredentialStatus,
     CustomNodeInstallRequest,
@@ -103,6 +120,8 @@ from .schemas import (
     ReferenceRecipe,
     RegenerateRequest,
     RunOut,
+    RuntimeStatus,
+    SettingField,
     StorageCleanupResult,
     SystemInfo,
     ToolCapabilityProbe,
@@ -120,14 +139,10 @@ from .schemas import (
 )
 from .security import SessionSecurity
 from .settings_registry import (
-    CHAT_SETTINGS,
-    IMAGE_SETTINGS,
-    VIDEO_SETTINGS,
     defaults,
     validate_settings,
     workflow_settings,
 )
-from .worker_startup import LAST_CHAT_PROFILE_KEY
 
 if TYPE_CHECKING:
     from .main import Services
@@ -140,6 +155,26 @@ def _services(request: Request) -> Services:
 
 
 router = APIRouter(prefix="/api")
+logger = logging.getLogger(__name__)
+
+
+async def _engine_role_fields(
+    request: Request,
+    role: str,
+    *,
+    engine: str | None = None,
+    allow_inactive: bool = False,
+) -> list[SettingField]:
+    try:
+        return await _services(request).engines.settings_for_role(
+            role,
+            engine=engine,
+            allow_inactive=allow_inactive,
+        )
+    except EngineNotConfiguredError as exc:
+        raise HTTPException(409, str(exc)) from exc
+    except EngineSchemaUnavailableError as exc:
+        raise HTTPException(503, str(exc)) from exc
 
 
 @router.post("/session")
@@ -148,6 +183,7 @@ async def create_session(request: Request, response: Response) -> dict[str, str 
     security: SessionSecurity = services.security
     return {
         "csrf_token": security.issue_session(response),
+        "event_epoch": services.events.epoch,
         "event_sequence": services.events.sequence,
     }
 
@@ -228,6 +264,16 @@ async def system_info(request: Request) -> SystemInfo:
     return collect_system_info(settings)
 
 
+@router.get("/about", response_model=ApplicationInfo)
+async def application_info(request: Request) -> ApplicationInfo:
+    settings: Settings = _services(request).settings
+    return ApplicationInfo(
+        version=__version__,
+        data_directory=str(settings.data_dir.resolve()),
+        log_directory=str(settings.log_dir.resolve()),
+    )
+
+
 @router.get("/platforms", response_model=list[PlatformMatrixEntry])
 async def platform_matrix() -> list[PlatformMatrixEntry]:
     return list_platform_matrix()
@@ -244,18 +290,21 @@ async def create_diagnostics(request: Request, session: SessionDep) -> ArtifactO
 
 @router.get("/backups", response_model=list[BackupInfo])
 async def list_backups(request: Request) -> list[BackupInfo]:
-    return _services(request).backups.list()
+    return await asyncio.to_thread(_services(request).backups.list)
 
 
 @router.post("/backups", response_model=BackupInfo, status_code=201)
 async def create_backup(request: Request, include_media: bool = False) -> BackupInfo:
-    return _services(request).backups.create(include_media=include_media)
+    return await asyncio.to_thread(
+        _services(request).backups.create,
+        include_media=include_media,
+    )
 
 
 @router.post("/backups/{name}/verify", response_model=BackupInfo)
 async def verify_backup(name: str, request: Request) -> BackupInfo:
     try:
-        return _services(request).backups.verify(name)
+        return await asyncio.to_thread(_services(request).backups.verify, name)
     except FileNotFoundError as exc:
         raise HTTPException(404, "backup not found") from exc
     except ValueError as exc:
@@ -265,7 +314,7 @@ async def verify_backup(name: str, request: Request) -> BackupInfo:
 @router.post("/backups/{name}/restore", response_model=BackupInfo)
 async def restore_backup(name: str, request: Request) -> BackupInfo:
     try:
-        return _services(request).backups.request_restore(name)
+        return await asyncio.to_thread(_services(request).backups.request_restore, name)
     except FileNotFoundError as exc:
         raise HTTPException(404, "backup not found") from exc
     except ValueError as exc:
@@ -275,7 +324,7 @@ async def restore_backup(name: str, request: Request) -> BackupInfo:
 @router.delete("/backups/{name}", status_code=204)
 async def delete_backup(name: str, request: Request) -> Response:
     try:
-        _services(request).backups.delete(name)
+        await asyncio.to_thread(_services(request).backups.delete, name)
     except FileNotFoundError as exc:
         raise HTTPException(404, "backup not found") from exc
     except ValueError as exc:
@@ -285,7 +334,10 @@ async def delete_backup(name: str, request: Request) -> Response:
 
 @router.get("/engines", response_model=list[EngineCapabilities])
 async def engine_capabilities(request: Request) -> list[EngineCapabilities]:
-    return await _services(request).engines.capabilities()
+    try:
+        return await _services(request).engines.capabilities()
+    except EngineSchemaUnavailableError as exc:
+        raise HTTPException(503, str(exc)) from exc
 
 
 @router.post("/engines/chat/tool-probe", response_model=ToolCapabilityProbe)
@@ -322,6 +374,21 @@ async def worker_status(request: Request, session: SessionDep) -> list[WorkerSta
     return statuses
 
 
+@router.get("/runtimes", response_model=list[RuntimeStatus])
+async def runtime_status(request: Request) -> list[RuntimeStatus]:
+    return _services(request).runtimes.statuses()
+
+
+@router.post("/runtimes/{engine}/install", response_model=RuntimeStatus, status_code=202)
+async def install_runtime(engine: str, request: Request) -> RuntimeStatus:
+    if engine not in {"llama.cpp", "comfyui"}:
+        raise HTTPException(422, "runtime must be llama.cpp or comfyui")
+    status = _services(request).runtimes.start(cast(Literal["llama.cpp", "comfyui"], engine))
+    if status.state == "unsupported":
+        raise HTTPException(422, status.message)
+    return status
+
+
 def _ensure_worker_idle(session: Session, name: str) -> None:
     kinds = [JobKind.CHAT.value] if name == "chat" else [JobKind.IMAGE.value, JobKind.VIDEO.value]
     busy_jobs = (
@@ -342,46 +409,81 @@ def _ensure_worker_idle(session: Session, name: str) -> None:
         )
 
 
+def _validated_profile_install(
+    session: Session,
+    *,
+    model_install_id: str | None,
+    role: str,
+    engine: str,
+) -> ModelInstall | None:
+    try:
+        return validate_profile_install(
+            session,
+            model_install_id=model_install_id,
+            role=role,
+            engine=engine,
+        )
+    except LookupError as exc:
+        raise HTTPException(404, str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(422, str(exc)) from exc
+
+
 @router.post("/workers/chat/load/{profile_id}", response_model=WorkerStatus)
 async def load_chat_worker(profile_id: str, request: Request, session: SessionDep) -> WorkerStatus:
-    _ensure_worker_idle(session, "chat")
-    profile = session.get(ModelProfile, profile_id)
-    if not profile or not profile.model_install_id:
-        raise HTTPException(404, "profile with a model install not found")
-    install = session.get(ModelInstall, profile.model_install_id)
-    if not install:
-        raise HTTPException(404, "profile model install not found")
-    try:
-        status = await _services(request).processes.load_chat(profile, install)
-    except (OSError, RuntimeError, ValueError, TimeoutError) as exc:
-        raise HTTPException(422, str(exc)) from exc
-    setting = session.get(AppSetting, LAST_CHAT_PROFILE_KEY)
-    if setting:
-        setting.value_json = profile.id
-    else:
-        session.add(AppSetting(key=LAST_CHAT_PROFILE_KEY, value_json=profile.id))
-    session.commit()
-    return status
+    services = _services(request)
+    async with services.scheduler.lease("primary"):
+        _ensure_worker_idle(session, "chat")
+        profile = session.get(ModelProfile, profile_id)
+        if not profile or not profile.model_install_id:
+            raise HTTPException(404, "profile with a model install not found")
+        if profile.role != ModelRole.CHAT.value:
+            raise HTTPException(422, "chat worker requires a chat profile")
+        install = _validated_profile_install(
+            session,
+            model_install_id=profile.model_install_id,
+            role=profile.role,
+            engine=profile.engine,
+        )
+        if not install:
+            raise HTTPException(404, "profile with a model install not found")
+        try:
+            status = await services.processes.load_chat(profile, install)
+        except (OSError, RuntimeError, ValueError, TimeoutError) as exc:
+            raise HTTPException(422, str(exc)) from exc
+        setting = session.get(AppSetting, LAST_CHAT_PROFILE_KEY)
+        if setting:
+            setting.value_json = profile.id
+        else:
+            session.add(AppSetting(key=LAST_CHAT_PROFILE_KEY, value_json=profile.id))
+        session.commit()
+        return status
 
 
 @router.post("/workers/media/start", response_model=WorkerStatus)
 async def start_media_worker(request: Request, session: SessionDep) -> WorkerStatus:
-    _ensure_worker_idle(session, "media")
-    try:
-        return await _services(request).processes.start_media()
-    except (OSError, RuntimeError, ValueError, TimeoutError) as exc:
-        raise HTTPException(422, str(exc)) from exc
+    services = _services(request)
+    async with services.scheduler.lease("primary"):
+        _ensure_worker_idle(session, "media")
+        if services.settings.media_engine != "comfyui":
+            raise HTTPException(422, "The ComfyUI media engine is not active.")
+        try:
+            return await services.processes.start_media()
+        except (OSError, RuntimeError, ValueError, TimeoutError) as exc:
+            raise HTTPException(422, str(exc)) from exc
 
 
 @router.post("/workers/{name}/stop", response_model=WorkerStatus)
 async def stop_worker(name: str, request: Request, session: SessionDep) -> WorkerStatus:
     if name not in {"chat", "media"}:
         raise HTTPException(422, "worker must be chat or media")
-    _ensure_worker_idle(session, name)
-    try:
-        return await _services(request).processes.stop(name)
-    except ValueError as exc:
-        raise HTTPException(422, str(exc)) from exc
+    services = _services(request)
+    async with services.scheduler.lease("primary"):
+        _ensure_worker_idle(session, name)
+        try:
+            return await services.processes.stop(name)
+        except ValueError as exc:
+            raise HTTPException(422, str(exc)) from exc
 
 
 @router.get("/projects", response_model=list[ProjectOut])
@@ -421,10 +523,59 @@ def _validate_project_workflow_pins(session: Session, values: dict[str, Any]) ->
             raise HTTPException(422, f"{field} has an incompatible workflow operation")
 
 
+async def _validate_generation_defaults(
+    request: Request,
+    session: Session,
+    values: dict[str, Any],
+) -> None:
+    scoped = values.get("generation_settings_json")
+    if scoped is None and "generation_settings_json" in values:
+        values["generation_settings_json"] = {}
+        scoped = {}
+    if scoped:
+        for role, settings in scoped.items():
+            if len(settings) > 256 or any(len(key) > 200 for key in settings):
+                raise HTTPException(422, f"{role} generation defaults are too large")
+            fields = await _engine_role_fields(request, role)
+            request_fields = [field for field in fields if field.scope != "load"]
+            load_keys = {field.key for field in fields if field.scope == "load"}
+            disallowed = sorted(load_keys & set(settings))
+            if disallowed:
+                raise HTTPException(
+                    422,
+                    f"{role} generation defaults cannot include load settings: "
+                    f"{', '.join(disallowed)}",
+                )
+            try:
+                validate_settings(settings, request_fields)
+            except ValueError as exc:
+                raise HTTPException(422, str(exc)) from exc
+
+    bindings = values.get("generation_preset_ids_json")
+    if bindings is None and "generation_preset_ids_json" in values:
+        values["generation_preset_ids_json"] = {}
+        bindings = {}
+    for role, preset_id in (bindings or {}).items():
+        if preset_id is None:
+            continue
+        if len(preset_id) > 40:
+            raise HTTPException(422, f"{role} generation preset id is too long")
+        preset = session.get(GenerationPreset, preset_id)
+        if not preset:
+            raise HTTPException(404, f"{role} generation preset not found")
+        if preset.role != role:
+            raise HTTPException(422, f"{role} generation preset has an incompatible role")
+
+
 @router.post("/projects", response_model=ProjectOut, status_code=201)
-async def create_project(payload: ProjectCreate, session: SessionDep) -> Project:
+async def create_project(
+    payload: ProjectCreate,
+    request: Request,
+    session: SessionDep,
+) -> Project:
     values = payload.model_dump()
     _validate_project_workflow_pins(session, values)
+    await _validate_generation_defaults(request, session, values)
     project = Project(**values)
     session.add(project)
     session.commit()
@@ -454,12 +605,18 @@ async def import_project(
 
 
 @router.patch("/projects/{project_id}", response_model=ProjectOut)
-async def update_project(project_id: str, payload: ProjectUpdate, session: SessionDep) -> Project:
+async def update_project(
+    project_id: str,
+    payload: ProjectUpdate,
+    request: Request,
+    session: SessionDep,
+) -> Project:
     project = session.get(Project, project_id)
     if not project:
         raise HTTPException(404, "project not found")
     values = payload.model_dump(exclude_unset=True)
     _validate_project_workflow_pins(session, values)
+    await _validate_generation_defaults(request, session, values)
     for key, value in values.items():
         setattr(project, key, value)
     session.commit()
@@ -516,13 +673,21 @@ async def list_chats(
 
 
 @router.post("/chats", response_model=ChatOut, status_code=201)
-async def create_chat(payload: ChatCreate, session: SessionDep) -> Chat:
+async def create_chat(
+    payload: ChatCreate,
+    request: Request,
+    session: SessionDep,
+) -> Chat:
     if payload.project_id and not session.get(Project, payload.project_id):
         raise HTTPException(404, "project not found")
+    values = payload.model_dump(mode="json")
+    await _validate_generation_defaults(request, session, values)
     chat = Chat(
         title=payload.title,
         project_id=payload.project_id,
         routing_mode=payload.routing_mode.value,
+        generation_settings_json=values["generation_settings_json"],
+        generation_preset_ids_json=values["generation_preset_ids_json"],
         active_chat_profile_id=AUTO_PROFILE_ID,
         active_image_profile_id=AUTO_PROFILE_ID,
         active_video_profile_id=AUTO_PROFILE_ID,
@@ -550,14 +715,17 @@ async def get_chat(chat_id: str, session: SessionDep) -> Chat:
 
 
 @router.patch("/chats/{chat_id}", response_model=ChatOut)
-async def update_chat(chat_id: str, payload: dict[str, Any], session: SessionDep) -> Chat:
-    from .schemas import ChatUpdate
-
-    validated = ChatUpdate.model_validate(payload)
+async def update_chat(
+    chat_id: str,
+    payload: ChatUpdate,
+    request: Request,
+    session: SessionDep,
+) -> Chat:
     chat = session.get(Chat, chat_id)
     if not chat:
         raise HTTPException(404, "chat not found")
-    values = validated.model_dump(exclude_unset=True, mode="json")
+    values = payload.model_dump(exclude_unset=True, mode="json")
+    await _validate_generation_defaults(request, session, values)
     if (
         "project_id" in values
         and values["project_id"]
@@ -578,6 +746,12 @@ async def update_chat(chat_id: str, payload: dict[str, Any], session: SessionDep
             raise HTTPException(404, f"{role} profile not found")
         if profile.role != role:
             raise HTTPException(422, f"{field} requires a {role} profile")
+        _validated_profile_install(
+            session,
+            model_install_id=profile.model_install_id,
+            role=profile.role,
+            engine=profile.engine,
+        )
     for key, value in values.items():
         setattr(chat, key, value)
     session.commit()
@@ -595,10 +769,16 @@ async def delete_chat(
     chat = session.get(Chat, chat_id)
     if not chat:
         raise HTTPException(404, "chat not found")
-    if delete_generated_media:
-        _services(request).artifacts.delete_chat_generated_media(session, chat_id)
-    session.delete(chat)
-    session.commit()
+    services = _services(request)
+    async with services.orchestrator.prepare_chat_deletion(chat_id):
+        session.expire_all()
+        chat = session.get(Chat, chat_id)
+        if not chat:
+            raise HTTPException(404, "chat not found")
+        if delete_generated_media:
+            services.artifacts.delete_chat_generated_media(session, chat_id)
+        session.delete(chat)
+        session.commit()
     return Response(status_code=204)
 
 
@@ -607,8 +787,24 @@ async def create_turn(
     chat_id: str, payload: TurnRequest, request: Request, session: SessionDep
 ) -> TurnAccepted:
     orchestrator: ConversationOrchestrator = _services(request).orchestrator
+    return await _accept_turn(orchestrator, session, chat_id, payload)
+
+
+async def _accept_turn(
+    orchestrator: ConversationOrchestrator,
+    session: Session,
+    chat_id: str,
+    payload: TurnRequest,
+    *,
+    use_explicit_parent: bool = False,
+) -> TurnAccepted:
     try:
-        return await orchestrator.create_turn(session, chat_id, payload)
+        return await orchestrator.create_turn(
+            session,
+            chat_id,
+            payload,
+            use_explicit_parent=use_explicit_parent,
+        )
     except LookupError as exc:
         raise HTTPException(404, str(exc)) from exc
     except RouteConfirmationRequired as exc:
@@ -620,6 +816,18 @@ async def create_turn(
                 "plan": exc.plan.model_dump(mode="json"),
             },
         ) from exc
+    except TimeoutError as exc:
+        raise HTTPException(
+            409,
+            detail={
+                "code": "idempotency_request_in_progress",
+                "message": str(exc),
+            },
+        ) from exc
+    except EngineNotConfiguredError as exc:
+        raise HTTPException(409, str(exc)) from exc
+    except EngineSchemaUnavailableError as exc:
+        raise HTTPException(503, str(exc)) from exc
     except ValueError as exc:
         raise HTTPException(422, str(exc)) from exc
 
@@ -661,20 +869,35 @@ async def regenerate_message(
         if prior_run.workflow_revision_id
         else None
     )
-    prior_settings = orchestrator.request_settings_for_operation(
-        Operation(prior_run.operation),
-        prior_run.settings_json,
-        input_schema=prior_revision.input_schema_json if prior_revision else None,
+    prior_profile = (
+        session.get(ModelProfile, prior_run.profile_id) if prior_run.profile_id else None
     )
+    try:
+        prior_settings = await orchestrator.request_settings_for_operation(
+            Operation(prior_run.operation),
+            prior_run.settings_json,
+            input_schema=prior_revision.input_schema_json if prior_revision else None,
+            engine=prior_profile.engine if prior_profile else None,
+        )
+    except EngineNotConfiguredError as exc:
+        raise HTTPException(409, str(exc)) from exc
+    except EngineSchemaUnavailableError as exc:
+        raise HTTPException(503, str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(422, str(exc)) from exc
     turn = TurnRequest(
         text=text,
         mode=mode,
         parent_message_id=user_message.parent_id,
-        input_artifact_ids=prior_run.provenance_json.get("input_artifact_ids", []),
+        input_artifact_ids=orchestrator.input_artifact_ids_for_run(session, prior_run),
         settings={**prior_settings, **payload.settings},
     )
-    return await _services(request).orchestrator.create_turn(
-        session, prior_run.chat_id, turn, use_explicit_parent=True
+    return await _accept_turn(
+        orchestrator,
+        session,
+        prior_run.chat_id,
+        turn,
+        use_explicit_parent=True,
     )
 
 
@@ -691,21 +914,40 @@ async def edit_and_branch(
         if payload.mode is None:
             updates["mode"] = _mode_for_operation(Operation(prior_run.operation))
         if not payload.input_artifact_ids:
-            updates["input_artifact_ids"] = prior_run.provenance_json.get("input_artifact_ids", [])
+            updates["input_artifact_ids"] = _services(
+                request
+            ).orchestrator.input_artifact_ids_for_run(session, prior_run)
         if not payload.settings:
             prior_revision = (
                 session.get(WorkflowRevision, prior_run.workflow_revision_id)
                 if prior_run.workflow_revision_id
                 else None
             )
-            updates["settings"] = _services(request).orchestrator.request_settings_for_operation(
-                Operation(prior_run.operation),
-                prior_run.settings_json,
-                input_schema=prior_revision.input_schema_json if prior_revision else None,
+            prior_profile = (
+                session.get(ModelProfile, prior_run.profile_id) if prior_run.profile_id else None
             )
+            try:
+                updates["settings"] = await _services(
+                    request
+                ).orchestrator.request_settings_for_operation(
+                    Operation(prior_run.operation),
+                    prior_run.settings_json,
+                    input_schema=(prior_revision.input_schema_json if prior_revision else None),
+                    engine=prior_profile.engine if prior_profile else None,
+                )
+            except EngineNotConfiguredError as exc:
+                raise HTTPException(409, str(exc)) from exc
+            except EngineSchemaUnavailableError as exc:
+                raise HTTPException(503, str(exc)) from exc
+            except ValueError as exc:
+                raise HTTPException(422, str(exc)) from exc
     turn = payload.model_copy(update=updates)
-    return await _services(request).orchestrator.create_turn(
-        session, source.chat_id, turn, use_explicit_parent=True
+    return await _accept_turn(
+        _services(request).orchestrator,
+        session,
+        source.chat_id,
+        turn,
+        use_explicit_parent=True,
     )
 
 
@@ -789,26 +1031,51 @@ async def retry_job(job_id: str, request: Request, session: SessionDep) -> Job:
         raise HTTPException(404, "job not found")
     if job.status not in {"failed", "cancelled", "interrupted"}:
         raise HTTPException(409, "only terminal unsuccessful jobs can be retried")
-    job.status = "queued"
-    job.progress = 0
-    job.phase = "retry queued"
-    job.error = None
-    job.completed_at = None
-    if job.run_id:
-        run = session.get(Run, job.run_id)
-        if run:
-            run.status = "queued"
-            run.error = None
-            run.completed_at = None
-    session.commit()
     if job.kind == JobKind.DOWNLOAD.value:
+        job.status = "queued"
+        job.progress = 0
+        job.phase = "retry queued"
+        job.error = None
+        job.completed_at = None
+        session.commit()
         _services(request).downloads.start(job.id)
-    elif job.run_id:
-        _services(request).orchestrator.start(job.id, job.run_id)
-    else:
+        session.refresh(job)
+        return job
+    if not job.run_id:
         raise HTTPException(422, "job has no retryable operation")
-    session.refresh(job)
-    return job
+    run = session.get(Run, job.run_id)
+    if not run:
+        raise HTTPException(422, "job has no retryable operation")
+
+    orchestrator = _services(request).orchestrator
+    async with orchestrator.chat_guard(run.chat_id):
+        session.expire_all()
+        job = session.get(Job, job_id)
+        if not job:
+            raise HTTPException(404, "job not found")
+        if job.status not in {"failed", "cancelled", "interrupted"}:
+            raise HTTPException(409, "only terminal unsuccessful jobs can be retried")
+        if not job.run_id:
+            raise HTTPException(422, "job has no retryable operation")
+        run = session.get(Run, job.run_id)
+        if not run:
+            raise HTTPException(422, "job has no retryable operation")
+        job.status = "queued"
+        job.progress = 0
+        job.phase = "retry queued"
+        job.error = None
+        job.completed_at = None
+        run.status = "queued"
+        run.error = None
+        run.completed_at = None
+        try:
+            orchestrator.prepare_retry(session, run)
+        except LookupError as exc:
+            raise HTTPException(422, str(exc)) from exc
+        session.commit()
+        orchestrator.start(job.id, run.id)
+        session.refresh(job)
+        return job
 
 
 @router.post("/artifacts", response_model=ArtifactOut, status_code=201)
@@ -891,7 +1158,7 @@ async def artifact_storage(request: Request, session: SessionDep) -> ArtifactSto
     services = _services(request)
     artifacts = session.scalars(select(Artifact)).all()
     referenced = services.artifacts.referenced_artifact_ids(session)
-    retention_pending_count, eligible_count, eligible_bytes = services.artifacts.cleanup_retention(
+    retention = services.artifacts.cleanup_retention(
         session,
         retention_days=services.settings.artifact_retention_days,
         temporary_hours=services.settings.temporary_retention_hours,
@@ -916,9 +1183,9 @@ async def artifact_storage(request: Request, session: SessionDep) -> ArtifactSto
         unreferenced_count=len(artifacts) - len(referenced_artifacts),
         temporary_bytes=sum(artifact.size_bytes for artifact in temporary),
         temporary_count=len(temporary),
-        eligible_bytes=eligible_bytes,
-        eligible_count=eligible_count,
-        retention_pending_count=retention_pending_count,
+        eligible_bytes=retention.reclaimed_bytes,
+        eligible_count=retention.removed_count,
+        retention_pending_count=retention.pending_count,
         disk_free_bytes=disk_free,
         warning=disk_free < services.settings.storage_warning_free_bytes,
         retention_days=services.settings.artifact_retention_days,
@@ -933,7 +1200,7 @@ async def cleanup_artifacts(
     session: SessionDep,
 ) -> ArtifactCleanupResult:
     services = _services(request)
-    marked, removed, reclaimed = services.artifacts.cleanup_retention(
+    cleanup = services.artifacts.cleanup_retention(
         session,
         retention_days=services.settings.artifact_retention_days,
         temporary_hours=services.settings.temporary_retention_hours,
@@ -943,9 +1210,10 @@ async def cleanup_artifacts(
         session.commit()
     return ArtifactCleanupResult(
         dry_run=payload.dry_run,
-        marked_count=marked,
-        removed_count=removed,
-        reclaimed_bytes=reclaimed,
+        marked_count=cleanup.marked_count,
+        retention_pending_count=cleanup.pending_count,
+        removed_count=cleanup.removed_count,
+        reclaimed_bytes=cleanup.reclaimed_bytes,
     )
 
 
@@ -988,14 +1256,15 @@ async def artifact_content(artifact_id: str, request: Request, session: SessionD
     artifact = session.get(Artifact, artifact_id)
     if not artifact:
         raise HTTPException(404, "artifact not found")
-    path: Path = _services(request).artifacts.resolve(artifact)
-    if not path.is_file():
-        raise HTTPException(410, "artifact file is missing")
+    try:
+        path, media_type, disposition = _services(request).artifacts.delivery_metadata(artifact)
+    except (FileNotFoundError, ValueError) as exc:
+        raise HTTPException(410, "artifact file is missing or corrupt") from exc
     return FileResponse(
         path,
-        media_type=artifact.media_type,
+        media_type=media_type,
         filename=Path(artifact.original_name or "artifact").name,
-        content_disposition_type="inline",
+        content_disposition_type=disposition,
         stat_result=path.stat(),
         headers={
             "Cache-Control": "private, max-age=31536000, immutable",
@@ -1053,14 +1322,25 @@ async def catalog_search(
         items = []
         for item in page.items:
             ready = bool(registry.matches(item.remote_id, role))
+            adaptive_candidate = role == "image" and "safetensors" in {
+                item_format.casefold() for item_format in item.formats
+            }
             items.append(
                 item.model_copy(
                     update={
-                        "compatibility": "likely" if ready else "unsupported",
+                        "compatibility": (
+                            "likely"
+                            if ready
+                            else ("advanced_import" if adaptive_candidate else "unsupported")
+                        ),
                         "compatibility_reasons": (
                             ["Official ComfyUI workflow available"]
                             if ready
-                            else ["No official workflow declares this exact model repository"]
+                            else (
+                                ["One-click checkpoint compatibility is checked before download"]
+                                if adaptive_candidate
+                                else ["No safe automatic workflow contract is available"]
+                            )
                         ),
                     }
                 )
@@ -1157,10 +1437,73 @@ async def catalog_preflight(
     ):
         return assess_catalog_install(detail, payload, services.settings, system)
 
+    runtime_status = services.runtimes.status("comfyui")
+    if runtime_status.security_status == "blocked" and runtime_status.state != "ready":
+        result = assess_catalog_install(detail, payload, services.settings, system)
+        checks = [
+            *[check for check in result.checks if check.id != "runtime"],
+            CatalogPreflightCheck(
+                id="runtime",
+                label="Runtime security",
+                status="block",
+                detail=runtime_status.security_message or runtime_status.message,
+            ),
+        ]
+        return result.model_copy(update={"can_install": False, "checks": checks})
+
     registry = ComfyTemplateRegistry(services.settings)
     candidates = registry.matches(detail.model.remote_id, payload.role)
     if not candidates:
-        result = assess_catalog_install(detail, payload, services.settings, system)
+        resolved_payload = payload.model_copy(update={"revision": detail.revision})
+        result = assess_catalog_install(
+            detail,
+            resolved_payload,
+            services.settings,
+            system,
+        )
+        adaptive = registry.adaptive_checkpoint(
+            detail.model.remote_id,
+            detail.revision,
+            result.selected_files,
+            payload.role,
+        )
+        if adaptive:
+            checks = [
+                *[
+                    (
+                        CatalogPreflightCheck(
+                            id="runtime",
+                            label="Runtime compatibility",
+                            status="warn",
+                            detail=(
+                                "This is a safe single-file checkpoint layout. ComfyUI "
+                                "must accept the checkpoint before LM Atelier activates it."
+                            ),
+                        )
+                        if check.id == "runtime"
+                        else check
+                    )
+                    for check in result.checks
+                ],
+                CatalogPreflightCheck(
+                    id="workflow-template",
+                    label="Automatic runtime setup",
+                    status="warn",
+                    detail=(
+                        "LM Atelier will use ComfyUI's standard checkpoint workflow and "
+                        "keep the model inactive if live runtime validation fails."
+                    ),
+                ),
+            ]
+            return result.model_copy(
+                update={
+                    "source_remote_id": detail.model.remote_id,
+                    "comfy_paths": adaptive.comfy_paths,
+                    "workflow_template_id": adaptive.id,
+                    "workflow_template_sha256": adaptive.sha256,
+                    "checks": checks,
+                }
+            )
         checks = [
             *[check for check in result.checks if check.id != "selection"],
             CatalogPreflightCheck(
@@ -1168,8 +1511,8 @@ async def catalog_preflight(
                 label="Automatic runtime setup",
                 status="block",
                 detail=(
-                    "The installed ComfyUI runtime does not yet advertise a compatible "
-                    "one-click workflow for this model."
+                    "No official workflow or safe adaptive standard-checkpoint contract "
+                    "is available for this model."
                 ),
             ),
         ]
@@ -1412,9 +1755,53 @@ async def delete_model(
     session: SessionDep,
     delete_profiles: bool = False,
 ) -> Response:
+    services = _services(request)
+    async with services.scheduler.lease("primary"):
+        install = session.get(ModelInstall, model_id)
+        if not install:
+            raise HTTPException(404, "model not found")
+        worker_name = "chat" if install.role == ModelRole.CHAT.value else "media"
+        _ensure_worker_idle(session, worker_name)
+        if worker_name == "media" and any(
+            worker.name == "media" and worker.running for worker in services.processes.statuses()
+        ):
+            raise HTTPException(409, "stop the media worker before deleting this model")
+        quarantine = _delete_model_locked(
+            model_id,
+            request,
+            session,
+            delete_profiles=delete_profiles,
+        )
+        try:
+            await asyncio.to_thread(_finalize_model_quarantine, quarantine)
+        except Exception:
+            # The database commit is authoritative. Startup recovery will
+            # finish this same-volume deletion without another user action.
+            logger.warning(
+                "Deleted model files remain safely quarantined at %s",
+                quarantine,
+                exc_info=True,
+            )
+        return Response(status_code=204)
+
+
+def _delete_model_locked(
+    model_id: str,
+    request: Request,
+    session: Session,
+    *,
+    delete_profiles: bool,
+) -> Path | None:
     install = session.get(ModelInstall, model_id)
     if not install:
         raise HTTPException(404, "model not found")
+    model_root = _services(request).settings.model_dir.resolve()
+    try:
+        path = _managed_model_path(model_root, install.local_path)
+        recover_model_delete_quarantines(session, model_root, strict=True)
+    except ValueError as exc:
+        raise HTTPException(422, str(exc)) from exc
+
     profiles = list(
         session.scalars(
             select(ModelProfile).where(ModelProfile.model_install_id == install.id)
@@ -1447,41 +1834,471 @@ async def delete_model(
                 chat.active_video_profile_id = AUTO_PROFILE_ID
         for profile in profiles:
             session.delete(profile)
+    moves: list[tuple[Path, Path]] = []
+    quarantine: Path | None = None
+    commit_started = False
+    try:
+        # Flush relationship and chat changes before touching the filesystem.
+        # A constraint failure here therefore cannot move any model content.
         session.flush()
-    model_root = _services(request).settings.model_dir.resolve()
-    path = Path(install.local_path).resolve()
-    siblings = session.scalars(
-        select(ModelInstall).where(
-            ModelInstall.id != install.id,
-            ModelInstall.local_path == install.local_path,
+        if path is not None:
+            moves, quarantine = _quarantine_model_files(
+                session,
+                install,
+                model_root,
+                path,
+            )
+        session.delete(install)
+        # Force database errors while the quarantined files are still
+        # restorable, rather than deferring every check into commit().
+        session.flush()
+        commit_started = True
+        session.commit()
+    except Exception as exc:
+        try:
+            session.rollback()
+        except Exception:
+            logger.exception("Database rollback failed during model deletion")
+        if commit_started:
+            committed = _model_delete_was_committed(model_id)
+            if committed is True:
+                logger.warning(
+                    "Model deletion commit completed despite a reported database error",
+                    exc_info=True,
+                )
+                return quarantine
+            if committed is None:
+                logger.error(
+                    "Could not determine model deletion outcome; leaving files in quarantine %s",
+                    quarantine,
+                    exc_info=True,
+                )
+                raise
+        try:
+            _restore_model_moves(moves)
+        except Exception:
+            logger.exception(
+                "Model deletion rollback left recoverable files in quarantine %s",
+                quarantine,
+            )
+        else:
+            try:
+                _finalize_model_quarantine(quarantine)
+            except Exception:
+                logger.warning(
+                    "Restored model files but could not prune quarantine %s",
+                    quarantine,
+                    exc_info=True,
+                )
+        if isinstance(exc, ValueError):
+            raise HTTPException(422, str(exc)) from exc
+        raise
+    return quarantine
+
+
+_MODEL_DELETE_QUARANTINE = ".delete-pending"
+_MODEL_DELETE_MARKER = ".model-id"
+
+
+def _model_delete_was_committed(model_id: str) -> bool | None:
+    """Resolve an ambiguous commit error from a fresh database transaction."""
+
+    try:
+        with SessionLocal() as verification:
+            return verification.get(ModelInstall, model_id) is None
+    except Exception:
+        logger.exception("Could not verify the model deletion database outcome")
+        return None
+
+
+def _managed_model_path(model_root: Path, value: str) -> Path | None:
+    """Return a confined, link-free managed path or None for external imports."""
+
+    raw = Path(os.path.abspath(os.fspath(Path(value).expanduser())))
+    try:
+        relative = raw.relative_to(model_root)
+    except ValueError:
+        return None
+    if not relative.parts or relative.parts[0] == _MODEL_DELETE_QUARANTINE:
+        return None
+    cursor = model_root
+    for part in relative.parts:
+        cursor /= part
+        if cursor.exists() and _model_path_is_link(cursor):
+            raise ValueError("managed model paths cannot use filesystem links")
+    resolved = raw.resolve(strict=False)
+    if model_root not in resolved.parents or resolved == model_root:
+        raise ValueError("managed model path escapes model storage")
+    return resolved
+
+
+def _model_path_is_link(path: Path) -> bool:
+    try:
+        if path.is_symlink():
+            return True
+        is_junction = getattr(path, "is_junction", None)
+        if is_junction is not None and is_junction():
+            return True
+        attributes = getattr(path.lstat(), "st_file_attributes", 0)
+        return bool(attributes & getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0))
+    except FileNotFoundError:
+        return False
+    except OSError:
+        return True
+
+
+def _ensure_model_tree_link_free(path: Path) -> None:
+    if _model_path_is_link(path):
+        raise ValueError("managed model paths cannot use filesystem links")
+    if not path.is_dir():
+        return
+    pending = [path]
+    while pending:
+        directory = pending.pop()
+        with os.scandir(directory) as entries:
+            for entry in entries:
+                candidate = Path(entry.path)
+                if _model_path_is_link(candidate):
+                    raise ValueError("managed model directories cannot contain filesystem links")
+                if entry.is_dir(follow_symlinks=False):
+                    pending.append(candidate)
+
+
+def _quarantine_model_files(
+    session: Session,
+    install: ModelInstall,
+    model_root: Path,
+    path: Path,
+) -> tuple[list[tuple[Path, Path]], Path | None]:
+    if not path.exists():
+        return [], None
+    siblings = _related_model_installs(session, install, model_root, path)
+    quarantine: Path | None = None
+    moves: list[tuple[Path, Path]] = []
+    try:
+        if not siblings:
+            _ensure_model_tree_link_free(path)
+            quarantine = _new_model_quarantine(model_root, install.id)
+            staged = quarantine / "payload"
+            os.replace(path, staged)
+            return [(staged, path)], quarantine
+
+        if not path.is_dir():
+            # Another install owns the same managed file.
+            return [], None
+
+        retained_paths, retained_roots = _retained_model_paths(
+            siblings,
+            model_root,
         )
-    ).all()
-    if model_root in path.parents and path != model_root:
-        if siblings and path.is_dir():
-            retained_files = {
-                str(filename)
-                for sibling in siblings
-                for filename in sibling.manifest_json.get("files", [])
-            }
-            for filename in install.manifest_json.get("files", []):
-                if str(filename) in retained_files:
-                    continue
-                candidate = (path / str(filename)).resolve()
-                if path in candidate.parents and candidate.is_file():
-                    candidate.unlink()
-            for directory in sorted(
-                (item for item in path.rglob("*") if item.is_dir()), reverse=True
+        for relative in _manifest_model_files(install):
+            candidate = _confined_manifest_file(path, relative)
+            if not candidate.exists():
+                continue
+            if _model_path_is_link(candidate):
+                raise ValueError("managed model files cannot use filesystem links")
+            if not candidate.is_file():
+                raise ValueError("managed model manifests may only reference files")
+            if candidate in retained_paths or any(
+                candidate == root or root in candidate.parents for root in retained_roots
             ):
-                with suppress(OSError):
-                    directory.rmdir()
-        elif not siblings:
-            if path.is_dir():
-                shutil.rmtree(path)
-            elif path.exists():
-                path.unlink()
-    session.delete(install)
-    session.commit()
-    return Response(status_code=204)
+                continue
+            if quarantine is None:
+                quarantine = _new_model_quarantine(model_root, install.id)
+            staged = _safe_quarantine_file_path(quarantine, relative)
+            os.replace(candidate, staged)
+            moves.append((staged, candidate))
+        return moves, quarantine
+    except Exception:
+        try:
+            _restore_model_moves(moves)
+        except Exception:
+            logger.exception(
+                "Model staging failure left recoverable files in quarantine %s",
+                quarantine,
+            )
+        else:
+            try:
+                _finalize_model_quarantine(quarantine)
+            except Exception:
+                logger.warning(
+                    "Could not prune a failed model deletion quarantine %s",
+                    quarantine,
+                    exc_info=True,
+                )
+        raise
+
+
+def _related_model_installs(
+    session: Session,
+    install: ModelInstall,
+    model_root: Path,
+    path: Path,
+) -> list[tuple[ModelInstall, Path]]:
+    related: list[tuple[ModelInstall, Path]] = []
+    for sibling in session.scalars(select(ModelInstall).where(ModelInstall.id != install.id)).all():
+        try:
+            sibling_path = _managed_model_path(model_root, sibling.local_path)
+        except ValueError:
+            # A linked sibling is never evidence that it is safe to remove
+            # content through the current install.
+            continue
+        if sibling_path is None:
+            continue
+        if sibling_path == path or sibling_path in path.parents or path in sibling_path.parents:
+            related.append((sibling, sibling_path))
+    return related
+
+
+def _retained_model_paths(
+    siblings: list[tuple[ModelInstall, Path]],
+    model_root: Path,
+) -> tuple[set[Path], set[Path]]:
+    retained_paths: set[Path] = set()
+    retained_roots: set[Path] = set()
+    for sibling, sibling_path in siblings:
+        if sibling_path.is_file():
+            retained_paths.add(sibling_path)
+            continue
+        try:
+            files = _manifest_model_files(sibling)
+        except ValueError:
+            retained_roots.add(sibling_path)
+            continue
+        if not files:
+            retained_roots.add(sibling_path)
+            continue
+        for relative in files:
+            try:
+                candidate = _confined_manifest_file(sibling_path, relative)
+            except ValueError:
+                retained_roots.add(sibling_path)
+                break
+            if candidate == model_root or model_root not in candidate.parents:
+                retained_roots.add(sibling_path)
+                break
+            retained_paths.add(candidate)
+    return retained_paths, retained_roots
+
+
+def _manifest_model_files(install: ModelInstall) -> list[PurePosixPath]:
+    raw_files = install.manifest_json.get("files", [])
+    if not isinstance(raw_files, list):
+        raise ValueError("managed model manifest files must be a list")
+    files: list[PurePosixPath] = []
+    seen: set[str] = set()
+    for value in raw_files:
+        if not isinstance(value, str) or not value:
+            raise ValueError("managed model manifest contains an invalid file path")
+        relative = PurePosixPath(value.replace("\\", "/"))
+        if (
+            relative.is_absolute()
+            or not relative.parts
+            or any(part in {"", ".", ".."} or ":" in part for part in relative.parts)
+        ):
+            raise ValueError("managed model manifest contains an unsafe file path")
+        identity = relative.as_posix().casefold()
+        if identity in seen:
+            continue
+        seen.add(identity)
+        files.append(relative)
+    return files
+
+
+def _confined_manifest_file(root: Path, relative: PurePosixPath) -> Path:
+    candidate = root.joinpath(*relative.parts)
+    cursor = root
+    for part in relative.parts:
+        cursor /= part
+        if cursor.exists() and _model_path_is_link(cursor):
+            raise ValueError("managed model files cannot use filesystem links")
+    resolved = candidate.resolve(strict=False)
+    if root not in resolved.parents:
+        raise ValueError("managed model manifest path escapes its install directory")
+    return resolved
+
+
+def _new_model_quarantine(model_root: Path, model_id: str) -> Path:
+    parent = model_root / _MODEL_DELETE_QUARANTINE
+    if parent.exists() and _model_path_is_link(parent):
+        raise ValueError("model deletion quarantine cannot use a filesystem link")
+    parent.mkdir(parents=True, exist_ok=True)
+    if not parent.is_dir() or parent.resolve().parent != model_root:
+        raise ValueError("model deletion quarantine escapes model storage")
+    quarantine = parent / new_id("delete")
+    quarantine.mkdir(mode=0o700)
+    try:
+        marker = quarantine / _MODEL_DELETE_MARKER
+        with marker.open("x", encoding="utf-8") as handle:
+            handle.write(model_id)
+            handle.flush()
+            os.fsync(handle.fileno())
+        marker.chmod(0o600)
+    except Exception:
+        with suppress(OSError):
+            quarantine.rmdir()
+        raise
+    return quarantine
+
+
+def _safe_quarantine_file_path(
+    quarantine: Path,
+    relative: PurePosixPath,
+) -> Path:
+    if _model_path_is_link(quarantine) or not quarantine.is_dir():
+        raise ValueError("model deletion quarantine contains a filesystem link")
+    files = quarantine / "files"
+    if _model_path_is_link(files):
+        raise ValueError("model deletion quarantine contains a filesystem link")
+    if not files.exists():
+        files.mkdir()
+    if _model_path_is_link(files) or not files.is_dir():
+        raise ValueError("model deletion quarantine contains an unsafe files directory")
+    files_root = files.resolve()
+    if files_root.parent != quarantine.resolve():
+        raise ValueError("model deletion quarantine escapes model storage")
+    cursor = files
+    for part in relative.parts[:-1]:
+        cursor /= part
+        if _model_path_is_link(cursor):
+            raise ValueError("model deletion quarantine contains a filesystem link")
+        if cursor.exists():
+            if not cursor.is_dir():
+                raise ValueError("model deletion quarantine contains a filesystem link")
+        else:
+            cursor.mkdir()
+            if _model_path_is_link(cursor) or not cursor.is_dir():
+                raise ValueError("model deletion quarantine contains a filesystem link")
+    staged = cursor / relative.name
+    if staged.exists() or _model_path_is_link(staged):
+        raise ValueError("model deletion quarantine contains an unexpected file")
+    resolved_parent = staged.parent.resolve()
+    if resolved_parent != files_root and files_root not in resolved_parent.parents:
+        raise ValueError("model deletion quarantine escapes model storage")
+    return staged
+
+
+def _restore_model_moves(moves: list[tuple[Path, Path]]) -> None:
+    for staged, original in reversed(moves):
+        if not staged.exists():
+            continue
+        if original.exists():
+            raise RuntimeError("cannot restore a quarantined model over an existing path")
+        original.parent.mkdir(parents=True, exist_ok=True)
+        os.replace(staged, original)
+
+
+def _finalize_model_quarantine(quarantine: Path | None) -> None:
+    if quarantine is None or not quarantine.exists():
+        return
+    if _model_path_is_link(quarantine) or not quarantine.is_dir():
+        raise OSError("refusing to follow an unsafe model deletion quarantine")
+    marker = quarantine / _MODEL_DELETE_MARKER
+    if _model_path_is_link(marker) or not marker.is_file():
+        raise OSError("model deletion quarantine has no safe ownership marker")
+    for child in quarantine.iterdir():
+        if child == marker:
+            continue
+        if _model_path_is_link(child):
+            raise OSError("refusing to follow a link in model deletion quarantine")
+        if child.is_dir():
+            try:
+                _ensure_model_tree_link_free(child)
+            except ValueError as exc:
+                raise OSError("refusing to follow a link in model deletion quarantine") from exc
+            shutil.rmtree(child)
+        elif child.is_file():
+            child.unlink()
+        else:
+            raise OSError("model deletion quarantine contains an unsupported entry")
+    # Remove the ownership marker last. If payload cleanup fails partway
+    # through, the next recovery pass can still determine whether to restore
+    # the remaining files or finish deleting them.
+    marker.unlink(missing_ok=True)
+    quarantine.rmdir()
+    with suppress(OSError):
+        quarantine.parent.rmdir()
+
+
+def recover_model_delete_quarantines(
+    session: Session,
+    model_root: Path,
+    *,
+    strict: bool = False,
+) -> None:
+    parent = model_root / _MODEL_DELETE_QUARANTINE
+    if not parent.exists():
+        return
+    if _model_path_is_link(parent) or not parent.is_dir():
+        raise ValueError("model deletion quarantine is not a safe directory")
+    for quarantine in list(parent.iterdir()):
+        if not quarantine.name.startswith("delete_"):
+            continue
+        try:
+            if not quarantine.is_dir() or _model_path_is_link(quarantine):
+                raise ValueError("model deletion quarantine contains a filesystem link")
+            marker = quarantine / _MODEL_DELETE_MARKER
+            if not marker.exists():
+                if not any(quarantine.iterdir()):
+                    quarantine.rmdir()
+                    continue
+                raise ValueError("model deletion quarantine has no ownership marker")
+            if _model_path_is_link(marker) or not marker.is_file():
+                raise ValueError("model deletion quarantine contains an unsafe marker")
+            marker_model_id = marker.read_text(encoding="utf-8")
+            if (
+                not marker_model_id
+                or marker_model_id != marker_model_id.strip()
+                or len(marker_model_id) > 200
+            ):
+                raise ValueError("model deletion quarantine has an invalid owner")
+            install = session.get(ModelInstall, marker_model_id)
+            if install is None:
+                _finalize_model_quarantine(quarantine)
+                continue
+            path = _managed_model_path(model_root, install.local_path)
+            if path is None:
+                raise ValueError("model deletion quarantine belongs to an external model")
+            _restore_model_quarantine(quarantine, path)
+        except (OSError, UnicodeError, ValueError):
+            if strict:
+                raise
+            logger.warning(
+                "Could not reconcile model deletion quarantine %s",
+                quarantine,
+                exc_info=True,
+            )
+    with suppress(OSError):
+        parent.rmdir()
+
+
+def _restore_model_quarantine(quarantine: Path, path: Path) -> None:
+    moves: list[tuple[Path, Path]] = []
+    payload = quarantine / "payload"
+    if payload.exists():
+        _ensure_model_tree_link_free(payload)
+        moves.append((payload, path))
+    files = quarantine / "files"
+    if files.exists():
+        if _model_path_is_link(files) or not files.is_dir():
+            raise ValueError("model deletion quarantine contains an unsafe files directory")
+        _ensure_model_tree_link_free(files)
+        for staged in files.rglob("*"):
+            if _model_path_is_link(staged):
+                raise ValueError("model deletion quarantine contains a filesystem link")
+            if not staged.is_file():
+                continue
+            relative = staged.relative_to(files)
+            original = _confined_manifest_file(
+                path,
+                PurePosixPath(*relative.parts),
+            )
+            moves.append((staged, original))
+    try:
+        _restore_model_moves(moves)
+    except RuntimeError as exc:
+        raise ValueError("model deletion recovery needs manual conflict resolution") from exc
+    _finalize_model_quarantine(quarantine)
 
 
 def _path_size(path: Path) -> int:
@@ -1494,22 +2311,49 @@ def _path_size(path: Path) -> int:
 
 @router.get("/profiles", response_model=list[ModelProfileOut])
 async def list_profiles(session: SessionDep, role: str | None = None) -> list[ModelProfile]:
-    statement = select(ModelProfile).order_by(ModelProfile.role, ModelProfile.name)
+    statement = (
+        select(ModelProfile)
+        .outerjoin(ModelInstall, ModelInstall.id == ModelProfile.model_install_id)
+        .where(
+            or_(
+                ModelProfile.model_install_id.is_(None),
+                and_(
+                    ModelInstall.active.is_(True),
+                    ModelInstall.role == ModelProfile.role,
+                    ModelInstall.engine == ModelProfile.engine,
+                ),
+            )
+        )
+        .order_by(ModelProfile.role, ModelProfile.name)
+    )
     if role:
         statement = statement.where(ModelProfile.role == role)
     return list(session.scalars(statement).all())
 
 
 @router.post("/profiles", response_model=ModelProfileOut, status_code=201)
-async def create_profile(payload: ModelProfileCreate, session: SessionDep) -> ModelProfile:
-    if payload.model_install_id and not session.get(ModelInstall, payload.model_install_id):
-        raise HTTPException(404, "model install not found")
+async def create_profile(
+    payload: ModelProfileCreate,
+    request: Request,
+    session: SessionDep,
+) -> ModelProfile:
+    _validated_profile_install(
+        session,
+        model_install_id=payload.model_install_id,
+        role=payload.role,
+        engine=payload.engine,
+    )
+    fields = await _engine_role_fields(
+        request,
+        payload.role,
+        engine=payload.engine,
+        allow_inactive=True,
+    )
     if payload.is_default:
         for profile in session.scalars(
             select(ModelProfile).where(ModelProfile.role == payload.role)
         ).all():
             profile.is_default = False
-    fields = _role_fields(payload.role)
     try:
         load_settings = validate_settings(
             payload.load_settings, [field for field in fields if field.scope == "load"]
@@ -1537,12 +2381,31 @@ async def create_profile(payload: ModelProfileCreate, session: SessionDep) -> Mo
 
 @router.patch("/profiles/{profile_id}", response_model=ModelProfileOut)
 async def update_profile(
-    profile_id: str, payload: ModelProfileUpdate, session: SessionDep
+    profile_id: str,
+    payload: ModelProfileUpdate,
+    request: Request,
+    session: SessionDep,
 ) -> ModelProfile:
     profile = session.get(ModelProfile, profile_id)
     if not profile:
         raise HTTPException(404, "profile not found")
+    try:
+        validate_profile_binding(session, profile)
+    except LookupError as exc:
+        raise HTTPException(404, str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(422, str(exc)) from exc
     values = payload.model_dump(exclude_unset=True)
+    fields = (
+        await _engine_role_fields(
+            request,
+            profile.role,
+            engine=profile.engine,
+            allow_inactive=True,
+        )
+        if {"load_settings", "request_settings"} & values.keys()
+        else []
+    )
     if "is_default" in values:
         is_default = bool(values.pop("is_default"))
         if is_default:
@@ -1555,7 +2418,7 @@ async def update_profile(
         try:
             profile.load_settings_json = validate_settings(
                 values.pop("load_settings") or {},
-                [field for field in _role_fields(profile.role) if field.scope == "load"],
+                [field for field in fields if field.scope == "load"],
             )
         except ValueError as exc:
             raise HTTPException(422, str(exc)) from exc
@@ -1563,7 +2426,7 @@ async def update_profile(
         try:
             profile.request_settings_json = validate_settings(
                 values.pop("request_settings") or {},
-                [field for field in _role_fields(profile.role) if field.scope != "load"],
+                [field for field in fields if field.scope != "load"],
             )
         except ValueError as exc:
             raise HTTPException(422, str(exc)) from exc
@@ -1576,22 +2439,29 @@ async def update_profile(
 
 @router.delete("/profiles/{profile_id}", status_code=204)
 async def delete_profile(profile_id: str, request: Request, session: SessionDep) -> Response:
-    profile = session.get(ModelProfile, profile_id)
-    if not profile:
-        raise HTTPException(404, "profile not found")
-    if any(
-        worker.running and worker.profile_id == profile.id
-        for worker in _services(request).processes.statuses()
-    ):
-        raise HTTPException(409, "unload the active worker before deleting its profile")
-    session.delete(profile)
-    session.commit()
-    return Response(status_code=204)
+    services = _services(request)
+    async with services.scheduler.lease("primary"):
+        profile = session.get(ModelProfile, profile_id)
+        if not profile:
+            raise HTTPException(404, "profile not found")
+        worker_name = "chat" if profile.role == ModelRole.CHAT.value else "media"
+        _ensure_worker_idle(session, worker_name)
+        if any(
+            worker.running and worker.profile_id == profile.id
+            for worker in services.processes.statuses()
+        ):
+            raise HTTPException(409, "unload the active worker before deleting its profile")
+        session.delete(profile)
+        session.commit()
+        return Response(status_code=204)
 
 
 @router.post("/profiles/{profile_id}/clone", response_model=ModelProfileOut, status_code=201)
 async def clone_profile(
-    profile_id: str, payload: ModelProfileClone, session: SessionDep
+    profile_id: str,
+    payload: ModelProfileClone,
+    request: Request,
+    session: SessionDep,
 ) -> ModelProfile:
     source = session.get(ModelProfile, profile_id)
     if not source:
@@ -1606,6 +2476,7 @@ async def clone_profile(
             load_settings=source.load_settings_json,
             request_settings=source.request_settings_json,
         ),
+        request,
         session,
     )
 
@@ -1615,6 +2486,12 @@ async def reset_profile(profile_id: str, session: SessionDep) -> ModelProfile:
     profile = session.get(ModelProfile, profile_id)
     if not profile:
         raise HTTPException(404, "profile not found")
+    try:
+        validate_profile_binding(session, profile)
+    except LookupError as exc:
+        raise HTTPException(404, str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(422, str(exc)) from exc
     profile.load_settings_json = {}
     profile.request_settings_json = {}
     session.commit()
@@ -1639,30 +2516,24 @@ async def export_profile(profile_id: str, session: SessionDep) -> ModelProfileBu
 
 
 @router.post("/profiles/import", response_model=ModelProfileOut, status_code=201)
-async def import_profile(payload: ModelProfileBundle, session: SessionDep) -> ModelProfile:
-    model_install_id = payload.model_install_id
-    if model_install_id and not session.get(ModelInstall, model_install_id):
-        model_install_id = None
+async def import_profile(
+    payload: ModelProfileBundle,
+    request: Request,
+    session: SessionDep,
+) -> ModelProfile:
     return await create_profile(
         ModelProfileCreate(
             name=payload.name,
             use_case=payload.use_case,
             role=payload.role,
             engine=payload.engine,
-            model_install_id=model_install_id,
+            model_install_id=payload.model_install_id,
             load_settings=payload.load_settings,
             request_settings=payload.request_settings,
         ),
+        request,
         session,
     )
-
-
-def _role_fields(role: str):  # type: ignore[no-untyped-def]
-    return {"chat": CHAT_SETTINGS, "image": IMAGE_SETTINGS, "video": VIDEO_SETTINGS}[role]
-
-
-def _preset_fields(role: str):  # type: ignore[no-untyped-def]
-    return [field for field in _role_fields(role) if field.scope != "load"]
 
 
 @router.get("/presets", response_model=list[PresetOut])
@@ -1674,9 +2545,17 @@ async def list_presets(session: SessionDep, role: str | None = None) -> list[Gen
 
 
 @router.post("/presets", response_model=PresetOut, status_code=201)
-async def create_preset(payload: PresetCreate, session: SessionDep) -> GenerationPreset:
+async def create_preset(
+    payload: PresetCreate,
+    request: Request,
+    session: SessionDep,
+) -> GenerationPreset:
+    fields = await _engine_role_fields(request, payload.role)
     try:
-        values = validate_settings(payload.settings, _preset_fields(payload.role))
+        values = validate_settings(
+            payload.settings,
+            [field for field in fields if field.scope != "load"],
+        )
     except ValueError as exc:
         raise HTTPException(422, str(exc)) from exc
     if payload.is_default:
@@ -1698,16 +2577,21 @@ async def create_preset(payload: PresetCreate, session: SessionDep) -> Generatio
 
 @router.patch("/presets/{preset_id}", response_model=PresetOut)
 async def update_preset(
-    preset_id: str, payload: PresetUpdate, session: SessionDep
+    preset_id: str,
+    payload: PresetUpdate,
+    request: Request,
+    session: SessionDep,
 ) -> GenerationPreset:
     preset = session.get(GenerationPreset, preset_id)
     if not preset:
         raise HTTPException(404, "preset not found")
     values = payload.model_dump(exclude_unset=True)
     if "settings" in values:
+        fields = await _engine_role_fields(request, preset.role)
         try:
             preset.settings_json = validate_settings(
-                values.pop("settings") or {}, _preset_fields(preset.role)
+                values.pop("settings") or {},
+                [field for field in fields if field.scope != "load"],
             )
         except ValueError as exc:
             raise HTTPException(422, str(exc)) from exc
@@ -1731,6 +2615,30 @@ async def delete_preset(preset_id: str, session: SessionDep) -> Response:
     preset = session.get(GenerationPreset, preset_id)
     if not preset:
         raise HTTPException(404, "preset not found")
+    owners: list[Project | Chat] = []
+    owners.extend(session.scalars(select(Project)).all())
+    owners.extend(session.scalars(select(Chat)).all())
+    for owner in owners:
+        bindings = (
+            dict(owner.generation_preset_ids_json)
+            if isinstance(owner.generation_preset_ids_json, dict)
+            else {}
+        )
+        if bindings.get(preset.role) != preset.id:
+            continue
+        bindings.pop(preset.role, None)
+        scoped = (
+            dict(owner.generation_settings_json)
+            if isinstance(owner.generation_settings_json, dict)
+            else {}
+        )
+        direct = scoped.get(preset.role)
+        scoped[preset.role] = {
+            **preset.settings_json,
+            **(direct if isinstance(direct, dict) else {}),
+        }
+        owner.generation_preset_ids_json = bindings
+        owner.generation_settings_json = scoped
     session.delete(preset)
     session.commit()
     return Response(status_code=204)
@@ -1738,7 +2646,10 @@ async def delete_preset(preset_id: str, session: SessionDep) -> Response:
 
 @router.post("/presets/{preset_id}/clone", response_model=PresetOut, status_code=201)
 async def clone_preset(
-    preset_id: str, payload: PresetClone, session: SessionDep
+    preset_id: str,
+    payload: PresetClone,
+    request: Request,
+    session: SessionDep,
 ) -> GenerationPreset:
     source = session.get(GenerationPreset, preset_id)
     if not source:
@@ -1749,6 +2660,7 @@ async def clone_preset(
             role=cast(Literal["chat", "image", "video"], source.role),
             settings=source.settings_json,
         ),
+        request,
         session,
     )
 
@@ -1777,9 +2689,15 @@ async def export_preset(preset_id: str, session: SessionDep) -> PresetBundle:
 
 
 @router.post("/presets/import", response_model=PresetOut, status_code=201)
-async def import_preset(payload: PresetBundle, session: SessionDep) -> GenerationPreset:
+async def import_preset(
+    payload: PresetBundle,
+    request: Request,
+    session: SessionDep,
+) -> GenerationPreset:
     return await create_preset(
-        PresetCreate(name=payload.name, role=payload.role, settings=payload.settings), session
+        PresetCreate(name=payload.name, role=payload.role, settings=payload.settings),
+        request,
+        session,
     )
 
 
@@ -1791,6 +2709,20 @@ def _require_media_worker_stopped(request: Request) -> None:
         raise HTTPException(409, "stop the media worker before changing custom nodes")
 
 
+async def _custom_node_lifecycle(
+    request: Request,
+    session: SessionDep,
+) -> AsyncIterator[None]:
+    services = _services(request)
+    async with services.scheduler.lease("primary"):
+        _ensure_worker_idle(session, "media")
+        _require_media_worker_stopped(request)
+        yield
+
+
+CustomNodeLifecycleDep = Annotated[None, Depends(_custom_node_lifecycle)]
+
+
 @router.get("/custom-nodes", response_model=list[CustomNodeOut])
 async def list_custom_nodes(session: SessionDep) -> list[CustomNodeInstall]:
     return list(session.scalars(select(CustomNodeInstall).order_by(CustomNodeInstall.name)).all())
@@ -1798,9 +2730,11 @@ async def list_custom_nodes(session: SessionDep) -> list[CustomNodeInstall]:
 
 @router.post("/custom-nodes", response_model=CustomNodeOut, status_code=201)
 async def install_custom_node(
-    payload: CustomNodeInstallRequest, request: Request, session: SessionDep
+    payload: CustomNodeInstallRequest,
+    request: Request,
+    session: SessionDep,
+    _lifecycle: CustomNodeLifecycleDep,
 ) -> CustomNodeInstall:
-    _require_media_worker_stopped(request)
     try:
         source_url = _services(request).custom_nodes.normalize_source(payload.source_url)
     except ValueError as exc:
@@ -1827,9 +2761,12 @@ async def install_custom_node(
 
 @router.patch("/custom-nodes/{node_id}", response_model=CustomNodeOut)
 async def update_custom_node(
-    node_id: str, payload: CustomNodeUpdateRequest, request: Request, session: SessionDep
+    node_id: str,
+    payload: CustomNodeUpdateRequest,
+    request: Request,
+    session: SessionDep,
+    _lifecycle: CustomNodeLifecycleDep,
 ) -> CustomNodeInstall:
-    _require_media_worker_stopped(request)
     install = session.get(CustomNodeInstall, node_id)
     if not install:
         raise HTTPException(404, "custom node install not found")
@@ -1845,9 +2782,12 @@ async def update_custom_node(
 
 @router.post("/custom-nodes/{node_id}/trust", response_model=CustomNodeOut)
 async def trust_custom_node(
-    node_id: str, payload: CustomNodeTrustRequest, request: Request, session: SessionDep
+    node_id: str,
+    payload: CustomNodeTrustRequest,
+    request: Request,
+    session: SessionDep,
+    _lifecycle: CustomNodeLifecycleDep,
 ) -> CustomNodeInstall:
-    _require_media_worker_stopped(request)
     install = session.get(CustomNodeInstall, node_id)
     if not install:
         raise HTTPException(404, "custom node install not found")
@@ -1869,9 +2809,11 @@ async def trust_custom_node(
 
 @router.post("/custom-nodes/{node_id}/rollback", response_model=CustomNodeOut)
 async def rollback_custom_node(
-    node_id: str, request: Request, session: SessionDep
+    node_id: str,
+    request: Request,
+    session: SessionDep,
+    _lifecycle: CustomNodeLifecycleDep,
 ) -> CustomNodeInstall:
-    _require_media_worker_stopped(request)
     install = session.get(CustomNodeInstall, node_id)
     if not install:
         raise HTTPException(404, "custom node install not found")
@@ -1886,8 +2828,12 @@ async def rollback_custom_node(
 
 
 @router.delete("/custom-nodes/{node_id}", status_code=204)
-async def remove_custom_node(node_id: str, request: Request, session: SessionDep) -> Response:
-    _require_media_worker_stopped(request)
+async def remove_custom_node(
+    node_id: str,
+    request: Request,
+    session: SessionDep,
+    _lifecycle: CustomNodeLifecycleDep,
+) -> Response:
     install = session.get(CustomNodeInstall, node_id)
     if not install:
         raise HTTPException(404, "custom node install not found")
@@ -1999,7 +2945,7 @@ async def import_workflow(payload: WorkflowBundle, session: SessionDep) -> Workf
             api_graph=payload.api_graph,
             input_schema=payload.input_schema,
             dependencies=payload.dependencies,
-            trusted=payload.trusted,
+            trusted=False,
         ),
         session,
     )
@@ -2010,9 +2956,21 @@ async def clone_workflow(
     workflow_id: str, payload: WorkflowClone, session: SessionDep
 ) -> WorkflowDefinition:
     definition, revision = _workflow_and_revision(session, workflow_id)
-    bundle = _workflow_bundle(definition, revision)
-    bundle.name = payload.name or f"{definition.name} copy"
-    return await import_workflow(bundle, session)
+    return await create_workflow(
+        WorkflowCreate(
+            name=payload.name or f"{definition.name} copy",
+            operation=Operation(definition.operation),
+            description=definition.description,
+            engine=revision.engine,
+            engine_version=revision.engine_version,
+            ui_graph=revision.ui_graph_json,
+            api_graph=revision.api_graph_json,
+            input_schema=revision.input_schema_json,
+            dependencies=revision.dependencies_json,
+            trusted=revision.trusted,
+        ),
+        session,
+    )
 
 
 @router.post(
@@ -2091,8 +3049,19 @@ async def validate_workflow(
         raise HTTPException(404, "workflow revision not found")
     errors = await _services(request).engines.media.validate_workflow(revision.api_graph_json)
     warnings: list[str] = []
+    if revision.engine == "comfyui" and not revision.trusted:
+        errors.append(
+            "workflow revision is not trusted; review it and create a trusted revision "
+            "before execution"
+        )
     try:
-        base_fields = VIDEO_SETTINGS if "video" in definition.operation else IMAGE_SETTINGS
+        role = "video" if "video" in definition.operation else "image"
+        base_fields = await _engine_role_fields(
+            request,
+            role,
+            engine=revision.engine,
+            allow_inactive=True,
+        )
         declared_fields = workflow_settings(base_fields, revision.input_schema_json)
         validate_settings(defaults(declared_fields), declared_fields)
     except ValueError as exc:
@@ -2100,7 +3069,7 @@ async def validate_workflow(
     dependencies = revision.dependencies_json
     errors.extend(custom_node_dependency_errors(session, dependencies.get("custom_nodes")))
     required_models = dependencies.get("models", [])
-    installed = session.scalars(select(ModelInstall)).all()
+    installed = session.scalars(select(ModelInstall).where(ModelInstall.active.is_(True))).all()
     installed_values = {
         value for model in installed for value in (model.id, model.name, model.local_path)
     }

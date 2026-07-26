@@ -1,26 +1,38 @@
 # Contributing
 
-## Branches and pull requests
+Thanks for helping improve LM Atelier. For questions and bug reports, start with
+[SUPPORT.md](SUPPORT.md). Security reports must follow [SECURITY.md](SECURITY.md).
+
+## Development
+
+Follow the source setup in [README.md](README.md). The React client is in
+`apps/web`; the FastAPI service and tests are in `services/api`.
+
+Work follows this branch flow:
 
 ```text
 descriptive work branch -> develop -> main
 ```
 
-- Branch from the latest `develop` and use a descriptive name without
-  `feature/`, `feature-`, or `feat/`.
+- Branch from the latest `develop`.
+- Use a descriptive branch name without `feature/`, `feature-`, or `feat/`.
 - Keep each pull request focused and target `develop`.
-- Explain the user impact and local validation in the pull request.
-- Squash-merge accepted work and delete its branch.
-- Promote tested releases from `develop` to `main`; tag releases from `main`.
-- Branch urgent production fixes from `main` as `hotfix-<description>`, then
+- Use `hotfix-<description>` from `main` only for urgent production fixes, then
   apply the same fix to `develop`.
+- Releases are promoted from `develop` to `main` and tagged from `main`.
 
-Do not commit credentials, model weights, generated media, databases, caches,
-logs, diagnostics, or files under `.private`.
+## Pull requests
 
-## Verification
+Explain the user impact, important design choices, and validation performed.
+Update tests and concise documentation when behavior changes. Accepted work is
+squash-merged, and its branch is deleted.
 
-Run the complete local gate before requesting a merge:
+Model or runtime changes must document the capability contract and add
+discovery, preflight, and generation fixtures. Backend-supported models must
+work through capability introspection; curated per-model recipes may improve
+results but cannot be required for basic support.
+
+Run the local gate before requesting review:
 
 ```bash
 ./scripts/verify.sh
@@ -30,6 +42,15 @@ Run the complete local gate before requesting a merge:
 powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\verify.ps1
 ```
 
-Hosted compatibility CI is opt-in to conserve the repository's Actions quota.
-Maintainers can add the `run-ci` label to a ready pull request or dispatch the
-workflow manually when an Ubuntu run is needed.
+The full gate needs PowerShell 7 on Linux and Git for Windows with Git Bash on
+Windows so both platforms' packaging scripts receive syntax checks.
+
+Install the pinned Chromium build once with `npm run e2e:install`, then run the
+isolated browser golden path with `npm run e2e`. It uses mock engines and a
+fresh operating-system temporary data directory.
+
+Never commit credentials, model weights, generated media, databases, caches,
+logs, diagnostics, or anything under `.private`.
+
+By participating, you agree to follow the
+[Code of Conduct](CODE_OF_CONDUCT.md).

@@ -1,9 +1,11 @@
 from __future__ import annotations
 
+import hashlib
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, Mock
 
+import local_lm.orchestrator as orchestrator_module
 from local_lm.adapters.base import MediaEvent
 from local_lm.models import Message, MessagePart, ModelInstall, ModelProfile, Run
 from local_lm.orchestrator import ConversationOrchestrator
@@ -138,3 +140,138 @@ def test_chat_progress_is_removed_without_discarding_text() -> None:
     ConversationOrchestrator._remove_chat_progress(message)
 
     assert message.parts == [text]
+
+
+def test_visual_context_enforces_image_count_and_total_byte_bounds(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:  # type: ignore[no-untyped-def]
+    paths = []
+    candidates = []
+    for index in range(3):
+        path = tmp_path / f"{index}.png"
+        path.write_bytes(b"123456")
+        paths.append(path)
+        candidates.append(
+            SimpleNamespace(
+                id=f"artifact-{index}",
+                size_bytes=6,
+                sha256=hashlib.sha256(b"123456").hexdigest(),
+            )
+        )
+    store = SimpleNamespace(
+        delivery_metadata=lambda artifact: (
+            paths[int(artifact.id.rsplit("-", 1)[1])],
+            "image/png",
+            "inline",
+        )
+    )
+    orchestrator = ConversationOrchestrator(
+        engines=Mock(),
+        artifacts=store,
+        events=Mock(),
+        scheduler=Mock(),
+        processes=Mock(),
+    )
+    monkeypatch.setattr(orchestrator_module, "MAX_VISION_IMAGES", 2)
+    monkeypatch.setattr(orchestrator_module, "MAX_VISION_IMAGE_BYTES", 8)
+    monkeypatch.setattr(orchestrator_module, "MAX_VISION_TOTAL_BYTES", 10)
+    monkeypatch.setattr(
+        orchestrator,
+        "_visual_context_artifacts",
+        Mock(return_value=candidates),
+    )
+
+    messages, metadata = orchestrator._attach_visual_context(
+        Mock(),
+        SimpleNamespace(),
+        [{"role": "user", "content": "Inspect these"}],
+    )
+
+    assert metadata == {
+        "available": True,
+        "images_included": 1,
+        "artifact_ids": ["artifact-0"],
+        "bytes_included": 6,
+        "images_skipped": 2,
+    }
+    assert len(messages[0]["content"]) == 2
+
+
+def test_visual_context_requires_a_user_target_before_reading_artifacts() -> None:
+    candidate = SimpleNamespace(id="artifact-1")
+    store = SimpleNamespace(delivery_metadata=Mock(side_effect=AssertionError))
+    orchestrator = ConversationOrchestrator(
+        engines=Mock(),
+        artifacts=store,
+        events=Mock(),
+        scheduler=Mock(),
+        processes=Mock(),
+    )
+    orchestrator._visual_context_artifacts = Mock(return_value=[candidate])  # type: ignore[method-assign]
+    original = [{"role": "system", "content": "System only"}]
+
+    messages, metadata = orchestrator._attach_visual_context(
+        Mock(),
+        SimpleNamespace(),
+        original,
+    )
+
+    assert messages == original
+    assert metadata == {
+        "available": True,
+        "images_included": 0,
+        "artifact_ids": [],
+        "bytes_included": 0,
+        "images_skipped": 1,
+    }
+    store.delivery_metadata.assert_not_called()
+
+
+def test_visual_context_rejects_non_raster_and_unverified_bytes(tmp_path: Path) -> None:
+    svg_path = tmp_path / "private-diagram.svg"
+    svg_path.write_text("<svg/>", encoding="utf-8")
+    tampered_path = tmp_path / "tampered.png"
+    tampered_path.write_bytes(b"tampered")
+    candidates = [
+        SimpleNamespace(
+            id="svg-artifact",
+            size_bytes=svg_path.stat().st_size,
+            sha256=hashlib.sha256(svg_path.read_bytes()).hexdigest(),
+        ),
+        SimpleNamespace(
+            id="tampered-artifact",
+            size_bytes=tampered_path.stat().st_size,
+            sha256="0" * 64,
+        ),
+    ]
+    paths = {
+        "svg-artifact": (svg_path, "image/svg+xml", "inline"),
+        "tampered-artifact": (tampered_path, "image/png", "inline"),
+    }
+    store = SimpleNamespace(delivery_metadata=lambda artifact: paths[artifact.id])
+    orchestrator = ConversationOrchestrator(
+        engines=Mock(),
+        artifacts=store,
+        events=Mock(),
+        scheduler=Mock(),
+        processes=Mock(),
+    )
+    orchestrator._visual_context_artifacts = Mock(  # type: ignore[method-assign]
+        return_value=candidates
+    )
+
+    messages, metadata = orchestrator._attach_visual_context(
+        Mock(),
+        SimpleNamespace(),
+        [{"role": "user", "content": "Inspect safely"}],
+    )
+
+    assert messages == [{"role": "user", "content": "Inspect safely"}]
+    assert metadata == {
+        "available": True,
+        "images_included": 0,
+        "artifact_ids": [],
+        "bytes_included": 0,
+        "images_skipped": 2,
+    }

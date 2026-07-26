@@ -26,6 +26,7 @@ SORTS = {
 
 _QUANTIZATION = re.compile(r"^(?:q\d(?:_[a-z0-9]+)*|i?q\d(?:_[a-z0-9]+)*|fp\d+|bf16)$", re.I)
 _PARAMETERS = re.compile(r"(?:^|[-_ ])(\d+(?:\.\d+)?)\s*([bmk])(?:$|[-_ ])", re.I)
+_REMOTE_ID = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]*/[A-Za-z0-9][A-Za-z0-9_.-]*$")
 _CACHE_VERSION = 3
 
 
@@ -104,7 +105,12 @@ class HuggingFaceCatalog:
             response = await self._client.get(url, params=None if cursor else params)
             response.raise_for_status()
             payload = response.json()
-            raw_items = [item for item in payload if isinstance(item, dict)]
+            raw_items = [
+                item
+                for item in payload
+                if isinstance(item, dict)
+                and self._valid_remote_id(str(item.get("id") or item.get("modelId") or ""))
+            ]
             if max_size_bytes is not None:
                 raw_items = await self._hydrate_file_sizes(raw_items, role)
             items = [self._normalize(item, role) for item in raw_items]
@@ -179,6 +185,8 @@ class HuggingFaceCatalog:
     async def inspect(
         self, remote_id: str, revision: str = "main", requested_role: str | None = None
     ) -> dict[str, Any]:
+        if not self._valid_remote_id(remote_id):
+            raise ValueError("remote_id must be in owner/model form")
         cache = self._cache_path("detail", remote_id, revision, requested_role)
         try:
             response = await self._client.get(
@@ -301,6 +309,10 @@ class HuggingFaceCatalog:
         if parsed.path != "/api/models":
             raise ValueError("catalog cursor path is invalid")
         return cursor
+
+    @staticmethod
+    def _valid_remote_id(remote_id: str) -> bool:
+        return bool(_REMOTE_ID.fullmatch(remote_id))
 
     @staticmethod
     def _filter_items(

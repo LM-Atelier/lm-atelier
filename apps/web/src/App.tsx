@@ -1,4 +1,12 @@
-import { isValidElement, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
+import {
+  isValidElement,
+  useEffect,
+  useId,
+  useMemo,
+  useRef,
+  useState,
+  type ReactNode,
+} from "react";
 import { useInfiniteQuery, useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
@@ -43,12 +51,15 @@ import {
   resolveWorkflowSettings,
 } from "./settings";
 import type {
+  ApplicationInfo,
   AppEvent,
   ArtifactLibraryItem,
+  BackupInfo,
   CatalogModel,
   Chat,
   ChatDetail,
   EngineCapabilities,
+  EngineRole,
   GenerationPreset,
   GenerationPresetBundle,
   Message,
@@ -59,17 +70,175 @@ import type {
   Project,
   ReferenceRecipe,
   RoutingMode,
+  RuntimeStatus,
   SettingField,
+  SystemInfo,
+  TurnAccepted,
   Workflow,
   WorkflowBundle,
+  WorkerStatus,
 } from "./types";
 
 type View = "chat" | "media" | "models" | "workflows" | "settings";
 type Visibility = "basic" | "advanced" | "expert";
 type PendingTurn = { text: string; mode: RoutingMode };
+type SendTurnVariables = PendingTurn & {
+  chatId: string;
+  artifacts: string[];
+  settings: Record<string, unknown>;
+};
 
 const visibilityRank: Record<Visibility, number> = { basic: 0, advanced: 1, expert: 2 };
 const AUTO_PROFILE_ID = "__auto__";
+const RECENT_UNSUCCESSFUL_JOB_LIMIT = 3;
+const PRIOR_VISUAL_EDIT = /^\s*(?:please\s+|now\s+)*(?:(?:make|change|turn|edit|modify|adjust)\s+(?:it|this|that|the\s+(?:image|picture|photo|illustration|artwork|logo|icon))\b|(?:add|remove|replace|recolor|crop|resize|brighten|darken|blur|sharpen|rotate|flip)\b)/i;
+const PRIOR_VISUAL_SOURCE = /\b(?:previous|prior|earlier|last|above)\s+(?:image|picture|photo|illustration|artwork|logo|icon)\b|^\s*(?:please\s+|now\s+)*(?:use|reuse|remix|restyle|transform|redo|recreate|continue)\b.*\b(?:it|this|that|the\s+(?:image|picture|photo|illustration|artwork|logo|icon))\b/i;
+const DIRECT_PRIOR_VIDEO = /^\s*(?:animate|make (?:it|this|that) move)\b/i;
+const TEXT_CONTEXT_REFERENCE = /\b(?:(?:previous|prior|earlier|above|last|preceding)\s+(?:story|response|answer|message|text|description|scene|passage|poem|idea|concept|discussion|conversation)|(?:that|this|the)\s+(?:story|response|answer|message|text|description|scene|passage|poem|idea|concept|discussion|conversation)|what\s+(?:you|i|we)\s+(?:wrote|described|said)|(?:our|the)\s+(?:conversation|discussion))\b/i;
+const AUTHORITATIVE_QUERY_ROOTS = new Set([
+  "about",
+  "artifact-storage",
+  "artifacts",
+  "backups",
+  "catalog",
+  "chats",
+  "chat",
+  "credential",
+  "custom-nodes",
+  "engines",
+  "jobs",
+  "models",
+  "model-storage",
+  "presets",
+  "profiles",
+  "projects",
+  "recipes",
+  "runtimes",
+  "system",
+  "workers",
+  "workflow-catalog-models",
+  "workflows",
+]);
+const DIALOG_FOCUSABLE = [
+  "a[href]",
+  "button:not([disabled])",
+  "input:not([disabled]):not([type='hidden'])",
+  "select:not([disabled])",
+  "textarea:not([disabled])",
+  "[tabindex]:not([tabindex='-1'])",
+].join(",");
+
+function focusMainContent() {
+  window.setTimeout(() => document.getElementById("main-content")?.focus(), 0);
+}
+
+function dialogFocusableElements(dialog: HTMLElement): HTMLElement[] {
+  return Array.from(dialog.querySelectorAll<HTMLElement>(DIALOG_FOCUSABLE)).filter(
+    (element) => element.getAttribute("aria-hidden") !== "true",
+  );
+}
+
+function AccessibleDialog({
+  title,
+  eyebrow,
+  closeLabel,
+  onClose,
+  className = "",
+  backdropClassName = "",
+  children,
+}: {
+  title: string;
+  eyebrow: string;
+  closeLabel: string;
+  onClose: () => void;
+  className?: string;
+  backdropClassName?: string;
+  children: ReactNode;
+}) {
+  const headingId = useId();
+  const dialog = useRef<HTMLDivElement>(null);
+  const returnFocus = useRef<HTMLElement | null>(null);
+  const close = useRef(onClose);
+
+  useEffect(() => {
+    close.current = onClose;
+  }, [onClose]);
+
+  useEffect(() => {
+    returnFocus.current = document.activeElement instanceof HTMLElement
+      ? document.activeElement
+      : null;
+    const previousOverflow = document.body.style.overflow;
+    document.body.style.overflow = "hidden";
+    const surface = dialog.current;
+    const initialFocus = surface?.querySelector<HTMLElement>("[data-dialog-initial-focus]")
+      ?? (surface ? dialogFocusableElements(surface)[0] : null)
+      ?? surface;
+    initialFocus?.focus();
+    return () => {
+      document.body.style.overflow = previousOverflow;
+      if (returnFocus.current?.isConnected) returnFocus.current.focus();
+    };
+  }, []);
+
+  const onKeyDown = (event: React.KeyboardEvent<HTMLDivElement>) => {
+    if (event.key === "Escape") {
+      event.preventDefault();
+      event.stopPropagation();
+      close.current();
+      return;
+    }
+    if (event.key !== "Tab" || !dialog.current) return;
+    const focusable = dialogFocusableElements(dialog.current);
+    if (!focusable.length) {
+      event.preventDefault();
+      dialog.current.focus();
+      return;
+    }
+    const first = focusable[0];
+    const last = focusable.at(-1)!;
+    if (event.shiftKey && (document.activeElement === first || !dialog.current.contains(document.activeElement))) {
+      event.preventDefault();
+      last.focus();
+    } else if (!event.shiftKey && (document.activeElement === last || !dialog.current.contains(document.activeElement))) {
+      event.preventDefault();
+      first.focus();
+    }
+  };
+
+  return (
+    <div className={`modal-backdrop ${backdropClassName}`.trim()}>
+      <div
+        ref={dialog}
+        className={`modal ${className}`.trim()}
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby={headingId}
+        tabIndex={-1}
+        onKeyDown={onKeyDown}
+      >
+        <header>
+          <div><small>{eyebrow}</small><h2 id={headingId}>{title}</h2></div>
+          <button
+            className="icon-button"
+            aria-label={closeLabel}
+            onClick={onClose}
+            data-dialog-initial-focus
+          >
+            <X />
+          </button>
+        </header>
+        {children}
+      </div>
+    </div>
+  );
+}
+
+function roleForMode(mode: RoutingMode): EngineRole {
+  if (mode === "video") return "video";
+  if (mode === "image") return "image";
+  return "chat";
+}
 
 function formatBytes(value?: number | null): string {
   if (value == null) return "Unknown";
@@ -90,6 +259,42 @@ function formatDate(value?: string | null): string {
     month: "short",
     day: "numeric",
   }).format(new Date(value))}`;
+}
+
+function formatTechnicalDetails(
+  application: ApplicationInfo,
+  system: SystemInfo,
+  engines: EngineCapabilities[],
+): string {
+  const devices = system.devices.length
+    ? [
+        "Devices:",
+        ...system.devices.map((device) => {
+          const facts = [
+            device.kind,
+            device.backend,
+            device.total_memory_bytes == null ? null : formatBytes(device.total_memory_bytes),
+          ].filter(Boolean);
+          return `- ${device.name}${facts.length ? ` (${facts.join("; ")})` : ""}`;
+        }),
+      ]
+    : ["Devices: None detected"];
+  const runtimes = engines.length
+    ? [
+        "Engines:",
+        ...engines.map(
+          (engine) => `- ${engine.engine} ${engine.version} (${engine.roles.join(", ")})`,
+        ),
+      ]
+    : ["Engines: None reported"];
+  return [
+    `LM Atelier: ${application.version}`,
+    `Platform: ${system.distribution} ${system.distribution_version} (${system.platform} ${system.platform_release}; ${system.architecture})`,
+    `Runtime: Python ${system.python_version}`,
+    `CPU: ${system.cpu_model}`,
+    ...devices,
+    ...runtimes,
+  ].join("\n");
 }
 
 function downloadJson(value: unknown, filename: string): void {
@@ -120,8 +325,15 @@ function AtelierMark() {
   );
 }
 
-function StatusDot({ healthy }: { healthy: boolean }) {
-  return <span className={`status-dot ${healthy ? "healthy" : "offline"}`} />;
+function StatusDot({ healthy, label }: { healthy: boolean; label?: string }) {
+  return (
+    <span
+      className={`status-dot ${healthy ? "healthy" : "offline"}`}
+      role={label ? "img" : undefined}
+      aria-label={label ? `${label}: ${healthy ? "ready" : "unavailable"}` : undefined}
+      aria-hidden={label ? undefined : true}
+    />
+  );
 }
 
 function ArtifactPart({ part }: { part: MessagePart }) {
@@ -129,12 +341,17 @@ function ArtifactPart({ part }: { part: MessagePart }) {
   const proxyId = typeof part.metadata_json.browser_proxy_artifact_id === "string" ? part.metadata_json.browser_proxy_artifact_id : null;
   const source = `/api/artifacts/${encodeURIComponent(proxyId ?? part.artifact_id)}/content`;
   const preview = Boolean(part.metadata_json.preview);
+  const inputReference = part.metadata_json.input_reference === true;
+  if (part.type === "attachment") {
+    const name = part.artifact?.original_name || "Attachment";
+    return <a className="message-attachment" href={source} download><Paperclip size={14} />{name}</a>;
+  }
   if (part.type === "image") {
     return (
       <figure className={`media-card ${preview ? "preview" : ""}`}>
-        <img src={source} alt={preview ? "Generation preview" : "Generated result"} loading="lazy" />
+        <img src={source} alt={preview ? "Generation preview" : inputReference ? "Attached image" : "Generated result"} loading="lazy" />
         <figcaption>
-          <ImageIcon size={14} /> {preview ? "Generation preview" : "Generated image"}
+          <ImageIcon size={14} /> {preview ? "Generation preview" : inputReference ? "Attached image" : "Generated image"}
         </figcaption>
       </figure>
     );
@@ -147,7 +364,7 @@ function ArtifactPart({ part }: { part: MessagePart }) {
     <figure className="media-card">
       <video src={source} poster={poster} controls preload="metadata" />
       <figcaption>
-        <Film size={14} /> Generated video
+        <Film size={14} /> {inputReference ? "Attached video" : "Generated video"}
       </figcaption>
     </figure>
   );
@@ -196,7 +413,7 @@ function MediaLibraryView() {
   return (
     <div className="page-view media-library">
       <header className="page-header">
-        <div><small>Local artifacts</small><h1>Media library</h1></div>
+        <div><h1>Media library</h1></div>
       </header>
       {storage.data && <section className={`artifact-storage-summary ${storage.data.warning ? "warning" : ""}`}>
         <div><strong>{formatBytes(storage.data.total_bytes)}</strong><small>{storage.data.total_count} stored artifacts</small></div>
@@ -209,8 +426,8 @@ function MediaLibraryView() {
         <div className="workspace-search"><Search size={14} /><input aria-label="Search media" placeholder="Search filenames or hashes" value={search} onChange={(event) => setSearch(event.target.value)} /></div>
         <select aria-label="Media type" value={kind} onChange={(event) => setKind(event.target.value)}><option value="">Images and videos</option><option value="image">Images</option><option value="video">Videos</option></select>
       </div>
-      {cleanup.data && <div className="callout success">{cleanup.data.removed_count > 0 && <>Removed {cleanup.data.removed_count} artifact{cleanup.data.removed_count === 1 ? "" : "s"} and reclaimed {formatBytes(cleanup.data.reclaimed_bytes)}. </>}{cleanup.data.marked_count > 0 ? `${cleanup.data.marked_count} newly unreferenced artifact${cleanup.data.marked_count === 1 ? "" : "s"} entered the ${storage.data?.retention_days ?? 30}-day recovery window.` : cleanup.data.removed_count === 0 ? "Nothing needed cleanup." : null}</div>}
-      {(cleanup.error || deleteArtifact.error) && <div className="callout error">{cleanup.error?.message || deleteArtifact.error?.message}</div>}
+      {cleanup.data && <div className="callout success" role="status">{cleanup.data.removed_count > 0 && <>Removed {cleanup.data.removed_count} artifact{cleanup.data.removed_count === 1 ? "" : "s"} and reclaimed {formatBytes(cleanup.data.reclaimed_bytes)}. </>}{cleanup.data.marked_count > 0 ? `${cleanup.data.marked_count} newly unreferenced artifact${cleanup.data.marked_count === 1 ? "" : "s"} entered the ${storage.data?.retention_days ?? 30}-day recovery window.` : cleanup.data.retention_pending_count > 0 ? `${cleanup.data.retention_pending_count} artifact${cleanup.data.retention_pending_count === 1 ? "" : "s"} ${cleanup.data.retention_pending_count === 1 ? "remains" : "remain"} in the recovery window; none are eligible yet.` : cleanup.data.removed_count === 0 ? "Nothing needed cleanup." : null}</div>}
+      {(cleanup.error || deleteArtifact.error) && <div className="callout error" role="alert">{cleanup.error?.message || deleteArtifact.error?.message}</div>}
       {artifacts.data?.length ? <div className="media-grid">{artifacts.data.map((artifact) => {
         const source = `/api/artifacts/${encodeURIComponent(artifact.id)}/content`;
         const proxyId = typeof artifact.metadata_json.browser_proxy_artifact_id === "string" ? artifact.metadata_json.browser_proxy_artifact_id : null;
@@ -218,9 +435,9 @@ function MediaLibraryView() {
         const posterId = typeof artifact.metadata_json.poster_artifact_id === "string" ? artifact.metadata_json.poster_artifact_id : null;
         return <article className="gallery-card" key={artifact.id}>
           {artifact.kind === "image" ? <img src={source} alt={artifact.original_name ?? "Generated image"} loading="lazy" /> : <video src={playbackSource} poster={posterId ? `/api/artifacts/${encodeURIComponent(posterId)}/content` : undefined} controls preload="metadata" />}
-          <div><strong>{artifact.original_name ?? artifact.kind}</strong><small>{formatBytes(artifact.size_bytes)} · {artifact.reference_count} reference{artifact.reference_count === 1 ? "" : "s"}</small><span><a href={source} download>Download</a><code>{artifact.sha256.slice(0, 12)}</code><button className="icon-button danger" aria-label={`Delete ${artifact.original_name ?? artifact.kind}`} disabled={deleteArtifact.isPending && deleteArtifact.variables === artifact.id} title="Delete media" onClick={() => { const references = artifact.reference_count ? ` and remove ${artifact.reference_count} appearance${artifact.reference_count === 1 ? "" : "s"} from chats` : ""; if (window.confirm(`Permanently delete ${artifact.original_name ?? artifact.kind}${references}?`)) deleteArtifact.mutate(artifact.id); }}><Trash2 size={14} /></button></span></div>
+          <div><strong>{artifact.original_name ?? artifact.kind}</strong><small>{formatBytes(artifact.size_bytes)} · {artifact.reference_count} reference{artifact.reference_count === 1 ? "" : "s"}</small><span><a href={source} download>Download</a><code>{artifact.sha256.slice(0, 12)}</code><button className="icon-button danger" aria-label={`Delete ${artifact.original_name ?? artifact.kind}`} disabled={deleteArtifact.isPending && deleteArtifact.variables === artifact.id} onClick={() => { const references = artifact.reference_count ? ` and remove ${artifact.reference_count} appearance${artifact.reference_count === 1 ? "" : "s"} from chats` : ""; if (window.confirm(`Permanently delete ${artifact.original_name ?? artifact.kind}${references}?`)) deleteArtifact.mutate(artifact.id); }}><Trash2 size={14} /></button></span></div>
         </article>;
-      })}</div> : <EmptyState icon={<ImageIcon />} title="No generated media" body="Images and videos created in chat will appear here." />}
+      })}</div> : <EmptyState icon={<ImageIcon />} title="No generated media" body="Generated images and videos appear here." />}
     </div>
   );
 }
@@ -245,10 +462,12 @@ function CopyTextButton({
   text,
   label,
   className,
+  buttonText = "Copy",
 }: {
   text: string;
   label: string;
   className?: string;
+  buttonText?: string;
 }) {
   const [copied, setCopied] = useState(false);
   const resetTimer = useRef<number | undefined>(undefined);
@@ -270,7 +489,7 @@ function CopyTextButton({
       }}
     >
       {copied ? <Check size={13} /> : <Copy size={13} />}
-      <span>{copied ? "Copied" : "Copy"}</span>
+      <span>{copied ? "Copied" : buttonText}</span>
     </button>
   );
 }
@@ -288,6 +507,21 @@ function MarkdownText({ text }: { text: string }) {
       <ReactMarkdown
         remarkPlugins={[remarkGfm]}
         components={{
+          a: ({ children, href, ...props }) => {
+            const external = /^https?:\/\//i.test(href ?? "");
+            return (
+              <a
+                {...props}
+                href={href}
+                {...(external
+                  ? { target: "_blank", rel: "noopener noreferrer" }
+                  : {})}
+              >
+                {children}
+              </a>
+            );
+          },
+          img: ({ alt }) => <span className="markdown-image-reference">[Image: {alt || "link"}]</span>,
           pre: ({ children }) => {
             const code = nodeText(children).replace(/\n$/, "");
             return (
@@ -329,11 +563,11 @@ function PartView({ part, liveText, markdown = false }: { part: MessagePart; liv
     const text = liveText || part.text || "";
     return markdown ? <MarkdownText text={text} /> : <div className="message-text">{text}</div>;
   }
-  if (part.type === "image" || part.type === "video") return <ArtifactPart part={part} />;
+  if (part.type === "image" || part.type === "video" || part.type === "attachment") return <ArtifactPart part={part} />;
   if (part.type === "progress") {
     const progress = Number(part.metadata_json.progress ?? 0);
     return (
-      <div className="generation-progress">
+      <div className="generation-progress" role="status" aria-live="polite">
         <Sparkles size={17} />
         <div>
           <span>{part.text || "Working"}</span>
@@ -342,8 +576,8 @@ function PartView({ part, liveText, markdown = false }: { part: MessagePart; liv
       </div>
     );
   }
-  if (part.type === "error") return <div className="message-error">{part.text}</div>;
-  return <div className="message-error">Unsupported message part: {String(part.type)}</div>;
+  if (part.type === "error") return <div className="message-error" role="alert">{part.text}</div>;
+  return <div className="message-error" role="alert">Unsupported message part: {String(part.type)}</div>;
 }
 
 function MessageBubble({
@@ -507,26 +741,42 @@ function SettingControl({
   );
 }
 
-function SettingsDrawer({
-  open,
-  onClose,
-  mode,
+function GenerationSettingsPanel({
+  role,
   engines,
   values,
   onValues,
+  presets,
+  presetId,
+  onPreset,
   workflowSchema,
+  inheritedValues = {},
+  inheritedPresetId = null,
+  presetLabel = `${role} preset`,
+  resetLabel,
+  onReset,
 }: {
-  open: boolean;
-  onClose: () => void;
-  mode: RoutingMode;
+  role: EngineRole;
   engines: EngineCapabilities[];
   values: Record<string, unknown>;
   onValues: (values: Record<string, unknown>) => void;
+  presets: GenerationPreset[];
+  presetId: string | null;
+  onPreset: (presetId: string | null) => void;
   workflowSchema?: Record<string, unknown>;
+  inheritedValues?: Record<string, unknown>;
+  inheritedPresetId?: string | null;
+  presetLabel?: string;
+  resetLabel: string;
+  onReset: () => void;
 }) {
   const [visibility, setVisibility] = useState<Visibility>("basic");
-  const role = mode === "video" ? "video" : mode === "image" ? "image" : "chat";
   const engine = engines.find((item) => item.roles.includes(role));
+  const rolePresets = presets.filter((preset) => preset.role === role);
+  const defaultPreset = rolePresets.find((preset) => preset.is_default);
+  const inheritedPreset = rolePresets.find((preset) => preset.id === inheritedPresetId);
+  const selectedPreset = rolePresets.find((preset) => preset.id === presetId);
+  const inheritedName = inheritedPreset?.name ?? defaultPreset?.name;
   const fields = resolveWorkflowSettings(
     resolveCapabilitySettings(engine, role),
     workflowSchema,
@@ -536,30 +786,120 @@ function SettingsDrawer({
       && visibilityRank[field.visibility] <= visibilityRank[visibility]
       && field.available,
   );
+  const effectiveValue = (field: SettingField): unknown => {
+    let value = field.default;
+    for (const layer of [
+      defaultPreset?.settings_json,
+      inheritedPreset?.settings_json,
+      inheritedValues,
+      selectedPreset?.settings_json,
+      values,
+    ]) {
+      if (layer && Object.prototype.hasOwnProperty.call(layer, field.key)) {
+        value = layer[field.key];
+      }
+    }
+    return value;
+  };
   return (
-    <aside className={`settings-drawer ${open ? "open" : ""}`} aria-hidden={!open}>
-      <header>
-        <div><small>Turn controls</small><h2>{role[0].toUpperCase() + role.slice(1)} settings</h2></div>
-        <button className="icon-button" onClick={onClose} aria-label="Close settings"><X /></button>
-      </header>
+    <div className="generation-settings-panel">
       <div className="segmented compact">
         {(["basic", "advanced", "expert"] as Visibility[]).map((level) => (
-          <button key={level} className={visibility === level ? "active" : ""} onClick={() => setVisibility(level)}>{level}</button>
+          <button
+            key={level}
+            type="button"
+            className={visibility === level ? "active" : ""}
+            aria-pressed={visibility === level}
+            onClick={() => setVisibility(level)}
+          >
+            {level}
+          </button>
         ))}
       </div>
       <div className="settings-list">
+        <label className="setting-row">
+          <span><strong>Preset</strong></span>
+          <select
+            aria-label={presetLabel}
+            value={presetId ?? ""}
+            onChange={(event) => onPreset(event.target.value || null)}
+          >
+            <option value="">{inheritedName ? `Inherit · ${inheritedName}` : "Inherit default"}</option>
+            {rolePresets.map((preset) => (
+              <option key={preset.id} value={preset.id}>{preset.name}</option>
+            ))}
+          </select>
+        </label>
         {fields.map((field) => (
           <SettingControl
-            key={`${field.scope}:${field.key}`}
+            key={`${field.scope}:${field.key}:${JSON.stringify(values[field.key])}`}
             field={field}
-            value={values[field.key] ?? field.default}
+            value={effectiveValue(field)}
             onChange={(value) => onValues({ ...values, [field.key]: value })}
           />
         ))}
         {!engine && <p className="muted">No {role} engine is configured.</p>}
       </div>
-      <footer><button className="secondary" onClick={() => onValues({})}>Reset turn overrides</button></footer>
-    </aside>
+      <div className="generation-settings-actions">
+        <button className="secondary" type="button" onClick={onReset}>{resetLabel}</button>
+      </div>
+    </div>
+  );
+}
+
+function SettingsDrawer({
+  open,
+  onClose,
+  mode,
+  engines,
+  values,
+  onValues,
+  presets,
+  presetId,
+  onPreset,
+  workflowSchema,
+  inheritedValues,
+  inheritedPresetId,
+}: {
+  open: boolean;
+  onClose: () => void;
+  mode: RoutingMode;
+  engines: EngineCapabilities[];
+  values: Record<string, unknown>;
+  onValues: (values: Record<string, unknown>) => void;
+  presets: GenerationPreset[];
+  presetId: string | null;
+  onPreset: (presetId: string | null) => void;
+  workflowSchema?: Record<string, unknown>;
+  inheritedValues?: Record<string, unknown>;
+  inheritedPresetId?: string | null;
+}) {
+  const role = roleForMode(mode);
+  if (!open) return null;
+  return (
+    <AccessibleDialog
+      title={`${role[0].toUpperCase() + role.slice(1)} settings`}
+      eyebrow="Chat defaults"
+      closeLabel="Close settings"
+      onClose={onClose}
+      className="settings-drawer"
+      backdropClassName="settings-drawer-backdrop"
+    >
+      <GenerationSettingsPanel
+        role={role}
+        engines={engines}
+        values={values}
+        onValues={onValues}
+        presets={presets}
+        presetId={presetId}
+        onPreset={onPreset}
+        workflowSchema={workflowSchema}
+        inheritedValues={inheritedValues}
+        inheritedPresetId={inheritedPresetId}
+        resetLabel="Reset chat overrides"
+        onReset={() => onValues({})}
+      />
+    </AccessibleDialog>
   );
 }
 
@@ -570,39 +910,71 @@ function Composer({
   stoppable,
   settings,
   onSettings,
+  presets,
+  presetId,
+  onPreset,
+  onMode,
   onSend,
   onStop,
   workflows,
   project,
 }: {
-  chat: Chat;
+  chat: ChatDetail;
   engines: EngineCapabilities[];
   busy: boolean;
   stoppable: boolean;
   settings: Record<string, unknown>;
   onSettings: (settings: Record<string, unknown>) => void;
+  presets: GenerationPreset[];
+  presetId: string | null;
+  onPreset: (presetId: string | null) => void;
+  onMode: (mode: RoutingMode) => void;
   onSend: (text: string, mode: RoutingMode, artifacts: string[], settings: Record<string, unknown>) => void;
   onStop: () => void;
   workflows: Workflow[];
   project?: Project;
 }) {
   const [text, setText] = useState("");
-  const [mode, setMode] = useState<RoutingMode>(chat.routing_mode);
+  const mode = chat.routing_mode;
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [attachments, setAttachments] = useState<string[]>([]);
   const [uploading, setUploading] = useState(false);
   const fileInput = useRef<HTMLInputElement>(null);
-  const workflowSchema = workflowSchemaForTurn(workflows, project, mode, attachments.length > 0);
+  const priorVisual = activeBranchMessages(chat).some((message) =>
+    message.parts.some((part) =>
+      Boolean(part.artifact_id)
+      && (part.type === "image" || part.type === "video")
+      && part.metadata_json.preview !== true
+    )
+  );
+  const usePriorVisual = priorVisual
+    && !TEXT_CONTEXT_REFERENCE.test(text)
+    && (
+      PRIOR_VISUAL_EDIT.test(text)
+      || PRIOR_VISUAL_SOURCE.test(text)
+      || (mode === "video" && DIRECT_PRIOR_VIDEO.test(text))
+    );
+  const workflowSchema = workflowSchemaForTurn(
+    workflows,
+    project,
+    mode,
+    attachments.length > 0 || usePriorVisual,
+  );
 
   const submit = () => {
     if (!text.trim() || busy) return;
-    const role = mode === "video" ? "video" : mode === "image" ? "image" : "chat";
+    const role = roleForMode(mode);
     const engine = engines.find((item) => item.roles.includes(role));
     const fields = resolveWorkflowSettings(
       resolveCapabilitySettings(engine, role),
       workflowSchema,
     );
-    onSend(text.trim(), mode, attachments, normalizeSettingsForFields(settings, fields));
+    onSend(
+      text.trim(),
+      mode,
+      attachments,
+      mode === "auto" ? {} : normalizeSettingsForFields(settings, fields),
+    );
     setText("");
     setAttachments([]);
   };
@@ -623,11 +995,12 @@ function Composer({
       <div className="composer-wrap">
         {attachments.length > 0 && (
           <div className="attachment-strip">
-            {attachments.map((id) => <span key={id}><Paperclip size={13} />{id.slice(0, 18)}<button onClick={() => setAttachments((items) => items.filter((item) => item !== id))}><X size={12} /></button></span>)}
+            {attachments.map((id) => <span key={id}><Paperclip size={13} />{id.slice(0, 18)}<button aria-label={`Remove attachment ${id.slice(0, 18)}`} onClick={() => setAttachments((items) => items.filter((item) => item !== id))}><X size={12} /></button></span>)}
           </div>
         )}
         <div className="composer">
           <textarea
+            aria-label="Message"
             value={text}
             onChange={(event) => setText(event.target.value)}
             onKeyDown={(event) => {
@@ -648,7 +1021,7 @@ function Composer({
                 {mode === "text" && <MessageSquare size={15} />}
                 {mode === "image" && <ImageIcon size={15} />}
                 {mode === "video" && <Film size={15} />}
-                <select value={mode} onChange={(event) => setMode(event.target.value as RoutingMode)}>
+                <select aria-label="Generation mode" value={mode} onChange={(event) => onMode(event.target.value as RoutingMode)}>
                   <option value="auto">Auto</option><option value="text">Text</option><option value="image">Image</option><option value="video">Video</option>
                 </select>
                 <ChevronDown size={13} />
@@ -664,7 +1037,20 @@ function Composer({
         </div>
         <small className="composer-note">Local models can make mistakes. Generation stays on this machine.</small>
       </div>
-      <SettingsDrawer open={settingsOpen} onClose={() => setSettingsOpen(false)} mode={mode} engines={engines} values={settings} onValues={onSettings} workflowSchema={workflowSchema} />
+      <SettingsDrawer
+        open={settingsOpen}
+        onClose={() => setSettingsOpen(false)}
+        mode={mode}
+        engines={engines}
+        values={settings}
+        onValues={onSettings}
+        presets={presets}
+        presetId={presetId}
+        onPreset={onPreset}
+        workflowSchema={workflowSchema}
+        inheritedValues={project?.generation_settings_json?.[roleForMode(mode)]}
+        inheritedPresetId={project?.generation_preset_ids_json?.[roleForMode(mode)]}
+      />
     </>
   );
 }
@@ -716,7 +1102,11 @@ function ChatView({
   liveText,
   pendingTurn,
   settings,
+  presets,
+  presetId,
   onSettings,
+  onPreset,
+  onMode,
   onSend,
   onProfile,
   onRegenerate,
@@ -731,7 +1121,11 @@ function ChatView({
   liveText: Record<string, string>;
   pendingTurn?: PendingTurn;
   settings: Record<string, unknown>;
+  presets: GenerationPreset[];
+  presetId: string | null;
   onSettings: (settings: Record<string, unknown>) => void;
+  onPreset: (presetId: string | null) => void;
+  onMode: (mode: RoutingMode) => void;
   onSend: (text: string, mode: RoutingMode, artifacts: string[], settings: Record<string, unknown>) => void;
   onProfile: (field: "active_chat_profile_id" | "active_image_profile_id" | "active_video_profile_id", id: string | null) => void;
   onRegenerate: (messageId: string, settings: Record<string, unknown>) => void;
@@ -744,7 +1138,7 @@ function ChatView({
       endRef.current.scrollIntoView({ behavior: "smooth" });
     }
   }, [chat?.messages, liveText, pendingTurn]);
-  if (!chat) return <EmptyState icon={<MessageSquare />} title="Start a local conversation" body="Create a chat, choose your models, and keep every response on your machine." />;
+  if (!chat) return <EmptyState icon={<MessageSquare />} title="Start a local conversation" body="Create a chat and choose a model. Conversations stay on this machine." />;
   const messages = activeBranchMessages(chat);
   const stoppable = messages.some((message) => message.status === "pending");
   const busy = stoppable || Boolean(pendingTurn);
@@ -757,20 +1151,26 @@ function ChatView({
             const field = `active_${role}_profile_id` as "active_chat_profile_id" | "active_image_profile_id" | "active_video_profile_id";
             const selected = profiles.find((profile) => profile.id === chat[field]);
             const value = selected?.is_default ? "" : chat[field] ?? "";
-            return <label key={role}><span>{role}</span><select value={value} title={`Choose the ${role} model for this chat`} onChange={(event) => onProfile(field, event.target.value || null)}><option value={AUTO_PROFILE_ID}>Auto</option><option value="">Default</option>{profiles.filter((profile) => profile.role === role && !profile.is_default).map((profile) => <option key={profile.id} value={profile.id}>{profile.name}</option>)}</select></label>;
+            return <label key={role}><span>{role}</span><select value={value} onChange={(event) => onProfile(field, event.target.value || null)}><option value={AUTO_PROFILE_ID}>Auto</option><option value="">Default</option>{profiles.filter((profile) => profile.role === role && !profile.is_default).map((profile) => <option key={profile.id} value={profile.id}>{profile.name}</option>)}</select></label>;
           })}
-          <button className="icon-button"><MoreHorizontal /></button>
         </div>
       </div>
       <div className="messages">
         {messages.length === 0 && !pendingTurn ? (
-          <EmptyState icon={<Sparkles />} title="What should we make?" body="Ask a question or describe an image or video. Auto mode chooses the appropriate local model." />
+          <EmptyState icon={<Sparkles />} title="What should we make?" body="Ask anything or create an image or video. Auto mode picks the model." />
         ) : messages.map((message) => <MessageBubble
           key={message.id}
           message={message}
           liveText={liveText[message.id]}
-          onRegenerate={busy ? undefined : (messageId) => onRegenerate(messageId, settings)}
-          onEdit={busy ? undefined : (messageId, text) => onEdit(messageId, text, settings)}
+          onRegenerate={busy ? undefined : (messageId) => onRegenerate(
+            messageId,
+            chat.routing_mode === "auto" ? {} : settings,
+          )}
+          onEdit={busy ? undefined : (messageId, text) => onEdit(
+            messageId,
+            text,
+            chat.routing_mode === "auto" ? {} : settings,
+          )}
         />)}
         {pendingTurn && (
           <>
@@ -791,7 +1191,7 @@ function ChatView({
         )}
         <div ref={endRef} />
       </div>
-      <Composer chat={chat} engines={engines} busy={busy} stoppable={stoppable} settings={settings} onSettings={onSettings} onSend={onSend} onStop={onStop} workflows={workflows} project={project} />
+      <Composer chat={chat} engines={engines} busy={busy} stoppable={stoppable} settings={settings} onSettings={onSettings} presets={presets} presetId={presetId} onPreset={onPreset} onMode={onMode} onSend={onSend} onStop={onStop} workflows={workflows} project={project} />
     </div>
   );
 }
@@ -846,7 +1246,7 @@ function RecipeCard({ recipe, pending, onInstall }: { recipe: ReferenceRecipe; p
         <div><small>{recipe.role} · recipe v{recipe.version}</small><h3>{recipe.name}</h3></div>
       </header>
       <p>{recipe.summary}</p>
-      <div className="recipe-badges"><span className="badge likely">Reference candidate</span><span className="badge">{recipe.license_id}</span><span className="badge">{recipe.node_policy || recipe.engine}</span></div>
+      <div className="recipe-badges"><span className="badge likely">Pinned recipe</span><span className="badge">{recipe.license_id}</span><span className="badge">{recipe.node_policy || recipe.engine}</span></div>
       <div className="recipe-meta"><span><HardDrive size={14} />{formatBytes(recipe.total_size_bytes)}</span><span><Gauge size={14} />{memory}</span></div>
       <small>{recipe.hardware.guidance}</small>
       <button className="primary" onClick={onInstall} disabled={pending}>{pending ? "Queued" : "Install pinned recipe"}</button>
@@ -892,9 +1292,9 @@ function InstalledModelRow({
       <span className="model-install-size">{formatBytes(model.size_bytes)}</span>
       <span className="row-actions">
         {profile
-          ? <button className="secondary compact-button" onClick={startEditing} disabled={editing || saving}>Edit use case</button>
-          : <button className="secondary compact-button" disabled={creating} title="Complete setup for this older model install" onClick={onCreate}>Finish setup</button>}
-        <button className="secondary compact-button danger" disabled={deleting} title="Delete installed model" onClick={onDelete}>Delete</button>
+          ? <button className="secondary compact-button" aria-label={`Edit use case for ${model.name}`} onClick={startEditing} disabled={editing || saving}>Edit use case</button>
+          : <button className="secondary compact-button" aria-label={`Finish setup for ${model.name}`} disabled={creating} onClick={onCreate}>Finish setup</button>}
+        <button className="secondary compact-button danger" aria-label={`Delete ${model.name}`} disabled={deleting} onClick={onDelete}>Delete</button>
       </span>
       {editing && profile && (
         <form className="model-use-case-editor" onSubmit={(event) => { event.preventDefault(); void save(); }}>
@@ -1075,12 +1475,12 @@ function ModelsView() {
   );
   return (
     <div className="page-view">
-      <header className="page-header"><div><small>Model library</small><h1>Find the right local model</h1></div><div className="storage-actions"><div className="storage-pill"><HardDrive size={17} />{storage.data?.installed_count ?? installed.data?.length ?? 0} installed · {formatBytes(storage.data?.installed_bytes)}</div><button className="secondary compact-button" onClick={() => setImportOpen(true)}><Folder size={16} />Import local</button><button className="secondary compact-button" disabled={!storage.data?.partial_download_count || cleanupDownloads.isPending} onClick={() => cleanupDownloads.mutate()}>Clean {storage.data?.partial_download_count ?? 0} partial</button></div></header>
+      <header className="page-header"><div><h1>Model library</h1></div><div className="storage-actions"><div className="storage-pill"><HardDrive size={17} />{storage.data?.installed_count ?? installed.data?.length ?? 0} installed · {formatBytes(storage.data?.installed_bytes)}</div><button className="secondary compact-button" onClick={() => setImportOpen(true)}><Folder size={16} />Import local</button>{Boolean(storage.data?.partial_download_count) && <button className="secondary compact-button" disabled={cleanupDownloads.isPending} onClick={() => cleanupDownloads.mutate()}>Clean {storage.data?.partial_download_count} partial</button>}</div></header>
       <section className="recipe-section">
-        <div className="section-heading"><div><small>Curated starting points</small><h2>Reference recipes</h2></div></div>
+        <div className="section-heading"><div><h2>Reference recipes</h2></div></div>
         {recipes.isLoading && <div className="loading-line" />}
-        {recipes.error && <div className="callout error">{recipes.error.message}</div>}
-        {installRecipe.error && <div className="callout error">{installRecipe.error.message}</div>}
+        {recipes.error && <div className="callout error" role="alert">{recipes.error.message}</div>}
+        {installRecipe.error && <div className="callout error" role="alert">{installRecipe.error.message}</div>}
         <div className="recipe-grid">{recipes.data?.map((recipe) => <RecipeCard key={recipe.id} recipe={recipe} pending={installRecipe.isPending && installRecipe.variables === recipe.id} onInstall={() => installRecipe.mutate(recipe.id)} />)}</div>
       </section>
       {(role === "image" || role === "video") && readyModels.length > 0 && <section className="workflow-ready-models"><div className="section-heading"><div><small>Runtime verified</small><h2>One-click models</h2></div></div><div className="model-grid">{readyModels.map((model) => <ModelCard key={model.remote_id} model={model} role={role} status={statusFor(model)} onDownload={() => download.mutate({ model, selectedRole: role })} />)}</div></section>}
@@ -1112,13 +1512,28 @@ function ModelsView() {
           }}
         />;
       })}</div></section>}
-      {(download.error || deleteModel.error || cleanupDownloads.error || updateUseCase.error) && <div className="callout error">{download.error?.message || deleteModel.error?.message || cleanupDownloads.error?.message || updateUseCase.error?.message}</div>}
+      {(download.error || deleteModel.error || cleanupDownloads.error || updateUseCase.error) && <div className="callout error" role="alert">{download.error?.message || deleteModel.error?.message || cleanupDownloads.error?.message || updateUseCase.error?.message}</div>}
       {catalog.isLoading && <div className="loading-line" />}
-      {catalog.error && <div className="callout error action-callout"><span>{catalog.error.message}</span><button className="secondary compact-button" disabled={catalog.isFetching} onClick={() => void catalog.refetch()}>Retry</button></div>}
-      {catalogIsStale && !catalog.error && <div className="callout warning action-callout"><span>Showing saved results while Hugging Face is unavailable.</span><button className="secondary compact-button" disabled={catalog.isFetching} onClick={() => void catalog.refetch()}>Refresh</button></div>}
+      {catalog.error && <div className="callout error action-callout" role="alert"><span>{catalog.error.message}</span><button className="secondary compact-button" disabled={catalog.isFetching} onClick={() => void catalog.refetch()}>Retry</button></div>}
+      {catalogIsStale && !catalog.error && <div className="callout warning action-callout" role="status"><span>Showing saved results while Hugging Face is unavailable.</span><button className="secondary compact-button" disabled={catalog.isFetching} onClick={() => void catalog.refetch()}>Refresh</button></div>}
       <div className="model-grid">{catalogItems.map((model) => <ModelCard key={model.remote_id} model={model} role={role} status={statusFor(model)} onDownload={() => download.mutate({ model, selectedRole: role })} />)}</div>
       {catalog.hasNextPage && <div className="load-more"><button className="secondary" disabled={catalog.isFetchingNextPage} onClick={() => void catalog.fetchNextPage()}>{catalog.isFetchingNextPage ? "Loading…" : "Load more models"}</button></div>}
-      {importOpen && <div className="modal-backdrop"><div className="modal"><header><div><small>Advanced import</small><h2>Import a local model</h2></div><button className="icon-button" aria-label="Close local import" onClick={() => setImportOpen(false)}><X /></button></header><p>Register an existing model file or directory. Pickle-compatible formats are blocked; imported models are marked for advanced review.</p><label>Display name<input value={importName} onChange={(event) => setImportName(event.target.value)} /></label><label>Absolute local path<input value={importPath} onChange={(event) => setImportPath(event.target.value)} placeholder="/path/to/model.gguf" /></label><label>Role<select value={importRole} onChange={(event) => { const next = event.target.value; setImportRole(next); setImportEngine(next === "chat" ? "llama.cpp" : "comfyui"); }}><option value="chat">Chat</option><option value="image">Image</option><option value="video">Video</option></select></label><label>Runtime<select value={importEngine} onChange={(event) => setImportEngine(event.target.value)}><option value="llama.cpp">llama.cpp</option><option value="comfyui">ComfyUI</option></select></label>{importModel.error && <div className="callout error">{importModel.error.message}</div>}<footer><button className="secondary" onClick={() => setImportOpen(false)}>Cancel</button><button className="primary" disabled={!importName.trim() || !importPath.trim() || importModel.isPending} onClick={() => importModel.mutate()}>{importModel.isPending ? "Importing…" : "Import model"}</button></footer></div></div>}
+      {importOpen && (
+        <AccessibleDialog
+          title="Import a local model"
+          eyebrow="Advanced import"
+          closeLabel="Close local import"
+          onClose={() => setImportOpen(false)}
+        >
+          <p>Register a local file or folder. Pickle-compatible formats are blocked as unsafe, and imports require review before use.</p>
+          <label>Display name<input value={importName} onChange={(event) => setImportName(event.target.value)} /></label>
+          <label>Absolute local path<input value={importPath} onChange={(event) => setImportPath(event.target.value)} placeholder="/path/to/model.gguf" /></label>
+          <label>Role<select value={importRole} onChange={(event) => { const next = event.target.value; setImportRole(next); setImportEngine(next === "chat" ? "llama.cpp" : "comfyui"); }}><option value="chat">Chat</option><option value="image">Image</option><option value="video">Video</option></select></label>
+          <label>Runtime<select value={importEngine} onChange={(event) => setImportEngine(event.target.value)}><option value="llama.cpp">llama.cpp</option><option value="comfyui">ComfyUI</option></select></label>
+          {importModel.error && <div className="callout error" role="alert">{importModel.error.message}</div>}
+          <footer><button className="secondary" onClick={() => setImportOpen(false)}>Cancel</button><button className="primary" disabled={!importName.trim() || !importPath.trim() || importModel.isPending} onClick={() => importModel.mutate()}>{importModel.isPending ? "Importing…" : "Import model"}</button></footer>
+        </AccessibleDialog>
+      )}
     </div>
   );
 }
@@ -1182,7 +1597,7 @@ function CustomNodesPanel() {
   const rollback = useMutation({ mutationFn: api.rollbackCustomNode, onSuccess: refresh });
   const remove = useMutation({ mutationFn: api.removeCustomNode, onSuccess: refresh });
   const error = install.error || trust.error || update.error || rollback.error || remove.error;
-  return <section className="custom-nodes"><div className="detail-title"><div><h2>Custom nodes</h2><p>Pinned GitHub sources stay disabled until you review their security summary and explicitly trust them. Stop ComfyUI before changing nodes.</p></div></div><div className="custom-node-install"><input aria-label="Custom node name" placeholder="Node name" value={name} onChange={(event) => setName(event.target.value)} /><input aria-label="Custom node source" placeholder="https://github.com/owner/repository" value={sourceUrl} onChange={(event) => setSourceUrl(event.target.value)} /><input aria-label="Custom node commit" placeholder="Full 40-character commit SHA" value={revision} onChange={(event) => setRevision(event.target.value)} /><button className="primary" disabled={!name.trim() || !sourceUrl.trim() || revision.trim().length !== 40 || install.isPending} onClick={() => { if (window.confirm("Download this pinned repository for review? Its code will remain untrusted.")) install.mutate(); }}>Install pinned source</button></div>{error && <div className="callout error">{error.message}</div>}<div className="profile-table custom-node-list">{nodes.data?.map((node) => <div key={node.id}><span className={`badge ${node.trusted ? "likely" : "advanced_import"}`}>{node.trusted ? "Trusted" : "Review required"}</span><span><strong>{node.name}</strong><small>{node.source_url}<br />{node.revision}</small></span><details><summary>Security</summary><pre>{JSON.stringify(node.security_json, null, 2)}</pre></details><span className="row-actions"><button className="secondary compact-button" onClick={() => { const next = window.prompt("Full pinned commit SHA", node.revision); if (next?.trim() && next.trim() !== node.revision) update.mutate({ id: node.id, revision: next.trim() }); }}>Update</button>{node.previous_revision && <button className="secondary compact-button" onClick={() => rollback.mutate(node.id)}>Rollback</button>}<button className="secondary compact-button" onClick={() => node.trusted ? trust.mutate({ id: node.id, trusted: false }) : window.confirm("I reviewed this exact pinned revision and trust its code to run in ComfyUI.") && trust.mutate({ id: node.id, trusted: true })}>{node.trusted ? "Revoke trust" : "Trust revision"}</button><button className="secondary compact-button danger" onClick={() => window.confirm(`Remove ${node.name}?`) && remove.mutate(node.id)}>Remove</button></span></div>)}</div></section>;
+  return <section className="custom-nodes"><div className="detail-title"><div><h2>Custom nodes</h2><p>Pinned sources stay disabled until you review and trust the exact revision. Stop ComfyUI before changing nodes.</p></div></div><div className="custom-node-install"><input aria-label="Custom node name" placeholder="Node name" value={name} onChange={(event) => setName(event.target.value)} /><input aria-label="Custom node source" placeholder="https://github.com/owner/repository" value={sourceUrl} onChange={(event) => setSourceUrl(event.target.value)} /><input aria-label="Custom node commit" placeholder="Full 40-character commit SHA" value={revision} onChange={(event) => setRevision(event.target.value)} /><button className="primary" disabled={!name.trim() || !sourceUrl.trim() || revision.trim().length !== 40 || install.isPending} onClick={() => { if (window.confirm("Download this pinned repository for review? Its code will remain untrusted.")) install.mutate(); }}>Install pinned source</button></div>{error && <div className="callout error" role="alert">{error.message}</div>}<div className="profile-table custom-node-list">{nodes.data?.map((node) => <div key={node.id}><span className={`badge ${node.trusted ? "likely" : "advanced_import"}`}>{node.trusted ? "Trusted" : "Review required"}</span><span><strong>{node.name}</strong><small>{node.source_url}<br />{node.revision}</small></span><details><summary>Security</summary><pre>{JSON.stringify(node.security_json, null, 2)}</pre></details><span className="row-actions"><button className="secondary compact-button" onClick={() => { const next = window.prompt("Full pinned commit SHA", node.revision); if (next?.trim() && next.trim() !== node.revision) update.mutate({ id: node.id, revision: next.trim() }); }}>Update</button>{node.previous_revision && <button className="secondary compact-button" onClick={() => rollback.mutate(node.id)}>Rollback</button>}<button className="secondary compact-button" onClick={() => node.trusted ? trust.mutate({ id: node.id, trusted: false }) : window.confirm("I reviewed this exact pinned revision and trust its code to run in ComfyUI.") && trust.mutate({ id: node.id, trusted: true })}>{node.trusted ? "Revoke trust" : "Trust revision"}</button><button className="secondary compact-button danger" onClick={() => window.confirm(`Remove ${node.name}?`) && remove.mutate(node.id)}>Remove</button></span></div>)}</div></section>;
 }
 
 function WorkflowsView() {
@@ -1236,15 +1651,34 @@ function WorkflowsView() {
   const currentRevision = selected?.revisions.find((revision) => revision.id === selected.current_revision_id);
   return (
     <div className="page-view">
-      <header className="page-header"><div><small>Workflow studio</small><h1>Media pipelines</h1></div><div className="storage-actions"><input ref={importInput} hidden type="file" accept="application/json,.json" onChange={(event) => { void importBundle(event.target.files?.[0]); event.target.value = ""; }} /><button className="secondary" onClick={() => importInput.current?.click()}>Import bundle</button><button className="primary" onClick={openCreate}><Plus size={17} />New workflow</button></div></header>
-      {(importBundleMutation.error || clone.error || restore.error || exportBundle.error || openInComfy.error) && <div className="callout error">{(importBundleMutation.error || clone.error || restore.error || exportBundle.error || openInComfy.error)?.message}</div>}
+      <header className="page-header"><div><h1>Workflows</h1></div><div className="storage-actions"><input ref={importInput} hidden type="file" accept="application/json,.json" onChange={(event) => { void importBundle(event.target.files?.[0]); event.target.value = ""; }} /><button className="secondary" onClick={() => importInput.current?.click()}>Import bundle</button><button className="primary" onClick={openCreate}><Plus size={17} />New workflow</button></div></header>
+      {(importBundleMutation.error || clone.error || restore.error || exportBundle.error || openInComfy.error) && <div className="callout error" role="alert">{(importBundleMutation.error || clone.error || restore.error || exportBundle.error || openInComfy.error)?.message}</div>}
       {selected && <div className="storage-actions"><button className="secondary" onClick={() => openInComfy.mutate(selected.id)}>Download UI graph and open in ComfyUI</button></div>}
       <div className="workflow-layout">
         <div className="workflow-list">{workflows.data?.map((workflow) => <button key={workflow.id} className={selected?.id === workflow.id ? "selected" : ""} onClick={() => { setSelectedId(workflow.id); setSelectedRevisionId(workflow.current_revision_id); }}><WorkflowIcon size={18} /><span><strong>{workflow.name}</strong><small>{workflow.operation} · {workflow.revisions.length} revision{workflow.revisions.length === 1 ? "" : "s"}</small></span></button>)}</div>
-        <div className="workflow-detail">{selected && selectedRevision ? <><div className="detail-title"><div><small>{selected.operation}</small><h2>{selected.name}</h2><p>{selected.description}</p></div><div className="row-actions"><button className="secondary compact-button" onClick={openEdit}>New revision</button><button className="secondary compact-button" onClick={() => clone.mutate(selected.id)}>Duplicate</button><button className="secondary compact-button" onClick={() => exportBundle.mutate(selected.id)}>Export</button><button className="secondary compact-button" onClick={() => validate.mutate(selected.id)}>Validate</button></div></div><div className="workflow-revision-bar"><label>Revision<select value={selectedRevision.id} onChange={(event) => setSelectedRevisionId(event.target.value)}>{[...selected.revisions].sort((a, b) => b.version - a.version).map((revision) => <option key={revision.id} value={revision.id}>v{revision.version}{revision.id === selected.current_revision_id ? " · current" : ""}</option>)}</select></label>{selectedRevision.id !== selected.current_revision_id && <button className="secondary compact-button" onClick={() => restore.mutate({ id: selected.id, revisionId: selectedRevision.id })}>Restore as new revision</button>}<span className={`badge ${selectedRevision.trusted ? "likely" : "advanced_import"}`}>{selectedRevision.trusted ? "Trusted" : "Untrusted"}</span></div><section className="workflow-input-section"><h3>Declared controls</h3><WorkflowControls schema={selectedRevision.input_schema_json} /></section><details open><summary>Executable graph</summary><pre>{JSON.stringify(selectedRevision.api_graph_json, null, 2)}</pre></details><details><summary>Dependencies</summary><pre>{JSON.stringify(selectedRevision.dependencies_json, null, 2)}</pre></details>{currentRevision && currentRevision.id !== selectedRevision.id && <details><summary>Compare with current revision</summary><div className="workflow-compare"><pre>{JSON.stringify(selectedRevision.api_graph_json, null, 2)}</pre><pre>{JSON.stringify(currentRevision.api_graph_json, null, 2)}</pre></div></details>}{validate.data && <div className={`callout ${validate.data.valid ? "success" : "error"}`}>{validate.data.valid ? "Workflow and declared dependencies are valid for the active media engine." : validate.data.errors.join("\n")}{validate.data.warnings.map((warning) => `\nWarning: ${warning}`)}</div>}</> : <EmptyState icon={<WorkflowIcon />} title="Select a workflow" body="Inspect its pinned revision, inputs, dependencies, and validation state." />}</div>
+        <div className="workflow-detail">{selected && selectedRevision ? <><div className="detail-title"><div><small>{selected.operation}</small><h2>{selected.name}</h2><p>{selected.description}</p></div><div className="row-actions"><button className="secondary compact-button" onClick={openEdit}>New revision</button><button className="secondary compact-button" onClick={() => clone.mutate(selected.id)}>Duplicate</button><button className="secondary compact-button" onClick={() => exportBundle.mutate(selected.id)}>Export</button><button className="secondary compact-button" onClick={() => validate.mutate(selected.id)}>Validate</button></div></div><div className="workflow-revision-bar"><label>Revision<select value={selectedRevision.id} onChange={(event) => setSelectedRevisionId(event.target.value)}>{[...selected.revisions].sort((a, b) => b.version - a.version).map((revision) => <option key={revision.id} value={revision.id}>v{revision.version}{revision.id === selected.current_revision_id ? " · current" : ""}</option>)}</select></label>{selectedRevision.id !== selected.current_revision_id && <button className="secondary compact-button" onClick={() => restore.mutate({ id: selected.id, revisionId: selectedRevision.id })}>Restore as new revision</button>}<span className={`badge ${selectedRevision.trusted ? "likely" : "advanced_import"}`}>{selectedRevision.trusted ? "Trusted" : "Untrusted"}</span></div><section className="workflow-input-section"><h3>Declared controls</h3><WorkflowControls schema={selectedRevision.input_schema_json} /></section><details open><summary>Executable graph</summary><pre>{JSON.stringify(selectedRevision.api_graph_json, null, 2)}</pre></details><details><summary>Dependencies</summary><pre>{JSON.stringify(selectedRevision.dependencies_json, null, 2)}</pre></details>{currentRevision && currentRevision.id !== selectedRevision.id && <details><summary>Compare with current revision</summary><div className="workflow-compare"><pre>{JSON.stringify(selectedRevision.api_graph_json, null, 2)}</pre><pre>{JSON.stringify(currentRevision.api_graph_json, null, 2)}</pre></div></details>}{validate.data && <div className={`callout ${validate.data.valid ? "success" : "error"}`} role={validate.data.valid ? "status" : "alert"}>{validate.data.valid ? "Workflow and declared dependencies are valid for the active media engine." : validate.data.errors.join("\n")}{validate.data.warnings.map((warning) => `\nWarning: ${warning}`)}</div>}</> : <EmptyState icon={<WorkflowIcon />} title="Select a workflow" body="Review its revision, inputs, dependencies, and validation." />}</div>
       </div>
       <CustomNodesPanel />
-      {newOpen && <div className="modal-backdrop"><div className="modal workflow-editor"><header><div><small>{editing ? "Immutable revision" : "Portable workflow"}</small><h2>{editing ? "Create workflow revision" : "Create ComfyUI workflow"}</h2></div><button className="icon-button" onClick={() => setNewOpen(false)}><X /></button></header><label>Name<input value={name} onChange={(event) => setName(event.target.value)} /></label><label>Description<textarea rows={2} value={description} onChange={(event) => setDescription(event.target.value)} /></label><label>Operation<select value={operation} disabled={editing} onChange={(event) => setOperation(event.target.value)}><option value="text_to_image">Text to image</option><option value="image_to_image">Image to image</option><option value="text_to_video">Text to video</option><option value="image_to_video">Image to video</option></select></label><label>API-format workflow JSON<textarea rows={10} value={graph} onChange={(event) => setGraph(event.target.value)} /></label><label>UI workflow JSON<textarea rows={5} value={uiGraph} onChange={(event) => setUiGraph(event.target.value)} /></label><label>Declared input schema JSON<textarea rows={6} value={inputSchema} onChange={(event) => setInputSchema(event.target.value)} /></label><label>Dependencies JSON<textarea rows={5} value={dependencies} onChange={(event) => setDependencies(event.target.value)} /></label><label className="toggle-row"><span><strong>Trust this workflow</strong><small>Only enable after reviewing every node and dependency.</small></span><input type="checkbox" checked={trusted} onChange={(event) => setTrusted(event.target.checked)} /></label>{save.error && <div className="callout error">{save.error.message}</div>}<footer><button className="secondary" onClick={() => setNewOpen(false)}>Cancel</button><button className="primary" disabled={!name.trim() || save.isPending} onClick={() => save.mutate()}>{save.isPending ? "Saving…" : editing ? "Create revision" : "Save workflow"}</button></footer></div></div>}
+      {newOpen && (
+        <AccessibleDialog
+          title={editing ? "Create workflow revision" : "Create ComfyUI workflow"}
+          eyebrow={editing ? "Immutable revision" : "Portable workflow"}
+          closeLabel="Close workflow editor"
+          onClose={() => setNewOpen(false)}
+          className="workflow-editor"
+        >
+          <label>Name<input value={name} onChange={(event) => setName(event.target.value)} /></label>
+          <label>Description<textarea rows={2} value={description} onChange={(event) => setDescription(event.target.value)} /></label>
+          <label>Operation<select value={operation} disabled={editing} onChange={(event) => setOperation(event.target.value)}><option value="text_to_image">Text to image</option><option value="image_to_image">Image to image</option><option value="text_to_video">Text to video</option><option value="image_to_video">Image to video</option></select></label>
+          <label>API-format workflow JSON<textarea rows={10} value={graph} onChange={(event) => setGraph(event.target.value)} /></label>
+          <label>UI workflow JSON<textarea rows={5} value={uiGraph} onChange={(event) => setUiGraph(event.target.value)} /></label>
+          <label>Declared input schema JSON<textarea rows={6} value={inputSchema} onChange={(event) => setInputSchema(event.target.value)} /></label>
+          <label>Dependencies JSON<textarea rows={5} value={dependencies} onChange={(event) => setDependencies(event.target.value)} /></label>
+          <label className="toggle-row"><span><strong>Trust this workflow</strong><small>Only enable after reviewing every node and dependency.</small></span><input type="checkbox" checked={trusted} onChange={(event) => setTrusted(event.target.checked)} /></label>
+          {save.error && <div className="callout error" role="alert">{save.error.message}</div>}
+          <footer><button className="secondary" onClick={() => setNewOpen(false)}>Cancel</button><button className="primary" disabled={!name.trim() || save.isPending} onClick={() => save.mutate()}>{save.isPending ? "Saving…" : editing ? "Create revision" : "Save workflow"}</button></footer>
+        </AccessibleDialog>
+      )}
     </div>
   );
 }
@@ -1303,26 +1737,29 @@ function ProfileEditor({
   );
   const error = save.error ?? clone.error ?? reset.error ?? remove.error ?? exportBundle.error;
   return (
-    <div className="modal-backdrop">
-      <div className="modal settings-editor">
-        <header><div><small>{profile.role} profile · {profile.engine}</small><h2>Edit profile</h2></div><button className="icon-button" onClick={onClose} aria-label="Close profile editor"><X /></button></header>
-        <label>Profile name<input value={name} onChange={(event) => setName(event.target.value)} /></label>
-        <label>Best used for<textarea rows={3} value={useCase} onChange={(event) => setUseCase(event.target.value)} placeholder="Programming, code review, technical explanations" /></label>
-        <label className="toggle-row"><span><strong>Default model</strong></span><input type="checkbox" checked={isDefault} onChange={(event) => setIsDefault(event.target.checked)} /></label>
-        <div className="segmented compact">
-          {(["basic", "advanced", "expert"] as Visibility[]).map((level) => <button key={level} className={visibility === level ? "active" : ""} onClick={() => setVisibility(level)}>{level}</button>)}
-        </div>
-        <div className="settings-list embedded">
-          {fields.map((field) => {
-            const target = field.scope === "load" ? loadSettings : requestSettings;
-            return <div className="scoped-setting" key={`${field.scope}:${field.key}:${JSON.stringify(target[field.key])}`}><span className="scope-label">{field.scope}{field.restart_required ? " · restart required" : ""}</span><SettingControl field={field} value={target[field.key] ?? field.default} onChange={(value) => field.scope === "load" ? setLoadSettings({ ...loadSettings, [field.key]: value }) : setRequestSettings({ ...requestSettings, [field.key]: value })} /></div>;
-          })}
-          {!engine && <p className="muted">No capability schema is available for this profile engine.</p>}
-        </div>
-        {error && <div className="callout error">{error.message}</div>}
-        <footer className="editor-actions"><button className="secondary danger" onClick={() => remove.mutate()} disabled={remove.isPending}>Delete profile</button><button className="secondary" onClick={() => reset.mutate()} disabled={reset.isPending}>Reset settings</button><button className="secondary" onClick={() => exportBundle.mutate()}>Export</button><button className="secondary" onClick={() => clone.mutate()}>Clone</button><button className="primary" onClick={() => save.mutate()} disabled={!name.trim() || save.isPending}>Save profile</button></footer>
+    <AccessibleDialog
+      title="Edit profile"
+      eyebrow={`${profile.role} profile · ${profile.engine}`}
+      closeLabel="Close profile editor"
+      onClose={onClose}
+      className="settings-editor"
+    >
+      <label>Profile name<input value={name} onChange={(event) => setName(event.target.value)} /></label>
+      <label>Best used for<textarea rows={3} value={useCase} onChange={(event) => setUseCase(event.target.value)} placeholder="Programming, code review, technical explanations" /></label>
+      <label className="toggle-row"><span><strong>Default model</strong></span><input type="checkbox" checked={isDefault} onChange={(event) => setIsDefault(event.target.checked)} /></label>
+      <div className="segmented compact" role="group" aria-label="Profile setting detail">
+        {(["basic", "advanced", "expert"] as Visibility[]).map((level) => <button type="button" key={level} className={visibility === level ? "active" : ""} aria-pressed={visibility === level} onClick={() => setVisibility(level)}>{level}</button>)}
       </div>
-    </div>
+      <div className="settings-list embedded">
+        {fields.map((field) => {
+          const target = field.scope === "load" ? loadSettings : requestSettings;
+          return <div className="scoped-setting" key={`${field.scope}:${field.key}:${JSON.stringify(target[field.key])}`}><span className="scope-label">{field.scope}{field.restart_required ? " · restart required" : ""}</span><SettingControl field={field} value={target[field.key] ?? field.default} onChange={(value) => field.scope === "load" ? setLoadSettings({ ...loadSettings, [field.key]: value }) : setRequestSettings({ ...requestSettings, [field.key]: value })} /></div>;
+        })}
+        {!engine && <p className="muted">No capability schema is available for this profile engine.</p>}
+      </div>
+      {error && <div className="callout error" role="alert">{error.message}</div>}
+      <footer className="editor-actions"><button className="secondary danger" onClick={() => remove.mutate()} disabled={remove.isPending}>Delete profile</button><button className="secondary" onClick={() => reset.mutate()} disabled={reset.isPending}>Reset settings</button><button className="secondary" onClick={() => exportBundle.mutate()}>Export</button><button className="secondary" onClick={() => clone.mutate()}>Clone</button><button className="primary" onClick={() => save.mutate()} disabled={!name.trim() || save.isPending}>Save profile</button></footer>
+    </AccessibleDialog>
   );
 }
 
@@ -1350,17 +1787,99 @@ function PresetEditor({
   const fields = resolveCapabilitySettings(engine, preset.role).filter((field) => field.scope !== "load" && visibilityRank[field.visibility] <= visibilityRank[visibility] && field.available);
   const error = save.error ?? clone.error ?? reset.error ?? remove.error ?? exportBundle.error;
   return (
-    <div className="modal-backdrop">
-      <div className="modal settings-editor">
-        <header><div><small>{preset.role} generation preset</small><h2>Edit preset</h2></div><button className="icon-button" onClick={onClose} aria-label="Close preset editor"><X /></button></header>
-        <label>Preset name<input value={name} onChange={(event) => setName(event.target.value)} /></label>
-        <label className="toggle-row"><span><strong>Default {preset.role} preset</strong></span><input type="checkbox" checked={isDefault} onChange={(event) => setIsDefault(event.target.checked)} /></label>
-        <div className="segmented compact">{(["basic", "advanced", "expert"] as Visibility[]).map((level) => <button key={level} className={visibility === level ? "active" : ""} onClick={() => setVisibility(level)}>{level}</button>)}</div>
-        <div className="settings-list embedded">{fields.map((field) => <div className="scoped-setting" key={`${field.scope}:${field.key}:${JSON.stringify(settings[field.key])}`}><span className="scope-label">{field.scope}</span><SettingControl field={field} value={settings[field.key] ?? field.default} onChange={(value) => setSettings({ ...settings, [field.key]: value })} /></div>)}</div>
-        {error && <div className="callout error">{error.message}</div>}
-        <footer className="editor-actions"><button className="secondary danger" onClick={() => remove.mutate()}>Delete</button><button className="secondary" onClick={() => reset.mutate()}>Reset</button><button className="secondary" onClick={() => exportBundle.mutate()}>Export</button><button className="secondary" onClick={() => clone.mutate()}>Clone</button><button className="primary" onClick={() => save.mutate()} disabled={!name.trim() || save.isPending}>Save preset</button></footer>
+    <AccessibleDialog
+      title="Edit preset"
+      eyebrow={`${preset.role} generation preset`}
+      closeLabel="Close preset editor"
+      onClose={onClose}
+      className="settings-editor"
+    >
+      <label>Preset name<input value={name} onChange={(event) => setName(event.target.value)} /></label>
+      <label className="toggle-row"><span><strong>Default {preset.role} preset</strong></span><input type="checkbox" checked={isDefault} onChange={(event) => setIsDefault(event.target.checked)} /></label>
+      <div className="segmented compact" role="group" aria-label="Preset setting detail">{(["basic", "advanced", "expert"] as Visibility[]).map((level) => <button type="button" key={level} className={visibility === level ? "active" : ""} aria-pressed={visibility === level} onClick={() => setVisibility(level)}>{level}</button>)}</div>
+      <div className="settings-list embedded">{fields.map((field) => <div className="scoped-setting" key={`${field.scope}:${field.key}:${JSON.stringify(settings[field.key])}`}><span className="scope-label">{field.scope}</span><SettingControl field={field} value={settings[field.key] ?? field.default} onChange={(value) => setSettings({ ...settings, [field.key]: value })} /></div>)}</div>
+      {error && <div className="callout error" role="alert">{error.message}</div>}
+      <footer className="editor-actions"><button className="secondary danger" onClick={() => remove.mutate()}>Delete</button><button className="secondary" onClick={() => reset.mutate()}>Reset</button><button className="secondary" onClick={() => exportBundle.mutate()}>Export</button><button className="secondary" onClick={() => clone.mutate()}>Clone</button><button className="primary" onClick={() => save.mutate()} disabled={!name.trim() || save.isPending}>Save preset</button></footer>
+    </AccessibleDialog>
+  );
+}
+
+function WorkerStatusCard({
+  worker,
+  startPending,
+  stopPending,
+  onStart,
+  onStop,
+}: {
+  worker: WorkerStatus;
+  startPending: boolean;
+  stopPending: boolean;
+  onStart: () => void;
+  onStop: () => void;
+}) {
+  const busy = worker.active_jobs + worker.queued_jobs > 0;
+  const busyTitle = busy ? "Wait for active and queued jobs before changing this worker" : undefined;
+  const failed = worker.state === "exited";
+  return (
+    <article className="engine-card">
+      <header>
+        <div>
+          <h3>{worker.name} worker</h3>
+          <p>
+            {worker.state === "ready"
+              ? `Ready · PID ${worker.pid}`
+              : worker.state === "starting"
+                ? "Starting and checking health"
+                : failed
+                  ? `Exited · code ${worker.exit_code ?? "unknown"}`
+                  : "Stopped or externally managed"}
+          </p>
+        </div>
+        <StatusDot healthy={worker.state === "ready"} />
+      </header>
+      <div className="worker-metrics">
+        <span><strong>{worker.active_jobs}</strong> active</span>
+        <span><strong>{worker.queued_jobs}</strong> queued</span>
+        <span><strong>{formatBytes(worker.current_memory_bytes)}</strong> current RAM</span>
+        <span><strong>{formatBytes(worker.peak_memory_bytes)}</strong> measured peak</span>
+        {worker.estimated_memory_bytes != null && (
+          <span><strong>{formatBytes(worker.estimated_memory_bytes)}</strong> estimated load</span>
+        )}
       </div>
-    </div>
+      {failed && (
+        <div className="worker-failure" role="alert">
+          <strong>{worker.failure_detail || `${worker.name} worker stopped unexpectedly.`}</strong>
+          {worker.stderr_tail && (
+            <pre aria-label={`${worker.name} worker error output`}>{worker.stderr_tail}</pre>
+          )}
+          {worker.log_path && <small>Log · Data folder/{worker.log_path}</small>}
+        </div>
+      )}
+      <div className="capability-list">
+        {worker.name === "media" && !worker.running && (
+          <button
+            className="secondary compact-button"
+            aria-label={`Start ${worker.name} worker`}
+            disabled={busy || startPending}
+            title={busyTitle}
+            onClick={onStart}
+          >
+            Start ComfyUI
+          </button>
+        )}
+        {worker.running && (
+          <button
+            className="secondary compact-button"
+            aria-label={`Unload ${worker.name} worker`}
+            disabled={busy || stopPending}
+            title={busyTitle}
+            onClick={onStop}
+          >
+            Unload
+          </button>
+        )}
+      </div>
+    </article>
   );
 }
 
@@ -1372,12 +1891,22 @@ function SettingsView({ engines }: { engines: EngineCapabilities[] }) {
   const [presetName, setPresetName] = useState("");
   const [presetRole, setPresetRole] = useState<GenerationPreset["role"]>("chat");
   const [importError, setImportError] = useState("");
+  const [backupFeedback, setBackupFeedback] = useState<{
+    kind: "success" | "error";
+    message: string;
+  } | null>(null);
   const profileImport = useRef<HTMLInputElement>(null);
   const presetImport = useRef<HTMLInputElement>(null);
   const system = useQuery({ queryKey: ["system"], queryFn: api.system });
+  const about = useQuery({ queryKey: ["about"], queryFn: api.about });
   const profiles = useQuery({ queryKey: ["profiles"], queryFn: api.profiles });
   const presets = useQuery({ queryKey: ["presets"], queryFn: api.presets });
   const workers = useQuery({ queryKey: ["workers"], queryFn: api.workers, refetchInterval: 3_000 });
+  const runtimes = useQuery({
+    queryKey: ["runtimes"],
+    queryFn: api.runtimes,
+    refetchInterval: (query) => query.state.data?.some((runtime) => runtime.state === "installing") ? 2_000 : false,
+  });
   const backups = useQuery({ queryKey: ["backups"], queryFn: api.backups });
   const credential = useQuery({ queryKey: ["credential", "huggingface"], queryFn: api.credentialStatus });
   const saveCredential = useMutation({
@@ -1392,10 +1921,74 @@ function SettingsView({ engines }: { engines: EngineCapabilities[] }) {
     onSuccess: (value) => client.setQueryData(["credential", "huggingface"], value),
   });
   const refreshWorkers = () => void client.invalidateQueries({ queryKey: ["workers"] });
-  const loadChat = useMutation({ mutationFn: api.loadChatWorker, onSuccess: refreshWorkers });
-  const startMedia = useMutation({ mutationFn: api.startMediaWorker, onSuccess: refreshWorkers });
-  const stopWorker = useMutation({ mutationFn: api.stopWorker, onSuccess: refreshWorkers });
-  const createBackup = useMutation({ mutationFn: api.createBackup, onSuccess: () => void client.invalidateQueries({ queryKey: ["backups"] }) });
+  const loadChat = useMutation({ mutationFn: api.loadChatWorker, onSettled: refreshWorkers });
+  const startMedia = useMutation({ mutationFn: api.startMediaWorker, onSettled: refreshWorkers });
+  const stopWorker = useMutation({ mutationFn: api.stopWorker, onSettled: refreshWorkers });
+  const installRuntime = useMutation({
+    mutationFn: (engine: RuntimeStatus["engine"]) => api.installRuntime(engine),
+    onSuccess: (value: RuntimeStatus) => {
+      client.setQueryData<RuntimeStatus[]>(["runtimes"], (current = []) =>
+        current.map((item) => item.engine === value.engine ? value : item)
+      );
+    },
+  });
+  const storeBackup = (backup: BackupInfo) => {
+    client.setQueryData<BackupInfo[]>(["backups"], (current = []) => {
+      const existing = current.find((item) => item.name === backup.name);
+      const stored = backup.restore_pending
+        ? backup
+        : { ...backup, restore_pending: existing?.restore_pending ?? false };
+      const remaining = current
+        .filter((item) => item.name !== backup.name)
+        .map((item) => backup.restore_pending ? { ...item, restore_pending: false } : item);
+      return [stored, ...remaining].sort(
+        (left, right) => Date.parse(right.created_at) - Date.parse(left.created_at),
+      );
+    });
+  };
+  const showBackupError = (error: Error) =>
+    setBackupFeedback({ kind: "error", message: error.message });
+  const createBackup = useMutation({
+    mutationFn: api.createBackup,
+    onMutate: () => setBackupFeedback(null),
+    onSuccess: (backup) => {
+      storeBackup(backup);
+      setBackupFeedback({ kind: "success", message: "Backup created." });
+    },
+    onError: showBackupError,
+  });
+  const verifyBackup = useMutation({
+    mutationFn: api.verifyBackup,
+    onMutate: () => setBackupFeedback(null),
+    onSuccess: (backup) => {
+      storeBackup(backup);
+      setBackupFeedback({ kind: "success", message: "Backup verified." });
+    },
+    onError: showBackupError,
+  });
+  const restoreBackup = useMutation({
+    mutationFn: api.restoreBackup,
+    onMutate: () => setBackupFeedback(null),
+    onSuccess: (backup) => {
+      storeBackup(backup);
+      setBackupFeedback({
+        kind: "success",
+        message: "Restore scheduled. Restart LM Atelier to apply this backup.",
+      });
+    },
+    onError: showBackupError,
+  });
+  const deleteBackup = useMutation({
+    mutationFn: api.deleteBackup,
+    onMutate: () => setBackupFeedback(null),
+    onSuccess: (_value, name) => {
+      client.setQueryData<BackupInfo[]>(["backups"], (current = []) =>
+        current.filter((backup) => backup.name !== name)
+      );
+      setBackupFeedback({ kind: "success", message: "Backup deleted." });
+    },
+    onError: showBackupError,
+  });
   const toolProbe = useMutation({ mutationFn: api.probeChatTools });
   const chatWorker = workers.data?.find((worker) => worker.name === "chat");
   const chatWorkerBusy = Boolean(
@@ -1426,9 +2019,12 @@ function SettingsView({ engines }: { engines: EngineCapabilities[] }) {
       setImportError(error instanceof Error ? error.message : "Could not import the bundle.");
     }
   };
+  const technicalDetails = about.data && system.data
+    ? formatTechnicalDetails(about.data, system.data, engines)
+    : "";
   return (
     <div className="page-view settings-page">
-      <header className="page-header"><div><small>Settings</small><h1>Models, runtimes, and recovery</h1></div></header>
+      <header className="page-header"><div><h1>Settings</h1></div></header>
       <section>
         <div className="detail-title"><div><h2>Hugging Face access</h2><p>Private and gated model access is stored in your operating system credential vault. The token is never displayed after saving.</p></div><span className={`badge ${credential.data?.configured ? "tested" : ""}`}>{credential.data?.configured ? `Configured · ${credential.data.source.replace("credential_vault", "credential vault")}` : "Not configured"}</span></div>
         <div className="preset-create">
@@ -1437,25 +2033,160 @@ function SettingsView({ engines }: { engines: EngineCapabilities[] }) {
           {credential.data?.configured && <button className="secondary danger" disabled={removeCredential.isPending || credential.data.source === "environment"} onClick={() => removeCredential.mutate()}>{removeCredential.isPending ? "Removing…" : "Remove"}</button>}
         </div>
         {credential.data?.source === "environment" && <p className="muted runtime-note">The LOCAL_LM_HF_TOKEN environment variable currently takes precedence. Unset it before managing the token here.</p>}
-        {credential.data && !credential.data.vault_available && <div className="callout error">No supported operating-system credential vault is available. Configure one or use LOCAL_LM_HF_TOKEN for this process.</div>}
-        {(credential.error || saveCredential.error || removeCredential.error) && <div className="callout error">{(credential.error || saveCredential.error || removeCredential.error)?.message}</div>}
+        {credential.data && !credential.data.vault_available && <div className="callout error" role="alert">No supported operating-system credential vault is available. Configure one or use LOCAL_LM_HF_TOKEN for this process.</div>}
+        {(credential.error || saveCredential.error || removeCredential.error) && <div className="callout error" role="alert">{(credential.error || saveCredential.error || removeCredential.error)?.message}</div>}
       </section>
-      <section><h2>Engines</h2><div className="engine-grid">{engines.map((engine) => <article className="engine-card" key={`${engine.engine}:${engine.roles.join()}`}><header><div className="model-icon"><Cpu /></div><div><h3>{engine.engine}</h3><p>{engine.roles.join(" · ")} · {engine.version}</p></div><StatusDot healthy={engine.healthy} /></header><div className="capability-list"><span>{engine.streaming ? "Streaming" : "Queued"}</span><span>{engine.tool_calling ? "Tool routing advertised" : "Workflow execution"}</span><span>{engine.settings.length} controls</span>{engine.roles.includes("chat") && <button className="secondary compact-button" onClick={() => toolProbe.mutate()} disabled={toolProbe.isPending}>{toolProbe.isPending ? "Testing…" : "Test structured tools"}</button>}</div></article>)}</div>{toolProbe.data && <div className={`callout ${toolProbe.data.passed ? "success" : "error"}`}>{toolProbe.data.passed ? `Structured tool schema passed on ${toolProbe.data.engine} ${toolProbe.data.version}.` : `Structured tool schema failed: ${toolProbe.data.error || "unknown response"}`}</div>}{toolProbe.error && <div className="callout error">{toolProbe.error.message}</div>}</section>
+      <section><h2>Engines</h2><div className="engine-grid">{engines.map((engine) => <article className="engine-card" key={`${engine.engine}:${engine.roles.join()}`}><header><div className="model-icon"><Cpu /></div><div><h3>{engine.engine}</h3><p>{engine.roles.join(" · ")} · {engine.version}</p></div><StatusDot healthy={engine.healthy} label={`${engine.engine} engine`} /></header>{engine.roles.includes("chat") && <div className="capability-list"><button className="secondary compact-button" onClick={() => toolProbe.mutate()} disabled={toolProbe.isPending}>{toolProbe.isPending ? "Testing…" : "Test structured tools"}</button></div>}</article>)}</div>{toolProbe.data && <div className={`callout ${toolProbe.data.passed ? "success" : "error"}`} role={toolProbe.data.passed ? "status" : "alert"}>{toolProbe.data.passed ? `Structured tool schema passed on ${toolProbe.data.engine} ${toolProbe.data.version}.` : `Structured tool schema failed: ${toolProbe.data.error || "unknown response"}`}</div>}{toolProbe.error && <div className="callout error" role="alert">{toolProbe.error.message}</div>}<div className="runtime-setup-grid">{runtimes.data?.map((runtime) => <article className="runtime-setup" key={runtime.engine}><div><strong>{runtime.engine}</strong><span>{runtime.release} · {runtime.state === "ready" ? "Ready" : runtime.state === "installing" ? `${Math.round(runtime.progress * 100)}%` : runtime.state === "unsupported" ? "Manual setup required" : runtime.state === "failed" ? "Setup failed" : "Not installed"}</span></div>{runtime.state === "installing" && <progress value={runtime.progress} max={1} aria-label={`${runtime.engine} setup progress`} />}{runtime.state !== "installing" && runtime.state !== "ready" && runtime.supported && <button className="secondary compact-button" disabled={installRuntime.isPending} onClick={() => installRuntime.mutate(runtime.engine)}>{runtime.state === "failed" ? "Retry" : `Install${runtime.size_bytes ? ` · ${formatBytes(runtime.size_bytes)}` : ""}`}</button>}<small>{runtime.security_status === "blocked" ? `${runtime.license} · ${runtime.security_message || runtime.message}` : runtime.engine === "comfyui" ? `${runtime.license} · downloaded separately` : runtime.message}</small></article>)}</div>{(runtimes.error || installRuntime.error) && <div className="callout error" role="alert">{(runtimes.error || installRuntime.error)?.message}</div>}</section>
       <section><h2>Machine</h2>{system.data && <div className="metric-grid"><div className="cpu-metric"><Cpu /><span><strong>{system.data.cpu_model}</strong><small>CPU model</small></span></div><div><HardDrive /><span><strong>{formatBytes(system.data.disk_free_bytes)}</strong> disk free</span></div></div>}<div className="device-list">{system.data?.devices.filter((device) => device.kind !== "cpu").map((device) => <div key={device.id}><span className="device-icon"><Cpu size={18} /></span><span><strong>{device.name}</strong><small>{device.backend}</small></span></div>)}</div></section>
       <section>
         <div className="detail-title"><div><h2>Model profiles</h2></div><button className="secondary" onClick={() => profileImport.current?.click()}>Import profile</button></div>
         <input ref={profileImport} hidden type="file" accept="application/json,.json" onChange={(event) => { void importBundle(event.target.files?.[0], "profile"); event.target.value = ""; }} />
-        <div className="profile-table interactive">{profiles.data?.map((profile: ModelProfile) => <div key={profile.id}><span className="badge">{profile.role}</span><strong>{profile.is_default ? "Default" : profile.name}{profile.is_default ? " · default" : ""}</strong><span title={profile.use_case}>{profile.use_case || "No Auto use case yet"}</span><span className="row-actions">{profile.role === "chat" && profile.model_install_id && <button className="secondary compact-button" disabled={chatWorkerBusy || loadChat.isPending} title={chatWorkerBusy ? "Wait for active and queued chat jobs before changing the worker" : "Load this chat profile"} onClick={() => loadChat.mutate(profile.id)}>Load</button>}<button className="secondary compact-button" onClick={() => setSelectedProfile(profile)}>Edit</button></span></div>)}</div>
+        <div className="profile-table interactive">{profiles.data?.map((profile: ModelProfile) => <div key={profile.id}><span className="badge">{profile.role}</span><strong>{profile.is_default ? "Default" : profile.name}{profile.is_default ? " · default" : ""}</strong><span title={profile.use_case}>{profile.use_case || "No Auto use case yet"}</span><span className="row-actions">{profile.role === "chat" && profile.model_install_id && <button className="secondary compact-button" aria-label={`Load profile: ${profile.name}`} disabled={chatWorkerBusy || loadChat.isPending} title={chatWorkerBusy ? "Wait for active and queued chat jobs before changing the worker" : "Load this chat profile"} onClick={() => loadChat.mutate(profile.id)}>Load</button>}<button className="secondary compact-button" aria-label={`Edit profile: ${profile.name}`} onClick={() => setSelectedProfile(profile)}>Edit</button></span></div>)}</div>
       </section>
       <section>
-        <div className="detail-title"><div><h2>Generation presets</h2><p>Save reusable choices such as temperature, output length, dimensions, steps, and seed behavior.</p></div><button className="secondary" onClick={() => presetImport.current?.click()}>Import preset</button></div>
+        <div className="detail-title"><div><h2>Generation presets</h2><p>Reuse response length, sampling, image size, video length, and seed settings.</p></div><button className="secondary" onClick={() => presetImport.current?.click()}>Import preset</button></div>
         <input ref={presetImport} hidden type="file" accept="application/json,.json" onChange={(event) => { void importBundle(event.target.files?.[0], "preset"); event.target.value = ""; }} />
         <div className="preset-create"><input aria-label="New preset name" placeholder="New preset name" value={presetName} onChange={(event) => setPresetName(event.target.value)} /><select aria-label="New preset role" value={presetRole} onChange={(event) => setPresetRole(event.target.value as GenerationPreset["role"])}><option value="chat">Chat</option><option value="image">Image</option><option value="video">Video</option></select><button className="primary" disabled={!presetName.trim() || createPreset.isPending} onClick={() => createPreset.mutate()}><Plus size={15} />Create preset</button></div>
-        <div className="profile-table interactive">{presets.data?.map((preset) => <div key={preset.id}><span className="badge">{preset.role}</span><strong>{preset.name}{preset.is_default ? " · default" : ""}</strong><span>{Object.keys(preset.settings_json).length} overrides</span><button className="secondary compact-button" onClick={() => setSelectedPreset(preset)}>Edit</button></div>)}</div>
-        {(createPreset.error || importError) && <div className="callout error">{createPreset.error?.message || importError}</div>}
+        <div className="profile-table interactive">{presets.data?.map((preset) => <div key={preset.id}><span className="badge">{preset.role}</span><strong>{preset.name}{preset.is_default ? " · default" : ""}</strong><span>{Object.keys(preset.settings_json).length} overrides</span><button className="secondary compact-button" aria-label={`Edit preset: ${preset.name}`} onClick={() => setSelectedPreset(preset)}>Edit</button></div>)}</div>
+        {(createPreset.error || importError) && <div className="callout error" role="alert">{createPreset.error?.message || importError}</div>}
       </section>
-      <section><div className="detail-title"><div><h2>Workers</h2></div></div><div className="engine-grid">{workers.data?.map((worker) => { const busy = worker.active_jobs + worker.queued_jobs > 0; const busyTitle = busy ? "Wait for active and queued jobs before changing this worker" : undefined; return <article className="engine-card" key={worker.name}><header><div><h3>{worker.name} worker</h3><p>{worker.state === "ready" ? `Ready · PID ${worker.pid}` : worker.state === "starting" ? "Starting and checking health" : worker.state === "exited" ? `Exited · code ${worker.exit_code ?? "unknown"}` : "Stopped or externally managed"}</p></div><StatusDot healthy={worker.state === "ready"} /></header><div className="worker-metrics"><span><strong>{worker.active_jobs}</strong> active</span><span><strong>{worker.queued_jobs}</strong> queued</span><span><strong>{formatBytes(worker.current_memory_bytes)}</strong> current RAM</span><span><strong>{formatBytes(worker.peak_memory_bytes)}</strong> measured peak</span>{worker.estimated_memory_bytes != null && <span><strong>{formatBytes(worker.estimated_memory_bytes)}</strong> estimated load</span>}</div><div className="capability-list">{worker.name === "media" && !worker.running && <button className="secondary compact-button" disabled={busy || startMedia.isPending} title={busyTitle} onClick={() => startMedia.mutate()}>Start ComfyUI</button>}{worker.running && <button className="secondary compact-button" disabled={busy || stopWorker.isPending} title={busyTitle} onClick={() => stopWorker.mutate(worker.name)}>Unload</button>}</div></article>; })}</div>{(loadChat.error || startMedia.error || stopWorker.error) && <div className="callout error">{(loadChat.error || startMedia.error || stopWorker.error)?.message}</div>}</section>
-      <section><div className="detail-title"><div><h2>Recovery backups</h2><p>Keep 7 daily and 4 weekly verified snapshots. Media is optional so routine backups stay bounded.</p></div><div className="row-actions"><button className="secondary" onClick={() => createBackup.mutate(false)}>Back up state</button><button className="secondary" onClick={() => createBackup.mutate(true)}>Back up with media</button></div></div><div className="profile-table">{backups.data?.map((backup) => <div key={backup.name}><strong>{backup.name}</strong><span>{formatBytes(backup.size_bytes + backup.media_size_bytes)}</span><span>{backup.sha256.slice(0, 12)}</span><span>{backup.media_included ? "State + media" : backup.verified ? "Verified" : "State"}</span></div>)}</div></section>
+      <section>
+        <div className="detail-title"><div><h2>Workers</h2></div></div>
+        <div className="engine-grid">
+          {workers.data?.map((worker) => (
+            <WorkerStatusCard
+              key={worker.name}
+              worker={worker}
+              startPending={startMedia.isPending}
+              stopPending={stopWorker.isPending}
+              onStart={() => startMedia.mutate()}
+              onStop={() => stopWorker.mutate(worker.name)}
+            />
+          ))}
+        </div>
+        {(loadChat.error || startMedia.error || stopWorker.error) && (
+          <div className="callout error" role="alert">
+            {(loadChat.error || startMedia.error || stopWorker.error)?.message}
+          </div>
+        )}
+      </section>
+      <section>
+        <div className="detail-title">
+          <div><h2>Recovery backups</h2></div>
+          <div className="row-actions">
+            <button
+              className="secondary"
+              disabled={createBackup.isPending}
+              onClick={() => createBackup.mutate(false)}
+            >
+              {createBackup.isPending && createBackup.variables === false ? "Backing up…" : "Back up state"}
+            </button>
+            <button
+              className="secondary"
+              disabled={createBackup.isPending}
+              onClick={() => createBackup.mutate(true)}
+            >
+              {createBackup.isPending && createBackup.variables === true ? "Backing up…" : "Back up with media"}
+            </button>
+          </div>
+        </div>
+        {backups.data?.some((backup) => backup.restore_pending) && (
+          <div className="callout success" role="status">
+            Restore scheduled. Restart LM Atelier to apply the selected backup.
+          </div>
+        )}
+        {backups.data?.length ? (
+          <div className="backup-list">
+            {backups.data.map((backup) => {
+              const verifying = verifyBackup.isPending && verifyBackup.variables === backup.name;
+              const restoring = restoreBackup.isPending && restoreBackup.variables === backup.name;
+              const deleting = deleteBackup.isPending && deleteBackup.variables === backup.name;
+              return (
+                <article className="backup-row" key={backup.name}>
+                  <div className="backup-copy">
+                    <strong>{formatDate(backup.created_at)}</strong>
+                    <small>
+                      {formatBytes(backup.size_bytes + backup.media_size_bytes)}
+                      {" · "}
+                      {backup.media_included ? "State + media" : "State only"}
+                      {" · "}
+                      {backup.verified ? "Verified" : "Not verified"}
+                    </small>
+                    <code title={backup.name}>{backup.name}</code>
+                  </div>
+                  <div className="row-actions">
+                    <button
+                      className="secondary compact-button"
+                      aria-label={`Verify backup ${backup.name}`}
+                      disabled={verifying || restoring || deleting}
+                      onClick={() => verifyBackup.mutate(backup.name)}
+                    >
+                      {verifying ? "Verifying…" : "Verify"}
+                    </button>
+                    <button
+                      className="secondary compact-button"
+                      aria-label={`Restore backup ${backup.name} on restart`}
+                      disabled={backup.restore_pending || verifying || restoring || deleting}
+                      onClick={() => {
+                        if (window.confirm("Restore this backup the next time LM Atelier starts?")) {
+                          restoreBackup.mutate(backup.name);
+                        }
+                      }}
+                    >
+                      {restoring ? "Scheduling…" : backup.restore_pending ? "Restore scheduled" : "Restore on restart"}
+                    </button>
+                    <button
+                      className="secondary compact-button danger"
+                      aria-label={`Delete backup ${backup.name}`}
+                      disabled={backup.restore_pending || verifying || restoring || deleting}
+                      onClick={() => {
+                        if (window.confirm("Delete this recovery backup? This cannot be undone.")) {
+                          deleteBackup.mutate(backup.name);
+                        }
+                      }}
+                    >
+                      {deleting ? "Deleting…" : "Delete"}
+                    </button>
+                  </div>
+                </article>
+              );
+            })}
+          </div>
+        ) : (
+          !backups.isLoading && <p className="muted">No recovery backups yet.</p>
+        )}
+        {backupFeedback && (
+          <div
+            className={`callout ${backupFeedback.kind}`}
+            role={backupFeedback.kind === "error" ? "alert" : "status"}
+          >
+            {backupFeedback.message}
+          </div>
+        )}
+        {backups.error && <div className="callout error" role="alert">{backups.error.message}</div>}
+      </section>
+      <section>
+        <div className="detail-title">
+          <div><h2>About &amp; support</h2></div>
+          {about.data && <span className="badge">Version {about.data.version}</span>}
+        </div>
+        {about.data && <div className="about-support">
+          <div className="about-paths">
+            <div><Folder size={17} /><span><small>Data folder</small><code>{about.data.data_directory}</code></span><CopyTextButton text={about.data.data_directory} label="Copy data folder" buttonText="Copy data folder" className="secondary compact-button" /></div>
+            <div><Folder size={17} /><span><small>Log folder</small><code>{about.data.log_directory}</code></span><CopyTextButton text={about.data.log_directory} label="Copy log folder" buttonText="Copy log folder" className="secondary compact-button" /></div>
+          </div>
+          <div className="about-actions">
+            {technicalDetails && <CopyTextButton text={technicalDetails} label="Copy technical details" buttonText="Copy technical details" className="secondary" />}
+            <nav aria-label="Support resources">
+              <a href="https://github.com/ajccarlson/lm-atelier/issues" target="_blank" rel="noreferrer">Issues</a>
+              <a href="https://github.com/ajccarlson/lm-atelier/blob/main/SECURITY.md" target="_blank" rel="noreferrer">Security</a>
+              <a href="https://github.com/ajccarlson/lm-atelier/blob/main/SUPPORT.md" target="_blank" rel="noreferrer">Support</a>
+              <a href="https://github.com/ajccarlson/lm-atelier/blob/main/docs/PRIVACY.md" target="_blank" rel="noreferrer">Privacy</a>
+            </nav>
+          </div>
+        </div>}
+        {(about.error || system.error) && <div className="callout error" role="alert">About information is unavailable.</div>}
+      </section>
       {selectedProfile && <ProfileEditor profile={selectedProfile} engines={engines} onClose={() => setSelectedProfile(null)} />}
       {selectedPreset && <PresetEditor preset={selectedPreset} engines={engines} onClose={() => setSelectedPreset(null)} />}
     </div>
@@ -1483,17 +2214,38 @@ function ChatManager({
   const deletePrompt = deleteGeneratedMedia
     ? `Delete ${chat.title}, its history, and generated media used only by this chat?`
     : `Delete ${chat.title} and its history?`;
-  return <div className="modal-backdrop"><div className="modal workspace-editor"><header><div><small>Conversation</small><h2>Manage chat</h2></div><button className="icon-button" aria-label="Close chat manager" onClick={onClose}><X /></button></header><label>Title<input value={title} onChange={(event) => setTitle(event.target.value)} /></label><label>Project<select value={projectId} onChange={(event) => setProjectId(event.target.value)}><option value="">Unfiled</option>{projects.filter((project) => !project.archived).map((project) => <option key={project.id} value={project.id}>{project.name}</option>)}</select></label><label className="toggle-row"><span className="toggle-copy"><strong>Confirm uncertain media</strong><small>Ask before Auto mode starts an image or video when the planner is unsure.</small></span><input type="checkbox" checked={confirmUncertainMedia} onChange={(event) => setConfirmUncertainMedia(event.target.checked)} /></label><label className="toggle-row"><span className="toggle-copy"><strong>Archived</strong><small>Hide this chat from the active workspace without deleting its history.</small></span><input type="checkbox" checked={archived} onChange={(event) => setArchived(event.target.checked)} /></label><label className="toggle-row delete-media-option"><span className="toggle-copy"><strong>Delete generated media with chat</strong><small>Permanently delete image and video outputs used only by this chat. Shared media is kept.</small></span><input type="checkbox" checked={deleteGeneratedMedia} onChange={(event) => setDeleteGeneratedMedia(event.target.checked)} /></label><footer className="editor-actions"><button className="secondary danger" onClick={() => { if (window.confirm(deletePrompt)) onDelete(deleteGeneratedMedia); }}>Delete chat</button><button className="secondary" onClick={onClose}>Cancel</button><button className="primary" disabled={!title.trim()} onClick={() => onSave({ title: title.trim(), project_id: projectId || null, archived, confirm_uncertain_media: confirmUncertainMedia })}>Save chat</button></footer></div></div>;
+  return (
+    <AccessibleDialog
+      title="Manage chat"
+      eyebrow="Conversation"
+      closeLabel="Close chat manager"
+      onClose={onClose}
+      className="workspace-editor"
+    >
+      <label>Title<input value={title} onChange={(event) => setTitle(event.target.value)} /></label>
+      <label>Project<select value={projectId} onChange={(event) => setProjectId(event.target.value)}><option value="">Unfiled</option>{projects.filter((project) => !project.archived).map((project) => <option key={project.id} value={project.id}>{project.name}</option>)}</select></label>
+      <label className="toggle-row"><span className="toggle-copy"><strong>Confirm uncertain media</strong><small>Ask before Auto mode starts an image or video when the planner is unsure.</small></span><input type="checkbox" checked={confirmUncertainMedia} onChange={(event) => setConfirmUncertainMedia(event.target.checked)} /></label>
+      <label className="toggle-row"><span className="toggle-copy"><strong>Archived</strong><small>Hide this chat from the active workspace without deleting its history.</small></span><input type="checkbox" checked={archived} onChange={(event) => setArchived(event.target.checked)} /></label>
+      <label className="toggle-row delete-media-option"><span className="toggle-copy"><strong>Delete generated media with chat</strong><small>Permanently delete image and video outputs used only by this chat. Shared media is kept.</small></span><input type="checkbox" checked={deleteGeneratedMedia} onChange={(event) => setDeleteGeneratedMedia(event.target.checked)} /></label>
+      <footer className="editor-actions"><button className="secondary danger" onClick={() => { if (window.confirm(deletePrompt)) onDelete(deleteGeneratedMedia); }}>Delete chat</button><button className="secondary" onClick={onClose}>Cancel</button><button className="primary" disabled={!title.trim()} onClick={() => onSave({ title: title.trim(), project_id: projectId || null, archived, confirm_uncertain_media: confirmUncertainMedia })}>Save chat</button></footer>
+    </AccessibleDialog>
+  );
 }
 
 function ProjectManager({
   project,
+  engines,
+  presets,
+  workflows,
   onClose,
   onSave,
   onDelete,
   onExport,
 }: {
   project: Project;
+  engines: EngineCapabilities[];
+  presets: GenerationPreset[];
+  workflows: Workflow[];
   onClose: () => void;
   onSave: (values: Partial<Project>) => void;
   onDelete: () => void;
@@ -1505,14 +2257,129 @@ function ProjectManager({
   const [archived, setArchived] = useState(project.archived);
   const [imageWorkflowRevisionId, setImageWorkflowRevisionId] = useState(project.image_workflow_revision_id ?? "");
   const [videoWorkflowRevisionId, setVideoWorkflowRevisionId] = useState(project.video_workflow_revision_id ?? "");
-  const workflows = useQuery({ queryKey: ["workflows"], queryFn: api.workflows });
-  const workflowOptions = (kind: "image" | "video") => workflows.data?.filter((workflow) => workflow.operation.includes(kind)).flatMap((workflow) => workflow.revisions.map((revision) => <option key={revision.id} value={revision.id}>{workflow.name} · {workflow.operation.replaceAll("_", " ")} · v{revision.version}</option>));
-  return <div className="modal-backdrop"><div className="modal workspace-editor"><header><div><small>Workspace</small><h2>Manage project</h2></div><button className="icon-button" aria-label="Close project manager" onClick={onClose}><X /></button></header><label>Name<input value={name} onChange={(event) => setName(event.target.value)} /></label><label>Description<textarea rows={3} value={description} onChange={(event) => setDescription(event.target.value)} /></label><label>Project instructions<textarea rows={5} value={instructions} onChange={(event) => setInstructions(event.target.value)} /></label><label>Default image workflow revision<select value={imageWorkflowRevisionId} onChange={(event) => setImageWorkflowRevisionId(event.target.value)}><option value="">Use global default</option>{workflowOptions("image")}</select></label><label>Default video workflow revision<select value={videoWorkflowRevisionId} onChange={(event) => setVideoWorkflowRevisionId(event.target.value)}><option value="">Use global default</option>{workflowOptions("video")}</select></label><label className="toggle-row"><span><strong>Archived</strong><small>Hide this project while preserving its chats and media.</small></span><input type="checkbox" checked={archived} onChange={(event) => setArchived(event.target.checked)} /></label><div className="project-export-actions"><button className="secondary" onClick={() => onExport(false)}>Export metadata only</button><button className="secondary" onClick={() => onExport(true)}>Export with media</button></div><footer className="editor-actions"><button className="secondary danger" onClick={() => { if (window.confirm(`Delete ${project.name}? Its chats will become unfiled.`)) onDelete(); }}>Delete project</button><button className="secondary" onClick={onClose}>Cancel</button><button className="primary" disabled={!name.trim()} onClick={() => onSave({ name: name.trim(), description, instructions, archived, image_workflow_revision_id: imageWorkflowRevisionId || null, video_workflow_revision_id: videoWorkflowRevisionId || null })}>Save project</button></footer></div></div>;
+  const [settingsRole, setSettingsRole] = useState<EngineRole>("chat");
+  const [generationSettings, setGenerationSettings] = useState<
+    NonNullable<Project["generation_settings_json"]>
+  >(() => Object.fromEntries(
+    Object.entries(project.generation_settings_json ?? {}).map(([role, settings]) => [
+      role,
+      { ...settings },
+    ]),
+  ));
+  const [generationPresetIds, setGenerationPresetIds] = useState<
+    NonNullable<Project["generation_preset_ids_json"]>
+  >({ ...(project.generation_preset_ids_json ?? {}) });
+  const workflowOptions = (kind: "image" | "video") => workflows
+    .filter((workflow) => workflow.operation.includes(kind))
+    .flatMap((workflow) => workflow.revisions.map((revision) => (
+      <option key={revision.id} value={revision.id}>
+        {workflow.name} · {workflow.operation.replaceAll("_", " ")} · v{revision.version}
+      </option>
+    )));
+  const setRoleSettings = (values: Record<string, unknown>) => {
+    setGenerationSettings((current) => {
+      const next = { ...current };
+      if (Object.keys(values).length) next[settingsRole] = values;
+      else delete next[settingsRole];
+      return next;
+    });
+  };
+  const setRolePreset = (presetId: string | null) => {
+    setGenerationPresetIds((current) => {
+      const next = { ...current };
+      if (presetId) next[settingsRole] = presetId;
+      else delete next[settingsRole];
+      return next;
+    });
+  };
+  const clearRoleDefaults = () => {
+    setRoleSettings({});
+    setRolePreset(null);
+  };
+  const clearAllDefaults = () => {
+    setGenerationSettings({});
+    setGenerationPresetIds({});
+  };
+  return (
+    <AccessibleDialog
+      title="Manage project"
+      eyebrow="Workspace"
+      closeLabel="Close project manager"
+      onClose={onClose}
+      className="workspace-editor project-editor"
+    >
+      <label>Name<input value={name} onChange={(event) => setName(event.target.value)} /></label>
+      <label>Description<textarea rows={3} value={description} onChange={(event) => setDescription(event.target.value)} /></label>
+      <label>Project instructions<textarea rows={5} value={instructions} onChange={(event) => setInstructions(event.target.value)} /></label>
+      <label>Default image workflow revision<select value={imageWorkflowRevisionId} onChange={(event) => setImageWorkflowRevisionId(event.target.value)}><option value="">Use global default</option>{workflowOptions("image")}</select></label>
+      <label>Default video workflow revision<select value={videoWorkflowRevisionId} onChange={(event) => setVideoWorkflowRevisionId(event.target.value)}><option value="">Use global default</option>{workflowOptions("video")}</select></label>
+      <section className="project-generation-defaults" aria-labelledby="project-generation-defaults-heading">
+        <div className="project-defaults-heading">
+          <div>
+            <h3 id="project-generation-defaults-heading">Generation defaults</h3>
+            <p>Chats inherit these settings; chat and turn choices override them.</p>
+          </div>
+          <button className="secondary compact-button" type="button" onClick={clearAllDefaults}>Clear all</button>
+        </div>
+        <div className="segmented project-role-tabs" aria-label="Project generation role">
+          {(["chat", "image", "video"] as EngineRole[]).map((role) => (
+            <button
+              key={role}
+              type="button"
+              className={settingsRole === role ? "active" : ""}
+              aria-pressed={settingsRole === role}
+              onClick={() => setSettingsRole(role)}
+            >
+              {role}
+            </button>
+          ))}
+        </div>
+        <GenerationSettingsPanel
+          key={settingsRole}
+          role={settingsRole}
+          engines={engines}
+          values={generationSettings[settingsRole] ?? {}}
+          onValues={setRoleSettings}
+          presets={presets}
+          presetId={generationPresetIds[settingsRole] ?? null}
+          onPreset={setRolePreset}
+          presetLabel={`${settingsRole} project preset`}
+          resetLabel="Clear role defaults"
+          onReset={clearRoleDefaults}
+        />
+      </section>
+      <label className="toggle-row"><span><strong>Archived</strong><small>Hide this project while preserving its chats and media.</small></span><input type="checkbox" checked={archived} onChange={(event) => setArchived(event.target.checked)} /></label>
+      <div className="project-export-actions"><button className="secondary" onClick={() => onExport(false)}>Export metadata only</button><button className="secondary" onClick={() => onExport(true)}>Export with media</button></div>
+      <footer className="editor-actions">
+        <button className="secondary danger" onClick={() => { if (window.confirm(`Delete ${project.name}? Its chats will become unfiled.`)) onDelete(); }}>Delete project</button>
+        <button className="secondary" onClick={onClose}>Cancel</button>
+        <button
+          className="primary"
+          disabled={!name.trim()}
+          onClick={() => onSave({
+            name: name.trim(),
+            description,
+            instructions,
+            archived,
+            image_workflow_revision_id: imageWorkflowRevisionId || null,
+            video_workflow_revision_id: videoWorkflowRevisionId || null,
+            generation_settings_json: generationSettings,
+            generation_preset_ids_json: generationPresetIds,
+          })}
+        >
+          Save project
+        </button>
+      </footer>
+    </AccessibleDialog>
+  );
 }
 
 function Sidebar({
   projects,
   chats,
+  engines,
+  presets,
+  workflows,
   currentChatId,
   view,
   onChat,
@@ -1528,6 +2395,9 @@ function Sidebar({
 }: {
   projects: Project[];
   chats: Chat[];
+  engines: EngineCapabilities[];
+  presets: GenerationPreset[];
+  workflows: Workflow[];
   currentChatId: string | null;
   view: View;
   onChat: (id: string) => void;
@@ -1541,48 +2411,45 @@ function Sidebar({
   onUpdateProject: (id: string, values: Partial<Project>) => void;
   onDeleteProject: (id: string) => void;
 }) {
-  const [openProjects, setOpenProjects] = useState<Set<string>>(new Set(projects.map((project) => project.id)));
+  const [closedProjects, setClosedProjects] = useState<Set<string>>(new Set());
   const [search, setSearch] = useState("");
   const [showArchived, setShowArchived] = useState(false);
   const [managedChat, setManagedChat] = useState<Chat | null>(null);
   const [managedProject, setManagedProject] = useState<Project | null>(null);
   const [mobileOpen, setMobileOpen] = useState(false);
   const projectImport = useRef<HTMLInputElement>(null);
-  useEffect(() => {
-    setOpenProjects((current) => new Set([...current, ...projects.map((project) => project.id)]));
-  }, [projects]);
   const normalizedSearch = search.trim().toLowerCase();
   const visibleChats = chats.filter((chat) => (showArchived || !chat.archived) && (!normalizedSearch || chat.title.toLowerCase().includes(normalizedSearch)));
   const visibleProjects = projects.filter((project) => (showArchived || !project.archived) && (!normalizedSearch || project.name.toLowerCase().includes(normalizedSearch) || visibleChats.some((chat) => chat.project_id === project.id)));
   const unfiled = visibleChats.filter((chat) => !chat.project_id);
-  const chatRow = (chat: Chat) => <div className="sidebar-chat-row" key={chat.id}><button className={`chat-main ${view === "chat" && currentChatId === chat.id ? "active" : ""}`} onClick={() => { onChat(chat.id); setMobileOpen(false); }}><MessageSquare size={14} /><span>{chat.title}</span>{chat.archived && <small>Archived</small>}</button><button className="inline-add" aria-label={`Manage ${chat.title}`} onClick={() => setManagedChat(chat)}><MoreHorizontal size={13} /></button></div>;
+  const chatRow = (chat: Chat) => <div className="sidebar-chat-row" key={chat.id}><button className={`chat-main ${view === "chat" && currentChatId === chat.id ? "active" : ""}`} aria-current={view === "chat" && currentChatId === chat.id ? "page" : undefined} onClick={() => { onChat(chat.id); setMobileOpen(false); }}><MessageSquare size={14} /><span>{chat.title}</span>{chat.archived && <small>Archived</small>}</button><button className="inline-add" aria-label={`Manage ${chat.title}`} onClick={() => setManagedChat(chat)}><MoreHorizontal size={13} /></button></div>;
   return (
     <aside className={`sidebar ${mobileOpen ? "mobile-open" : ""}`}>
       <div className="brand"><div className="brand-mark"><AtelierMark /></div><span>LM Atelier<small>Local creative studio</small></span><button className="icon-button mobile-menu" aria-label="Toggle navigation" aria-expanded={mobileOpen} onClick={() => setMobileOpen((open) => !open)}><Menu /></button></div>
       <button className="new-chat" onClick={() => { onNewChat(null); setMobileOpen(false); }}><Plus size={18} />New chat</button>
-      <nav className="primary-nav"><button className={view === "media" ? "active" : ""} onClick={() => { onView("media"); setMobileOpen(false); }}><ImageIcon />Media library</button><button className={view === "models" ? "active" : ""} onClick={() => { onView("models"); setMobileOpen(false); }}><Library />Model library</button><button className={view === "workflows" ? "active" : ""} onClick={() => { onView("workflows"); setMobileOpen(false); }}><WorkflowIcon />Workflows</button></nav>
+      <nav className="primary-nav"><button className={view === "media" ? "active" : ""} aria-current={view === "media" ? "page" : undefined} onClick={() => { onView("media"); setMobileOpen(false); }}><ImageIcon />Media library</button><button className={view === "models" ? "active" : ""} aria-current={view === "models" ? "page" : undefined} onClick={() => { onView("models"); setMobileOpen(false); }}><Library />Model library</button><button className={view === "workflows" ? "active" : ""} aria-current={view === "workflows" ? "page" : undefined} onClick={() => { onView("workflows"); setMobileOpen(false); }}><WorkflowIcon />Workflows</button></nav>
       <div className="workspace-search"><Search size={14} /><input aria-label="Search projects and chats" placeholder="Search workspace" value={search} onChange={(event) => setSearch(event.target.value)} /><button className={showArchived ? "active" : ""} aria-pressed={showArchived} onClick={() => setShowArchived((value) => !value)}>Archived</button></div>
       <div className="workspace-tree" role="region" aria-label="Projects and chats">
         <div className="sidebar-section">
           <div className="section-title"><span>Projects</span><input ref={projectImport} hidden type="file" accept=".zip,.lm-atelier.zip,application/zip" onChange={(event) => { const file = event.target.files?.[0]; if (file) onImportProject(file); event.target.value = ""; }} /><button aria-label="Import project" onClick={() => projectImport.current?.click()}><Upload size={14} /></button><button aria-label="New project" onClick={onNewProject}><Plus size={15} /></button></div>
           {visibleProjects.map((project) => {
-            const open = openProjects.has(project.id);
+            const open = !closedProjects.has(project.id);
             const projectMatches = normalizedSearch && project.name.toLowerCase().includes(normalizedSearch);
             const projectChats = chats.filter((chat) => chat.project_id === project.id && (showArchived || !chat.archived) && (!normalizedSearch || projectMatches || chat.title.toLowerCase().includes(normalizedSearch)));
             return (
               <div className="project-group" key={project.id}>
                 <div className="project-row">
-                  <button className="project-main" onClick={() => setOpenProjects((current) => {
+                  <button className="project-main" aria-expanded={open} onClick={() => setClosedProjects((current) => {
                     const next = new Set(current);
-                    if (open) next.delete(project.id);
-                    else next.add(project.id);
+                    if (open) next.add(project.id);
+                    else next.delete(project.id);
                     return next;
                   })}>
                     <ChevronDown className={open ? "" : "closed"} size={14} />
                     <Folder size={16} />
                     <span>{project.name}</span>
                   </button>
-                  <button className="inline-add" onClick={() => onNewChat(project.id)} aria-label={`New chat in ${project.name}`}><Plus size={13} /></button>
+                  <button className="inline-add" onClick={() => { onNewChat(project.id); setMobileOpen(false); }} aria-label={`New chat in ${project.name}`}><Plus size={13} /></button>
                   <button className="inline-add" onClick={() => onExportProject(project.id)} aria-label={`Export ${project.name}`}><Download size={13} /></button>
                   <button className="inline-add" onClick={() => setManagedProject(project)} aria-label={`Manage ${project.name}`}><MoreHorizontal size={13} /></button>
                 </div>
@@ -1593,9 +2460,9 @@ function Sidebar({
         </div>
         {unfiled.length > 0 && <div className="sidebar-section"><div className="section-title"><span>Chats</span></div><div className="chat-list standalone">{unfiled.map(chatRow)}</div></div>}
       </div>
-      <div className="sidebar-footer"><button className={view === "settings" ? "active" : ""} onClick={() => { onView("settings"); setMobileOpen(false); }}><Settings />Settings</button></div>
+      <div className="sidebar-footer"><button className={view === "settings" ? "active" : ""} aria-current={view === "settings" ? "page" : undefined} onClick={() => { onView("settings"); setMobileOpen(false); }}><Settings />Settings</button></div>
       {managedChat && <ChatManager chat={managedChat} projects={projects} onClose={() => setManagedChat(null)} onSave={(values) => { onUpdateChat(managedChat.id, values); setManagedChat(null); }} onDelete={(deleteGeneratedMedia) => { onDeleteChat(managedChat.id, deleteGeneratedMedia); setManagedChat(null); }} />}
-      {managedProject && <ProjectManager project={managedProject} onClose={() => setManagedProject(null)} onSave={(values) => { onUpdateProject(managedProject.id, values); setManagedProject(null); }} onDelete={() => { onDeleteProject(managedProject.id); setManagedProject(null); }} onExport={(includeMedia) => onExportProject(managedProject.id, includeMedia)} />}
+      {managedProject && <ProjectManager project={managedProject} engines={engines} presets={presets} workflows={workflows} onClose={() => setManagedProject(null)} onSave={(values) => { onUpdateProject(managedProject.id, values); setManagedProject(null); }} onDelete={() => { onDeleteProject(managedProject.id); setManagedProject(null); }} onExport={(includeMedia) => onExportProject(managedProject.id, includeMedia)} />}
     </aside>
   );
 }
@@ -1607,9 +2474,90 @@ function JobsPanel() {
   const cancel = useMutation({ mutationFn: api.cancelJob, onSuccess: refresh });
   const pause = useMutation({ mutationFn: api.pauseDownload, onSuccess: refresh });
   const resume = useMutation({ mutationFn: api.resumeDownload, onSuccess: refresh });
+  const retry = useMutation({ mutationFn: api.retryJob, onSuccess: refresh });
   const active = jobs.data?.filter((job) => ["queued", "running", "paused"].includes(job.status)) ?? [];
-  if (!active.length) return null;
-  return <div className="jobs-panel"><header><Activity size={16} /><span>{active.length} active job{active.length === 1 ? "" : "s"}</span></header>{active.map((job) => <div className="job-row" key={job.id}><div><strong>{job.kind}</strong><small>{job.phase}</small><div className="progress-track"><div style={{ width: `${Math.max(4, job.progress * 100)}%` }} /></div></div><span className="job-actions">{job.kind === "download" && (job.status === "paused" ? <button className="icon-button" aria-label="Resume download" onClick={() => resume.mutate(job.id)}><Play size={16} /></button> : <button className="icon-button" aria-label="Pause download" onClick={() => pause.mutate(job.id)}><Pause size={16} /></button>)}<button className="icon-button" aria-label="Cancel job" onClick={() => cancel.mutate(job.id)}><CircleStop size={17} /></button></span></div>)}</div>;
+  const recentUnsuccessful = (jobs.data ?? [])
+    .filter((job) => ["failed", "cancelled", "interrupted"].includes(job.status))
+    .sort((left, right) => Date.parse(right.updated_at) - Date.parse(left.updated_at))
+    .slice(0, RECENT_UNSUCCESSFUL_JOB_LIMIT);
+  if (!active.length && !recentUnsuccessful.length) return null;
+  return (
+    <aside className="jobs-panel" aria-label="Jobs">
+      <header>
+        <Activity size={16} />
+        <span>
+          {active.length
+            ? `${active.length} active job${active.length === 1 ? "" : "s"}`
+            : "Recent job issues"}
+        </span>
+      </header>
+      {active.map((job) => (
+        <div className="job-row" key={job.id}>
+          <div>
+            <strong>{job.kind}</strong>
+            <small>{job.phase}</small>
+            <div className="progress-track">
+              <div style={{ width: `${Math.max(4, job.progress * 100)}%` }} />
+            </div>
+          </div>
+          <span className="job-actions">
+            {job.kind === "download" && (job.status === "paused" ? (
+              <button
+                className="icon-button"
+                aria-label="Resume download"
+                disabled={resume.isPending && resume.variables === job.id}
+                onClick={() => resume.mutate(job.id)}
+              >
+                <Play size={16} />
+              </button>
+            ) : (
+              <button
+                className="icon-button"
+                aria-label="Pause download"
+                disabled={pause.isPending && pause.variables === job.id}
+                onClick={() => pause.mutate(job.id)}
+              >
+                <Pause size={16} />
+              </button>
+            ))}
+            {job.cancellable && (
+              <button
+                className="icon-button"
+                aria-label="Cancel job"
+                disabled={cancel.isPending && cancel.variables === job.id}
+                onClick={() => cancel.mutate(job.id)}
+              >
+                <CircleStop size={17} />
+              </button>
+            )}
+          </span>
+        </div>
+      ))}
+      {active.length > 0 && recentUnsuccessful.length > 0 && (
+        <div className="jobs-subheading">Recent issues</div>
+      )}
+      {recentUnsuccessful.map((job) => (
+        <div className="job-row unsuccessful" key={job.id}>
+          <div>
+            <strong>{job.kind} · {job.status}</strong>
+            <small>{job.phase || "Stopped"}</small>
+            {job.error && <small className="job-error" title={job.error}>{job.error}</small>}
+          </div>
+          <span className="job-actions">
+            <button
+              className="icon-button"
+              aria-label={`Retry ${job.kind} job`}
+              disabled={retry.isPending && retry.variables === job.id}
+              onClick={() => retry.mutate(job.id)}
+            >
+              <RotateCcw size={16} />
+            </button>
+          </span>
+        </div>
+      ))}
+      {retry.error && <div className="jobs-error" role="alert">{retry.error.message}</div>}
+    </aside>
+  );
 }
 
 export default function App() {
@@ -1617,17 +2565,22 @@ export default function App() {
   const [view, setView] = useState<View>("chat");
   const [currentChatId, setCurrentChatId] = useState<string | null>(() => localStorage.getItem("local-lm-chat"));
   const [liveText, setLiveText] = useState<Record<string, string>>({});
-  const [turnSettingsByChat, setTurnSettingsByChat] = useState<Record<string, Record<string, unknown>>>({});
+  const [chatDrafts, setChatDrafts] = useState<Record<string, Partial<Chat>>>({});
+  const [pendingTurns, setPendingTurns] = useState<Record<string, PendingTurn>>({});
   const projects = useQuery({ queryKey: ["projects"], queryFn: () => api.projects(true) });
   const chats = useQuery({ queryKey: ["chats"], queryFn: () => api.chats(null, true) });
-  const chat = useQuery({ queryKey: ["chat", currentChatId], queryFn: () => api.chat(currentChatId!), enabled: Boolean(currentChatId) });
+  const firstActiveChatId = chats.data?.find((candidate) => !candidate.archived)?.id ?? null;
+  const activeChatId = currentChatId ?? firstActiveChatId;
+  const chat = useQuery({ queryKey: ["chat", activeChatId], queryFn: () => api.chat(activeChatId!), enabled: Boolean(activeChatId) });
   const engines = useQuery({ queryKey: ["engines"], queryFn: api.engines });
   const profiles = useQuery({ queryKey: ["profiles"], queryFn: api.profiles });
+  const presets = useQuery({ queryKey: ["presets"], queryFn: api.presets });
   const workflows = useQuery({ queryKey: ["workflows"], queryFn: api.workflows });
 
   useEffect(() => {
     let dispose: (() => void) | undefined;
     let mediaRefresh: number | undefined;
+    let authoritativeRefresh: number | undefined;
     const scheduleMediaRefresh = () => {
       if (mediaRefresh !== undefined) return;
       mediaRefresh = window.setTimeout(() => {
@@ -1635,8 +2588,22 @@ export default function App() {
         void client.invalidateQueries({ queryKey: ["chat"] });
       }, 100);
     };
+    const scheduleAuthoritativeRefresh = () => {
+      if (authoritativeRefresh !== undefined) return;
+      authoritativeRefresh = window.setTimeout(() => {
+        authoritativeRefresh = undefined;
+        void client.invalidateQueries({
+          predicate: (query) =>
+            AUTHORITATIVE_QUERY_ROOTS.has(String(query.queryKey[0] ?? "")),
+        });
+      }, 100);
+    };
     void connectEvents(
       (event: AppEvent) => {
+        if (event.type === "events.replay_gap") {
+          scheduleAuthoritativeRefresh();
+          return;
+        }
         if (event.type === "text.delta") {
           const messageId = String(event.payload.assistant_message_id ?? "");
           const text = String(event.payload.text ?? "");
@@ -1665,57 +2632,122 @@ export default function App() {
         }
       },
       () => undefined,
+      scheduleAuthoritativeRefresh,
     ).then((cleanup) => { dispose = cleanup; });
     return () => {
       if (mediaRefresh !== undefined) window.clearTimeout(mediaRefresh);
+      if (authoritativeRefresh !== undefined) window.clearTimeout(authoritativeRefresh);
       dispose?.();
     };
   }, [client]);
 
   const createChat = useMutation({
     mutationFn: (projectId?: string | null) => api.createChat(projectId),
-    onSuccess: (created) => { setCurrentChatId(created.id); localStorage.setItem("local-lm-chat", created.id); setView("chat"); void client.invalidateQueries({ queryKey: ["chats"] }); },
+    onSuccess: (created) => { setCurrentChatId(created.id); localStorage.setItem("local-lm-chat", created.id); setView("chat"); focusMainContent(); void client.invalidateQueries({ queryKey: ["chats"] }); },
   });
   const createProject = useMutation({
     mutationFn: api.createProject,
     onSuccess: () => void client.invalidateQueries({ queryKey: ["projects"] }),
   });
+  const applyAcceptedTurn = (chatId: string, accepted: TurnAccepted) => {
+    client.setQueryData<ChatDetail>(["chat", chatId], (current) => {
+      if (!current) return current;
+      const messageIds = new Set(current.messages.map((message) => message.id));
+      const acceptedMessages = [accepted.user_message, accepted.assistant_message]
+        .filter((message) => !messageIds.has(message.id));
+      return {
+        ...current,
+        active_head_message_id: accepted.assistant_message.id,
+        messages: [...current.messages, ...acceptedMessages],
+      };
+    });
+    void client.invalidateQueries({ queryKey: ["chat", chatId], exact: true });
+    void client.invalidateQueries({ queryKey: ["chats"] });
+    void client.invalidateQueries({ queryKey: ["jobs"] });
+  };
   const send = useMutation({
-    mutationFn: ({ text, mode, artifacts, settings }: { text: string; mode: RoutingMode; artifacts: string[]; settings: Record<string, unknown> }) => api.sendTurn(currentChatId!, text, mode, artifacts, settings),
-    onSuccess: (accepted) => {
-      client.setQueryData<ChatDetail>(["chat", currentChatId], (current) => current ? { ...current, active_head_message_id: accepted.assistant_message.id, messages: [...current.messages, accepted.user_message, accepted.assistant_message] } : current);
-      void client.invalidateQueries({ queryKey: ["chats"] });
-      void client.invalidateQueries({ queryKey: ["jobs"] });
+    mutationFn: ({ chatId, text, mode, artifacts, settings }: SendTurnVariables) =>
+      api.sendTurn(chatId, text, mode, artifacts, settings),
+    onMutate: ({ chatId, text, mode }) => {
+      setPendingTurns((current) => ({ ...current, [chatId]: { text, mode } }));
+    },
+    onSuccess: (accepted, { chatId }) => applyAcceptedTurn(chatId, accepted),
+    onSettled: (_accepted, _error, { chatId }) => {
+      setPendingTurns((current) => {
+        if (!(chatId in current)) return current;
+        const next = { ...current };
+        delete next[chatId];
+        return next;
+      });
     },
   });
   const regenerate = useMutation({
-    mutationFn: ({ messageId, settings }: { messageId: string; settings: Record<string, unknown> }) => api.regenerateMessage(messageId, settings),
-    onSuccess: (accepted) => {
-      client.setQueryData<ChatDetail>(["chat", currentChatId], (current) => current ? { ...current, active_head_message_id: accepted.assistant_message.id, messages: [...current.messages, accepted.user_message, accepted.assistant_message] } : current);
-      void client.invalidateQueries({ queryKey: ["chats"] });
-      void client.invalidateQueries({ queryKey: ["jobs"] });
-    },
+    mutationFn: ({ messageId, settings }: { chatId: string; messageId: string; settings: Record<string, unknown> }) =>
+      api.regenerateMessage(messageId, settings),
+    onSuccess: (accepted, { chatId }) => applyAcceptedTurn(chatId, accepted),
   });
   const branch = useMutation({
-    mutationFn: ({ messageId, text, settings }: { messageId: string; text: string; settings: Record<string, unknown> }) => api.branchMessage(messageId, text, settings),
-    onSuccess: (accepted) => {
-      client.setQueryData<ChatDetail>(["chat", currentChatId], (current) => current ? { ...current, active_head_message_id: accepted.assistant_message.id, messages: [...current.messages, accepted.user_message, accepted.assistant_message] } : current);
-      void client.invalidateQueries({ queryKey: ["chats"] });
-      void client.invalidateQueries({ queryKey: ["jobs"] });
-    },
+    mutationFn: ({ messageId, text, settings }: { chatId: string; messageId: string; text: string; settings: Record<string, unknown> }) =>
+      api.branchMessage(messageId, text, settings),
+    onSuccess: (accepted, { chatId }) => applyAcceptedTurn(chatId, accepted),
   });
   const stop = useMutation({
-    mutationFn: () => api.cancelChat(currentChatId!),
-    onSuccess: () => {
-      void client.invalidateQueries({ queryKey: ["chat", currentChatId] });
+    mutationFn: (chatId: string) => api.cancelChat(chatId),
+    onSuccess: (_job, chatId) => {
+      void client.invalidateQueries({ queryKey: ["chat", chatId] });
       void client.invalidateQueries({ queryKey: ["jobs"] });
     },
   });
   const updateChat = useMutation({
-    mutationFn: (values: Partial<Chat>) => api.updateChat(currentChatId!, values),
-    onSuccess: () => {
-      void client.invalidateQueries({ queryKey: ["chat", currentChatId] });
-      void client.invalidateQueries({ queryKey: ["chats"] });
+    mutationFn: ({ id, values }: { id: string; values: Partial<Chat> }) => api.updateChat(id, values),
+    onMutate: ({ id, values }) => {
+      void client.cancelQueries({ queryKey: ["chat", id] });
+      const previousChat = client.getQueryData<ChatDetail>(["chat", id]);
+      const previousChats = client.getQueryData<Chat[]>(["chats"]);
+      client.setQueryData<ChatDetail>(["chat", id], (current) => (
+        current ? { ...current, ...values } : current
+      ));
+      client.setQueryData<Chat[]>(["chats"], (current) => current?.map((item) => (
+        item.id === id ? { ...item, ...values } : item
+      )));
+      return { previousChat, previousChats };
+    },
+    onError: (_error, { id }, context) => {
+      setChatDrafts((current) => {
+        const next = { ...current };
+        delete next[id];
+        return next;
+      });
+      if (context?.previousChat) client.setQueryData(["chat", id], context.previousChat);
+      if (context?.previousChats) client.setQueryData(["chats"], context.previousChats);
+    },
+    onSuccess: (updated, { id, values }) => {
+      if (updated) {
+        client.setQueryData<ChatDetail>(["chat", id], (current) => (
+          current ? { ...current, ...updated } : current
+        ));
+        client.setQueryData<Chat[]>(["chats"], (current) => current?.map((item) => (
+          item.id === id ? { ...item, ...updated } : item
+        )));
+        setChatDrafts((current) => {
+          const draft = current[id];
+          if (!draft) return current;
+          const remaining = { ...draft };
+          for (const key of Object.keys(values) as (keyof Chat)[]) {
+            if (remaining[key] === values[key]) delete remaining[key];
+          }
+          const next = { ...current };
+          if (Object.keys(remaining).length) next[id] = remaining;
+          else delete next[id];
+          return next;
+        });
+      }
+    },
+    onSettled: (updated, error, { id }) => {
+      if (updated || error) {
+        void client.invalidateQueries({ queryKey: ["chat", id] });
+        void client.invalidateQueries({ queryKey: ["chats"] });
+      }
     },
   });
   const manageChat = useMutation({
@@ -1733,7 +2765,7 @@ export default function App() {
       const remainingChats = previousChats.filter((candidate) => candidate.id !== deletedId);
       const previousCurrentChatId = currentChatId;
       client.setQueryData<Chat[]>(["chats"], remainingChats);
-      if (currentChatId === deletedId) {
+      if (activeChatId === deletedId) {
         const nextChatId = remainingChats.find((candidate) => !candidate.archived)?.id ?? null;
         setCurrentChatId(nextChatId);
         if (nextChatId) localStorage.setItem("local-lm-chat", nextChatId);
@@ -1743,7 +2775,7 @@ export default function App() {
       return { previousChats, previousCurrentChatId };
     },
     onSuccess: (_value, { id: deletedId }) => {
-      setTurnSettingsByChat((current) => {
+      setChatDrafts((current) => {
         const next = { ...current };
         delete next[deletedId];
         return next;
@@ -1797,13 +2829,6 @@ export default function App() {
     },
   });
 
-  useEffect(() => {
-    if (!currentChatId) {
-      const firstActive = chats.data?.find((candidate) => !candidate.archived);
-      if (firstActive) setCurrentChatId(firstActive.id);
-    }
-  }, [chats.data, currentChatId]);
-
   const allChats = useMemo(() => chats.data ?? [], [chats.data]);
   const allProjects = useMemo(() => projects.data ?? [], [projects.data]);
   const activeContent = useMemo(() => {
@@ -1811,18 +2836,61 @@ export default function App() {
     if (view === "models") return <ModelsView />;
     if (view === "workflows") return <WorkflowsView />;
     if (view === "settings") return <SettingsView engines={engines.data ?? []} />;
-    return <ChatView chat={chat.data} engines={engines.data ?? []} profiles={profiles.data ?? []} workflows={workflows.data ?? []} project={allProjects.find((item) => item.id === chat.data?.project_id)} liveText={liveText} pendingTurn={send.isPending && send.variables ? { text: send.variables.text, mode: send.variables.mode } : undefined} settings={currentChatId ? turnSettingsByChat[currentChatId] ?? {} : {}} onSettings={(settings) => {
-      if (currentChatId) setTurnSettingsByChat((current) => ({ ...current, [currentChatId]: settings }));
-    }} onProfile={(field, id) => updateChat.mutate({ [field]: id })} onRegenerate={(messageId, settings) => regenerate.mutate({ messageId, settings })} onEdit={(messageId, text, settings) => branch.mutate({ messageId, text, settings })} onStop={() => stop.mutate()} onSend={(text, mode, artifacts, settings) => send.mutate({ text, mode, artifacts, settings })} />;
-  }, [view, engines.data, profiles.data, workflows.data, allProjects, chat.data, liveText, currentChatId, turnSettingsByChat, send, regenerate, branch, stop, updateChat]);
+    const displayedChat = chat.data
+      ? { ...chat.data, ...(chatDrafts[chat.data.id] ?? {}) }
+      : undefined;
+    const selectedRole = roleForMode(displayedChat?.routing_mode ?? "auto");
+    const scopedSettings = displayedChat?.generation_settings_json?.[selectedRole] ?? {};
+    const presetId = displayedChat?.generation_preset_ids_json?.[selectedRole] ?? null;
+    const persistActiveChat = (values: Partial<Chat>) => {
+      if (!displayedChat) return;
+      setChatDrafts((current) => ({
+        ...current,
+        [displayedChat.id]: { ...(current[displayedChat.id] ?? {}), ...values },
+      }));
+      client.setQueryData<ChatDetail>(["chat", displayedChat.id], (current) => (
+        current ? { ...current, ...values } : current
+      ));
+      updateChat.mutate({ id: displayedChat.id, values });
+    };
+    return <ChatView chat={displayedChat} engines={engines.data ?? []} profiles={profiles.data ?? []} presets={presets.data ?? []} workflows={workflows.data ?? []} project={allProjects.find((item) => item.id === displayedChat?.project_id)} liveText={liveText} pendingTurn={displayedChat ? pendingTurns[displayedChat.id] : undefined} settings={scopedSettings} presetId={presetId} onSettings={(settings) => {
+      if (!displayedChat) return;
+      const role = roleForMode(displayedChat.routing_mode);
+      persistActiveChat({
+        generation_settings_json: {
+          ...(displayedChat.generation_settings_json ?? {}),
+          [role]: settings,
+        },
+      });
+    }} onPreset={(selectedPresetId) => {
+      if (!displayedChat) return;
+      const role = roleForMode(displayedChat.routing_mode);
+      const bindings = { ...(displayedChat.generation_preset_ids_json ?? {}) };
+      if (selectedPresetId) bindings[role] = selectedPresetId;
+      else delete bindings[role];
+      persistActiveChat({ generation_preset_ids_json: bindings });
+    }} onMode={(mode) => {
+      persistActiveChat({ routing_mode: mode });
+    }} onProfile={(field, id) => {
+      persistActiveChat({ [field]: id });
+    }} onRegenerate={(messageId, settings) => {
+      if (displayedChat) regenerate.mutate({ chatId: displayedChat.id, messageId, settings });
+    }} onEdit={(messageId, text, settings) => {
+      if (displayedChat) branch.mutate({ chatId: displayedChat.id, messageId, text, settings });
+    }} onStop={() => {
+      if (displayedChat) stop.mutate(displayedChat.id);
+    }} onSend={(text, mode, artifacts, settings) => {
+      if (displayedChat) send.mutate({ chatId: displayedChat.id, text, mode, artifacts, settings });
+    }} />;
+  }, [view, engines.data, profiles.data, presets.data, workflows.data, allProjects, chat.data, chatDrafts, liveText, pendingTurns, send, regenerate, branch, stop, updateChat, client]);
 
   return (
     <div className="app-shell">
       <a className="skip-link" href="#main-content">Skip to main content</a>
-      <Sidebar projects={allProjects} chats={allChats} currentChatId={currentChatId} view={view} onChat={(id) => { setCurrentChatId(id); localStorage.setItem("local-lm-chat", id); setView("chat"); }} onView={setView} onNewChat={(projectId) => createChat.mutate(projectId)} onNewProject={() => { const name = window.prompt("Project name"); if (name?.trim()) createProject.mutate(name.trim()); }} onExportProject={(id, includeMedia) => exportProject.mutate({ id, includeMedia })} onImportProject={(file) => importProject.mutate(file)} onUpdateChat={(id, values) => manageChat.mutate({ id, values })} onDeleteChat={(id, deleteGeneratedMedia) => deleteChat.mutate({ id, deleteGeneratedMedia })} onUpdateProject={(id, values) => updateProject.mutate({ id, values })} onDeleteProject={(id) => deleteProject.mutate(id)} />
+      <Sidebar projects={allProjects} chats={allChats} engines={engines.data ?? []} presets={presets.data ?? []} workflows={workflows.data ?? []} currentChatId={activeChatId} view={view} onChat={(id) => { setCurrentChatId(id); localStorage.setItem("local-lm-chat", id); setView("chat"); focusMainContent(); }} onView={(nextView) => { setView(nextView); focusMainContent(); }} onNewChat={(projectId) => createChat.mutate(projectId)} onNewProject={() => { const name = window.prompt("Project name"); if (name?.trim()) createProject.mutate(name.trim()); }} onExportProject={(id, includeMedia) => exportProject.mutate({ id, includeMedia })} onImportProject={(file) => importProject.mutate(file)} onUpdateChat={(id, values) => manageChat.mutate({ id, values })} onDeleteChat={(id, deleteGeneratedMedia) => deleteChat.mutate({ id, deleteGeneratedMedia })} onUpdateProject={(id, values) => updateProject.mutate({ id, values })} onDeleteProject={(id) => deleteProject.mutate(id)} />
       <main id="main-content" tabIndex={-1}>{activeContent}</main>
       <JobsPanel />
-      {(send.error || regenerate.error || branch.error || stop.error || createChat.error || createProject.error || importProject.error || manageChat.error || deleteChat.error || updateProject.error || deleteProject.error) && <div className="toast error"><X size={16} />{(send.error || regenerate.error || branch.error || stop.error || createChat.error || createProject.error || importProject.error || manageChat.error || deleteChat.error || updateProject.error || deleteProject.error)?.message}</div>}
+      {(send.error || regenerate.error || branch.error || stop.error || updateChat.error || createChat.error || createProject.error || importProject.error || manageChat.error || deleteChat.error || updateProject.error || deleteProject.error) && <div className="toast error" role="alert"><X size={16} />{(send.error || regenerate.error || branch.error || stop.error || updateChat.error || createChat.error || createProject.error || importProject.error || manageChat.error || deleteChat.error || updateProject.error || deleteProject.error)?.message}</div>}
     </div>
   );
 }

@@ -1,15 +1,19 @@
 from __future__ import annotations
 
 import asyncio
+import base64
 import hashlib
 import logging
 import re
 import secrets
 import time
+from collections.abc import AsyncIterator
+from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Any
 
-from sqlalchemy import select
+from sqlalchemy import delete, select
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session, object_session, selectinload
 
 from .adapters.base import ChatRequest, MediaEvent, MediaRequest
@@ -43,6 +47,7 @@ from .models import (
     ModelSource,
     Project,
     Run,
+    TurnCreationClaim,
     WorkflowDefinition,
     WorkflowRevision,
 )
@@ -52,16 +57,24 @@ from .routing import ModalityRouter, RouteConfirmationRequired
 from .scheduler import ResourceScheduler
 from .schemas import MessageOut, RunOut, TurnAccepted, TurnRequest, WorkerStatus
 from .settings_registry import (
-    CHAT_SETTINGS,
-    IMAGE_SETTINGS,
-    VIDEO_SETTINGS,
-    defaults,
-    resolve_settings,
+    compatible_stored_settings,
+    resolve_generation_settings,
     validate_settings,
     workflow_settings,
 )
 
 logger = logging.getLogger(__name__)
+
+IDEMPOTENCY_CLAIM_WAIT_SECONDS = 120.0
+MAX_VISION_IMAGES = 4
+MAX_VISION_IMAGE_BYTES = 20 * 1024 * 1024
+MAX_VISION_TOTAL_BYTES = 32 * 1024 * 1024
+VISION_MEDIA_TYPES = {
+    "image/gif",
+    "image/jpeg",
+    "image/png",
+    "image/webp",
+}
 
 SELECTION_TERM_ALIASES = {
     "animation": "video",
@@ -132,11 +145,15 @@ class ConversationOrchestrator:
         self.processes = processes
         self.router = ModalityRouter()
         self._tasks: dict[str, asyncio.Task[None]] = {}
+        self._chat_guards: dict[str, asyncio.Lock] = {}
         self._chat_planner_ready = asyncio.Event()
         self._chat_planner_ready.set()
 
     def recover_interrupted(self) -> None:
         with SessionLocal() as session:
+            # Claims only live while an API process is planning a new turn. Any
+            # surviving row belongs to a process that can no longer finish it.
+            session.execute(delete(TurnCreationClaim))
             jobs = session.scalars(
                 select(Job).where(Job.status.in_([JobStatus.RUNNING.value, JobStatus.QUEUED.value]))
             ).all()
@@ -158,16 +175,37 @@ class ConversationOrchestrator:
                         message = session.get(Message, run.assistant_message_id)
                         if message:
                             message.status = MessageStatus.FAILED.value
-                            self._replace_parts(
-                                message,
-                                [
+                            preview_ids = self._temporary_preview_ids(message)
+                            for part in list(message.parts):
+                                if part.type == PartType.PROGRESS.value or (
+                                    part.artifact_id and part.metadata_json.get("preview")
+                                ):
+                                    message.parts.remove(part)
+                            session.flush()
+                            error_part = next(
+                                (
+                                    part
+                                    for part in message.parts
+                                    if part.type == PartType.ERROR.value
+                                ),
+                                None,
+                            )
+                            if error_part:
+                                error_part.text = job.error
+                            else:
+                                message.parts.append(
                                     MessagePart(
-                                        position=0,
+                                        position=max(
+                                            (part.position for part in message.parts),
+                                            default=-1,
+                                        )
+                                        + 1,
                                         type=PartType.ERROR.value,
                                         text=job.error,
                                     )
-                                ],
-                            )
+                                )
+                            for artifact_id in preview_ids:
+                                self.artifacts.delete_temporary_preview(session, artifact_id)
             session.commit()
 
     async def create_turn(
@@ -178,13 +216,151 @@ class ConversationOrchestrator:
         *,
         use_explicit_parent: bool = False,
     ) -> TurnAccepted:
-        if request.idempotency_key:
-            existing = session.scalar(
-                select(Run).where(Run.idempotency_key == request.idempotency_key)
+        async with self.chat_guard(chat_id):
+            return await self._create_turn(
+                session,
+                chat_id,
+                request,
+                use_explicit_parent=use_explicit_parent,
             )
+
+    async def _create_turn(
+        self,
+        session: Session,
+        chat_id: str,
+        request: TurnRequest,
+        *,
+        use_explicit_parent: bool = False,
+    ) -> TurnAccepted:
+        # Never resolve an idempotency key until its URL-scoped chat has been
+        # validated. Otherwise a key from one chat could disclose another
+        # chat's run, including when the requested chat never existed.
+        chat = session.get(Chat, chat_id)
+        if not chat:
+            raise LookupError("chat not found")
+
+        key = request.idempotency_key
+        if key is None:
+            return await self._create_new_turn(
+                session,
+                chat_id,
+                request,
+                use_explicit_parent=use_explicit_parent,
+            )
+
+        owner_token, replay = await self._claim_or_replay_turn(
+            session,
+            chat_id,
+            key,
+        )
+        if replay:
+            return replay
+        if not owner_token:
+            raise TimeoutError("turn idempotency claim could not be acquired")
+
+        try:
+            # Revalidate after the claim commit. This also refreshes state that
+            # may have changed while a competing request held the claim.
+            session.expire_all()
+            if not session.get(Chat, chat_id):
+                raise LookupError("chat not found")
+            existing = self._idempotent_run(session, chat_id, key)
             if existing:
                 return self._accepted_for_run(session, existing)
+            return await self._create_new_turn(
+                session,
+                chat_id,
+                request,
+                use_explicit_parent=use_explicit_parent,
+            )
+        finally:
+            self._release_turn_claim(session, chat_id, key, owner_token)
 
+    async def _claim_or_replay_turn(
+        self,
+        session: Session,
+        chat_id: str,
+        idempotency_key: str,
+    ) -> tuple[str | None, TurnAccepted | None]:
+        deadline = asyncio.get_running_loop().time() + IDEMPOTENCY_CLAIM_WAIT_SECONDS
+        while True:
+            session.expire_all()
+            if not session.get(Chat, chat_id):
+                raise LookupError("chat not found")
+            existing = self._idempotent_run(session, chat_id, idempotency_key)
+            if existing:
+                return None, self._accepted_for_run(session, existing)
+
+            owner_token = secrets.token_hex(24)
+            claim = TurnCreationClaim(
+                chat_id=chat_id,
+                idempotency_key=idempotency_key,
+                owner_token=owner_token,
+            )
+            session.add(claim)
+            try:
+                session.commit()
+                return owner_token, None
+            except IntegrityError:
+                session.rollback()
+                # A chat may be deleted between the ownership check and claim
+                # insertion. Distinguish that from a legitimate duplicate.
+                if not session.get(Chat, chat_id):
+                    raise LookupError("chat not found") from None
+
+            if asyncio.get_running_loop().time() >= deadline:
+                raise TimeoutError(
+                    "another request is still creating this turn; retry with the same key"
+                )
+            await asyncio.sleep(0.01)
+
+    @staticmethod
+    def _idempotent_run(
+        session: Session,
+        chat_id: str,
+        idempotency_key: str,
+    ) -> Run | None:
+        return session.scalar(
+            select(Run).where(
+                Run.chat_id == chat_id,
+                Run.idempotency_key == idempotency_key,
+            )
+        )
+
+    @staticmethod
+    def _release_turn_claim(
+        session: Session,
+        chat_id: str,
+        idempotency_key: str,
+        owner_token: str,
+    ) -> None:
+        try:
+            # If turn construction failed after flushing messages, discard that
+            # partial graph before releasing ownership to a retry.
+            session.rollback()
+            session.execute(
+                delete(TurnCreationClaim).where(
+                    TurnCreationClaim.chat_id == chat_id,
+                    TurnCreationClaim.idempotency_key == idempotency_key,
+                    TurnCreationClaim.owner_token == owner_token,
+                )
+            )
+            session.commit()
+        except Exception:
+            session.rollback()
+            logger.exception(
+                "Failed to release turn idempotency claim for chat %s",
+                chat_id,
+            )
+
+    async def _create_new_turn(
+        self,
+        session: Session,
+        chat_id: str,
+        request: TurnRequest,
+        *,
+        use_explicit_parent: bool = False,
+    ) -> TurnAccepted:
         chat = session.get(Chat, chat_id)
         if not chat:
             raise LookupError("chat not found")
@@ -204,12 +380,20 @@ class ConversationOrchestrator:
                     )
                     .limit(1)
                 )
+        explicit_artifacts: dict[str, Artifact] = {}
         for artifact_id in request.input_artifact_ids:
-            if not session.get(Artifact, artifact_id):
+            artifact = session.get(Artifact, artifact_id)
+            if not artifact:
                 raise LookupError(f"input artifact not found: {artifact_id}")
+            explicit_artifacts[artifact_id] = artifact
 
         mode = request.mode or RoutingMode(chat.routing_mode)
-        has_prior_image = self._has_prior_image(session, chat.id)
+        prior_image, prior_image_prompt = self._latest_image_context(
+            session,
+            chat.id,
+            parent_message_id,
+        )
+        has_prior_image = prior_image is not None
         routing_context = self._routing_context(session, chat, parent_message_id)
         planner_available = (
             await self._chat_planner_available() if mode == RoutingMode.AUTO else True
@@ -239,14 +423,18 @@ class ConversationOrchestrator:
             and not request.confirm_media
         ):
             raise RouteConfirmationRequired(plan)
-        resolved_input_ids = list(request.input_artifact_ids)
+        resolved_input_ids = list(dict.fromkeys(request.input_artifact_ids))
         prior_prompt: str | None = None
         if plan.operation in {Operation.IMAGE_TO_IMAGE, Operation.IMAGE_TO_VIDEO}:
-            if not resolved_input_ids:
-                prior_image = self._latest_image(session, chat.id)
-                if prior_image:
-                    resolved_input_ids.append(prior_image)
-            prior_prompt = self._latest_media_prompt(session, chat.id)
+            if not resolved_input_ids and prior_image:
+                resolved_input_ids.append(prior_image)
+                prior_prompt = prior_image_prompt
+            elif resolved_input_ids:
+                prior_prompt = self._latest_media_prompt(
+                    session,
+                    chat.id,
+                    parent_message_id,
+                )
             if prior_prompt:
                 plan.standalone_prompt = f"{prior_prompt}. Follow-up instruction: {request.text}"
         plan.input_artifact_ids = resolved_input_ids
@@ -284,36 +472,48 @@ class ConversationOrchestrator:
                     "No ready workflow matches the active media engine. Install a supported "
                     "image or video model and LM Atelier will configure it automatically."
                 )
+        role = self._role_for_operation(plan.operation)
+        engine = (
+            profile.engine if profile else workflow_revision.engine if workflow_revision else None
+        )
         fields = workflow_settings(
-            self._fields_for_operation(plan.operation),
+            await self.engines.settings_for_role(role, engine=engine),
             workflow_revision.input_schema_json if workflow_revision else None,
         )
         request_fields = [field for field in fields if field.scope != "load"]
         request_settings = validate_settings(request.settings, request_fields)
-        preset = self._default_preset(session, plan.operation)
-        profile_load_settings = self._compatible_workflow_settings(
-            profile.load_settings_json if profile else {},
+        project = session.get(Project, chat.project_id) if chat.project_id else None
+        default_preset = self._default_preset(session, plan.operation)
+        project_preset = self._bound_preset(session, project, role)
+        chat_preset = self._bound_preset(session, chat, role)
+        preset_layers = [
+            (scope, preset, compatible_stored_settings(preset.settings_json, request_fields))
+            for scope, preset in (
+                ("default", default_preset),
+                ("project", project_preset),
+                ("chat", chat_preset),
+            )
+            if preset
+        ]
+        effective_settings = resolve_generation_settings(
             fields,
-            enabled=workflow_revision is not None,
+            request_fields=request_fields,
+            profile_defaults=(
+                profile.load_settings_json if profile else {},
+                profile.request_settings_json if profile else {},
+                default_preset.settings_json if default_preset else {},
+            ),
+            project_defaults=(
+                project_preset.settings_json if project_preset else {},
+                self._scoped_generation_settings(project, role),
+            ),
+            chat_defaults=(
+                chat_preset.settings_json if chat_preset else {},
+                self._scoped_generation_settings(chat, role),
+            ),
+            turn_overrides=request_settings,
         )
-        profile_request_settings = self._compatible_workflow_settings(
-            profile.request_settings_json if profile else {},
-            request_fields,
-            enabled=workflow_revision is not None,
-        )
-        preset_settings = self._compatible_workflow_settings(
-            preset.settings_json if preset else {},
-            request_fields,
-            enabled=workflow_revision is not None,
-        )
-        effective_settings = resolve_settings(
-            defaults(fields),
-            profile_load_settings,
-            profile_request_settings,
-            preset_settings,
-            request_settings,
-        )
-        effective_settings = validate_settings(effective_settings, fields)
+        effective_preset = preset_layers[-1] if preset_layers else None
         if plan.operation != Operation.TEXT and effective_settings.get("seed") == -1:
             effective_settings["seed"] = secrets.randbelow(2_147_483_648)
         generation_estimate = (
@@ -335,12 +535,35 @@ class ConversationOrchestrator:
         ):
             raise RouteConfirmationRequired(plan)
 
+        input_parts: list[MessagePart] = [
+            MessagePart(position=0, type=PartType.TEXT.value, text=request.text)
+        ]
+        explicit_ids = set(explicit_artifacts)
+        for artifact_id in resolved_input_ids:
+            artifact = explicit_artifacts.get(artifact_id) or session.get(Artifact, artifact_id)
+            if not artifact:
+                # The ancestor reference was resolved in this transaction, so this
+                # guard only protects against corrupt legacy rows.
+                raise LookupError(f"input artifact not found: {artifact_id}")
+            input_parts.append(
+                MessagePart(
+                    position=len(input_parts),
+                    type=self._input_part_type(artifact),
+                    artifact_id=artifact.id,
+                    metadata_json={
+                        "input_reference": True,
+                        "input_reference_source": (
+                            "explicit" if artifact.id in explicit_ids else "ancestor"
+                        ),
+                    },
+                )
+            )
         user_message = Message(
             chat_id=chat.id,
             parent_id=parent_message_id,
             role=MessageRole.USER.value,
             status=MessageStatus.COMPLETE.value,
-            parts=[MessagePart(position=0, type=PartType.TEXT.value, text=request.text)],
+            parts=input_parts,
         )
         if plan.operation == Operation.TEXT:
             initial_parts = [
@@ -432,14 +655,24 @@ class ConversationOrchestrator:
                 "model": model_provenance,
                 "preset": (
                     {
+                        "id": effective_preset[1].id,
+                        "name": effective_preset[1].name,
+                        "role": effective_preset[1].role,
+                        "settings": effective_preset[2],
+                    }
+                    if effective_preset
+                    else None
+                ),
+                "preset_layers": [
+                    {
+                        "scope": scope,
                         "id": preset.id,
                         "name": preset.name,
                         "role": preset.role,
-                        "settings": preset_settings,
+                        "settings": settings,
                     }
-                    if preset
-                    else None
-                ),
+                    for scope, preset, settings in preset_layers
+                ],
                 "workflow": workflow_provenance,
                 "resolved_settings": effective_settings,
                 "generation_estimate": generation_estimate,
@@ -469,6 +702,116 @@ class ConversationOrchestrator:
         task = asyncio.create_task(self._execute(job_id, run_id), name=f"local-lm-{job_id}")
         self._tasks[job_id] = task
         task.add_done_callback(lambda finished: self._task_done(job_id, finished))
+
+    def prepare_retry(self, session: Session, run: Run) -> None:
+        """Reset the existing assistant slot before dispatching a retry."""
+
+        message = session.get(Message, run.assistant_message_id)
+        if not message:
+            raise LookupError("run assistant message not found")
+        preview_ids = self._temporary_preview_ids(message)
+        message.status = MessageStatus.PENDING.value
+        if run.operation == Operation.TEXT.value:
+            parts = [
+                MessagePart(position=0, type=PartType.TEXT.value, text=""),
+                MessagePart(
+                    position=1,
+                    type=PartType.PROGRESS.value,
+                    text="Queued",
+                    metadata_json={
+                        "activity": "chat",
+                        "progress": 0,
+                        "phase": "queued",
+                    },
+                ),
+            ]
+        else:
+            parts = [
+                MessagePart(
+                    position=0,
+                    type=PartType.PROGRESS.value,
+                    text="Queued",
+                    metadata_json={"progress": 0, "phase": "queued"},
+                )
+            ]
+        self._replace_parts(message, parts)
+        session.flush()
+        for artifact_id in preview_ids:
+            self.artifacts.delete_temporary_preview(session, artifact_id)
+
+    def chat_guard(self, chat_id: str) -> asyncio.Lock:
+        """Serialize turn creation, retries, and deletion for one chat."""
+        return self._chat_guards.setdefault(chat_id, asyncio.Lock())
+
+    @asynccontextmanager
+    async def prepare_chat_deletion(self, chat_id: str) -> AsyncIterator[None]:
+        """Stop every chat generation and hold its lifecycle lock through deletion."""
+        async with self.chat_guard(chat_id):
+            await self._cancel_chat_runs(chat_id)
+            yield
+
+    async def _cancel_chat_runs(self, chat_id: str) -> None:
+        active_statuses = {
+            JobStatus.QUEUED.value,
+            JobStatus.RUNNING.value,
+            JobStatus.PAUSED.value,
+        }
+        with SessionLocal() as session:
+            rows = session.execute(
+                select(Job.id, Job.run_id, Job.status, Run.operation)
+                .join(Run, Job.run_id == Run.id)
+                .where(Run.chat_id == chat_id)
+            ).all()
+
+        cancellable_rows = [
+            (job_id, run_id, operation)
+            for job_id, run_id, status, operation in rows
+            if status in active_statuses or self._task_is_active(job_id)
+        ]
+        for job_id, run_id, operation in cancellable_rows:
+            try:
+                if operation == Operation.TEXT.value:
+                    await self.engines.chat.cancel(run_id)
+                else:
+                    await self.engines.media.cancel(run_id)
+            except Exception:
+                logger.exception(
+                    "Engine cancellation failed while deleting chat %s (job %s)",
+                    chat_id,
+                    job_id,
+                )
+
+        tasks = {
+            job_id: task
+            for job_id, _run_id, _operation in cancellable_rows
+            if (task := self._tasks.get(job_id)) is not None and not task.done()
+        }
+        for task in tasks.values():
+            task.cancel()
+        if tasks:
+            await asyncio.gather(*tasks.values(), return_exceptions=True)
+            for job_id, task in tasks.items():
+                if self._tasks.get(job_id) is task:
+                    self._tasks.pop(job_id, None)
+
+        cancelled: list[tuple[str, str]] = []
+        with SessionLocal() as session:
+            for job_id, run_id, _status, _operation in rows:
+                job = session.get(Job, job_id)
+                if not job:
+                    continue
+                if job.status in active_statuses:
+                    self._mark_cancelled(session, job)
+                if job.status == JobStatus.CANCELLED.value:
+                    cancelled.append((job.id, run_id))
+            session.commit()
+
+        for job_id, run_id in cancelled:
+            await self.events.publish("run.cancelled", run_id, {"job_id": job_id})
+
+    def _task_is_active(self, job_id: str) -> bool:
+        task = self._tasks.get(job_id)
+        return task is not None and not task.done()
 
     def _task_done(self, job_id: str, task: asyncio.Task[None]) -> None:
         if self._tasks.get(job_id) is task:
@@ -768,10 +1111,7 @@ class ConversationOrchestrator:
         )
 
     async def _ensure_chat_worker(self, run_id: str) -> WorkerStatus | None:
-        if (
-            self.engines.settings.chat_engine != "llama.cpp"
-            or not self.processes.settings.llama_executable
-        ):
+        if self.engines.settings.chat_engine != "llama.cpp":
             return None
         with SessionLocal() as session:
             run = session.get(Run, run_id)
@@ -791,20 +1131,27 @@ class ConversationOrchestrator:
         return await self.processes.load_chat(profile, install)
 
     async def _chat_planner_available(self) -> bool:
-        if (
-            self.engines.settings.chat_engine != "llama.cpp"
-            or not self.processes.settings.llama_executable
-        ):
+        if self.engines.settings.chat_engine != "llama.cpp":
             return True
+        if not self.processes.settings.llama_executable:
+            return False
         if not self._chat_planner_ready.is_set():
             return False
         status = next(item for item in self.processes.statuses() if item.name == "chat")
-        return status.state != "starting"
+        return status.state == "ready"
 
     async def _prepare_chat_context(
         self, session: Session, run: Run
-    ) -> tuple[list[dict[str, str]], dict[str, Any], dict[str, Any]]:
+    ) -> tuple[list[dict[str, Any]], dict[str, Any], dict[str, Any]]:
         messages = self._context_messages(session, run)
+        capabilities = await self.engines.chat_capabilities()
+        vision_metadata: dict[str, Any] = {
+            "available": "image" in capabilities.input_modalities,
+            "images_included": 0,
+            "artifact_ids": [],
+        }
+        if vision_metadata["available"]:
+            messages, vision_metadata = self._attach_visual_context(session, run, messages)
         profile = session.get(ModelProfile, run.profile_id) if run.profile_id else None
         context_limit = int(
             (profile.load_settings_json if profile else {}).get("context_length", 8192)
@@ -847,8 +1194,157 @@ class ConversationOrchestrator:
             "messages_included": len(messages),
             "messages_omitted": omitted,
             "output_adjusted": output_limit != requested_output,
+            "vision": vision_metadata,
         }
         return messages, request_settings, metadata
+
+    def _attach_visual_context(
+        self,
+        session: Session,
+        run: Run,
+        messages: list[dict[str, Any]],
+    ) -> tuple[list[dict[str, Any]], dict[str, Any]]:
+        candidates = self._visual_context_artifacts(session, run)
+        user_index = next(
+            (
+                index
+                for index in range(len(messages) - 1, -1, -1)
+                if messages[index].get("role") == MessageRole.USER.value
+            ),
+            None,
+        )
+        if user_index is None:
+            return messages, {
+                "available": True,
+                "images_included": 0,
+                "artifact_ids": [],
+                "bytes_included": 0,
+                "images_skipped": len(candidates),
+            }
+        encoded: list[tuple[Artifact, str, str]] = []
+        total_bytes = 0
+        skipped = 0
+        for artifact in candidates:
+            if len(encoded) >= MAX_VISION_IMAGES:
+                skipped += 1
+                continue
+            try:
+                path, detected_type, _disposition = self.artifacts.delivery_metadata(artifact)
+                size = path.stat().st_size
+                if (
+                    detected_type not in VISION_MEDIA_TYPES
+                    or size > MAX_VISION_IMAGE_BYTES
+                    or total_bytes + size > MAX_VISION_TOTAL_BYTES
+                ):
+                    skipped += 1
+                    continue
+                content = path.read_bytes()
+                if (
+                    len(content) != artifact.size_bytes
+                    or hashlib.sha256(content).hexdigest() != artifact.sha256
+                ):
+                    skipped += 1
+                    continue
+            except (OSError, ValueError):
+                skipped += 1
+                continue
+            encoded.append(
+                (
+                    artifact,
+                    detected_type,
+                    base64.b64encode(content).decode("ascii"),
+                )
+            )
+            total_bytes += size
+
+        if encoded:
+            user_index = next(
+                (
+                    index
+                    for index in range(len(messages) - 1, -1, -1)
+                    if messages[index].get("role") == MessageRole.USER.value
+                ),
+                None,
+            )
+            if user_index is not None:
+                text = messages[user_index].get("content", "")
+                text = text if isinstance(text, str) else ""
+                messages[user_index] = {
+                    "role": MessageRole.USER.value,
+                    "content": [
+                        {"type": "text", "text": text},
+                        *[
+                            {
+                                "type": "image_url",
+                                "image_url": {
+                                    "url": f"data:{media_type};base64,{payload}",
+                                    "detail": "auto",
+                                },
+                            }
+                            for _artifact, media_type, payload in encoded
+                        ],
+                    ],
+                }
+
+        return messages, {
+            "available": True,
+            "images_included": len(encoded),
+            "artifact_ids": [artifact.id for artifact, _media_type, _payload in encoded],
+            "bytes_included": total_bytes,
+            "images_skipped": skipped,
+        }
+
+    @classmethod
+    def _visual_context_artifacts(cls, session: Session, run: Run) -> list[Artifact]:
+        """Return explicit current inputs, then the newest prior branch visual."""
+
+        current = session.get(Message, run.user_message_id)
+        candidates: list[Artifact] = []
+        for artifact in cls._message_input_artifacts(session, current) if current else []:
+            if artifact.media_type.casefold().startswith("video/"):
+                poster_id = artifact.metadata_json.get("poster_artifact_id")
+                poster = session.get(Artifact, poster_id) if isinstance(poster_id, str) else None
+                if poster:
+                    candidates.append(poster)
+                continue
+            candidates.append(artifact)
+        seen = {artifact.id for artifact in candidates}
+
+        current_id = current.parent_id if current else None
+        visited: set[str] = set()
+        while current_id and current_id not in visited:
+            visited.add(current_id)
+            message = session.scalar(
+                select(Message)
+                .options(selectinload(Message.parts))
+                .where(Message.id == current_id, Message.chat_id == run.chat_id)
+            )
+            if not message:
+                break
+            for part in sorted(message.parts, key=lambda value: value.position, reverse=True):
+                if not part.artifact_id:
+                    continue
+                referenced = session.get(Artifact, part.artifact_id)
+                if not referenced:
+                    continue
+                selected: Artifact | None = referenced
+                if part.type == PartType.VIDEO.value:
+                    poster_id = referenced.metadata_json.get("poster_artifact_id")
+                    selected = (
+                        session.get(Artifact, poster_id) if isinstance(poster_id, str) else None
+                    )
+                    if not selected:
+                        continue
+                if selected is None:
+                    continue
+                if (
+                    part.type in {PartType.IMAGE.value, PartType.VIDEO.value}
+                    and selected.id not in seen
+                ):
+                    candidates.append(selected)
+                    return candidates
+            current_id = message.parent_id
+        return candidates
 
     async def _prepare_device_handoff(self, operation: str) -> str | None:
         if (
@@ -887,12 +1383,41 @@ class ConversationOrchestrator:
             self._chat_planner_ready.set()
 
     async def _execute_media(self, job_id: str, run_id: str) -> None:
+        if self.engines.settings.media_engine == "comfyui":
+            status = next(item for item in self.processes.statuses() if item.name == "media")
+            if not status.running or status.state != "ready":
+                with SessionLocal() as session:
+                    job = session.get(Job, job_id)
+                    run = session.get(Run, run_id)
+                    message = session.get(Message, run.assistant_message_id) if run else None
+                    if job and message:
+                        event = MediaEvent(
+                            type="progress",
+                            progress=0,
+                            phase="preparing media runtime",
+                        )
+                        job.phase = event.phase
+                        self._replace_parts(
+                            message,
+                            self._media_progress_parts(message, event),
+                        )
+                        session.commit()
+                await self.events.publish(
+                    "generation.progress",
+                    run_id,
+                    {
+                        "progress": 0,
+                        "phase": "preparing media runtime",
+                        "job_id": job_id,
+                    },
+                )
+                await self.processes.start_media()
         with SessionLocal() as session:
             run = session.get(Run, run_id)
             if not run:
                 return
             input_paths: list[Path] = []
-            for artifact_id in run.provenance_json.get("input_artifact_ids", []):
+            for artifact_id in self.input_artifact_ids_for_run(session, run):
                 artifact = session.get(Artifact, artifact_id)
                 if artifact:
                     input_paths.append(self.artifacts.resolve(artifact))
@@ -1016,6 +1541,9 @@ class ConversationOrchestrator:
                         **generated.metadata,
                         "run_id": run.id,
                         "semantic_description": run.standalone_prompt,
+                        "semantic_description_source": "generation_prompt",
+                        "semantic_description_confidence": "intent-only",
+                        "visual_contents_inspected": False,
                         "settings": run.settings_json,
                     },
                 )
@@ -1277,39 +1805,126 @@ class ConversationOrchestrator:
         message.parts.extend(parts)
 
     @staticmethod
-    def _has_prior_image(session: Session, chat_id: str) -> bool:
-        return (
-            session.scalar(
-                select(MessagePart.id)
-                .join(Message)
-                .where(Message.chat_id == chat_id, MessagePart.type == PartType.IMAGE.value)
-                .limit(1)
-            )
-            is not None
-        )
+    def _ancestor_messages(
+        session: Session,
+        chat_id: str,
+        head_message_id: str | None,
+        *,
+        limit: int | None = None,
+    ) -> list[Message]:
+        """Return one active message ancestry from newest to oldest.
 
-    @staticmethod
-    def _latest_image(session: Session, chat_id: str) -> str | None:
-        return session.scalar(
-            select(MessagePart.artifact_id)
-            .join(Message)
-            .where(
-                Message.chat_id == chat_id,
-                MessagePart.type == PartType.IMAGE.value,
-                MessagePart.artifact_id.is_not(None),
-            )
-            .order_by(MessagePart.created_at.desc())
-            .limit(1)
-        )
+        Message timestamps cannot identify a branch: edited turns leave sibling
+        messages in the same chat. Following parent links is therefore required
+        anywhere that resolves conversational media.
+        """
 
-    @staticmethod
-    def _latest_media_prompt(session: Session, chat_id: str) -> str | None:
-        return session.scalar(
-            select(Run.standalone_prompt)
-            .where(Run.chat_id == chat_id, Run.operation != Operation.TEXT.value)
-            .order_by(Run.created_at.desc())
-            .limit(1)
+        rows: list[Message] = []
+        current_id = head_message_id
+        visited: set[str] = set()
+        while current_id and current_id not in visited and (limit is None or len(rows) < limit):
+            visited.add(current_id)
+            message = session.scalar(
+                select(Message)
+                .options(selectinload(Message.parts).selectinload(MessagePart.artifact))
+                .where(Message.id == current_id, Message.chat_id == chat_id)
+            )
+            if not message:
+                break
+            rows.append(message)
+            current_id = message.parent_id
+        return rows
+
+    @classmethod
+    def _latest_image_context(
+        cls,
+        session: Session,
+        chat_id: str,
+        head_message_id: str | None,
+    ) -> tuple[str | None, str | None]:
+        for message in cls._ancestor_messages(session, chat_id, head_message_id):
+            if (
+                message.role != MessageRole.ASSISTANT.value
+                or message.status != MessageStatus.COMPLETE.value
+            ):
+                continue
+            run = session.scalar(
+                select(Run).where(
+                    Run.chat_id == chat_id,
+                    Run.assistant_message_id == message.id,
+                    Run.status == RunStatus.COMPLETE.value,
+                    Run.operation != Operation.TEXT.value,
+                )
+            )
+            if not run:
+                continue
+            image_parts = [
+                part
+                for part in message.parts
+                if (
+                    part.type == PartType.IMAGE.value
+                    and part.artifact_id
+                    and not part.metadata_json.get("preview")
+                )
+            ]
+            if image_parts:
+                image_parts.sort(key=lambda part: (part.position, part.id))
+                prompt = run.standalone_prompt.strip() or None
+                return image_parts[-1].artifact_id, prompt
+        return None, None
+
+    @classmethod
+    def _has_prior_image(
+        cls,
+        session: Session,
+        chat_id: str,
+        head_message_id: str | None,
+    ) -> bool:
+        artifact_id, _prompt = cls._latest_image_context(
+            session,
+            chat_id,
+            head_message_id,
         )
+        return artifact_id is not None
+
+    @classmethod
+    def _latest_image(
+        cls,
+        session: Session,
+        chat_id: str,
+        head_message_id: str | None,
+    ) -> str | None:
+        artifact_id, _prompt = cls._latest_image_context(
+            session,
+            chat_id,
+            head_message_id,
+        )
+        return artifact_id
+
+    @classmethod
+    def _latest_media_prompt(
+        cls,
+        session: Session,
+        chat_id: str,
+        head_message_id: str | None,
+    ) -> str | None:
+        for message in cls._ancestor_messages(session, chat_id, head_message_id):
+            if (
+                message.role != MessageRole.ASSISTANT.value
+                or message.status != MessageStatus.COMPLETE.value
+            ):
+                continue
+            run = session.scalar(
+                select(Run).where(
+                    Run.chat_id == chat_id,
+                    Run.assistant_message_id == message.id,
+                    Run.status == RunStatus.COMPLETE.value,
+                    Run.operation != Operation.TEXT.value,
+                )
+            )
+            if run and run.standalone_prompt.strip():
+                return run.standalone_prompt.strip()
+        return None
 
     @staticmethod
     def _routing_context(
@@ -1320,22 +1935,17 @@ class ConversationOrchestrator:
             project = session.get(Project, chat.project_id)
             if project and project.instructions:
                 messages.append({"role": "system", "content": project.instructions})
-        rows: list[Message] = []
-        current_id = parent_message_id
-        visited: set[str] = set()
-        while current_id and current_id not in visited and len(rows) < 8:
-            visited.add(current_id)
-            message = session.scalar(
-                select(Message)
-                .options(selectinload(Message.parts))
-                .where(Message.id == current_id, Message.chat_id == chat.id)
-            )
-            if not message:
-                break
-            rows.append(message)
-            current_id = message.parent_id
+        rows = ConversationOrchestrator._ancestor_messages(
+            session,
+            chat.id,
+            parent_message_id,
+            limit=8,
+        )
         for message in reversed(rows):
-            content = ConversationOrchestrator._message_context_text(message)
+            content = ConversationOrchestrator._message_context_text(
+                message,
+                ConversationOrchestrator._message_input_artifacts(session, message),
+            )
             if content:
                 messages.append({"role": message.role, "content": content})
         return messages
@@ -1458,6 +2068,32 @@ class ConversationOrchestrator:
         )
 
     @staticmethod
+    def _scoped_generation_settings(
+        owner: Project | Chat | None,
+        role: str,
+    ) -> dict[str, Any]:
+        scoped = owner.generation_settings_json if owner else {}
+        if not isinstance(scoped, dict):
+            return {}
+        settings = scoped.get(role)
+        return dict(settings) if isinstance(settings, dict) else {}
+
+    @staticmethod
+    def _bound_preset(
+        session: Session,
+        owner: Project | Chat | None,
+        role: str,
+    ) -> GenerationPreset | None:
+        bindings = owner.generation_preset_ids_json if owner else {}
+        if not isinstance(bindings, dict):
+            return None
+        preset_id = bindings.get(role)
+        if not isinstance(preset_id, str):
+            return None
+        preset = session.get(GenerationPreset, preset_id)
+        return preset if preset and preset.role == role else None
+
+    @staticmethod
     def _role_for_operation(operation: Operation) -> str:
         if operation == Operation.TEXT:
             return "chat"
@@ -1465,49 +2101,21 @@ class ConversationOrchestrator:
             return "video"
         return "image"
 
-    @staticmethod
-    def _fields_for_operation(operation: Operation):  # type: ignore[no-untyped-def]
-        if operation == Operation.TEXT:
-            return CHAT_SETTINGS
-        if "video" in operation.value:
-            return VIDEO_SETTINGS
-        return IMAGE_SETTINGS
-
-    @classmethod
-    def request_settings_for_operation(
-        cls,
+    async def request_settings_for_operation(
+        self,
         operation: Operation,
         values: dict[str, Any],
         *,
         input_schema: dict[str, Any] | None = None,
+        engine: str | None = None,
     ) -> dict[str, Any]:
-        fields = workflow_settings(cls._fields_for_operation(operation), input_schema)
-        request_keys = {field.key for field in fields if field.scope != "load"}
-        return {key: value for key, value in values.items() if key in request_keys}
-
-    @staticmethod
-    def _compatible_workflow_settings(
-        values: dict[str, Any],
-        fields: list[Any],
-        *,
-        enabled: bool,
-    ) -> dict[str, Any]:
-        if not enabled:
-            return validate_settings(values, fields)
-        compatible: dict[str, Any] = {}
-        field_keys = {field.key for field in fields}
-        for key, value in values.items():
-            if key not in field_keys:
-                continue
-            try:
-                compatible.update(validate_settings({key: value}, fields))
-            except ValueError:
-                # Profiles and presets predate workflow-specific constraints
-                # and may be reused across workflows. An incompatible stored
-                # value falls back to the workflow default; explicit per-turn
-                # values are still rejected above.
-                continue
-        return compatible
+        role = self._role_for_operation(operation)
+        fields = workflow_settings(
+            await self.engines.settings_for_role(role, engine=engine),
+            input_schema,
+        )
+        request_fields = [field for field in fields if field.scope != "load"]
+        return compatible_stored_settings(values, request_fields)
 
     @staticmethod
     def _video_estimate(settings: dict[str, Any]) -> dict[str, int | float]:
@@ -1590,6 +2198,74 @@ class ConversationOrchestrator:
         return revision.engine == engine and (engine == "mock" or bool(revision.api_graph_json))
 
     @staticmethod
+    def _input_part_type(artifact: Artifact) -> str:
+        media_type = artifact.media_type.casefold()
+        if media_type.startswith("image/"):
+            return PartType.IMAGE.value
+        if media_type.startswith("video/"):
+            return PartType.VIDEO.value
+        return PartType.ATTACHMENT.value
+
+    @staticmethod
+    def input_artifact_ids_for_run(session: Session, run: Run) -> list[str]:
+        """Return normalized turn inputs, with provenance fallback for old data."""
+
+        user_message = session.scalar(
+            select(Message)
+            .options(selectinload(Message.parts))
+            .where(Message.id == run.user_message_id, Message.chat_id == run.chat_id)
+        )
+        durable_ids = (
+            [
+                part.artifact_id
+                for part in sorted(user_message.parts, key=lambda part: part.position)
+                if (part.artifact_id and part.metadata_json.get("input_reference") is True)
+            ]
+            if user_message
+            else []
+        )
+        if durable_ids:
+            return list(dict.fromkeys(durable_ids))
+        provenance = run.provenance_json if isinstance(run.provenance_json, dict) else {}
+        legacy_ids = provenance.get("input_artifact_ids")
+        if not isinstance(legacy_ids, list):
+            return []
+        return list(
+            dict.fromkeys(artifact_id for artifact_id in legacy_ids if isinstance(artifact_id, str))
+        )
+
+    @classmethod
+    def _message_input_artifacts(
+        cls,
+        session: Session,
+        message: Message,
+    ) -> list[Artifact]:
+        """Load a user's explicit inputs, including legacy provenance-only runs."""
+
+        if message.role != MessageRole.USER.value:
+            return []
+        direct_ids = [
+            part.artifact_id
+            for part in sorted(message.parts, key=lambda part: part.position)
+            if part.artifact_id and part.metadata_json.get("input_reference") is True
+        ]
+        artifact_ids = list(dict.fromkeys(direct_ids))
+        if not artifact_ids:
+            run = session.scalar(
+                select(Run)
+                .where(Run.chat_id == message.chat_id, Run.user_message_id == message.id)
+                .order_by(Run.created_at.desc(), Run.id.desc())
+                .limit(1)
+            )
+            if run:
+                artifact_ids = cls.input_artifact_ids_for_run(session, run)
+        return [
+            artifact
+            for artifact_id in artifact_ids
+            if (artifact := session.get(Artifact, artifact_id)) is not None
+        ]
+
+    @staticmethod
     def _context_messages(session: Session, run: Run) -> list[dict[str, str]]:
         chat = session.get(Chat, run.chat_id)
         if not chat:
@@ -1615,16 +2291,46 @@ class ConversationOrchestrator:
             current_id = message.parent_id
         rows.reverse()
         for message in rows:
-            text = ConversationOrchestrator._message_context_text(message)
+            text = ConversationOrchestrator._message_context_text(
+                message,
+                ConversationOrchestrator._message_input_artifacts(session, message),
+            )
             if text:
                 messages.append({"role": message.role, "content": text})
         return messages
 
     @staticmethod
-    def _message_context_text(message: Message) -> str:
+    def _message_context_text(
+        message: Message,
+        input_artifacts: list[Artifact] | None = None,
+    ) -> str:
         text = "\n".join(part.text for part in message.parts if part.text).strip()
-        if text:
-            return text
+        attachment_lines: list[str] = []
+        for artifact in input_artifacts or []:
+            if artifact.media_type.casefold().startswith("image/"):
+                kind = "image"
+            elif artifact.media_type.casefold().startswith("video/"):
+                kind = "video"
+            else:
+                kind = "file"
+            name = " ".join((artifact.original_name or kind).split())[:240]
+            description = artifact.metadata_json.get("semantic_description")
+            detail = ""
+            if isinstance(description, str) and description.strip():
+                normalized = " ".join(description.split())
+                if artifact.metadata_json.get("semantic_description_source") in {
+                    None,
+                    "generation_prompt",
+                }:
+                    detail = (
+                        ". Generation request (visual contents not inspected): "
+                        f"{normalized[:1_000]}"
+                    )
+                else:
+                    detail = f". Description: {normalized[:1_000]}"
+            attachment_lines.append(f"[Attached {kind}: {name}{detail}]")
+        if text or attachment_lines:
+            return "\n".join([value for value in (text, *attachment_lines) if value])
 
         prompt = ""
         for part in message.parts:
@@ -1644,13 +2350,20 @@ class ConversationOrchestrator:
             (PartType.IMAGE.value, "image"),
             (PartType.VIDEO.value, "video"),
         ):
-            count = sum(part.type == part_type for part in message.parts)
+            count = sum(
+                part.type == part_type and part.metadata_json.get("input_reference") is not True
+                for part in message.parts
+            )
             if count:
                 media.append(singular if count == 1 else f"{count} {singular}s")
         if not media:
             return ""
         summary = f"Generated {' and '.join(media)}"
-        return f'{summary} from this prompt: "{prompt}".' if prompt else f"{summary}."
+        return (
+            f'{summary} requested with this prompt (visual contents not inspected): "{prompt}".'
+            if prompt
+            else f"{summary}; visual contents not inspected."
+        )
 
     @staticmethod
     def _accepted_for_run(session: Session, run: Run) -> TurnAccepted:

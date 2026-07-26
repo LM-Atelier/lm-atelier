@@ -23,6 +23,7 @@ export function resolveWorkflowSettings(
     if (
       baseKeys.has(key)
       || !isRecord(property)
+      || isReservedSettingKey(key)
       || !("default" in property || "const" in property || Array.isArray(property.enum))
     ) continue;
     const custom = workflowField(key, property);
@@ -58,26 +59,52 @@ function workflowField(
   base?: SettingField,
 ): SettingField | null {
   const supportedTypes = new Set<SettingField["type"]>([
-    "boolean", "integer", "number", "string", "array", "object",
+    "boolean", "integer", "number", "string", "enum", "array", "object",
   ]);
-  const inferred = typeof schema.type === "string" && supportedTypes.has(schema.type as SettingField["type"])
+  const declared = typeof schema.type === "string" && supportedTypes.has(schema.type as SettingField["type"])
     ? schema.type as SettingField["type"]
-    : base?.type ?? inferType(schema.const ?? schema.default);
+    : null;
+  if (
+    base
+    && declared
+    && declared !== base.type
+    && !(base.type === "enum" && ["boolean", "integer", "number", "string"].includes(declared))
+  ) return null;
+  const inferred = base?.type ?? declared ?? inferType(schema.const ?? schema.default);
   if (!inferred) return null;
-  const choices = "const" in schema
+  const declaredChoices = "const" in schema
     ? [schema.const]
     : Array.isArray(schema.enum)
       ? schema.enum
       : base?.choices ?? [];
+  if (
+    base?.choices.length
+    && declaredChoices.some((choice) => !base.choices.includes(choice))
+  ) return null;
+  const choices = declaredChoices.length ? declaredChoices : base?.choices ?? [];
   const defaultValue = "const" in schema
     ? schema.const
     : "default" in schema
       ? schema.default
       : base?.default ?? choices[0] ?? null;
-  let minimum = typeof schema.minimum === "number" ? schema.minimum : base?.minimum ?? null;
+  const declaredMinimum = typeof schema.minimum === "number" ? schema.minimum : null;
+  let minimum = declaredMinimum == null
+    ? base?.minimum ?? null
+    : Math.max(declaredMinimum, base?.minimum ?? declaredMinimum);
   if (key === "seed" && base?.default === -1 && defaultValue === -1) {
     minimum = Math.min(minimum ?? -1, -1);
   }
+  const declaredMaximum = typeof schema.maximum === "number" ? schema.maximum : null;
+  const maximum = declaredMaximum == null
+    ? base?.maximum ?? null
+    : Math.min(declaredMaximum, base?.maximum ?? declaredMaximum);
+  if (minimum != null && maximum != null && minimum > maximum) return null;
+  const declaredMultiple = typeof schema.multipleOf === "number" ? schema.multipleOf : null;
+  if (
+    base?.multiple_of != null
+    && declaredMultiple != null
+    && !isStricterMultiple(declaredMultiple, base.multiple_of)
+  ) return null;
   const fixedHelp = "const" in schema ? `Fixed by this workflow at ${String(schema.const)}.` : "";
   return {
     key,
@@ -85,9 +112,9 @@ function workflowField(
     type: inferred,
     default: defaultValue,
     minimum,
-    maximum: typeof schema.maximum === "number" ? schema.maximum : base?.maximum ?? null,
+    maximum,
     step: typeof schema.multipleOf === "number" ? schema.multipleOf : base?.step ?? null,
-    multiple_of: typeof schema.multipleOf === "number" ? schema.multipleOf : null,
+    multiple_of: declaredMultiple ?? base?.multiple_of ?? null,
     choices,
     scope: base?.scope ?? "workflow",
     visibility: base?.visibility ?? "advanced",
@@ -111,6 +138,28 @@ function inferType(value: unknown): SettingField["type"] | null {
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return Boolean(value) && typeof value === "object" && !Array.isArray(value);
+}
+
+function isReservedSettingKey(key: string): boolean {
+  const normalized = key.toLowerCase();
+  return normalized.startsWith("_")
+    || [
+      "input_image",
+      "input_images",
+      "messages",
+      "operation",
+      "parameters",
+      "prompt",
+      "run_id",
+      "tools",
+      "workflow",
+    ].includes(normalized)
+    || /^input_image_[0-9]+$/i.test(normalized);
+}
+
+function isStricterMultiple(candidate: number, base: number): boolean {
+  const quotient = candidate / base;
+  return candidate >= base && Math.abs(quotient - Math.round(quotient)) <= 1e-9;
 }
 
 function titleCase(value: string): string {

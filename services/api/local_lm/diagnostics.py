@@ -39,7 +39,7 @@ class DiagnosticBundleBuilder:
             },
             "system": collect_system_info(self.settings).model_dump(mode="json"),
             "configuration": {
-                "host_scope": "lan" if self.settings.allow_lan else "loopback",
+                "host_scope": "loopback",
                 "chat_engine": self.settings.chat_engine,
                 "media_engine": self.settings.media_engine,
                 "auto_unload_chat_for_media": self.settings.auto_unload_chat_for_media,

@@ -67,6 +67,20 @@ def test_unavailable_vault_fails_closed(monkeypatch: pytest.MonkeyPatch) -> None
         store.set_token("hf_secret")
 
 
+def test_vault_availability_does_not_read_a_stored_secret(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    vault = FakeKeyring()
+    monkeypatch.setattr(credentials_module, "keyring", vault)
+    monkeypatch.setattr(
+        vault,
+        "get_password",
+        lambda *_args: pytest.fail("availability probe read a credential"),
+    )
+
+    assert CredentialStore().vault_available() is True
+
+
 async def test_huggingface_credential_api_updates_runtime_clients(
     client: AsyncClient, monkeypatch: pytest.MonkeyPatch
 ) -> None:

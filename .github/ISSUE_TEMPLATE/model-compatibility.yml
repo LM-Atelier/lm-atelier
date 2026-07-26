@@ -1,0 +1,81 @@
+name: Model compatibility report
+description: Report a model that does not install, start, or generate correctly.
+title: "[Model]: "
+labels: []
+assignees: []
+body:
+  - type: checkboxes
+    id: checks
+    attributes:
+      label: Before submitting
+      options:
+        - label: I searched existing issues for this model and failure.
+          required: true
+        - label: I removed credentials and private chats, prompts, media, and logs.
+          required: true
+        - label: This is not a security vulnerability.
+          required: true
+  - type: input
+    id: version
+    attributes:
+      label: LM Atelier version
+      placeholder: Shown in the release name
+    validations:
+      required: true
+  - type: input
+    id: model
+    attributes:
+      label: Model
+      description: Provide the Hugging Face repository or local model name.
+      placeholder: owner/model-name
+    validations:
+      required: true
+  - type: input
+    id: revision
+    attributes:
+      label: Revision or selected file
+      description: Include a revision and filename when known.
+  - type: dropdown
+    id: role
+    attributes:
+      label: Intended use
+      options:
+        - Chat
+        - Image generation
+        - Video generation
+        - Multiple
+    validations:
+      required: true
+  - type: input
+    id: system
+    attributes:
+      label: System
+      description: Operating system, CPU, GPU, RAM, and VRAM.
+    validations:
+      required: true
+  - type: dropdown
+    id: stage
+    attributes:
+      label: Failure stage
+      options:
+        - Catalog listing
+        - Download or installation
+        - Profile or workflow creation
+        - Worker startup
+        - Generation
+        - Generated output
+    validations:
+      required: true
+  - type: textarea
+    id: behavior
+    attributes:
+      label: What happened?
+      description: Include exact errors and concise reproduction steps.
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected behavior
+    validations:
+      required: true

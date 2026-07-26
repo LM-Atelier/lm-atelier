@@ -1,13 +1,15 @@
 [build-system]
-requires = ["hatchling>=1.27"]
+requires = ["hatchling==1.31.0"]
 build-backend = "hatchling.build"
 
 [project]
 name = "lm-atelier-api"
-version = "0.1.7"
 description = "LM Atelier control plane"
+dynamic = ["version"]
 license = "Apache-2.0"
-requires-python = ">=3.11"
+authors = [{ name = "LM Atelier contributors" }]
+maintainers = [{ name = "ajccarlson" }]
+requires-python = ">=3.12,<3.13"
 dependencies = [
   "alembic>=1.16,<2",
   "fastapi>=0.116,<1",
@@ -25,22 +27,33 @@ dependencies = [
 [project.optional-dependencies]
 dev = [
   "bandit>=1.8,<2",
+  "cyclonedx-bom>=7.3,<8",
   "httpx2>=2.7,<3",
   "mypy>=1.16,<2",
-  "pytest>=8.4,<9",
+  "pip-audit>=2.10,<3",
+  "pyyaml>=6.0.3,<7",
+  "pytest>=9.0.3,<10",
   "pytest-asyncio>=1.0,<2",
   "pytest-cov>=6.2,<7",
   "ruff>=0.12,<1",
   "types-psutil>=7.0,<8"
 ]
 package = [
-  "pillow>=11.3,<12",
+  "pillow>=12.3,<13",
   "pyinstaller>=6.21,<7"
 ]
+
+[project.urls]
+Homepage = "https://github.com/ajccarlson/lm-atelier"
+Issues = "https://github.com/ajccarlson/lm-atelier/issues"
+Repository = "https://github.com/ajccarlson/lm-atelier.git"
 
 [project.scripts]
 lm-atelier = "local_lm.desktop:main"
 local-lm = "local_lm.main:run"
+
+[tool.hatch.version]
+path = "local_lm/__init__.py"
 
 [tool.hatch.build.targets.wheel]
 packages = ["local_lm"]
@@ -52,13 +65,13 @@ testpaths = ["tests"]
 
 [tool.ruff]
 line-length = 100
-target-version = "py311"
+target-version = "py312"
 
 [tool.ruff.lint]
 select = ["E", "F", "I", "UP", "B", "SIM"]
 
 [tool.mypy]
-python_version = "3.11"
+python_version = "3.12"
 strict = true
 plugins = ["pydantic.mypy"]
 exclude = ["alembic"]

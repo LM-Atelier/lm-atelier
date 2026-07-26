@@ -1,0 +1,21 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1280" height="640" viewBox="0 0 1280 640" role="img" aria-labelledby="title description">
+  <title id="title">LM Atelier</title>
+  <desc id="description">LM Atelier logo with the tagline A local-first creative studio.</desc>
+  <rect width="1280" height="640" fill="#12110f"/>
+  <circle cx="1180" cy="-40" r="320" fill="#315a9a" opacity=".12"/>
+  <circle cx="90" cy="700" r="250" fill="#b85f3c" opacity=".10"/>
+  <rect x="48" y="48" width="1184" height="544" rx="32" fill="none" stroke="#3a342c" stroke-width="2"/>
+
+  <!-- Locked LMA mark: geometry and colors match the app and icon builder. -->
+  <g transform="translate(80 120)">
+    <rect width="400" height="400" rx="80" fill="#12110f"/>
+    <path d="M43 20h64v300h169v60H43z" fill="#efe7d8"/>
+    <path d="M125 20l118 109L356 20v360h-58v-92h-85l46-45h39v-82L164 303h-39z" fill="#315a9a"/>
+  </g>
+
+  <g transform="translate(566 0)">
+    <rect x="2" y="219" width="80" height="6" rx="3" fill="#b85f3c"/>
+    <text x="0" y="324" fill="#efe7d8" font-family="Georgia, 'Times New Roman', serif" font-size="86" font-weight="700" letter-spacing="-2">LM Atelier</text>
+    <text x="4" y="381" fill="#a79b8b" font-family="Inter, 'Segoe UI', Arial, sans-serif" font-size="30" font-weight="500" letter-spacing=".4">A local-first creative studio</text>
+  </g>
+</svg>

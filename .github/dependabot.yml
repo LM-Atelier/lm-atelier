@@ -13,7 +13,7 @@ updates:
       web-dependencies:
         patterns: ["*"]
 
-  - package-ecosystem: pip
+  - package-ecosystem: uv
     directory: /services/api
     schedule:
       interval: monthly
