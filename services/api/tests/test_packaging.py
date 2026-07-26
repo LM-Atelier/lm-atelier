@@ -854,6 +854,7 @@ def test_frozen_installer_contracts_are_explicit() -> None:
     assert '"packaging" / "engines.json"' in spec
     assert '"packaging" / "runtime-reviews"' in spec
     assert '"local_lm/migrations"' in spec
+    assert '"local_lm" / "capability_packs"' in spec
     assert '"__pycache__" not in source.parts' in spec
     assert 'source.suffix not in {".pyc", ".pyo"}' in spec
     assert "upx=False" in spec

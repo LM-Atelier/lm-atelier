@@ -373,6 +373,32 @@ class ModelSource(TimestampMixin, Base):
     metadata_json: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
 
 
+class InstallPlan(TimestampMixin, Base):
+    __tablename__ = "install_plans"
+    __table_args__ = (
+        UniqueConstraint("plan_hash", name="uq_install_plan_hash"),
+        Index("ix_install_plan_source", "provider", "remote_id", "revision", "role"),
+    )
+
+    id: Mapped[str] = mapped_column(String(40), primary_key=True, default=lambda: new_id("plan"))
+    provider: Mapped[str] = mapped_column(String(32), default="huggingface")
+    remote_id: Mapped[str] = mapped_column(String(500))
+    revision: Mapped[str] = mapped_column(String(200))
+    role: Mapped[str] = mapped_column(String(16))
+    engine: Mapped[str] = mapped_column(String(32))
+    architecture: Mapped[str | None] = mapped_column(String(200), nullable=True)
+    family: Mapped[str | None] = mapped_column(String(100), nullable=True)
+    plan_hash: Mapped[str] = mapped_column(String(64), unique=True, index=True)
+    resolver_version: Mapped[str] = mapped_column(String(40))
+    compatibility: Mapped[str] = mapped_column(String(40))
+    artifacts_json: Mapped[list[dict[str, Any]]] = mapped_column(JSON, default=list)
+    runtime_contract_json: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
+    activation_probe_json: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
+    status: Mapped[str] = mapped_column(String(24), default="planned", index=True)
+    failure_code: Mapped[str | None] = mapped_column(String(80), nullable=True)
+    failure_reason: Mapped[str | None] = mapped_column(Text, nullable=True)
+
+
 class ModelInstall(TimestampMixin, Base):
     __tablename__ = "model_installs"
 
@@ -390,6 +416,69 @@ class ModelInstall(TimestampMixin, Base):
     )
     manifest_json: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
     active: Mapped[bool] = mapped_column(Boolean, default=True)
+
+
+class ModelComponentManifest(TimestampMixin, Base):
+    __tablename__ = "model_component_manifests"
+    __table_args__ = (
+        UniqueConstraint(
+            "model_install_id",
+            "relative_path",
+            name="uq_model_component_path",
+        ),
+    )
+
+    id: Mapped[str] = mapped_column(
+        String(40),
+        primary_key=True,
+        default=lambda: new_id("component"),
+    )
+    model_install_id: Mapped[str] = mapped_column(
+        ForeignKey("model_installs.id", ondelete="CASCADE"),
+        index=True,
+    )
+    kind: Mapped[str] = mapped_column(String(40))
+    relative_path: Mapped[str] = mapped_column(Text)
+    target_folder: Mapped[str] = mapped_column(String(80))
+    sha256: Mapped[str | None] = mapped_column(String(64), nullable=True, index=True)
+    size_bytes: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    required: Mapped[bool] = mapped_column(Boolean, default=True)
+    metadata_json: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
+
+
+class ModelCapabilityEvidence(TimestampMixin, Base):
+    __tablename__ = "model_capability_evidence"
+    __table_args__ = (
+        UniqueConstraint(
+            "model_install_id",
+            "evidence_key",
+            name="uq_model_capability_evidence_install_key",
+        ),
+        Index("ix_model_capability_evidence_install_result", "model_install_id", "result"),
+    )
+
+    id: Mapped[str] = mapped_column(
+        String(40),
+        primary_key=True,
+        default=lambda: new_id("evidence"),
+    )
+    model_install_id: Mapped[str] = mapped_column(
+        ForeignKey("model_installs.id", ondelete="CASCADE"),
+        index=True,
+    )
+    evidence_key: Mapped[str] = mapped_column(String(64), index=True)
+    result: Mapped[str] = mapped_column(String(24))
+    component_hashes_json: Mapped[dict[str, str]] = mapped_column(JSON, default=dict)
+    runtime_build: Mapped[str] = mapped_column(String(200))
+    adapter_contract_version: Mapped[int] = mapped_column(Integer)
+    launch_contract_version: Mapped[str] = mapped_column(String(40))
+    workflow_contract_version: Mapped[str | None] = mapped_column(String(100), nullable=True)
+    hardware_class: Mapped[str] = mapped_column(String(200))
+    probe_version: Mapped[str] = mapped_column(String(40))
+    failure_code: Mapped[str | None] = mapped_column(String(80), nullable=True)
+    failure_reason: Mapped[str | None] = mapped_column(Text, nullable=True)
+    details_json: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
+    probed_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
 
 
 class ModelProfile(TimestampMixin, Base):

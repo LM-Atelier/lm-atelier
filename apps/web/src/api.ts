@@ -486,6 +486,7 @@ export const api = {
     comfyPaths: Record<string, string> = {},
     workflowTemplateId: string | null = null,
     workflowTemplateSha256: string | null = null,
+    installPlanId: string | null = null,
   ) =>
     request<Job>("/api/downloads", {
       method: "POST",
@@ -500,6 +501,7 @@ export const api = {
         comfy_paths: comfyPaths,
         workflow_template_id: workflowTemplateId,
         workflow_template_sha256: workflowTemplateSha256,
+        install_plan_id: installPlanId,
       }),
     }),
   importModel: (payload: { name: string; role: string; engine: string; local_path: string }) =>

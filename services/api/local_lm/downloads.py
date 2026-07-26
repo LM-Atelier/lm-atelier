@@ -19,7 +19,8 @@ from huggingface_hub import HfApi
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from .adapters.base import MediaRequest
+from .adapters.base import ChatAdapter, ChatRequest, MediaRequest
+from .adapters.contracts import ADAPTER_CONTRACT_VERSION
 from .comfy_templates import (
     COMFY_TEMPLATE_COMPILER_VERSION,
     ComfyTemplateRegistry,
@@ -34,8 +35,34 @@ from .gguf import (
     automatic_mmproj_selection,
     validate_gguf_selection,
 )
-from .models import Job, ModelInstall, ModelSource, WorkflowDefinition, WorkflowRevision
-from .profile_service import ensure_profile_for_install, retire_profiles_for_installs
+from .hardware import hardware_capability_class
+from .model_manifests import (
+    MAX_METADATA_BYTES,
+    MAX_WEIGHT_HEADER_BYTES,
+    ModelManifestInspection,
+    inspect_repository_metadata,
+)
+from .model_planner import (
+    ACTIVATION_PROBE_VERSION,
+    LAUNCH_CONTRACT_VERSION,
+    media_workflow_contract_version,
+)
+from .models import (
+    InstallPlan,
+    Job,
+    ModelCapabilityEvidence,
+    ModelComponentManifest,
+    ModelInstall,
+    ModelProfile,
+    ModelSource,
+    WorkflowDefinition,
+    WorkflowRevision,
+)
+from .profile_service import (
+    build_profile_for_install,
+    ensure_profile_for_install,
+    retire_profiles_for_installs,
+)
 from .progress import completed_progress, update_job_progress
 from .scheduler import ResourceScheduler
 from .schemas import DownloadRequest
@@ -67,12 +94,14 @@ class DownloadManager:
         settings: Settings,
         events: EventBroker,
         *,
+        chat_adapter: ChatAdapter | None = None,
         media_adapter: ComfyUIAdapter | None = None,
         processes: ProcessSupervisor | None = None,
         scheduler: ResourceScheduler | None = None,
     ) -> None:
         self.settings = settings
         self.events = events
+        self.chat_adapter = chat_adapter
         self.media_adapter = media_adapter
         self.processes = processes
         self.scheduler = scheduler or ResourceScheduler()
@@ -108,8 +137,7 @@ class DownloadManager:
         elif request.workflow_template_sha256:
             raise ValueError("workflow template hash requires a template identifier")
         for filename, digest in request.expected_sha256.items():
-            path = PurePosixPath(filename)
-            if path.is_absolute() or ".." in path.parts:
+            if not self._safe_relative_filename(filename):
                 raise ValueError("expected hash paths must be safe relative paths")
             if not re.fullmatch(r"[0-9a-f]{64}", digest):
                 raise ValueError("expected SHA-256 values must be lowercase hexadecimal")
@@ -167,6 +195,17 @@ class DownloadManager:
         return job
 
     @staticmethod
+    def _safe_relative_filename(filename: str) -> bool:
+        path = PurePosixPath(filename)
+        return bool(
+            filename
+            and len(filename) <= 1_000
+            and "\\" not in filename
+            and not path.is_absolute()
+            and all(part not in {"", ".", ".."} and ":" not in part for part in path.parts)
+        )
+
+    @staticmethod
     def _automatic_comfy_paths(filenames: list[str]) -> dict[str, str]:
         known_folders = {
             "checkpoints",
@@ -187,6 +226,227 @@ class DownloadManager:
         if any(marker in primary_name for marker in ("diffusion", "unet", "t2v", "i2v")):
             return {"diffusion_models": "."}
         return {"checkpoints": "."}
+
+    @staticmethod
+    def _inspect_staged_model(
+        staging: Path,
+        filenames: list[str],
+        role: str,
+    ) -> ModelManifestInspection:
+        metadata: dict[str, bytes] = {}
+        for filename in filenames:
+            relative = PurePosixPath(filename)
+            path = staging.joinpath(*relative.parts)
+            lowered = filename.casefold()
+            if lowered.endswith(".json"):
+                with path.open("rb") as handle:
+                    metadata[filename] = handle.read(MAX_METADATA_BYTES + 1)
+            elif lowered.endswith(".safetensors"):
+                with path.open("rb") as handle:
+                    prefix = handle.read(8)
+                    if len(prefix) != 8:
+                        metadata[filename] = prefix
+                        continue
+                    header_size = int.from_bytes(prefix, "little")
+                    metadata[filename] = prefix + handle.read(
+                        min(header_size, MAX_WEIGHT_HEADER_BYTES) + 1
+                    )
+            elif lowered.endswith(".gguf"):
+                with path.open("rb") as handle:
+                    metadata[filename] = handle.read(MAX_WEIGHT_HEADER_BYTES)
+        return inspect_repository_metadata(metadata, filenames, role=role)
+
+    @staticmethod
+    def _validate_staged_plan(
+        plan: InstallPlan | None,
+        inspection: ModelManifestInspection,
+        component_hashes: dict[str, str],
+    ) -> None:
+        if not plan:
+            raise ValueError("install plan not found; run the install check again")
+        if (
+            plan.family
+            and inspection.family
+            and plan.family.casefold() != inspection.family.casefold()
+        ):
+            raise ValueError("downloaded model family does not match the install plan")
+        expected = {
+            str(item.get("path")): (
+                str(item.get("kind")),
+                str(item.get("target_folder")),
+            )
+            for item in plan.artifacts_json
+            if item.get("required", True)
+        }
+        actual = {item.path: (item.kind, item.target_folder) for item in inspection.components}
+        if set(expected) != set(actual):
+            raise ValueError("downloaded model components do not match the install plan")
+        for path, planned_contract in expected.items():
+            inspected_contract = actual[path]
+            # Filename-only planning intentionally starts conservatively. A
+            # bounded real header may refine generic safe-tensor weights into
+            # a more specific declarative component, but never into executable
+            # or auxiliary content.
+            if planned_contract != inspected_contract and planned_contract[0] not in {
+                "checkpoint",
+                "unknown_safetensors",
+            }:
+                raise ValueError(f"downloaded component contract changed for {path}")
+            if inspected_contract[0] in {"lora", "unknown_safetensors", "metadata"}:
+                raise ValueError(f"downloaded primary model component is unsupported: {path}")
+            if path not in component_hashes:
+                raise ValueError(f"downloaded component could not be verified: {path}")
+        kinds = {item.kind for item in inspection.components}
+        if plan.role == "chat" and "gguf_model" not in kinds:
+            raise ValueError("downloaded chat bundle has no primary GGUF model")
+        if plan.role in {"image", "video"} and not kinds.intersection(
+            {"checkpoint", "diffusion_model"}
+        ):
+            raise ValueError("downloaded media bundle has no primary generation model")
+
+    @staticmethod
+    def _stable_failure_code(exc: Exception) -> str:
+        message = str(exc).casefold()
+        if isinstance(exc, TimeoutError) or "timeout" in message:
+            return "activation_probe_timeout"
+        if "sha-256" in message or "verified" in message:
+            return "component_verification_failed"
+        if "component" in message or "header" in message or "metadata" in message:
+            return "manifest_inspection_failed"
+        if "workflow" in message or "template" in message or "graph" in message:
+            return "activation_contract_failed"
+        if "runtime" in message or "worker" in message or "comfyui" in message:
+            return "activation_runtime_failed"
+        if "disk space" in message:
+            return "insufficient_storage"
+        return "install_failed"
+
+    async def _reuse_verified_file(
+        self,
+        session: Session,
+        *,
+        staging: Path,
+        filename: str,
+        expected_sha256: str | None,
+        expected_size: int | None,
+    ) -> tuple[Path, int] | None:
+        """Reuse only bytes whose exact digest is already known and rechecked."""
+
+        if not expected_sha256:
+            return None
+        relative = PurePosixPath(filename)
+        target = staging.joinpath(*relative.parts)
+        candidates = [target]
+        rows = session.execute(
+            select(ModelComponentManifest, ModelInstall)
+            .join(
+                ModelInstall,
+                ModelInstall.id == ModelComponentManifest.model_install_id,
+            )
+            .where(ModelComponentManifest.sha256 == expected_sha256)
+            .order_by(ModelInstall.updated_at.desc())
+        ).all()
+        model_root = self.settings.model_dir.resolve()
+        for component, install in rows:
+            root = Path(install.local_path).resolve()
+            component_path = PurePosixPath(component.relative_path)
+            if (
+                root != model_root
+                and model_root not in root.parents
+                or component_path.is_absolute()
+                or ".." in component_path.parts
+            ):
+                continue
+            candidates.append(root.joinpath(*component_path.parts))
+
+        for candidate in candidates:
+            if not candidate.is_file() or candidate.is_symlink():
+                continue
+            size = candidate.stat().st_size
+            if expected_size and size != expected_size:
+                if candidate == target:
+                    candidate.unlink(missing_ok=True)
+                continue
+            digest = await asyncio.to_thread(self._sha256_file, candidate)
+            if digest != expected_sha256:
+                if candidate == target:
+                    candidate.unlink(missing_ok=True)
+                continue
+            if candidate != target:
+                target.parent.mkdir(parents=True, exist_ok=True)
+                temporary = target.with_name(f".{target.name}.reuse")
+                await asyncio.to_thread(shutil.copyfile, candidate, temporary)
+                copied_digest = await asyncio.to_thread(self._sha256_file, temporary)
+                if copied_digest != expected_sha256:
+                    temporary.unlink(missing_ok=True)
+                    continue
+                os.replace(temporary, target)
+            return target, size
+        return None
+
+    def _record_capability_evidence(
+        self,
+        session: Session,
+        install: ModelInstall,
+        *,
+        component_hashes: dict[str, str],
+        runtime_build: str,
+        workflow_contract_version: str | None,
+        details: dict[str, Any],
+    ) -> ModelCapabilityEvidence:
+        hardware_class = hardware_capability_class(self.settings)
+        runtime_release: str | None = None
+        runtime_managed: bool | None = None
+        runtimes = getattr(self.processes, "runtimes", None) if self.processes else None
+        if runtimes and install.engine in {"llama.cpp", "comfyui"}:
+            runtime_status = runtimes.status(install.engine)
+            runtime_release = runtime_status.release
+            runtime_managed = runtime_status.managed
+        evidence_payload = {
+            "component_hashes": dict(sorted(component_hashes.items())),
+            "runtime_build": runtime_build,
+            "adapter_contract_version": ADAPTER_CONTRACT_VERSION,
+            "launch_contract_version": LAUNCH_CONTRACT_VERSION,
+            "workflow_contract_version": workflow_contract_version,
+            "hardware_class": hardware_class,
+            "probe_version": ACTIVATION_PROBE_VERSION,
+            "runtime_release": runtime_release,
+        }
+        evidence_key = hashlib.sha256(
+            json.dumps(
+                evidence_payload,
+                sort_keys=True,
+                separators=(",", ":"),
+                allow_nan=False,
+            ).encode()
+        ).hexdigest()
+        existing = session.scalar(
+            select(ModelCapabilityEvidence).where(
+                ModelCapabilityEvidence.model_install_id == install.id,
+                ModelCapabilityEvidence.evidence_key == evidence_key,
+            )
+        )
+        if existing:
+            return existing
+        evidence = ModelCapabilityEvidence(
+            model_install_id=install.id,
+            evidence_key=evidence_key,
+            result="ready",
+            component_hashes_json=component_hashes,
+            runtime_build=runtime_build[:200],
+            adapter_contract_version=ADAPTER_CONTRACT_VERSION,
+            launch_contract_version=LAUNCH_CONTRACT_VERSION,
+            workflow_contract_version=workflow_contract_version,
+            hardware_class=hardware_class[:200],
+            probe_version=ACTIVATION_PROBE_VERSION,
+            details_json={
+                **details,
+                "runtime_release": runtime_release,
+                "runtime_managed": runtime_managed,
+            },
+        )
+        session.add(evidence)
+        return evidence
 
     def start(self, job_id: str) -> None:
         if job_id in self._tasks and not self._tasks[job_id].done():
@@ -250,6 +510,17 @@ class DownloadManager:
                 return False
             job.status = JobStatus.CANCELLED.value
             job.completed_at = utcnow()
+            plan_id = (
+                job.payload_json.get("install_plan_id")
+                if isinstance(job.payload_json, dict)
+                else None
+            )
+            if isinstance(plan_id, str) and plan_id:
+                plan = session.get(InstallPlan, plan_id)
+                if plan:
+                    plan.status = "cancelled"
+                    plan.failure_code = "install_cancelled"
+                    plan.failure_reason = "Installation was cancelled."
             update_job_progress(
                 job,
                 stage="cancelled",
@@ -347,9 +618,9 @@ class DownloadManager:
             session.commit()
 
     def cleanup_partials(self, session: Session) -> tuple[int, int]:
-        active_ids = set(
+        active_jobs = list(
             session.scalars(
-                select(Job.id).where(
+                select(Job).where(
                     Job.kind == JobKind.DOWNLOAD.value,
                     Job.status.in_(
                         [
@@ -361,11 +632,24 @@ class DownloadManager:
                 )
             ).all()
         )
+        active_ids = {job.id for job in active_jobs}
+        active_plan_ids = {
+            str(job.payload_json.get("install_plan_id"))
+            for job in active_jobs
+            if isinstance(job.payload_json, dict) and job.payload_json.get("install_plan_id")
+        }
+        active_plan_hashes = set(
+            session.scalars(
+                select(InstallPlan.plan_hash).where(InstallPlan.id.in_(active_plan_ids))
+            ).all()
+        )
         removed_count = 0
         reclaimed_bytes = 0
         for candidate in self.settings.download_dir.glob("*.partial"):
             job_id = candidate.name.removesuffix(".partial")
-            if job_id in active_ids:
+            if job_id in active_ids or (
+                job_id.startswith("plan-") and job_id.removeprefix("plan-") in active_plan_hashes
+            ):
                 continue
             reclaimed_bytes += self._path_size(candidate)
             if candidate.is_dir() and not candidate.is_symlink():
@@ -395,6 +679,8 @@ class DownloadManager:
         provisional_install_id: str | None = None
         provisional_path: Path | None = None
         provisional_files: list[str] = []
+        retained_staging: Path | None = None
+        previous_media_running: bool | None = None
         try:
             async with self.scheduler.job_lease(
                 job_id,
@@ -408,6 +694,17 @@ class DownloadManager:
                     if not job:
                         return
                     request = DownloadRequest.model_validate(job.payload_json)
+                    plan = (
+                        session.get(InstallPlan, request.install_plan_id)
+                        if request.install_plan_id
+                        else None
+                    )
+                    if request.install_plan_id and not plan:
+                        raise ValueError("install plan not found; run the install check again")
+                    if plan:
+                        plan.status = "downloading"
+                        plan.failure_code = None
+                        plan.failure_reason = None
                     job.completed_at = None
                     job.error = None
                     update_job_progress(
@@ -422,6 +719,10 @@ class DownloadManager:
                     "download.started", job_id, {"remote_id": request.remote_id}
                 )
                 if request.workflow_template_id:
+                    if request.install_plan_id and self.processes:
+                        previous_media_running = next(
+                            status for status in self.processes.statuses() if status.name == "media"
+                        ).running
                     await self._cleanup_provisional_install_serialized(job_id)
                     with SessionLocal() as session:
                         job = session.get(Job, job_id)
@@ -449,6 +750,8 @@ class DownloadManager:
                 filenames = self._select_files(request, siblings)
                 if not filenames:
                     raise ValueError("no files matched the requested model selection")
+                if any(not self._safe_relative_filename(filename) for filename in filenames):
+                    raise ValueError("model selection contains an unsafe file path")
                 resolved_sha256 = self._resolved_sha256(request, siblings, filenames)
                 total_size = sum(
                     int(getattr(sibling, "size", 0) or 0)
@@ -468,24 +771,87 @@ class DownloadManager:
                     )
 
                 revision = str(info.sha or request.revision)
-                staging = self.settings.download_dir / f"{job_id}.partial"
+                staging_key = (
+                    f"plan-{plan.plan_hash}" if request.install_plan_id and plan else job_id
+                )
+                staging = self.settings.download_dir / f"{staging_key}.partial"
+                retained_staging = staging if request.install_plan_id else None
                 destination = self.settings.model_dir / self._install_directory_name(
                     request.remote_id,
                     revision,
                 )
                 staging.mkdir(parents=True, exist_ok=True)
-                completed_bytes = 0
-                for index, filename in enumerate(filenames):
+                reused_by_file: dict[str, tuple[Path, int]] = {}
+                for filename in filenames:
+                    with SessionLocal() as session:
+                        reused = await self._reuse_verified_file(
+                            session,
+                            staging=staging,
+                            filename=filename,
+                            expected_sha256=resolved_sha256.get(filename),
+                            expected_size=file_sizes.get(filename) or None,
+                        )
+                    if reused:
+                        reused_by_file[filename] = reused
+                reused_bytes = sum(size for _, size in reused_by_file.values())
+                completed_bytes = reused_bytes
+                missing_files = [
+                    filename for filename in filenames if filename not in reused_by_file
+                ]
+                parallel_paths: dict[str, str] = {}
+                if request.install_plan_id and len(missing_files) > 1:
+                    batch_size = sum(file_sizes.get(filename, 0) for filename in missing_files)
                     with SessionLocal() as session:
                         job = session.get(Job, job_id)
                         if not job or job.status == JobStatus.CANCELLED.value:
                             return
                         update_job_progress(
                             job,
-                            stage=f"downloading {filename}",
+                            stage=f"downloading {len(missing_files)} components",
+                            completed_units=completed_bytes if total_size else None,
+                            total_units=total_size or None,
+                            unit="bytes" if total_size else None,
+                            bytes_reused=reused_bytes,
+                            file_count=len(filenames),
+                            queue_resource=job.queue_resource,
+                            indeterminate=not bool(total_size),
+                        )
+                        session.commit()
+                    await self.scheduler.publish_job(job_id)
+                    parallel_paths = await self._download_files_parallel(
+                        job_id=job_id,
+                        remote_id=request.remote_id,
+                        filenames=missing_files,
+                        revision=revision,
+                        staging=staging,
+                        completed_bytes=completed_bytes,
+                        total_size=total_size or None,
+                        batch_size=batch_size,
+                        bytes_reused=reused_bytes,
+                    )
+                for index, filename in enumerate(filenames):
+                    expected_hash = resolved_sha256.get(filename)
+                    reused = reused_by_file.get(filename)
+                    with SessionLocal() as session:
+                        job = session.get(Job, job_id)
+                        if not job or job.status == JobStatus.CANCELLED.value:
+                            return
+                        stage = (
+                            f"reusing verified {filename}"
+                            if reused
+                            else (
+                                f"verifying downloaded {filename}"
+                                if filename in parallel_paths
+                                else f"downloading {filename}"
+                            )
+                        )
+                        update_job_progress(
+                            job,
+                            stage=stage,
                             completed_units=completed_bytes,
                             total_units=total_size or None,
                             unit="bytes" if total_size else None,
+                            bytes_reused=reused_bytes,
                             file_index=index + 1,
                             file_count=len(filenames),
                             queue_resource=job.queue_resource,
@@ -493,18 +859,26 @@ class DownloadManager:
                         )
                         session.commit()
                     await self.scheduler.publish_job(job_id)
-                    downloaded_path = await self._download_file(
-                        job_id=job_id,
-                        remote_id=request.remote_id,
-                        filename=filename,
-                        revision=revision,
-                        staging=staging,
-                        file_size=file_sizes.get(filename) or None,
-                        completed_bytes=completed_bytes,
-                        total_size=total_size or None,
-                    )
-                    expected_hash = resolved_sha256.get(filename)
-                    if expected_hash:
+                    if reused:
+                        reused_path, reused_size = reused
+                        downloaded_path = str(reused_path)
+                        actual_hash = expected_hash
+                    elif filename in parallel_paths:
+                        downloaded_path = parallel_paths[filename]
+                        actual_hash = None
+                    else:
+                        downloaded_path = await self._download_file(
+                            job_id=job_id,
+                            remote_id=request.remote_id,
+                            filename=filename,
+                            revision=revision,
+                            staging=staging,
+                            file_size=file_sizes.get(filename) or None,
+                            completed_bytes=completed_bytes,
+                            total_size=total_size or None,
+                        )
+                        actual_hash = None
+                    if expected_hash or request.install_plan_id:
                         with SessionLocal() as session:
                             job = session.get(Job, job_id)
                             if job:
@@ -514,6 +888,7 @@ class DownloadManager:
                                     completed_units=completed_bytes + file_sizes.get(filename, 0),
                                     total_units=total_size or None,
                                     unit="bytes" if total_size else None,
+                                    bytes_reused=reused_bytes,
                                     file_index=index + 1,
                                     file_count=len(filenames),
                                     queue_resource="disk",
@@ -521,23 +896,27 @@ class DownloadManager:
                                 )
                                 session.commit()
                         await self.scheduler.publish_job(job_id)
-                        async with self.scheduler.lease("disk"):
-                            actual_hash = await asyncio.to_thread(
-                                self._sha256_file, Path(downloaded_path)
-                            )
-                        if actual_hash != expected_hash:
+                        if actual_hash is None:
+                            async with self.scheduler.lease("disk"):
+                                actual_hash = await asyncio.to_thread(
+                                    self._sha256_file, Path(downloaded_path)
+                                )
+                        if expected_hash and actual_hash != expected_hash:
                             raise ValueError(f"SHA-256 mismatch for {filename}")
+                        resolved_sha256[filename] = actual_hash
                     with SessionLocal() as session:
                         job = session.get(Job, job_id)
                         if not job or job.status == JobStatus.CANCELLED.value:
                             return
-                        completed_bytes += file_sizes.get(filename, 0)
+                        if not reused:
+                            completed_bytes += file_sizes.get(filename, 0)
                         update_job_progress(
                             job,
                             stage=f"downloaded {filename}",
                             completed_units=completed_bytes if total_size else index + 1,
                             total_units=total_size if total_size else len(filenames),
                             unit="bytes" if total_size else "files",
+                            bytes_reused=reused_bytes,
                             file_index=index + 1,
                             file_count=len(filenames),
                             queue_resource=job.queue_resource,
@@ -555,9 +934,24 @@ class DownloadManager:
                             ),
                             "downloaded_bytes": completed_bytes if total_size else None,
                             "total_bytes": total_size or None,
+                            "bytes_reused": reused_bytes,
                             "filename": filename,
                         },
                     )
+
+                inspection = (
+                    self._inspect_staged_model(
+                        staging,
+                        filenames,
+                        request.role,
+                    )
+                    if request.install_plan_id
+                    else None
+                )
+                if request.install_plan_id:
+                    if not inspection:
+                        raise ValueError("downloaded model metadata could not be inspected")
+                    self._validate_staged_plan(plan, inspection, resolved_sha256)
 
                 if compiled_template and compiled_template.template.runtime_adaptive:
                     with SessionLocal() as session:
@@ -583,7 +977,7 @@ class DownloadManager:
                         )
 
                 destination.parent.mkdir(parents=True, exist_ok=True)
-                if compiled_template:
+                if compiled_template or request.install_plan_id:
                     provisional_path = destination
                     provisional_files = list(filenames)
                 async with self.scheduler.lease("disk"):
@@ -640,15 +1034,33 @@ class DownloadManager:
                             "workflow_template_sha256": request.workflow_template_sha256,
                             "default_settings": default_settings,
                         },
-                        active=compiled_template is None,
+                        active=compiled_template is None and not request.install_plan_id,
                     )
                     session.add(install)
                     session.flush()
-                    provisional_install_id = install.id if compiled_template else None
+                    if request.install_plan_id:
+                        if not inspection:
+                            raise ValueError("downloaded model metadata could not be inspected")
+                        for component in inspection.components:
+                            session.add(
+                                ModelComponentManifest(
+                                    model_install_id=install.id,
+                                    kind=component.kind,
+                                    relative_path=component.path,
+                                    target_folder=component.target_folder,
+                                    sha256=resolved_sha256.get(component.path),
+                                    size_bytes=file_sizes.get(component.path),
+                                    required=True,
+                                    metadata_json=component.metadata,
+                                )
+                            )
+                    provisional_install_id = (
+                        install.id if compiled_template or request.install_plan_id else None
+                    )
                     profile = None
                     workflow_revision_id = None
                     superseded_install_ids: list[str] = []
-                    if not compiled_template:
+                    if not compiled_template and not request.install_plan_id:
                         profile = ensure_profile_for_install(
                             session,
                             install,
@@ -666,7 +1078,7 @@ class DownloadManager:
                         queue_resource="primary_compute" if compiled_template else "disk",
                         indeterminate=True,
                     )
-                    if profile:
+                    if profile and not request.install_plan_id:
                         job.result_json = {
                             "model_install_id": install.id,
                             "profile_id": profile.id,
@@ -686,7 +1098,7 @@ class DownloadManager:
                     profile_id = profile.id if profile else None
 
                 if compiled_template:
-                    activation = await self._activate_comfy_install(
+                    media_activation = await self._activate_comfy_install(
                         job_id=job_id,
                         install_id=install_id,
                         destination=destination,
@@ -694,11 +1106,24 @@ class DownloadManager:
                         compiled=compiled_template,
                         default_settings=default_settings,
                     )
-                    if not activation:
+                    if not media_activation:
                         return
                     compiled_template, profile_id, workflow_revision_id, superseded_install_ids = (
-                        activation
+                        media_activation
                     )
+                    provisional_install_id = None
+                    provisional_path = None
+                    provisional_files = []
+                elif request.install_plan_id:
+                    chat_activation = await self._activate_chat_install(
+                        job_id=job_id,
+                        install_id=install_id,
+                        default_settings=default_settings,
+                        component_hashes=resolved_sha256,
+                    )
+                    if not chat_activation:
+                        return
+                    profile_id = chat_activation
                     provisional_install_id = None
                     provisional_path = None
                     provisional_files = []
@@ -707,6 +1132,12 @@ class DownloadManager:
                     job = session.get(Job, job_id)
                     if not job:
                         return
+                    if request.install_plan_id:
+                        completed_plan = session.get(InstallPlan, request.install_plan_id)
+                        if completed_plan:
+                            completed_plan.status = "activated"
+                            completed_plan.failure_code = None
+                            completed_plan.failure_reason = None
                     job.status = JobStatus.COMPLETE.value
                     job.completed_at = utcnow()
                     completed_progress(job)
@@ -718,26 +1149,52 @@ class DownloadManager:
                     {"model_install_id": install_id, "profile_id": profile_id},
                 )
         except asyncio.CancelledError:
+            if retained_staging and provisional_path:
+                self._retain_verified_staging(
+                    provisional_path,
+                    retained_staging,
+                    provisional_files,
+                )
             await self._cleanup_provisional_install_serialized(
                 job_id,
                 provisional_install_id=provisional_install_id,
                 provisional_path=provisional_path,
                 provisional_files=provisional_files,
             )
+            await self._restore_media_worker(previous_media_running)
             raise
         except Exception as exc:
             try:
+                if retained_staging and provisional_path:
+                    self._retain_verified_staging(
+                        provisional_path,
+                        retained_staging,
+                        provisional_files,
+                    )
                 await self._cleanup_provisional_install_serialized(
                     job_id,
                     provisional_install_id=provisional_install_id,
                     provisional_path=provisional_path,
                     provisional_files=provisional_files,
                 )
+                await self._restore_media_worker(previous_media_running)
             except Exception:
                 logger.exception("Could not safely clean failed model install %s", job_id)
             with SessionLocal() as session:
                 job = session.get(Job, job_id)
                 if job:
+                    request = DownloadRequest.model_validate(job.payload_json)
+                    if request.install_plan_id:
+                        failure_code = self._stable_failure_code(exc)
+                        failed_plan = session.get(InstallPlan, request.install_plan_id)
+                        if failed_plan:
+                            failed_plan.status = "failed"
+                            failed_plan.failure_code = failure_code
+                            failed_plan.failure_reason = str(exc)[:1_000]
+                        job.result_json = {
+                            "failure_code": failure_code,
+                            "failure_reason": str(exc)[:1_000],
+                        }
                     job.status = JobStatus.FAILED.value
                     job.error = str(exc)
                     job.completed_at = utcnow()
@@ -750,6 +1207,131 @@ class DownloadManager:
                     session.commit()
             await self.scheduler.publish_job(job_id)
             await self.events.publish("download.failed", job_id, {"error": str(exc)})
+
+    async def _restore_media_worker(self, was_running: bool | None) -> None:
+        if was_running is None or not self.processes:
+            return
+        if was_running:
+            await self.processes.start_media()
+        else:
+            await self.processes.stop("media")
+
+    async def _activate_chat_install(
+        self,
+        *,
+        job_id: str,
+        install_id: str,
+        default_settings: dict[str, Any],
+        component_hashes: dict[str, str],
+    ) -> str | None:
+        """Prove a downloaded GGUF can launch and complete one bounded turn."""
+
+        if not self.processes or not self.chat_adapter:
+            raise RuntimeError("automatic chat activation is unavailable")
+        from .db import SessionLocal
+
+        async with self.scheduler.lease("primary"):
+            previous = next(item for item in self.processes.statuses() if item.name == "chat")
+            previous_profile_id = previous.profile_id if previous.running else None
+            with SessionLocal() as session:
+                install = session.get(ModelInstall, install_id)
+                job = session.get(Job, job_id)
+                if not install or not job:
+                    return None
+                profile = build_profile_for_install(
+                    install,
+                    default_settings=default_settings,
+                )
+                update_job_progress(
+                    job,
+                    stage="proving chat runtime",
+                    queue_resource="primary_compute",
+                    indeterminate=True,
+                )
+                session.commit()
+                session.expunge(install)
+            await self.scheduler.publish_job(job_id)
+            completion_seen = False
+            text_seen = False
+            runtime_build = "unknown"
+            try:
+                await self.processes.load_chat(profile, install)
+                capabilities = await self.chat_adapter.capabilities()
+                if not capabilities.healthy:
+                    raise RuntimeError("chat worker did not pass its health check")
+                runtime_build = capabilities.version
+                token_count = await self.chat_adapter.count_tokens(
+                    [{"role": "user", "content": "Reply with OK."}]
+                )
+                if token_count < 1:
+                    raise RuntimeError("chat worker tokenizer did not accept the probe")
+                async with asyncio.timeout(120):
+                    async for event in self.chat_adapter.stream(
+                        ChatRequest(
+                            run_id=new_id("activation-probe"),
+                            messages=[{"role": "user", "content": "Reply with OK."}],
+                            settings={
+                                "temperature": 0,
+                                "seed": 0,
+                                "max_tokens": 8,
+                            },
+                        )
+                    ):
+                        text_seen = text_seen or bool(event.text)
+                        if event.type == "complete":
+                            completion_seen = True
+                if not completion_seen or not text_seen:
+                    raise RuntimeError("chat worker did not complete the bounded probe")
+            finally:
+                if previous_profile_id:
+                    with SessionLocal() as session:
+                        previous_profile = session.get(ModelProfile, previous_profile_id)
+                        previous_install = (
+                            session.get(ModelInstall, previous_profile.model_install_id)
+                            if previous_profile and previous_profile.model_install_id
+                            else None
+                        )
+                        if previous_profile and previous_install:
+                            session.expunge(previous_profile)
+                            session.expunge(previous_install)
+                    if previous_profile and previous_install:
+                        await self.processes.load_chat(previous_profile, previous_install)
+                    else:
+                        await self.processes.stop("chat")
+                else:
+                    await self.processes.stop("chat")
+
+            with SessionLocal() as session:
+                activated = session.get(ModelInstall, install_id)
+                job = session.get(Job, job_id)
+                if not activated or not job:
+                    return None
+                activated.active = True
+                profile = ensure_profile_for_install(
+                    session,
+                    activated,
+                    default_settings=default_settings,
+                )
+                self._record_capability_evidence(
+                    session,
+                    activated,
+                    component_hashes=component_hashes,
+                    runtime_build=runtime_build,
+                    workflow_contract_version=None,
+                    details={
+                        "probe": "minimal_chat_completion",
+                        "tokenizer": "accepted",
+                        "completion": "received",
+                    },
+                )
+                job.result_json = {
+                    "model_install_id": activated.id,
+                    "profile_id": profile.id,
+                    "workflow_revision_id": None,
+                    "superseded_model_install_ids": [],
+                }
+                session.commit()
+                return profile.id
 
     async def _prepare_comfy_template(
         self, request: DownloadRequest
@@ -764,6 +1346,9 @@ class DownloadManager:
             if not self.processes:
                 raise
             await self.processes.start_media()
+            invalidate = getattr(self.media_adapter, "invalidate_object_info_cache", None)
+            if callable(invalidate):
+                invalidate()
             object_info = await self.media_adapter.object_info()
         compiled = self.comfy_templates.compile(
             request.workflow_template_id,
@@ -791,7 +1376,11 @@ class DownloadManager:
         await self.media_adapter.probe_workflow(
             MediaRequest(
                 run_id=new_id("activation-probe"),
-                operation="text_to_image",
+                operation=getattr(
+                    getattr(compiled, "template", None),
+                    "operation",
+                    "text_to_image",
+                ),
                 prompt="simple geometric shape",
                 negative_prompt="",
                 input_paths=[],
@@ -829,6 +1418,9 @@ class DownloadManager:
 
         async with self.scheduler.lease("primary"):
             await self.processes.start_media((destination, request.comfy_paths))
+            invalidate = getattr(self.media_adapter, "invalidate_object_info_cache", None)
+            if callable(invalidate):
+                invalidate()
             refreshed_object_info = await self.media_adapter.object_info()
             compiled = self.comfy_templates.compile(
                 request.workflow_template_id or "",
@@ -844,7 +1436,7 @@ class DownloadManager:
             validation_errors = await self.media_adapter.validate_workflow(compiled.api_graph)
             if validation_errors:
                 raise ValueError("; ".join(validation_errors))
-            if compiled.template.runtime_adaptive:
+            if compiled.template.runtime_adaptive or request.install_plan_id:
                 with SessionLocal() as session:
                     job = session.get(Job, job_id)
                     if job:
@@ -857,6 +1449,11 @@ class DownloadManager:
                         session.commit()
                 await self.scheduler.publish_job(job_id)
                 await self._probe_adaptive_checkpoint(compiled)
+            capabilities = (
+                await self.media_adapter.capabilities() if request.install_plan_id else None
+            )
+            if capabilities and not capabilities.healthy:
+                raise RuntimeError("ComfyUI did not pass its health check after the probe")
             with SessionLocal() as session:
                 activated_install = session.get(ModelInstall, install_id)
                 job = session.get(Job, job_id)
@@ -878,6 +1475,26 @@ class DownloadManager:
                     compiled,
                     activated_install,
                 )
+                if request.install_plan_id and capabilities:
+                    self._record_capability_evidence(
+                        session,
+                        activated_install,
+                        component_hashes={
+                            str(key): str(value)
+                            for key, value in (
+                                activated_install.manifest_json.get("expected_sha256") or {}
+                            ).items()
+                        },
+                        runtime_build=capabilities.version,
+                        workflow_contract_version=media_workflow_contract_version(
+                            compiled.template.sha256
+                        ),
+                        details={
+                            "probe": "bounded_media_output",
+                            "operation": compiled.template.operation,
+                            "workflow_template_id": compiled.template.id,
+                        },
+                    )
                 update_job_progress(
                     job,
                     stage="activating",
@@ -1082,16 +1699,12 @@ class DownloadManager:
         """Retire provisional media files without racing an active generation."""
 
         async with self.scheduler.lease("primary"):
-            cleaned = self._cleanup_provisional_install(
+            return self._cleanup_provisional_install(
                 job_id,
                 provisional_install_id=provisional_install_id,
                 provisional_path=provisional_path,
                 provisional_files=provisional_files,
             )
-            if cleaned and self.processes:
-                with suppress(Exception):
-                    await self.processes.start_media()
-            return cleaned
 
     def _cleanup_provisional_install(
         self,
@@ -1275,6 +1888,154 @@ class DownloadManager:
         if worker and worker.poll() is None:
             with suppress(ProcessLookupError):
                 await asyncio.to_thread(worker.wait)
+
+    async def _download_files_parallel(
+        self,
+        *,
+        job_id: str,
+        remote_id: str,
+        filenames: list[str],
+        revision: str,
+        staging: Path,
+        completed_bytes: int,
+        total_size: int | None,
+        batch_size: int,
+        bytes_reused: int,
+    ) -> dict[str, str]:
+        """Transfer independent plan components concurrently in one controllable worker."""
+
+        from .db import SessionLocal
+
+        for attempt in range(1, _TRANSFER_ATTEMPTS + 1):
+            creationflags = getattr(subprocess, "CREATE_NO_WINDOW", 0) if os.name == "nt" else 0
+            environment = subprocess_environment(overrides={"HF_HUB_DISABLE_PROGRESS_BARS": "1"})
+            process = subprocess.Popen(
+                download_worker_command(),
+                stdin=subprocess.PIPE,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                env=environment,
+                creationflags=creationflags,
+            )
+            self._workers[job_id] = process
+            payload = json.dumps(
+                {
+                    "repo_id": remote_id,
+                    "files": filenames,
+                    "revision": revision,
+                    "local_dir": str(staging),
+                    "token": self.settings.hf_token,
+                    "max_workers": min(3, len(filenames)),
+                }
+            ).encode()
+            monitor_stop = asyncio.Event()
+            monitor = asyncio.create_task(
+                self._monitor_component_batch(
+                    job_id=job_id,
+                    process=process,
+                    completed_bytes=completed_bytes,
+                    total_size=total_size,
+                    batch_size=batch_size,
+                    bytes_reused=bytes_reused,
+                    file_count=len(filenames),
+                    stop=monitor_stop,
+                )
+            )
+            try:
+                stdout, stderr = await asyncio.to_thread(process.communicate, payload)
+            finally:
+                monitor_stop.set()
+                await asyncio.gather(monitor, return_exceptions=True)
+                if self._workers.get(job_id) is process:
+                    self._workers.pop(job_id, None)
+                if process.poll() is None:
+                    with suppress(ProcessLookupError):
+                        process.terminate()
+                    with suppress(ProcessLookupError):
+                        await asyncio.to_thread(process.wait)
+            if not process.returncode:
+                try:
+                    result = json.loads(stdout)
+                    paths = result["paths"]
+                except (json.JSONDecodeError, KeyError, TypeError) as exc:
+                    raise RuntimeError(
+                        "Hub download worker returned an invalid batch response"
+                    ) from exc
+                if (
+                    not isinstance(paths, dict)
+                    or set(paths) != set(filenames)
+                    or any(not isinstance(path, str) for path in paths.values())
+                ):
+                    raise RuntimeError("Hub download worker returned an invalid batch response")
+                return {str(filename): str(path) for filename, path in paths.items()}
+            if attempt >= _TRANSFER_ATTEMPTS:
+                detail = stderr.decode(errors="replace").strip()
+                raise RuntimeError(detail[-2_000:] or "Hub download worker failed")
+            with SessionLocal() as session:
+                job = session.get(Job, job_id)
+                if job:
+                    update_job_progress(
+                        job,
+                        stage=f"retrying component batch ({attempt + 1}/{_TRANSFER_ATTEMPTS})",
+                        completed_units=completed_bytes,
+                        total_units=total_size,
+                        unit="bytes" if total_size else None,
+                        bytes_reused=bytes_reused,
+                        queue_resource=job.queue_resource,
+                        indeterminate=not bool(total_size),
+                    )
+                    session.commit()
+            await self.scheduler.publish_job(job_id)
+            await asyncio.sleep(2 ** (attempt - 1))
+        raise RuntimeError("download transfer exhausted its retry budget")
+
+    async def _monitor_component_batch(
+        self,
+        *,
+        job_id: str,
+        process: subprocess.Popen[bytes],
+        completed_bytes: int,
+        total_size: int | None,
+        batch_size: int,
+        bytes_reused: int,
+        file_count: int,
+        stop: asyncio.Event,
+    ) -> None:
+        from .db import SessionLocal
+
+        initial_write_bytes = self._process_tree_write_bytes(process.pid)
+        maximum_transferred = 0
+        last_reported = -1
+        while not stop.is_set():
+            current_write_bytes = self._process_tree_write_bytes(process.pid)
+            if current_write_bytes is not None and initial_write_bytes is not None:
+                maximum_transferred = max(
+                    maximum_transferred,
+                    min(batch_size, max(0, current_write_bytes - initial_write_bytes)),
+                )
+            reported = completed_bytes + maximum_transferred
+            if total_size and reported != last_reported:
+                with SessionLocal() as session:
+                    job = session.get(Job, job_id)
+                    if not job or job.status == JobStatus.CANCELLED.value:
+                        return
+                    update_job_progress(
+                        job,
+                        stage=f"downloading {file_count} components",
+                        completed_units=reported,
+                        total_units=total_size,
+                        unit="bytes",
+                        bytes_reused=bytes_reused,
+                        file_count=file_count,
+                        queue_resource=job.queue_resource,
+                    )
+                    session.commit()
+                await self.scheduler.publish_job(job_id)
+                last_reported = reported
+            try:
+                await asyncio.wait_for(stop.wait(), timeout=0.2)
+            except TimeoutError:
+                continue
 
     async def _download_file(
         self,
@@ -1507,6 +2268,30 @@ class DownloadManager:
             else:
                 os.replace(source, target)
         shutil.rmtree(staging, ignore_errors=True)
+
+    @staticmethod
+    def _retain_verified_staging(
+        install_path: Path,
+        staging: Path,
+        filenames: list[str],
+    ) -> None:
+        """Move only this failed plan's verified files back to resumable staging."""
+
+        if install_path.is_symlink() or staging.is_symlink():
+            raise ValueError("model staging cannot use filesystem links")
+        staging.mkdir(parents=True, exist_ok=True)
+        for filename in filenames:
+            relative = PurePosixPath(filename)
+            if relative.is_absolute() or ".." in relative.parts:
+                raise ValueError("model staging path is unsafe")
+            source = install_path.joinpath(*relative.parts)
+            target = staging.joinpath(*relative.parts)
+            if not source.is_file() or source.is_symlink():
+                continue
+            target.parent.mkdir(parents=True, exist_ok=True)
+            if target.exists():
+                target.unlink()
+            os.replace(source, target)
 
     @staticmethod
     def _install_directory_name(remote_id: str, revision: str) -> str:

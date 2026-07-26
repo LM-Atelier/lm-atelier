@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 import os
 import shutil
@@ -17,9 +18,14 @@ from sqlalchemy.orm import Session, selectinload
 from starlette.responses import FileResponse
 
 from . import __version__
+from .adapters.contracts import ADAPTER_CONTRACT_VERSION
 from .capability_probe import probe_structured_tools
 from .catalog import HuggingFaceCatalog
-from .comfy_templates import ComfyTemplate, ComfyTemplateRegistry
+from .comfy_templates import (
+    COMFY_TEMPLATE_COMPILER_VERSION,
+    ComfyTemplate,
+    ComfyTemplateRegistry,
+)
 from .config import Settings
 from .credentials import CredentialVaultUnavailable
 from .custom_nodes import custom_node_dependency_errors
@@ -42,11 +48,24 @@ from .engines import (
     EngineRegistry,
     EngineSchemaUnavailableError,
 )
-from .hardware import collect_system_info
+from .hardware import collect_system_info, hardware_capability_class
 from .incognito import (
     INCOGNITO_HEADER,
     IncognitoUnavailableError,
     is_incognito_scoped_path,
+)
+from .model_manifests import (
+    MAX_METADATA_BYTES,
+    MAX_WEIGHT_HEADER_BYTES,
+    ModelManifestError,
+    inspect_repository_metadata,
+)
+from .model_planner import (
+    ACTIVATION_PROBE_VERSION,
+    LAUNCH_CONTRACT_VERSION,
+    media_workflow_contract_version,
+    persist_install_plan,
+    resolve_install_plan,
 )
 from .models import (
     AppSetting,
@@ -54,9 +73,11 @@ from .models import (
     Chat,
     CustomNodeInstall,
     GenerationPreset,
+    InstallPlan,
     Job,
     Message,
     MessagePart,
+    ModelCapabilityEvidence,
     ModelInstall,
     ModelProfile,
     Project,
@@ -112,6 +133,7 @@ from .schemas import (
     HealthOut,
     JobOut,
     MessageOut,
+    ModelCapabilityEvidenceOut,
     ModelImport,
     ModelInstallOut,
     ModelProfileBundle,
@@ -1800,6 +1822,7 @@ async def catalog_preflight(
     name: str,
     payload: CatalogPreflightRequest,
     request: Request,
+    session: SessionDep,
 ) -> CatalogPreflight:
     services = _services(request)
     try:
@@ -1813,12 +1836,136 @@ async def catalog_preflight(
             "Hugging Face is temporarily unavailable. Check your connection and retry.",
         ) from exc
     system = collect_system_info(services.settings)
+
+    async def finalize(
+        result: CatalogPreflight,
+        resolved_detail: CatalogDetail,
+    ) -> CatalogPreflight:
+        metadata: dict[str, bytes] = {}
+        inspect_prefix = getattr(services.catalog, "inspect_file_prefix", None)
+        repo_files = {
+            str(item.get("filename") or "")
+            for item in resolved_detail.files
+            if item.get("filename")
+        }
+        metadata_paths = sorted(
+            path
+            for path in repo_files
+            if PurePosixPath(path).name.casefold()
+            in {"config.json", "model_index.json", "generation_config.json"}
+        )[:16]
+        selected_binary_paths = [
+            path
+            for path in result.selected_files
+            if path.casefold().endswith((".gguf", ".safetensors"))
+        ][:8]
+
+        async def fetch_prefix(path: str) -> tuple[str, bytes] | None:
+            if not callable(inspect_prefix):
+                return None
+            try:
+                if path.casefold().endswith(".safetensors"):
+                    prefix = await inspect_prefix(
+                        resolved_detail.model.remote_id,
+                        resolved_detail.revision,
+                        path,
+                        max_bytes=8,
+                    )
+                    if len(prefix) < 8:
+                        return path, prefix
+                    header_size = int.from_bytes(prefix[:8], "little")
+                    limit = min(8 + header_size, MAX_WEIGHT_HEADER_BYTES + 8)
+                elif path.casefold().endswith(".gguf"):
+                    limit = MAX_WEIGHT_HEADER_BYTES
+                else:
+                    limit = MAX_METADATA_BYTES
+                return (
+                    path,
+                    await inspect_prefix(
+                        resolved_detail.model.remote_id,
+                        resolved_detail.revision,
+                        path,
+                        max_bytes=limit,
+                    ),
+                )
+            except Exception:
+                # Staged bytes are inspected again before activation. Remote
+                # prefix inspection is an optimization, never a trust bypass.
+                return None
+
+        inspected_prefixes = await asyncio.gather(
+            *(fetch_prefix(path) for path in [*metadata_paths, *selected_binary_paths])
+        )
+        metadata.update(item for item in inspected_prefixes if item is not None)
+        if not metadata and resolved_detail.model.architecture:
+            metadata["catalog-config.json"] = json.dumps(
+                {"model_type": resolved_detail.model.architecture},
+                separators=(",", ":"),
+            ).encode()
+        inspection_error: str | None = None
+        try:
+            inspection = inspect_repository_metadata(
+                metadata,
+                result.selected_files,
+                role=payload.role,
+            )
+        except ModelManifestError as exc:
+            inspection_error = str(exc)
+            inspection = inspect_repository_metadata(
+                {},
+                result.selected_files,
+                role=payload.role,
+            )
+        files = {str(item.get("filename") or ""): item for item in resolved_detail.files}
+        selected_metadata = [
+            files.get(
+                filename,
+                {
+                    "filename": filename,
+                    "size": None,
+                    "sha256": result.expected_sha256.get(filename),
+                },
+            )
+            for filename in result.selected_files
+        ]
+        resolved = resolve_install_plan(
+            remote_id=result.remote_id,
+            revision=result.revision,
+            role=payload.role,
+            engine=payload.engine,
+            selected_files=selected_metadata,
+            inspection=inspection,
+            workflow_template_id=result.workflow_template_id,
+            workflow_template_sha256=result.workflow_template_sha256,
+            comfy_paths=result.comfy_paths,
+            source_remote_id=result.source_remote_id,
+        )
+        if inspection_error:
+            resolved = resolved.blocked(
+                "metadata_inspection_failed",
+                inspection_error,
+            )
+        if not result.can_install:
+            resolved = resolved.blocked(
+                "preflight_blocked",
+                next(
+                    (check.detail for check in result.checks if check.status == "block"),
+                    "The install check did not pass.",
+                ),
+            )
+        plan = persist_install_plan(session, resolved)
+        session.commit()
+        return result.model_copy(update={"install_plan": plan})
+
     if (
         payload.role == "chat"
         or payload.engine != "comfyui"
         or services.settings.media_engine != "comfyui"
     ):
-        return assess_catalog_install(detail, payload, services.settings, system)
+        return await finalize(
+            assess_catalog_install(detail, payload, services.settings, system),
+            detail,
+        )
 
     runtime_status = services.runtimes.status("comfyui")
     if runtime_status.security_status == "blocked" and runtime_status.state != "ready":
@@ -1832,7 +1979,10 @@ async def catalog_preflight(
                 detail=runtime_status.security_message or runtime_status.message,
             ),
         ]
-        return result.model_copy(update={"can_install": False, "checks": checks})
+        return await finalize(
+            result.model_copy(update={"can_install": False, "checks": checks}),
+            detail,
+        )
 
     registry = ComfyTemplateRegistry(services.settings)
     candidates = registry.matches(detail.model.remote_id, payload.role)
@@ -1878,14 +2028,17 @@ async def catalog_preflight(
                     ),
                 ),
             ]
-            return result.model_copy(
-                update={
-                    "source_remote_id": detail.model.remote_id,
-                    "comfy_paths": adaptive.comfy_paths,
-                    "workflow_template_id": adaptive.id,
-                    "workflow_template_sha256": adaptive.sha256,
-                    "checks": checks,
-                }
+            return await finalize(
+                result.model_copy(
+                    update={
+                        "source_remote_id": detail.model.remote_id,
+                        "comfy_paths": adaptive.comfy_paths,
+                        "workflow_template_id": adaptive.id,
+                        "workflow_template_sha256": adaptive.sha256,
+                        "checks": checks,
+                    }
+                ),
+                detail,
             )
         checks = [
             *[check for check in result.checks if check.id != "selection"],
@@ -1899,15 +2052,18 @@ async def catalog_preflight(
                 ),
             ),
         ]
-        return result.model_copy(
-            update={
-                "source_remote_id": detail.model.remote_id,
-                "selected_files": [],
-                "expected_sha256": {},
-                "download_bytes": 0,
-                "can_install": False,
-                "checks": checks,
-            }
+        return await finalize(
+            result.model_copy(
+                update={
+                    "source_remote_id": detail.model.remote_id,
+                    "selected_files": [],
+                    "expected_sha256": {},
+                    "download_bytes": 0,
+                    "can_install": False,
+                    "checks": checks,
+                }
+            ),
+            detail,
         )
 
     inspected: dict[tuple[str, str], CatalogDetail] = {}
@@ -1948,15 +2104,18 @@ async def catalog_preflight(
                 ),
             ),
         ]
-        return result.model_copy(
-            update={
-                "source_remote_id": detail.model.remote_id,
-                "selected_files": [],
-                "expected_sha256": {},
-                "download_bytes": 0,
-                "can_install": False,
-                "checks": checks,
-            }
+        return await finalize(
+            result.model_copy(
+                update={
+                    "source_remote_id": detail.model.remote_id,
+                    "selected_files": [],
+                    "expected_sha256": {},
+                    "download_bytes": 0,
+                    "can_install": False,
+                    "checks": checks,
+                }
+            ),
+            detail,
         )
 
     _, template, resolved_detail = min(viable, key=lambda item: (item[0], item[1].id))
@@ -1999,14 +2158,17 @@ async def catalog_preflight(
             ),
         ),
     ]
-    return result.model_copy(
-        update={
-            "source_remote_id": detail.model.remote_id,
-            "comfy_paths": template.comfy_paths,
-            "workflow_template_id": template.id,
-            "workflow_template_sha256": template.sha256,
-            "checks": checks,
-        }
+    return await finalize(
+        result.model_copy(
+            update={
+                "source_remote_id": detail.model.remote_id,
+                "comfy_paths": template.comfy_paths,
+                "workflow_template_id": template.id,
+                "workflow_template_sha256": template.sha256,
+                "checks": checks,
+            }
+        ),
+        resolved_detail,
     )
 
 
@@ -2014,6 +2176,49 @@ async def catalog_preflight(
 async def create_download(payload: DownloadRequest, request: Request, session: SessionDep) -> Job:
     manager: DownloadManager = _services(request).downloads
     try:
+        if payload.install_plan_id:
+            plan = session.get(InstallPlan, payload.install_plan_id)
+            if not plan:
+                raise ValueError("install plan not found; run the install check again")
+            if plan.status != "planned":
+                raise ValueError("install plan is no longer active; run the install check again")
+            if plan.compatibility != "supported":
+                raise ValueError(plan.failure_reason or "this model layout is unsupported")
+            planned_files = [
+                str(item.get("path") or "")
+                for item in plan.artifacts_json
+                if item.get("required", True)
+            ]
+            planned_hashes = {
+                str(item["path"]): str(item["sha256"])
+                for item in plan.artifacts_json
+                if item.get("sha256")
+            }
+            runtime = plan.runtime_contract_json
+            if (
+                runtime.get("workflow_template_id")
+                and runtime.get("workflow_compiler_version") != COMFY_TEMPLATE_COMPILER_VERSION
+            ):
+                raise ValueError("workflow contract changed; run the install check again")
+            expected = {
+                "remote_id": plan.remote_id,
+                "revision": plan.revision,
+                "role": plan.role,
+                "engine": plan.engine,
+                "allow_patterns": planned_files,
+                "expected_sha256": planned_hashes,
+                "source_remote_id": runtime.get("source_remote_id"),
+                "comfy_paths": runtime.get("comfy_paths") or {},
+                "workflow_template_id": runtime.get("workflow_template_id"),
+                "workflow_template_sha256": runtime.get("workflow_template_sha256"),
+            }
+            supplied = payload.model_dump()
+            mismatched = [key for key, value in expected.items() if supplied.get(key) != value]
+            if mismatched:
+                raise ValueError(
+                    "install request no longer matches its immutable plan; "
+                    "run the install check again"
+                )
         return manager.create(session, payload)
     except ValueError as exc:
         raise HTTPException(422, str(exc)) from exc
@@ -2073,14 +2278,87 @@ async def install_recipe(recipe_id: str, request: Request, session: SessionDep) 
 
 
 @router.get("/models", response_model=list[ModelInstallOut])
-async def list_models(session: SessionDep) -> list[ModelInstall]:
-    return list(
+async def list_models(request: Request, session: SessionDep) -> list[ModelInstallOut]:
+    installs = list(
         session.scalars(
             select(ModelInstall)
             .where(ModelInstall.active.is_(True))
             .order_by(ModelInstall.updated_at.desc())
         ).all()
     )
+    services = _services(request)
+    current_hardware_class = hardware_capability_class(services.settings)
+    runtime_statuses = {
+        "llama.cpp": services.runtimes.status("llama.cpp"),
+        "comfyui": services.runtimes.status("comfyui"),
+    }
+    evidence_by_install: dict[str, ModelCapabilityEvidence] = {}
+    for evidence in session.scalars(
+        select(ModelCapabilityEvidence)
+        .where(
+            ModelCapabilityEvidence.model_install_id.in_([install.id for install in installs]),
+            ModelCapabilityEvidence.result == "ready",
+        )
+        .order_by(ModelCapabilityEvidence.probed_at.desc())
+    ).all():
+        install = next(
+            (candidate for candidate in installs if candidate.id == evidence.model_install_id),
+            None,
+        )
+        if not install:
+            continue
+        expected_hashes = {
+            str(path): str(digest)
+            for path, digest in (install.manifest_json.get("expected_sha256") or {}).items()
+            if isinstance(path, str) and isinstance(digest, str)
+        }
+        template_sha256 = install.manifest_json.get("workflow_template_sha256")
+        expected_workflow = (
+            media_workflow_contract_version(template_sha256)
+            if isinstance(template_sha256, str)
+            else None
+        )
+        runtime_release = evidence.details_json.get("runtime_release")
+        current_runtime = runtime_statuses.get(install.engine)
+        if (
+            evidence.adapter_contract_version != ADAPTER_CONTRACT_VERSION
+            or evidence.launch_contract_version != LAUNCH_CONTRACT_VERSION
+            or evidence.probe_version != ACTIVATION_PROBE_VERSION
+            or evidence.hardware_class != current_hardware_class
+            or evidence.component_hashes_json != expected_hashes
+            or evidence.workflow_contract_version != expected_workflow
+            or (
+                isinstance(runtime_release, str)
+                and (
+                    not current_runtime
+                    or current_runtime.state != "ready"
+                    or current_runtime.release != runtime_release
+                )
+            )
+        ):
+            continue
+        evidence_by_install.setdefault(evidence.model_install_id, evidence)
+    return [
+        ModelInstallOut.model_validate(install).model_copy(
+            update={
+                "readiness": (
+                    "ready"
+                    if install.id in evidence_by_install
+                    else (
+                        "unsupported"
+                        if install.compatibility == CompatibilityLevel.UNSUPPORTED.value
+                        else "unverified"
+                    )
+                ),
+                "capability_evidence": (
+                    ModelCapabilityEvidenceOut.model_validate(evidence_by_install[install.id])
+                    if install.id in evidence_by_install
+                    else None
+                ),
+            }
+        )
+        for install in installs
+    ]
 
 
 @router.get("/models/storage", response_model=ModelStorageInfo)

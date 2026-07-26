@@ -43,6 +43,34 @@ def test_preview_binary_envelopes_are_decoded_and_validated() -> None:
     assert _preview_payload((1).to_bytes(4, "big") + (1).to_bytes(4, "big") + b"invalid") is None
 
 
+async def test_object_info_is_cached_by_content_hash_and_explicitly_invalidated() -> None:
+    requests = 0
+
+    def handler(_request: httpx.Request) -> httpx.Response:
+        nonlocal requests
+        requests += 1
+        return httpx.Response(200, json={"Sampler": {"output_node": False}})
+
+    adapter = ComfyUIAdapter("http://comfy.test")
+    await adapter._client.aclose()
+    adapter._client = httpx.AsyncClient(
+        base_url="http://comfy.test",
+        transport=httpx.MockTransport(handler),
+    )
+    try:
+        first = await adapter.object_info()
+        second = await adapter.object_info()
+        adapter.invalidate_object_info_cache()
+        third = await adapter.object_info()
+    finally:
+        await adapter.close()
+
+    assert first is second
+    assert third == first
+    assert requests == 2
+    assert len(adapter._object_info_by_hash) == 1
+
+
 async def test_conditioning_images_are_staged_and_exposed_as_workflow_parameters(
     tmp_path: Path,
 ) -> None:

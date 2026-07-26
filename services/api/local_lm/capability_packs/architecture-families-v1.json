@@ -1,0 +1,90 @@
+{
+  "version": 1,
+  "families": [
+    {
+      "id": "stable-diffusion-xl",
+      "roles": ["image"],
+      "architecture_markers": [
+        "stable diffusion xl",
+        "stablediffusionxlpipeline",
+        "sdxl"
+      ]
+    },
+    {
+      "id": "stable-diffusion",
+      "roles": ["image"],
+      "architecture_markers": [
+        "stable diffusion",
+        "stablediffusionpipeline"
+      ]
+    },
+    {
+      "id": "flux",
+      "roles": ["image"],
+      "architecture_markers": [
+        "fluxtransformer",
+        "fluxpipeline"
+      ]
+    },
+    {
+      "id": "z-image",
+      "roles": ["image"],
+      "architecture_markers": [
+        "zimage",
+        "z-image"
+      ]
+    },
+    {
+      "id": "wan-video",
+      "roles": ["video"],
+      "architecture_markers": [
+        "wanpipeline",
+        "wanmodel",
+        "wan2"
+      ]
+    },
+    {
+      "id": "hunyuan-video",
+      "roles": ["video"],
+      "architecture_markers": [
+        "hunyuanvideo",
+        "hunyuan_video"
+      ]
+    },
+    {
+      "id": "cogvideox",
+      "roles": ["video"],
+      "architecture_markers": [
+        "cogvideox"
+      ]
+    },
+    {
+      "id": "llama",
+      "roles": ["chat"],
+      "architecture_markers": [
+        "llama"
+      ]
+    },
+    {
+      "id": "qwen",
+      "roles": ["chat"],
+      "architecture_markers": [
+        "qwen"
+      ]
+    },
+    {
+      "id": "gemma",
+      "roles": ["chat"],
+      "architecture_markers": [
+        "gemma"
+      ]
+    },
+    {
+      "id": "mistral",
+      "roles": ["chat"],
+      "architecture_markers": [
+        "mistral"
+      ]
+    }
+  ]
+}

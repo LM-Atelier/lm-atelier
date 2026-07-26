@@ -21,6 +21,14 @@ migration_datas = [
     and "__pycache__" not in source.parts
     and source.suffix not in {".pyc", ".pyo"}
 ]
+capability_pack_root = (
+    repository_root / "services" / "api" / "local_lm" / "capability_packs"
+)
+capability_pack_datas = [
+    (str(source), "local_lm/capability_packs")
+    for source in capability_pack_root.iterdir()
+    if source.is_file()
+]
 
 datas = [
     (str(repository_root / "apps" / "web" / "dist"), "web"),
@@ -30,6 +38,7 @@ datas = [
         "runtime-reviews",
     ),
     *migration_datas,
+    *capability_pack_datas,
     (str(repository_root / "build" / "release-metadata" / "LICENSE"), "."),
     (
         str(repository_root / "build" / "release-metadata" / "THIRD_PARTY_NOTICES.md"),

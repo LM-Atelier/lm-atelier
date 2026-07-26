@@ -544,6 +544,92 @@ async def test_catalog_detail_requests_live_blob_metadata(tmp_path) -> None:
     ]
 
 
+async def test_catalog_file_prefix_is_bounded_and_cached_by_revision(tmp_path: Path) -> None:
+    requests: list[httpx.Request] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        requests.append(request)
+        return httpx.Response(206, content=b'{"model_type":"qwen3"}')
+
+    catalog = HuggingFaceCatalog(Settings(data_dir=tmp_path))
+    await catalog.close()
+    catalog._client = httpx.AsyncClient(
+        base_url="https://huggingface.co",
+        transport=httpx.MockTransport(handler),
+    )
+    try:
+        first = await catalog.inspect_file_prefix(
+            "owner/model",
+            "immutable-sha",
+            "configs/config.json",
+            max_bytes=128,
+        )
+        second = await catalog.inspect_file_prefix(
+            "owner/model",
+            "immutable-sha",
+            "configs/config.json",
+            max_bytes=128,
+        )
+    finally:
+        await catalog.close()
+
+    assert first == second == b'{"model_type":"qwen3"}'
+    assert len(requests) == 1
+    assert requests[0].headers["range"] == "bytes=0-127"
+    assert requests[0].url.path == "/owner/model/resolve/immutable-sha/configs/config.json"
+
+
+async def test_catalog_file_prefix_rejects_an_oversized_response(tmp_path: Path) -> None:
+    def handler(_request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, content=b"12345")
+
+    catalog = HuggingFaceCatalog(Settings(data_dir=tmp_path))
+    await catalog.close()
+    catalog._client = httpx.AsyncClient(
+        base_url="https://huggingface.co",
+        transport=httpx.MockTransport(handler),
+    )
+    try:
+        with pytest.raises(ValueError, match="inspection limit"):
+            await catalog.inspect_file_prefix(
+                "owner/model",
+                "immutable-sha",
+                "config.json",
+                max_bytes=4,
+            )
+    finally:
+        await catalog.close()
+
+
+async def test_catalog_file_prefix_rejects_unsafe_paths_without_a_request(
+    tmp_path: Path,
+) -> None:
+    requests: list[httpx.Request] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        requests.append(request)
+        return httpx.Response(500)
+
+    catalog = HuggingFaceCatalog(Settings(data_dir=tmp_path))
+    await catalog.close()
+    catalog._client = httpx.AsyncClient(
+        base_url="https://huggingface.co",
+        transport=httpx.MockTransport(handler),
+    )
+    try:
+        with pytest.raises(ValueError, match="safe relative path"):
+            await catalog.inspect_file_prefix(
+                "owner/model",
+                "immutable-sha",
+                "../config.json",
+                max_bytes=128,
+            )
+    finally:
+        await catalog.close()
+
+    assert requests == []
+
+
 @pytest.mark.parametrize(
     "remote_id",
     [

@@ -376,6 +376,14 @@ export interface ModelInstall {
   compatibility: string;
   manifest_json: Record<string, unknown>;
   active: boolean;
+  readiness: "ready" | "unverified" | "unsupported";
+  capability_evidence: {
+    id: string;
+    evidence_key: string;
+    result: string;
+    runtime_build: string;
+    probed_at: string;
+  } | null;
   created_at: string;
   updated_at: string;
 }
@@ -444,6 +452,14 @@ export interface CatalogPreflight {
   estimated_ram_bytes: number | null;
   estimated_vram_bytes: number | null;
   can_install: boolean;
+  install_plan: {
+    id: string;
+    plan_hash: string;
+    compatibility: "supported" | "unsupported" | "trusted_extension_required";
+    family: string | null;
+    failure_code: string | null;
+    failure_reason: string | null;
+  } | null;
   checks: Array<{
     id: string;
     label: string;

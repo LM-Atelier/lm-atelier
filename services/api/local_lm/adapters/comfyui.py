@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import json
 import logging
 import math
@@ -98,6 +99,9 @@ class ComfyUIAdapter:
         self._cancelled: set[str] = set()
         self._cancel_events: dict[str, asyncio.Event] = {}
         self._last_output_sweep = 0.0
+        self._object_info_by_hash: dict[str, dict[str, Any]] = {}
+        self._latest_object_info_hash: str | None = None
+        self._object_info_cached_until = 0.0
 
     @property
     def supports_incognito(self) -> bool:
@@ -177,6 +181,8 @@ class ComfyUIAdapter:
         return errors
 
     async def object_info(self) -> dict[str, Any]:
+        if self._latest_object_info_hash and time.monotonic() < self._object_info_cached_until:
+            return self._object_info_by_hash[self._latest_object_info_hash]
         response = await self._client.get("/object_info", timeout=10)
         response.raise_for_status()
         if len(response.content) > _MAX_COMFY_JSON_BYTES:
@@ -184,7 +190,24 @@ class ComfyUIAdapter:
         value = response.json()
         if not isinstance(value, dict):
             raise ValueError("ComfyUI object metadata must be an object")
-        return value
+        encoded = json.dumps(
+            value,
+            sort_keys=True,
+            separators=(",", ":"),
+            allow_nan=False,
+        ).encode()
+        version_hash = hashlib.sha256(encoded).hexdigest()
+        if version_hash not in self._object_info_by_hash:
+            if len(self._object_info_by_hash) >= 4:
+                self._object_info_by_hash.pop(next(iter(self._object_info_by_hash)))
+            self._object_info_by_hash[version_hash] = value
+        self._latest_object_info_hash = version_hash
+        self._object_info_cached_until = time.monotonic() + 5
+        return self._object_info_by_hash[version_hash]
+
+    def invalidate_object_info_cache(self) -> None:
+        self._latest_object_info_hash = None
+        self._object_info_cached_until = 0
 
     @staticmethod
     def _compile(value: Any, parameters: dict[str, Any]) -> Any:

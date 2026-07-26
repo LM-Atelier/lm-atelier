@@ -1993,6 +1993,8 @@ describe("App", () => {
         compatibility: "advanced_import",
         manifest_json: {},
         active: true,
+        readiness: "unverified",
+        capability_evidence: null,
         created_at: "2026-07-22T00:00:00Z",
         updated_at: "2026-07-22T00:00:00Z",
       },
@@ -2043,6 +2045,8 @@ describe("App", () => {
         compatibility: "likely",
         manifest_json: {},
         active: true,
+        readiness: "unverified",
+        capability_evidence: null,
         created_at: "2026-07-22T00:00:00Z",
         updated_at: "2026-07-22T00:00:00Z",
       },
@@ -2126,6 +2130,8 @@ describe("App", () => {
           source_remote_id: model.remote_id,
         },
         active: false,
+        readiness: "unverified",
+        capability_evidence: null,
         created_at: "2026-07-22T00:00:00Z",
         updated_at: "2026-07-22T00:00:00Z",
       },
@@ -2140,9 +2146,9 @@ describe("App", () => {
     );
 
     fireEvent.click(await screen.findByText("Model library"));
-    fireEvent.change(screen.getAllByRole("combobox")[0], { target: { value: "image" } });
+    fireEvent.change(screen.getByLabelText("Model role"), { target: { value: "image" } });
 
-    expect(await screen.findByRole("heading", { name: "One-click models" })).toBeInTheDocument();
+    await waitFor(() => expect(api.workflowCatalogModels).toHaveBeenCalledWith("image"));
     expect(await screen.findByRole("button", { name: "Install" })).toBeEnabled();
     expect(screen.getAllByText("sdxl-turbo")).toHaveLength(1);
   });
@@ -2229,6 +2235,14 @@ describe("App", () => {
       estimated_ram_bytes: 2048,
       estimated_vram_bytes: null,
       can_install: true,
+      install_plan: {
+        id: "plan-chat",
+        plan_hash: "b".repeat(64),
+        compatibility: "supported",
+        family: "qwen",
+        failure_code: null,
+        failure_reason: null,
+      },
       checks: [
         { id: "checksum", label: "Checksum metadata", status: "pass", detail: "Available." },
         { id: "disk", label: "Disk capacity", status: "pass", detail: "Fits." },
@@ -2260,6 +2274,7 @@ describe("App", () => {
       {},
       null,
       null,
+      "plan-chat",
     ));
   });
 

@@ -6,9 +6,9 @@ import json
 import os
 import re
 from datetime import UTC, datetime, timedelta
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from typing import Any, cast
-from urllib.parse import urlparse
+from urllib.parse import quote, urlparse
 
 import httpx
 
@@ -222,6 +222,58 @@ class HuggingFaceCatalog:
         self._write_cache(cache, json.dumps(result, default=str))
         return result
 
+    async def inspect_file_prefix(
+        self,
+        remote_id: str,
+        revision: str,
+        filename: str,
+        *,
+        max_bytes: int,
+    ) -> bytes:
+        """Fetch and cache a bounded immutable file prefix for static inspection."""
+
+        if not self._valid_remote_id(remote_id):
+            raise ValueError("remote_id must be in owner/model form")
+        if max_bytes < 1 or max_bytes > 16 * 1024 * 1024 + 8:
+            raise ValueError("metadata prefix size is outside the supported bounds")
+        path = PurePosixPath(filename.replace("\\", "/"))
+        if (
+            not filename
+            or len(filename) > 1_000
+            or path.is_absolute()
+            or any(part in {"", ".", ".."} or ":" in part for part in path.parts)
+        ):
+            raise ValueError("metadata filename must be a safe relative path")
+        if not revision or len(revision) > 200 or any(character < " " for character in revision):
+            raise ValueError("metadata revision is invalid")
+        cache = self._binary_cache_path(
+            "file-prefix",
+            remote_id,
+            revision,
+            path.as_posix(),
+            max_bytes,
+        )
+        if cache.is_file():
+            content = cache.read_bytes()
+            if len(content) <= max_bytes:
+                return content
+        encoded_path = "/".join(quote(part, safe="") for part in path.parts)
+        encoded_revision = quote(revision, safe="")
+        content = bytearray()
+        async with self._client.stream(
+            "GET",
+            f"/{remote_id}/resolve/{encoded_revision}/{encoded_path}",
+            headers={"range": f"bytes=0-{max_bytes - 1}"},
+        ) as response:
+            response.raise_for_status()
+            async for chunk in response.aiter_bytes():
+                content.extend(chunk)
+                if len(content) > max_bytes:
+                    raise ValueError("model metadata exceeds the inspection limit")
+        result = bytes(content)
+        self._write_binary_cache(cache, result)
+        return result
+
     async def close(self) -> None:
         await self._client.aclose()
 
@@ -264,11 +316,21 @@ class HuggingFaceCatalog:
         ).hexdigest()
         return self._cache_dir / f"{key}.json"
 
+    def _binary_cache_path(self, *parts: object) -> Path:
+        return self._cache_path(*parts).with_suffix(".bin")
+
     @staticmethod
     def _write_cache(path: Path, content: str) -> None:
         path.parent.mkdir(parents=True, exist_ok=True)
         temporary = path.with_suffix(".partial")
         temporary.write_text(content, encoding="utf-8")
+        os.replace(temporary, path)
+
+    @staticmethod
+    def _write_binary_cache(path: Path, content: bytes) -> None:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        temporary = path.with_suffix(".partial")
+        temporary.write_bytes(content)
         os.replace(temporary, path)
 
     @staticmethod

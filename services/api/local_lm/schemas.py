@@ -341,6 +341,56 @@ class ModelSourceOut(ApiModel):
     updated_at: datetime
 
 
+class InstallArtifact(ApiModel):
+    path: str = Field(min_length=1, max_length=1_000)
+    kind: str = Field(min_length=1, max_length=40)
+    target_folder: str = Field(min_length=1, max_length=80)
+    size_bytes: int | None = Field(default=None, ge=0)
+    sha256: str | None = Field(default=None, pattern=r"^[0-9a-f]{64}$")
+    required: bool = True
+    reuse: Literal["download", "installed", "verified-cache"] = "download"
+
+
+class InstallPlanOut(ApiModel):
+    id: str
+    provider: str
+    remote_id: str
+    revision: str
+    role: str
+    engine: str
+    architecture: str | None
+    family: str | None
+    plan_hash: str
+    resolver_version: str
+    compatibility: str
+    artifacts_json: list[dict[str, Any]]
+    runtime_contract_json: dict[str, Any]
+    activation_probe_json: dict[str, Any]
+    status: str
+    failure_code: str | None
+    failure_reason: str | None
+    created_at: datetime
+    updated_at: datetime
+
+
+class ModelCapabilityEvidenceOut(ApiModel):
+    id: str
+    model_install_id: str
+    evidence_key: str
+    result: str
+    component_hashes_json: dict[str, str]
+    runtime_build: str
+    adapter_contract_version: int
+    launch_contract_version: str
+    workflow_contract_version: str | None
+    hardware_class: str
+    probe_version: str
+    failure_code: str | None
+    failure_reason: str | None
+    details_json: dict[str, Any]
+    probed_at: datetime
+
+
 class ModelInstallOut(ApiModel):
     id: str
     source_id: str | None
@@ -352,6 +402,8 @@ class ModelInstallOut(ApiModel):
     compatibility: str
     manifest_json: dict[str, Any]
     active: bool
+    readiness: Literal["ready", "unverified", "unsupported"] = "unverified"
+    capability_evidence: ModelCapabilityEvidenceOut | None = None
     created_at: datetime
     updated_at: datetime
 
@@ -632,9 +684,11 @@ class CatalogPreflight(ApiModel):
     estimated_vram_bytes: int | None = None
     can_install: bool
     checks: list[CatalogPreflightCheck]
+    install_plan: InstallPlanOut | None = None
 
 
 class DownloadRequest(ApiModel):
+    install_plan_id: str | None = Field(default=None, max_length=40)
     remote_id: str = Field(min_length=1, max_length=500)
     source_remote_id: str | None = Field(default=None, min_length=1, max_length=500)
     revision: str = Field(default="main", min_length=1, max_length=200)
