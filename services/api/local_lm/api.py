@@ -60,6 +60,8 @@ from .models import (
     Run,
     WorkflowDefinition,
     WorkflowRevision,
+    WorkPlan,
+    WorkStep,
 )
 from .orchestrator import ConversationOrchestrator, ResponseRevisionConflict
 from .platforms import list_platform_matrix
@@ -71,6 +73,7 @@ from .profile_service import (
     validate_profile_binding,
     validate_profile_install,
 )
+from .progress import update_job_progress
 from .recipes import get_reference_recipe, list_reference_recipes, recipe_download_request
 from .routing import RouteConfirmationRequired
 from .schemas import (
@@ -139,6 +142,8 @@ from .schemas import (
     WorkflowRevisionCreate,
     WorkflowRevisionOut,
     WorkflowUpdate,
+    WorkPlanOut,
+    WorkStepOut,
 )
 from .security import SessionSecurity
 from .settings_registry import (
@@ -805,6 +810,7 @@ async def _accept_turn(
     *,
     use_explicit_parent: bool = False,
     replacement_message_id: str | None = None,
+    source_action: str = "send",
 ) -> TurnAccepted:
     try:
         return await orchestrator.create_turn(
@@ -813,6 +819,7 @@ async def _accept_turn(
             payload,
             use_explicit_parent=use_explicit_parent,
             replacement_message_id=replacement_message_id,
+            source_action=source_action,
         )
     except LookupError as exc:
         raise HTTPException(404, str(exc)) from exc
@@ -941,6 +948,7 @@ async def regenerate_message(
         turn,
         use_explicit_parent=True,
         replacement_message_id=message_id,
+        source_action="regenerate",
     )
 
 
@@ -1023,6 +1031,7 @@ async def edit_and_branch(
         source.chat_id,
         turn,
         use_explicit_parent=True,
+        source_action="edit_and_branch",
     )
 
 
@@ -1040,6 +1049,41 @@ async def get_run(run_id: str, session: SessionDep) -> Run:
     if not run:
         raise HTTPException(404, "run not found")
     return run
+
+
+@router.get("/work-plans", response_model=list[WorkPlanOut])
+async def list_work_plans(
+    session: SessionDep,
+    chat_id: str | None = None,
+    limit: int = Query(default=100, ge=1, le=500),
+) -> list[WorkPlan]:
+    statement = (
+        select(WorkPlan)
+        .options(selectinload(WorkPlan.steps))
+        .order_by(WorkPlan.created_at.desc(), WorkPlan.id.desc())
+        .limit(limit)
+    )
+    if chat_id:
+        statement = statement.where(WorkPlan.chat_id == chat_id)
+    return list(session.scalars(statement).unique().all())
+
+
+@router.get("/work-plans/{plan_id}", response_model=WorkPlanOut)
+async def get_work_plan(plan_id: str, session: SessionDep) -> WorkPlan:
+    plan = session.scalar(
+        select(WorkPlan).options(selectinload(WorkPlan.steps)).where(WorkPlan.id == plan_id)
+    )
+    if not plan:
+        raise HTTPException(404, "work plan not found")
+    return plan
+
+
+@router.get("/work-steps/{step_id}", response_model=WorkStepOut)
+async def get_work_step(step_id: str, session: SessionDep) -> WorkStep:
+    step = session.get(WorkStep, step_id)
+    if not step:
+        raise HTTPException(404, "work step not found")
+    return step
 
 
 @router.get("/jobs", response_model=list[JobOut])
@@ -1109,9 +1153,19 @@ async def retry_job(job_id: str, request: Request, session: SessionDep) -> Job:
     if job.kind == JobKind.DOWNLOAD.value:
         job.status = "queued"
         job.progress = 0
-        job.phase = "retry queued"
         job.error = None
+        job.started_at = None
         job.completed_at = None
+        job.enqueued_at = utcnow()
+        job.claim_owner = None
+        job.claim_expires_at = None
+        job.heartbeat_at = None
+        update_job_progress(
+            job,
+            stage="retry queued",
+            queue_resource=job.queue_resource or "network",
+            indeterminate=True,
+        )
         session.commit()
         _services(request).downloads.start(job.id)
         session.refresh(job)
@@ -1137,9 +1191,19 @@ async def retry_job(job_id: str, request: Request, session: SessionDep) -> Job:
             raise HTTPException(422, "job has no retryable operation")
         job.status = "queued"
         job.progress = 0
-        job.phase = "retry queued"
         job.error = None
+        job.started_at = None
         job.completed_at = None
+        job.enqueued_at = utcnow()
+        job.claim_owner = None
+        job.claim_expires_at = None
+        job.heartbeat_at = None
+        update_job_progress(
+            job,
+            stage="retry queued",
+            queue_resource=job.queue_resource or "interactive_compute",
+            indeterminate=True,
+        )
         run.status = "queued"
         run.error = None
         run.completed_at = None

@@ -35,6 +35,8 @@ import type {
   WorkflowBundle,
   WorkflowRevision,
   WorkerStatus,
+  WorkPlan,
+  WorkStep,
 } from "./types";
 
 let csrfToken = "";
@@ -216,6 +218,12 @@ export const api = {
   cancelChat: (chatId: string) =>
     request<Job>(`/api/chats/${chatId}/cancel`, { method: "POST" }),
   jobs: () => request<Job[]>("/api/jobs"),
+  workPlans: (chatId?: string) =>
+    request<WorkPlan[]>(
+      `/api/work-plans${chatId ? `?chat_id=${encodeURIComponent(chatId)}` : ""}`,
+    ),
+  workPlan: (id: string) => request<WorkPlan>(`/api/work-plans/${id}`),
+  workStep: (id: string) => request<WorkStep>(`/api/work-steps/${id}`),
   cancelJob: (id: string) => request<Job>(`/api/jobs/${id}/cancel`, { method: "POST" }),
   retryJob: (id: string) =>
     request<Job>(`/api/jobs/${encodeURIComponent(id)}/retry`, { method: "POST" }),

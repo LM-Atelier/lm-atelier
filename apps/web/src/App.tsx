@@ -62,11 +62,13 @@ import type {
   EngineRole,
   GenerationPreset,
   GenerationPresetBundle,
+  Job,
   Message,
   MessagePart,
   ModelInstall,
   ModelProfile,
   ModelProfileBundle,
+  ProgressV2,
   Project,
   ReferenceRecipe,
   RoutingMode,
@@ -1941,6 +1943,73 @@ function WorkerStatusCard({
   );
 }
 
+function RuntimeSetupCard({
+  runtime,
+  installPending,
+  onInstall,
+}: {
+  runtime: RuntimeStatus;
+  installPending: boolean;
+  onInstall: (engine: RuntimeStatus["engine"]) => void;
+}) {
+  const structured = runtime.progress_json;
+  const exactProgress = structured?.indeterminate
+    ? null
+    : structured?.overall_progress ?? structured?.stage_progress ?? runtime.progress;
+  const stateLabel = runtime.state === "ready"
+    ? "Ready"
+    : runtime.state === "installing"
+      ? exactProgress === null
+        ? structured?.stage || "Working"
+        : `${Math.round(exactProgress * 100)}%`
+      : runtime.state === "unsupported"
+        ? "Manual setup required"
+        : runtime.state === "failed"
+          ? "Setup failed"
+          : "Not installed";
+  const detail = runtime.security_status === "blocked"
+    ? `${runtime.license} · ${runtime.security_message || runtime.message}`
+    : runtime.engine === "comfyui"
+      ? `${runtime.license} · downloaded separately`
+      : runtime.message;
+  const transfer = structured?.rate_bytes_per_second && progressSampleIsFresh(structured)
+    ? [
+        formatTransferRate(structured.rate_bytes_per_second),
+        typeof structured.eta_seconds === "number"
+          ? formatEta(structured.eta_seconds)
+          : null,
+      ].filter(Boolean).join(" · ")
+    : null;
+  return (
+    <article className="runtime-setup">
+      <div>
+        <strong>{runtime.engine}</strong>
+        <span>{runtime.release} · {stateLabel}</span>
+      </div>
+      {runtime.state === "installing" && (
+        <progress
+          value={exactProgress ?? undefined}
+          max={1}
+          aria-label={`${runtime.engine} setup progress`}
+        />
+      )}
+      {runtime.state !== "installing" && runtime.state !== "ready" && runtime.supported && (
+        <button
+          className="secondary compact-button"
+          disabled={installPending}
+          onClick={() => onInstall(runtime.engine)}
+        >
+          {runtime.state === "failed"
+            ? "Retry"
+            : `Install${runtime.size_bytes ? ` · ${formatBytes(runtime.size_bytes)}` : ""}`}
+        </button>
+      )}
+      <small>{detail}</small>
+      {transfer && <small>{transfer}</small>}
+    </article>
+  );
+}
+
 function SettingsView({ engines }: { engines: EngineCapabilities[] }) {
   const client = useQueryClient();
   const [hfToken, setHfToken] = useState("");
@@ -2094,7 +2163,7 @@ function SettingsView({ engines }: { engines: EngineCapabilities[] }) {
         {credential.data && !credential.data.vault_available && <div className="callout error" role="alert">No supported operating-system credential vault is available. Configure one or use LOCAL_LM_HF_TOKEN for this process.</div>}
         {(credential.error || saveCredential.error || removeCredential.error) && <div className="callout error" role="alert">{(credential.error || saveCredential.error || removeCredential.error)?.message}</div>}
       </section>
-      <section><h2>Engines</h2><div className="engine-grid">{engines.map((engine) => <article className="engine-card" key={`${engine.engine}:${engine.roles.join()}`}><header><div className="model-icon"><Cpu /></div><div><h3>{engine.engine}</h3><p>{engine.roles.join(" · ")} · {engine.version}</p></div><StatusDot healthy={engine.healthy} label={`${engine.engine} engine`} /></header>{engine.roles.includes("chat") && <div className="capability-list"><button className="secondary compact-button" onClick={() => toolProbe.mutate()} disabled={toolProbe.isPending}>{toolProbe.isPending ? "Testing…" : "Test structured tools"}</button></div>}</article>)}</div>{toolProbe.data && <div className={`callout ${toolProbe.data.passed ? "success" : "error"}`} role={toolProbe.data.passed ? "status" : "alert"}>{toolProbe.data.passed ? `Structured tool schema passed on ${toolProbe.data.engine} ${toolProbe.data.version}.` : `Structured tool schema failed: ${toolProbe.data.error || "unknown response"}`}</div>}{toolProbe.error && <div className="callout error" role="alert">{toolProbe.error.message}</div>}<div className="runtime-setup-grid">{runtimes.data?.map((runtime) => <article className="runtime-setup" key={runtime.engine}><div><strong>{runtime.engine}</strong><span>{runtime.release} · {runtime.state === "ready" ? "Ready" : runtime.state === "installing" ? `${Math.round(runtime.progress * 100)}%` : runtime.state === "unsupported" ? "Manual setup required" : runtime.state === "failed" ? "Setup failed" : "Not installed"}</span></div>{runtime.state === "installing" && <progress value={runtime.progress} max={1} aria-label={`${runtime.engine} setup progress`} />}{runtime.state !== "installing" && runtime.state !== "ready" && runtime.supported && <button className="secondary compact-button" disabled={installRuntime.isPending} onClick={() => installRuntime.mutate(runtime.engine)}>{runtime.state === "failed" ? "Retry" : `Install${runtime.size_bytes ? ` · ${formatBytes(runtime.size_bytes)}` : ""}`}</button>}<small>{runtime.security_status === "blocked" ? `${runtime.license} · ${runtime.security_message || runtime.message}` : runtime.engine === "comfyui" ? `${runtime.license} · downloaded separately` : runtime.message}</small></article>)}</div>{(runtimes.error || installRuntime.error) && <div className="callout error" role="alert">{(runtimes.error || installRuntime.error)?.message}</div>}</section>
+      <section><h2>Engines</h2><div className="engine-grid">{engines.map((engine) => <article className="engine-card" key={`${engine.engine}:${engine.roles.join()}`}><header><div className="model-icon"><Cpu /></div><div><h3>{engine.engine}</h3><p>{engine.roles.join(" · ")} · {engine.version}</p></div><StatusDot healthy={engine.healthy} label={`${engine.engine} engine`} /></header>{engine.roles.includes("chat") && <div className="capability-list"><button className="secondary compact-button" onClick={() => toolProbe.mutate()} disabled={toolProbe.isPending}>{toolProbe.isPending ? "Testing…" : "Test structured tools"}</button></div>}</article>)}</div>{toolProbe.data && <div className={`callout ${toolProbe.data.passed ? "success" : "error"}`} role={toolProbe.data.passed ? "status" : "alert"}>{toolProbe.data.passed ? `Structured tool schema passed on ${toolProbe.data.engine} ${toolProbe.data.version}.` : `Structured tool schema failed: ${toolProbe.data.error || "unknown response"}`}</div>}{toolProbe.error && <div className="callout error" role="alert">{toolProbe.error.message}</div>}<div className="runtime-setup-grid">{runtimes.data?.map((runtime) => <RuntimeSetupCard key={runtime.engine} runtime={runtime} installPending={installRuntime.isPending} onInstall={(engine) => installRuntime.mutate(engine)} />)}</div>{(runtimes.error || installRuntime.error) && <div className="callout error" role="alert">{(runtimes.error || installRuntime.error)?.message}</div>}</section>
       <section><h2>Machine</h2>{system.data && <div className="metric-grid"><div className="cpu-metric"><Cpu /><span><strong>{system.data.cpu_model}</strong><small>CPU model</small></span></div><div><HardDrive /><span><strong>{formatBytes(system.data.disk_free_bytes)}</strong> disk free</span></div></div>}<div className="device-list">{system.data?.devices.filter((device) => device.kind !== "cpu").map((device) => <div key={device.id}><span className="device-icon"><Cpu size={18} /></span><span><strong>{device.name}</strong><small>{device.backend}</small></span></div>)}</div></section>
       <section>
         <div className="detail-title"><div><h2>Model profiles</h2></div><button className="secondary" onClick={() => profileImport.current?.click()}>Import profile</button></div>
@@ -2525,6 +2594,56 @@ function Sidebar({
   );
 }
 
+function jobProgressFraction(job: Job): number | null {
+  const progress = job.progress_json;
+  if (progress?.indeterminate) return null;
+  const value = progress?.overall_progress ?? progress?.stage_progress;
+  if (typeof value === "number" && Number.isFinite(value)) {
+    return Math.min(1, Math.max(0, value));
+  }
+  if (job.status === "queued") return null;
+  return Number.isFinite(job.progress) ? Math.min(1, Math.max(0, job.progress)) : null;
+}
+
+function formatTransferRate(bytesPerSecond: number): string {
+  const units = ["B/s", "KB/s", "MB/s", "GB/s"];
+  let value = bytesPerSecond;
+  let unit = 0;
+  while (value >= 1024 && unit < units.length - 1) {
+    value /= 1024;
+    unit += 1;
+  }
+  return `${value >= 10 || unit === 0 ? value.toFixed(0) : value.toFixed(1)} ${units[unit]}`;
+}
+
+function formatEta(seconds: number): string {
+  if (seconds < 60) return `about ${Math.max(0, Math.round(seconds))} sec`;
+  return `about ${Math.round(seconds / 60)} min`;
+}
+
+function progressSampleIsFresh(progress: ProgressV2): boolean {
+  const updatedAt = Date.parse(progress.updated_at);
+  return Number.isFinite(updatedAt) && Math.abs(Date.now() - updatedAt) <= 5_000;
+}
+
+function jobProgressText(job: Job): string {
+  const progress = job.progress_json;
+  const pieces = [progress?.stage || job.phase];
+  const fraction = jobProgressFraction(job);
+  if (fraction !== null) pieces.push(`${Math.round(fraction * 100)}%`);
+  if (job.status === "queued" && typeof progress?.queue_position === "number") {
+    pieces.push(progress.queue_position > 0 ? `${progress.queue_position} ahead` : "Next");
+  }
+  const freshSample = progress ? progressSampleIsFresh(progress) : false;
+  if (freshSample && typeof progress?.rate_bytes_per_second === "number") {
+    pieces.push(formatTransferRate(progress.rate_bytes_per_second));
+  }
+  if (freshSample && typeof progress?.eta_seconds === "number") {
+    pieces.push(formatEta(progress.eta_seconds));
+  }
+  return pieces.filter(Boolean).join(" · ");
+}
+
 function JobsPanel() {
   const client = useQueryClient();
   const [dismissedBefore, setDismissedBefore] = useState(() => {
@@ -2578,9 +2697,23 @@ function JobsPanel() {
         <div className="job-row" key={job.id}>
           <div>
             <strong>{job.kind}</strong>
-            <small>{job.phase}</small>
-            <div className="progress-track">
-              <div style={{ width: `${Math.max(4, job.progress * 100)}%` }} />
+            <small>{jobProgressText(job)}</small>
+            <div
+              className="progress-track"
+              role="progressbar"
+              aria-label={`${job.kind} progress`}
+              aria-valuemin={0}
+              aria-valuemax={100}
+              aria-valuenow={jobProgressFraction(job) === null
+                ? undefined
+                : Math.round(jobProgressFraction(job)! * 100)}
+            >
+              <div
+                className={jobProgressFraction(job) === null ? "indeterminate" : undefined}
+                style={jobProgressFraction(job) === null
+                  ? undefined
+                  : { width: `${jobProgressFraction(job)! * 100}%` }}
+              />
             </div>
           </div>
           <span className="job-actions">
@@ -2691,6 +2824,18 @@ export default function App() {
           const messageId = String(event.payload.assistant_message_id ?? "");
           const text = String(event.payload.text ?? "");
           if (messageId) setLiveText((current) => ({ ...current, [messageId]: `${current[messageId] ?? ""}${text}` }));
+          return;
+        }
+        if (event.type === "job.progress") {
+          const snapshot = event.payload.job as Job | undefined;
+          if (snapshot?.id) {
+            client.setQueryData<Job[]>(["jobs"], (current) => {
+              if (!current) return [snapshot];
+              const index = current.findIndex((job) => job.id === snapshot.id);
+              if (index < 0) return [snapshot, ...current];
+              return current.map((job) => job.id === snapshot.id ? snapshot : job);
+            });
+          }
           return;
         }
         if (event.type.includes("progress") || event.type.startsWith("download.")) void client.invalidateQueries({ queryKey: ["jobs"] });

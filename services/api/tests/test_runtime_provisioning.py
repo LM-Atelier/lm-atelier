@@ -172,6 +172,37 @@ async def test_runtime_download_resumes_verifies_and_persists(
     assert not list((settings.download_dir / "runtimes").glob("*.zip"))
 
 
+async def test_runtime_download_uses_shared_exact_byte_progress(
+    settings,
+    tmp_path: Path,
+) -> None:  # type: ignore[no-untyped-def]
+    content = _zip_bytes({"llama-server.exe": b"runtime"})
+    manifest = tmp_path / "engines.json"
+    _write_manifest(manifest, llama_content=content)
+    settings.prepare()
+    async with httpx.AsyncClient() as client:
+        provisioner = RuntimeProvisioner(
+            settings,
+            manifest_path=manifest,
+            client=client,
+            environment={},
+            platform_key="test-platform",
+        )
+        provisioner._states["llama.cpp"] = provisioner.status("llama.cpp")
+        definition = provisioner._definition("llama.cpp")
+
+        provisioner._set_download_progress("llama.cpp", definition, 1_000, 250)
+        status = provisioner.status("llama.cpp")
+
+    assert status.progress == pytest.approx(0.25)
+    assert status.progress_json
+    assert status.progress_json.version == 2
+    assert status.progress_json.stage_progress == pytest.approx(0.25)
+    assert status.progress_json.completed_units == 250
+    assert status.progress_json.total_units == 1_000
+    assert status.progress_json.unit == "bytes"
+
+
 async def test_runtime_checksum_failure_removes_untrusted_partial(
     settings,
     tmp_path: Path,

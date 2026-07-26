@@ -130,6 +130,8 @@ export interface Run {
   chat_id: string;
   user_message_id: string;
   assistant_message_id: string;
+  work_plan_id?: string | null;
+  work_step_id?: string | null;
   operation: string;
   status: string;
   standalone_prompt: string;
@@ -152,13 +154,82 @@ export interface Job {
   kind: string;
   status: string;
   run_id: string | null;
+  work_plan_id?: string | null;
+  work_step_id?: string | null;
   progress: number;
   phase: string;
+  progress_json?: ProgressV2;
+  queue_resource?: string | null;
+  queue_group?: string | null;
+  queue_priority?: number;
+  queue_ticket?: string | null;
+  enqueued_at?: string | null;
+  claim_expires_at?: string | null;
+  heartbeat_at?: string | null;
   payload_json: Record<string, unknown>;
   result_json: Record<string, unknown>;
   error: string | null;
   attempt: number;
   cancellable: boolean;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface ProgressV2 {
+  version: 2;
+  stage: string;
+  stage_progress: number | null;
+  overall_progress: number | null;
+  completed_units: number | null;
+  total_units: number | null;
+  unit: string | null;
+  bytes_reused: number;
+  rate_bytes_per_second: number | null;
+  eta_seconds: number | null;
+  file_index: number | null;
+  file_count: number | null;
+  queue_resource: string | null;
+  queue_position: number | null;
+  queue_length: number | null;
+  blocked_by: string[];
+  indeterminate: boolean;
+  updated_at: string;
+}
+
+export interface WorkStep {
+  id: string;
+  plan_id: string;
+  run_id: string | null;
+  ordinal: number;
+  display_group: string | null;
+  operation: string;
+  status: string;
+  prompt: string;
+  profile_id: string | null;
+  workflow_revision_id: string | null;
+  settings_json: Record<string, unknown>;
+  input_bindings_json: Array<Record<string, unknown>>;
+  output_contract_json: Array<Record<string, unknown>>;
+  queue_class: string;
+  error: string | null;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface WorkPlan {
+  id: string;
+  chat_id: string;
+  idempotency_key: string | null;
+  source_action: string;
+  persistence_scope: "durable" | "incognito";
+  status: string;
+  context_head_message_id: string | null;
+  transcript_sequence: number;
+  priority: number;
+  planner_version: string;
+  failure_policy: string;
+  summary_json: Record<string, unknown>;
+  steps: WorkStep[];
   created_at: string;
   updated_at: string;
 }
@@ -273,6 +344,7 @@ export interface RuntimeStatus {
   supported: boolean;
   managed: boolean;
   progress: number;
+  progress_json?: ProgressV2 | null;
   downloaded_bytes: number;
   size_bytes: number | null;
   distribution: string;

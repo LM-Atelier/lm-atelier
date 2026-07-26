@@ -23,6 +23,7 @@ from uuid import uuid4
 import httpx
 
 from .config import Settings
+from .progress import reduce_progress
 from .runtime_config import persist_runtime_values
 from .schemas import RuntimeStatus
 from .subprocess_env import subprocess_environment
@@ -163,7 +164,19 @@ class RuntimeProvisioner:
         if current.state in {"ready", "unsupported", "installing"}:
             return current
         self._states[engine] = current.model_copy(
-            update={"state": "installing", "progress": 0, "message": "Preparing download."}
+            update={
+                "state": "installing",
+                "progress": 0,
+                "progress_json": reduce_progress(
+                    current.progress_json.model_dump(mode="json")
+                    if current.progress_json
+                    else None,
+                    stage="preparing download",
+                    queue_resource="network_transfer",
+                    indeterminate=True,
+                ),
+                "message": "Preparing download.",
+            }
         )
         task = asyncio.create_task(
             self.provision(engine),
@@ -380,7 +393,16 @@ class RuntimeProvisioner:
             definition,
             state="installing",
             supported=True,
-            progress=0.9,
+            progress=1,
+            progress_json=reduce_progress(
+                self._runtime_progress(engine),
+                stage="installing verified runtime",
+                completed_units=expected_size,
+                total_units=expected_size,
+                unit="bytes",
+                queue_resource="disk",
+                indeterminate=True,
+            ),
             downloaded_bytes=expected_size,
             size_bytes=expected_size,
             message="Installing verified runtime.",
@@ -1266,7 +1288,15 @@ class RuntimeProvisioner:
             definition,
             state="installing",
             supported=True,
-            progress=min(0.85, (downloaded / expected_size) * 0.85),
+            progress=downloaded / expected_size,
+            progress_json=reduce_progress(
+                self._runtime_progress(engine),
+                stage="downloading runtime",
+                completed_units=downloaded,
+                total_units=expected_size,
+                unit="bytes",
+                queue_resource="network_transfer",
+            ),
             downloaded_bytes=downloaded,
             size_bytes=expected_size,
             message="Downloading runtime.",
@@ -1281,6 +1311,7 @@ class RuntimeProvisioner:
         supported: bool,
         managed: bool = False,
         progress: float = 0,
+        progress_json: dict[str, Any] | None = None,
         downloaded_bytes: int = 0,
         size_bytes: int | None = None,
         message: str,
@@ -1296,6 +1327,23 @@ class RuntimeProvisioner:
             supported=supported,
             managed=managed,
             progress=progress,
+            progress_json=progress_json
+            or (
+                reduce_progress(
+                    self._runtime_progress(engine),
+                    stage="complete",
+                    stage_progress=1,
+                    overall_progress=1,
+                )
+                if state == "ready"
+                else reduce_progress(
+                    self._runtime_progress(engine),
+                    stage=message.rstrip(".").lower(),
+                    indeterminate=True,
+                )
+                if state == "installing"
+                else None
+            ),
             downloaded_bytes=downloaded_bytes,
             size_bytes=size_bytes,
             distribution=str(definition["distribution"]),
@@ -1306,6 +1354,14 @@ class RuntimeProvisioner:
             ),
             security_message=str(security_source.get("security_message") or ""),
             message=message,
+        )
+
+    def _runtime_progress(self, engine: RuntimeName) -> dict[str, Any] | None:
+        current = self._states.get(engine)
+        return (
+            current.progress_json.model_dump(mode="json")
+            if current and current.progress_json
+            else None
         )
 
     def _definition(self, engine: RuntimeName) -> dict[str, Any]:
