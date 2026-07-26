@@ -78,6 +78,40 @@ it("sends turn overrides with edited branches and regenerated responses", async 
   });
 });
 
+it("uses the explicit stop-and-send endpoint and preserves its idempotency key", async () => {
+  const fetchMock = vi.fn()
+    .mockResolvedValueOnce(
+      new Response(JSON.stringify({ csrf_token: "csrf" }), {
+        status: 200,
+        headers: { "content-type": "application/json" },
+      }),
+    )
+    .mockResolvedValueOnce(
+      new Response(JSON.stringify({}), {
+        status: 202,
+        headers: { "content-type": "application/json" },
+      }),
+    );
+  vi.stubGlobal("fetch", fetchMock);
+
+  const { api } = await import("./api");
+  await api.stopAndSendTurn(
+    "chat/one",
+    "Use this instead",
+    "text",
+    [],
+    { max_tokens: 128 },
+    "client-turn-7",
+  );
+
+  expect(fetchMock.mock.calls[1][0]).toBe("/api/chats/chat/one/stop-and-send");
+  expect(JSON.parse(String(fetchMock.mock.calls[1][1]?.body))).toMatchObject({
+    text: "Use this instead",
+    mode: "text",
+    idempotency_key: "client-turn-7",
+  });
+});
+
 it("uses the recovery and unsuccessful-job action contracts", async () => {
   const fetchMock = vi.fn()
     .mockResolvedValueOnce(

@@ -91,11 +91,19 @@ vi.mock("./api", () => ({
     cleanupArtifacts: vi.fn(),
     deleteArtifact: vi.fn(),
     sendTurn: vi.fn(),
+    stopAndSendTurn: vi.fn(),
     regenerateMessage: vi.fn(),
     selectResponseRevision: vi.fn(),
     branchMessage: vi.fn(),
     cancelChat: vi.fn(),
     jobs: vi.fn().mockResolvedValue([]),
+    workPlans: vi.fn().mockResolvedValue([]),
+    workPlan: vi.fn(),
+    workStep: vi.fn(),
+    cancelWorkPlan: vi.fn(),
+    retryWorkPlan: vi.fn(),
+    cancelWorkStep: vi.fn(),
+    retryWorkStep: vi.fn(),
     cancelJob: vi.fn(),
     retryJob: vi.fn(),
     pauseDownload: vi.fn(),
@@ -246,6 +254,7 @@ describe("App", () => {
     vi.mocked(api.workers).mockResolvedValue([]);
     vi.mocked(api.runtimes).mockResolvedValue([]);
     vi.mocked(api.jobs).mockResolvedValue([]);
+    vi.mocked(api.workPlans).mockResolvedValue([]);
     vi.mocked(api.backups).mockResolvedValue([]);
     vi.mocked(api.models).mockResolvedValue([]);
     vi.mocked(api.catalog).mockResolvedValue({ items: [], next_cursor: null });
@@ -2439,9 +2448,142 @@ describe("App", () => {
       "auto",
       [],
       {},
+      expect.any(String),
     );
     expect(screen.getByText("Choosing mode and model…")).toBeVisible();
-    expect(screen.getByRole("button", { name: "Preparing response" })).toBeDisabled();
+    expect(screen.getByRole("button", { name: "Send" })).toBeDisabled();
+  });
+
+  it("keeps the composer available and orders multiple optimistic submissions", async () => {
+    const stamp = "2026-07-26T00:00:00Z";
+    const chat = {
+      id: "chat-continuous",
+      project_id: null,
+      title: "Continuous submission",
+      archived: false,
+      routing_mode: "text" as const,
+      confirm_uncertain_media: false,
+      active_chat_profile_id: null,
+      active_image_profile_id: null,
+      active_video_profile_id: null,
+      active_head_message_id: null,
+      created_at: stamp,
+      updated_at: stamp,
+    };
+    localStorage.setItem("local-lm-chat", chat.id);
+    vi.mocked(api.chats).mockResolvedValue([chat]);
+    vi.mocked(api.chat).mockResolvedValue({ ...chat, messages: [] });
+    vi.mocked(api.sendTurn).mockReturnValue(new Promise(() => {}));
+    const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+    const { container } = render(
+      <QueryClientProvider client={client}>
+        <App />
+      </QueryClientProvider>,
+    );
+
+    const composer = await screen.findByRole("textbox", { name: "Message" });
+    for (const prompt of ["First queued prompt", "Second queued prompt", "Third queued prompt"]) {
+      fireEvent.change(composer, { target: { value: prompt } });
+      fireEvent.click(screen.getByRole("button", { name: "Send" }));
+    }
+
+    expect(composer).toBeEnabled();
+    await waitFor(() => expect(api.sendTurn).toHaveBeenCalledTimes(3));
+    expect(
+      Array.from(
+        container.querySelectorAll(".message.user.optimistic .message-text"),
+        (element) => element.textContent,
+      ),
+    ).toEqual(["First queued prompt", "Second queued prompt", "Third queued prompt"]);
+  });
+
+  it("offers queued cancellation and an explicit Stop and send action", async () => {
+    const stamp = new Date().toISOString();
+    const chat = {
+      id: "chat-stop-and-send",
+      project_id: null,
+      title: "Stop controls",
+      archived: false,
+      routing_mode: "text" as const,
+      confirm_uncertain_media: false,
+      active_chat_profile_id: null,
+      active_image_profile_id: null,
+      active_video_profile_id: null,
+      active_head_message_id: "assistant-queued",
+      created_at: stamp,
+      updated_at: stamp,
+    };
+    const plan = {
+      id: "plan-queued",
+      chat_id: chat.id,
+      idempotency_key: "queued-key",
+      source_action: "send",
+      persistence_scope: "durable" as const,
+      status: "queued",
+      context_head_message_id: null,
+      transcript_sequence: 1,
+      priority: 10,
+      planner_version: "legacy-turn-v1",
+      failure_policy: "stop_dependents",
+      summary_json: { assistant_message_id: "assistant-queued" },
+      steps: [],
+      created_at: stamp,
+      updated_at: stamp,
+    };
+    localStorage.setItem("local-lm-chat", chat.id);
+    vi.mocked(api.chats).mockResolvedValue([chat]);
+    vi.mocked(api.chat).mockResolvedValue({
+      ...chat,
+      messages: [
+        {
+          id: "user-queued",
+          chat_id: chat.id,
+          parent_id: null,
+          role: "user",
+          status: "complete",
+          parts: [{ id: "prompt", position: 0, type: "text", text: "Original", artifact_id: null, metadata_json: {} }],
+          created_at: stamp,
+          updated_at: stamp,
+        },
+        {
+          id: "assistant-queued",
+          chat_id: chat.id,
+          parent_id: "user-queued",
+          role: "assistant",
+          status: "pending",
+          parts: [{ id: "queued", position: 0, type: "progress", text: "Queued", artifact_id: null, metadata_json: { activity: "chat", progress: 0 } }],
+          created_at: stamp,
+          updated_at: stamp,
+        },
+      ],
+    });
+    vi.mocked(api.workPlans).mockResolvedValue([plan]);
+    vi.mocked(api.cancelWorkPlan).mockReturnValue(new Promise(() => {}));
+    vi.mocked(api.stopAndSendTurn).mockReturnValue(new Promise(() => {}));
+    const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+    render(
+      <QueryClientProvider client={client}>
+        <App />
+      </QueryClientProvider>,
+    );
+
+    fireEvent.click(await screen.findByRole("button", { name: "Cancel queued item" }));
+    await waitFor(() => expect(api.cancelWorkPlan).toHaveBeenCalledWith(
+      plan.id,
+      expect.anything(),
+    ));
+    const composer = screen.getByRole("textbox", { name: "Message" });
+    fireEvent.change(composer, { target: { value: "Use this instead" } });
+    expect(screen.getByRole("button", { name: "Stop current response" })).toBeEnabled();
+    fireEvent.click(screen.getByRole("button", { name: "Stop current response and send" }));
+    await waitFor(() => expect(api.stopAndSendTurn).toHaveBeenCalledWith(
+      chat.id,
+      "Use this instead",
+      "text",
+      [],
+      {},
+      expect.any(String),
+    ));
   });
 
   it("keeps a deferred turn and its pending state on the originating chat", async () => {
@@ -2808,7 +2950,14 @@ describe("App", () => {
 
     fireEvent.change(screen.getByRole("textbox", { name: "Message" }), { target: { value: "Count to 1000" } });
     fireEvent.click(screen.getByRole("button", { name: "Send" }));
-    await waitFor(() => expect(api.sendTurn).toHaveBeenCalledWith(chat.id, "Count to 1000", "text", [], { max_tokens: 4096 }));
+    await waitFor(() => expect(api.sendTurn).toHaveBeenCalledWith(
+      chat.id,
+      "Count to 1000",
+      "text",
+      [],
+      { max_tokens: 4096 },
+      expect.any(String),
+    ));
   });
 
   it("switches completed response revisions without branching the chat", async () => {

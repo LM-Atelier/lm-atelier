@@ -12,7 +12,7 @@ from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Any
 
-from sqlalchemy import delete, select
+from sqlalchemy import delete, func, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session, object_session, selectinload
 
@@ -54,6 +54,7 @@ from .models import (
     WorkflowRevision,
     WorkPlan,
     WorkStep,
+    WorkStepDependency,
 )
 from .processes import ProcessSupervisor
 from .profile_service import AUTO_PROFILE_ID
@@ -74,6 +75,15 @@ IDEMPOTENCY_CLAIM_WAIT_SECONDS = 120.0
 MAX_VISION_IMAGES = 4
 MAX_VISION_IMAGE_BYTES = 20 * 1024 * 1024
 MAX_VISION_TOTAL_BYTES = 32 * 1024 * 1024
+MAX_PENDING_WORK_PER_CHAT = 32
+PENDING_OUTPUT_REFERENCE = re.compile(
+    r"\b(?:"
+    r"(?:that|this|it|its)(?:\s+(?:image|video|answer|response|story|result|output))?"
+    r"|(?:previous|last|above|earlier)\s+(?:image|video|answer|response|story|result|output)"
+    r"|based\s+on\s+(?:that|this|it|the\s+(?:previous|last|above|earlier|story|response))"
+    r")\b",
+    re.IGNORECASE,
+)
 VISION_MEDIA_TYPES = {
     "image/gif",
     "image/jpeg",
@@ -165,7 +175,14 @@ class ConversationOrchestrator:
             # Turn-creation claims only live while one API process is planning.
             session.execute(delete(TurnCreationClaim))
             queued_jobs = session.scalars(
-                select(Job).where(Job.status == JobStatus.QUEUED.value)
+                select(Job)
+                .where(Job.status == JobStatus.QUEUED.value)
+                .order_by(
+                    Job.enqueued_at,
+                    Job.queue_ticket,
+                    Job.created_at,
+                    Job.id,
+                )
             ).all()
             for job in queued_jobs:
                 job.claim_owner = None
@@ -292,6 +309,25 @@ class ConversationOrchestrator:
         chat = session.get(Chat, chat_id)
         if not chat:
             raise LookupError("chat not found")
+        pending_count = session.scalar(
+            select(func.count(Job.id))
+            .join(Run, Job.run_id == Run.id)
+            .where(
+                Run.chat_id == chat_id,
+                Job.status.in_(
+                    [
+                        JobStatus.QUEUED.value,
+                        JobStatus.RUNNING.value,
+                        JobStatus.PAUSED.value,
+                    ]
+                ),
+            )
+        )
+        if (pending_count or 0) >= MAX_PENDING_WORK_PER_CHAT:
+            raise ValueError(
+                f"This chat already has {MAX_PENDING_WORK_PER_CHAT} pending items. "
+                "Cancel one or wait for work to finish before sending another."
+            )
 
         key = request.idempotency_key
         if key is None:
@@ -479,6 +515,23 @@ class ConversationOrchestrator:
                     )
                     .limit(1)
                 )
+        pending_dependency_step_id = self._pending_parent_step_id(
+            session,
+            chat_id,
+            parent_message_id,
+        )
+        references_pending_output = bool(
+            pending_dependency_step_id and PENDING_OUTPUT_REFERENCE.search(request.text)
+        )
+        context_head_message_id = (
+            parent_message_id
+            if references_pending_output
+            else self._latest_completed_context_head(
+                session,
+                chat_id,
+                parent_message_id,
+            )
+        )
         explicit_artifacts: dict[str, Artifact] = {}
         for artifact_id in request.input_artifact_ids:
             artifact = session.get(Artifact, artifact_id)
@@ -490,10 +543,10 @@ class ConversationOrchestrator:
         prior_image, prior_image_prompt = self._latest_image_context(
             session,
             chat.id,
-            parent_message_id,
+            context_head_message_id,
         )
         has_prior_image = prior_image is not None
-        routing_context = self._routing_context(session, chat, parent_message_id)
+        routing_context = self._routing_context(session, chat, context_head_message_id)
         planner_available = (
             await self._chat_planner_available() if mode == RoutingMode.AUTO else True
         )
@@ -532,7 +585,7 @@ class ConversationOrchestrator:
                 prior_prompt = self._latest_media_prompt(
                     session,
                     chat.id,
-                    parent_message_id,
+                    context_head_message_id,
                 )
             if prior_prompt:
                 plan.standalone_prompt = f"{prior_prompt}. Follow-up instruction: {request.text}"
@@ -681,7 +734,11 @@ class ConversationOrchestrator:
                     position=0,
                     type=PartType.PROGRESS.value,
                     text="Queued",
-                    metadata_json={"progress": 0, "phase": "queued"},
+                    metadata_json={
+                        "progress": 0,
+                        "phase": "queued",
+                        "indeterminate": True,
+                    },
                 )
             ]
         assistant_message = Message(
@@ -755,7 +812,7 @@ class ConversationOrchestrator:
             source_action=source_action,
             persistence_scope="durable",
             status=JobStatus.QUEUED.value,
-            context_head_message_id=parent_message_id,
+            context_head_message_id=context_head_message_id,
             transcript_sequence=transcript_sequence,
             priority=10 if plan.operation == Operation.TEXT else 0,
             planner_version="legacy-turn-v1",
@@ -764,6 +821,11 @@ class ConversationOrchestrator:
                 "operation": plan.operation.value,
                 "step_count": 1,
                 "source_action": source_action,
+                "user_message_id": user_message.id,
+                "assistant_message_id": assistant_message.id,
+                "dependency_step_ids": (
+                    [pending_dependency_step_id] if references_pending_output else []
+                ),
             },
         )
         input_bindings: list[dict[str, Any]] = [
@@ -775,12 +837,12 @@ class ConversationOrchestrator:
             }
             for artifact_id in resolved_input_ids
         ]
-        if parent_message_id:
+        if context_head_message_id:
             input_bindings.insert(
                 0,
                 {
                     "type": "context_text",
-                    "context_head_message_id": parent_message_id,
+                    "context_head_message_id": context_head_message_id,
                 },
             )
         output_type = (
@@ -805,6 +867,13 @@ class ConversationOrchestrator:
         )
         session.add(work_plan)
         session.flush()
+        if references_pending_output and pending_dependency_step_id:
+            session.add(
+                WorkStepDependency(
+                    step_id=work_step.id,
+                    depends_on_step_id=pending_dependency_step_id,
+                )
+            )
         run = Run(
             idempotency_key=request.idempotency_key,
             chat_id=chat.id,
@@ -900,7 +969,7 @@ class ConversationOrchestrator:
             queue_resource=queue_class,
             queue_group="primary",
             queue_priority=work_plan.priority,
-            queue_ticket=run.id,
+            queue_ticket=f"{transcript_sequence:020d}:{run.id}",
             enqueued_at=utcnow(),
             payload_json={"operation": plan.operation.value},
         )
@@ -2106,7 +2175,12 @@ class ConversationOrchestrator:
                 position=0,
                 type=PartType.PROGRESS.value,
                 text=event.phase.title(),
-                metadata_json={"progress": event.progress, "phase": event.phase},
+                metadata_json={
+                    "progress": event.progress,
+                    "phase": event.phase,
+                    "indeterminate": event.type == "queued"
+                    or (event.progress <= 0 and "prepar" in event.phase.casefold()),
+                },
             )
         ]
         preview = next(
@@ -2340,6 +2414,61 @@ class ConversationOrchestrator:
             rows.append(message)
             current_id = message.parent_id
         return rows
+
+    @staticmethod
+    def _pending_parent_step_id(
+        session: Session,
+        chat_id: str,
+        parent_message_id: str | None,
+    ) -> str | None:
+        if not parent_message_id:
+            return None
+        parent = session.get(Message, parent_message_id)
+        if (
+            not parent
+            or parent.chat_id != chat_id
+            or parent.role != MessageRole.ASSISTANT.value
+            or parent.status != MessageStatus.PENDING.value
+        ):
+            return None
+        return session.scalar(
+            select(Run.work_step_id)
+            .join(Job, Job.run_id == Run.id)
+            .where(
+                Run.chat_id == chat_id,
+                Run.assistant_message_id == parent_message_id,
+                Run.work_step_id.is_not(None),
+                Job.status.in_(
+                    [
+                        JobStatus.QUEUED.value,
+                        JobStatus.RUNNING.value,
+                        JobStatus.PAUSED.value,
+                    ]
+                ),
+            )
+            .order_by(Job.created_at.desc(), Job.id.desc())
+            .limit(1)
+        )
+
+    @classmethod
+    def _latest_completed_context_head(
+        cls,
+        session: Session,
+        chat_id: str,
+        parent_message_id: str | None,
+    ) -> str | None:
+        return next(
+            (
+                message.id
+                for message in cls._ancestor_messages(
+                    session,
+                    chat_id,
+                    parent_message_id,
+                )
+                if message.status == MessageStatus.COMPLETE.value
+            ),
+            None,
+        )
 
     @classmethod
     def _latest_image_context(
@@ -2781,21 +2910,34 @@ class ConversationOrchestrator:
             project = session.get(Project, chat.project_id)
             if project and project.instructions:
                 messages.append({"role": "system", "content": project.instructions})
-        rows: list[Message] = []
-        current_id: str | None = run.user_message_id
-        visited: set[str] = set()
-        while current_id and current_id not in visited:
-            visited.add(current_id)
-            message = session.scalar(
+        plan = session.get(WorkPlan, run.work_plan_id) if run.work_plan_id else None
+        if plan:
+            rows = [
+                message
+                for message in reversed(
+                    ConversationOrchestrator._ancestor_messages(
+                        session, run.chat_id, plan.context_head_message_id
+                    )
+                )
+                if message.status == MessageStatus.COMPLETE.value
+            ]
+            user_message = session.scalar(
                 select(Message)
                 .options(selectinload(Message.parts))
-                .where(Message.id == current_id, Message.chat_id == run.chat_id)
+                .where(Message.id == run.user_message_id, Message.chat_id == run.chat_id)
             )
-            if not message:
-                break
-            rows.append(message)
-            current_id = message.parent_id
-        rows.reverse()
+            if user_message and all(message.id != user_message.id for message in rows):
+                rows.append(user_message)
+        else:
+            rows = list(
+                reversed(
+                    ConversationOrchestrator._ancestor_messages(
+                        session,
+                        run.chat_id,
+                        run.user_message_id,
+                    )
+                )
+            )
         for message in rows:
             text = ConversationOrchestrator._message_context_text(
                 message,

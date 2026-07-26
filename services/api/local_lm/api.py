@@ -1086,6 +1086,98 @@ async def get_work_step(step_id: str, session: SessionDep) -> WorkStep:
     return step
 
 
+@router.post("/work-plans/{plan_id}/cancel", response_model=WorkPlanOut)
+async def cancel_work_plan(
+    plan_id: str,
+    request: Request,
+    session: SessionDep,
+) -> WorkPlan:
+    plan = session.scalar(
+        select(WorkPlan).options(selectinload(WorkPlan.steps)).where(WorkPlan.id == plan_id)
+    )
+    if not plan:
+        raise HTTPException(404, "work plan not found")
+    jobs = list(
+        session.scalars(
+            select(Job)
+            .where(
+                Job.work_plan_id == plan_id,
+                Job.status.in_(["queued", "running", "paused"]),
+            )
+            .order_by(Job.created_at, Job.id)
+        ).all()
+    )
+    if not jobs:
+        raise HTTPException(409, "work plan has no cancellable steps")
+    for job in jobs:
+        await _services(request).orchestrator.cancel(job.id)
+    session.expire_all()
+    refreshed = session.scalar(
+        select(WorkPlan).options(selectinload(WorkPlan.steps)).where(WorkPlan.id == plan_id)
+    )
+    if not refreshed:
+        raise HTTPException(404, "work plan not found")
+    return refreshed
+
+
+@router.post("/work-steps/{step_id}/cancel", response_model=JobOut)
+async def cancel_work_step(
+    step_id: str,
+    request: Request,
+    session: SessionDep,
+) -> Job:
+    job = session.scalar(select(Job).where(Job.work_step_id == step_id))
+    if not job:
+        raise HTTPException(404, "work step job not found")
+    return await cancel_job(job.id, request, session)
+
+
+@router.post("/work-plans/{plan_id}/retry", response_model=WorkPlanOut)
+async def retry_work_plan(
+    plan_id: str,
+    request: Request,
+    session: SessionDep,
+) -> WorkPlan:
+    plan = session.scalar(
+        select(WorkPlan).options(selectinload(WorkPlan.steps)).where(WorkPlan.id == plan_id)
+    )
+    if not plan:
+        raise HTTPException(404, "work plan not found")
+    jobs = list(
+        session.scalars(
+            select(Job)
+            .where(
+                Job.work_plan_id == plan_id,
+                Job.status.in_(["failed", "cancelled", "interrupted"]),
+            )
+            .order_by(Job.created_at, Job.id)
+        ).all()
+    )
+    if not jobs:
+        raise HTTPException(409, "work plan has no retryable steps")
+    for job in jobs:
+        await retry_job(job.id, request, session)
+    session.expire_all()
+    refreshed = session.scalar(
+        select(WorkPlan).options(selectinload(WorkPlan.steps)).where(WorkPlan.id == plan_id)
+    )
+    if not refreshed:
+        raise HTTPException(404, "work plan not found")
+    return refreshed
+
+
+@router.post("/work-steps/{step_id}/retry", response_model=JobOut)
+async def retry_work_step(
+    step_id: str,
+    request: Request,
+    session: SessionDep,
+) -> Job:
+    job = session.scalar(select(Job).where(Job.work_step_id == step_id))
+    if not job:
+        raise HTTPException(404, "work step job not found")
+    return await retry_job(job.id, request, session)
+
+
 @router.get("/jobs", response_model=list[JobOut])
 async def list_jobs(
     session: SessionDep,
@@ -1120,17 +1212,7 @@ async def cancel_job(job_id: str, request: Request, session: SessionDep) -> Job:
 async def cancel_active_chat_run(chat_id: str, request: Request, session: SessionDep) -> Job:
     if not session.get(Chat, chat_id):
         raise HTTPException(404, "chat not found")
-    job = session.scalar(
-        select(Job)
-        .join(Run, Job.run_id == Run.id)
-        .where(
-            Run.chat_id == chat_id,
-            Job.status.in_(["queued", "running", "paused"]),
-            Job.cancellable.is_(True),
-        )
-        .order_by(Job.created_at.desc(), Job.id.desc())
-        .limit(1)
-    )
+    job = _current_chat_job(session, chat_id)
     if not job:
         raise HTTPException(409, "chat has no cancellable run")
     changed = await _services(request).orchestrator.cancel(job.id)
@@ -1141,6 +1223,59 @@ async def cancel_active_chat_run(chat_id: str, request: Request, session: Sessio
     if not refreshed:
         raise HTTPException(404, "job not found")
     return refreshed
+
+
+@router.post(
+    "/chats/{chat_id}/stop-and-send",
+    response_model=TurnAccepted,
+    status_code=202,
+)
+async def stop_and_send_turn(
+    chat_id: str,
+    payload: TurnRequest,
+    request: Request,
+    session: SessionDep,
+) -> TurnAccepted:
+    if not session.get(Chat, chat_id):
+        raise HTTPException(404, "chat not found")
+    job = _current_chat_job(session, chat_id)
+    if job:
+        await _services(request).orchestrator.cancel(job.id)
+        session.expire_all()
+    return await _accept_turn(
+        _services(request).orchestrator,
+        session,
+        chat_id,
+        payload,
+        source_action="stop_and_send",
+    )
+
+
+def _current_chat_job(session: Session, chat_id: str) -> Job | None:
+    running = session.scalar(
+        select(Job)
+        .join(Run, Job.run_id == Run.id)
+        .where(
+            Run.chat_id == chat_id,
+            Job.status == "running",
+            Job.cancellable.is_(True),
+        )
+        .order_by(Job.started_at, Job.created_at, Job.id)
+        .limit(1)
+    )
+    if running:
+        return running
+    return session.scalar(
+        select(Job)
+        .join(Run, Job.run_id == Run.id)
+        .where(
+            Run.chat_id == chat_id,
+            Job.status.in_(["queued", "paused"]),
+            Job.cancellable.is_(True),
+        )
+        .order_by(Job.created_at, Job.id)
+        .limit(1)
+    )
 
 
 @router.post("/jobs/{job_id}/retry", response_model=JobOut)

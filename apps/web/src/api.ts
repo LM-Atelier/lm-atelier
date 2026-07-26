@@ -155,9 +155,10 @@ export const api = {
     mode: RoutingMode,
     inputArtifactIds: string[],
     settings: Record<string, unknown>,
+    idempotencyKey: string = crypto.randomUUID(),
+    endpoint: string = "turns",
   ) => {
-    const idempotencyKey = crypto.randomUUID();
-    const submit = (selectedMode: RoutingMode, confirmed = false) => request<TurnAccepted>(`/api/chats/${chatId}/turns`, {
+    const submit = (selectedMode: RoutingMode, confirmed = false) => request<TurnAccepted>(`/api/chats/${chatId}/${endpoint}`, {
       method: "POST",
       body: JSON.stringify({
         text,
@@ -190,6 +191,22 @@ export const api = {
       throw error;
     }
   },
+  stopAndSendTurn: (
+    chatId: string,
+    text: string,
+    mode: RoutingMode,
+    inputArtifactIds: string[],
+    settings: Record<string, unknown>,
+    idempotencyKey: string = crypto.randomUUID(),
+  ) => api.sendTurn(
+    chatId,
+    text,
+    mode,
+    inputArtifactIds,
+    settings,
+    idempotencyKey,
+    "stop-and-send",
+  ),
   regenerateMessage: (messageId: string, settings: Record<string, unknown>) =>
     request<TurnAccepted>(`/api/messages/${messageId}/regenerate`, {
       method: "POST",
@@ -224,6 +241,14 @@ export const api = {
     ),
   workPlan: (id: string) => request<WorkPlan>(`/api/work-plans/${id}`),
   workStep: (id: string) => request<WorkStep>(`/api/work-steps/${id}`),
+  cancelWorkPlan: (id: string) =>
+    request<WorkPlan>(`/api/work-plans/${id}/cancel`, { method: "POST" }),
+  retryWorkPlan: (id: string) =>
+    request<WorkPlan>(`/api/work-plans/${id}/retry`, { method: "POST" }),
+  cancelWorkStep: (id: string) =>
+    request<Job>(`/api/work-steps/${id}/cancel`, { method: "POST" }),
+  retryWorkStep: (id: string) =>
+    request<Job>(`/api/work-steps/${id}/retry`, { method: "POST" }),
   cancelJob: (id: string) => request<Job>(`/api/jobs/${id}/cancel`, { method: "POST" }),
   retryJob: (id: string) =>
     request<Job>(`/api/jobs/${encodeURIComponent(id)}/retry`, { method: "POST" }),

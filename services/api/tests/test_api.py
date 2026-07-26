@@ -42,9 +42,12 @@ from local_lm.models import (
     TurnCreationClaim,
     WorkflowDefinition,
     WorkflowRevision,
+    WorkPlan,
+    WorkStepDependency,
 )
 from local_lm.orchestrator import ConversationOrchestrator
 from local_lm.runtime_provisioning import RuntimeProvisioner
+from local_lm.scheduler import ResourceScheduler
 from local_lm.schemas import EngineCapabilities, RuntimeStatus, SettingField, TurnRequest
 
 ONE_PIXEL_PNG = base64.b64decode(
@@ -1400,6 +1403,227 @@ async def test_turn_remains_truthfully_queued_until_compute_lease(
     await wait_for_run(client, accepted["run"]["id"])
 
 
+async def test_three_rapid_turns_are_admitted_once_in_transcript_order(
+    app: FastAPI,
+    client: AsyncClient,
+) -> None:
+    chat = (await client.post("/api/chats", json={"title": "Rapid turns"})).json()
+    prompts = ["First prompt", "Second prompt", "Third prompt"]
+    async with app.state.services.scheduler.lease("primary"):
+        responses = [
+            await client.post(
+                f"/api/chats/{chat['id']}/turns",
+                json={
+                    "text": prompt,
+                    "mode": "text",
+                    "idempotency_key": f"rapid-{index}",
+                },
+            )
+            for index, prompt in enumerate(prompts, start=1)
+        ]
+        assert all(response.status_code == 202 for response in responses)
+        detail = (await client.get(f"/api/chats/{chat['id']}")).json()
+        user_text = [
+            part["text"]
+            for message in detail["messages"]
+            if message["role"] == "user"
+            for part in message["parts"]
+            if part["type"] == "text"
+        ]
+        assert user_text == prompts
+        plans = (await client.get("/api/work-plans", params={"chat_id": chat["id"]})).json()
+        assert [plan["transcript_sequence"] for plan in reversed(plans)] == [1, 2, 3]
+        assert len({response.json()["run"]["id"] for response in responses}) == 3
+        with SessionLocal() as session:
+            third_run = session.get(Run, responses[2].json()["run"]["id"])
+            assert third_run
+            assert ConversationOrchestrator._context_messages(session, third_run) == [
+                {"role": "user", "content": prompt} for prompt in prompts
+            ]
+
+    for response in responses:
+        await wait_for_run(client, response.json()["run"]["id"])
+
+
+async def test_pending_output_reference_creates_a_dispatch_dependency(
+    app: FastAPI,
+    client: AsyncClient,
+) -> None:
+    chat = (await client.post("/api/chats", json={"title": "Pending dependency"})).json()
+    async with app.state.services.scheduler.lease("primary"):
+        first = (
+            await client.post(
+                f"/api/chats/{chat['id']}/turns",
+                json={"text": "Write a tiny story", "mode": "text"},
+            )
+        ).json()
+        second = (
+            await client.post(
+                f"/api/chats/{chat['id']}/turns",
+                json={"text": "Summarize that response", "mode": "text"},
+            )
+        ).json()
+        with SessionLocal() as session:
+            first_run = session.get(Run, first["run"]["id"])
+            second_run = session.get(Run, second["run"]["id"])
+            assert first_run and second_run
+            second_plan = session.get(WorkPlan, second_run.work_plan_id)
+            dependency = session.scalar(
+                select(WorkStepDependency).where(
+                    WorkStepDependency.step_id == second_run.work_step_id
+                )
+            )
+            assert second_plan
+            assert second_plan.context_head_message_id == first["assistant_message"]["id"]
+            assert dependency
+            assert dependency.depends_on_step_id == first_run.work_step_id
+            eligible = ResourceScheduler._eligible_jobs(session, "primary", utcnow())
+            assert [job.run_id for job in eligible] == [first_run.id]
+
+    await wait_for_run(client, first["run"]["id"])
+    await wait_for_run(client, second["run"]["id"])
+
+
+async def test_independent_text_is_prioritized_ahead_of_untouched_media(
+    app: FastAPI,
+    client: AsyncClient,
+) -> None:
+    chat = (await client.post("/api/chats", json={"title": "Interactive priority"})).json()
+    async with app.state.services.scheduler.lease("primary"):
+        image = (
+            await client.post(
+                f"/api/chats/{chat['id']}/turns",
+                json={"text": "Create an abstract image", "mode": "image"},
+            )
+        ).json()
+        text_turn = (
+            await client.post(
+                f"/api/chats/{chat['id']}/turns",
+                json={"text": "Explain binary search", "mode": "text"},
+            )
+        ).json()
+        with SessionLocal() as session:
+            eligible = ResourceScheduler._eligible_jobs(session, "primary", utcnow())
+            assert [job.run_id for job in eligible] == [
+                text_turn["run"]["id"],
+                image["run"]["id"],
+            ]
+            text_run = session.get(Run, text_turn["run"]["id"])
+            image_run = session.get(Run, image["run"]["id"])
+            assert text_run and image_run
+            text_plan = session.get(WorkPlan, text_run.work_plan_id)
+            image_job = session.scalar(select(Job).where(Job.run_id == image_run.id))
+            assert text_plan
+            assert text_plan.context_head_message_id == image["user_message"]["id"]
+            assert image_job and image_job.status == JobStatus.QUEUED.value
+            assert not session.scalar(
+                select(WorkStepDependency).where(
+                    WorkStepDependency.step_id == text_run.work_step_id
+                )
+            )
+
+    await wait_for_run(client, text_turn["run"]["id"])
+    await wait_for_run(client, image["run"]["id"])
+
+
+async def test_stop_and_send_cancels_current_item_then_admits_replacement(
+    app: FastAPI,
+    client: AsyncClient,
+) -> None:
+    chat = (await client.post("/api/chats", json={"title": "Stop and send"})).json()
+    async with app.state.services.scheduler.lease("primary"):
+        first = (
+            await client.post(
+                f"/api/chats/{chat['id']}/turns",
+                json={"text": "Original queued prompt", "mode": "text"},
+            )
+        ).json()
+        replacement = await client.post(
+            f"/api/chats/{chat['id']}/stop-and-send",
+            json={"text": "Replacement prompt", "mode": "text"},
+        )
+        assert replacement.status_code == 202
+        jobs = (await client.get("/api/jobs")).json()
+        first_job = next(job for job in jobs if job["run_id"] == first["run"]["id"])
+        assert first_job["status"] == "cancelled"
+        plan = (
+            await client.get(f"/api/work-plans/{replacement.json()['run']['work_plan_id']}")
+        ).json()
+        assert plan["source_action"] == "stop_and_send"
+
+    await wait_for_run(client, replacement.json()["run"]["id"])
+
+
+async def test_plan_cancel_and_retry_control_the_queued_step(
+    app: FastAPI,
+    client: AsyncClient,
+) -> None:
+    chat = (await client.post("/api/chats", json={"title": "Plan controls"})).json()
+    async with app.state.services.scheduler.lease("primary"):
+        accepted = (
+            await client.post(
+                f"/api/chats/{chat['id']}/turns",
+                json={"text": "Queue this plan", "mode": "text"},
+            )
+        ).json()
+        plan_id = accepted["run"]["work_plan_id"]
+        cancelled = await client.post(f"/api/work-plans/{plan_id}/cancel")
+        assert cancelled.status_code == 200
+        assert cancelled.json()["status"] == "cancelled"
+        assert cancelled.json()["steps"][0]["status"] == "cancelled"
+
+        retried = await client.post(f"/api/work-plans/{plan_id}/retry")
+        assert retried.status_code == 200
+        assert retried.json()["status"] == "queued"
+        assert retried.json()["steps"][0]["status"] == "queued"
+
+        step_id = retried.json()["steps"][0]["id"]
+        step_cancelled = await client.post(f"/api/work-steps/{step_id}/cancel")
+        assert step_cancelled.status_code == 200
+        assert step_cancelled.json()["status"] == "cancelled"
+
+        step_retried = await client.post(f"/api/work-steps/{step_id}/retry")
+        assert step_retried.status_code == 200
+        assert step_retried.json()["status"] == "queued"
+
+    await wait_for_run(client, accepted["run"]["id"])
+
+
+async def test_chat_pending_admission_limit_is_bounded(
+    app: FastAPI,
+    client: AsyncClient,
+) -> None:
+    chat = (await client.post("/api/chats", json={"title": "Admission bound"})).json()
+    async with app.state.services.scheduler.lease("primary"):
+        accepted = (
+            await client.post(
+                f"/api/chats/{chat['id']}/turns",
+                json={"text": "The real queued turn", "mode": "text"},
+            )
+        ).json()
+        with SessionLocal() as session:
+            session.add_all(
+                [
+                    Job(
+                        id=f"job_admission_{index}",
+                        kind="chat",
+                        status=JobStatus.QUEUED.value,
+                        run_id=accepted["run"]["id"],
+                    )
+                    for index in range(31)
+                ]
+            )
+            session.commit()
+        rejected = await client.post(
+            f"/api/chats/{chat['id']}/turns",
+            json={"text": "One too many", "mode": "text"},
+        )
+        assert rejected.status_code == 422
+        assert "32 pending items" in rejected.json()["detail"]
+
+    await wait_for_run(client, accepted["run"]["id"])
+
+
 async def test_active_chat_run_can_be_cancelled_directly(client: AsyncClient) -> None:
     chat = (await client.post("/api/chats", json={"title": "Stop response"})).json()
     turn = await client.post(
@@ -1573,6 +1797,53 @@ async def test_restart_recovery_requeues_work_that_never_started(
         assert recovered.claim_owner is None
         assert recovered.progress_json["stage"] == "queued"
     assert restarted == [(job_id, turn["run"]["id"])]
+
+
+async def test_restart_recovery_preserves_queued_transcript_order(
+    client: AsyncClient,
+    app: FastAPI,
+    monkeypatch,
+) -> None:  # type: ignore[no-untyped-def]
+    chat = (await client.post("/api/chats", json={"title": "Ordered recovery"})).json()
+    turns = []
+    for index in range(3):
+        turn = (
+            await client.post(
+                f"/api/chats/{chat['id']}/turns",
+                json={"text": f"Queued item {index + 1}", "mode": "text"},
+            )
+        ).json()
+        await wait_for_run(client, turn["run"]["id"])
+        turns.append(turn)
+
+    with SessionLocal() as session:
+        expected: list[tuple[str, str]] = []
+        for turn in turns:
+            run = session.get(Run, turn["run"]["id"])
+            job = session.scalar(select(Job).where(Job.run_id == turn["run"]["id"]))
+            assert run and job
+            run.status = JobStatus.QUEUED.value
+            run.started_at = None
+            run.completed_at = None
+            job.status = JobStatus.QUEUED.value
+            job.started_at = None
+            job.completed_at = None
+            job.claim_owner = "stale-dispatcher"
+            expected.append((job.id, run.id))
+        session.commit()
+
+    restarted: list[tuple[str, str]] = []
+    monkeypatch.setattr(
+        app.state.services.orchestrator,
+        "start",
+        lambda candidate_job_id, candidate_run_id: restarted.append(
+            (candidate_job_id, candidate_run_id)
+        ),
+    )
+
+    app.state.services.orchestrator.recover_interrupted()
+
+    assert restarted == expected
 
 
 async def test_retry_clears_stale_error_before_dispatch(

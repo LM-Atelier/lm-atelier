@@ -1,4 +1,5 @@
 import {
+  Fragment,
   isValidElement,
   useEffect,
   useId,
@@ -78,16 +79,18 @@ import type {
   TurnAccepted,
   Workflow,
   WorkflowBundle,
+  WorkPlan,
   WorkerStatus,
 } from "./types";
 
 type View = "chat" | "media" | "models" | "workflows" | "settings";
 type Visibility = "basic" | "advanced" | "expert";
-type PendingTurn = { text: string; mode: RoutingMode };
+type PendingTurn = { id: string; text: string; mode: RoutingMode };
 type SendTurnVariables = PendingTurn & {
   chatId: string;
   artifacts: string[];
   settings: Record<string, unknown>;
+  stopCurrent?: boolean;
 };
 
 const visibilityRank: Record<Visibility, number> = { basic: 0, advanced: 1, expert: 2 };
@@ -569,12 +572,18 @@ function PartView({ part, liveText, markdown = false }: { part: MessagePart; liv
   if (part.type === "image" || part.type === "video" || part.type === "attachment") return <ArtifactPart part={part} />;
   if (part.type === "progress") {
     const progress = Number(part.metadata_json.progress ?? 0);
+    const indeterminate = part.metadata_json.indeterminate === true;
     return (
       <div className="generation-progress" role="status" aria-live="polite">
         <Sparkles size={17} />
         <div>
           <span>{part.text || "Working"}</span>
-          <div className="progress-track"><div style={{ width: `${Math.max(4, progress * 100)}%` }} /></div>
+          <div className="progress-track">
+            <div
+              className={indeterminate ? "indeterminate" : undefined}
+              style={indeterminate ? undefined : { width: `${progress * 100}%` }}
+            />
+          </div>
         </div>
       </div>
     );
@@ -589,12 +598,14 @@ function MessageBubble({
   onRegenerate,
   onEdit,
   onSelectRevision,
+  onCancelQueued,
 }: {
   message: Message;
   liveText?: string;
   onRegenerate?: (messageId: string) => void;
   onEdit?: (messageId: string, text: string) => void;
   onSelectRevision?: (messageId: string, revisionId: string) => void;
+  onCancelQueued?: () => void;
 }) {
   const visibleParts = message.parts.filter((part) => part.type !== "generation_metadata");
   const userText = visibleParts.filter((part) => part.type === "text").map((part) => part.text || "").join("\n");
@@ -704,6 +715,11 @@ function MessageBubble({
         )}
         {message.role === "assistant" && message.status !== "complete" && copyableText && (
           <div className="message-meta"><CopyTextButton text={copyableText} label="Copy assistant message" /></div>
+        )}
+        {message.role === "assistant" && message.status === "pending" && onCancelQueued && (
+          <div className="message-meta">
+            <button onClick={onCancelQueued}><X size={13} /> Cancel queued item</button>
+          </div>
         )}
       </div>
     </article>
@@ -949,7 +965,6 @@ function SettingsDrawer({
 function Composer({
   chat,
   engines,
-  busy,
   stoppable,
   settings,
   onSettings,
@@ -959,12 +974,12 @@ function Composer({
   onMode,
   onSend,
   onStop,
+  onStopAndSend,
   workflows,
   project,
 }: {
   chat: ChatDetail;
   engines: EngineCapabilities[];
-  busy: boolean;
   stoppable: boolean;
   settings: Record<string, unknown>;
   onSettings: (settings: Record<string, unknown>) => void;
@@ -974,6 +989,12 @@ function Composer({
   onMode: (mode: RoutingMode) => void;
   onSend: (text: string, mode: RoutingMode, artifacts: string[], settings: Record<string, unknown>) => void;
   onStop: () => void;
+  onStopAndSend: (
+    text: string,
+    mode: RoutingMode,
+    artifacts: string[],
+    settings: Record<string, unknown>,
+  ) => void;
   workflows: Workflow[];
   project?: Project;
 }) {
@@ -1004,15 +1025,16 @@ function Composer({
     attachments.length > 0 || usePriorVisual,
   );
 
-  const submit = () => {
-    if (!text.trim() || busy) return;
+  const submit = (stopCurrent = false) => {
+    if (!text.trim()) return;
     const role = roleForMode(mode);
     const engine = engines.find((item) => item.roles.includes(role));
     const fields = resolveWorkflowSettings(
       resolveCapabilitySettings(engine, role),
       workflowSchema,
     );
-    onSend(
+    const dispatch = stopCurrent ? onStopAndSend : onSend;
+    dispatch(
       text.trim(),
       mode,
       attachments,
@@ -1071,11 +1093,35 @@ function Composer({
               </label>
               <button className="icon-button" onClick={() => setSettingsOpen(true)} aria-label="Turn settings"><SlidersHorizontal size={18} /></button>
             </div>
-            {busy
-              ? stoppable
-                ? <button className="send-button stop" onClick={onStop} aria-label="Stop response"><CircleStop size={18} /></button>
-                : <button className="send-button pending" disabled aria-label="Preparing response"><LoaderCircle size={18} /></button>
-              : <button className="send-button" disabled={!text.trim()} onClick={submit} aria-label="Send"><Send size={18} /></button>}
+            <span className="composer-submit-actions">
+              {stoppable && (
+                <button
+                  className="send-button stop"
+                  onClick={onStop}
+                  aria-label="Stop current response"
+                  title="Stop current response"
+                >
+                  <CircleStop size={18} />
+                </button>
+              )}
+              {stoppable && text.trim() && (
+                <button
+                  className="secondary stop-and-send"
+                  onClick={() => submit(true)}
+                  aria-label="Stop current response and send"
+                >
+                  Stop and send
+                </button>
+              )}
+              <button
+                className="send-button"
+                disabled={!text.trim()}
+                onClick={() => submit()}
+                aria-label="Send"
+              >
+                <Send size={18} />
+              </button>
+            </span>
           </div>
         </div>
         <small className="composer-note">Local models can make mistakes. Generation stays on this machine.</small>
@@ -1146,7 +1192,8 @@ function ChatView({
   workflows,
   project,
   liveText,
-  pendingTurn,
+  pendingTurns,
+  workPlans,
   settings,
   presets,
   presetId,
@@ -1159,6 +1206,8 @@ function ChatView({
   onSelectRevision,
   onEdit,
   onStop,
+  onStopAndSend,
+  onCancelPlan,
 }: {
   chat?: ChatDetail;
   engines: EngineCapabilities[];
@@ -1166,7 +1215,8 @@ function ChatView({
   workflows: Workflow[];
   project?: Project;
   liveText: Record<string, string>;
-  pendingTurn?: PendingTurn;
+  pendingTurns: PendingTurn[];
+  workPlans: WorkPlan[];
   settings: Record<string, unknown>;
   presets: GenerationPreset[];
   presetId: string | null;
@@ -1184,13 +1234,20 @@ function ChatView({
     settings: Record<string, unknown>,
   ) => void;
   onStop: () => void;
+  onStopAndSend: (
+    text: string,
+    mode: RoutingMode,
+    artifacts: string[],
+    settings: Record<string, unknown>,
+  ) => void;
+  onCancelPlan: (planId: string) => void;
 }) {
   const endRef = useRef<HTMLDivElement>(null);
   useEffect(() => {
     if (typeof endRef.current?.scrollIntoView === "function") {
       endRef.current.scrollIntoView({ behavior: "smooth" });
     }
-  }, [chat?.messages, liveText, pendingTurn]);
+  }, [chat?.messages, liveText, pendingTurns]);
   if (!chat) return <EmptyState icon={<MessageSquare />} title="Start a local conversation" body="Create a chat and choose a model. Conversations stay on this machine." />;
   const messages = activeBranchMessages(chat);
   const stoppable = messages.some(
@@ -1199,7 +1256,13 @@ function ChatView({
         (revision) => revision.status === "pending",
       ),
   );
-  const busy = stoppable || Boolean(pendingTurn);
+  const busy = stoppable || pendingTurns.length > 0;
+  const planByAssistantMessage = new Map(
+    workPlans.flatMap((plan) => {
+      const assistantMessageId = plan.summary_json.assistant_message_id;
+      return typeof assistantMessageId === "string" ? [[assistantMessageId, plan] as const] : [];
+    }),
+  );
   return (
     <div className="chat-view">
       <div className="chat-header">
@@ -1214,7 +1277,7 @@ function ChatView({
         </div>
       </div>
       <div className="messages">
-        {messages.length === 0 && !pendingTurn ? (
+        {messages.length === 0 && pendingTurns.length === 0 ? (
           <EmptyState icon={<Sparkles />} title="What should we make?" body="Ask anything or create an image or video. Auto mode picks the model." />
         ) : messages.map((message) => <MessageBubble
           key={message.id}
@@ -1231,14 +1294,21 @@ function ChatView({
             chat.routing_mode,
             chat.routing_mode === "auto" ? {} : settings,
           )}
+          onCancelQueued={(() => {
+            const plan = planByAssistantMessage.get(message.id);
+            return plan?.status === "queued" ? () => onCancelPlan(plan.id) : undefined;
+          })()}
         />)}
-        {pendingTurn && (
-          <>
+        {pendingTurns.map((pendingTurn) => (
+          <Fragment key={pendingTurn.id}>
             <article className="message user optimistic">
               <div className="avatar">You</div>
               <div className="message-content"><div className="message-text">{pendingTurn.text}</div></div>
             </article>
-            <article className="message assistant optimistic" aria-live="polite">
+            <article
+              className="message assistant optimistic"
+              aria-live="polite"
+            >
               <div className="avatar"><Bot size={19} /></div>
               <div className="message-content">
                 <div className="submission-progress">
@@ -1247,11 +1317,11 @@ function ChatView({
                 </div>
               </div>
             </article>
-          </>
-        )}
+          </Fragment>
+        ))}
         <div ref={endRef} />
       </div>
-      <Composer chat={chat} engines={engines} busy={busy} stoppable={stoppable} settings={settings} onSettings={onSettings} presets={presets} presetId={presetId} onPreset={onPreset} onMode={onMode} onSend={onSend} onStop={onStop} workflows={workflows} project={project} />
+      <Composer chat={chat} engines={engines} stoppable={stoppable} settings={settings} onSettings={onSettings} presets={presets} presetId={presetId} onPreset={onPreset} onMode={onMode} onSend={onSend} onStop={onStop} onStopAndSend={onStopAndSend} workflows={workflows} project={project} />
     </div>
   );
 }
@@ -2782,12 +2852,18 @@ export default function App() {
   const [currentChatId, setCurrentChatId] = useState<string | null>(() => localStorage.getItem("local-lm-chat"));
   const [liveText, setLiveText] = useState<Record<string, string>>({});
   const [chatDrafts, setChatDrafts] = useState<Record<string, Partial<Chat>>>({});
-  const [pendingTurns, setPendingTurns] = useState<Record<string, PendingTurn>>({});
+  const [pendingTurns, setPendingTurns] = useState<Record<string, PendingTurn[]>>({});
   const projects = useQuery({ queryKey: ["projects"], queryFn: () => api.projects(true) });
   const chats = useQuery({ queryKey: ["chats"], queryFn: () => api.chats(null, true) });
   const firstActiveChatId = chats.data?.find((candidate) => !candidate.archived)?.id ?? null;
   const activeChatId = currentChatId ?? firstActiveChatId;
   const chat = useQuery({ queryKey: ["chat", activeChatId], queryFn: () => api.chat(activeChatId!), enabled: Boolean(activeChatId) });
+  const workPlans = useQuery({
+    queryKey: ["work-plans", activeChatId],
+    queryFn: () => api.workPlans(activeChatId!),
+    enabled: Boolean(activeChatId),
+    refetchInterval: 3_000,
+  });
   const engines = useQuery({ queryKey: ["engines"], queryFn: api.engines });
   const profiles = useQuery({ queryKey: ["profiles"], queryFn: api.profiles });
   const presets = useQuery({ queryKey: ["presets"], queryFn: api.presets });
@@ -2835,8 +2911,29 @@ export default function App() {
               if (index < 0) return [snapshot, ...current];
               return current.map((job) => job.id === snapshot.id ? snapshot : job);
             });
+            if (snapshot.work_plan_id) {
+              client.setQueriesData<WorkPlan[]>(
+                { queryKey: ["work-plans"] },
+                (current) => current?.map((plan) => (
+                  plan.id === snapshot.work_plan_id
+                    ? {
+                        ...plan,
+                        status: snapshot.status,
+                        steps: plan.steps.map((step) => (
+                          step.id === snapshot.work_step_id
+                            ? { ...step, status: snapshot.status, error: snapshot.error }
+                            : step
+                        )),
+                      }
+                    : plan
+                )),
+              );
+            }
           }
           return;
+        }
+        if (event.type === "work_plan.created") {
+          void client.invalidateQueries({ queryKey: ["work-plans"] });
         }
         if (event.type.includes("progress") || event.type.startsWith("download.")) void client.invalidateQueries({ queryKey: ["jobs"] });
         if (event.type === "run.progress") void client.invalidateQueries({ queryKey: ["chat"] });
@@ -2892,21 +2989,36 @@ export default function App() {
     void client.invalidateQueries({ queryKey: ["chat", chatId], exact: true });
     void client.invalidateQueries({ queryKey: ["chats"] });
     void client.invalidateQueries({ queryKey: ["jobs"] });
+    void client.invalidateQueries({ queryKey: ["work-plans", chatId] });
   };
   const send = useMutation({
-    mutationFn: ({ chatId, text, mode, artifacts, settings }: SendTurnVariables) =>
-      api.sendTurn(chatId, text, mode, artifacts, settings),
-    onMutate: ({ chatId, text, mode }) => {
-      setPendingTurns((current) => ({ ...current, [chatId]: { text, mode } }));
+    mutationFn: ({ chatId, id, text, mode, artifacts, settings, stopCurrent }: SendTurnVariables) =>
+      stopCurrent
+        ? api.stopAndSendTurn(chatId, text, mode, artifacts, settings, id)
+        : api.sendTurn(chatId, text, mode, artifacts, settings, id),
+    onMutate: ({ chatId, id, text, mode }) => {
+      setPendingTurns((current) => ({
+        ...current,
+        [chatId]: [...(current[chatId] ?? []), { id, text, mode }],
+      }));
     },
     onSuccess: (accepted, { chatId }) => applyAcceptedTurn(chatId, accepted),
-    onSettled: (_accepted, _error, { chatId }) => {
+    onSettled: (_accepted, _error, { chatId, id }) => {
       setPendingTurns((current) => {
-        if (!(chatId in current)) return current;
+        const remaining = (current[chatId] ?? []).filter((pending) => pending.id !== id);
         const next = { ...current };
-        delete next[chatId];
+        if (remaining.length) next[chatId] = remaining;
+        else delete next[chatId];
         return next;
       });
+    },
+  });
+  const cancelWorkPlan = useMutation({
+    mutationFn: api.cancelWorkPlan,
+    onSuccess: (plan) => {
+      void client.invalidateQueries({ queryKey: ["chat", plan.chat_id] });
+      void client.invalidateQueries({ queryKey: ["work-plans", plan.chat_id] });
+      void client.invalidateQueries({ queryKey: ["jobs"] });
     },
   });
   const regenerate = useMutation({
@@ -3091,7 +3203,7 @@ export default function App() {
       ));
       updateChat.mutate({ id: displayedChat.id, values });
     };
-    return <ChatView chat={displayedChat} engines={engines.data ?? []} profiles={profiles.data ?? []} presets={presets.data ?? []} workflows={workflows.data ?? []} project={allProjects.find((item) => item.id === displayedChat?.project_id)} liveText={liveText} pendingTurn={displayedChat ? pendingTurns[displayedChat.id] : undefined} settings={scopedSettings} presetId={presetId} onSettings={(settings) => {
+    return <ChatView chat={displayedChat} engines={engines.data ?? []} profiles={profiles.data ?? []} presets={presets.data ?? []} workflows={workflows.data ?? []} project={allProjects.find((item) => item.id === displayedChat?.project_id)} liveText={liveText} pendingTurns={displayedChat ? pendingTurns[displayedChat.id] ?? [] : []} workPlans={workPlans.data ?? []} settings={scopedSettings} presetId={presetId} onSettings={(settings) => {
       if (!displayedChat) return;
       const role = roleForMode(displayedChat.routing_mode);
       persistActiveChat({
@@ -3131,10 +3243,33 @@ export default function App() {
       });
     }} onStop={() => {
       if (displayedChat) stop.mutate(displayedChat.id);
+    }} onStopAndSend={(text, mode, artifacts, settings) => {
+      if (displayedChat) {
+        send.mutate({
+          chatId: displayedChat.id,
+          id: crypto.randomUUID(),
+          text,
+          mode,
+          artifacts,
+          settings,
+          stopCurrent: true,
+        });
+      }
+    }} onCancelPlan={(planId) => {
+      cancelWorkPlan.mutate(planId);
     }} onSend={(text, mode, artifacts, settings) => {
-      if (displayedChat) send.mutate({ chatId: displayedChat.id, text, mode, artifacts, settings });
+      if (displayedChat) {
+        send.mutate({
+          chatId: displayedChat.id,
+          id: crypto.randomUUID(),
+          text,
+          mode,
+          artifacts,
+          settings,
+        });
+      }
     }} />;
-  }, [view, engines.data, profiles.data, presets.data, workflows.data, allProjects, chat.data, chatDrafts, liveText, pendingTurns, send, regenerate, selectResponseRevision, branch, stop, updateChat, client]);
+  }, [view, engines.data, profiles.data, presets.data, workflows.data, allProjects, chat.data, chatDrafts, liveText, pendingTurns, workPlans.data, send, regenerate, selectResponseRevision, branch, stop, cancelWorkPlan, updateChat, client]);
 
   return (
     <div className="app-shell">
@@ -3142,7 +3277,7 @@ export default function App() {
       <Sidebar projects={allProjects} chats={allChats} engines={engines.data ?? []} presets={presets.data ?? []} workflows={workflows.data ?? []} currentChatId={activeChatId} view={view} onChat={(id) => { setCurrentChatId(id); localStorage.setItem("local-lm-chat", id); setView("chat"); focusMainContent(); }} onView={(nextView) => { setView(nextView); focusMainContent(); }} onNewChat={(projectId) => createChat.mutate(projectId)} onNewProject={() => { const name = window.prompt("Project name"); if (name?.trim()) createProject.mutate(name.trim()); }} onExportProject={(id, includeMedia) => exportProject.mutate({ id, includeMedia })} onImportProject={(file) => importProject.mutate(file)} onUpdateChat={(id, values) => manageChat.mutate({ id, values })} onDeleteChat={(id, deleteGeneratedMedia) => deleteChat.mutate({ id, deleteGeneratedMedia })} onUpdateProject={(id, values) => updateProject.mutate({ id, values })} onDeleteProject={(id) => deleteProject.mutate(id)} />
       <main id="main-content" tabIndex={-1}>{activeContent}</main>
       <JobsPanel />
-      {(send.error || regenerate.error || selectResponseRevision.error || branch.error || stop.error || updateChat.error || createChat.error || createProject.error || importProject.error || manageChat.error || deleteChat.error || updateProject.error || deleteProject.error) && <div className="toast error" role="alert"><X size={16} />{(send.error || regenerate.error || selectResponseRevision.error || branch.error || stop.error || updateChat.error || createChat.error || createProject.error || importProject.error || manageChat.error || deleteChat.error || updateProject.error || deleteProject.error)?.message}</div>}
+      {(send.error || regenerate.error || selectResponseRevision.error || branch.error || stop.error || cancelWorkPlan.error || updateChat.error || createChat.error || createProject.error || importProject.error || manageChat.error || deleteChat.error || updateProject.error || deleteProject.error) && <div className="toast error" role="alert"><X size={16} />{(send.error || regenerate.error || selectResponseRevision.error || branch.error || stop.error || cancelWorkPlan.error || updateChat.error || createChat.error || createProject.error || importProject.error || manageChat.error || deleteChat.error || updateProject.error || deleteProject.error)?.message}</div>}
     </div>
   );
 }
