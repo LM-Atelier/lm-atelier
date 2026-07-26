@@ -682,6 +682,7 @@ class CatalogModel(ApiModel):
     total_size_bytes: int | None = None
     compatibility: str
     compatibility_reasons: list[str] = Field(default_factory=list)
+    required_runtime: str | None = None
 
 
 class CatalogPage(ApiModel):
@@ -808,7 +809,7 @@ class ReferenceRecipe(ApiModel):
     name: str
     summary: str
     role: Literal["chat", "image", "video"]
-    engine: Literal["llama.cpp", "comfyui"]
+    engine: Literal["llama.cpp", "vllm", "comfyui"]
     operations: list[str]
     license_id: str
     status: Literal["reference-candidate", "certified"]
@@ -947,7 +948,7 @@ class WorkerStatus(ApiModel):
 
 
 class RuntimeStatus(ApiModel):
-    engine: Literal["llama.cpp", "comfyui"]
+    engine: Literal["llama.cpp", "vllm", "comfyui"]
     release: str
     state: Literal["missing", "installing", "ready", "failed", "unsupported"]
     supported: bool

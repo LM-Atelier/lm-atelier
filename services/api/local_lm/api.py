@@ -420,9 +420,11 @@ async def runtime_status(request: Request) -> list[RuntimeStatus]:
 
 @router.post("/runtimes/{engine}/install", response_model=RuntimeStatus, status_code=202)
 async def install_runtime(engine: str, request: Request) -> RuntimeStatus:
-    if engine not in {"llama.cpp", "comfyui"}:
-        raise HTTPException(422, "runtime must be llama.cpp or comfyui")
-    status = _services(request).runtimes.start(cast(Literal["llama.cpp", "comfyui"], engine))
+    if engine not in {"llama.cpp", "vllm", "comfyui"}:
+        raise HTTPException(422, "runtime must be llama.cpp, vllm, or comfyui")
+    status = _services(request).runtimes.start(
+        cast(Literal["llama.cpp", "vllm", "comfyui"], engine)
+    )
     if status.state == "unsupported":
         raise HTTPException(422, status.message)
     return status

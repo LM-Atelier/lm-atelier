@@ -3,7 +3,13 @@ from __future__ import annotations
 import asyncio
 from typing import Literal
 
-from .adapters import ComfyUIAdapter, LlamaCppAdapter, MockChatAdapter, MockMediaAdapter
+from .adapters import (
+    ComfyUIAdapter,
+    LlamaCppAdapter,
+    MockChatAdapter,
+    MockMediaAdapter,
+    VllmAdapter,
+)
 from .adapters.base import ChatAdapter, MediaAdapter
 from .adapters.contracts import capability_contract_errors
 from .adapters.discovery import load_external_adapter
@@ -27,17 +33,23 @@ class EngineNotConfiguredError(EngineSchemaUnavailableError):
 class EngineRegistry:
     def __init__(self, settings: Settings) -> None:
         self.settings = settings
-        self.chat: ChatAdapter
+        self._chat_adapters: dict[str, ChatAdapter] = {}
+        self._fallback_chat: ChatAdapter
         self.media: MediaAdapter
-        if settings.chat_engine == "llama.cpp":
-            self.chat = LlamaCppAdapter(
+        if settings.chat_engine in {"llama.cpp", "vllm"}:
+            self._chat_adapters["llama.cpp"] = LlamaCppAdapter(
                 settings.llama_url,
                 inactivity_seconds=settings.llama_inactivity_seconds,
             )
+            self._chat_adapters["vllm"] = VllmAdapter(
+                settings.llama_url,
+                inactivity_seconds=settings.llama_inactivity_seconds,
+            )
+            self._fallback_chat = self._chat_adapters[settings.chat_engine]
         elif settings.chat_engine == "mock":
-            self.chat = MockChatAdapter()
+            self._fallback_chat = MockChatAdapter()
         else:
-            self.chat = load_external_adapter("chat", settings.chat_engine, settings)
+            self._fallback_chat = load_external_adapter("chat", settings.chat_engine, settings)
         if settings.media_engine == "comfyui":
             managed_output_root = (
                 settings.comfy_output_dir
@@ -61,6 +73,10 @@ class EngineRegistry:
         else:
             self.media = load_external_adapter("media", settings.media_engine, settings)
 
+    @property
+    def chat(self) -> ChatAdapter:
+        return self._chat_adapters.get(self.settings.chat_engine, self._fallback_chat)
+
     async def capabilities(self) -> list[EngineCapabilities]:
         chat, media = await asyncio.gather(
             self._adapter_capabilities(self.chat, "chat"),
@@ -78,10 +94,13 @@ class EngineRegistry:
         engine: str | None = None,
         allow_inactive: bool = False,
     ) -> list[SettingField]:
+        adapter: ChatAdapter | MediaAdapter
         if role == "chat":
-            adapter: ChatAdapter | MediaAdapter = self.chat
+            adapter = self._chat_adapters.get(engine or self.settings.chat_engine, self.chat)
             kind: Literal["chat", "media"] = "chat"
-            configured_engine = self.settings.chat_engine
+            configured_engine = (
+                engine if engine in self._chat_adapters else self.settings.chat_engine
+            )
         elif role in {"image", "video"}:
             adapter = self.media
             kind = "media"
@@ -126,4 +145,9 @@ class EngineRegistry:
             ) from exc
 
     async def close(self) -> None:
-        await asyncio.gather(self.chat.close(), self.media.close())
+        chat_adapters = {id(adapter): adapter for adapter in self._chat_adapters.values()}
+        chat_adapters.setdefault(id(self._fallback_chat), self._fallback_chat)
+        await asyncio.gather(
+            *(adapter.close() for adapter in chat_adapters.values()),
+            self.media.close(),
+        )

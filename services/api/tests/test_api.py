@@ -1247,7 +1247,7 @@ async def test_runtime_status_exposes_pinned_external_setup(client: AsyncClient)
 
     assert response.status_code == 200
     runtimes = {item["engine"]: item for item in response.json()}
-    assert set(runtimes) == {"llama.cpp", "comfyui"}
+    assert set(runtimes) == {"llama.cpp", "vllm", "comfyui"}
     assert runtimes["llama.cpp"]["release"] == "b9637"
     assert runtimes["comfyui"]["release"] == "v0.28.0"
     assert runtimes["comfyui"]["distribution"] == "external-gpl-3.0"

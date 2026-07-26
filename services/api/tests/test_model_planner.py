@@ -240,6 +240,78 @@ def test_static_inspector_skips_large_gguf_token_arrays_without_materializing_th
     assert inspection.family == "qwen"
 
 
+def test_modelopt_snapshot_produces_a_vllm_install_contract() -> None:
+    selected = [
+        "model-00001-of-00002.safetensors",
+        "model-00002-of-00002.safetensors",
+        "config.json",
+        "hf_quant_config.json",
+        "tokenizer.json",
+    ]
+    inspection = inspect_repository_metadata(
+        {
+            "config.json": json.dumps(
+                {"architectures": ["Qwen3_5ForConditionalGeneration"]}
+            ).encode(),
+            "hf_quant_config.json": json.dumps({"quantization": {"quant_algo": "NVFP4"}}).encode(),
+            "model-00001-of-00002.safetensors": _safetensors(
+                ["model.layers.0.self_attn.q_proj.weight"]
+            ),
+            "model-00002-of-00002.safetensors": _safetensors(
+                ["model.layers.1.self_attn.q_proj.weight"]
+            ),
+        },
+        selected,
+        role="chat",
+    )
+    plan = resolve_install_plan(
+        remote_id="nvidia/Qwen3.6-27B-NVFP4",
+        revision="a" * 40,
+        role="chat",
+        engine="vllm",
+        selected_files=[
+            {
+                "filename": filename,
+                "size": 1_024,
+                "sha256": "b" * 64,
+            }
+            for filename in selected
+        ],
+        inspection=inspection,
+    )
+
+    assert plan.compatibility == "supported"
+    assert plan.runtime_contract["engine"] == "vllm"
+    assert plan.runtime_contract["quantization"] == "modelopt"
+    assert plan.runtime_contract["model_layout"] == "transformers_snapshot"
+    assert {artifact.kind for artifact in plan.artifacts} == {"weights", "metadata"}
+
+
+def test_modelopt_snapshot_requires_quantization_metadata() -> None:
+    inspection = inspect_repository_metadata(
+        {
+            "config.json": json.dumps({"model_type": "qwen3_5"}).encode(),
+            "model.safetensors": _safetensors(["model.embed_tokens.weight"]),
+        },
+        ["model.safetensors", "config.json"],
+        role="chat",
+    )
+    plan = resolve_install_plan(
+        remote_id="synthetic/incomplete-modelopt",
+        revision="a" * 40,
+        role="chat",
+        engine="vllm",
+        selected_files=[
+            {"filename": "model.safetensors", "size": 1_024, "sha256": "b" * 64},
+            {"filename": "config.json", "size": 128, "sha256": "c" * 64},
+        ],
+        inspection=inspection,
+    )
+
+    assert plan.compatibility == "unsupported"
+    assert plan.failure_code == "incomplete_modelopt_snapshot"
+
+
 def test_static_inspector_rejects_oversized_and_unsafe_metadata() -> None:
     with pytest.raises(ModelManifestError, match="size limit"):
         inspect_repository_metadata(

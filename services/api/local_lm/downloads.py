@@ -11,6 +11,7 @@ import re
 import shutil
 import subprocess
 import sys
+from collections.abc import Callable
 from contextlib import suppress
 from pathlib import Path, PurePosixPath
 from typing import TYPE_CHECKING, Any
@@ -106,7 +107,7 @@ class DownloadManager:
         settings: Settings,
         events: EventBroker,
         *,
-        chat_adapter: ChatAdapter | None = None,
+        chat_adapter: ChatAdapter | Callable[[], ChatAdapter] | None = None,
         media_adapter: ComfyUIAdapter | None = None,
         processes: ProcessSupervisor | None = None,
         scheduler: ResourceScheduler | None = None,
@@ -121,6 +122,9 @@ class DownloadManager:
         self._api = HfApi(token=settings.hf_token)
         self._tasks: dict[str, asyncio.Task[None]] = {}
         self._workers: dict[str, subprocess.Popen[bytes]] = {}
+
+    def _active_chat_adapter(self) -> ChatAdapter | None:
+        return self.chat_adapter() if callable(self.chat_adapter) else self.chat_adapter
 
     def set_token(self, token: str | None) -> None:
         self.settings.hf_token = token
@@ -456,7 +460,7 @@ class DownloadManager:
         runtime_release: str | None = None
         runtime_managed: bool | None = None
         runtimes = getattr(self.processes, "runtimes", None) if self.processes else None
-        if runtimes and install.engine in {"llama.cpp", "comfyui"}:
+        if runtimes and install.engine in {"llama.cpp", "vllm", "comfyui"}:
             runtime_status = runtimes.status(install.engine)
             runtime_release = runtime_status.release
             runtime_managed = runtime_status.managed
@@ -1454,7 +1458,10 @@ class DownloadManager:
             runtime_build = "unknown"
             try:
                 await self.processes.load_chat(profile, install)
-                capabilities = await self.chat_adapter.capabilities()
+                chat_adapter = self._active_chat_adapter()
+                if not chat_adapter:
+                    raise RuntimeError("automatic chat activation is unavailable")
+                capabilities = await chat_adapter.capabilities()
                 if not capabilities.healthy:
                     raise RuntimeError("chat worker did not pass its health check")
                 advertised_modalities = getattr(capabilities, "input_modalities", ["text"])
@@ -1490,11 +1497,11 @@ class DownloadManager:
                         ),
                     }
                 ]
-                token_count = await self.chat_adapter.count_tokens(probe_messages)
+                token_count = await chat_adapter.count_tokens(probe_messages)
                 if token_count < 1:
                     raise RuntimeError("chat worker tokenizer did not accept the probe")
                 async with asyncio.timeout(120):
-                    async for event in self.chat_adapter.stream(
+                    async for event in chat_adapter.stream(
                         ChatRequest(
                             run_id=new_id("activation-probe"),
                             messages=probe_messages,

@@ -82,6 +82,14 @@ def _write_manifest(
                     }
                 },
             },
+            "vllm": {
+                "pinned_release": "v-test",
+                "distribution": "external",
+                "license": "Apache-2.0",
+                "security_status": "blocked",
+                "security_message": "The test vLLM bundle is pending dependency review.",
+                "runtime_assets": {},
+            },
             "comfyui": {
                 "pinned_release": "v-test",
                 "distribution": "external-gpl-3.0",
@@ -577,6 +585,37 @@ async def test_blocked_runtime_security_status_prevents_automatic_download(
         assert status.security_status == "blocked"
         with pytest.raises(RuntimeProvisioningError, match="security review failed"):
             await provisioner.ensure("comfyui")
+        await provisioner.close()
+
+
+async def test_blocked_runtime_without_assets_is_reported_before_asset_selection(
+    settings,
+    tmp_path: Path,
+) -> None:  # type: ignore[no-untyped-def]
+    content = _zip_bytes({"llama-server.exe": b"llama"})
+    manifest = tmp_path / "engines.json"
+    _write_manifest(manifest, llama_content=content)
+    settings.prepare()
+
+    def handler(_request: httpx.Request) -> httpx.Response:
+        raise AssertionError("blocked runtimes without assets must not be downloaded")
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        provisioner = RuntimeProvisioner(
+            settings,
+            manifest_path=manifest,
+            client=client,
+            environment={},
+            platform_key="test-platform",
+            allowed_download_hosts={"runtime.test"},
+        )
+        status = provisioner.status("vllm")
+        assert status.state == "unsupported"
+        assert status.supported is False
+        assert status.security_status == "blocked"
+        assert "pending dependency review" in status.message
+        with pytest.raises(RuntimeProvisioningError, match="pending dependency review"):
+            await provisioner.ensure("vllm")
         await provisioner.close()
 
 

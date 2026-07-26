@@ -30,8 +30,8 @@ from .subprocess_env import subprocess_environment
 
 logger = logging.getLogger(__name__)
 
-RuntimeName = Literal["llama.cpp", "comfyui"]
-RUNTIME_NAMES: tuple[RuntimeName, ...] = ("llama.cpp", "comfyui")
+RuntimeName = Literal["llama.cpp", "vllm", "comfyui"]
+RUNTIME_NAMES: tuple[RuntimeName, ...] = ("llama.cpp", "vllm", "comfyui")
 _MANAGED_MARKER = ".lm-atelier-runtime.json"
 _RUNTIME_PROBE_SENTINEL = "LM_ATELIER_RUNTIME_PROBE:"
 _SHA256 = re.compile(r"^[0-9a-f]{64}$")
@@ -125,6 +125,16 @@ class RuntimeProvisioner:
         if configured:
             self._states[engine] = configured
             return configured
+        if self._security_blocked(definition):
+            blocked = self._status(
+                engine,
+                definition,
+                state="unsupported",
+                supported=False,
+                message=self._security_message(definition),
+            )
+            self._states[engine] = blocked
+            return blocked
         asset = self._asset(engine, definition)
         if self._security_blocked(definition, asset):
             blocked = self._status(
@@ -208,6 +218,16 @@ class RuntimeProvisioner:
             if configured:
                 self._states[engine] = configured
                 return configured
+            if self._security_blocked(definition):
+                status = self._status(
+                    engine,
+                    definition,
+                    state="unsupported",
+                    supported=False,
+                    message=self._security_message(definition),
+                )
+                self._states[engine] = status
+                raise RuntimeProvisioningError(status.message)
             asset = self._asset(engine, definition)
             if self._security_blocked(definition, asset):
                 status = self._status(
@@ -724,6 +744,13 @@ class RuntimeProvisioner:
                 "LOCAL_LM_CHAT_ENGINE": "llama.cpp",
                 "LOCAL_LM_LLAMA_EXECUTABLE": str(executable),
             }
+        elif engine == "vllm":
+            self.settings.chat_engine = "vllm"
+            self.settings.vllm_executable = executable
+            values = {
+                "LOCAL_LM_CHAT_ENGINE": "vllm",
+                "LOCAL_LM_VLLM_EXECUTABLE": str(executable),
+            }
         else:
             directory = installed["directory"].resolve()
             self.settings.media_engine = "comfyui"
@@ -748,6 +775,10 @@ class RuntimeProvisioner:
     ) -> RuntimeStatus | None:
         if engine == "llama.cpp":
             executable = self.settings.llama_executable
+            ready = bool(executable and executable.expanduser().is_file())
+            paths = [executable] if executable else []
+        elif engine == "vllm":
+            executable = self.settings.vllm_executable
             ready = bool(executable and executable.expanduser().is_file())
             paths = [executable] if executable else []
         else:
@@ -811,6 +842,12 @@ class RuntimeProvisioner:
         if not x64:
             nvidia = None
         if system == "windows" and x64:
+            if engine == "vllm":
+                if nvidia:
+                    driver_major, compute_major = nvidia
+                    if driver_major >= 580 and compute_major >= 8:
+                        return "windows-x86_64-nvidia-cu13"
+                return "windows-x86_64"
             if engine == "comfyui":
                 if nvidia:
                     driver_major, compute_major = nvidia
@@ -1412,9 +1449,13 @@ class RuntimeProvisioner:
             definition = payload["engines"].get(engine)
             if not isinstance(definition, dict):
                 raise RuntimeProvisioningError(f"The {engine} runtime definition is missing.")
-            for key in ("pinned_release", "distribution", "license", "runtime_assets"):
+            for key in ("pinned_release", "distribution", "license"):
                 if not definition.get(key):
                     raise RuntimeProvisioningError(f"The {engine} runtime definition has no {key}.")
+            if "runtime_assets" not in definition:
+                raise RuntimeProvisioningError(
+                    f"The {engine} runtime definition has no runtime_assets."
+                )
             if definition.get("security_status", "checksum-pinned") not in {
                 "checksum-pinned",
                 "blocked",
@@ -1427,7 +1468,9 @@ class RuntimeProvisioner:
                     f"The {engine} blocked runtime has no security explanation."
                 )
             runtime_assets = definition["runtime_assets"]
-            if not isinstance(runtime_assets, dict) or not runtime_assets:
+            if not isinstance(runtime_assets, dict) or (
+                not runtime_assets and definition.get("security_status") != "blocked"
+            ):
                 raise RuntimeProvisioningError(f"The {engine} runtime assets are invalid.")
             if engine == "comfyui":
                 RuntimeProvisioner._validate_security_review(definition)

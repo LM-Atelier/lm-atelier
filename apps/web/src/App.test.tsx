@@ -2466,6 +2466,118 @@ describe("App", () => {
     ));
   });
 
+  it("gates ModelOpt downloads on vLLM readiness and selects vLLM when ready", async () => {
+    const model = {
+      provider: "huggingface",
+      remote_id: "owner/qwen-nvfp4",
+      name: "qwen-nvfp4",
+      author: "owner",
+      pipeline_tag: "image-text-to-text",
+      tags: ["modelopt", "nvfp4", "safetensors"],
+      downloads: 12,
+      likes: 2,
+      trending_score: 1,
+      created_at: "2026-07-26T00:00:00Z",
+      last_modified: "2026-07-26T00:00:00Z",
+      gated: false,
+      private: false,
+      library_name: "transformers",
+      architecture: "qwen3_5",
+      formats: ["safetensors"],
+      quantizations: ["nvfp4"],
+      parameter_count: 27_000_000_000,
+      license_id: "apache-2.0",
+      total_size_bytes: 20 * 1024 ** 3,
+      compatibility: "advanced_import",
+      compatibility_reasons: ["requires the managed vLLM ModelOpt runtime"],
+      required_runtime: "vllm",
+    };
+    vi.mocked(api.catalog).mockResolvedValue({ items: [model], next_cursor: null });
+    vi.mocked(api.runtimes).mockResolvedValue([
+      {
+        engine: "vllm",
+        release: "v0.25.0",
+        state: "unsupported",
+        supported: false,
+        managed: false,
+        progress: 0,
+        downloaded_bytes: 0,
+        size_bytes: null,
+        distribution: "external",
+        license: "Apache-2.0",
+        security_status: "blocked",
+        security_message: "Dependency review pending.",
+        message: "Dependency review pending.",
+      },
+    ]);
+    const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+    const rendered = render(
+      <QueryClientProvider client={client}>
+        <App />
+      </QueryClientProvider>,
+    );
+    fireEvent.click(await screen.findByText("Model library"));
+    expect(await screen.findByRole("button", { name: "Needs vLLM" })).toBeDisabled();
+
+    rendered.unmount();
+    vi.mocked(api.runtimes).mockResolvedValue([
+      {
+        engine: "vllm",
+        release: "v0.25.0",
+        state: "ready",
+        supported: true,
+        managed: true,
+        progress: 1,
+        downloaded_bytes: 0,
+        size_bytes: null,
+        distribution: "external",
+        license: "Apache-2.0",
+        security_status: "checksum-pinned",
+        security_message: "",
+        message: "Ready.",
+      },
+    ]);
+    vi.mocked(api.catalogPreflight).mockResolvedValue({
+      remote_id: model.remote_id,
+      source_remote_id: null,
+      revision: "main",
+      selected_files: ["config.json", "hf_quant_config.json", "model.safetensors"],
+      expected_sha256: {},
+      comfy_paths: {},
+      workflow_template_id: null,
+      workflow_template_sha256: null,
+      download_bytes: model.total_size_bytes,
+      available_disk_bytes: model.total_size_bytes * 2,
+      estimated_ram_bytes: null,
+      estimated_vram_bytes: model.total_size_bytes,
+      can_install: true,
+      install_plan: {
+        id: "plan-nvfp4",
+        plan_hash: "b".repeat(64),
+        compatibility: "supported",
+        family: "qwen",
+        failure_code: null,
+        failure_reason: null,
+      },
+      checks: [],
+    });
+    const readyClient = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+    render(
+      <QueryClientProvider client={readyClient}>
+        <App />
+      </QueryClientProvider>,
+    );
+    fireEvent.click(await screen.findByText("Model library"));
+    fireEvent.click(await screen.findByRole("button", { name: "Install" }));
+    await waitFor(() => expect(api.catalogPreflight).toHaveBeenCalledWith(
+      model.remote_id,
+      "chat",
+      "vllm",
+      "main",
+      [],
+    ));
+  });
+
   it("preflights and queues a LoRA as a verified auxiliary asset", async () => {
     const model = {
       provider: "huggingface",

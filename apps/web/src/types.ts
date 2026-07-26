@@ -342,7 +342,7 @@ export interface WorkerStatus {
 }
 
 export interface RuntimeStatus {
-  engine: "llama.cpp" | "comfyui";
+  engine: "llama.cpp" | "vllm" | "comfyui";
   release: string;
   state: "missing" | "installing" | "ready" | "failed" | "unsupported";
   supported: boolean;
@@ -442,6 +442,7 @@ export interface CatalogModel {
   total_size_bytes: number | null;
   compatibility: string;
   compatibility_reasons: string[];
+  required_runtime?: string | null;
 }
 
 export interface CatalogPage {
@@ -499,7 +500,7 @@ export interface ReferenceRecipe {
   name: string;
   summary: string;
   role: "chat" | "image" | "video";
-  engine: "llama.cpp" | "comfyui";
+  engine: "llama.cpp" | "vllm" | "comfyui";
   operations: string[];
   license_id: string;
   status: "reference-candidate" | "certified";

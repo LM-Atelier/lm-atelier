@@ -22,6 +22,55 @@ from .schemas import (
 _BLOCKED_SUFFIXES = {".bin", ".pt", ".pth", ".ckpt", ".pkl", ".pickle"}
 
 
+_VLLM_SNAPSHOT_FILES = {
+    "added_tokens.json",
+    "chat_template.jinja",
+    "config.json",
+    "configuration.json",
+    "generation_config.json",
+    "hf_quant_config.json",
+    "merges.txt",
+    "model.safetensors.index.json",
+    "preprocessor_config.json",
+    "processor_config.json",
+    "special_tokens_map.json",
+    "tokenizer.json",
+    "tokenizer.model",
+    "tokenizer_config.json",
+    "video_preprocessor_config.json",
+    "vocab.json",
+}
+
+
+def _automatic_vllm_selection(files: list[dict[str, Any]]) -> list[str]:
+    selected: list[str] = []
+    names: set[str] = set()
+    for item in files:
+        raw_name = str(item.get("filename") or "")
+        path = PurePosixPath(raw_name.replace("\\", "/"))
+        if (
+            not raw_name
+            or path.is_absolute()
+            or any(part in {"", ".", ".."} or ":" in part for part in path.parts)
+        ):
+            continue
+        base_name = path.name.casefold()
+        if base_name.endswith(".safetensors") or base_name in _VLLM_SNAPSHOT_FILES:
+            normalized = path.as_posix()
+            if normalized.casefold() not in names:
+                selected.append(normalized)
+                names.add(normalized.casefold())
+    selected.sort(key=lambda value: (not value.casefold().endswith(".safetensors"), value))
+    selected_names = {PurePosixPath(value).name.casefold() for value in selected}
+    if (
+        not any(value.endswith(".safetensors") for value in selected_names)
+        or "config.json" not in selected_names
+        or "hf_quant_config.json" not in selected_names
+    ):
+        return []
+    return selected
+
+
 def _automatic_selection(
     files: dict[str, dict[str, Any]],
     role: str,
@@ -114,7 +163,9 @@ def assess_catalog_install(
     elif not selected:
         try:
             selected = (
-                automatic_gguf_selection(detail.files, system.memory_total_bytes)
+                _automatic_vllm_selection(detail.files)
+                if request.role == "chat" and request.engine == "vllm"
+                else automatic_gguf_selection(detail.files, system.memory_total_bytes)
                 if request.role == "chat"
                 else _automatic_selection(
                     files,
@@ -125,7 +176,12 @@ def assess_catalog_install(
             )
         except GGUFSelectionError as exc:
             selection_error = str(exc)
-    if request.role == "chat" and selected and selection_error is None:
+    if (
+        request.role == "chat"
+        and request.engine == "llama.cpp"
+        and selected
+        and selection_error is None
+    ):
         projector = automatic_mmproj_selection(detail.files, selected)
         if projector and projector not in selected:
             selected.append(projector)
@@ -138,6 +194,7 @@ def assess_catalog_install(
     ]
     if (
         request.role == "chat"
+        and request.engine == "llama.cpp"
         and selected
         and not missing
         and not unsafe_paths
@@ -270,7 +327,9 @@ def assess_catalog_install(
         )
     )
 
-    expected_engine = "llama.cpp" if request.role == "chat" else "comfyui"
+    expected_engine = detail.model.required_runtime or (
+        "llama.cpp" if request.role == "chat" else "comfyui"
+    )
     compatibility_status: Literal["pass", "warn", "block"] = "pass"
     compatibility_detail = "Catalog metadata matches the selected local runtime."
     if request.engine != expected_engine:
@@ -279,7 +338,9 @@ def assess_catalog_install(
     elif detail.model.compatibility == "unsupported":
         compatibility_status = "block"
         compatibility_detail = "Catalog metadata marks this model unsupported."
-    elif detail.model.compatibility == "advanced_import":
+    elif detail.model.compatibility == "advanced_import" and not (
+        detail.model.required_runtime == "vllm" and request.engine == "vllm"
+    ):
         compatibility_status = "warn"
         compatibility_detail = "This model needs advanced setup or a verified workflow."
     checks.append(
@@ -324,13 +385,15 @@ def assess_catalog_install(
 
     estimated_ram = int(download_bytes * 1.2) + 512 * 1024**2 if download_bytes else None
     estimated_vram = (
-        int(download_bytes * 1.25) + 1024**3 if download_bytes and request.role != "chat" else None
+        int(download_bytes * 1.25) + 1024**3
+        if download_bytes and (request.role != "chat" or request.engine == "vllm")
+        else None
     )
     accelerators = [device for device in system.devices if device.kind != "cpu"]
     available_accelerator = max(
         (device.available_memory_bytes or 0 for device in accelerators), default=0
     )
-    if request.role == "chat" and estimated_ram:
+    if request.role == "chat" and request.engine != "vllm" and estimated_ram:
         memory_status: Literal["pass", "warn", "block"] = (
             "pass" if estimated_ram <= system.memory_total_bytes else "warn"
         )
@@ -351,9 +414,7 @@ def assess_catalog_install(
         )
     else:
         memory_status = "warn"
-        memory_detail = (
-            "No accelerator memory was detected; media generation may fall back or fail."
-        )
+        memory_detail = "No accelerator memory was detected; accelerated generation may fail."
     checks.append(_check("memory", "Memory estimate", memory_status, memory_detail))
 
     checks.append(

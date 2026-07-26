@@ -1563,11 +1563,13 @@ function ModelCard({
   role,
   onDownload,
   status,
+  runtime,
 }: {
   model: CatalogModel;
   role: string;
   onDownload: () => void;
   status: "idle" | "preparing" | "downloading" | "installed";
+  runtime?: RuntimeStatus;
 }) {
   const label = {
     idle: "Install",
@@ -1581,18 +1583,28 @@ function ModelCard({
     advanced_import: "Advanced import",
     unsupported: "Unsupported",
   }[model.compatibility] ?? model.compatibility.replace("_", " ");
+  const runtimeUnavailable = Boolean(
+    model.required_runtime === "vllm" && (!runtime || !runtime.supported),
+  );
+  const displayCompatibility = model.required_runtime === "vllm"
+    ? runtimeUnavailable
+      ? "Needs vLLM"
+      : "Automatic test available"
+    : compatibilityLabel;
   const actionLabel = status === "idle" && model.compatibility === "unsupported"
     ? "No workflow"
-    : label;
+    : status === "idle" && runtimeUnavailable
+      ? "Needs vLLM"
+      : label;
   return (
     <article className="model-card">
       <div className="model-icon">{role === "video" ? <Film /> : role === "image" || role === "lora" ? <ImageIcon /> : <Bot />}</div>
       <div className="model-copy">
         <h3>{model.name}</h3><p>{model.author} · {model.pipeline_tag || model.library_name || "model"}</p>
-        <div className="badges"><span className={`badge ${model.compatibility}`}>{compatibilityLabel}</span>{model.gated && <span className="badge">Gated</span>}{model.formats.slice(0, 2).map((format) => <span className="badge" key={format}>{format}</span>)}{model.quantizations.slice(0, 2).map((value) => <span className="badge" key={value}>{value}</span>)}</div>
+        <div className="badges"><span className={`badge ${model.compatibility}`}>{displayCompatibility}</span>{model.gated && <span className="badge">Gated</span>}{model.formats.slice(0, 2).map((format) => <span className="badge" key={format}>{format}</span>)}{model.quantizations.slice(0, 2).map((value) => <span className="badge" key={value}>{value}</span>)}</div>
         <small>{formatDate(model.last_modified)}{model.compatibility_reasons.length ? ` · ${model.compatibility_reasons.join(" · ")}` : ""}</small>
       </div>
-      <div className="model-stats">{model.trending_score != null && <span title="Hugging Face trending score"><Sparkles size={14} />{model.trending_score.toLocaleString()}</span>}<span><Download size={14} />{model.downloads?.toLocaleString() ?? "—"}</span><button className="primary compact-button" title={model.compatibility === "unsupported" ? model.compatibility_reasons.join(" ") : undefined} onClick={onDownload} disabled={status !== "idle" || model.compatibility === "unsupported"}>{actionLabel}</button></div>
+      <div className="model-stats">{model.trending_score != null && <span title="Hugging Face trending score"><Sparkles size={14} />{model.trending_score.toLocaleString()}</span>}<span><Download size={14} />{model.downloads?.toLocaleString() ?? "—"}</span><button className="primary compact-button" title={model.compatibility === "unsupported" || runtimeUnavailable ? model.compatibility_reasons.join(" ") : undefined} onClick={onDownload} disabled={status !== "idle" || model.compatibility === "unsupported" || runtimeUnavailable}>{actionLabel}</button></div>
     </article>
   );
 }
@@ -1749,11 +1761,15 @@ function ModelsView() {
   const jobs = useQuery({ queryKey: ["jobs"], queryFn: api.jobs, refetchInterval: 3_000 });
   const storage = useQuery({ queryKey: ["model-storage"], queryFn: api.modelStorage });
   const profiles = useQuery({ queryKey: ["profiles"], queryFn: api.profiles });
+  const runtimes = useQuery({ queryKey: ["runtimes"], queryFn: api.runtimes });
+  const runtimeFor = (model: CatalogModel) => runtimes.data?.find(
+    (runtime) => runtime.engine === model.required_runtime,
+  );
   const download = useMutation({
     mutationFn: async ({ model, selectedRole }: { model: CatalogModel; selectedRole: string }) => {
       const auxiliaryKind = selectedRole === "lora" ? "lora" : null;
       const installRole = auxiliaryKind ? "image" : selectedRole;
-      const engine = installRole === "chat" ? "llama.cpp" : "comfyui";
+      const engine = model.required_runtime ?? (installRole === "chat" ? "llama.cpp" : "comfyui");
       const preflight = auxiliaryKind
         ? await api.catalogPreflight(
             model.remote_id,
@@ -1928,7 +1944,7 @@ function ModelsView() {
         {installRecipe.error && <div className="callout error" role="alert">{installRecipe.error.message}</div>}
         <div className="recipe-grid">{recipes.data?.map((recipe) => <RecipeCard key={recipe.id} recipe={recipe} pending={installRecipe.isPending && installRecipe.variables === recipe.id} onInstall={() => installRecipe.mutate(recipe.id)} />)}</div>
       </section>
-      {(role === "image" || role === "video") && readyModels.length > 0 && <section className="workflow-ready-models"><div className="section-heading"><div><small>Declarative workflow available</small><h2>Automatic setup candidates</h2></div></div><div className="model-grid">{readyModels.map((model) => <ModelCard key={model.remote_id} model={model} role={role} status={statusFor(model)} onDownload={() => download.mutate({ model, selectedRole: role })} />)}</div></section>}
+      {(role === "image" || role === "video") && readyModels.length > 0 && <section className="workflow-ready-models"><div className="section-heading"><div><small>Declarative workflow available</small><h2>Automatic setup candidates</h2></div></div><div className="model-grid">{readyModels.map((model) => <ModelCard key={model.remote_id} model={model} role={role} runtime={runtimeFor(model)} status={statusFor(model)} onDownload={() => download.mutate({ model, selectedRole: role })} />)}</div></section>}
       <div className="toolbar">
         <form className="search-box" onSubmit={(event) => { event.preventDefault(); setSubmitted(query); }}><Search size={18} /><input value={query} onChange={(event) => setQuery(event.target.value)} placeholder="Search models" /></form>
         <select aria-label="Model role" value={role} onChange={(event) => setRole(event.target.value)}><option value="chat">Chat</option><option value="image">Image</option><option value="video">Video</option><option value="lora">LoRA</option></select>
@@ -1996,7 +2012,7 @@ function ModelsView() {
       {catalog.isLoading && <div className="loading-line" />}
       {catalog.error && <div className="callout error action-callout" role="alert"><span>{catalog.error.message}</span><button className="secondary compact-button" disabled={catalog.isFetching} onClick={() => void catalog.refetch()}>Retry</button></div>}
       {catalogIsStale && !catalog.error && <div className="callout warning action-callout" role="status"><span>Showing saved results while Hugging Face is unavailable.</span><button className="secondary compact-button" disabled={catalog.isFetching} onClick={() => void catalog.refetch()}>Refresh</button></div>}
-      <div className="model-grid">{catalogItems.map((model) => <ModelCard key={model.remote_id} model={model} role={role} status={statusFor(model)} onDownload={() => download.mutate({ model, selectedRole: role })} />)}</div>
+      <div className="model-grid">{catalogItems.map((model) => <ModelCard key={model.remote_id} model={model} role={role} runtime={runtimeFor(model)} status={statusFor(model)} onDownload={() => download.mutate({ model, selectedRole: role })} />)}</div>
       {catalog.hasNextPage && <div className="load-more"><button className="secondary" disabled={catalog.isFetchingNextPage} onClick={() => void catalog.fetchNextPage()}>{catalog.isFetchingNextPage ? "Loading…" : "Load more models"}</button></div>}
       {importOpen && (
         <AccessibleDialog
@@ -2009,7 +2025,7 @@ function ModelsView() {
           <label>Display name<input value={importName} onChange={(event) => setImportName(event.target.value)} /></label>
           <label>Absolute local path<input value={importPath} onChange={(event) => setImportPath(event.target.value)} placeholder="/path/to/model.gguf" /></label>
           <label>Role<select value={importRole} onChange={(event) => { const next = event.target.value; setImportRole(next); setImportEngine(next === "chat" ? "llama.cpp" : "comfyui"); }}><option value="chat">Chat</option><option value="image">Image</option><option value="video">Video</option></select></label>
-          <label>Runtime<select value={importEngine} onChange={(event) => setImportEngine(event.target.value)}><option value="llama.cpp">llama.cpp</option><option value="comfyui">ComfyUI</option></select></label>
+          <label>Runtime<select value={importEngine} onChange={(event) => setImportEngine(event.target.value)}><option value="llama.cpp">llama.cpp</option><option value="vllm">vLLM (ModelOpt/NVFP4)</option><option value="comfyui">ComfyUI</option></select></label>
           {importModel.error && <div className="callout error" role="alert">{importModel.error.message}</div>}
           <footer><button className="secondary" onClick={() => setImportOpen(false)}>Cancel</button><button className="primary" disabled={!importName.trim() || !importPath.trim() || importModel.isPending} onClick={() => importModel.mutate()}>{importModel.isPending ? "Importing…" : "Import model"}</button></footer>
         </AccessibleDialog>

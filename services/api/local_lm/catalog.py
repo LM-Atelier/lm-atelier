@@ -468,6 +468,11 @@ class HuggingFaceCatalog:
             tags=tags,
             filenames=filenames,
         )
+        required_runtime = cls._required_runtime(
+            requested_role=requested_role,
+            tags=tags,
+            filenames=filenames,
+        )
         remote_id = str(item.get("id") or item.get("modelId") or "")
         return CatalogModel(
             remote_id=remote_id,
@@ -491,6 +496,7 @@ class HuggingFaceCatalog:
             total_size_bytes=sum(sizes) or None,
             compatibility=compatibility.value,
             compatibility_reasons=reasons,
+            required_runtime=required_runtime,
         )
 
     @staticmethod
@@ -513,6 +519,32 @@ class HuggingFaceCatalog:
             return None
 
     @staticmethod
+    def _required_runtime(
+        *,
+        requested_role: str | None,
+        tags: list[str],
+        filenames: list[str],
+    ) -> str | None:
+        if requested_role != "chat":
+            return None
+        lower_files = [name.lower() for name in filenames]
+        lower_tags = {tag.lower() for tag in tags}
+        if any(name.endswith(".gguf") for name in lower_files) or "gguf" in lower_tags:
+            return "llama.cpp"
+        if HuggingFaceCatalog._is_modelopt_snapshot(lower_tags, lower_files):
+            return "vllm"
+        return None
+
+    @staticmethod
+    def _is_modelopt_snapshot(lower_tags: set[str], lower_files: list[str]) -> bool:
+        has_safe_weights = any(name.endswith(".safetensors") for name in lower_files)
+        has_quant_config = any(
+            PurePosixPath(name).name == "hf_quant_config.json" for name in lower_files
+        )
+        has_modelopt_tag = bool(lower_tags.intersection({"modelopt", "nvidia modelopt", "nvfp4"}))
+        return has_safe_weights and (has_quant_config or has_modelopt_tag)
+
+    @staticmethod
     def _compatibility(
         *,
         requested_role: str | None,
@@ -532,6 +564,8 @@ class HuggingFaceCatalog:
                 if unsafe_note:
                     reasons.append(unsafe_note)
                 return CompatibilityLevel.LIKELY, reasons
+            if HuggingFaceCatalog._is_modelopt_snapshot(lower_tags, lower_files):
+                return CompatibilityLevel.ADVANCED, ["requires the managed vLLM ModelOpt runtime"]
             return CompatibilityLevel.ADVANCED, ["no GGUF artifact detected"]
         if requested_role == "image":
             if pipeline_tag in {"text-to-image", "image-to-image"}:

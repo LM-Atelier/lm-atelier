@@ -2240,7 +2240,7 @@ class ConversationOrchestrator:
         )
 
     async def _ensure_chat_worker(self, run_id: str) -> WorkerStatus | None:
-        if self.engines.settings.chat_engine != "llama.cpp":
+        if self.engines.settings.chat_engine not in {"llama.cpp", "vllm"}:
             return None
         with self.session_factory() as session:
             run = session.get(Run, run_id)
@@ -2260,9 +2260,14 @@ class ConversationOrchestrator:
         return await self.processes.load_chat(profile, install)
 
     async def _chat_planner_available(self) -> bool:
-        if self.engines.settings.chat_engine != "llama.cpp":
+        if self.engines.settings.chat_engine not in {"llama.cpp", "vllm"}:
             return True
-        if not self.processes.settings.llama_executable:
+        executable = (
+            self.processes.settings.vllm_executable
+            if self.engines.settings.chat_engine == "vllm"
+            else self.processes.settings.llama_executable
+        )
+        if not executable:
             return False
         if not self._chat_planner_ready.is_set():
             return False

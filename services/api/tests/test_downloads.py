@@ -175,10 +175,15 @@ async def test_planned_chat_activation_requires_completion_and_records_evidence(
             self.stopped.append(name)
 
     processes = FakeProcesses()
+
+    def active_adapter() -> FakeChatAdapter:
+        assert processes.loaded
+        return FakeChatAdapter()
+
     manager = DownloadManager(
         settings,
         EventBroker(),
-        chat_adapter=FakeChatAdapter(),  # type: ignore[arg-type]
+        chat_adapter=active_adapter,
         processes=processes,  # type: ignore[arg-type]
     )
     with SessionLocal() as session:

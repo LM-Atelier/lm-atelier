@@ -10,7 +10,11 @@ from local_lm.catalog import HuggingFaceCatalog
 from local_lm.config import Settings
 from local_lm.domain import CompatibilityLevel
 from local_lm.downloads import DownloadManager
-from local_lm.preflight import _automatic_selection, assess_catalog_install
+from local_lm.preflight import (
+    _automatic_selection,
+    _automatic_vllm_selection,
+    assess_catalog_install,
+)
 from local_lm.schemas import (
     CatalogDetail,
     CatalogModel,
@@ -36,6 +40,66 @@ def test_gguf_catalog_entry_is_likely_compatible() -> None:
     )
     assert level == CompatibilityLevel.LIKELY
     assert "GGUF" in reasons[0]
+
+
+def test_modelopt_catalog_entry_names_its_required_runtime() -> None:
+    model = HuggingFaceCatalog._normalize(
+        {
+            "id": "nvidia/Qwen3.6-27B-NVFP4",
+            "pipeline_tag": "text-generation",
+            "tags": ["safetensors", "ModelOpt", "NVFP4"],
+            "siblings": [
+                {"rfilename": "config.json"},
+                {"rfilename": "hf_quant_config.json"},
+                {"rfilename": "model-00001-of-00003.safetensors"},
+            ],
+        },
+        "chat",
+    )
+
+    assert model.compatibility == "advanced_import"
+    assert model.compatibility_reasons == ["requires the managed vLLM ModelOpt runtime"]
+    assert model.required_runtime == "vllm"
+
+
+def test_vllm_snapshot_selection_keeps_required_data_files_only() -> None:
+    files = [
+        {"filename": "model-00001-of-00003.safetensors"},
+        {"filename": "model-00002-of-00003.safetensors"},
+        {"filename": "model-00003-of-00003.safetensors"},
+        {"filename": "model.safetensors.index.json"},
+        {"filename": "config.json"},
+        {"filename": "hf_quant_config.json"},
+        {"filename": "tokenizer.json"},
+        {"filename": "processor_config.json"},
+        {"filename": "custom_modeling.py"},
+        {"filename": "README.md"},
+    ]
+
+    selected = _automatic_vllm_selection(files)
+
+    assert selected == [
+        "model-00001-of-00003.safetensors",
+        "model-00002-of-00003.safetensors",
+        "model-00003-of-00003.safetensors",
+        "config.json",
+        "hf_quant_config.json",
+        "model.safetensors.index.json",
+        "processor_config.json",
+        "tokenizer.json",
+    ]
+
+
+def test_vllm_snapshot_selection_requires_modelopt_metadata() -> None:
+    assert (
+        _automatic_vllm_selection(
+            [
+                {"filename": "model.safetensors"},
+                {"filename": "config.json"},
+            ]
+        )
+        == []
+    )
 
 
 def test_default_chat_download_selects_smallest_gguf() -> None:
