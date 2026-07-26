@@ -2841,6 +2841,11 @@ async def test_cancelled_media_run_can_be_retried(client: AsyncClient) -> None:
     cancelled = await client.post(f"/api/chats/{chat['id']}/cancel")
     assert cancelled.status_code == 200
     assert cancelled.json()["status"] == "cancelled"
+    cancelled_message = (
+        await client.get(f"/api/messages/{turn.json()['assistant_message']['id']}")
+    ).json()
+    assert cancelled_message["status"] == "cancelled"
+    assert not any(part["type"] in {"error", "progress"} for part in cancelled_message["parts"])
 
     retried = await client.post(f"/api/jobs/{cancelled.json()['id']}/retry")
     assert retried.status_code == 200

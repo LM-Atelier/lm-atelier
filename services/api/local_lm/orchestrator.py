@@ -3112,12 +3112,16 @@ class ConversationOrchestrator:
             if run.operation == Operation.TEXT.value:
                 self._remove_chat_progress(message)
             else:
+                # Cancellation is a state, not a generation failure. Remove
+                # transient progress/preview parts and let the client render
+                # the neutral cancelled subtext below any durable content.
                 self._replace_parts(
                     message,
                     [
-                        MessagePart(
-                            position=0, type=PartType.ERROR.value, text="Generation cancelled"
-                        )
+                        self._message_part_copy(part)
+                        for part in message.parts
+                        if part.type != PartType.PROGRESS.value
+                        and part.artifact_id not in preview_ids
                     ],
                 )
             self._finalize_response_revision(
