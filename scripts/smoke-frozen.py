@@ -30,12 +30,17 @@ def main() -> int:
     application = args.application.resolve()
     if not application.is_file():
         raise SystemExit(f"Frozen application not found: {application}")
+    health_url = f"http://127.0.0.1:{args.port}/api/health"
+    if request_json(health_url) is not None:
+        raise RuntimeError(f"Smoke-test port {args.port} is already serving LM Atelier")
 
     with tempfile.TemporaryDirectory(prefix="lm-atelier-frozen-smoke-") as data_dir:
         environment = os.environ.copy()
         environment.update(
             {
                 "LOCAL_LM_DATA_DIR": data_dir,
+                "LOCAL_LM_CHAT_ENGINE": "mock",
+                "LOCAL_LM_MEDIA_ENGINE": "mock",
                 "LOCAL_LM_OPEN_BROWSER": "false",
                 "LOCAL_LM_PORT": str(args.port),
             }
@@ -49,7 +54,7 @@ def main() -> int:
                     raise RuntimeError(
                         f"Frozen application exited with code {process.returncode} before startup"
                     )
-                health = request_json(f"http://127.0.0.1:{args.port}/api/health")
+                health = request_json(health_url)
                 if health is not None:
                     break
                 time.sleep(0.25)
@@ -78,30 +83,59 @@ def main() -> int:
                 except subprocess.TimeoutExpired:
                     process.kill()
                     process.wait(timeout=5)
-    worker = subprocess.run(
-        [str(application), "--download-worker"],
-        input=b"{}",
-        capture_output=True,
-        timeout=15,
-        check=False,
-    )
-    if worker.returncode == 0 or b"repo_id" not in worker.stderr:
-        raise RuntimeError("Frozen download-worker dispatch did not run as expected")
-    runtime = subprocess.run(
-        [str(application), "--runtime-self-test"],
-        capture_output=True,
-        text=True,
-        timeout=15,
-        check=False,
-    )
-    try:
-        runtime_result = json.loads(runtime.stdout)
-    except ValueError as exc:
-        raise RuntimeError(
-            f"Frozen runtime self-test returned invalid output: {runtime.stderr}"
-        ) from exc
-    if runtime.returncode != 0 or runtime_result.get("version") != args.version:
-        raise RuntimeError(f"Frozen runtime self-test failed: {runtime_result}")
+            shutdown_deadline = time.monotonic() + 10
+            while time.monotonic() < shutdown_deadline:
+                if request_json(health_url) is None:
+                    break
+                time.sleep(0.25)
+            else:
+                raise RuntimeError(
+                    f"Frozen application still responds on port {args.port} after shutdown"
+                )
+        worker = subprocess.run(
+            [str(application), "--download-worker"],
+            input=b"{}",
+            capture_output=True,
+            timeout=15,
+            check=False,
+            env=environment,
+        )
+        if worker.returncode == 0 or b"repo_id" not in worker.stderr:
+            raise RuntimeError("Frozen download-worker dispatch did not run as expected")
+        runtime_environment = environment.copy()
+        runtime_environment["LOCAL_LM_DATA_DIR"] = str(Path(data_dir) / "default-runtime")
+        for key in (
+            "LOCAL_LM_CHAT_ENGINE",
+            "LOCAL_LM_MEDIA_ENGINE",
+            "LOCAL_LM_LLAMA_EXECUTABLE",
+            "LOCAL_LM_LLAMA_URL",
+            "LOCAL_LM_COMFY_EXECUTABLE",
+            "LOCAL_LM_COMFY_DIRECTORY",
+            "LOCAL_LM_COMFY_URL",
+        ):
+            runtime_environment.pop(key, None)
+        runtime = subprocess.run(
+            [str(application), "--runtime-self-test"],
+            capture_output=True,
+            text=True,
+            timeout=15,
+            check=False,
+            env=runtime_environment,
+        )
+        try:
+            runtime_result = json.loads(runtime.stdout)
+        except ValueError as exc:
+            raise RuntimeError(
+                f"Frozen runtime self-test returned invalid output: {runtime.stderr}"
+            ) from exc
+        if (
+            runtime.returncode != 0
+            or runtime_result.get("version") != args.version
+            or runtime_result.get("chat_engine") != "llama.cpp"
+            or runtime_result.get("media_engine") != "comfyui"
+            or runtime_result.get("engine_manifest_available") is not True
+        ):
+            raise RuntimeError(f"Frozen runtime self-test failed: {runtime_result}")
     print(f"Frozen application smoke test passed: {application}")
     return 0
 

@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 import asyncio
+import json
 from collections.abc import AsyncIterator
+from pathlib import Path
 
 import pytest
 
@@ -9,6 +11,8 @@ from local_lm.adapters.base import ChatEvent, ChatRequest
 from local_lm.adapters.mock import MockChatAdapter
 from local_lm.domain import Operation, RoutingMode
 from local_lm.routing import ModalityRouter
+
+CORPUS = Path(__file__).parent / "fixtures" / "routing-corpus-v1.json"
 
 
 class CapturingMockChatAdapter(MockChatAdapter):
@@ -38,6 +42,45 @@ class HangingChatAdapter(MockChatAdapter):
         del request
         await asyncio.Event().wait()
         yield ChatEvent(type="complete")
+
+
+def test_versioned_routing_corpus_meets_precision_and_recall_gate() -> None:
+    document = json.loads(CORPUS.read_text(encoding="utf-8"))
+    assert document["schema_version"] == 1
+    cases = document["cases"]
+    operations = [operation.value for operation in Operation]
+    confusion = {expected: {actual: 0 for actual in operations} for expected in operations}
+    failures: list[str] = []
+
+    for case in cases:
+        plan = ModalityRouter().plan(
+            text=case["text"],
+            mode=RoutingMode(case["mode"]),
+            input_artifact_ids=case.get("input_artifact_ids", []),
+            has_prior_image=case.get("has_prior_image", False),
+            conversation=case.get("conversation", []),
+        )
+        expected = case["expected"]
+        actual = plan.operation.value
+        confusion[expected][actual] += 1
+        if actual != expected:
+            failures.append(f"{case['id']}: expected {expected}, got {actual}")
+
+    for operation in {
+        Operation.TEXT.value,
+        Operation.TEXT_TO_IMAGE.value,
+        Operation.IMAGE_TO_IMAGE.value,
+        Operation.TEXT_TO_VIDEO.value,
+        Operation.IMAGE_TO_VIDEO.value,
+    }:
+        true_positive = confusion[operation][operation]
+        predicted = sum(confusion[expected][operation] for expected in operations)
+        actual = sum(confusion[operation].values())
+        precision = true_positive / predicted if predicted else 0
+        recall = true_positive / actual if actual else 0
+        assert precision >= 0.9, f"{operation} precision was {precision:.3f}"
+        assert recall >= 0.9, f"{operation} recall was {recall:.3f}"
+    assert not failures, "\n".join(failures)
 
 
 @pytest.mark.parametrize(
@@ -70,6 +113,66 @@ def test_explicit_mode_always_wins() -> None:
     )
     assert plan.operation == Operation.TEXT_TO_IMAGE
     assert plan.confidence == 1
+
+
+@pytest.mark.parametrize(
+    ("mode", "text", "expected"),
+    [
+        (RoutingMode.IMAGE, "Make it green", Operation.IMAGE_TO_IMAGE),
+        (
+            RoutingMode.IMAGE,
+            "Use the previous image in a watercolor style",
+            Operation.IMAGE_TO_IMAGE,
+        ),
+        (RoutingMode.VIDEO, "Make it move", Operation.IMAGE_TO_VIDEO),
+        (
+            RoutingMode.VIDEO,
+            "Animate the previous picture with a slow camera orbit",
+            Operation.IMAGE_TO_VIDEO,
+        ),
+        (
+            RoutingMode.IMAGE,
+            "Create a fresh image of a green apple",
+            Operation.TEXT_TO_IMAGE,
+        ),
+        (
+            RoutingMode.VIDEO,
+            "Create a fresh video of a green apple",
+            Operation.TEXT_TO_VIDEO,
+        ),
+    ],
+)
+def test_explicit_media_mode_uses_prior_image_only_for_clear_follow_ups(
+    mode: RoutingMode,
+    text: str,
+    expected: Operation,
+) -> None:
+    plan = ModalityRouter().plan(
+        text=text,
+        mode=mode,
+        input_artifact_ids=[],
+        has_prior_image=True,
+    )
+
+    assert plan.operation == expected
+
+
+def test_explicit_media_mode_prefers_referenced_chat_text_over_prior_image() -> None:
+    plan = ModalityRouter().plan(
+        text="Illustrate the previous story",
+        mode=RoutingMode.IMAGE,
+        input_artifact_ids=[],
+        has_prior_image=True,
+        conversation=[
+            {
+                "role": "assistant",
+                "content": "A glass orchard floated above a quiet sea.",
+            }
+        ],
+    )
+
+    assert plan.operation == Operation.TEXT_TO_IMAGE
+    assert "A glass orchard floated above a quiet sea." in plan.standalone_prompt
 
 
 def test_image_input_selects_image_to_video() -> None:

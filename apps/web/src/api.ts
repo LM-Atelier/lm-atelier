@@ -1,4 +1,5 @@
 import type {
+  ApplicationInfo,
   AppEvent,
   ArtifactCleanupResult,
   ArtifactDeleteResult,
@@ -25,6 +26,7 @@ import type {
   Project,
   ReferenceRecipe,
   RoutingMode,
+  RuntimeStatus,
   SystemInfo,
   ToolCapabilityProbe,
   TurnAccepted,
@@ -35,6 +37,7 @@ import type {
 } from "./types";
 
 let csrfToken = "";
+let eventEpoch = "";
 let eventSequence = 0;
 let sessionPromise: Promise<void> | null = null;
 
@@ -63,8 +66,13 @@ async function ensureSession(): Promise<void> {
         credentials: "same-origin",
       });
       if (!response.ok) throw new Error("Could not initialize the local session");
-      const payload = (await response.json()) as { csrf_token: string; event_sequence?: number };
+      const payload = (await response.json()) as {
+        csrf_token: string;
+        event_epoch?: string;
+        event_sequence?: number;
+      };
       csrfToken = payload.csrf_token;
+      eventEpoch = payload.event_epoch ?? "";
       eventSequence = Math.max(0, payload.event_sequence ?? 0);
     })();
   }
@@ -193,6 +201,8 @@ export const api = {
     request<Job>(`/api/chats/${chatId}/cancel`, { method: "POST" }),
   jobs: () => request<Job[]>("/api/jobs"),
   cancelJob: (id: string) => request<Job>(`/api/jobs/${id}/cancel`, { method: "POST" }),
+  retryJob: (id: string) =>
+    request<Job>(`/api/jobs/${encodeURIComponent(id)}/retry`, { method: "POST" }),
   pauseDownload: (id: string) =>
     request<Job>(`/api/downloads/${id}/pause`, { method: "POST" }),
   resumeDownload: (id: string) =>
@@ -201,6 +211,7 @@ export const api = {
   probeChatTools: () =>
     request<ToolCapabilityProbe>("/api/engines/chat/tool-probe", { method: "POST" }),
   system: () => request<SystemInfo>("/api/system"),
+  about: () => request<ApplicationInfo>("/api/about"),
   platforms: () => request<PlatformMatrixEntry[]>("/api/platforms"),
   createDiagnostics: () => request<{ url: string }>("/api/diagnostics", { method: "POST" }),
   credentialStatus: () => request<CredentialStatus>("/api/credentials/huggingface"),
@@ -279,6 +290,9 @@ export const api = {
     request<GenerationPreset>("/api/presets/import", { method: "POST", body: JSON.stringify(bundle) }),
   deletePreset: (id: string) => request<void>(`/api/presets/${id}`, { method: "DELETE" }),
   workers: () => request<WorkerStatus[]>("/api/workers"),
+  runtimes: () => request<RuntimeStatus[]>("/api/runtimes"),
+  installRuntime: (engine: RuntimeStatus["engine"]) =>
+    request<RuntimeStatus>(`/api/runtimes/${engine}/install`, { method: "POST" }),
   loadChatWorker: (profileId: string) =>
     request<WorkerStatus>(`/api/workers/chat/load/${profileId}`, { method: "POST" }),
   startMediaWorker: () => request<WorkerStatus>("/api/workers/media/start", { method: "POST" }),
@@ -287,6 +301,12 @@ export const api = {
   backups: () => request<BackupInfo[]>("/api/backups"),
   createBackup: (includeMedia = false) =>
     request<BackupInfo>(`/api/backups?${new URLSearchParams({ include_media: String(includeMedia) })}`, { method: "POST" }),
+  verifyBackup: (name: string) =>
+    request<BackupInfo>(`/api/backups/${encodeURIComponent(name)}/verify`, { method: "POST" }),
+  restoreBackup: (name: string) =>
+    request<BackupInfo>(`/api/backups/${encodeURIComponent(name)}/restore`, { method: "POST" }),
+  deleteBackup: (name: string) =>
+    request<void>(`/api/backups/${encodeURIComponent(name)}`, { method: "DELETE" }),
   exportProject: (projectId: string, includeMedia = true) =>
     request<{ url: string }>(`/api/projects/${projectId}/export?${new URLSearchParams({ include_media: String(includeMedia) })}`, { method: "POST" }),
   importProject: async (file: File) => {
@@ -421,13 +441,16 @@ export const api = {
 export async function connectEvents(
   onEvent: (event: AppEvent) => void,
   onStatus: (connected: boolean) => void,
+  onReconnect?: () => void,
 ): Promise<() => void> {
   let closed = false;
   let opening = false;
   let socket: WebSocket | null = null;
   let retry: number | undefined;
+  let connectedEpoch = eventEpoch;
   let lastSequence = eventSequence;
   let sequenceInitialized = false;
+  let hasOpened = false;
 
   const scheduleRetry = () => {
     if (closed || retry !== undefined) return;
@@ -445,13 +468,21 @@ export async function connectEvents(
       if (closed) return;
       if (!sequenceInitialized) {
         lastSequence = eventSequence;
+        connectedEpoch = eventEpoch;
         sequenceInitialized = true;
+      } else if (eventEpoch && connectedEpoch && eventEpoch !== connectedEpoch) {
+        lastSequence = 0;
+        connectedEpoch = eventEpoch;
       } else if (eventSequence < lastSequence) {
         lastSequence = 0;
       }
       const scheme = window.location.protocol === "https:" ? "wss:" : "ws:";
       socket = new WebSocket(`${scheme}//${window.location.host}/api/events?after=${lastSequence}`);
-      socket.onopen = () => onStatus(true);
+      socket.onopen = () => {
+        onStatus(true);
+        if (hasOpened) onReconnect?.();
+        hasOpened = true;
+      };
       socket.onmessage = (message) => {
         const event = JSON.parse(message.data as string) as AppEvent;
         lastSequence = Math.max(lastSequence, event.sequence);

@@ -1,5 +1,7 @@
 export type RoutingMode = "auto" | "text" | "image" | "video";
 export type EngineRole = "chat" | "image" | "video";
+export type GenerationSettingsByRole = Partial<Record<EngineRole, Record<string, unknown>>>;
+export type GenerationPresetIdsByRole = Partial<Record<EngineRole, string | null>>;
 
 export interface Project {
   id: string;
@@ -9,6 +11,8 @@ export interface Project {
   archived: boolean;
   image_workflow_revision_id: string | null;
   video_workflow_revision_id: string | null;
+  generation_settings_json?: GenerationSettingsByRole;
+  generation_preset_ids_json?: GenerationPresetIdsByRole;
   created_at: string;
   updated_at: string;
 }
@@ -52,6 +56,7 @@ export interface ArtifactStorageInfo {
 export interface ArtifactCleanupResult {
   dry_run: boolean;
   marked_count: number;
+  retention_pending_count: number;
   removed_count: number;
   reclaimed_bytes: number;
 }
@@ -66,7 +71,7 @@ export interface ArtifactDeleteResult {
 export interface MessagePart {
   id: string;
   position: number;
-  type: "text" | "image" | "video" | "progress" | "error" | "generation_metadata";
+  type: "text" | "image" | "video" | "attachment" | "progress" | "error" | "generation_metadata";
   text: string | null;
   artifact_id: string | null;
   metadata_json: Record<string, unknown>;
@@ -95,6 +100,8 @@ export interface Chat {
   active_image_profile_id: string | null;
   active_video_profile_id: string | null;
   active_head_message_id: string | null;
+  generation_settings_json?: GenerationSettingsByRole;
+  generation_preset_ids_json?: GenerationPresetIdsByRole;
   created_at: string;
   updated_at: string;
 }
@@ -167,6 +174,7 @@ export interface EngineCapabilities {
   operations: string[];
   formats: string[];
   devices: string[];
+  input_modalities?: string[];
   streaming: boolean;
   tool_calling: boolean;
   settings: SettingField[];
@@ -239,6 +247,25 @@ export interface WorkerStatus {
   peak_memory_bytes: number | null;
   active_jobs: number;
   queued_jobs: number;
+  failure_detail?: string | null;
+  stderr_tail?: string | null;
+  log_path?: string | null;
+}
+
+export interface RuntimeStatus {
+  engine: "llama.cpp" | "comfyui";
+  release: string;
+  state: "missing" | "installing" | "ready" | "failed" | "unsupported";
+  supported: boolean;
+  managed: boolean;
+  progress: number;
+  downloaded_bytes: number;
+  size_bytes: number | null;
+  distribution: string;
+  license: string;
+  security_status?: "checksum-pinned" | "blocked";
+  security_message?: string;
+  message: string;
 }
 
 export interface BackupInfo {
@@ -451,6 +478,12 @@ export interface SystemInfo {
     backend: string | null;
     details: Record<string, unknown>;
   }>;
+}
+
+export interface ApplicationInfo {
+  version: string;
+  data_directory: string;
+  log_directory: string;
 }
 
 export interface CredentialStatus {

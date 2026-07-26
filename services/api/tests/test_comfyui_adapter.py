@@ -2,13 +2,16 @@ from __future__ import annotations
 
 import asyncio
 import json
+import os
+import time
 from pathlib import Path
 from typing import Any
 
 import httpx
 import pytest
+from websockets.exceptions import WebSocketException
 
-from local_lm.adapters.base import MediaRequest
+from local_lm.adapters.base import GeneratedAsset, MediaEvent, MediaRequest
 from local_lm.adapters.comfyui import ComfyUIAdapter, _preview_payload
 
 
@@ -104,6 +107,8 @@ async def test_websocket_is_connected_before_a_warm_prompt_can_complete(
 ) -> None:
     events: list[str] = []
     prompt_id = "prompt-warm"
+    monkeypatch.setenv("HTTP_PROXY", "http://proxy.invalid:8080")
+    monkeypatch.setenv("HTTPS_PROXY", "http://proxy.invalid:8080")
 
     class Socket:
         def __init__(self) -> None:
@@ -134,7 +139,8 @@ async def test_websocket_is_connected_before_a_warm_prompt_can_complete(
             except StopIteration as exc:
                 raise StopAsyncIteration from exc
 
-    def connect(*_args: Any, **_kwargs: Any) -> Socket:
+    def connect(*_args: Any, **kwargs: Any) -> Socket:
+        assert kwargs["proxy"] is None
         return Socket()
 
     async def comfy(request: httpx.Request) -> httpx.Response:
@@ -185,6 +191,73 @@ async def test_websocket_is_connected_before_a_warm_prompt_can_complete(
     assert generated[-1].assets[0].name == "warm.png"
 
 
+async def test_workflow_probe_requires_a_generated_asset(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    adapter = ComfyUIAdapter("http://comfy.test")
+    request = media_request(operation="text_to_image")
+
+    async def successful_probe(_request: MediaRequest):  # type: ignore[no-untyped-def]
+        yield MediaEvent(
+            type="complete",
+            assets=[
+                GeneratedAsset(
+                    content=b"\x89PNG\r\n\x1a\n",
+                    media_type="image/png",
+                    kind="image",
+                    name="probe.png",
+                )
+            ],
+        )
+
+    async def empty_probe(_request: MediaRequest):  # type: ignore[no-untyped-def]
+        yield MediaEvent(type="complete")
+
+    try:
+        monkeypatch.setattr(adapter, "generate", successful_probe)
+        await adapter.probe_workflow(request, timeout_seconds=1)
+
+        monkeypatch.setattr(adapter, "generate", empty_probe)
+        with pytest.raises(RuntimeError, match="did not produce media"):
+            await adapter.probe_workflow(request, timeout_seconds=1)
+    finally:
+        await adapter.close()
+
+
+async def test_workflow_probe_interrupts_a_backend_that_exceeds_its_deadline(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    interrupted = False
+
+    async def comfy(request: httpx.Request) -> httpx.Response:
+        nonlocal interrupted
+        assert request.url.path == "/interrupt"
+        interrupted = True
+        return httpx.Response(200, json={})
+
+    async def stalled_probe(_request: MediaRequest):  # type: ignore[no-untyped-def]
+        yield MediaEvent(type="queued")
+        await asyncio.Event().wait()
+
+    adapter = ComfyUIAdapter("http://comfy.test")
+    await adapter._client.aclose()
+    adapter._client = httpx.AsyncClient(
+        base_url="http://comfy.test",
+        transport=httpx.MockTransport(comfy),
+    )
+    monkeypatch.setattr(adapter, "generate", stalled_probe)
+    try:
+        with pytest.raises(RuntimeError, match="bounded model activation probe"):
+            await adapter.probe_workflow(
+                media_request(operation="text_to_image"),
+                timeout_seconds=0.01,
+            )
+    finally:
+        await adapter.close()
+
+    assert interrupted
+
+
 async def test_silent_websocket_is_interrupted_after_configured_inactivity(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -233,6 +306,227 @@ async def test_silent_websocket_is_interrupted_after_configured_inactivity(
 
     assert interrupted
     assert request.run_id not in adapter._jobs
+
+
+async def test_cancel_wakes_a_blocked_comfyui_websocket(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    prompt_id = "prompt-cancelled"
+    receiving = asyncio.Event()
+    interrupted = False
+
+    class Socket:
+        async def __aenter__(self) -> Socket:
+            return self
+
+        async def __aexit__(self, *_args: Any) -> None:
+            return None
+
+        def __aiter__(self) -> Socket:
+            return self
+
+        async def __anext__(self) -> str:
+            receiving.set()
+            await asyncio.Event().wait()
+            raise AssertionError("unreachable")
+
+    def connect(*_args: Any, **_kwargs: Any) -> Socket:
+        return Socket()
+
+    async def comfy(request: httpx.Request) -> httpx.Response:
+        nonlocal interrupted
+        if request.url.path == "/prompt":
+            return httpx.Response(200, json={"prompt_id": prompt_id, "node_errors": {}})
+        if request.url.path == "/interrupt":
+            interrupted = True
+            # Local cancellation must remain authoritative when the worker is
+            # already stopping and its best-effort interrupt request fails.
+            return httpx.Response(500)
+        if request.url.path == f"/history/{prompt_id}":
+            return httpx.Response(200, json={})
+        raise AssertionError(f"unexpected ComfyUI request: {request.method} {request.url}")
+
+    monkeypatch.setattr("local_lm.adapters.comfyui.websockets.connect", connect)
+    adapter = ComfyUIAdapter("http://comfy.test", inactivity_seconds=60)
+    await adapter._client.aclose()
+    adapter._client = httpx.AsyncClient(
+        base_url="http://comfy.test",
+        transport=httpx.MockTransport(comfy),
+    )
+    request = media_request(operation="text_to_image")
+    collecting = asyncio.create_task(_collect_media_events(adapter, request))
+    try:
+        await asyncio.wait_for(receiving.wait(), timeout=0.5)
+        await adapter.cancel(request.run_id)
+        events = await asyncio.wait_for(collecting, timeout=0.5)
+    finally:
+        if not collecting.done():
+            collecting.cancel()
+        await adapter.close()
+
+    assert [event.type for event in events] == ["queued", "cancelled"]
+    assert interrupted
+    assert request.run_id not in adapter._jobs
+    assert request.run_id not in adapter._cancel_events
+
+
+async def _collect_media_events(
+    adapter: ComfyUIAdapter,
+    request: MediaRequest,
+) -> list[MediaEvent]:
+    return [event async for event in adapter.generate(request)]
+
+
+@pytest.mark.parametrize(
+    ("raw", "expected"),
+    [
+        pytest.param(
+            "{not-json",
+            "ComfyUI returned a malformed progress event",
+            id="malformed-json",
+        ),
+        pytest.param(
+            "[]",
+            "ComfyUI returned a malformed progress event",
+            id="non-object-json",
+        ),
+        pytest.param(
+            json.dumps(
+                {
+                    "type": "progress",
+                    "data": {"prompt_id": "prompt-invalid", "max": float("nan"), "value": 1},
+                }
+            ),
+            "ComfyUI returned a malformed progress event",
+            id="non-finite-progress",
+        ),
+        pytest.param(
+            json.dumps(
+                {
+                    "type": "execution_error",
+                    "data": {
+                        "prompt_id": "prompt-invalid",
+                        "exception_message": "C:\\private\\model\\secret.safetensors",
+                    },
+                }
+            ),
+            "ComfyUI could not execute the selected workflow",
+            id="redacted-execution-error",
+        ),
+        pytest.param(
+            "x" * (1024 * 1024 + 1),
+            "ComfyUI returned an oversized progress event",
+            id="oversized-event",
+        ),
+    ],
+)
+async def test_invalid_comfyui_events_fail_with_redacted_bounded_errors(
+    monkeypatch: pytest.MonkeyPatch,
+    raw: str,
+    expected: str,
+) -> None:
+    prompt_id = "prompt-invalid"
+
+    class Socket:
+        def __init__(self) -> None:
+            self.sent = False
+
+        async def __aenter__(self) -> Socket:
+            return self
+
+        async def __aexit__(self, *_args: Any) -> None:
+            return None
+
+        def __aiter__(self) -> Socket:
+            return self
+
+        async def __anext__(self) -> str:
+            if self.sent:
+                raise StopAsyncIteration
+            self.sent = True
+            return raw
+
+    def connect(*_args: Any, **_kwargs: Any) -> Socket:
+        return Socket()
+
+    async def comfy(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/prompt":
+            return httpx.Response(200, json={"prompt_id": prompt_id, "node_errors": {}})
+        if request.url.path == f"/history/{prompt_id}":
+            return httpx.Response(200, json={})
+        raise AssertionError(f"unexpected ComfyUI request: {request.method} {request.url}")
+
+    monkeypatch.setattr("local_lm.adapters.comfyui.websockets.connect", connect)
+    adapter = ComfyUIAdapter("http://comfy.test")
+    await adapter._client.aclose()
+    adapter._client = httpx.AsyncClient(
+        base_url="http://comfy.test",
+        transport=httpx.MockTransport(comfy),
+    )
+    try:
+        with pytest.raises(RuntimeError) as captured:
+            [event async for event in adapter.generate(media_request(operation="text_to_image"))]
+    finally:
+        await adapter.close()
+
+    assert str(captured.value) == expected
+    assert "secret.safetensors" not in str(captured.value)
+
+
+async def test_comfyui_transport_errors_are_redacted(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    secret = "C:\\private\\worker\\secret.safetensors"
+
+    def failed_connect(*_args: Any, **_kwargs: Any) -> None:
+        raise WebSocketException(secret)
+
+    monkeypatch.setattr("local_lm.adapters.comfyui.websockets.connect", failed_connect)
+    adapter = ComfyUIAdapter("http://comfy.test")
+    try:
+        with pytest.raises(RuntimeError) as captured:
+            [event async for event in adapter.generate(media_request(operation="text_to_image"))]
+    finally:
+        await adapter.close()
+
+    assert str(captured.value) == "ComfyUI generation connection failed"
+    assert secret not in str(captured.value)
+
+
+async def test_comfyui_http_error_body_and_url_are_redacted(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    secret = "backend-private-workflow-detail"
+
+    class Socket:
+        async def __aenter__(self) -> Socket:
+            return self
+
+        async def __aexit__(self, *_args: Any) -> None:
+            return None
+
+    def connect(*_args: Any, **_kwargs: Any) -> Socket:
+        return Socket()
+
+    async def comfy(_request: httpx.Request) -> httpx.Response:
+        return httpx.Response(400, text=secret)
+
+    monkeypatch.setattr("local_lm.adapters.comfyui.websockets.connect", connect)
+    adapter = ComfyUIAdapter("http://comfy.test")
+    await adapter._client.aclose()
+    adapter._client = httpx.AsyncClient(
+        base_url="http://comfy.test",
+        transport=httpx.MockTransport(comfy),
+    )
+    try:
+        with pytest.raises(RuntimeError) as captured:
+            [event async for event in adapter.generate(media_request(operation="text_to_image"))]
+    finally:
+        await adapter.close()
+
+    assert str(captured.value) == "ComfyUI rejected a generation request (HTTP 400)"
+    assert secret not in str(captured.value)
+    assert "http://comfy.test" not in str(captured.value)
 
 
 async def test_native_save_video_is_classified_by_media_type_not_collection() -> None:
@@ -336,6 +630,134 @@ async def test_collected_managed_outputs_are_removed_after_all_downloads(tmp_pat
     assert [output.content for output in outputs] == [b"first", b"second"]
     assert not first.exists()
     assert not second.exists()
+
+
+async def test_managed_outputs_are_removed_when_collection_fails(tmp_path: Path) -> None:
+    prompt_id = "prompt-partial-failure"
+    output_root = tmp_path / "output"
+    first = output_root / "LMAtelier" / "first.png"
+    second = output_root / "LMAtelier" / "second.png"
+    first.parent.mkdir(parents=True)
+    first.write_bytes(b"first")
+    second.write_bytes(b"second")
+
+    async def comfy(request: httpx.Request) -> httpx.Response:
+        if request.url.path == f"/history/{prompt_id}":
+            return httpx.Response(
+                200,
+                json={
+                    prompt_id: {
+                        "outputs": {
+                            "save": {
+                                "images": [
+                                    {
+                                        "filename": first.name,
+                                        "subfolder": "LMAtelier",
+                                        "type": "output",
+                                    },
+                                    {
+                                        "filename": second.name,
+                                        "subfolder": "LMAtelier",
+                                        "type": "output",
+                                    },
+                                ]
+                            }
+                        }
+                    }
+                },
+            )
+        if request.url.path == "/view" and request.url.params["filename"] == first.name:
+            return httpx.Response(200, content=b"first", headers={"content-type": "image/png"})
+        if request.url.path == "/view":
+            return httpx.Response(500, text="collection failed")
+        raise AssertionError(f"unexpected ComfyUI request: {request.method} {request.url}")
+
+    adapter = ComfyUIAdapter("http://comfy.test", managed_output_root=output_root)
+    await adapter._client.aclose()
+    adapter._client = httpx.AsyncClient(
+        base_url="http://comfy.test",
+        transport=httpx.MockTransport(comfy),
+    )
+    try:
+        with pytest.raises(httpx.HTTPStatusError):
+            await adapter._collect_outputs(prompt_id, "text_to_image")
+    finally:
+        await adapter.close()
+
+    assert not first.exists()
+    assert not second.exists()
+
+
+async def test_output_collection_enforces_total_byte_limit_and_removes_source(
+    tmp_path: Path,
+) -> None:
+    prompt_id = "prompt-too-large"
+    output_root = tmp_path / "output"
+    source = output_root / "LMAtelier" / "large.mp4"
+    source.parent.mkdir(parents=True)
+    source.write_bytes(b"12345")
+
+    async def comfy(request: httpx.Request) -> httpx.Response:
+        if request.url.path == f"/history/{prompt_id}":
+            return httpx.Response(
+                200,
+                json={
+                    prompt_id: {
+                        "outputs": {
+                            "save": {
+                                "videos": [
+                                    {
+                                        "filename": source.name,
+                                        "subfolder": "LMAtelier",
+                                        "type": "output",
+                                    }
+                                ]
+                            }
+                        }
+                    }
+                },
+            )
+        if request.url.path == "/view":
+            return httpx.Response(
+                200,
+                content=b"12345",
+                headers={"content-type": "video/mp4"},
+            )
+        raise AssertionError(f"unexpected ComfyUI request: {request.method} {request.url}")
+
+    adapter = ComfyUIAdapter(
+        "http://comfy.test",
+        managed_output_root=output_root,
+        max_output_bytes=4,
+    )
+    await adapter._client.aclose()
+    adapter._client = httpx.AsyncClient(
+        base_url="http://comfy.test",
+        transport=httpx.MockTransport(comfy),
+    )
+    try:
+        with pytest.raises(RuntimeError, match="4-byte limit"):
+            await adapter._collect_outputs(prompt_id, "text_to_video")
+    finally:
+        await adapter.close()
+
+    assert not source.exists()
+
+
+def test_stale_output_sweep_keeps_fresh_files(tmp_path: Path) -> None:
+    root = tmp_path / "output"
+    stale = root / "LMAtelier" / "stale.png"
+    fresh = root / "LMAtelier" / "fresh.png"
+    stale.parent.mkdir(parents=True)
+    stale.write_bytes(b"stale")
+    fresh.write_bytes(b"fresh")
+    now = time.time()
+    os.utime(stale, (now - 7200, now - 7200))
+
+    ComfyUIAdapter._sweep_stale_outputs_sync(root.resolve(), now - 3600)
+
+    assert not stale.exists()
+    assert fresh.exists()
 
 
 def test_managed_output_cleanup_rejects_external_temporary_and_unsafe_paths(

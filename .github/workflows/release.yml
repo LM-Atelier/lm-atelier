@@ -1,8 +1,14 @@
 name: Release installers
 
+run-name: Release installers for ${{ inputs.tag }} (${{ inputs.platform }})
+
 on:
   workflow_dispatch:
     inputs:
+      tag:
+        description: Existing release tag on main (for example, v0.2.0-beta.1)
+        required: true
+        type: string
       platform:
         description: Installer platform to build
         required: true
@@ -12,62 +18,1009 @@ on:
           - all
           - windows
           - linux
+      create_draft_release:
+        description: Create a new draft GitHub Release after all platform checks pass
+        required: true
+        default: false
+        type: boolean
 
 permissions:
   contents: read
 
+concurrency:
+  group: release-installers-${{ inputs.tag }}
+  cancel-in-progress: false
+
 jobs:
-  windows-installer:
-    if: inputs.platform == 'all' || inputs.platform == 'windows'
-    runs-on: windows-2025
+  validate-release:
+    name: Validate release source
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    outputs:
+      sha: ${{ steps.source.outputs.sha }}
+      previous_tag: ${{ steps.source.outputs.previous_tag }}
     steps:
-      - uses: actions/checkout@v7
-      - uses: actions/setup-python@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
-          python-version: "3.12"
-          cache: pip
-      - uses: actions/setup-node@v7
+          fetch-depth: 0
+          fetch-tags: true
+          persist-credentials: false
+      - id: source
+        name: Resolve tagged main commit
+        shell: bash
+        env:
+          CREATE_DRAFT_RELEASE: ${{ inputs.create_draft_release }}
+          MAIN_SHA: ${{ github.sha }}
+          RELEASE_TAG: ${{ inputs.tag }}
+          RELEASE_PLATFORM: ${{ inputs.platform }}
+          REPOSITORY_VISIBILITY: ${{ github.event.repository.visibility }}
+          WORKFLOW_REF: ${{ github.ref }}
+        run: |
+          set -euo pipefail
+          if [[ "$CREATE_DRAFT_RELEASE" == "true" && "$RELEASE_PLATFORM" != "all" ]]; then
+            echo "A draft release requires the complete Windows and Linux candidate." >&2
+            exit 1
+          fi
+          if [[ "$CREATE_DRAFT_RELEASE" == "true" && "$REPOSITORY_VISIBILITY" != "public" ]]; then
+            echo "Draft release creation is enabled only after the repository is public." >&2
+            exit 1
+          fi
+          if [[ "$WORKFLOW_REF" != "refs/heads/main" ]]; then
+            echo "Release workflow must be dispatched from main." >&2
+            exit 1
+          fi
+          if [[ ! "$RELEASE_TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z][0-9A-Za-z.-]*)?$ ]]; then
+            echo "Release tag must be an exact SemVer-style v* tag." >&2
+            exit 1
+          fi
+          if ! git show-ref --verify --quiet "refs/tags/$RELEASE_TAG"; then
+            echo "Release tag does not exist in the repository." >&2
+            exit 1
+          fi
+          tag_sha="$(git rev-parse --verify "refs/tags/$RELEASE_TAG^{commit}")"
+          version="$(
+            git show "${tag_sha}:services/api/local_lm/__init__.py" |
+              sed -n 's/^__version__ = "\([^"]*\)"$/\1/p'
+          )"
+          if [[ "$RELEASE_TAG" != "v$version" ]]; then
+            echo "Release tag $RELEASE_TAG does not match source version $version." >&2
+            exit 1
+          fi
+          main_sha="$(git rev-parse --verify "$MAIN_SHA^{commit}")"
+          if ! git merge-base --is-ancestor "$tag_sha" "$main_sha"; then
+            echo "Release tag must point to a commit on main." >&2
+            exit 1
+          fi
+          previous_tag=""
+          while IFS= read -r candidate; do
+            if [[ "$candidate" =~ ^v[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z][0-9A-Za-z.-]*)?$ ]]; then
+              previous_tag="$candidate"
+              break
+            fi
+          done < <(
+            git tag \
+              --merged "${tag_sha}^" \
+              --sort=-version:refname
+          )
+          if [[ -z "$previous_tag" ]]; then
+            echo "A prior release tag is required for the upgrade smoke test." >&2
+            exit 1
+          fi
+          if ! git show \
+            "${tag_sha}:packaging/prior-release-checksums.json" |
+            python3 -c '
+          import json
+          import re
+          import sys
+
+          checksums = json.load(sys.stdin)
+          entry = checksums.get(sys.argv[1])
+          if not isinstance(entry, dict):
+              raise SystemExit(1)
+          for platform in ("windows-x86_64", "linux-x86_64"):
+              value = entry.get(platform)
+              if not isinstance(value, str) or re.fullmatch(r"[0-9a-f]{64}", value) is None:
+                  raise SystemExit(1)
+          ' "$previous_tag"; then
+            echo "The tagged source lacks reviewed checksums for $previous_tag." >&2
+            exit 1
+          fi
+          echo "sha=$tag_sha" >> "$GITHUB_OUTPUT"
+          echo "previous_tag=$previous_tag" >> "$GITHUB_OUTPUT"
+
+  release-validation:
+    name: Validate exact tagged source
+    needs: validate-release
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    env:
+      LOCAL_LM_DATA_DIR: ${{ runner.temp }}/local-lm-tests
+      UV_PROJECT_ENVIRONMENT: ${{ github.workspace }}/.venv
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ needs.validate-release.outputs.sha }}
+          fetch-depth: 0
+          fetch-tags: true
+          persist-credentials: false
+      - name: Scan reachable source history for secrets
+        shell: bash
+        run: |
+          set -euo pipefail
+          version="8.30.1"
+          archive_name="gitleaks_${version}_linux_x64.tar.gz"
+          archive="$RUNNER_TEMP/$archive_name"
+          expected_hash=551f6fc83ea457d62a0d98237cbad105af8d557003051f41f3e7ca7b3f2470eb
+          curl --fail --location --proto '=https' --tlsv1.2 \
+            --output "$archive" \
+            "https://github.com/gitleaks/gitleaks/releases/download/v$version/$archive_name"
+          echo "$expected_hash  $archive" | sha256sum --check --strict
+          tar -xzf "$archive" -C "$RUNNER_TEMP" gitleaks
+          "$RUNNER_TEMP/gitleaks" git . --redact
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
           node-version: 22
           cache: npm
-      - run: python -m venv .venv
-      - run: .\.venv\Scripts\python.exe -m pip install --upgrade pip
-      - run: .\.venv\Scripts\python.exe -m pip install -e './services/api[package]'
-      - run: npm.cmd ci
-      - name: Ensure Inno Setup is available
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: "3.12"
+      - uses: astral-sh/setup-uv@08807647e7069bb48b6ef5acd8ec9567f424441b # v8.1.0
+        with:
+          version: "0.11.18"
+          enable-cache: true
+          cache-dependency-glob: services/api/uv.lock
+      - name: Install validation dependencies
+        run: |
+          uv sync --project services/api --locked --python 3.12 \
+            --extra dev \
+            --extra package
+          npm ci
+      - name: Audit locked validation dependencies
+        run: |
+          npm audit --audit-level=high
+          mkdir -p temp/pip-audit-cache
+          .venv/bin/python -m pip_audit \
+            --skip-editable \
+            --progress-spinner off \
+            --cache-dir temp/pip-audit-cache
+      - name: Run exact-tag verification
+        run: ./scripts/verify.sh
+
+  windows-installer:
+    name: Windows installer
+    needs: [validate-release, release-validation]
+    if: ${{ inputs.platform == 'all' || inputs.platform == 'windows' }}
+    runs-on: windows-2025
+    timeout-minutes: 60
+    env:
+      RELEASE_SHA: ${{ needs.validate-release.outputs.sha }}
+      RELEASE_TAG: ${{ inputs.tag }}
+      UV_PROJECT_ENVIRONMENT: ${{ github.workspace }}/.venv
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ needs.validate-release.outputs.sha }}
+          fetch-depth: 0
+          fetch-tags: true
+          persist-credentials: false
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: "3.12"
+      - uses: astral-sh/setup-uv@08807647e7069bb48b6ef5acd8ec9567f424441b # v8.1.0
+        with:
+          version: "0.11.18"
+          enable-cache: true
+          cache-dependency-glob: services/api/uv.lock
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: 22
+          cache: npm
+      - name: Confirm exact release checkout
         shell: pwsh
         run: |
+          $ActualSha = (git rev-parse HEAD).Trim()
+          $ActualTag = (git describe --tags --exact-match).Trim()
+          if ($ActualSha -ne $env:RELEASE_SHA) {
+            throw "Checkout SHA $ActualSha does not match validated SHA $env:RELEASE_SHA."
+          }
+          if ($ActualTag -ne $env:RELEASE_TAG) {
+            throw "Checkout tag $ActualTag does not match requested tag $env:RELEASE_TAG."
+          }
+      - run: >-
+          uv sync --project services/api --locked --python 3.12
+          --extra dev --extra package --no-install-project
+      - run: npm.cmd ci
+      - name: Audit exact release dependencies
+        shell: pwsh
+        run: |
+          $NpmReport = Join-Path $env:RUNNER_TEMP "npm-audit-windows.json"
+          npm.cmd audit --audit-level=high --json > $NpmReport
+          $NpmExit = $LASTEXITCODE
+          Get-Content -Raw -LiteralPath $NpmReport | ConvertFrom-Json | Out-Null
+          if ($NpmExit -ne 0) {
+            throw "npm audit failed with exit code $NpmExit."
+          }
+          $Requirements = Join-Path $env:RUNNER_TEMP "release-requirements.txt"
+          uv export `
+            --project services/api `
+            --locked `
+            --no-dev `
+            --extra package `
+            --no-emit-project `
+            --output-file $Requirements
+          if ($LASTEXITCODE -ne 0) {
+            throw "Locked release dependency export failed."
+          }
+          $PipReport = Join-Path $env:RUNNER_TEMP "pip-audit-windows.json"
+          .\.venv\Scripts\python.exe -m pip_audit `
+            --requirement $Requirements `
+            --progress-spinner off `
+            --strict `
+            --desc off `
+            --format json `
+            --output $PipReport
+          if ($LASTEXITCODE -ne 0) {
+            throw "Python release dependency audit failed."
+          }
+          Get-Content -Raw -LiteralPath $PipReport | ConvertFrom-Json | Out-Null
+      - name: Install pinned Inno Setup
+        shell: pwsh
+        run: |
+          $InnoSetupVersion = "6.7.1"
+          choco install innosetup `
+            "--version=$InnoSetupVersion" `
+            "--source=https://community.chocolatey.org/api/v2/" `
+            --allow-downgrade `
+            --yes `
+            --no-progress
+          if ($LASTEXITCODE -notin @(0, 1641, 3010)) {
+            throw "Inno Setup installation failed with exit code $LASTEXITCODE."
+          }
           $Compiler = "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe"
           if (-not (Test-Path -LiteralPath $Compiler)) {
-            choco install innosetup --yes --no-progress
+            throw "Pinned Inno Setup compiler was not installed at $Compiler."
           }
-      - run: .\scripts\build-windows-installer.ps1
-      - uses: actions/upload-artifact@v7
+          $Uninstaller = Join-Path (Split-Path -Parent $Compiler) "unins000.exe"
+          if (-not (Test-Path -LiteralPath $Uninstaller)) {
+            throw "Could not verify the installed Inno Setup package version."
+          }
+          $InstalledVersion = (
+            Get-Item -LiteralPath $Uninstaller
+          ).VersionInfo.ProductVersion.Trim()
+          if ($InstalledVersion -ne $InnoSetupVersion) {
+            throw "Expected Inno Setup $InnoSetupVersion; found $InstalledVersion."
+          }
+      - name: Build with the verified Inno Setup compiler
+        shell: pwsh
+        run: |
+          .\scripts\build-windows-installer.ps1 `
+            -InnoCompilerPath "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe"
+      - name: Scan the frozen payload and installer for secrets
+        shell: pwsh
+        run: |
+          $Version = "8.30.1"
+          $ArchiveName = "gitleaks_${Version}_windows_x64.zip"
+          $Archive = Join-Path $env:RUNNER_TEMP $ArchiveName
+          $ScannerRoot = Join-Path $env:RUNNER_TEMP "gitleaks-$Version"
+          $ExpectedHash = (
+            "d29144deff3a68aa93ced33dddf84b7fdc26070add4aa0f4513094c8332afc4e"
+          )
+          Invoke-WebRequest `
+            -Uri (
+              "https://github.com/gitleaks/gitleaks/releases/download/" +
+              "v$Version/$ArchiveName"
+            ) `
+            -OutFile $Archive
+          $ActualHash = (
+            Get-FileHash -Algorithm SHA256 -LiteralPath $Archive
+          ).Hash.ToLowerInvariant()
+          if ($ActualHash -ne $ExpectedHash) {
+            throw "Gitleaks archive checksum verification failed."
+          }
+          Expand-Archive -LiteralPath $Archive -DestinationPath $ScannerRoot
+          $Scanner = Join-Path $ScannerRoot "gitleaks.exe"
+          function Invoke-RedactedGitleaksScan {
+            param(
+              [Parameter(Mandatory)]
+              [string]$Target,
+              [Parameter(Mandatory)]
+              [string]$ReportName,
+              [Parameter(Mandatory)]
+              [string]$Scope
+            )
+
+            $Report = Join-Path $env:RUNNER_TEMP $ReportName
+            & $Scanner dir $Target `
+              --max-archive-depth 2 `
+              --redact `
+              --report-format json `
+              --report-path $Report
+            if ($LASTEXITCODE -ne 0) {
+              throw "Gitleaks found a likely secret in $Scope."
+            }
+            if (-not (Test-Path -LiteralPath $Report)) {
+              [IO.File]::WriteAllText(
+                $Report,
+                "[]`n",
+                [Text.UTF8Encoding]::new($false)
+              )
+            }
+            Get-Content -Raw -LiteralPath $Report | ConvertFrom-Json | Out-Null
+          }
+          Invoke-RedactedGitleaksScan `
+            -Target "build\pyinstaller-windows\LM Atelier" `
+            -ReportName "gitleaks-windows-payload.json" `
+            -Scope "the frozen payload"
+          Invoke-RedactedGitleaksScan `
+            -Target "build\release-metadata" `
+            -ReportName "gitleaks-windows-metadata.json" `
+            -Scope "release metadata"
+          $Installer = (
+            "release\LM-Atelier-Setup-" +
+            $env:RELEASE_TAG.Substring(1) +
+            "-windows-x86_64.exe"
+          )
+          Invoke-RedactedGitleaksScan `
+            -Target $Installer `
+            -ReportName "gitleaks-windows-installer.json" `
+            -Scope "the installer"
+      - name: Scan the Windows installer for malware
+        shell: pwsh
+        run: |
+          $Installer = (
+            "release\LM-Atelier-Setup-" +
+            $env:RELEASE_TAG.Substring(1) +
+            "-windows-x86_64.exe"
+          )
+          $PlatformRoot = Join-Path $env:ProgramData (
+            "Microsoft\Windows Defender\Platform"
+          )
+          $Scanner = Get-ChildItem `
+            -LiteralPath $PlatformRoot `
+            -Filter MpCmdRun.exe `
+            -Recurse `
+            -File |
+            Sort-Object -Property FullName -Descending |
+            Select-Object -First 1
+          if ($null -eq $Scanner) {
+            throw "Microsoft Defender command-line scanner is unavailable."
+          }
+          & $Scanner.FullName -SignatureUpdate
+          if ($LASTEXITCODE -ne 0) {
+            throw "Microsoft Defender signatures could not be updated."
+          }
+          $ScanTargets = @(
+            "build\pyinstaller-windows\LM Atelier",
+            $Installer
+          )
+          foreach ($Target in $ScanTargets) {
+            $ResolvedTarget = (
+              Resolve-Path -LiteralPath $Target
+            ).Path
+            & $Scanner.FullName `
+              -Scan `
+              -ScanType 3 `
+              -File $ResolvedTarget `
+              -DisableRemediation
+            if ($LASTEXITCODE -ne 0) {
+              throw "Microsoft Defender rejected release target $Target."
+            }
+          }
+          $Status = Get-MpComputerStatus
+          @(
+            "scanner=Microsoft Defender"
+            "engine=$($Status.AMEngineVersion)"
+            "signatures=$($Status.AntivirusSignatureVersion)"
+            "scanned_at=$([DateTimeOffset]::UtcNow.ToString('O'))"
+            "result=clean"
+          ) | Set-Content `
+            -LiteralPath (
+              Join-Path $env:RUNNER_TEMP "malware-scan-windows.txt"
+            ) `
+            -Encoding utf8NoBOM
+      - name: Stage release artifact and evidence
+        shell: pwsh
+        run: |
+          $Version = $env:RELEASE_TAG.Substring(1)
+          $Installer = "release\LM-Atelier-Setup-$Version-windows-x86_64.exe"
+          $Metadata = "build\release-metadata"
+          $Bundle = "release\artifact-windows"
+          New-Item -ItemType Directory -Force -Path $Bundle | Out-Null
+          Copy-Item -LiteralPath $Installer -Destination $Bundle
+          Copy-Item -LiteralPath "$Metadata\LICENSE" `
+            -Destination "$Bundle\LICENSE-windows.txt"
+          Copy-Item -LiteralPath "$Metadata\THIRD_PARTY_NOTICES.md" `
+            -Destination "$Bundle\THIRD_PARTY_NOTICES-windows.md"
+          Copy-Item -LiteralPath "$Metadata\release-manifest.json" `
+            -Destination "$Bundle\release-manifest-windows.json"
+          Copy-Item -LiteralPath "$Metadata\sbom.cdx.json" `
+            -Destination "$Bundle\sbom-windows.cdx.json"
+          Copy-Item -LiteralPath "$Metadata\payload-manifest.json" `
+            -Destination "$Bundle\payload-manifest-windows.json"
+          foreach ($EvidenceName in @(
+            "gitleaks-windows-payload.json",
+            "gitleaks-windows-metadata.json",
+            "gitleaks-windows-installer.json",
+            "npm-audit-windows.json",
+            "pip-audit-windows.json"
+          )) {
+            Copy-Item `
+              -LiteralPath (Join-Path $env:RUNNER_TEMP $EvidenceName) `
+              -Destination (Join-Path $Bundle $EvidenceName)
+          }
+          Copy-Item `
+            -LiteralPath (
+              Join-Path $env:RUNNER_TEMP "malware-scan-windows.txt"
+            ) `
+            -Destination "$Bundle\malware-scan-windows.txt"
+          Compress-Archive `
+            -LiteralPath (Join-Path $Metadata "third-party-licenses") `
+            -DestinationPath (
+              Join-Path $Bundle "third-party-licenses-windows.zip"
+            )
+          [string[]]$ChecksumLines = Get-ChildItem -LiteralPath $Bundle -File |
+            Sort-Object -Property Name |
+            ForEach-Object {
+              $Hash = (Get-FileHash -Algorithm SHA256 -LiteralPath $_.FullName).Hash
+              "$($Hash.ToLowerInvariant())  $($_.Name)"
+            }
+          [IO.File]::WriteAllLines(
+            (Join-Path $Bundle "SHA256SUMS"),
+            $ChecksumLines,
+            [Text.UTF8Encoding]::new($false)
+          )
+          Move-Item `
+            -LiteralPath (Join-Path $Bundle "SHA256SUMS") `
+            -Destination (Join-Path $Bundle "SHA256SUMS-windows")
+          Get-Content -LiteralPath (Join-Path $Bundle "SHA256SUMS-windows") |
+            ForEach-Object {
+              $ExpectedHash, $Name = $_ -split "  ", 2
+              $ActualHash = (
+                Get-FileHash -Algorithm SHA256 -LiteralPath (Join-Path $Bundle $Name)
+              ).Hash.ToLowerInvariant()
+              if ($ActualHash -ne $ExpectedHash) {
+                throw "Checksum verification failed for $Name."
+              }
+            }
+          python scripts/verify-release-bundle.py `
+            --bundle $Bundle `
+            --platform windows `
+            --version $Version `
+            --source-sha $env:RELEASE_SHA
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
-          name: lm-atelier-windows-installer
-          path: release/LM-Atelier-Setup-*-windows-x86_64.exe
+          name: lm-atelier-${{ inputs.tag }}-windows-installer
+          path: release/artifact-windows/
           if-no-files-found: error
+          retention-days: 7
+          compression-level: 0
 
   linux-installer:
-    if: inputs.platform == 'all' || inputs.platform == 'linux'
+    name: Linux installer
+    needs: [validate-release, release-validation]
+    if: ${{ inputs.platform == 'all' || inputs.platform == 'linux' }}
     runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    env:
+      RELEASE_SHA: ${{ needs.validate-release.outputs.sha }}
+      RELEASE_TAG: ${{ inputs.tag }}
+      UV_PROJECT_ENVIRONMENT: ${{ github.workspace }}/.venv
     steps:
-      - uses: actions/checkout@v7
-      - uses: actions/setup-python@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ needs.validate-release.outputs.sha }}
+          fetch-depth: 0
+          fetch-tags: true
+          persist-credentials: false
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
         with:
           python-version: "3.12"
-          cache: pip
-      - uses: actions/setup-node@v7
+      - uses: astral-sh/setup-uv@08807647e7069bb48b6ef5acd8ec9567f424441b # v8.1.0
+        with:
+          version: "0.11.18"
+          enable-cache: true
+          cache-dependency-glob: services/api/uv.lock
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
           node-version: 22
           cache: npm
-      - run: python -m venv .venv
-      - run: .venv/bin/python -m pip install --upgrade pip
-      - run: .venv/bin/python -m pip install -e './services/api[package]'
+      - name: Confirm exact release checkout
+        shell: bash
+        run: |
+          set -euo pipefail
+          actual_sha="$(git rev-parse HEAD)"
+          actual_tag="$(git describe --tags --exact-match)"
+          if [[ "$actual_sha" != "$RELEASE_SHA" ]]; then
+            echo "Checkout SHA does not match the validated release SHA." >&2
+            exit 1
+          fi
+          if [[ "$actual_tag" != "$RELEASE_TAG" ]]; then
+            echo "Checkout tag does not match the requested release tag." >&2
+            exit 1
+          fi
+      - run: >-
+          uv sync --project services/api --locked --python 3.12
+          --extra dev --extra package --no-install-project
       - run: npm ci
+      - name: Audit exact release dependencies
+        shell: bash
+        run: |
+          set -euo pipefail
+          npm_report="$RUNNER_TEMP/npm-audit-linux.json"
+          npm audit --audit-level=high --json > "$npm_report"
+          python3 -m json.tool "$npm_report" > /dev/null
+          requirements="$RUNNER_TEMP/release-requirements.txt"
+          uv export \
+            --project services/api \
+            --locked \
+            --no-dev \
+            --extra package \
+            --no-emit-project \
+            --output-file "$requirements"
+          pip_report="$RUNNER_TEMP/pip-audit-linux.json"
+          .venv/bin/python -m pip_audit \
+            --requirement "$requirements" \
+            --progress-spinner off \
+            --strict \
+            --desc off \
+            --format json \
+            --output "$pip_report"
+          python3 -m json.tool "$pip_report" > /dev/null
       - run: ./scripts/build-linux-installer.sh
-      - uses: actions/upload-artifact@v7
+      - name: Scan the frozen payload and installer for secrets
+        shell: bash
+        run: |
+          set -euo pipefail
+          version="8.30.1"
+          archive_name="gitleaks_${version}_linux_x64.tar.gz"
+          archive="$RUNNER_TEMP/$archive_name"
+          scanner_root="$RUNNER_TEMP/gitleaks-$version"
+          expected_hash=551f6fc83ea457d62a0d98237cbad105af8d557003051f41f3e7ca7b3f2470eb
+          curl --fail --location --proto '=https' --tlsv1.2 \
+            --output "$archive" \
+            "https://github.com/gitleaks/gitleaks/releases/download/v$version/$archive_name"
+          echo "$expected_hash  $archive" | sha256sum --check --strict
+          mkdir -p "$scanner_root"
+          tar -xzf "$archive" -C "$scanner_root" gitleaks
+          scan_target() {
+            local target="$1"
+            local report_name="$2"
+            local report="$RUNNER_TEMP/$report_name"
+            "$scanner_root/gitleaks" dir "$target" \
+              --max-archive-depth 2 \
+              --redact \
+              --report-format json \
+              --report-path "$report"
+            if [[ ! -f "$report" ]]; then
+              printf '[]\n' > "$report"
+            fi
+            python3 -m json.tool "$report" > /dev/null
+          }
+          scan_target \
+            build/pyinstaller-linux/lm-atelier \
+            gitleaks-linux-payload.json
+          scan_target \
+            build/release-metadata \
+            gitleaks-linux-metadata.json
+          installer="release/LM-Atelier-Setup-${RELEASE_TAG#v}-linux-x86_64.run"
+          scan_target "$installer" gitleaks-linux-installer.json
+      - name: Scan the Linux installer for malware
+        shell: bash
+        run: |
+          set -euo pipefail
+          sudo apt-get update
+          sudo apt-get install --yes --no-install-recommends clamav
+          if systemctl is-active --quiet clamav-freshclam.service; then
+            sudo systemctl stop clamav-freshclam.service
+          fi
+          sudo freshclam
+          installer="release/LM-Atelier-Setup-${RELEASE_TAG#v}-linux-x86_64.run"
+          clamscan \
+            --infected \
+            --scan-archive=yes \
+            "$installer" \
+            build/pyinstaller-linux/lm-atelier
+          {
+            echo "scanner=ClamAV"
+            clamscan --version | sed 's/^/version=/'
+            echo "scanned_at=$(date --utc --iso-8601=seconds)"
+            echo "result=clean"
+          } > "$RUNNER_TEMP/malware-scan-linux.txt"
+      - name: Stage release artifact and evidence
+        shell: bash
+        run: |
+          set -euo pipefail
+          version="${RELEASE_TAG#v}"
+          installer="release/LM-Atelier-Setup-$version-linux-x86_64.run"
+          metadata="build/release-metadata"
+          bundle="release/artifact-linux"
+          mkdir -p "$bundle"
+          install -m 755 "$installer" "$bundle/"
+          install -m 644 "$metadata/LICENSE" "$bundle/LICENSE-linux.txt"
+          install -m 644 "$metadata/THIRD_PARTY_NOTICES.md" \
+            "$bundle/THIRD_PARTY_NOTICES-linux.md"
+          install -m 644 "$metadata/release-manifest.json" \
+            "$bundle/release-manifest-linux.json"
+          install -m 644 "$metadata/sbom.cdx.json" \
+            "$bundle/sbom-linux.cdx.json"
+          install -m 644 "$metadata/payload-manifest.json" \
+            "$bundle/payload-manifest-linux.json"
+          for evidence_name in \
+            gitleaks-linux-payload.json \
+            gitleaks-linux-metadata.json \
+            gitleaks-linux-installer.json \
+            npm-audit-linux.json \
+            pip-audit-linux.json; do
+            install -m 644 \
+              "$RUNNER_TEMP/$evidence_name" \
+              "$bundle/$evidence_name"
+          done
+          install -m 644 "$RUNNER_TEMP/malware-scan-linux.txt" \
+            "$bundle/malware-scan-linux.txt"
+          tar -C "$metadata" \
+            -czf "$bundle/third-party-licenses-linux.tar.gz" \
+            third-party-licenses
+          (
+            cd "$bundle"
+            export LC_ALL=C
+            for file in *; do
+              if [[ -f "$file" && "$file" != "SHA256SUMS" ]]; then
+                sha256sum "$file"
+              fi
+            done
+          ) > "$bundle/SHA256SUMS-linux"
+          (
+            cd "$bundle"
+            sha256sum --check SHA256SUMS-linux
+          )
+          python3 scripts/verify-release-bundle.py \
+            --bundle "$bundle" \
+            --platform linux \
+            --version "$version" \
+            --source-sha "$RELEASE_SHA"
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
-          name: lm-atelier-linux-installer
-          path: release/LM-Atelier-Setup-*-linux-x86_64.run
+          name: lm-atelier-${{ inputs.tag }}-linux-installer
+          path: release/artifact-linux/
           if-no-files-found: error
+          retention-days: 7
+          compression-level: 0
+
+  windows-upgrade-smoke:
+    name: Windows install and upgrade smoke
+    needs: [validate-release, windows-installer]
+    if: >-
+      always() &&
+      (inputs.platform == 'all' || inputs.platform == 'windows') &&
+      needs.validate-release.result == 'success' &&
+      needs.windows-installer.result == 'success'
+    runs-on: windows-2025
+    timeout-minutes: 30
+    env:
+      PREVIOUS_TAG: ${{ needs.validate-release.outputs.previous_tag }}
+      RELEASE_SHA: ${{ needs.validate-release.outputs.sha }}
+      RELEASE_TAG: ${{ inputs.tag }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ needs.validate-release.outputs.sha }}
+          persist-credentials: false
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: "3.12"
+      - name: Prepare standard-library smoke helpers
+        run: python -m venv .venv
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: lm-atelier-${{ inputs.tag }}-windows-installer
+          path: current-release
+      - name: Verify the immutable current Windows artifact
+        shell: pwsh
+        run: |
+          python scripts/verify-release-bundle.py `
+            --bundle current-release `
+            --platform windows `
+            --version ($env:RELEASE_TAG.Substring(1)) `
+            --source-sha $env:RELEASE_SHA
+      - name: Download and independently verify the prior Windows installer
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          $Checksums = Get-Content `
+            -Raw `
+            -LiteralPath "packaging\prior-release-checksums.json" |
+            ConvertFrom-Json
+          $TagEntry = $Checksums.PSObject.Properties[$env:PREVIOUS_TAG]
+          if ($null -eq $TagEntry) {
+            throw "No reviewed checksum exists for $env:PREVIOUS_TAG."
+          }
+          $PlatformEntry = (
+            $TagEntry.Value.PSObject.Properties["windows-x86_64"]
+          )
+          if ($null -eq $PlatformEntry) {
+            throw "No reviewed Windows checksum exists for $env:PREVIOUS_TAG."
+          }
+          $ExpectedHash = ([string]$PlatformEntry.Value).ToLowerInvariant()
+          if ($ExpectedHash -notmatch "^[0-9a-f]{64}$") {
+            throw "The reviewed prior Windows checksum is malformed."
+          }
+          $PreviousVersion = $env:PREVIOUS_TAG.Substring(1)
+          $PreviousName = (
+            "LM-Atelier-Setup-$PreviousVersion-windows-x86_64.exe"
+          )
+          $PreviousRoot = Join-Path $env:RUNNER_TEMP "previous-release"
+          New-Item -ItemType Directory -Force -Path $PreviousRoot | Out-Null
+          gh release download $env:PREVIOUS_TAG `
+            --repo $env:GITHUB_REPOSITORY `
+            --pattern $PreviousName `
+            --dir $PreviousRoot
+          if ($LASTEXITCODE -ne 0) {
+            throw "Could not download the prior Windows installer."
+          }
+          $PreviousInstaller = Join-Path $PreviousRoot $PreviousName
+          $ActualHash = (
+            Get-FileHash -Algorithm SHA256 -LiteralPath $PreviousInstaller
+          ).Hash.ToLowerInvariant()
+          if ($ActualHash -ne $ExpectedHash) {
+            throw "Prior Windows installer does not match the reviewed checksum."
+          }
+      - name: Exercise fresh install, upgrade, and uninstall on Windows
+        shell: pwsh
+        run: |
+          $Version = $env:RELEASE_TAG.Substring(1)
+          $PreviousVersion = $env:PREVIOUS_TAG.Substring(1)
+          $PreviousInstaller = Join-Path `
+            $env:RUNNER_TEMP `
+            (
+              "previous-release\LM-Atelier-Setup-" +
+              "$PreviousVersion-windows-x86_64.exe"
+            )
+          .\scripts\smoke-windows-installer.ps1 `
+            -Installer (
+              "current-release\LM-Atelier-Setup-" +
+              "$Version-windows-x86_64.exe"
+            ) `
+            -Version $Version `
+            -PreviousInstaller $PreviousInstaller `
+            -PreviousVersion $PreviousVersion `
+            -AllowPurge
+
+  linux-upgrade-smoke:
+    name: Linux install and upgrade smoke
+    needs: [validate-release, linux-installer]
+    if: >-
+      always() &&
+      (inputs.platform == 'all' || inputs.platform == 'linux') &&
+      needs.validate-release.result == 'success' &&
+      needs.linux-installer.result == 'success'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    env:
+      PREVIOUS_TAG: ${{ needs.validate-release.outputs.previous_tag }}
+      RELEASE_SHA: ${{ needs.validate-release.outputs.sha }}
+      RELEASE_TAG: ${{ inputs.tag }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ needs.validate-release.outputs.sha }}
+          persist-credentials: false
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: "3.12"
+      - name: Prepare standard-library smoke helpers
+        run: python -m venv .venv
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: lm-atelier-${{ inputs.tag }}-linux-installer
+          path: current-release
+      - name: Verify the immutable current Linux artifact
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 scripts/verify-release-bundle.py \
+            --bundle current-release \
+            --platform linux \
+            --version "${RELEASE_TAG#v}" \
+            --source-sha "$RELEASE_SHA"
+      - name: Download and independently verify the prior Linux installer
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          expected_hash="$(
+            python3 -c \
+              'import json, sys; print(json.load(open(sys.argv[1], encoding="utf-8"))[sys.argv[2]]["linux-x86_64"])' \
+              packaging/prior-release-checksums.json \
+              "$PREVIOUS_TAG"
+          )"
+          if [[ ! "$expected_hash" =~ ^[0-9a-f]{64}$ ]]; then
+            echo "The reviewed prior Linux checksum is malformed." >&2
+            exit 1
+          fi
+          previous_version="${PREVIOUS_TAG#v}"
+          previous_name="LM-Atelier-Setup-$previous_version-linux-x86_64.run"
+          previous_root="$RUNNER_TEMP/previous-release"
+          mkdir -p "$previous_root"
+          gh release download "$PREVIOUS_TAG" \
+            --repo "$GITHUB_REPOSITORY" \
+            --pattern "$previous_name" \
+            --dir "$previous_root"
+          echo "$expected_hash  $previous_root/$previous_name" |
+            sha256sum --check --strict
+          chmod +x "$previous_root/$previous_name"
+      - name: Exercise fresh install, upgrade, and uninstall on Linux
+        shell: bash
+        run: |
+          set -euo pipefail
+          version="${RELEASE_TAG#v}"
+          current_installer="$PWD/current-release/LM-Atelier-Setup-$version-linux-x86_64.run"
+          chmod +x "$current_installer"
+          ./scripts/smoke-linux-installer.sh \
+            "$current_installer" \
+            "$version" \
+            "$RUNNER_TEMP/previous-release/LM-Atelier-Setup-${PREVIOUS_TAG#v}-linux-x86_64.run" \
+            "${PREVIOUS_TAG#v}"
+
+  release-candidate:
+    name: Assemble release candidate
+    needs:
+      [
+        validate-release,
+        release-validation,
+        windows-installer,
+        linux-installer,
+        windows-upgrade-smoke,
+        linux-upgrade-smoke,
+      ]
+    if: >-
+      always() &&
+      needs.validate-release.result == 'success' &&
+      needs.release-validation.result == 'success' &&
+      (
+        inputs.platform == 'linux' ||
+        needs.windows-installer.result == 'success'
+      ) &&
+      (
+        inputs.platform == 'windows' ||
+        needs.linux-installer.result == 'success'
+      ) &&
+      (
+        inputs.platform == 'linux' ||
+        needs.windows-upgrade-smoke.result == 'success'
+      ) &&
+      (
+        inputs.platform == 'windows' ||
+        needs.linux-upgrade-smoke.result == 'success'
+      )
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    env:
+      RELEASE_SHA: ${{ needs.validate-release.outputs.sha }}
+      RELEASE_TAG: ${{ inputs.tag }}
+      RELEASE_PLATFORM: ${{ inputs.platform }}
+    permissions:
+      contents: read
+      id-token: write
+      attestations: write
+      artifact-metadata: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ needs.validate-release.outputs.sha }}
+          persist-credentials: false
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          pattern: lm-atelier-${{ inputs.tag }}-*-installer
+          path: release-candidate
+          merge-multiple: true
+      - name: Verify and assemble one release file set
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 scripts/verify-release-bundle.py \
+            --bundle release-candidate \
+            --platform "$RELEASE_PLATFORM" \
+            --version "${RELEASE_TAG#v}" \
+            --source-sha "$RELEASE_SHA"
+          cd release-candidate
+          checksum_files=(SHA256SUMS-*)
+          for checksum_file in "${checksum_files[@]}"; do
+            sha256sum --check "$checksum_file"
+          done
+          license_files=(LICENSE-*.txt)
+          cp "${license_files[0]}" LICENSE
+          for license_file in "${license_files[@]:1}"; do
+            cmp LICENSE "$license_file"
+          done
+          rm -- "${checksum_files[@]}" "${license_files[@]}"
+          export LC_ALL=C
+          for file in *; do
+            if [[ -f "$file" && "$file" != "SHA256SUMS" ]]; then
+              sha256sum "$file"
+            fi
+          done > SHA256SUMS
+          sha256sum --check SHA256SUMS
+      - name: Attest release provenance
+        id: attest
+        if: ${{ github.event.repository.visibility == 'public' }}
+        uses: actions/attest@59d89421af93a897026c735860bf21b6eb4f7b26 # v4.1.0
+        with:
+          subject-checksums: release-candidate/SHA256SUMS
+      - name: Preserve the offline attestation bundle
+        if: ${{ github.event.repository.visibility == 'public' }}
+        shell: bash
+        env:
+          ATTESTATION_BUNDLE: ${{ steps.attest.outputs.bundle-path }}
+        run: |
+          set -euo pipefail
+          cp "$ATTESTATION_BUNDLE" \
+            release-candidate/provenance-attestation.sigstore.json
+          cd release-candidate
+          sha256sum provenance-attestation.sigstore.json >> SHA256SUMS
+          sha256sum --check SHA256SUMS
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: lm-atelier-${{ inputs.tag }}-${{ inputs.platform }}-release-candidate
+          path: release-candidate/
+          if-no-files-found: error
+          retention-days: 7
+          compression-level: 0
+
+  draft-release:
+    name: Create reviewed draft release
+    needs: [validate-release, release-candidate]
+    if: >-
+      always() &&
+      inputs.create_draft_release &&
+      needs.validate-release.result == 'success' &&
+      needs.release-candidate.result == 'success'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    permissions:
+      actions: read
+      contents: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ needs.validate-release.outputs.sha }}
+          persist-credentials: false
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: lm-atelier-${{ inputs.tag }}-all-release-candidate
+          path: release-candidate
+      - name: Verify candidate and prepare release notes
+        shell: bash
+        env:
+          RELEASE_SHA: ${{ needs.validate-release.outputs.sha }}
+          RELEASE_TAG: ${{ inputs.tag }}
+        run: |
+          set -euo pipefail
+          (
+            cd release-candidate
+            sha256sum --check --strict SHA256SUMS
+          )
+          python3 scripts/render-release-notes.py \
+            --template .github/RELEASE_TEMPLATE.md \
+            --version "${RELEASE_TAG#v}" \
+            --source-sha "$RELEASE_SHA" \
+            --output "$RUNNER_TEMP/release-notes.md"
+      - name: Create a new draft without replacing an existing release
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ inputs.tag }}
+        run: |
+          set -euo pipefail
+          if gh release view "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            echo "A GitHub Release already exists for $RELEASE_TAG; refusing to overwrite it." >&2
+            exit 1
+          fi
+          gh release create "$RELEASE_TAG" \
+            --repo "$GITHUB_REPOSITORY" \
+            --verify-tag \
+            --draft \
+            --title "LM Atelier ${RELEASE_TAG#v} - preview" \
+            --notes-file "$RUNNER_TEMP/release-notes.md" \
+            release-candidate/*

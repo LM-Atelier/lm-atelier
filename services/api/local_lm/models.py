@@ -55,6 +55,8 @@ class Project(TimestampMixin, Base):
     video_workflow_revision_id: Mapped[str | None] = mapped_column(
         ForeignKey("workflow_revisions.id", ondelete="SET NULL"), nullable=True
     )
+    generation_settings_json: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
+    generation_preset_ids_json: Mapped[dict[str, str | None]] = mapped_column(JSON, default=dict)
 
     chats: Mapped[list[Chat]] = relationship(back_populates="project")
 
@@ -74,6 +76,8 @@ class Chat(TimestampMixin, Base):
     active_image_profile_id: Mapped[str | None] = mapped_column(String(40), nullable=True)
     active_video_profile_id: Mapped[str | None] = mapped_column(String(40), nullable=True)
     active_head_message_id: Mapped[str | None] = mapped_column(String(40), nullable=True)
+    generation_settings_json: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
+    generation_preset_ids_json: Mapped[dict[str, str | None]] = mapped_column(JSON, default=dict)
 
     project: Mapped[Project | None] = relationship(back_populates="chats")
     messages: Mapped[list[Message]] = relationship(
@@ -123,9 +127,16 @@ class MessagePart(TimestampMixin, Base):
 
 class Run(TimestampMixin, Base):
     __tablename__ = "runs"
+    __table_args__ = (
+        UniqueConstraint(
+            "chat_id",
+            "idempotency_key",
+            name="uq_runs_chat_id_idempotency_key",
+        ),
+    )
 
     id: Mapped[str] = mapped_column(String(40), primary_key=True, default=lambda: new_id("run"))
-    idempotency_key: Mapped[str | None] = mapped_column(String(200), unique=True, nullable=True)
+    idempotency_key: Mapped[str | None] = mapped_column(String(200), nullable=True)
     chat_id: Mapped[str] = mapped_column(ForeignKey("chats.id", ondelete="CASCADE"), index=True)
     user_message_id: Mapped[str] = mapped_column(ForeignKey("messages.id", ondelete="CASCADE"))
     assistant_message_id: Mapped[str] = mapped_column(
@@ -144,6 +155,27 @@ class Run(TimestampMixin, Base):
     duration_ms: Mapped[int | None] = mapped_column(Integer, nullable=True)
 
     chat: Mapped[Chat] = relationship(back_populates="runs")
+
+
+class TurnCreationClaim(Base):
+    """Short-lived database lease that deduplicates turn planning across orchestrators."""
+
+    __tablename__ = "turn_creation_claims"
+    __table_args__ = (
+        UniqueConstraint(
+            "chat_id",
+            "idempotency_key",
+            name="uq_turn_creation_claim_chat_id_idempotency_key",
+        ),
+    )
+
+    id: Mapped[str] = mapped_column(String(40), primary_key=True, default=lambda: new_id("claim"))
+    chat_id: Mapped[str] = mapped_column(
+        ForeignKey("chats.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    idempotency_key: Mapped[str] = mapped_column(String(200), nullable=False)
+    owner_token: Mapped[str] = mapped_column(String(64), nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
 
 
 class Artifact(TimestampMixin, Base):

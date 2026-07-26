@@ -71,6 +71,49 @@ it("sends turn overrides with edited branches and regenerated responses", async 
   });
 });
 
+it("uses the recovery and unsuccessful-job action contracts", async () => {
+  const fetchMock = vi.fn()
+    .mockResolvedValueOnce(
+      new Response(JSON.stringify({ csrf_token: "csrf" }), {
+        status: 200,
+        headers: { "content-type": "application/json" },
+      }),
+    )
+    .mockResolvedValueOnce(
+      new Response(JSON.stringify({ id: "job/retry" }), {
+        status: 200,
+        headers: { "content-type": "application/json" },
+      }),
+    )
+    .mockResolvedValueOnce(
+      new Response(JSON.stringify({ name: "backup one.sqlite3" }), {
+        status: 200,
+        headers: { "content-type": "application/json" },
+      }),
+    )
+    .mockResolvedValueOnce(
+      new Response(JSON.stringify({ name: "backup one.sqlite3", restore_pending: true }), {
+        status: 200,
+        headers: { "content-type": "application/json" },
+      }),
+    )
+    .mockResolvedValueOnce(new Response(null, { status: 204 }));
+  vi.stubGlobal("fetch", fetchMock);
+
+  const { api } = await import("./api");
+  await api.retryJob("job/retry");
+  await api.verifyBackup("backup one.sqlite3");
+  await api.restoreBackup("backup one.sqlite3");
+  await api.deleteBackup("backup one.sqlite3");
+
+  expect(fetchMock.mock.calls.slice(1).map(([url, init]) => [url, init?.method])).toEqual([
+    ["/api/jobs/job%2Fretry/retry", "POST"],
+    ["/api/backups/backup%20one.sqlite3/verify", "POST"],
+    ["/api/backups/backup%20one.sqlite3/restore", "POST"],
+    ["/api/backups/backup%20one.sqlite3", "DELETE"],
+  ]);
+});
+
 it("requests transactional profile cleanup when deleting an installed model", async () => {
   const fetchMock = vi.fn()
     .mockResolvedValueOnce(
@@ -287,6 +330,59 @@ it("replays events from zero when the service sequence resets after a restart", 
   dispose();
 });
 
+it("replays from zero when a restarted service has already advanced beyond the old sequence", async () => {
+  vi.useFakeTimers();
+  const urls: string[] = [];
+  const sockets: FakeWebSocket[] = [];
+
+  class FakeWebSocket {
+    onopen: (() => void) | null = null;
+    onmessage: ((message: MessageEvent) => void) | null = null;
+    onclose: ((event: CloseEvent) => void) | null = null;
+
+    constructor(url: string) {
+      urls.push(url);
+      sockets.push(this);
+    }
+
+    close() {}
+  }
+
+  const fetchMock = vi.fn()
+    .mockResolvedValueOnce(
+      new Response(JSON.stringify({
+        csrf_token: "csrf-old",
+        event_epoch: "old-process",
+        event_sequence: 3,
+      }), {
+        status: 200,
+        headers: { "content-type": "application/json" },
+      }),
+    )
+    .mockResolvedValueOnce(
+      new Response(JSON.stringify({
+        csrf_token: "csrf-new",
+        event_epoch: "new-process",
+        event_sequence: 15,
+      }), {
+        status: 200,
+        headers: { "content-type": "application/json" },
+      }),
+    );
+  vi.stubGlobal("fetch", fetchMock);
+  vi.stubGlobal("WebSocket", FakeWebSocket);
+
+  const { connectEvents } = await import("./api");
+  const dispose = await connectEvents(vi.fn(), vi.fn());
+  expect(new URL(urls[0]).searchParams.get("after")).toBe("3");
+
+  sockets[0].onclose?.({ code: 1006 } as CloseEvent);
+  await vi.advanceTimersByTimeAsync(1_000);
+
+  expect(new URL(urls[1]).searchParams.get("after")).toBe("0");
+  dispose();
+});
+
 it("retains the last received sequence during a same-service reconnect", async () => {
   vi.useFakeTimers();
   const urls: string[] = [];
@@ -330,5 +426,50 @@ it("retains the last received sequence during a same-service reconnect", async (
   await vi.advanceTimersByTimeAsync(1_000);
 
   expect(new URL(urls[1]).searchParams.get("after")).toBe("12");
+  dispose();
+});
+
+it("notifies the client after each event socket reconnect, not the initial open", async () => {
+  vi.useFakeTimers();
+  const sockets: FakeWebSocket[] = [];
+
+  class FakeWebSocket {
+    onopen: (() => void) | null = null;
+    onmessage: ((message: MessageEvent) => void) | null = null;
+    onclose: ((event: CloseEvent) => void) | null = null;
+
+    constructor() {
+      sockets.push(this);
+    }
+
+    close() {}
+  }
+
+  const fetchMock = vi.fn()
+    .mockResolvedValueOnce(
+      new Response(JSON.stringify({ csrf_token: "csrf-old", event_sequence: 10 }), {
+        status: 200,
+        headers: { "content-type": "application/json" },
+      }),
+    )
+    .mockResolvedValueOnce(
+      new Response(JSON.stringify({ csrf_token: "csrf-new", event_sequence: 10 }), {
+        status: 200,
+        headers: { "content-type": "application/json" },
+      }),
+    );
+  vi.stubGlobal("fetch", fetchMock);
+  vi.stubGlobal("WebSocket", FakeWebSocket);
+
+  const { connectEvents } = await import("./api");
+  const onReconnect = vi.fn();
+  const dispose = await connectEvents(vi.fn(), vi.fn(), onReconnect);
+  sockets[0].onopen?.();
+  expect(onReconnect).not.toHaveBeenCalled();
+
+  sockets[0].onclose?.({ code: 1006 } as CloseEvent);
+  await vi.advanceTimersByTimeAsync(1_000);
+  sockets[1].onopen?.();
+  expect(onReconnect).toHaveBeenCalledTimes(1);
   dispose();
 });

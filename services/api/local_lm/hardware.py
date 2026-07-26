@@ -13,6 +13,7 @@ import psutil
 from .config import Settings
 from .platforms import assess_platform
 from .schemas import DeviceInfo, SystemInfo
+from .subprocess_env import subprocess_environment
 
 
 def _cpu_model() -> str:
@@ -47,6 +48,7 @@ def _cpu_model() -> str:
                 capture_output=True,
                 text=True,
                 timeout=2,
+                env=subprocess_environment(),
             )
             if result.stdout.strip():
                 return " ".join(result.stdout.split())
@@ -58,7 +60,12 @@ def _cpu_model() -> str:
 def _run_json(command: list[str], timeout: float = 5) -> Any | None:
     try:
         result = subprocess.run(
-            command, check=True, capture_output=True, text=True, timeout=timeout
+            command,
+            check=True,
+            capture_output=True,
+            text=True,
+            timeout=timeout,
+            env=subprocess_environment(),
         )
         return json.loads(result.stdout)
     except (OSError, subprocess.SubprocessError, json.JSONDecodeError):
@@ -80,6 +87,7 @@ def _nvidia_devices() -> list[DeviceInfo]:
             capture_output=True,
             text=True,
             timeout=5,
+            env=subprocess_environment(),
         )
     except (OSError, subprocess.SubprocessError):
         return []

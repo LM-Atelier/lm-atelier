@@ -3,86 +3,78 @@ name: CI
 on:
   pull_request:
     branches: [develop, main]
-    types: [opened, synchronize, reopened, ready_for_review, labeled]
-    # These paths are validated locally and cannot change application behavior.
-    paths-ignore:
-      - "**/*.md"
-      - ".github/dependabot.yml"
+    types: [opened, synchronize, reopened, ready_for_review]
   workflow_dispatch:
 
 permissions:
   contents: read
 
 concurrency:
-  group: ci-${{ github.event.pull_request.number || github.ref }}
+  group: ci-${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
   cancel-in-progress: true
 
 jobs:
   compatibility:
     name: Ubuntu compatibility
-    # Local parity verification is the default while hosted Actions quota is
-    # constrained. Label a ready PR `run-ci` when an Ubuntu run is warranted;
-    # subsequent pushes keep running while the label remains attached.
     if: >-
       github.event_name == 'workflow_dispatch' ||
       (
-        github.event.pull_request.draft == false &&
-        contains(github.event.pull_request.labels.*.name, 'run-ci')
+        github.event.repository.private == false &&
+        github.event.pull_request.draft == false
       )
     runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    env:
+      LOCAL_LM_DATA_DIR: ${{ runner.temp }}/local-lm-tests
+      UV_PROJECT_ENVIRONMENT: ${{ github.workspace }}/.venv
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           fetch-depth: 0
-      - uses: actions/setup-node@v7
+          persist-credentials: false
+      - name: Scan reachable source history for secrets
+        shell: bash
+        run: |
+          set -euo pipefail
+          version="8.30.1"
+          archive_name="gitleaks_${version}_linux_x64.tar.gz"
+          archive="$RUNNER_TEMP/$archive_name"
+          expected_hash=551f6fc83ea457d62a0d98237cbad105af8d557003051f41f3e7ca7b3f2470eb
+          curl --fail --location --proto '=https' --tlsv1.2 \
+            --output "$archive" \
+            "https://github.com/gitleaks/gitleaks/releases/download/v$version/$archive_name"
+          echo "$expected_hash  $archive" | sha256sum --check --strict
+          tar -xzf "$archive" -C "$RUNNER_TEMP" gitleaks
+          "$RUNNER_TEMP/gitleaks" git . --redact
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
           node-version: 22
           cache: npm
-      - uses: actions/setup-python@v7
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
         with:
           python-version: "3.12"
-          cache: pip
-      - run: python -m pip install --upgrade pip
-      - run: python -m pip install -e './services/api[dev]'
-      - run: npm ci
-      - run: ruff format --check services/api
-      - run: ruff check services/api
-      - run: mypy services/api/local_lm
-      - run: bandit -q -lll -r services/api/local_lm
-      - run: pytest services/api/tests -q
-        env:
-          LOCAL_LM_DATA_DIR: ${{ runner.temp }}/local-lm-tests
-      - run: npm run lint
-      - run: npm run typecheck
-      - run: npm test
-      - run: npm run build
-      - name: Validate Windows packaging scripts
-        shell: pwsh
+      - uses: astral-sh/setup-uv@08807647e7069bb48b6ef5acd8ec9567f424441b # v8.1.0
+        with:
+          version: "0.11.18"
+          enable-cache: true
+          cache-dependency-glob: services/api/uv.lock
+      - name: Install verification dependencies
         run: |
-          $failed = $false
-          Get-ChildItem packaging/windows/*.ps1 | ForEach-Object {
-            $tokens = $null
-            $errors = $null
-            [System.Management.Automation.Language.Parser]::ParseFile(
-              $_.FullName,
-              [ref]$tokens,
-              [ref]$errors
-            ) | Out-Null
-            if ($errors.Count -gt 0) {
-              Write-Error "Syntax errors in $($_.Name): $($errors -join '; ')"
-              $failed = $true
-            }
-          }
-          if ($failed) { exit 1 }
-      - name: Validate Linux packaging scripts
-        run: bash -n scripts/package.sh packaging/linux/*.sh
-      - name: Reject committed secrets and runtime artifacts
+          uv sync --project services/api --locked --python 3.12 \
+            --extra dev \
+            --extra package
+          npm ci
+      - name: Audit locked dependencies
         run: |
-          if git ls-files | grep -E '(^|/)(\.env|\.private|data|models|downloads|artifacts)(/|$)|\.(gguf|safetensors|ckpt|sqlite3?)$'; then
-            echo 'A private/runtime artifact is tracked.' >&2
-            exit 1
-          fi
-          if git grep -I -E '(hf_[A-Za-z0-9]{20,}|BEGIN (RSA |EC |OPENSSH )?PRIVATE KEY)' -- . ':!package-lock.json'; then
-            echo 'A likely credential is tracked.' >&2
-            exit 1
-          fi
+          npm audit --audit-level=high
+          mkdir -p temp/pip-audit-cache
+          .venv/bin/python -m pip_audit \
+            --skip-editable \
+            --progress-spinner off \
+            --cache-dir temp/pip-audit-cache
+      - name: Run repository verification
+        run: ./scripts/verify.sh
+      - name: Install golden-path browser
+        run: npx playwright install --with-deps chromium
+      - name: Run browser golden path
+        run: npm run e2e:run

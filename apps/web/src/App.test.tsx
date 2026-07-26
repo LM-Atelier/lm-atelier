@@ -3,7 +3,7 @@ import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import App from "./App";
 import { api, connectEvents } from "./api";
-import type { EngineCapabilities, SettingField } from "./types";
+import type { BackupInfo, Chat, ChatDetail, EngineCapabilities, SettingField, TurnAccepted } from "./types";
 
 const clipboardWrite = vi.fn();
 
@@ -96,6 +96,7 @@ vi.mock("./api", () => ({
     cancelChat: vi.fn(),
     jobs: vi.fn().mockResolvedValue([]),
     cancelJob: vi.fn(),
+    retryJob: vi.fn(),
     pauseDownload: vi.fn(),
     resumeDownload: vi.fn(),
     engines: vi.fn().mockResolvedValue([
@@ -141,6 +142,11 @@ vi.mock("./api", () => ({
         messages: ["No primary media accelerator was detected."],
       },
     }),
+    about: vi.fn().mockResolvedValue({
+      version: "0.1.7",
+      data_directory: "C:\\LM Atelier\\data",
+      log_directory: "C:\\LM Atelier\\data\\logs",
+    }),
     platforms: vi.fn().mockResolvedValue([]),
     createDiagnostics: vi.fn(),
     credentialStatus: vi.fn().mockResolvedValue({ provider: "huggingface", configured: false, source: "none", vault_available: true }),
@@ -166,11 +172,16 @@ vi.mock("./api", () => ({
     importPreset: vi.fn(),
     deletePreset: vi.fn(),
     workers: vi.fn().mockResolvedValue([]),
+    runtimes: vi.fn().mockResolvedValue([]),
+    installRuntime: vi.fn(),
     backups: vi.fn().mockResolvedValue([]),
     loadChatWorker: vi.fn(),
     startMediaWorker: vi.fn(),
     stopWorker: vi.fn(),
     createBackup: vi.fn(),
+    verifyBackup: vi.fn(),
+    restoreBackup: vi.fn(),
+    deleteBackup: vi.fn(),
     catalog: vi.fn(),
     workflowCatalogModels: vi.fn(),
     catalogDetail: vi.fn(),
@@ -212,9 +223,29 @@ describe("App", () => {
       value: { writeText: clipboardWrite },
     });
     localStorage.clear();
+    vi.mocked(api.projects).mockResolvedValue([]);
     vi.mocked(api.profiles).mockResolvedValue([]);
+    vi.mocked(api.presets).mockResolvedValue([]);
     vi.mocked(api.chats).mockResolvedValue([]);
+    vi.mocked(api.engines).mockResolvedValue([
+      {
+        engine: "mock",
+        version: "1",
+        roles: ["chat", "image", "video"],
+        operations: ["text", "text_to_image", "text_to_video"],
+        formats: ["mock"],
+        devices: ["cpu:0"],
+        streaming: true,
+        tool_calling: true,
+        settings: [],
+        healthy: true,
+        details: {},
+      },
+    ]);
     vi.mocked(api.workers).mockResolvedValue([]);
+    vi.mocked(api.runtimes).mockResolvedValue([]);
+    vi.mocked(api.jobs).mockResolvedValue([]);
+    vi.mocked(api.backups).mockResolvedValue([]);
     vi.mocked(api.models).mockResolvedValue([]);
     vi.mocked(api.catalog).mockResolvedValue({ items: [], next_cursor: null });
     vi.mocked(api.workflowCatalogModels).mockResolvedValue([]);
@@ -239,6 +270,10 @@ describe("App", () => {
     expect(navigation).toHaveAttribute("aria-expanded", "false");
     fireEvent.click(navigation);
     expect(navigation).toHaveAttribute("aria-expanded", "true");
+    const modelLibrary = screen.getByRole("button", { name: "Model library" });
+    fireEvent.click(modelLibrary);
+    expect(modelLibrary).toHaveAttribute("aria-current", "page");
+    await waitFor(() => expect(document.getElementById("main-content")).toHaveFocus());
   });
 
   it("refreshes the visible chat when media generation progress changes", async () => {
@@ -267,6 +302,42 @@ describe("App", () => {
       expect(invalidate).toHaveBeenCalledWith({ queryKey: ["jobs"] });
       expect(invalidate).toHaveBeenCalledWith({ queryKey: ["chat"] });
     });
+  });
+
+  it("coalesces reconnect and replay-gap reconciliation across authoritative data", async () => {
+    const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+    const invalidate = vi.spyOn(client, "invalidateQueries");
+    render(
+      <QueryClientProvider client={client}>
+        <App />
+      </QueryClientProvider>,
+    );
+    expect(await screen.findByText("LM Atelier")).toBeInTheDocument();
+    const eventConnection = vi.mocked(connectEvents).mock.calls.at(-1);
+    const onEvent = eventConnection?.[0];
+    const onReconnect = eventConnection?.[2];
+    expect(onReconnect).toBeDefined();
+    invalidate.mockClear();
+
+    act(() => {
+      onReconnect?.();
+      onEvent?.({
+        sequence: 2,
+        type: "events.replay_gap",
+        entity_id: null,
+        payload: { oldest_sequence: 10 },
+        created_at: "2026-07-23T00:00:00Z",
+      });
+    });
+
+    await waitFor(() => expect(invalidate).toHaveBeenCalledTimes(1));
+    const options = invalidate.mock.calls[0]?.[0] as {
+      predicate?: (query: { queryKey: readonly unknown[] }) => boolean;
+    };
+    expect(options.predicate?.({ queryKey: ["chat", "chat-1"] })).toBe(true);
+    expect(options.predicate?.({ queryKey: ["backups"] })).toBe(true);
+    expect(options.predicate?.({ queryKey: ["workers"] })).toBe(true);
+    expect(options.predicate?.({ queryKey: ["unrelated"] })).toBe(false);
   });
 
   it("searches and manages chats from the workspace sidebar", async () => {
@@ -407,6 +478,328 @@ describe("App", () => {
     click.mockRestore();
   });
 
+  it("persists schema-driven project defaults by role without leaking values", async () => {
+    const stamp = "2026-07-22T00:00:00Z";
+    const project = {
+      id: "project-defaults",
+      name: "Creative work",
+      description: "",
+      instructions: "",
+      archived: false,
+      image_workflow_revision_id: null,
+      video_workflow_revision_id: null,
+      generation_settings_json: {
+        chat: { max_tokens: 2048 },
+        image: { negative_prompt: "noise" },
+        video: { frames: 49 },
+      },
+      generation_preset_ids_json: {},
+      created_at: stamp,
+      updated_at: stamp,
+    };
+    const imagePreset = {
+      id: "project-image-preset",
+      name: "Project image",
+      role: "image" as const,
+      settings_json: { negative_prompt: "blur" },
+      is_default: false,
+    };
+    vi.mocked(api.projects).mockResolvedValue([project]);
+    vi.mocked(api.engines).mockResolvedValue([{
+      ...roleAwareMediaEngine,
+      roles: ["chat", "image", "video"],
+      settings: [maxTokensSetting, imageSetting, videoSetting],
+      settings_by_role: {
+        chat: [maxTokensSetting],
+        image: [imageSetting],
+        video: [videoSetting],
+      },
+    }]);
+    vi.mocked(api.presets).mockResolvedValue([imagePreset]);
+    vi.mocked(api.updateProject).mockResolvedValue(project);
+    const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+    render(
+      <QueryClientProvider client={client}>
+        <App />
+      </QueryClientProvider>,
+    );
+
+    fireEvent.click(await screen.findByRole("button", { name: "Manage Creative work" }));
+    const dialog = screen.getByRole("dialog", { name: "Manage project" });
+    expect(dialog).toHaveAttribute("aria-modal", "true");
+    expect(screen.getByRole("spinbutton", { name: /Maximum output/ })).toHaveValue(2048);
+    fireEvent.change(screen.getByRole("spinbutton", { name: /Maximum output/ }), {
+      target: { value: "4096" },
+    });
+
+    fireEvent.click(screen.getByRole("button", { name: "image" }));
+    expect(screen.getByLabelText(/Negative prompt/)).toHaveValue("noise");
+    fireEvent.change(screen.getByRole("combobox", { name: "image project preset" }), {
+      target: { value: imagePreset.id },
+    });
+    fireEvent.change(screen.getByLabelText(/Negative prompt/), {
+      target: { value: "fog" },
+    });
+
+    fireEvent.click(screen.getByRole("button", { name: "video" }));
+    expect(screen.getByRole("spinbutton", { name: /Frames/ })).toHaveValue(49);
+    fireEvent.change(screen.getByRole("spinbutton", { name: /Frames/ }), {
+      target: { value: "81" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "chat" }));
+    expect(screen.getByRole("spinbutton", { name: /Maximum output/ })).toHaveValue(4096);
+    fireEvent.click(screen.getByRole("button", { name: "Save project" }));
+
+    await waitFor(() => expect(api.updateProject).toHaveBeenCalledWith(
+      project.id,
+      expect.objectContaining({
+        generation_settings_json: {
+          chat: { max_tokens: 4096 },
+          image: { negative_prompt: "fog" },
+          video: { frames: 81 },
+        },
+        generation_preset_ids_json: { image: imagePreset.id },
+      }),
+    ));
+  });
+
+  it("clears only the selected project role or all project generation defaults", async () => {
+    const stamp = "2026-07-22T00:00:00Z";
+    const project = {
+      id: "project-reset",
+      name: "Reset scopes",
+      description: "",
+      instructions: "",
+      archived: false,
+      image_workflow_revision_id: null,
+      video_workflow_revision_id: null,
+      generation_settings_json: {
+        chat: { max_tokens: 2048 },
+        image: { negative_prompt: "noise" },
+        video: { frames: 81 },
+      },
+      generation_preset_ids_json: {
+        image: "project-image-preset",
+        video: "project-video-preset",
+      },
+      created_at: stamp,
+      updated_at: stamp,
+    };
+    vi.mocked(api.projects).mockResolvedValue([project]);
+    vi.mocked(api.engines).mockResolvedValue([{
+      ...roleAwareMediaEngine,
+      roles: ["chat", "image", "video"],
+      settings_by_role: {
+        chat: [maxTokensSetting],
+        image: [imageSetting],
+        video: [videoSetting],
+      },
+    }]);
+    vi.mocked(api.presets).mockResolvedValue([
+      {
+        id: "project-image-preset",
+        name: "Image",
+        role: "image",
+        settings_json: {},
+        is_default: false,
+      },
+      {
+        id: "project-video-preset",
+        name: "Video",
+        role: "video",
+        settings_json: {},
+        is_default: false,
+      },
+    ]);
+    vi.mocked(api.updateProject).mockResolvedValue(project);
+    const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+    render(
+      <QueryClientProvider client={client}>
+        <App />
+      </QueryClientProvider>,
+    );
+
+    fireEvent.click(await screen.findByRole("button", { name: "Manage Reset scopes" }));
+    fireEvent.click(screen.getByRole("button", { name: "video" }));
+    fireEvent.click(screen.getByRole("button", { name: "Clear role defaults" }));
+    fireEvent.click(screen.getByRole("button", { name: "Save project" }));
+    await waitFor(() => expect(api.updateProject).toHaveBeenLastCalledWith(
+      project.id,
+      expect.objectContaining({
+        generation_settings_json: {
+          chat: { max_tokens: 2048 },
+          image: { negative_prompt: "noise" },
+        },
+        generation_preset_ids_json: { image: "project-image-preset" },
+      }),
+    ));
+
+    fireEvent.click(screen.getByRole("button", { name: "Manage Reset scopes" }));
+    fireEvent.click(screen.getByRole("button", { name: "Clear all" }));
+    fireEvent.click(screen.getByRole("button", { name: "Save project" }));
+    await waitFor(() => expect(api.updateProject).toHaveBeenLastCalledWith(
+      project.id,
+      expect.objectContaining({
+        generation_settings_json: {},
+        generation_preset_ids_json: {},
+      }),
+    ));
+  });
+
+  it("shows inherited project defaults without copying them into chat scope", async () => {
+    const stamp = "2026-07-22T00:00:00Z";
+    const project = {
+      id: "project-inherited",
+      name: "Inherited defaults",
+      description: "",
+      instructions: "",
+      archived: false,
+      image_workflow_revision_id: null,
+      video_workflow_revision_id: null,
+      generation_settings_json: { image: { negative_prompt: "project value" } },
+      generation_preset_ids_json: { image: "project-image-preset" },
+      created_at: stamp,
+      updated_at: stamp,
+    };
+    const chat = {
+      id: "chat-inherited",
+      project_id: project.id,
+      title: "Inherited chat",
+      archived: false,
+      routing_mode: "image" as const,
+      confirm_uncertain_media: false,
+      active_chat_profile_id: null,
+      active_image_profile_id: null,
+      active_video_profile_id: null,
+      active_head_message_id: null,
+      generation_settings_json: {},
+      generation_preset_ids_json: {},
+      created_at: stamp,
+      updated_at: stamp,
+    };
+    vi.mocked(api.projects).mockResolvedValue([project]);
+    vi.mocked(api.chats).mockResolvedValue([chat]);
+    vi.mocked(api.chat).mockResolvedValue({ ...chat, messages: [] });
+    vi.mocked(api.engines).mockResolvedValue([roleAwareMediaEngine]);
+    vi.mocked(api.presets).mockResolvedValue([
+      {
+        id: "global-image-preset",
+        name: "Global image",
+        role: "image",
+        settings_json: { negative_prompt: "global value" },
+        is_default: true,
+      },
+      {
+        id: "project-image-preset",
+        name: "Project image",
+        role: "image",
+        settings_json: { negative_prompt: "project preset value" },
+        is_default: false,
+      },
+    ]);
+    vi.mocked(api.updateChat).mockImplementation(async (_id, values) => ({ ...chat, ...values }));
+    const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+    render(
+      <QueryClientProvider client={client}>
+        <App />
+      </QueryClientProvider>,
+    );
+
+    fireEvent.click(await screen.findByRole("button", { name: "Turn settings" }));
+    expect(screen.getByRole("combobox", { name: "image preset" }))
+      .toHaveDisplayValue("Inherit · Project image");
+    expect(screen.getByLabelText(/Negative prompt/)).toHaveValue("project value");
+    fireEvent.change(screen.getByLabelText(/Negative prompt/), {
+      target: { value: "chat value" },
+    });
+
+    await waitFor(() => expect(api.updateChat).toHaveBeenCalledWith(chat.id, {
+      generation_settings_json: { image: { negative_prompt: "chat value" } },
+    }));
+    expect(project.generation_settings_json.image.negative_prompt).toBe("project value");
+  });
+
+  it("traps modal focus, closes on Escape, and restores the opener", async () => {
+    const stamp = "2026-07-22T00:00:00Z";
+    const chat = {
+      id: "chat-dialog",
+      project_id: null,
+      title: "Keyboard dialog",
+      archived: false,
+      routing_mode: "auto" as const,
+      confirm_uncertain_media: false,
+      active_chat_profile_id: null,
+      active_image_profile_id: null,
+      active_video_profile_id: null,
+      active_head_message_id: null,
+      created_at: stamp,
+      updated_at: stamp,
+    };
+    vi.mocked(api.chats).mockResolvedValue([chat]);
+    vi.mocked(api.chat).mockResolvedValue({ ...chat, messages: [] });
+    const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+    render(
+      <QueryClientProvider client={client}>
+        <App />
+      </QueryClientProvider>,
+    );
+
+    const opener = await screen.findByRole("button", { name: "Manage Keyboard dialog" });
+    opener.focus();
+    fireEvent.click(opener);
+    const dialog = screen.getByRole("dialog", { name: "Manage chat" });
+    const close = screen.getByRole("button", { name: "Close chat manager" });
+    const save = screen.getByRole("button", { name: "Save chat" });
+    expect(dialog).toHaveAttribute("aria-modal", "true");
+    expect(close).toHaveFocus();
+
+    save.focus();
+    fireEvent.keyDown(dialog, { key: "Tab" });
+    expect(close).toHaveFocus();
+    fireEvent.keyDown(dialog, { key: "Tab", shiftKey: true });
+    expect(save).toHaveFocus();
+
+    fireEvent.keyDown(dialog, { key: "Escape" });
+    expect(screen.queryByRole("dialog", { name: "Manage chat" })).not.toBeInTheDocument();
+    expect(opener).toHaveFocus();
+  });
+
+  it("treats the settings drawer as a labelled modal and restores focus", async () => {
+    const stamp = "2026-07-22T00:00:00Z";
+    const chat = {
+      id: "chat-settings-dialog",
+      project_id: null,
+      title: "Settings dialog",
+      archived: false,
+      routing_mode: "auto" as const,
+      confirm_uncertain_media: false,
+      active_chat_profile_id: null,
+      active_image_profile_id: null,
+      active_video_profile_id: null,
+      active_head_message_id: null,
+      created_at: stamp,
+      updated_at: stamp,
+    };
+    vi.mocked(api.chats).mockResolvedValue([chat]);
+    vi.mocked(api.chat).mockResolvedValue({ ...chat, messages: [] });
+    const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+    render(
+      <QueryClientProvider client={client}>
+        <App />
+      </QueryClientProvider>,
+    );
+
+    const opener = await screen.findByRole("button", { name: "Turn settings" });
+    opener.focus();
+    fireEvent.click(opener);
+    const dialog = screen.getByRole("dialog", { name: "Chat settings" });
+    expect(dialog).toHaveAttribute("aria-modal", "true");
+    expect(screen.getByRole("button", { name: "Close settings" })).toHaveFocus();
+    fireEvent.keyDown(dialog, { key: "Escape" });
+    expect(screen.queryByRole("dialog", { name: "Chat settings" })).not.toBeInTheDocument();
+    expect(opener).toHaveFocus();
+  });
+
   it("resumes a paused model download from the job panel", async () => {
     const stamp = "2026-07-22T00:00:00Z";
     const pausedJob = {
@@ -440,6 +833,43 @@ describe("App", () => {
     await waitFor(() => expect(vi.mocked(api.resumeDownload).mock.calls[0]?.[0]).toBe("download-1"));
   });
 
+  it("shows a bounded list of unsuccessful jobs and retries one", async () => {
+    const failedJobs = Array.from({ length: 5 }, (_, index) => ({
+      id: `job-${index + 1}`,
+      kind: `image-${index + 1}`,
+      status: index % 2 ? "interrupted" : "failed",
+      run_id: `run-${index + 1}`,
+      progress: 0.5,
+      phase: `loading phase ${index + 1}`,
+      payload_json: {},
+      result_json: {},
+      error: `loader ${index + 1} crashed`,
+      attempt: 1,
+      cancellable: false,
+      created_at: `2026-07-2${index + 1}T00:00:00Z`,
+      updated_at: `2026-07-2${index + 1}T00:00:00Z`,
+    }));
+    vi.mocked(api.jobs).mockResolvedValue(failedJobs);
+    vi.mocked(api.retryJob).mockResolvedValue({
+      ...failedJobs[4],
+      status: "queued",
+      phase: "retry queued",
+      error: null,
+    });
+    const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+    render(
+      <QueryClientProvider client={client}>
+        <App />
+      </QueryClientProvider>,
+    );
+
+    expect(await screen.findByText("loader 5 crashed")).toBeInTheDocument();
+    expect(screen.queryByText("loader 1 crashed")).not.toBeInTheDocument();
+    expect(screen.getAllByRole("button", { name: /Retry image-\d job/ })).toHaveLength(3);
+    fireEvent.click(screen.getByRole("button", { name: "Retry image-5 job" }));
+    await waitFor(() => expect(vi.mocked(api.retryJob).mock.calls[0]?.[0]).toBe("job-5"));
+  });
+
   it("shows useful machine details without platform-status clutter", async () => {
     const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
     render(
@@ -452,6 +882,230 @@ describe("App", () => {
     expect(screen.getByText("CPU model")).toBeInTheDocument();
     expect(screen.queryByText(/logical processors/i)).not.toBeInTheDocument();
     expect(screen.queryByText("Platform support")).not.toBeInTheDocument();
+  });
+
+  it("verifies, schedules restore, and deletes recovery backups", async () => {
+    const backup = (name: string, createdAt: string): BackupInfo => ({
+      name,
+      size_bytes: 2048,
+      sha256: "abcdef0123456789",
+      created_at: createdAt,
+      verified: false,
+      restore_pending: false,
+      media_included: false,
+      media_size_bytes: 0,
+    });
+    const first = backup("local-lm-first.sqlite3", "2026-07-25T12:00:00Z");
+    const second = { ...backup("local-lm-second.sqlite3", "2026-07-24T12:00:00Z"), verified: true };
+    vi.mocked(api.backups).mockResolvedValue([first, second]);
+    vi.mocked(api.verifyBackup).mockResolvedValue({ ...first, verified: true });
+    vi.mocked(api.restoreBackup).mockResolvedValue({
+      ...first,
+      verified: true,
+      restore_pending: true,
+    });
+    vi.mocked(api.deleteBackup).mockResolvedValue(undefined);
+    const confirm = vi.spyOn(window, "confirm").mockReturnValue(true);
+    const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+    render(
+      <QueryClientProvider client={client}>
+        <App />
+      </QueryClientProvider>,
+    );
+
+    fireEvent.click(await screen.findByText("Settings"));
+    expect(await screen.findByText(first.name)).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: `Verify backup ${first.name}` }));
+    expect(await screen.findByText("Backup verified.")).toBeInTheDocument();
+    expect(vi.mocked(api.verifyBackup).mock.calls[0]?.[0]).toBe(first.name);
+
+    fireEvent.click(screen.getByRole("button", { name: `Restore backup ${first.name} on restart` }));
+    await waitFor(() => expect(vi.mocked(api.restoreBackup).mock.calls[0]?.[0]).toBe(first.name));
+    expect(await screen.findByText("Restore scheduled. Restart LM Atelier to apply this backup.")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: `Restore backup ${first.name} on restart` })).toBeDisabled();
+
+    fireEvent.click(screen.getByRole("button", { name: `Delete backup ${second.name}` }));
+    await waitFor(() => expect(vi.mocked(api.deleteBackup).mock.calls[0]?.[0]).toBe(second.name));
+    expect(screen.queryByText(second.name)).not.toBeInTheDocument();
+    expect(await screen.findByText("Backup deleted.")).toBeInTheDocument();
+    confirm.mockRestore();
+  });
+
+  it("prevents duplicate backup creation while a snapshot is pending", async () => {
+    let finishBackup: ((backup: BackupInfo) => void) | undefined;
+    vi.mocked(api.createBackup).mockImplementation(
+      () => new Promise<BackupInfo>((resolve) => { finishBackup = resolve; }),
+    );
+    const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+    render(
+      <QueryClientProvider client={client}>
+        <App />
+      </QueryClientProvider>,
+    );
+
+    fireEvent.click(await screen.findByText("Settings"));
+    const create = await screen.findByRole("button", { name: "Back up state" });
+    fireEvent.click(create);
+    expect(await screen.findByRole("button", { name: "Backing up…" })).toBeDisabled();
+    fireEvent.click(screen.getByRole("button", { name: "Backing up…" }));
+    expect(api.createBackup).toHaveBeenCalledTimes(1);
+
+    await act(async () => {
+      finishBackup?.({
+        name: "local-lm-new.sqlite3",
+        size_bytes: 1024,
+        sha256: "1234567890abcdef",
+        created_at: "2026-07-25T12:00:00Z",
+        verified: true,
+        restore_pending: false,
+        media_included: false,
+        media_size_bytes: 0,
+      });
+    });
+    expect(await screen.findByText("Backup created.")).toBeInTheDocument();
+  });
+
+  it("offers pinned external runtime setup without bundling ComfyUI", async () => {
+    const missingRuntime = {
+      engine: "llama.cpp" as const,
+      release: "b9637",
+      state: "missing" as const,
+      supported: true,
+      managed: false,
+      progress: 0,
+      downloaded_bytes: 0,
+      size_bytes: 16_906_751,
+      distribution: "external",
+      license: "MIT",
+      message: "Installs automatically when first used.",
+    };
+    vi.mocked(api.runtimes).mockResolvedValue([
+      missingRuntime,
+      {
+        ...missingRuntime,
+        engine: "comfyui",
+        release: "v0.28.0",
+        state: "unsupported",
+        supported: false,
+        size_bytes: null,
+        distribution: "external-gpl-3.0",
+        license: "GPL-3.0-only",
+        security_status: "blocked",
+        security_message: "Automatic setup is paused pending dependency security updates.",
+        message: "Automatic setup is paused pending dependency security updates.",
+      },
+    ]);
+    vi.mocked(api.installRuntime).mockResolvedValue({
+      ...missingRuntime,
+      state: "installing",
+      message: "Preparing download.",
+    });
+    const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+    render(
+      <QueryClientProvider client={client}>
+        <App />
+      </QueryClientProvider>,
+    );
+
+    fireEvent.click(await screen.findByText("Settings"));
+    expect(await screen.findByText("v0.28.0 · Manual setup required")).toBeInTheDocument();
+    expect(
+      screen.getByText(
+        "GPL-3.0-only · Automatic setup is paused pending dependency security updates.",
+      ),
+    ).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: /Install · 16 MB/ }));
+    await waitFor(() => expect(api.installRuntime).toHaveBeenCalledWith("llama.cpp"));
+  });
+
+  it("shows support paths and copies only allowlisted technical details", async () => {
+    vi.mocked(api.about).mockResolvedValue({
+      version: "0.1.7",
+      data_directory: "C:\\Users\\someone\\LM Atelier\\data",
+      log_directory: "C:\\Users\\someone\\LM Atelier\\data\\logs",
+    });
+    vi.mocked(api.system).mockResolvedValue({
+      platform: "Windows",
+      platform_release: "11",
+      distribution: "Windows",
+      distribution_version: "11",
+      architecture: "AMD64",
+      python_version: "3.12.10",
+      cpu_model: "Test CPU 9000",
+      cpu_count: 16,
+      memory_total_bytes: 32 * 1024 ** 3,
+      memory_available_bytes: 16 * 1024 ** 3,
+      disk_total_bytes: 1024 ** 4,
+      disk_free_bytes: 512 * 1024 ** 3,
+      ffmpeg_available: true,
+      devices: [{
+        id: "cuda:0",
+        name: "Test GPU",
+        kind: "gpu",
+        total_memory_bytes: 16 * 1024 ** 3,
+        available_memory_bytes: 12 * 1024 ** 3,
+        backend: "cuda",
+        details: {
+          credential: "must-not-copy",
+          prompt: "private chat content",
+          driver_version: "999.1",
+        },
+      }],
+      support: {
+        platform_status: "target",
+        platform_label: "Windows 11 x64 target",
+        accelerator_status: "primary",
+        accelerator_label: "CUDA",
+        certification_status: "hardware-pending",
+        chat_ready: true,
+        reference_media_ready: true,
+        vram_tier_gb: 16,
+        messages: [],
+      },
+    });
+    const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+    render(
+      <QueryClientProvider client={client}>
+        <App />
+      </QueryClientProvider>,
+    );
+
+    fireEvent.click(await screen.findByText("Settings"));
+    expect(await screen.findByText("Version 0.1.7")).toBeInTheDocument();
+    expect(screen.getByText("C:\\Users\\someone\\LM Atelier\\data")).toBeInTheDocument();
+    expect(screen.getByRole("link", { name: "Issues" })).toHaveAttribute(
+      "href",
+      "https://github.com/ajccarlson/lm-atelier/issues",
+    );
+    expect(screen.getByRole("link", { name: "Security" })).toHaveAttribute(
+      "href",
+      "https://github.com/ajccarlson/lm-atelier/blob/main/SECURITY.md",
+    );
+    expect(screen.getByRole("link", { name: "Support" })).toHaveAttribute(
+      "href",
+      "https://github.com/ajccarlson/lm-atelier/blob/main/SUPPORT.md",
+    );
+    expect(screen.getByRole("link", { name: "Privacy" })).toHaveAttribute(
+      "href",
+      "https://github.com/ajccarlson/lm-atelier/blob/main/docs/PRIVACY.md",
+    );
+
+    fireEvent.click(screen.getByRole("button", { name: "Copy data folder" }));
+    await waitFor(() => {
+      expect(clipboardWrite).toHaveBeenLastCalledWith("C:\\Users\\someone\\LM Atelier\\data");
+    });
+
+    fireEvent.click(screen.getByRole("button", { name: "Copy technical details" }));
+    await waitFor(() => expect(clipboardWrite).toHaveBeenCalledTimes(2));
+    const technicalDetails = String(clipboardWrite.mock.calls.at(-1)?.[0]);
+    expect(technicalDetails).toContain("LM Atelier: 0.1.7");
+    expect(technicalDetails).toContain("Runtime: Python 3.12.10");
+    expect(technicalDetails).toContain("CPU: Test CPU 9000");
+    expect(technicalDetails).toContain("Test GPU (gpu; cuda; 16 GB)");
+    expect(technicalDetails).toContain("mock 1 (chat, image, video)");
+    expect(technicalDetails).not.toContain("C:\\Users");
+    expect(technicalDetails).not.toContain("must-not-copy");
+    expect(technicalDetails).not.toContain("private chat content");
   });
 
   it("stores a Hugging Face token without echoing it back", async () => {
@@ -499,10 +1153,13 @@ describe("App", () => {
     );
     fireEvent.click(await screen.findByText("Settings"));
     expect(await screen.findByText(/Default.*default/)).toBeInTheDocument();
-    fireEvent.click(screen.getByRole("button", { name: "Edit" }));
+    fireEvent.click(screen.getByRole("button", { name: "Edit profile: Local chat" }));
     expect(await screen.findByText("Edit profile")).toBeInTheDocument();
     expect(screen.getByDisplayValue("Local chat")).toBeInTheDocument();
     expect(screen.getByText("Default model")).toBeInTheDocument();
+    const detailLevel = screen.getByRole("group", { name: "Profile setting detail" });
+    expect(detailLevel).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "basic" })).toHaveAttribute("aria-pressed", "true");
   });
 
   it("renders Markdown on only the active edited branch", async () => {
@@ -758,7 +1415,17 @@ describe("App", () => {
   it("copies complete messages and fenced code blocks", async () => {
     localStorage.setItem("local-lm-chat", "chat-copy");
     const stamp = "2026-07-22T00:00:00Z";
-    const response = "Run this command:\n\n```powershell\nGet-Date\n```";
+    const response = [
+      "Run this command:",
+      "",
+      "```powershell",
+      "Get-Date",
+      "```",
+      "",
+      "![tracking pixel](https://telemetry.invalid/pixel.png)",
+      "",
+      "[Documentation](https://example.com/docs)",
+    ].join("\n");
     vi.mocked(api.chats).mockResolvedValue([{
       id: "chat-copy",
       project_id: null,
@@ -821,6 +1488,12 @@ describe("App", () => {
 
     fireEvent.click(screen.getByRole("button", { name: "Copy code block" }));
     await waitFor(() => expect(clipboardWrite).toHaveBeenCalledWith("Get-Date"));
+    expect(screen.queryByRole("img", { name: "tracking pixel" })).not.toBeInTheDocument();
+    expect(screen.getByText("[Image: tracking pixel]")).toBeInTheDocument();
+    expect(screen.getByRole("link", { name: "Documentation" })).toHaveAttribute(
+      "rel",
+      "noopener noreferrer",
+    );
   });
 
   it("shows the persisted chat startup phase before the first token", async () => {
@@ -910,7 +1583,43 @@ describe("App", () => {
     expect(screen.getByText("current RAM")).toBeInTheDocument();
     expect(screen.getByText("measured peak")).toBeInTheDocument();
     expect(screen.getByText("estimated load")).toBeInTheDocument();
-    expect(screen.getByRole("button", { name: "Unload" })).toBeDisabled();
+    expect(screen.getByRole("button", { name: "Unload chat worker" })).toBeDisabled();
+  });
+
+  it("shows concise redacted worker failure diagnostics and the local log", async () => {
+    vi.mocked(api.workers).mockResolvedValue([
+      {
+        name: "chat",
+        state: "exited",
+        managed: true,
+        running: false,
+        pid: null,
+        profile_id: "profile-1",
+        command: ["[local path]", "--model", "[data folder]/models/model.gguf"],
+        exit_code: 1,
+        estimated_memory_bytes: null,
+        current_memory_bytes: null,
+        peak_memory_bytes: null,
+        active_jobs: 0,
+        queued_jobs: 0,
+        failure_detail: "chat worker exited with code 1.",
+        stderr_tail: "model loader: unsupported architecture",
+        log_path: "logs/chat-worker.log",
+      },
+    ]);
+    const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+    render(
+      <QueryClientProvider client={client}>
+        <App />
+      </QueryClientProvider>,
+    );
+
+    fireEvent.click(await screen.findByText("Settings"));
+    const alert = await screen.findByRole("alert");
+    expect(alert).toHaveTextContent("chat worker exited with code 1.");
+    expect(alert).toHaveTextContent("model loader: unsupported architecture");
+    expect(alert).toHaveTextContent("Log · Data folder/logs/chat-worker.log");
+    expect(screen.getByLabelText("chat worker error output")).toBeInTheDocument();
   });
 
   it("runs an executable structured-tool capability probe", async () => {
@@ -942,6 +1651,7 @@ describe("App", () => {
       </QueryClientProvider>,
     );
     fireEvent.click(await screen.findByText("Settings"));
+    expect(await screen.findByRole("img", { name: "mock engine: ready" })).toBeInTheDocument();
     expect(screen.queryByText("Download redacted diagnostics")).not.toBeInTheDocument();
     expect(screen.queryByText("FFmpeg")).not.toBeInTheDocument();
     expect(screen.queryByText("memory free")).not.toBeInTheDocument();
@@ -984,7 +1694,19 @@ describe("App", () => {
     expect(await screen.findByText("1 installed · 2.0 KB")).toBeInTheDocument();
     expect(screen.getByText("Clean 2 partial")).toBeEnabled();
     expect(await screen.findByText("Local GGUF")).toBeInTheDocument();
-    expect(screen.getByTitle("Delete installed model")).toBeEnabled();
+    expect(screen.getByRole("button", { name: "Delete Local GGUF" })).toBeEnabled();
+  });
+
+  it("omits the partial-download cleanup action when there is nothing to clean", async () => {
+    const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+    render(
+      <QueryClientProvider client={client}>
+        <App />
+      </QueryClientProvider>,
+    );
+    fireEvent.click(await screen.findByText("Model library"));
+    expect(await screen.findByRole("heading", { name: "Model library" })).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Clean 0 partial" })).not.toBeInTheDocument();
   });
 
   it("edits Auto Mode use cases beside installed models", async () => {
@@ -1030,7 +1752,7 @@ describe("App", () => {
 
     fireEvent.click(await screen.findByText("Model library"));
     expect(await screen.findByText("General conversation")).toBeInTheDocument();
-    fireEvent.click(screen.getByRole("button", { name: "Edit use case" }));
+    fireEvent.click(screen.getByRole("button", { name: "Edit use case for Local specialist" }));
     fireEvent.change(screen.getByLabelText("Best uses for Local specialist"), {
       target: { value: "Python programming and code review" },
     });
@@ -1334,7 +2056,7 @@ describe("App", () => {
     await waitFor(() => expect(screen.queryByText("observatory.png")).not.toBeInTheDocument());
   });
 
-  it("starts the recovery window when cleanup finds new unreferenced media", async () => {
+  it("explains when cleanup only finds media still in the recovery window", async () => {
     vi.mocked(api.artifactStorage).mockResolvedValue({
       total_bytes: 2048,
       total_count: 1,
@@ -1354,7 +2076,8 @@ describe("App", () => {
     });
     vi.mocked(api.cleanupArtifacts).mockResolvedValue({
       dry_run: false,
-      marked_count: 1,
+      marked_count: 0,
+      retention_pending_count: 1,
       removed_count: 0,
       reclaimed_bytes: 0,
     });
@@ -1366,7 +2089,7 @@ describe("App", () => {
     );
     fireEvent.click(await screen.findByText("Media library"));
     fireEvent.click(await screen.findByRole("button", { name: "Run cleanup" }));
-    expect(await screen.findByText("1 newly unreferenced artifact entered the 30-day recovery window.")).toBeInTheDocument();
+    expect(await screen.findByText("1 artifact remains in the recovery window; none are eligible yet.")).toBeInTheDocument();
   });
 
   it("isolates role-aware settings in profile and preset editors", async () => {
@@ -1398,12 +2121,12 @@ describe("App", () => {
 
     fireEvent.click(await screen.findByText("Settings"));
     await screen.findByText("Image profile");
-    fireEvent.click(screen.getAllByRole("button", { name: "Edit" })[0]);
+    fireEvent.click(screen.getByRole("button", { name: "Edit profile: Image profile" }));
     expect(await screen.findByText("Negative prompt")).toBeInTheDocument();
     expect(screen.queryByText("Frames")).not.toBeInTheDocument();
 
     fireEvent.click(screen.getByRole("button", { name: "Close profile editor" }));
-    fireEvent.click(screen.getAllByRole("button", { name: "Edit" })[1]);
+    fireEvent.click(screen.getByRole("button", { name: "Edit preset: Video preset" }));
     expect(await screen.findByText("Frames")).toBeInTheDocument();
     expect(screen.queryByText("Negative prompt")).not.toBeInTheDocument();
   });
@@ -1432,12 +2155,12 @@ describe("App", () => {
 
     fireEvent.click(await screen.findByText("Settings"));
     await screen.findByText("Chat preset");
-    fireEvent.click(screen.getByRole("button", { name: "Edit" }));
+    fireEvent.click(screen.getByRole("button", { name: "Edit preset: Chat preset" }));
     expect(await screen.findByText("Maximum output")).toBeInTheDocument();
     expect(screen.queryByText("Context length")).not.toBeInTheDocument();
   });
 
-  it("isolates role-aware settings in per-turn controls", async () => {
+  it("isolates role-aware settings in per-chat defaults", async () => {
     const stamp = "2026-07-22T00:00:00Z";
     const chat = {
       id: "chat-role-settings",
@@ -1454,9 +2177,14 @@ describe("App", () => {
       updated_at: stamp,
     };
     localStorage.setItem("local-lm-chat", chat.id);
+    let persistedChat: Chat = { ...chat };
     vi.mocked(api.engines).mockResolvedValue([roleAwareMediaEngine]);
     vi.mocked(api.chats).mockResolvedValue([chat]);
-    vi.mocked(api.chat).mockResolvedValue({ ...chat, messages: [] });
+    vi.mocked(api.chat).mockImplementation(async () => ({ ...persistedChat, messages: [] }));
+    vi.mocked(api.updateChat).mockImplementation(async (_id, values) => {
+      persistedChat = { ...persistedChat, ...values };
+      return persistedChat;
+    });
     const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
     render(
       <QueryClientProvider client={client}>
@@ -1488,6 +2216,7 @@ describe("App", () => {
       active_image_profile_id: null,
       active_video_profile_id: null,
       active_head_message_id: null,
+      generation_settings_json: { chat: { max_tokens: 4096 } },
       created_at: stamp,
       updated_at: stamp,
     };
@@ -1502,13 +2231,129 @@ describe("App", () => {
       </QueryClientProvider>,
     );
 
-    const composer = await screen.findByPlaceholderText(/Ask anything/);
+    const composer = await screen.findByRole("textbox", { name: "Message" });
+    expect(screen.getByRole("combobox", { name: "Generation mode" })).toHaveValue("auto");
     fireEvent.change(composer, { target: { value: "Surprise me with a tiny story" } });
     fireEvent.click(screen.getByRole("button", { name: "Send" }));
 
     expect(await screen.findByText("Surprise me with a tiny story")).toBeVisible();
+    expect(api.sendTurn).toHaveBeenCalledWith(
+      chat.id,
+      "Surprise me with a tiny story",
+      "auto",
+      [],
+      {},
+    );
     expect(screen.getByText("Choosing mode and model…")).toBeVisible();
     expect(screen.getByRole("button", { name: "Preparing response" })).toBeDisabled();
+  });
+
+  it("keeps a deferred turn and its pending state on the originating chat", async () => {
+    const stamp = "2026-07-25T12:00:00Z";
+    const makeChat = (id: string, title: string): Chat => ({
+      id,
+      project_id: null,
+      title,
+      archived: false,
+      routing_mode: "text",
+      confirm_uncertain_media: false,
+      active_chat_profile_id: null,
+      active_image_profile_id: null,
+      active_video_profile_id: null,
+      active_head_message_id: null,
+      created_at: stamp,
+      updated_at: stamp,
+    });
+    const first = makeChat("chat-origin", "Origin chat");
+    const second = makeChat("chat-destination", "Destination chat");
+    const details = new Map<string, ChatDetail>([
+      [first.id, { ...first, messages: [] }],
+      [second.id, { ...second, messages: [] }],
+    ]);
+    const accepted: TurnAccepted = {
+      run: {
+        id: "run-origin",
+        idempotency_key: "turn-origin",
+        chat_id: first.id,
+        user_message_id: "user-origin",
+        assistant_message_id: "assistant-origin",
+        operation: "text",
+        status: "queued",
+        standalone_prompt: "Stay with the first chat",
+        profile_id: null,
+        workflow_revision_id: null,
+        settings_json: {},
+        provenance_json: {},
+        error: null,
+        created_at: stamp,
+      },
+      user_message: {
+        id: "user-origin",
+        chat_id: first.id,
+        parent_id: null,
+        role: "user",
+        status: "complete",
+        parts: [{
+          id: "user-origin-part",
+          position: 0,
+          type: "text",
+          text: "Stay with the first chat",
+          artifact_id: null,
+          metadata_json: {},
+        }],
+        created_at: stamp,
+        updated_at: stamp,
+      },
+      assistant_message: {
+        id: "assistant-origin",
+        chat_id: first.id,
+        parent_id: "user-origin",
+        role: "assistant",
+        status: "pending",
+        parts: [],
+        created_at: stamp,
+        updated_at: stamp,
+      },
+    };
+    let finishTurn: ((turn: TurnAccepted) => void) | undefined;
+    vi.mocked(api.sendTurn).mockImplementation(
+      () => new Promise<TurnAccepted>((resolve) => { finishTurn = resolve; }),
+    );
+    vi.mocked(api.chats).mockResolvedValue([first, second]);
+    vi.mocked(api.chat).mockImplementation(async (id) => details.get(id)!);
+    localStorage.setItem("local-lm-chat", first.id);
+    const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+    render(
+      <QueryClientProvider client={client}>
+        <App />
+      </QueryClientProvider>,
+    );
+
+    const composer = await screen.findByRole("textbox", { name: "Message" });
+    fireEvent.change(composer, { target: { value: "Stay with the first chat" } });
+    fireEvent.click(screen.getByRole("button", { name: "Send" }));
+    expect(await screen.findByText("Stay with the first chat")).toBeVisible();
+
+    fireEvent.click(screen.getByText(second.title));
+    expect(await screen.findByRole("heading", { name: second.title })).toBeInTheDocument();
+    expect(screen.queryByText("Stay with the first chat")).not.toBeInTheDocument();
+    const secondComposer = screen.getByRole("textbox", { name: "Message" });
+    expect(secondComposer).toBeEnabled();
+    fireEvent.change(secondComposer, { target: { value: "A second-chat message" } });
+    expect(screen.getByRole("button", { name: "Send" })).toBeEnabled();
+
+    await act(async () => {
+      finishTurn?.(accepted);
+    });
+    await waitFor(() => {
+      const origin = client.getQueryData<ChatDetail>(["chat", first.id]);
+      expect(origin?.messages.map((message) => message.id)).toEqual([
+        "user-origin",
+        "assistant-origin",
+      ]);
+    });
+    expect(client.getQueryData<ChatDetail>(["chat", second.id])?.messages).toEqual([]);
+    expect(screen.getByRole("heading", { name: second.title })).toBeInTheDocument();
   });
 
   it("applies the pinned workflow schema to per-turn controls", async () => {
@@ -1580,6 +2425,106 @@ describe("App", () => {
     expect(screen.getByText(/Fixed by this workflow at 81/)).toBeInTheDocument();
   });
 
+  it("selects prior-image workflow controls only for an explicit visual follow-up", async () => {
+    const stamp = "2026-07-22T00:00:00Z";
+    const chat = {
+      id: "chat-prior-image-controls",
+      project_id: null,
+      title: "Prior image controls",
+      archived: false,
+      routing_mode: "image" as const,
+      confirm_uncertain_media: false,
+      active_chat_profile_id: null,
+      active_image_profile_id: null,
+      active_video_profile_id: null,
+      active_head_message_id: "assistant-prior-image",
+      created_at: stamp,
+      updated_at: stamp,
+    };
+    const userMessage = {
+      id: "user-prior-image",
+      chat_id: chat.id,
+      parent_id: null,
+      role: "user" as const,
+      status: "complete" as const,
+      parts: [{ id: "prior-prompt", position: 0, type: "text" as const, text: "Make an apple", artifact_id: null, metadata_json: {} }],
+      created_at: stamp,
+      updated_at: stamp,
+    };
+    const assistantMessage = {
+      id: "assistant-prior-image",
+      chat_id: chat.id,
+      parent_id: userMessage.id,
+      role: "assistant" as const,
+      status: "complete" as const,
+      parts: [{ id: "prior-image", position: 0, type: "image" as const, text: null, artifact_id: "sha256:prior", metadata_json: {} }],
+      created_at: stamp,
+      updated_at: stamp,
+    };
+    const workflow = (
+      id: string,
+      operation: "text_to_image" | "image_to_image",
+      title: string,
+    ) => ({
+      id,
+      name: title,
+      operation,
+      description: "",
+      current_revision_id: `${id}-revision`,
+      revisions: [{
+        id: `${id}-revision`,
+        workflow_id: id,
+        version: 1,
+        engine: "mock",
+        engine_version: null,
+        ui_graph_json: {},
+        api_graph_json: {},
+        input_schema_json: {
+          type: "object",
+          properties: {
+            negative_prompt: {
+              type: "string",
+              title,
+              default: "",
+            },
+          },
+        },
+        dependencies_json: {},
+        trusted: true,
+        created_at: stamp,
+      }],
+    });
+    localStorage.setItem("local-lm-chat", chat.id);
+    vi.mocked(api.engines).mockResolvedValue([roleAwareMediaEngine]);
+    vi.mocked(api.chats).mockResolvedValue([chat]);
+    vi.mocked(api.chat).mockResolvedValue({
+      ...chat,
+      messages: [userMessage, assistantMessage],
+    });
+    vi.mocked(api.workflows).mockResolvedValue([
+      workflow("fresh-image", "text_to_image", "Fresh image exclusion"),
+      workflow("edit-image", "image_to_image", "Edit image exclusion"),
+    ]);
+    const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+    render(
+      <QueryClientProvider client={client}>
+        <App />
+      </QueryClientProvider>,
+    );
+
+    const composer = await screen.findByRole("textbox", { name: "Message" });
+    fireEvent.change(composer, { target: { value: "Create an image of a pear" } });
+    fireEvent.click(screen.getByRole("button", { name: "Turn settings" }));
+    expect(screen.getByLabelText(/Fresh image exclusion/)).toBeInTheDocument();
+    expect(screen.queryByLabelText(/Edit image exclusion/)).not.toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "Close settings" }));
+
+    fireEvent.change(composer, { target: { value: "Make it green" } });
+    fireEvent.click(screen.getByRole("button", { name: "Turn settings" }));
+    expect(screen.getByLabelText(/Edit image exclusion/)).toBeInTheDocument();
+    expect(screen.queryByLabelText(/Fresh image exclusion/)).not.toBeInTheDocument();
+  });
+
   it("applies turn controls to send, edit-and-branch, and regenerate actions", async () => {
     const stamp = "2026-07-22T00:00:00Z";
     const chat = {
@@ -1625,7 +2570,15 @@ describe("App", () => {
       settings_by_role: { chat: [contextLengthSetting, maxTokensSetting] },
     }]);
     vi.mocked(api.chats).mockResolvedValue([chat]);
-    vi.mocked(api.chat).mockResolvedValue({ ...chat, messages: [userMessage, assistantMessage] });
+    let persistedChat: Chat = { ...chat };
+    vi.mocked(api.chat).mockImplementation(async () => ({
+      ...persistedChat,
+      messages: [userMessage, assistantMessage],
+    }));
+    vi.mocked(api.updateChat).mockImplementation(async (_id, values) => {
+      persistedChat = { ...persistedChat, ...values };
+      return persistedChat;
+    });
     vi.mocked(api.sendTurn).mockReturnValue(new Promise(() => {}));
     vi.mocked(api.branchMessage).mockReturnValue(new Promise(() => {}));
     vi.mocked(api.regenerateMessage).mockReturnValue(new Promise(() => {}));
@@ -1640,6 +2593,9 @@ describe("App", () => {
     expect(screen.queryByRole("spinbutton", { name: /Context length/ })).not.toBeInTheDocument();
     fireEvent.change(screen.getByRole("spinbutton", { name: /Maximum output/ }), { target: { value: "4096" } });
     fireEvent.click(screen.getByRole("button", { name: "Close settings" }));
+    await waitFor(() => expect(api.updateChat).toHaveBeenCalledWith(chat.id, {
+      generation_settings_json: { chat: { max_tokens: 4096 } },
+    }));
 
     fireEvent.click(screen.getByRole("button", { name: "Regenerate response" }));
     await waitFor(() => expect(api.regenerateMessage).toHaveBeenCalledWith(assistantMessage.id, { max_tokens: 4096 }));
@@ -1649,7 +2605,7 @@ describe("App", () => {
     fireEvent.click(screen.getByText("Send edited message"));
     await waitFor(() => expect(api.branchMessage).toHaveBeenCalledWith(userMessage.id, "Count to 1000", { max_tokens: 4096 }));
 
-    fireEvent.change(screen.getByPlaceholderText(/Ask anything/), { target: { value: "Count to 1000" } });
+    fireEvent.change(screen.getByRole("textbox", { name: "Message" }), { target: { value: "Count to 1000" } });
     fireEvent.click(screen.getByRole("button", { name: "Send" }));
     await waitFor(() => expect(api.sendTurn).toHaveBeenCalledWith(chat.id, "Count to 1000", "text", [], { max_tokens: 4096 }));
   });
@@ -1672,6 +2628,10 @@ describe("App", () => {
     });
     const firstChat = chat("chat-settings-one", "Settings chat one");
     const secondChat = chat("chat-settings-two", "Settings chat two");
+    const storedChats = new Map<string, Chat>([
+      [firstChat.id, firstChat],
+      [secondChat.id, secondChat],
+    ]);
     localStorage.setItem("local-lm-chat", firstChat.id);
     vi.mocked(api.engines).mockResolvedValue([{
       ...roleAwareMediaEngine,
@@ -1682,9 +2642,14 @@ describe("App", () => {
     }]);
     vi.mocked(api.chats).mockResolvedValue([firstChat, secondChat]);
     vi.mocked(api.chat).mockImplementation(async (id) => ({
-      ...(id === firstChat.id ? firstChat : secondChat),
+      ...storedChats.get(id)!,
       messages: [],
     }));
+    vi.mocked(api.updateChat).mockImplementation(async (id, values) => {
+      const updated = { ...storedChats.get(id)!, ...values };
+      storedChats.set(id, updated);
+      return updated;
+    });
     const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
     render(
       <QueryClientProvider client={client}>
@@ -1707,5 +2672,99 @@ describe("App", () => {
     await screen.findByRole("heading", { name: firstChat.title });
     fireEvent.click(screen.getByRole("button", { name: "Turn settings" }));
     expect(screen.getByRole("spinbutton", { name: /Maximum output/ })).toHaveValue(4096);
+  });
+
+  it("persists each chat mode, role defaults, and preset binding without leakage", async () => {
+    const stamp = "2026-07-22T00:00:00Z";
+    const imagePreset = {
+      id: "preset-image-studio",
+      name: "Studio image",
+      role: "image" as const,
+      settings_json: { negative_prompt: "blur" },
+      is_default: false,
+    };
+    const firstChat = {
+      id: "chat-persisted-image",
+      project_id: null,
+      title: "Persisted image chat",
+      archived: false,
+      routing_mode: "text" as const,
+      confirm_uncertain_media: false,
+      active_chat_profile_id: null,
+      active_image_profile_id: null,
+      active_video_profile_id: null,
+      active_head_message_id: null,
+      generation_settings_json: {},
+      generation_preset_ids_json: {},
+      created_at: stamp,
+      updated_at: stamp,
+    };
+    const secondChat = {
+      ...firstChat,
+      id: "chat-persisted-video",
+      title: "Persisted video chat",
+      routing_mode: "video" as const,
+      generation_settings_json: { video: { frames: 81 } },
+    };
+    const storedChats = new Map<string, Chat>([
+      [firstChat.id, firstChat],
+      [secondChat.id, secondChat],
+    ]);
+    localStorage.setItem("local-lm-chat", firstChat.id);
+    vi.mocked(api.engines).mockResolvedValue([roleAwareMediaEngine]);
+    vi.mocked(api.presets).mockResolvedValue([imagePreset]);
+    vi.mocked(api.chats).mockResolvedValue([firstChat, secondChat]);
+    vi.mocked(api.chat).mockImplementation(async (id) => ({
+      ...storedChats.get(id)!,
+      messages: [],
+    }));
+    vi.mocked(api.updateChat).mockImplementation(async (id, values) => {
+      const updated = { ...storedChats.get(id)!, ...values };
+      storedChats.set(id, updated);
+      return updated;
+    });
+    const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+    render(
+      <QueryClientProvider client={client}>
+        <App />
+      </QueryClientProvider>,
+    );
+
+    const mode = await screen.findByDisplayValue("Text");
+    fireEvent.change(mode, { target: { value: "image" } });
+    await waitFor(() => expect(api.updateChat).toHaveBeenCalledWith(
+      firstChat.id,
+      { routing_mode: "image" },
+    ));
+    fireEvent.click(screen.getByRole("button", { name: "Turn settings" }));
+    fireEvent.change(screen.getByRole("combobox", { name: "image preset" }), {
+      target: { value: imagePreset.id },
+    });
+    fireEvent.change(screen.getByLabelText(/Negative prompt/), {
+      target: { value: "no fog" },
+    });
+    await waitFor(() => {
+      expect(api.updateChat).toHaveBeenCalledWith(firstChat.id, {
+        generation_preset_ids_json: { image: imagePreset.id },
+      });
+      expect(api.updateChat).toHaveBeenCalledWith(firstChat.id, {
+        generation_settings_json: { image: { negative_prompt: "no fog" } },
+      });
+    });
+    fireEvent.click(screen.getByRole("button", { name: "Close settings" }));
+
+    fireEvent.click(screen.getByText(secondChat.title));
+    await screen.findByRole("heading", { name: secondChat.title });
+    expect(screen.getByDisplayValue("Video")).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "Turn settings" }));
+    expect(screen.getByRole("spinbutton", { name: /Frames/ })).toHaveValue(81);
+    fireEvent.click(screen.getByRole("button", { name: "Close settings" }));
+
+    fireEvent.click(screen.getByText(firstChat.title));
+    await screen.findByRole("heading", { name: firstChat.title });
+    expect(screen.getByDisplayValue("Image")).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "Turn settings" }));
+    expect(screen.getByRole("combobox", { name: "image preset" })).toHaveValue(imagePreset.id);
+    expect(screen.getByLabelText(/Negative prompt/)).toHaveValue("no fog");
   });
 });

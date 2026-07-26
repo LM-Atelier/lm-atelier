@@ -12,12 +12,24 @@ class ApiModel(BaseModel):
     model_config = ConfigDict(from_attributes=True)
 
 
+GenerationSettingsByRole = dict[
+    Literal["chat", "image", "video"],
+    dict[str, Any],
+]
+GenerationPresetIdsByRole = dict[
+    Literal["chat", "image", "video"],
+    str | None,
+]
+
+
 class ProjectCreate(ApiModel):
     name: str = Field(min_length=1, max_length=200)
     description: str = Field(default="", max_length=10_000)
     instructions: str = Field(default="", max_length=100_000)
     image_workflow_revision_id: str | None = None
     video_workflow_revision_id: str | None = None
+    generation_settings_json: GenerationSettingsByRole = Field(default_factory=dict)
+    generation_preset_ids_json: GenerationPresetIdsByRole = Field(default_factory=dict)
 
 
 class ProjectUpdate(ApiModel):
@@ -27,6 +39,8 @@ class ProjectUpdate(ApiModel):
     archived: bool | None = None
     image_workflow_revision_id: str | None = None
     video_workflow_revision_id: str | None = None
+    generation_settings_json: GenerationSettingsByRole | None = None
+    generation_preset_ids_json: GenerationPresetIdsByRole | None = None
 
 
 class ProjectOut(ApiModel):
@@ -37,6 +51,8 @@ class ProjectOut(ApiModel):
     archived: bool
     image_workflow_revision_id: str | None
     video_workflow_revision_id: str | None
+    generation_settings_json: GenerationSettingsByRole
+    generation_preset_ids_json: GenerationPresetIdsByRole
     created_at: datetime
     updated_at: datetime
 
@@ -45,6 +61,8 @@ class ChatCreate(ApiModel):
     title: str = Field(default="New chat", min_length=1, max_length=240)
     project_id: str | None = None
     routing_mode: RoutingMode = RoutingMode.AUTO
+    generation_settings_json: GenerationSettingsByRole = Field(default_factory=dict)
+    generation_preset_ids_json: GenerationPresetIdsByRole = Field(default_factory=dict)
 
 
 class ChatUpdate(ApiModel):
@@ -56,6 +74,8 @@ class ChatUpdate(ApiModel):
     active_chat_profile_id: str | None = None
     active_image_profile_id: str | None = None
     active_video_profile_id: str | None = None
+    generation_settings_json: GenerationSettingsByRole | None = None
+    generation_preset_ids_json: GenerationPresetIdsByRole | None = None
 
 
 class ArtifactOut(ApiModel):
@@ -101,6 +121,7 @@ class ArtifactCleanupRequest(ApiModel):
 class ArtifactCleanupResult(ApiModel):
     dry_run: bool
     marked_count: int
+    retention_pending_count: int
     removed_count: int
     reclaimed_bytes: int
 
@@ -144,6 +165,8 @@ class ChatOut(ApiModel):
     active_image_profile_id: str | None
     active_video_profile_id: str | None
     active_head_message_id: str | None
+    generation_settings_json: GenerationSettingsByRole
+    generation_preset_ids_json: GenerationPresetIdsByRole
     created_at: datetime
     updated_at: datetime
 
@@ -603,6 +626,7 @@ class EngineCapabilities(ApiModel):
     version: str
     roles: list[str]
     operations: list[str]
+    input_modalities: list[str] = Field(default_factory=lambda: ["text"])
     formats: list[str]
     devices: list[str]
     streaming: bool
@@ -676,6 +700,12 @@ class SystemInfo(ApiModel):
     support: PlatformAssessment
 
 
+class ApplicationInfo(ApiModel):
+    version: str
+    data_directory: str
+    log_directory: str
+
+
 class WorkerStatus(ApiModel):
     name: Literal["chat", "media"]
     state: Literal["stopped", "starting", "ready", "exited"] = "stopped"
@@ -690,6 +720,25 @@ class WorkerStatus(ApiModel):
     peak_memory_bytes: int | None = None
     active_jobs: int = 0
     queued_jobs: int = 0
+    failure_detail: str | None = None
+    stderr_tail: str | None = None
+    log_path: str | None = None
+
+
+class RuntimeStatus(ApiModel):
+    engine: Literal["llama.cpp", "comfyui"]
+    release: str
+    state: Literal["missing", "installing", "ready", "failed", "unsupported"]
+    supported: bool
+    managed: bool = False
+    progress: float = 0
+    downloaded_bytes: int = 0
+    size_bytes: int | None = None
+    distribution: str
+    license: str
+    security_status: Literal["checksum-pinned", "blocked"] = "checksum-pinned"
+    security_message: str = ""
+    message: str = ""
 
 
 class BackupInfo(ApiModel):

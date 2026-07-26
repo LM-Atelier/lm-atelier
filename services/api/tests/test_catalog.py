@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+import json
+from pathlib import Path
+
 import httpx
 import pytest
 
@@ -7,14 +10,21 @@ from local_lm.catalog import HuggingFaceCatalog
 from local_lm.config import Settings
 from local_lm.domain import CompatibilityLevel
 from local_lm.downloads import DownloadManager
-from local_lm.preflight import _automatic_selection
-from local_lm.schemas import DownloadRequest
+from local_lm.preflight import _automatic_selection, assess_catalog_install
+from local_lm.schemas import (
+    CatalogDetail,
+    CatalogModel,
+    CatalogPreflightRequest,
+    DownloadRequest,
+    SystemInfo,
+)
 
 
 class Sibling:
-    def __init__(self, name: str, size: int) -> None:
+    def __init__(self, name: str, size: int, sha256: str | None = None) -> None:
         self.rfilename = name
         self.size = size
+        self.lfs = {"sha256": sha256} if sha256 else None
 
 
 def test_gguf_catalog_entry_is_likely_compatible() -> None:
@@ -41,6 +51,100 @@ def test_default_chat_download_selects_smallest_gguf() -> None:
     assert files == ["small.gguf"]
 
 
+def test_default_chat_download_includes_matching_multimodal_projector() -> None:
+    request = DownloadRequest(
+        remote_id="owner/model",
+        role="chat",
+        engine="llama.cpp",
+    )
+    files = DownloadManager._select_files(
+        request,
+        [
+            Sibling("vision-model-4B-Q4_K_M.gguf", 20, "a" * 64),
+            Sibling("vision-model-8B-Q4_K_M.gguf", 40, "b" * 64),
+            Sibling("mmproj-vision-model-4B-f32.gguf", 8, "c" * 64),
+            Sibling("mmproj-vision-model-4B-f16.gguf", 4, "d" * 64),
+            Sibling("mmproj-vision-model-8B-f16.gguf", 6, "e" * 64),
+        ],
+    )
+
+    assert files == [
+        "vision-model-4B-Q4_K_M.gguf",
+        "mmproj-vision-model-4B-f16.gguf",
+    ]
+
+
+def test_chat_download_selects_every_shard_from_one_quantization() -> None:
+    request = DownloadRequest(
+        remote_id="owner/model",
+        role="chat",
+        engine="llama.cpp",
+    )
+    siblings = [
+        Sibling("model-Q2_K-00001-of-00002.gguf", 4, "a" * 64),
+        Sibling("model-Q2_K-00002-of-00002.gguf", 4, "b" * 64),
+        Sibling("model-Q4_K_M-00001-of-00002.gguf", 6, "c" * 64),
+        Sibling("model-Q4_K_M-00002-of-00002.gguf", 6, "d" * 64),
+    ]
+
+    assert DownloadManager._select_files(request, siblings) == [
+        "model-Q4_K_M-00001-of-00002.gguf",
+        "model-Q4_K_M-00002-of-00002.gguf",
+    ]
+
+
+def test_chat_download_rejects_an_incomplete_split_gguf() -> None:
+    request = DownloadRequest(
+        remote_id="owner/model",
+        role="chat",
+        engine="llama.cpp",
+    )
+
+    with pytest.raises(ValueError, match="incomplete; missing shard"):
+        DownloadManager._select_files(
+            request,
+            [Sibling("model-Q4_K_M-00001-of-00002.gguf", 6, "a" * 64)],
+        )
+
+
+def test_chat_download_rejects_duplicate_split_shard_metadata() -> None:
+    request = DownloadRequest(
+        remote_id="owner/model",
+        role="chat",
+        engine="llama.cpp",
+    )
+    siblings = [
+        Sibling("model-Q4_K_M-00001-of-00002.gguf", 6, "a" * 64),
+        Sibling("model-Q4_K_M-00001-of-00002.gguf", 6, "a" * 64),
+        Sibling("model-Q4_K_M-00002-of-00002.gguf", 6, "b" * 64),
+    ]
+
+    with pytest.raises(ValueError, match="duplicate shard"):
+        DownloadManager._select_files(request, siblings)
+
+
+def test_explicit_chat_download_rejects_mixed_quantization_sets() -> None:
+    filenames = [
+        "model-Q4_K_M-00001-of-00002.gguf",
+        "model-Q4_K_M-00002-of-00002.gguf",
+        "model-Q5_K_M-00001-of-00002.gguf",
+        "model-Q5_K_M-00002-of-00002.gguf",
+    ]
+    request = DownloadRequest(
+        remote_id="owner/model",
+        role="chat",
+        engine="llama.cpp",
+        allow_patterns=["*.gguf"],
+    )
+    siblings = [
+        Sibling(filename, index + 1, f"{index + 1:064x}")
+        for index, filename in enumerate(filenames)
+    ]
+
+    with pytest.raises(ValueError, match="mix quantizations or shard sets"):
+        DownloadManager._select_files(request, siblings)
+
+
 def test_automatic_chat_selection_falls_back_to_smallest_when_none_fit_memory() -> None:
     gib = 1024**3
     files = {
@@ -54,6 +158,106 @@ def test_automatic_chat_selection_falls_back_to_smallest_when_none_fit_memory() 
         },
     }
     assert _automatic_selection(files, "chat", 2 * gib) == ["model-Q2_K.gguf"]
+
+
+def test_chat_preflight_selects_and_hashes_multimodal_projector(tmp_path: Path) -> None:
+    detail = CatalogDetail(
+        model=CatalogModel(
+            remote_id="owner/vision-model",
+            name="vision-model",
+            compatibility="likely",
+        ),
+        revision="a" * 40,
+        files=[
+            {
+                "filename": "vision-model-4B-Q4_K_M.gguf",
+                "size": 10,
+                "sha256": "a" * 64,
+            },
+            {
+                "filename": "mmproj-vision-model-4B-f16.gguf",
+                "size": 3,
+                "sha256": "b" * 64,
+            },
+        ],
+    )
+    system = SystemInfo.model_construct(
+        memory_total_bytes=16 * 1024**3,
+        disk_free_bytes=100 * 1024**3,
+        devices=[],
+    )
+
+    result = assess_catalog_install(
+        detail,
+        CatalogPreflightRequest(role="chat", engine="llama.cpp"),
+        Settings(data_dir=tmp_path),
+        system,
+    )
+
+    assert result.selected_files == [
+        "vision-model-4B-Q4_K_M.gguf",
+        "mmproj-vision-model-4B-f16.gguf",
+    ]
+    assert result.expected_sha256 == {
+        "vision-model-4B-Q4_K_M.gguf": "a" * 64,
+        "mmproj-vision-model-4B-f16.gguf": "b" * 64,
+    }
+    assert result.download_bytes == 13
+    assert result.can_install is True
+
+
+@pytest.mark.parametrize(
+    ("role", "engine", "filename"),
+    [
+        ("chat", "llama.cpp", "model-Q4_K_M.gguf"),
+        ("image", "comfyui", "model.safetensors"),
+        ("video", "comfyui", "model.safetensors"),
+    ],
+)
+def test_preflight_pins_the_catalog_resolved_revision_for_every_role(
+    tmp_path: Path,
+    role: str,
+    engine: str,
+    filename: str,
+) -> None:
+    resolved_revision = "a" * 40
+    detail = CatalogDetail(
+        model=CatalogModel(
+            remote_id="owner/model",
+            name="model",
+            compatibility="likely",
+        ),
+        revision=resolved_revision,
+        files=[
+            {
+                "filename": filename,
+                "size": 1024,
+                "sha256": "b" * 64,
+            }
+        ],
+    )
+    request = CatalogPreflightRequest(
+        revision="main",
+        role=role,  # type: ignore[arg-type]
+        engine=engine,
+    )
+    system = SystemInfo.model_construct(
+        memory_total_bytes=16 * 1024**3,
+        disk_free_bytes=100 * 1024**3,
+        devices=[],
+    )
+
+    result = assess_catalog_install(
+        detail,
+        request,
+        Settings(data_dir=tmp_path / role),
+        system,
+    )
+
+    revision_check = next(check for check in result.checks if check.id == "revision")
+    assert result.revision == resolved_revision
+    assert revision_check.status == "pass"
+    assert resolved_revision in revision_check.detail
 
 
 def test_explicit_download_patterns_are_honored() -> None:
@@ -83,6 +287,51 @@ def test_automatic_comfy_paths_cover_checkpoint_and_component_layouts() -> None:
         "text_encoders": "split_files/text_encoders",
         "vae": "split_files/vae",
     }
+
+
+def _write_safetensors_header(path: Path, tensor_names: list[str]) -> None:
+    header = {
+        name: {
+            "dtype": "F16",
+            "shape": [1],
+            "data_offsets": [index * 2, index * 2 + 2],
+        }
+        for index, name in enumerate(tensor_names)
+    }
+    encoded = json.dumps(header).encode()
+    path.write_bytes(len(encoded).to_bytes(8, "little") + encoded + b"\0" * (len(header) * 2))
+
+
+def test_adaptive_checkpoint_probe_accepts_a_complete_standard_checkpoint(
+    tmp_path: Path,
+) -> None:
+    checkpoint = tmp_path / "model.safetensors"
+    _write_safetensors_header(
+        checkpoint,
+        [
+            "model.diffusion_model.input_blocks.0.weight",
+            "first_stage_model.encoder.conv_in.weight",
+            "conditioner.embedders.0.transformer.weight",
+        ],
+    )
+
+    DownloadManager._validate_standard_checkpoint_safetensors(checkpoint)
+
+
+def test_adaptive_checkpoint_probe_rejects_a_single_non_checkpoint_safetensors_repo(
+    tmp_path: Path,
+) -> None:
+    lora = tmp_path / "model.safetensors"
+    _write_safetensors_header(
+        lora,
+        [
+            "lora_unet_down_blocks_0_attentions_0_to_q.lora_down.weight",
+            "lora_unet_down_blocks_0_attentions_0_to_q.lora_up.weight",
+        ],
+    )
+
+    with pytest.raises(ValueError, match="not a complete standard checkpoint"):
+        DownloadManager._validate_standard_checkpoint_safetensors(lora)
 
 
 def test_pickle_compatible_download_is_blocked() -> None:
@@ -293,6 +542,67 @@ async def test_catalog_detail_requests_live_blob_metadata(tmp_path) -> None:
             "sha256": "a" * 64,
         }
     ]
+
+
+@pytest.mark.parametrize(
+    "remote_id",
+    [
+        "../api",
+        "owner/model/extra",
+        "owner/model?blobs=false",
+        "owner/model#fragment",
+        "owner%2fother/model",
+        "owner/",
+    ],
+)
+async def test_catalog_detail_rejects_unsafe_remote_ids_without_a_request(
+    tmp_path: Path,
+    remote_id: str,
+) -> None:
+    requests: list[httpx.Request] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        requests.append(request)
+        return httpx.Response(500)
+
+    catalog = HuggingFaceCatalog(Settings(data_dir=tmp_path))
+    await catalog.close()
+    catalog._client = httpx.AsyncClient(
+        base_url="https://huggingface.co",
+        transport=httpx.MockTransport(handler),
+    )
+    try:
+        with pytest.raises(ValueError, match="owner/model"):
+            await catalog.inspect(remote_id)
+    finally:
+        await catalog.close()
+
+    assert requests == []
+
+
+async def test_catalog_search_ignores_entries_with_unsafe_remote_ids(tmp_path: Path) -> None:
+    def handler(_request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200,
+            json=[
+                {"id": "owner/model", "tags": ["gguf"]},
+                {"id": "owner/model?private=true", "tags": ["gguf"]},
+                {"id": "../api/models", "tags": ["gguf"]},
+            ],
+        )
+
+    catalog = HuggingFaceCatalog(Settings(data_dir=tmp_path))
+    await catalog.close()
+    catalog._client = httpx.AsyncClient(
+        base_url="https://huggingface.co",
+        transport=httpx.MockTransport(handler),
+    )
+    try:
+        page = await catalog.search(role="chat")
+    finally:
+        await catalog.close()
+
+    assert [item.remote_id for item in page.items] == ["owner/model"]
 
 
 async def test_maximum_size_filter_hydrates_live_file_sizes(tmp_path) -> None:
