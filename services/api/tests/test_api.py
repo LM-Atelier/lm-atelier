@@ -1725,6 +1725,10 @@ async def test_media_variations_create_ordered_independent_output_slots(
                 select(Job).where(Job.work_plan_id == plan["id"]).order_by(Job.queue_ticket)
             ).all()
             assert len(runs) == len(steps) == len(jobs) == 4
+            assert {step.prompt for step in steps} == {"Create one image of a blue ceramic apple"}
+            assert {run.standalone_prompt for run in runs} == {
+                "Create one image of a blue ceramic apple"
+            }
             assert len({run.assistant_message_id for run in runs}) == 4
             assert [job.payload_json["output_index"] for job in jobs] == [1, 2, 3, 4]
             assert [job.payload_json["output_count"] for job in jobs] == [4, 4, 4, 4]

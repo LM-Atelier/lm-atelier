@@ -780,6 +780,11 @@ class ConversationOrchestrator:
                 configured_output_count,
             )
         )
+        per_output_prompt = ModalityRouter.per_output_media_prompt(
+            plan.standalone_prompt,
+            plan.operation,
+            output_count,
+        )
         if output_count > self.engines.settings.max_media_outputs_per_plan:
             raise ValueError(
                 f"A media request can create at most "
@@ -1017,7 +1022,7 @@ class ConversationOrchestrator:
                 display_group="media_outputs" if output_count > 1 else None,
                 operation=plan.operation.value,
                 status=JobStatus.QUEUED.value,
-                prompt=plan.standalone_prompt,
+                prompt=per_output_prompt,
                 profile_id=profile_id,
                 workflow_revision_id=workflow_revision.id if workflow_revision else None,
                 settings_json=output_settings,
@@ -1104,7 +1109,7 @@ class ConversationOrchestrator:
                 work_step_id=work_step.id,
                 operation=plan.operation.value,
                 status=RunStatus.QUEUED.value,
-                standalone_prompt=plan.standalone_prompt,
+                standalone_prompt=per_output_prompt,
                 profile_id=profile_id,
                 vision_profile_id=vision_profile_id,
                 workflow_revision_id=workflow_revision.id if workflow_revision else None,
