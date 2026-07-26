@@ -1221,6 +1221,66 @@ function workflowSchemaForTurn(
     ?.input_schema_json;
 }
 
+function MediaOutputPlan({
+  plan,
+  onCancelStep,
+  onRetryStep,
+}: {
+  plan: WorkPlan;
+  onCancelStep: (stepId: string) => void;
+  onRetryStep: (stepId: string) => void;
+}) {
+  const steps = [...plan.steps].sort((left, right) => left.ordinal - right.ordinal);
+  const counts = steps.reduce<Record<string, number>>((current, step) => {
+    current[step.status] = (current[step.status] ?? 0) + 1;
+    return current;
+  }, {});
+  const summary = Object.entries(counts)
+    .map(([status, count]) => `${count} ${status.replace("_", " ")}`)
+    .join(" · ");
+  return (
+    <details className="media-output-plan">
+      <summary>
+        <span>{steps.length} media outputs</span>
+        <small>{summary}</small>
+      </summary>
+      <ol>
+        {steps.map((step) => {
+          const cancellable = ["queued", "running", "paused"].includes(step.status);
+          const retryable = ["failed", "cancelled", "interrupted"].includes(step.status);
+          return (
+            <li key={step.id}>
+              <span>
+                <strong>Output {step.ordinal}</strong>
+                <small>{step.status.replace("_", " ")}</small>
+                {step.error && <small className="error-text">{step.error}</small>}
+              </span>
+              {cancellable && (
+                <button
+                  className="secondary compact-button"
+                  aria-label={`Cancel output ${step.ordinal}`}
+                  onClick={() => onCancelStep(step.id)}
+                >
+                  Cancel
+                </button>
+              )}
+              {retryable && (
+                <button
+                  className="secondary compact-button"
+                  aria-label={`Retry output ${step.ordinal}`}
+                  onClick={() => onRetryStep(step.id)}
+                >
+                  Retry
+                </button>
+              )}
+            </li>
+          );
+        })}
+      </ol>
+    </details>
+  );
+}
+
 function ChatView({
   chat,
   engines,
@@ -1244,6 +1304,8 @@ function ChatView({
   onStop,
   onStopAndSend,
   onCancelPlan,
+  onCancelStep,
+  onRetryStep,
 }: {
   chat?: ChatDetail;
   engines: EngineCapabilities[];
@@ -1277,6 +1339,8 @@ function ChatView({
     settings: Record<string, unknown>,
   ) => void;
   onCancelPlan: (planId: string) => void;
+  onCancelStep: (stepId: string) => void;
+  onRetryStep: (stepId: string) => void;
 }) {
   const endRef = useRef<HTMLDivElement>(null);
   useEffect(() => {
@@ -1295,8 +1359,18 @@ function ChatView({
   const busy = stoppable || pendingTurns.length > 0;
   const planByAssistantMessage = new Map(
     workPlans.flatMap((plan) => {
-      const assistantMessageId = plan.summary_json.assistant_message_id;
-      return typeof assistantMessageId === "string" ? [[assistantMessageId, plan] as const] : [];
+      const assistantMessageIds = Array.isArray(plan.summary_json.assistant_message_ids)
+        ? plan.summary_json.assistant_message_ids.filter(
+          (messageId): messageId is string => typeof messageId === "string",
+        )
+        : [];
+      const legacyAssistantMessageId = plan.summary_json.assistant_message_id;
+      if (typeof legacyAssistantMessageId === "string") {
+        assistantMessageIds.push(legacyAssistantMessageId);
+      }
+      return [...new Set(assistantMessageIds)].map(
+        (messageId) => [messageId, plan] as const,
+      );
     }),
   );
   return (
@@ -1320,26 +1394,41 @@ function ChatView({
       <div className="messages">
         {messages.length === 0 && pendingTurns.length === 0 ? (
           <EmptyState icon={<Sparkles />} title="What should we make?" body="Ask anything or create an image or video. Auto mode picks the model." />
-        ) : messages.map((message) => <MessageBubble
-          key={message.id}
-          message={message}
-          liveText={liveText[message.id]}
-          onRegenerate={busy ? undefined : (messageId) => onRegenerate(
-            messageId,
-            chat.routing_mode === "auto" ? {} : settings,
-          )}
-          onSelectRevision={busy ? undefined : onSelectRevision}
-          onEdit={busy ? undefined : (messageId, text) => onEdit(
-            messageId,
-            text,
-            chat.routing_mode,
-            chat.routing_mode === "auto" ? {} : settings,
-          )}
-          onCancelQueued={(() => {
-            const plan = planByAssistantMessage.get(message.id);
-            return plan?.status === "queued" ? () => onCancelPlan(plan.id) : undefined;
-          })()}
-        />)}
+        ) : messages.map((message) => {
+          const messagePlan = planByAssistantMessage.get(message.id);
+          const isPrimaryOutput = messagePlan?.summary_json.assistant_message_id === message.id;
+          return (
+            <Fragment key={message.id}>
+              {messagePlan && messagePlan.steps.length > 1 && isPrimaryOutput && (
+                <MediaOutputPlan
+                  plan={messagePlan}
+                  onCancelStep={onCancelStep}
+                  onRetryStep={onRetryStep}
+                />
+              )}
+              <MessageBubble
+                message={message}
+                liveText={liveText[message.id]}
+                onRegenerate={busy ? undefined : (messageId) => onRegenerate(
+                  messageId,
+                  chat.routing_mode === "auto" ? {} : settings,
+                )}
+                onSelectRevision={busy ? undefined : onSelectRevision}
+                onEdit={busy ? undefined : (messageId, text) => onEdit(
+                  messageId,
+                  text,
+                  chat.routing_mode,
+                  chat.routing_mode === "auto" ? {} : settings,
+                )}
+                onCancelQueued={
+                  messagePlan && messagePlan.steps.length <= 1 && messagePlan.status === "queued"
+                    ? () => onCancelPlan(messagePlan.id)
+                    : undefined
+                }
+              />
+            </Fragment>
+          );
+        })}
         {pendingTurns.map((pendingTurn) => (
           <Fragment key={pendingTurn.id}>
             <article className="message user optimistic">
@@ -3183,6 +3272,19 @@ export default function App() {
       void client.invalidateQueries({ queryKey: ["jobs"] });
     },
   });
+  const refreshWorkStep = () => {
+    void client.invalidateQueries({ queryKey: ["chat", activeChatId] });
+    void client.invalidateQueries({ queryKey: ["work-plans", activeChatId] });
+    void client.invalidateQueries({ queryKey: ["jobs"] });
+  };
+  const cancelWorkStep = useMutation({
+    mutationFn: api.cancelWorkStep,
+    onSuccess: refreshWorkStep,
+  });
+  const retryWorkStep = useMutation({
+    mutationFn: api.retryWorkStep,
+    onSuccess: refreshWorkStep,
+  });
   const regenerate = useMutation({
     mutationFn: ({ messageId, settings }: { chatId: string; messageId: string; settings: Record<string, unknown> }) =>
       api.regenerateMessage(messageId, settings),
@@ -3423,6 +3525,10 @@ export default function App() {
       }
     }} onCancelPlan={(planId) => {
       cancelWorkPlan.mutate(planId);
+    }} onCancelStep={(stepId) => {
+      cancelWorkStep.mutate(stepId);
+    }} onRetryStep={(stepId) => {
+      retryWorkStep.mutate(stepId);
     }} onSend={(text, mode, artifacts, settings) => {
       if (displayedChat) {
         send.mutate({
@@ -3435,7 +3541,7 @@ export default function App() {
         });
       }
     }} />;
-  }, [view, engines.data, profiles.data, presets.data, workflows.data, allProjects, chat.data, chatDrafts, liveText, pendingTurns, workPlans.data, send, regenerate, selectResponseRevision, branch, stop, cancelWorkPlan, updateChat, client]);
+  }, [view, engines.data, profiles.data, presets.data, workflows.data, allProjects, chat.data, chatDrafts, liveText, pendingTurns, workPlans.data, send, regenerate, selectResponseRevision, branch, stop, cancelWorkPlan, cancelWorkStep, retryWorkStep, updateChat, client]);
 
   return (
     <IncognitoContext.Provider value={incognito}>
@@ -3452,7 +3558,7 @@ export default function App() {
         }} onChat={(id) => { setCurrentChatId(id); if (!incognito) localStorage.setItem("local-lm-chat", id); setView("chat"); focusMainContent(); }} onView={(nextView) => { setView(nextView); focusMainContent(); }} onNewChat={(projectId) => createChat.mutate(projectId)} onNewProject={() => { const name = window.prompt("Project name"); if (name?.trim()) createProject.mutate(name.trim()); }} onExportProject={(id, includeMedia) => exportProject.mutate({ id, includeMedia })} onImportProject={(file) => importProject.mutate(file)} onUpdateChat={(id, values) => manageChat.mutate({ id, values })} onDeleteChat={(id, deleteGeneratedMedia) => deleteChat.mutate({ id, deleteGeneratedMedia })} onUpdateProject={(id, values) => updateProject.mutate({ id, values })} onDeleteProject={(id) => deleteProject.mutate(id)} />
         <main id="main-content" tabIndex={-1}>{activeContent}</main>
         <JobsPanel key={incognito ? "incognito-jobs" : "durable-jobs"} />
-        {(send.error || regenerate.error || selectResponseRevision.error || branch.error || stop.error || cancelWorkPlan.error || updateChat.error || createChat.error || startIncognito.error || endIncognito.error || createProject.error || importProject.error || manageChat.error || deleteChat.error || updateProject.error || deleteProject.error) && <div className="toast error" role="alert"><X size={16} />{(send.error || regenerate.error || selectResponseRevision.error || branch.error || stop.error || cancelWorkPlan.error || updateChat.error || createChat.error || startIncognito.error || endIncognito.error || createProject.error || importProject.error || manageChat.error || deleteChat.error || updateProject.error || deleteProject.error)?.message}</div>}
+        {(send.error || regenerate.error || selectResponseRevision.error || branch.error || stop.error || cancelWorkPlan.error || cancelWorkStep.error || retryWorkStep.error || updateChat.error || createChat.error || startIncognito.error || endIncognito.error || createProject.error || importProject.error || manageChat.error || deleteChat.error || updateProject.error || deleteProject.error) && <div className="toast error" role="alert"><X size={16} />{(send.error || regenerate.error || selectResponseRevision.error || branch.error || stop.error || cancelWorkPlan.error || cancelWorkStep.error || retryWorkStep.error || updateChat.error || createChat.error || startIncognito.error || endIncognito.error || createProject.error || importProject.error || manageChat.error || deleteChat.error || updateProject.error || deleteProject.error)?.message}</div>}
       </div>
     </IncognitoContext.Provider>
   );

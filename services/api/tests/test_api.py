@@ -46,6 +46,7 @@ from local_lm.models import (
     WorkflowDefinition,
     WorkflowRevision,
     WorkPlan,
+    WorkStep,
     WorkStepDependency,
 )
 from local_lm.orchestrator import ConversationOrchestrator
@@ -1440,6 +1441,108 @@ async def test_legacy_turn_creates_one_durable_work_plan_and_step(
     assert [item["id"] for item in listed] == [plan_id]
 
 
+async def test_media_variations_create_ordered_independent_output_slots(
+    app: FastAPI,
+    client: AsyncClient,
+) -> None:
+    chat = (await client.post("/api/chats", json={"title": "Four variations"})).json()
+    async with app.state.services.scheduler.lease("primary"):
+        response = await client.post(
+            f"/api/chats/{chat['id']}/turns",
+            json={
+                "text": "Create four variations of a blue ceramic apple",
+                "mode": "image",
+                "idempotency_key": "four-media-outputs",
+            },
+        )
+        assert response.status_code == 202
+        accepted = response.json()
+        plan = (await client.get(f"/api/work-plans/{accepted['run']['work_plan_id']}")).json()
+        assert plan["planner_version"] == "media-outputs-v1"
+        assert plan["summary_json"]["output_count"] == 4
+        assert plan["summary_json"]["status_counts"] == {"queued": 4}
+        assert [step["ordinal"] for step in plan["steps"]] == [1, 2, 3, 4]
+        assert [step["output_contract_json"][0]["slot"] for step in plan["steps"]] == [
+            "output-1",
+            "output-2",
+            "output-3",
+            "output-4",
+        ]
+        assert all(step["display_group"] == "media_outputs" for step in plan["steps"])
+        assert all(step["settings_json"].get("batch_size") == 1 for step in plan["steps"])
+
+        with SessionLocal() as session:
+            runs = session.scalars(
+                select(Run).where(Run.work_plan_id == plan["id"]).order_by(Run.created_at, Run.id)
+            ).all()
+            steps = session.scalars(
+                select(WorkStep).where(WorkStep.plan_id == plan["id"]).order_by(WorkStep.ordinal)
+            ).all()
+            jobs = session.scalars(
+                select(Job).where(Job.work_plan_id == plan["id"]).order_by(Job.queue_ticket)
+            ).all()
+            assert len(runs) == len(steps) == len(jobs) == 4
+            assert len({run.assistant_message_id for run in runs}) == 4
+            assert [job.payload_json["output_index"] for job in jobs] == [1, 2, 3, 4]
+            assert [job.payload_json["output_count"] for job in jobs] == [4, 4, 4, 4]
+            assert runs[0].idempotency_key == "four-media-outputs"
+            assert all(run.idempotency_key is None for run in runs[1:])
+            assistant_ids = plan["summary_json"]["assistant_message_ids"]
+            messages = [session.get(Message, message_id) for message_id in assistant_ids]
+            assert all(message is not None for message in messages)
+            assert messages[0].parent_id == accepted["user_message"]["id"]
+            assert [message.parent_id for message in messages[1:]] == assistant_ids[:-1]
+
+        second_step_id = plan["steps"][1]["id"]
+        cancelled = await client.post(f"/api/work-steps/{second_step_id}/cancel")
+        assert cancelled.status_code == 200
+        updated = (await client.get(f"/api/work-plans/{plan['id']}")).json()
+        assert [step["status"] for step in updated["steps"]] == [
+            "queued",
+            "cancelled",
+            "queued",
+            "queued",
+        ]
+        assert updated["status"] == "queued"
+        assert updated["summary_json"]["status_counts"] == {
+            "queued": 3,
+            "cancelled": 1,
+        }
+
+        retried = await client.post(f"/api/work-steps/{second_step_id}/retry")
+        assert retried.status_code == 200
+        updated = (await client.get(f"/api/work-plans/{plan['id']}")).json()
+        assert [step["status"] for step in updated["steps"]] == ["queued"] * 4
+
+    for run_id in plan["summary_json"]["run_ids"]:
+        await wait_for_run(client, run_id)
+    completed = (await client.get(f"/api/work-plans/{plan['id']}")).json()
+    assert completed["status"] == "complete"
+    assert completed["summary_json"]["status_counts"] == {"complete": 4}
+    assert (await client.delete(f"/api/chats/{chat['id']}")).status_code == 204
+    with SessionLocal() as session:
+        assert session.get(WorkPlan, plan["id"]) is None
+        assert not session.scalar(select(Job.id).where(Job.work_plan_id == plan["id"]))
+        assert not session.scalar(select(Run.id).where(Run.work_plan_id == plan["id"]))
+
+
+async def test_media_output_count_is_bounded_before_any_turn_is_written(
+    client: AsyncClient,
+) -> None:
+    chat = (await client.post("/api/chats", json={"title": "Output bound"})).json()
+    response = await client.post(
+        f"/api/chats/{chat['id']}/turns",
+        json={
+            "text": "Create nine variations of a red square",
+            "mode": "image",
+        },
+    )
+    assert response.status_code == 422
+    detail = (await client.get(f"/api/chats/{chat['id']}")).json()
+    assert detail["messages"] == []
+    assert (await client.get("/api/work-plans", params={"chat_id": chat["id"]})).json() == []
+
+
 async def test_turn_remains_truthfully_queued_until_compute_lease(
     app: FastAPI,
     client: AsyncClient,
@@ -2000,6 +2103,62 @@ async def test_restart_recovery_preserves_queued_transcript_order(
     app.state.services.orchestrator.recover_interrupted()
 
     assert restarted == expected
+
+
+async def test_restart_recovery_preserves_media_output_order(
+    client: AsyncClient,
+    app: FastAPI,
+    monkeypatch,
+) -> None:  # type: ignore[no-untyped-def]
+    chat = (await client.post("/api/chats", json={"title": "Media recovery"})).json()
+    turn = (
+        await client.post(
+            f"/api/chats/{chat['id']}/turns",
+            json={
+                "text": "Create three variations of a paper boat",
+                "mode": "image",
+            },
+        )
+    ).json()
+    plan_id = turn["run"]["work_plan_id"]
+    plan = (await client.get(f"/api/work-plans/{plan_id}")).json()
+    for run_id in plan["summary_json"]["run_ids"]:
+        await wait_for_run(client, run_id)
+
+    with SessionLocal() as session:
+        jobs = session.scalars(
+            select(Job).where(Job.work_plan_id == plan_id).order_by(Job.queue_ticket)
+        ).all()
+        expected = [(job.id, job.run_id) for job in jobs]
+        for job in jobs:
+            run = session.get(Run, job.run_id)
+            step = session.get(WorkStep, job.work_step_id)
+            assert run and step
+            job.status = JobStatus.QUEUED.value
+            job.started_at = None
+            job.completed_at = None
+            job.claim_owner = "stale-dispatcher"
+            run.status = JobStatus.QUEUED.value
+            run.started_at = None
+            run.completed_at = None
+            step.status = JobStatus.QUEUED.value
+        work_plan = session.get(WorkPlan, plan_id)
+        assert work_plan
+        work_plan.status = JobStatus.QUEUED.value
+        session.commit()
+
+    restarted: list[tuple[str, str]] = []
+    monkeypatch.setattr(
+        app.state.services.orchestrator,
+        "start",
+        lambda job_id, run_id: restarted.append((job_id, run_id)),
+    )
+    app.state.services.orchestrator.recover_interrupted()
+
+    assert restarted == expected
+    recovered = (await client.get(f"/api/work-plans/{plan_id}")).json()
+    assert recovered["status"] == "queued"
+    assert recovered["summary_json"]["status_counts"] == {"queued": 3}
 
 
 async def test_retry_clears_stale_error_before_dispatch(

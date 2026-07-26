@@ -1,10 +1,12 @@
 from __future__ import annotations
 
 import asyncio
+import copy
 import hashlib
 import logging
 import re
 import secrets
+import shutil
 import time
 from collections.abc import AsyncIterator, Callable
 from contextlib import asynccontextmanager
@@ -69,6 +71,7 @@ from .settings_registry import (
     workflow_settings,
 )
 from .vision import PreparedVisualContext, VisionContextService
+from .work_plans import plan_status_summary, refresh_plan_status
 
 logger = logging.getLogger(__name__)
 
@@ -478,6 +481,20 @@ class ConversationOrchestrator:
         chat = session.get(Chat, chat_id)
         if not chat:
             raise LookupError("chat not found")
+        pending_count = session.scalar(
+            select(func.count(Job.id))
+            .join(Run, Job.run_id == Run.id)
+            .where(
+                Run.chat_id == chat_id,
+                Job.status.in_(
+                    [
+                        JobStatus.QUEUED.value,
+                        JobStatus.RUNNING.value,
+                        JobStatus.PAUSED.value,
+                    ]
+                ),
+            )
+        )
         replacement_message = (
             session.get(Message, replacement_message_id) if replacement_message_id else None
         )
@@ -677,9 +694,66 @@ class ConversationOrchestrator:
         effective_preset = preset_layers[-1] if preset_layers else None
         if plan.operation != Operation.TEXT and effective_settings.get("seed") == -1:
             effective_settings["seed"] = secrets.randbelow(2_147_483_648)
+        configured_batch_size = effective_settings.get("batch_size", 1)
+        try:
+            configured_output_count = max(1, int(configured_batch_size))
+        except (TypeError, ValueError):
+            configured_output_count = 1
+        output_count = (
+            1
+            if plan.operation == Operation.TEXT or replacement_message is not None
+            else max(
+                request.output_count or 1,
+                plan.output_count,
+                configured_output_count,
+            )
+        )
+        if output_count > self.engines.settings.max_media_outputs_per_plan:
+            raise ValueError(
+                f"A media request can create at most "
+                f"{self.engines.settings.max_media_outputs_per_plan} outputs."
+            )
+        if (pending_count or 0) + output_count > MAX_PENDING_WORK_PER_CHAT:
+            raise ValueError(
+                f"This request would exceed the limit of "
+                f"{MAX_PENDING_WORK_PER_CHAT} pending items in one chat."
+            )
+        if output_count > 1 and "batch_size" in effective_settings:
+            # Each planned output owns its own lifecycle. Prevent an engine-native
+            # batch from multiplying the visible output slots a second time.
+            effective_settings["batch_size"] = 1
         generation_estimate = (
             self._video_estimate(effective_settings) if "video" in plan.operation.value else None
         )
+        media_plan_estimate = (
+            self._media_plan_estimate(plan.operation, effective_settings, output_count)
+            if plan.operation != Operation.TEXT
+            else None
+        )
+        if media_plan_estimate:
+            if media_plan_estimate["work_units"] > self.engines.settings.max_media_plan_work_units:
+                raise ValueError(
+                    "This media request is too large to queue safely. "
+                    "Reduce the output count, resolution, frames, or steps."
+                )
+            if (
+                media_plan_estimate["estimated_bytes"]
+                > self.engines.settings.max_media_plan_estimated_bytes
+            ):
+                raise ValueError(
+                    "This media request has an unsafe storage estimate. "
+                    "Reduce the output count, resolution, or duration."
+                )
+            artifact_root = self.engines.settings.artifact_dir
+            artifact_root.mkdir(parents=True, exist_ok=True)
+            available_bytes = shutil.disk_usage(artifact_root).free
+            if media_plan_estimate["estimated_bytes"] > available_bytes:
+                raise ValueError("There is not enough free storage to queue this media request.")
+            media_plan_estimate["available_bytes_at_admission"] = available_bytes
+            plan.parameter_overrides = {
+                **plan.parameter_overrides,
+                "_media_plan_estimate": media_plan_estimate,
+            }
         if generation_estimate:
             plan.parameter_overrides = {
                 **plan.parameter_overrides,
@@ -727,42 +801,26 @@ class ConversationOrchestrator:
             transcript_visible=replacement_message is None,
             parts=input_parts,
         )
-        if plan.operation == Operation.TEXT:
-            initial_parts = [
-                MessagePart(position=0, type=PartType.TEXT.value, text=""),
-                MessagePart(
-                    position=1,
-                    type=PartType.PROGRESS.value,
-                    text="Queued",
-                    metadata_json={"activity": "chat", "progress": 0, "phase": "queued"},
-                ),
-            ]
-        else:
-            initial_parts = [
-                MessagePart(
-                    position=0,
-                    type=PartType.PROGRESS.value,
-                    text="Queued",
-                    metadata_json={
-                        "progress": 0,
-                        "phase": "queued",
-                        "indeterminate": True,
-                    },
-                )
-            ]
-        assistant_message = Message(
-            chat_id=chat.id,
-            parent_id=None,
-            role=MessageRole.ASSISTANT.value,
-            status=MessageStatus.PENDING.value,
-            transcript_visible=replacement_message is None,
-            parts=initial_parts,
-        )
-        session.add_all([user_message, assistant_message])
+        assistant_messages = [
+            Message(
+                chat_id=chat.id,
+                parent_id=None,
+                role=MessageRole.ASSISTANT.value,
+                status=MessageStatus.PENDING.value,
+                transcript_visible=replacement_message is None,
+                parts=self._initial_output_parts(plan.operation, ordinal, output_count),
+            )
+            for ordinal in range(1, output_count + 1)
+        ]
+        session.add_all([user_message, *assistant_messages])
         session.flush()
-        assistant_message.parent_id = user_message.id
+        previous_message_id = user_message.id
+        for assistant_message in assistant_messages:
+            assistant_message.parent_id = previous_message_id
+            previous_message_id = assistant_message.id
         if replacement_message is None:
-            chat.active_head_message_id = assistant_message.id
+            chat.active_head_message_id = assistant_messages[-1].id
+        assistant_message = assistant_messages[0]
 
         model_provenance: dict[str, Any] | None = None
         if profile and profile.model_install_id:
@@ -824,17 +882,21 @@ class ConversationOrchestrator:
             context_head_message_id=context_head_message_id,
             transcript_sequence=transcript_sequence,
             priority=10 if plan.operation == Operation.TEXT else 0,
-            planner_version="legacy-turn-v1",
+            planner_version=("media-outputs-v1" if output_count > 1 else "legacy-turn-v1"),
             failure_policy="stop_dependents",
             summary_json={
                 "operation": plan.operation.value,
-                "step_count": 1,
+                "step_count": output_count,
+                "output_count": output_count,
                 "source_action": source_action,
                 "user_message_id": user_message.id,
                 "assistant_message_id": assistant_message.id,
+                "assistant_message_ids": [message.id for message in assistant_messages],
                 "dependency_step_ids": (
                     [pending_dependency_step_id] if references_pending_output else []
                 ),
+                "media_plan_estimate": media_plan_estimate,
+                "status_counts": {"queued": output_count},
             },
         )
         input_bindings: list[dict[str, Any]] = [
@@ -861,43 +923,53 @@ class ConversationOrchestrator:
             if plan.operation in {Operation.TEXT_TO_VIDEO, Operation.IMAGE_TO_VIDEO}
             else "image"
         )
-        work_step = WorkStep(
-            plan=work_plan,
-            ordinal=1,
-            operation=plan.operation.value,
-            status=JobStatus.QUEUED.value,
-            prompt=plan.standalone_prompt,
-            profile_id=profile_id,
-            workflow_revision_id=workflow_revision.id if workflow_revision else None,
-            settings_json=effective_settings,
-            input_bindings_json=input_bindings,
-            output_contract_json=[{"slot": "response", "type": output_type}],
-            queue_class=queue_class,
-        )
         session.add(work_plan)
         session.flush()
-        if references_pending_output and pending_dependency_step_id:
-            session.add(
-                WorkStepDependency(
-                    step_id=work_step.id,
-                    depends_on_step_id=pending_dependency_step_id,
-                )
+        work_steps: list[WorkStep] = []
+        runs: list[Run] = []
+        jobs: list[Job] = []
+        base_seed = effective_settings.get("seed")
+        for ordinal, output_message in enumerate(assistant_messages, start=1):
+            output_settings = copy.deepcopy(effective_settings)
+            if (
+                output_count > 1
+                and isinstance(base_seed, int)
+                and not isinstance(base_seed, bool)
+                and base_seed >= 0
+            ):
+                output_settings["seed"] = (base_seed + ordinal - 1) % 2_147_483_648
+            output_slot = "response" if output_count == 1 else f"output-{ordinal}"
+            work_step = WorkStep(
+                plan=work_plan,
+                ordinal=ordinal,
+                display_group="media_outputs" if output_count > 1 else None,
+                operation=plan.operation.value,
+                status=JobStatus.QUEUED.value,
+                prompt=plan.standalone_prompt,
+                profile_id=profile_id,
+                workflow_revision_id=workflow_revision.id if workflow_revision else None,
+                settings_json=output_settings,
+                input_bindings_json=copy.deepcopy(input_bindings),
+                output_contract_json=[
+                    {
+                        "slot": output_slot,
+                        "type": output_type,
+                        "index": ordinal,
+                        "count": output_count,
+                    }
+                ],
+                queue_class=queue_class,
             )
-        run = Run(
-            idempotency_key=request.idempotency_key,
-            chat_id=chat.id,
-            user_message_id=user_message.id,
-            assistant_message_id=assistant_message.id,
-            work_plan_id=work_plan.id,
-            work_step_id=work_step.id,
-            operation=plan.operation.value,
-            status=RunStatus.QUEUED.value,
-            standalone_prompt=plan.standalone_prompt,
-            profile_id=profile_id,
-            vision_profile_id=vision_profile_id,
-            workflow_revision_id=workflow_revision.id if workflow_revision else None,
-            settings_json=effective_settings,
-            provenance_json={
+            session.add(work_step)
+            session.flush()
+            if references_pending_output and pending_dependency_step_id:
+                session.add(
+                    WorkStepDependency(
+                        step_id=work_step.id,
+                        depends_on_step_id=pending_dependency_step_id,
+                    )
+                )
+            provenance: dict[str, Any] = {
                 "routing": plan.model_dump(mode="json"),
                 "model_selection": model_selection,
                 "input_artifact_ids": resolved_input_ids,
@@ -923,8 +995,14 @@ class ConversationOrchestrator:
                     for scope, preset, settings in preset_layers
                 ],
                 "workflow": workflow_provenance,
-                "resolved_settings": effective_settings,
+                "resolved_settings": output_settings,
                 "generation_estimate": generation_estimate,
+                "media_plan_estimate": media_plan_estimate,
+                "media_output": {
+                    "index": ordinal,
+                    "count": output_count,
+                    "slot": output_slot,
+                },
                 **(
                     {
                         "response_replacement": {
@@ -935,79 +1013,111 @@ class ConversationOrchestrator:
                     if replacement_message
                     else {}
                 ),
-            },
-        )
-        session.add(run)
-        session.flush()
-        work_step.run_id = run.id
-        if replacement_message:
-            latest_sequence = session.scalar(
-                select(ResponseRevision.sequence)
-                .where(ResponseRevision.message_id == replacement_message.id)
-                .order_by(ResponseRevision.sequence.desc())
-                .limit(1)
-            )
-            revision = ResponseRevision(
-                message_id=replacement_message.id,
-                run_id=run.id,
-                sequence=(latest_sequence or 0) + 1,
-                status=MessageStatus.PENDING.value,
-            )
-            session.add(revision)
-            try:
-                session.flush()
-            except IntegrityError as exc:
-                session.rollback()
-                raise ResponseRevisionConflict(
-                    "this response is already being regenerated"
-                ) from exc
-            run.provenance_json = {
-                **run.provenance_json,
-                "response_replacement": {
-                    **run.provenance_json["response_replacement"],
-                    "revision_id": revision.id,
-                },
             }
-        job = Job(
-            kind=self._job_kind(plan.operation).value,
-            status=JobStatus.QUEUED.value,
-            run_id=run.id,
-            work_plan_id=work_plan.id,
-            work_step_id=work_step.id,
-            progress=0,
-            phase="queued",
-            queue_resource=queue_class,
-            queue_group="primary",
-            queue_priority=work_plan.priority,
-            queue_ticket=f"{transcript_sequence:020d}:{run.id}",
-            enqueued_at=utcnow(),
-            payload_json={"operation": plan.operation.value},
-        )
-        update_job_progress(
-            job,
-            stage="queued",
-            queue_resource=queue_class,
-            queue_position=0,
-            queue_length=1,
-            indeterminate=True,
-        )
-        session.add(job)
+            run = Run(
+                idempotency_key=request.idempotency_key if ordinal == 1 else None,
+                chat_id=chat.id,
+                user_message_id=user_message.id,
+                assistant_message_id=output_message.id,
+                work_plan_id=work_plan.id,
+                work_step_id=work_step.id,
+                operation=plan.operation.value,
+                status=RunStatus.QUEUED.value,
+                standalone_prompt=plan.standalone_prompt,
+                profile_id=profile_id,
+                vision_profile_id=vision_profile_id,
+                workflow_revision_id=workflow_revision.id if workflow_revision else None,
+                settings_json=output_settings,
+                provenance_json=provenance,
+            )
+            session.add(run)
+            session.flush()
+            work_step.run_id = run.id
+            if replacement_message:
+                latest_sequence = session.scalar(
+                    select(ResponseRevision.sequence)
+                    .where(ResponseRevision.message_id == replacement_message.id)
+                    .order_by(ResponseRevision.sequence.desc())
+                    .limit(1)
+                )
+                revision = ResponseRevision(
+                    message_id=replacement_message.id,
+                    run_id=run.id,
+                    sequence=(latest_sequence or 0) + 1,
+                    status=MessageStatus.PENDING.value,
+                )
+                session.add(revision)
+                try:
+                    session.flush()
+                except IntegrityError as exc:
+                    session.rollback()
+                    raise ResponseRevisionConflict(
+                        "this response is already being regenerated"
+                    ) from exc
+                run.provenance_json = {
+                    **run.provenance_json,
+                    "response_replacement": {
+                        **run.provenance_json["response_replacement"],
+                        "revision_id": revision.id,
+                    },
+                }
+            job = Job(
+                kind=self._job_kind(plan.operation).value,
+                status=JobStatus.QUEUED.value,
+                run_id=run.id,
+                work_plan_id=work_plan.id,
+                work_step_id=work_step.id,
+                progress=0,
+                phase="queued",
+                queue_resource=queue_class,
+                queue_group="primary",
+                queue_priority=work_plan.priority,
+                queue_ticket=f"{transcript_sequence:020d}:{ordinal:04d}:{run.id}",
+                enqueued_at=utcnow(),
+                payload_json={
+                    "operation": plan.operation.value,
+                    "output_index": ordinal,
+                    "output_count": output_count,
+                },
+            )
+            update_job_progress(
+                job,
+                stage="queued",
+                queue_resource=queue_class,
+                queue_position=ordinal - 1,
+                queue_length=output_count,
+                indeterminate=True,
+            )
+            session.add(job)
+            work_steps.append(work_step)
+            runs.append(run)
+            jobs.append(job)
+        work_plan.summary_json = {
+            **work_plan.summary_json,
+            "step_ids": [step.id for step in work_steps],
+            "run_ids": [run.id for run in runs],
+            "job_ids": [job.id for job in jobs],
+        }
         if chat.title == "New chat":
             chat.title = request.text.strip().replace("\n", " ")[:72] or "New chat"
         session.commit()
-        accepted = self._accepted_for_run(session, run)
+        accepted = self._accepted_for_run(session, runs[0])
         await self.events.publish(
             "work_plan.created",
             work_plan.id,
             {
                 "plan_id": work_plan.id,
-                "step_id": work_step.id,
-                "run_id": run.id,
-                "job_id": job.id,
+                "step_id": work_steps[0].id,
+                "run_id": runs[0].id,
+                "job_id": jobs[0].id,
+                "step_ids": [step.id for step in work_steps],
+                "run_ids": [run.id for run in runs],
+                "job_ids": [job.id for job in jobs],
                 "chat_id": chat.id,
             },
         )
-        self.start(job.id, run.id)
+        for queued_job, queued_run in zip(jobs, runs, strict=True):
+            self.start(queued_job.id, queued_run.id)
         return accepted
 
     def start(self, job_id: str, run_id: str) -> None:
@@ -2348,7 +2458,12 @@ class ConversationOrchestrator:
         if run.work_plan_id:
             plan = session.get(WorkPlan, run.work_plan_id)
             if plan:
-                plan.status = status
+                session.flush()
+                refresh_plan_status(session, plan.id)
+                plan.summary_json = {
+                    **plan.summary_json,
+                    "status_counts": plan_status_summary(session, plan.id),
+                }
 
     @staticmethod
     def _temporary_preview_ids(message: Message) -> list[str]:
@@ -3019,6 +3134,67 @@ class ConversationOrchestrator:
         )
         request_fields = [field for field in fields if field.scope != "load"]
         return compatible_stored_settings(values, request_fields)
+
+    @staticmethod
+    def _initial_output_parts(
+        operation: Operation,
+        ordinal: int,
+        output_count: int,
+    ) -> list[MessagePart]:
+        progress_metadata: dict[str, Any] = {
+            "progress": 0,
+            "phase": "queued",
+        }
+        if output_count > 1:
+            progress_metadata.update({"output_index": ordinal, "output_count": output_count})
+        if operation == Operation.TEXT:
+            progress_metadata["activity"] = "chat"
+            return [
+                MessagePart(position=0, type=PartType.TEXT.value, text=""),
+                MessagePart(
+                    position=1,
+                    type=PartType.PROGRESS.value,
+                    text="Queued",
+                    metadata_json=progress_metadata,
+                ),
+            ]
+        progress_metadata["indeterminate"] = True
+        return [
+            MessagePart(
+                position=0,
+                type=PartType.PROGRESS.value,
+                text="Queued",
+                metadata_json=progress_metadata,
+            )
+        ]
+
+    @classmethod
+    def _media_plan_estimate(
+        cls,
+        operation: Operation,
+        settings: dict[str, Any],
+        output_count: int,
+    ) -> dict[str, int]:
+        if "video" in operation.value:
+            per_output = cls._video_estimate(settings)
+            per_output_work = int(per_output["work_units"])
+            per_output_bytes = int(per_output["estimated_output_bytes"]) + int(
+                per_output["estimated_intermediate_bytes"]
+            )
+        else:
+            width = max(1, int(settings.get("width", 1024)))
+            height = max(1, int(settings.get("height", 1024)))
+            steps = max(1, int(settings.get("steps", 30)))
+            per_output_work = width * height * steps
+            raw_bytes = width * height * 4
+            per_output_bytes = max(1_000_000, raw_bytes * 3)
+        return {
+            "output_count": output_count,
+            "work_units_per_output": per_output_work,
+            "work_units": per_output_work * output_count,
+            "estimated_bytes_per_output": per_output_bytes,
+            "estimated_bytes": per_output_bytes * output_count,
+        }
 
     @staticmethod
     def _video_estimate(settings: dict[str, Any]) -> dict[str, int | float]:

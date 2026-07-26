@@ -25,6 +25,7 @@ from .models import (
 )
 from .progress import update_job_progress
 from .schemas import JobOut
+from .work_plans import plan_status_summary, refresh_plan_status
 
 if TYPE_CHECKING:
     from .events import EventBroker
@@ -361,7 +362,12 @@ class ResourceScheduler:
                         step.error = error
                     plan = session.get(WorkPlan, run.work_plan_id) if run.work_plan_id else None
                     if plan:
-                        plan.status = JobStatus.INTERRUPTED.value
+                        session.flush()
+                        refresh_plan_status(session, plan.id)
+                        plan.summary_json = {
+                            **plan.summary_json,
+                            "status_counts": plan_status_summary(session, plan.id),
+                        }
                     message = session.get(Message, run.assistant_message_id)
                     if message:
                         message.status = MessageStatus.FAILED.value
