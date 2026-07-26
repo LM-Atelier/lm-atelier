@@ -182,6 +182,7 @@ class ConversationOrchestrator:
         self.router = ModalityRouter()
         self.vision = VisionContextService(engines.settings, artifacts)
         self._tasks: dict[str, asyncio.Task[None]] = {}
+        self._media_restart_task: asyncio.Task[None] | None = None
         self._chat_guards: dict[str, asyncio.Lock] = {}
         self._chat_planner_ready = asyncio.Event()
         self._chat_planner_ready.set()
@@ -1915,6 +1916,10 @@ class ConversationOrchestrator:
         if tasks:
             await asyncio.gather(*tasks, return_exceptions=True)
         self._tasks.clear()
+        if self._media_restart_task:
+            self._media_restart_task.cancel()
+            await asyncio.gather(self._media_restart_task, return_exceptions=True)
+            self._media_restart_task = None
 
     def stop_admission(self) -> None:
         self._admission_open = False
@@ -2734,35 +2739,41 @@ class ConversationOrchestrator:
             await self._resume_chat_worker(selected_chat_profile_id)
             return
 
-        # ComfyUI startup does not load a generation model. Starting that empty
-        # service alongside the selected chat model avoids serial startup cost
-        # without recreating the oversubscribed model state that caused paging.
-        media_result, chat_result = await asyncio.gather(
-            self.processes.start_media(),
-            self._resume_chat_worker(selected_chat_profile_id),
-            return_exceptions=True,
+        # Restore chat without competing with Python/Torch startup for disk and
+        # CPU. Once chat is ready, warm the empty ComfyUI service in a tracked
+        # background task so the queued text job can proceed immediately.
+        await self._resume_chat_worker(selected_chat_profile_id)
+        self._schedule_media_restart()
+
+    def _schedule_media_restart(self) -> None:
+        if self._media_restart_task and not self._media_restart_task.done():
+            return
+        task = asyncio.create_task(
+            self._restart_media_worker(),
+            name="media-worker-handoff-restart",
         )
-        for result in (media_result, chat_result):
-            if isinstance(result, asyncio.CancelledError):
-                raise result
-        if isinstance(media_result, BaseException):
-            logger.error(
-                "Could not restart the managed media worker after device handoff",
-                exc_info=(
-                    type(media_result),
-                    media_result,
-                    media_result.__traceback__,
-                ),
-            )
-        if isinstance(chat_result, BaseException):
-            logger.error(
-                "Could not restore the chat worker after device handoff",
-                exc_info=(
-                    type(chat_result),
-                    chat_result,
-                    chat_result.__traceback__,
-                ),
-            )
+        self._media_restart_task = task
+        task.add_done_callback(self._media_restart_finished)
+
+    async def _restart_media_worker(self) -> None:
+        try:
+            await self.processes.start_media()
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            logger.exception("Could not restart the managed media worker after device handoff")
+
+    def _media_restart_finished(self, task: asyncio.Task[None]) -> None:
+        if self._media_restart_task is task:
+            self._media_restart_task = None
+
+    async def _ensure_media_worker(self) -> None:
+        restart_task = self._media_restart_task
+        if restart_task and not restart_task.done():
+            await asyncio.shield(restart_task)
+        status = next(item for item in self.processes.statuses() if item.name == "media")
+        if not status.running or status.state != "ready":
+            await self.processes.start_media()
 
     async def _execute_media(self, job_id: str, run_id: str) -> None:
         if self.engines.settings.media_engine == "comfyui":
@@ -2799,7 +2810,7 @@ class ConversationOrchestrator:
                         "job_id": job_id,
                     },
                 )
-                await self.processes.start_media()
+                await self._ensure_media_worker()
         with self.session_factory() as session:
             run = session.get(Run, run_id)
             if not run:
