@@ -560,3 +560,13 @@ def test_text_to_image_graph_derives_a_standard_image_edit_workflow(tmp_path: Pa
         0,
     ]
     assert set(derived.input_schema["properties"]) == {"prompt", "denoise"}
+    assert derived.input_schema["properties"]["denoise"] == {
+        "type": "number",
+        "default": 0.9,
+        "title": "Edit strength",
+        "description": (
+            "Higher values make the requested change more visible; "
+            "lower values preserve more of the source."
+        ),
+        "x-lm-atelier-visibility": "basic",
+    }

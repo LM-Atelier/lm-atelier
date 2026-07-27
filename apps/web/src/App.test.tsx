@@ -3479,6 +3479,16 @@ describe("App", () => {
               title,
               default: "",
             },
+            ...(operation === "image_to_image" ? {
+              denoise: {
+                type: "number",
+                title: "Edit strength",
+                default: 0.9,
+                minimum: 0,
+                maximum: 1,
+                "x-lm-atelier-visibility": "basic",
+              },
+            } : {}),
           },
         },
         dependencies_json: {},
@@ -3515,6 +3525,7 @@ describe("App", () => {
     fireEvent.click(screen.getByRole("button", { name: "Turn settings" }));
     expect(screen.getByLabelText(/Edit image exclusion/)).toBeInTheDocument();
     expect(screen.queryByLabelText(/Fresh image exclusion/)).not.toBeInTheDocument();
+    expect(screen.getByLabelText("Edit strength")).toHaveValue(0.9);
     fireEvent.click(screen.getByRole("button", { name: "Close settings" }));
     fireEvent.click(screen.getByRole("button", { name: "Edit" }));
     await waitFor(() => expect(api.updateChat).toHaveBeenCalledWith(chat.id, { routing_mode: "image" }));

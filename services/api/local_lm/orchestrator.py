@@ -26,6 +26,7 @@ from .auxiliary_assets import (
     workflow_lora_extension,
 )
 from .capability_evidence import current_capability_evidence, evidence_input_modalities
+from .comfy_templates import DEFAULT_IMAGE_EDIT_DENOISE
 from .custom_nodes import custom_node_dependency_errors
 from .db import SessionLocal
 from .domain import (
@@ -4101,9 +4102,10 @@ class ConversationOrchestrator:
         if any("denoise" in layer for layer in explicit_layers):
             return False
         # A denoise value of 1 is necessary for text-to-image, but it replaces
-        # nearly the entire source during image-to-image. Preserve the source by
-        # default while keeping explicit presets and scoped settings authoritative.
-        effective_settings["denoise"] = 0.35
+        # nearly the entire source during image-to-image. Use a moderate default
+        # that can visibly apply edits while keeping explicit presets and scoped
+        # settings authoritative.
+        effective_settings["denoise"] = DEFAULT_IMAGE_EDIT_DENOISE
         return True
 
     @staticmethod
@@ -4116,9 +4118,10 @@ class ConversationOrchestrator:
         ):
             return run.standalone_prompt
         return (
-            "Edit the supplied image. Preserve every visual detail that the requested "
-            "change does not require, including each person's identity and physical "
-            "appearance. Requested change: "
+            "Apply the requested edit visibly to the supplied image. Preserve areas "
+            "that the edit does not affect. Keep each person's facial identity, hair, "
+            "skin tone, body proportions, and pose unless the request explicitly changes "
+            "them. Do not simply reproduce the source unchanged. Requested edit: "
             f"{run.standalone_prompt}"
         )
 

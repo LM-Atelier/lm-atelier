@@ -106,6 +106,14 @@ function workflowField(
     && !isStricterMultiple(declaredMultiple, base.multiple_of)
   ) return null;
   const fixedHelp = "const" in schema ? `Fixed by this workflow at ${String(schema.const)}.` : "";
+  const declaredVisibility = schema["x-lm-atelier-visibility"];
+  const visibility = (
+    declaredVisibility === "basic"
+    || declaredVisibility === "advanced"
+    || declaredVisibility === "expert"
+  )
+    ? declaredVisibility
+    : base?.visibility ?? "advanced";
   return {
     key,
     label: typeof schema.title === "string" ? schema.title : base?.label ?? titleCase(key),
@@ -117,7 +125,7 @@ function workflowField(
     multiple_of: declaredMultiple ?? base?.multiple_of ?? null,
     choices,
     scope: base?.scope ?? "workflow",
-    visibility: base?.visibility ?? "advanced",
+    visibility,
     restart_required: base?.restart_required ?? false,
     available: base?.available ?? true,
     unavailable_reason: base?.unavailable_reason ?? null,

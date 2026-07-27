@@ -59,9 +59,11 @@ def test_image_edit_media_prompt_preserves_unrequested_details() -> None:
     )
 
     assert ConversationOrchestrator._media_prompt(run) == (
-        "Edit the supplied image. Preserve every visual detail that the requested "
-        "change does not require, including each person's identity and physical "
-        "appearance. Requested change: Replace the jacket with a green coat"
+        "Apply the requested edit visibly to the supplied image. Preserve areas "
+        "that the edit does not affect. Keep each person's facial identity, hair, "
+        "skin tone, body proportions, and pose unless the request explicitly changes "
+        "them. Do not simply reproduce the source unchanged. Requested edit: "
+        "Replace the jacket with a green coat"
     )
 
 
@@ -82,7 +84,7 @@ async def test_turn_inputs_are_durable_message_parts_and_context(
         "Restyle this reference",
         input_artifact_ids=[artifact_id],
     )
-    assert accepted["run"]["settings_json"]["denoise"] == 0.35
+    assert accepted["run"]["settings_json"]["denoise"] == 0.9
     assert accepted["run"]["provenance_json"]["image_edit"] == {
         "policy": "preserve_unrequested_details_v1",
         "default_change_strength_applied": True,
