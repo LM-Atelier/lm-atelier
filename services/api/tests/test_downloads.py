@@ -641,6 +641,34 @@ async def test_chat_plan_downloads_a_pinned_projector_from_a_companion_repo(
         assert session.query(ModelCapabilityEvidence).one().result == "ready"
 
 
+def test_companion_relocation_rejects_a_worker_path_outside_staging(
+    tmp_path: Path,
+) -> None:
+    staging = tmp_path / "staging"
+    staging.mkdir()
+    expected = staging / "mmproj-model.gguf"
+    expected.write_bytes(b"expected")
+    outside = tmp_path / "outside.gguf"
+    outside.write_bytes(b"outside")
+
+    with pytest.raises(ValueError, match="unexpected local path"):
+        DownloadManager._relocate_companion_download(
+            staging=staging,
+            source_filename="mmproj-model.gguf",
+            destination_filename="companions/author/model/mmproj-model.gguf",
+            downloaded_path=str(outside),
+        )
+
+    relocated = DownloadManager._relocate_companion_download(
+        staging=staging,
+        source_filename="mmproj-model.gguf",
+        destination_filename="companions/author/model/mmproj-model.gguf",
+        downloaded_path=str(expected),
+    )
+    assert Path(relocated).read_bytes() == b"expected"
+    assert not expected.exists()
+
+
 async def test_lora_plan_installs_as_a_verified_auxiliary_asset(
     settings: Settings,
     monkeypatch: pytest.MonkeyPatch,

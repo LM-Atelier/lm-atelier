@@ -1022,13 +1022,12 @@ class DownloadManager:
                             total_size=total_size or None,
                         )
                         if source_filename != filename:
-                            source_path = Path(downloaded_path)
-                            target_path = staging.joinpath(*PurePosixPath(filename).parts)
-                            target_path.parent.mkdir(parents=True, exist_ok=True)
-                            if target_path.exists():
-                                target_path.unlink()
-                            os.replace(source_path, target_path)
-                            downloaded_path = str(target_path)
+                            downloaded_path = self._relocate_companion_download(
+                                staging=staging,
+                                source_filename=source_filename,
+                                destination_filename=filename,
+                                downloaded_path=downloaded_path,
+                            )
                         actual_hash = None
                     if expected_hash or request.install_plan_id:
                         with SessionLocal() as session:
@@ -2725,6 +2724,39 @@ class DownloadManager:
         if path.is_file():
             return path.stat().st_size
         return sum(item.stat().st_size for item in path.rglob("*") if item.is_file())
+
+    @staticmethod
+    def _relocate_companion_download(
+        *,
+        staging: Path,
+        source_filename: str,
+        destination_filename: str,
+        downloaded_path: str,
+    ) -> str:
+        """Confine an external companion transfer before assigning its local name."""
+
+        if not DownloadManager._safe_relative_filename(
+            source_filename
+        ) or not DownloadManager._safe_relative_filename(destination_filename):
+            raise ValueError("companion model selection contains an unsafe file path")
+        staging_root = staging.resolve(strict=True)
+        expected_source = staging.joinpath(*PurePosixPath(source_filename).parts)
+        source = Path(downloaded_path)
+        if (
+            source.is_symlink()
+            or not source.is_file()
+            or source.resolve(strict=True) != expected_source.resolve(strict=True)
+            or staging_root not in expected_source.resolve(strict=True).parents
+        ):
+            raise ValueError("companion downloader returned an unexpected local path")
+        target = staging.joinpath(*PurePosixPath(destination_filename).parts)
+        target.parent.mkdir(parents=True, exist_ok=True)
+        if target.exists():
+            if target.is_symlink() or not target.is_file():
+                raise ValueError("companion destination is not a regular staged file")
+            target.unlink()
+        os.replace(source, target)
+        return str(target)
 
     @staticmethod
     def _select_files(request: DownloadRequest, siblings: list[Any]) -> list[str]:
