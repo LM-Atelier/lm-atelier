@@ -45,6 +45,17 @@ VersionInfoProductTextVersion={#MyAppVersion}
 VersionInfoCompany=LM Atelier
 LicenseFile=..\..\LICENSE
 
+[InstallDelete]
+; Upgrades must not leave files from earlier payloads behind: stale
+; dist-info directories and hashed web assets would shadow the new
+; payload, and application data lives outside {app}.
+Type: filesandordirs; Name: "{app}\_internal"
+
+[UninstallDelete]
+; Running the application compiles bytecode caches inside the payload;
+; remove them so uninstall leaves no application directory behind.
+Type: filesandordirs; Name: "{app}\_internal"
+
 [Files]
 Source: "{#MySourceDir}\*"; DestDir: "{app}"; Flags: ignoreversion recursesubdirs createallsubdirs
 
