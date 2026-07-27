@@ -27,6 +27,11 @@ Explain the user impact, important design choices, and validation performed.
 Update tests and concise documentation when behavior changes. Accepted work is
 squash-merged, and its branch is deleted.
 
+Contributions are submitted under the project's Apache License 2.0
+(inbound equals outbound). Add a `Signed-off-by` trailer to each commit with
+`git commit -s` to certify the
+[Developer Certificate of Origin 1.1](https://developercertificate.org/).
+
 Model or runtime changes must document the capability contract and add
 discovery, preflight, and generation fixtures. Backend-supported models must
 work through capability introspection; curated per-model recipes may improve
