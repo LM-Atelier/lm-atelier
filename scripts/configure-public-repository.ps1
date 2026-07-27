@@ -212,7 +212,7 @@ if (-not $Apply) {
     Write-Host "After the approved visibility change, run:"
     Write-Host "  .\scripts\configure-public-repository.ps1 -Apply"
     Write-Host "Prepared controls:"
-    Write-Host "  - squash-only merges and automatic branch cleanup"
+    Write-Host "  - squash work merges, merge-commit promotions, and branch cleanup"
     Write-Host "  - read-only, SHA-pinned selected Actions"
     Write-Host "  - 30-day Actions log and artifact retention"
     Write-Host "  - protected main/develop branches and v* tags"
@@ -239,7 +239,7 @@ if ($RepositoryState.owner.id -ne $ExpectedOwnerId) {
 
 Invoke-GitHubApi -Method PATCH -Endpoint "repos/$Repository" -Body @{
     allow_auto_merge = $false
-    allow_merge_commit = $false
+    allow_merge_commit = $true
     allow_rebase_merge = $false
     allow_squash_merge = $true
     allow_update_branch = $true
@@ -387,7 +387,7 @@ $ActualTagCreationRules = Invoke-GitHubApi `
 
 Assert-JsonSubset -Label "Repository settings" -Actual $FinalRepository -Expected @{
     allow_auto_merge = $false
-    allow_merge_commit = $false
+    allow_merge_commit = $true
     allow_rebase_merge = $false
     allow_squash_merge = $true
     allow_update_branch = $true
