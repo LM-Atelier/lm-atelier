@@ -1247,7 +1247,7 @@ async def test_runtime_status_exposes_pinned_external_setup(client: AsyncClient)
 
     assert response.status_code == 200
     runtimes = {item["engine"]: item for item in response.json()}
-    assert set(runtimes) == {"llama.cpp", "comfyui"}
+    assert set(runtimes) == {"llama.cpp", "vllm", "comfyui"}
     assert runtimes["llama.cpp"]["release"] == "b9637"
     assert runtimes["comfyui"]["release"] == "v0.28.0"
     assert runtimes["comfyui"]["distribution"] == "external-gpl-3.0"
@@ -4877,6 +4877,88 @@ async def test_superseded_media_profile_is_retired_from_defaults_and_chats(
     profiles = (await client.get("/api/profiles?role=image")).json()
     assert not any(profile["id"] == "profile_old_media" for profile in profiles)
     assert any(profile["id"] == "profile_current_media" for profile in profiles)
+
+
+async def test_superseded_chat_profile_migrates_existing_selections(
+    client: AsyncClient,
+    settings: Settings,
+) -> None:
+    old_path = settings.model_dir / "old-chat"
+    current_path = settings.model_dir / "current-chat"
+    old_path.mkdir()
+    current_path.mkdir()
+    with SessionLocal() as session:
+        seeded_default = session.scalar(
+            select(ModelProfile).where(
+                ModelProfile.role == "chat",
+                ModelProfile.is_default.is_(True),
+            )
+        )
+        assert seeded_default
+        seeded_default.is_default = False
+        old_install = ModelInstall(
+            id="model_old_chat",
+            name="Old chat",
+            role="chat",
+            engine="llama.cpp",
+            local_path=str(old_path),
+            manifest_json={"remote_id": "owner/model", "files": ["model.gguf"]},
+            active=True,
+        )
+        current_install = ModelInstall(
+            id="model_current_chat",
+            name="Current chat",
+            role="chat",
+            engine="llama.cpp",
+            local_path=str(current_path),
+            manifest_json={
+                "remote_id": "owner/model",
+                "files": ["model.gguf", "mmproj-model.gguf"],
+            },
+            active=True,
+        )
+        old_profile = ModelProfile(
+            id="profile_old_chat",
+            name="Old chat",
+            role="chat",
+            engine="llama.cpp",
+            model_install_id=old_install.id,
+            is_default=True,
+        )
+        current_profile = ModelProfile(
+            id="profile_current_chat",
+            name="Current chat",
+            role="chat",
+            engine="llama.cpp",
+            model_install_id=current_install.id,
+        )
+        chat = Chat(
+            id="chat_old_chat",
+            title="Old chat selection",
+            active_chat_profile_id=old_profile.id,
+            active_vision_profile_id=old_profile.id,
+        )
+        session.add_all([old_install, current_install, old_profile, current_profile, chat])
+        session.flush()
+
+        superseded = DownloadManager._deactivate_superseded_chat_installs(
+            session,
+            current_install,
+            current_profile,
+            "owner/model",
+        )
+        session.commit()
+
+        assert superseded == [old_install.id]
+        assert old_install.active is False
+        assert old_profile.is_default is False
+        assert current_profile.is_default is True
+        assert chat.active_chat_profile_id == current_profile.id
+        assert chat.active_vision_profile_id == current_profile.id
+
+    profiles = (await client.get("/api/profiles?role=chat")).json()
+    assert not any(profile["id"] == old_profile.id for profile in profiles)
+    assert any(profile["id"] == current_profile.id for profile in profiles)
 
 
 async def test_auto_model_selection_matches_profile_use_case(client: AsyncClient) -> None:

@@ -26,6 +26,7 @@ from .auxiliary_assets import (
     workflow_lora_extension,
 )
 from .capability_evidence import current_capability_evidence, evidence_input_modalities
+from .comfy_templates import DEFAULT_IMAGE_EDIT_DENOISE
 from .custom_nodes import custom_node_dependency_errors
 from .db import SessionLocal
 from .domain import (
@@ -753,6 +754,16 @@ class ConversationOrchestrator:
             ),
             turn_overrides=request_settings,
         )
+        edit_default_applied = self._apply_image_edit_default(
+            plan.operation,
+            effective_settings,
+            request_settings,
+            default_preset.settings_json if default_preset else {},
+            project_preset.settings_json if project_preset else {},
+            self._scoped_generation_settings(project, role),
+            chat_preset.settings_json if chat_preset else {},
+            self._scoped_generation_settings(chat, role),
+        )
         lora_resolution = None
         if plan.operation != Operation.TEXT and effective_settings.get("loras"):
             if not workflow_revision:
@@ -1080,6 +1091,14 @@ class ConversationOrchestrator:
                     "count": output_count,
                     "slot": output_slot,
                 },
+                "image_edit": (
+                    {
+                        "policy": "preserve_unrequested_details_v1",
+                        "default_change_strength_applied": edit_default_applied,
+                    }
+                    if plan.operation == Operation.IMAGE_TO_IMAGE
+                    else None
+                ),
                 "auxiliary_assets": (
                     {
                         "lora_stack": lora_resolution.provenance,
@@ -1374,6 +1393,16 @@ class ConversationOrchestrator:
                 ),
                 turn_overrides=step_overrides,
             )
+            edit_default_applied = self._apply_image_edit_default(
+                operation,
+                effective_settings,
+                step_overrides,
+                default_preset.settings_json if default_preset else {},
+                project_preset.settings_json if project_preset else {},
+                self._scoped_generation_settings(project, role),
+                chat_preset.settings_json if chat_preset else {},
+                self._scoped_generation_settings(chat, role),
+            )
             lora_resolution = None
             if operation != Operation.TEXT and effective_settings.get("loras"):
                 if not workflow_revision:
@@ -1410,6 +1439,7 @@ class ConversationOrchestrator:
                     "role": role,
                     "settings": effective_settings,
                     "model_selection": model_selection,
+                    "edit_default_applied": edit_default_applied,
                     "preset_layers": preset_layers,
                     "effective_preset": preset_layers[-1] if preset_layers else None,
                     "estimate": estimate,
@@ -1662,6 +1692,14 @@ class ConversationOrchestrator:
                     "resolved_settings": resolved["settings"],
                     "generation_estimate": resolved["generation_estimate"],
                     "plan_step_estimate": resolved["estimate"],
+                    "image_edit": (
+                        {
+                            "policy": "preserve_unrequested_details_v1",
+                            "default_change_strength_applied": resolved["edit_default_applied"],
+                        }
+                        if operation == Operation.IMAGE_TO_IMAGE
+                        else None
+                    ),
                     "auxiliary_assets": (
                         {
                             "lora_stack": resolved["lora_resolution"].provenance,
@@ -2240,7 +2278,7 @@ class ConversationOrchestrator:
         )
 
     async def _ensure_chat_worker(self, run_id: str) -> WorkerStatus | None:
-        if self.engines.settings.chat_engine != "llama.cpp":
+        if self.engines.settings.chat_engine not in {"llama.cpp", "vllm"}:
             return None
         with self.session_factory() as session:
             run = session.get(Run, run_id)
@@ -2260,9 +2298,14 @@ class ConversationOrchestrator:
         return await self.processes.load_chat(profile, install)
 
     async def _chat_planner_available(self) -> bool:
-        if self.engines.settings.chat_engine != "llama.cpp":
+        if self.engines.settings.chat_engine not in {"llama.cpp", "vllm"}:
             return True
-        if not self.processes.settings.llama_executable:
+        executable = (
+            self.processes.settings.vllm_executable
+            if self.engines.settings.chat_engine == "vllm"
+            else self.processes.settings.llama_executable
+        )
+        if not executable:
             return False
         if not self._chat_planner_ready.is_set():
             return False
@@ -2890,7 +2933,7 @@ class ConversationOrchestrator:
             request = MediaRequest(
                 run_id=run.id,
                 operation=run.operation,
-                prompt=run.standalone_prompt,
+                prompt=self._media_prompt(run),
                 negative_prompt=str(run.settings_json.get("negative_prompt", "")) or None,
                 input_paths=input_paths,
                 workflow=workflow,
@@ -4047,6 +4090,40 @@ class ConversationOrchestrator:
             "estimated_output_bytes": max(1_000_000, raw_bytes // 45),
             "estimated_intermediate_bytes": raw_bytes * 2,
         }
+
+    @staticmethod
+    def _apply_image_edit_default(
+        operation: Operation,
+        effective_settings: dict[str, Any],
+        *explicit_layers: dict[str, Any],
+    ) -> bool:
+        if operation != Operation.IMAGE_TO_IMAGE:
+            return False
+        if any("denoise" in layer for layer in explicit_layers):
+            return False
+        # A denoise value of 1 is necessary for text-to-image, but it replaces
+        # nearly the entire source during image-to-image. Use a moderate default
+        # that can visibly apply edits while keeping explicit presets and scoped
+        # settings authoritative.
+        effective_settings["denoise"] = DEFAULT_IMAGE_EDIT_DENOISE
+        return True
+
+    @staticmethod
+    def _media_prompt(run: Run) -> str:
+        edit = run.provenance_json.get("image_edit")
+        if (
+            run.operation != Operation.IMAGE_TO_IMAGE.value
+            or not isinstance(edit, dict)
+            or edit.get("policy") != "preserve_unrequested_details_v1"
+        ):
+            return run.standalone_prompt
+        return (
+            "Apply the requested edit visibly to the supplied image. Preserve areas "
+            "that the edit does not affect. Keep each person's facial identity, hair, "
+            "skin tone, body proportions, and pose unless the request explicitly changes "
+            "them. Do not simply reproduce the source unchanged. Requested edit: "
+            f"{run.standalone_prompt}"
+        )
 
     @staticmethod
     def _job_kind(operation: Operation) -> JobKind:

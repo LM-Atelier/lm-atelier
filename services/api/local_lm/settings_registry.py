@@ -407,7 +407,7 @@ IMAGE_SETTINGS = [
     ),
     SettingField(
         key="denoise",
-        label="Denoise",
+        label="Change strength",
         type="number",
         default=1,
         minimum=0,
@@ -415,6 +415,7 @@ IMAGE_SETTINGS = [
         step=0.01,
         scope="workflow",
         visibility="advanced",
+        help="For image edits, lower values preserve more of the source image.",
     ),
     SettingField(
         key="batch_size",

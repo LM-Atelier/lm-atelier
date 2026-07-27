@@ -19,6 +19,7 @@ from local_lm.adapters.contracts import (
 from local_lm.adapters.discovery import AdapterLoadError, load_external_adapter
 from local_lm.adapters.llama_cpp import LlamaCppAdapter
 from local_lm.adapters.mock import MockChatAdapter, MockMediaAdapter
+from local_lm.adapters.vllm import VllmAdapter
 from local_lm.config import Settings
 from local_lm.engines import EngineRegistry
 from local_lm.schemas import EngineCapabilities, SettingField
@@ -137,6 +138,26 @@ async def test_llama_inactivity_timeout_is_validated_and_wired(tmp_path: Path) -
     )
     try:
         assert registry.chat.inactivity_seconds == 321  # type: ignore[attr-defined]
+    finally:
+        await registry.close()
+
+
+async def test_managed_chat_registry_switches_adapter_with_active_runtime(
+    tmp_path: Path,
+) -> None:
+    settings = Settings(data_dir=tmp_path, chat_engine="llama.cpp")
+    registry = EngineRegistry(settings)
+    try:
+        assert isinstance(registry.chat, LlamaCppAdapter)
+        assert not isinstance(registry.chat, VllmAdapter)
+        settings.chat_engine = "vllm"
+        assert isinstance(registry.chat, VllmAdapter)
+        vllm_settings = await registry.settings_for_role(
+            "chat",
+            engine="vllm",
+            allow_inactive=True,
+        )
+        assert vllm_settings
     finally:
         await registry.close()
 

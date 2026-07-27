@@ -7,13 +7,15 @@ from typing import Any
 
 from huggingface_hub import hf_hub_download
 
+_MAX_DOWNLOAD_FILES = 512
+
 
 def main() -> int:
     payload: dict[str, Any] = json.load(sys.stdin.buffer)
     raw_files = payload.get("files")
     if isinstance(raw_files, list):
         files = [str(item) for item in raw_files]
-        if not files or len(files) > 32:
+        if not files or len(files) > _MAX_DOWNLOAD_FILES:
             raise ValueError("download worker file batch is outside the supported bounds")
         workers = min(max(int(payload.get("max_workers") or 1), 1), 4, len(files))
 

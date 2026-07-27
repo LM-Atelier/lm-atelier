@@ -5,6 +5,7 @@ import hashlib
 import json
 import logging
 import math
+import re
 import time
 from collections.abc import AsyncIterator
 from contextlib import suppress
@@ -27,6 +28,20 @@ logger = logging.getLogger(__name__)
 _CANCELLED = object()
 _MAX_COMFY_JSON_BYTES = 32 * 1024 * 1024
 _MAX_COMFY_OUTPUTS = 64
+_ERROR_LABEL = re.compile(r"[A-Za-z][A-Za-z0-9_.-]{0,79}\Z")
+_ERRNO = re.compile(r"\[Errno (?P<number>\d{1,5})\]")
+
+
+def _execution_error_message(data: dict[str, Any]) -> str:
+    node_type = str(data.get("node_type") or "")
+    exception_type = str(data.get("exception_type") or "")
+    if not _ERROR_LABEL.fullmatch(node_type) or not _ERROR_LABEL.fullmatch(exception_type):
+        return "ComfyUI could not execute the selected workflow"
+    detail = exception_type
+    errno = _ERRNO.search(str(data.get("exception_message") or ""))
+    if errno:
+        detail = f"{detail}, errno {errno.group('number')}"
+    return f"ComfyUI {node_type} failed ({detail})"
 
 
 def _is_preview_image(content: bytes) -> bool:
@@ -430,7 +445,7 @@ class ComfyUIAdapter:
                         yield MediaEvent(type="cancelled")
                         return
                     elif message_type == "execution_error":
-                        raise RuntimeError("ComfyUI could not execute the selected workflow")
+                        raise RuntimeError(_execution_error_message(data))
 
             if cancel_event.is_set():
                 yield MediaEvent(type="cancelled")

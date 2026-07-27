@@ -14,7 +14,7 @@ from .domain import new_id
 from .model_manifests import ModelManifestInspection
 from .models import InstallPlan
 
-INSTALL_RESOLVER_VERSION = "install-resolver-v1"
+INSTALL_RESOLVER_VERSION = "install-resolver-v3"
 ACTIVATION_PROBE_VERSION = "activation-probe-v2"
 LAUNCH_CONTRACT_VERSION = "worker-launch-v1"
 
@@ -39,6 +39,9 @@ class PlannedArtifact:
     sha256: str | None
     required: bool = True
     reuse: str = "download"
+    source_remote_id: str | None = None
+    source_revision: str | None = None
+    source_path: str | None = None
 
     def as_dict(self) -> dict[str, Any]:
         return {
@@ -49,6 +52,9 @@ class PlannedArtifact:
             "sha256": self.sha256,
             "required": self.required,
             "reuse": self.reuse,
+            "source_remote_id": self.source_remote_id,
+            "source_revision": self.source_revision,
+            "source_path": self.source_path,
         }
 
 
@@ -125,7 +131,15 @@ def resolve_install_plan(
     artifacts = tuple(
         PlannedArtifact(
             path=str(item["filename"]),
-            kind=auxiliary_kind or metadata_by_path[str(item["filename"])].kind,
+            kind=(
+                auxiliary_kind
+                or (
+                    "weights"
+                    if engine == "vllm"
+                    and str(item["filename"]).casefold().endswith(".safetensors")
+                    else metadata_by_path[str(item["filename"])].kind
+                )
+            ),
             target_folder=(
                 {
                     "lora": "loras",
@@ -144,6 +158,11 @@ def resolve_install_plan(
                 else None
             ),
             sha256=(str(item["sha256"]).lower() if isinstance(item.get("sha256"), str) else None),
+            source_remote_id=(
+                str(item["source_remote_id"]) if item.get("source_remote_id") else None
+            ),
+            source_revision=(str(item["source_revision"]) if item.get("source_revision") else None),
+            source_path=(str(item["source_filename"]) if item.get("source_filename") else None),
         )
         for item in selected_files
     )
@@ -167,11 +186,28 @@ def resolve_install_plan(
             compatibility = "unsupported"
             failure_code = "auxiliary_kind_mismatch"
             failure_reason = "The selected safetensors file is not a verified LoRA."
-    elif role == "chat":
-        if engine != "llama.cpp" or not any(item.kind == "gguf_model" for item in artifacts):
+    elif role == "chat" and engine == "llama.cpp":
+        if not any(item.kind == "gguf_model" for item in artifacts):
             compatibility = "unsupported"
             failure_code = "unsupported_chat_layout"
             failure_reason = "Chat installation requires one complete GGUF model."
+    elif role == "chat" and engine == "vllm":
+        artifact_names = {artifact.path.rsplit("/", 1)[-1].casefold() for artifact in artifacts}
+        if (
+            not any(artifact.kind == "weights" for artifact in artifacts)
+            or "config.json" not in artifact_names
+            or "hf_quant_config.json" not in artifact_names
+        ):
+            compatibility = "unsupported"
+            failure_code = "incomplete_modelopt_snapshot"
+            failure_reason = (
+                "ModelOpt installation requires complete safetensors weights, config.json, "
+                "and hf_quant_config.json."
+            )
+    elif role == "chat":
+        compatibility = "unsupported"
+        failure_code = "unsupported_chat_engine"
+        failure_reason = "Chat installation requires the managed llama.cpp or vLLM runtime."
     elif engine != "comfyui":
         compatibility = "unsupported"
         failure_code = "unsupported_media_engine"
@@ -208,6 +244,8 @@ def resolve_install_plan(
         "comfy_paths": comfy_paths or {},
         "source_remote_id": source_remote_id,
         "auxiliary_kind": auxiliary_kind,
+        "quantization": "modelopt" if engine == "vllm" else None,
+        "model_layout": "transformers_snapshot" if engine == "vllm" else None,
     }
     activation_probe = {
         "version": ACTIVATION_PROBE_VERSION,

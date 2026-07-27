@@ -39,7 +39,7 @@ def chat_profile_to_restore() -> tuple[ModelProfile, ModelInstall] | None:
                 .join(ModelInstall, ModelInstall.id == ModelProfile.model_install_id)
                 .where(
                     ModelProfile.role == "chat",
-                    ModelProfile.engine == "llama.cpp",
+                    ModelProfile.engine.in_(("llama.cpp", "vllm")),
                     ModelInstall.active.is_(True),
                     ModelInstall.role == ModelProfile.role,
                     ModelInstall.engine == ModelProfile.engine,
@@ -63,7 +63,7 @@ def _restorable_chat_profile(profile: ModelProfile | None) -> bool:
     return bool(
         profile
         and profile.role == "chat"
-        and profile.engine == "llama.cpp"
+        and profile.engine in {"llama.cpp", "vllm"}
         and profile.model_install_id
     )
 
@@ -102,10 +102,10 @@ async def restore_configured_workers(services: Services) -> None:
         except Exception:
             logger.exception("Could not restore the configured media worker")
 
-    if settings.chat_engine == "llama.cpp":
+    if settings.chat_engine in {"llama.cpp", "vllm"}:
         selected = chat_profile_to_restore()
         if not selected:
-            logger.info("No installed llama.cpp chat profile is available to restore")
+            logger.info("No installed managed chat profile is available to restore")
             return
         profile, install = selected
         try:

@@ -342,7 +342,7 @@ export interface WorkerStatus {
 }
 
 export interface RuntimeStatus {
-  engine: "llama.cpp" | "comfyui";
+  engine: "llama.cpp" | "vllm" | "comfyui";
   release: string;
   state: "missing" | "installing" | "ready" | "failed" | "unsupported";
   supported: boolean;
@@ -442,6 +442,7 @@ export interface CatalogModel {
   total_size_bytes: number | null;
   compatibility: string;
   compatibility_reasons: string[];
+  required_runtime?: string | null;
 }
 
 export interface CatalogPage {
@@ -462,6 +463,13 @@ export interface CatalogPreflight {
   revision: string;
   selected_files: string[];
   expected_sha256: Record<string, string>;
+  file_sources?: Record<string, {
+    remote_id: string;
+    revision: string;
+    filename: string;
+    size_bytes: number | null;
+    sha256: string | null;
+  }>;
   comfy_paths: Record<string, string>;
   workflow_template_id: string | null;
   workflow_template_sha256: string | null;
@@ -499,7 +507,7 @@ export interface ReferenceRecipe {
   name: string;
   summary: string;
   role: "chat" | "image" | "video";
-  engine: "llama.cpp" | "comfyui";
+  engine: "llama.cpp" | "vllm" | "comfyui";
   operations: string[];
   license_id: string;
   status: "reference-candidate" | "certified";

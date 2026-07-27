@@ -216,8 +216,10 @@ class ProcessSupervisor:
         return result
 
     async def load_chat(self, profile: ModelProfile, install: ModelInstall) -> WorkerStatus:
+        if profile.engine == "vllm":
+            return await self._load_vllm_chat(profile, install)
         if profile.engine != "llama.cpp":
-            raise ValueError("the selected profile is not a llama.cpp profile")
+            raise ValueError("the selected profile is not a managed chat profile")
         if (
             not self.settings.llama_executable or not self.settings.llama_executable.is_file()
         ) and self.runtimes:
@@ -250,13 +252,92 @@ class ProcessSupervisor:
         if projection_path is not None:
             model_size += projection_path.stat().st_size
         estimate = self._estimate_chat_memory(model_size, profile.load_settings_json)
-        await self._replace(
-            "chat",
-            command,
-            self.settings.llama_url + "/health",
-            profile.id,
-            estimated_memory_bytes=estimate,
+        previous_engine = self.settings.chat_engine
+        self.settings.chat_engine = "llama.cpp"
+        try:
+            await self._replace(
+                "chat",
+                command,
+                self.settings.llama_url + "/health",
+                profile.id,
+                estimated_memory_bytes=estimate,
+            )
+        except Exception:
+            self.settings.chat_engine = previous_engine
+            raise
+        return self.statuses()[0]
+
+    async def _load_vllm_chat(
+        self,
+        profile: ModelProfile,
+        install: ModelInstall,
+    ) -> WorkerStatus:
+        if (
+            not self.settings.vllm_executable or not self.settings.vllm_executable.is_file()
+        ) and self.runtimes:
+            await self.runtimes.ensure("vllm")
+        executable = self.settings.vllm_executable
+        if not executable:
+            raise RuntimeError("The vLLM runtime is not installed.")
+        model_root = Path(install.local_path).expanduser().resolve(strict=True)
+        if not model_root.is_dir():
+            raise ValueError("the vLLM model install must be a snapshot directory")
+        if (
+            not (model_root / "config.json").is_file()
+            or not (model_root / "hf_quant_config.json").is_file()
+        ):
+            raise ValueError("the vLLM model install is missing ModelOpt metadata")
+        if not any(model_root.rglob("*.safetensors")):
+            raise ValueError("the vLLM model install has no safetensors weights")
+        parsed = urlparse(self.settings.llama_url)
+        context_length = int(profile.load_settings_json.get("context_length", 8192))
+        command = [
+            str(executable.expanduser().resolve(strict=True)),
+            "-m",
+            "vllm.entrypoints.openai.api_server",
+            "--model",
+            str(model_root),
+            "--served-model-name",
+            "local-model",
+            "--host",
+            parsed.hostname or "127.0.0.1",
+            "--port",
+            str(parsed.port or 12341),
+            "--quantization",
+            "modelopt",
+            "--max-model-len",
+            str(context_length),
+            "--max-num-seqs",
+            "1",
+            "--gpu-memory-utilization",
+            "0.9",
+            "--limit-mm-per-prompt",
+            json.dumps({"image": self.settings.vision_max_images, "video": 1}),
+        ]
+        raw_offload = profile.load_settings_json.get("cpu_offload_gb")
+        if (
+            isinstance(raw_offload, (int, float))
+            and not isinstance(raw_offload, bool)
+            and raw_offload > 0
+        ):
+            command.extend(["--cpu-offload-gb", str(float(raw_offload))])
+        model_size = sum(
+            candidate.stat().st_size for candidate in model_root.rglob("*") if candidate.is_file()
         )
+        estimate = self._estimate_chat_memory(model_size, profile.load_settings_json)
+        previous_engine = self.settings.chat_engine
+        self.settings.chat_engine = "vllm"
+        try:
+            await self._replace(
+                "chat",
+                command,
+                self.settings.llama_url + "/health",
+                profile.id,
+                estimated_memory_bytes=estimate,
+            )
+        except Exception:
+            self.settings.chat_engine = previous_engine
+            raise
         return self.statuses()[0]
 
     async def start_media(

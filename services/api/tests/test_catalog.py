@@ -10,10 +10,15 @@ from local_lm.catalog import HuggingFaceCatalog
 from local_lm.config import Settings
 from local_lm.domain import CompatibilityLevel
 from local_lm.downloads import DownloadManager
-from local_lm.preflight import _automatic_selection, assess_catalog_install
+from local_lm.preflight import (
+    _automatic_selection,
+    _automatic_vllm_selection,
+    assess_catalog_install,
+)
 from local_lm.schemas import (
     CatalogDetail,
     CatalogModel,
+    CatalogPage,
     CatalogPreflightRequest,
     DownloadRequest,
     SystemInfo,
@@ -36,6 +41,66 @@ def test_gguf_catalog_entry_is_likely_compatible() -> None:
     )
     assert level == CompatibilityLevel.LIKELY
     assert "GGUF" in reasons[0]
+
+
+def test_modelopt_catalog_entry_names_its_required_runtime() -> None:
+    model = HuggingFaceCatalog._normalize(
+        {
+            "id": "nvidia/Qwen3.6-27B-NVFP4",
+            "pipeline_tag": "text-generation",
+            "tags": ["safetensors", "ModelOpt", "NVFP4"],
+            "siblings": [
+                {"rfilename": "config.json"},
+                {"rfilename": "hf_quant_config.json"},
+                {"rfilename": "model-00001-of-00003.safetensors"},
+            ],
+        },
+        "chat",
+    )
+
+    assert model.compatibility == "advanced_import"
+    assert model.compatibility_reasons == ["requires the managed vLLM ModelOpt runtime"]
+    assert model.required_runtime == "vllm"
+
+
+def test_vllm_snapshot_selection_keeps_required_data_files_only() -> None:
+    files = [
+        {"filename": "model-00001-of-00003.safetensors"},
+        {"filename": "model-00002-of-00003.safetensors"},
+        {"filename": "model-00003-of-00003.safetensors"},
+        {"filename": "model.safetensors.index.json"},
+        {"filename": "config.json"},
+        {"filename": "hf_quant_config.json"},
+        {"filename": "tokenizer.json"},
+        {"filename": "processor_config.json"},
+        {"filename": "custom_modeling.py"},
+        {"filename": "README.md"},
+    ]
+
+    selected = _automatic_vllm_selection(files)
+
+    assert selected == [
+        "model-00001-of-00003.safetensors",
+        "model-00002-of-00003.safetensors",
+        "model-00003-of-00003.safetensors",
+        "config.json",
+        "hf_quant_config.json",
+        "model.safetensors.index.json",
+        "processor_config.json",
+        "tokenizer.json",
+    ]
+
+
+def test_vllm_snapshot_selection_requires_modelopt_metadata() -> None:
+    assert (
+        _automatic_vllm_selection(
+            [
+                {"filename": "model.safetensors"},
+                {"filename": "config.json"},
+            ]
+        )
+        == []
+    )
 
 
 def test_default_chat_download_selects_smallest_gguf() -> None:
@@ -231,6 +296,115 @@ def test_chat_preflight_selects_and_hashes_multimodal_projector(tmp_path: Path) 
     }
     assert result.download_bytes == 13
     assert result.can_install is True
+
+
+def test_chat_preflight_preserves_external_projector_provenance(tmp_path: Path) -> None:
+    destination = "companions/author/model/mmproj-vision-model-4B-f16.gguf"
+    detail = CatalogDetail(
+        model=CatalogModel(
+            remote_id="converter/vision-model-gguf",
+            name="vision-model-gguf",
+            compatibility="likely",
+        ),
+        revision="a" * 40,
+        files=[
+            {
+                "filename": "vision-model-4B-Q4_K_M.gguf",
+                "size": 10,
+                "sha256": "a" * 64,
+            },
+            {
+                "filename": destination,
+                "size": 3,
+                "sha256": "b" * 64,
+                "source_remote_id": "author/vision-model",
+                "source_revision": "c" * 40,
+                "source_filename": "mmproj-vision-model-4B-f16.gguf",
+            },
+        ],
+    )
+    system = SystemInfo.model_construct(
+        memory_total_bytes=16 * 1024**3,
+        disk_free_bytes=100 * 1024**3,
+        devices=[],
+    )
+
+    result = assess_catalog_install(
+        detail,
+        CatalogPreflightRequest(role="chat", engine="llama.cpp"),
+        Settings(data_dir=tmp_path),
+        system,
+    )
+
+    assert result.selected_files == [
+        "vision-model-4B-Q4_K_M.gguf",
+        destination,
+    ]
+    assert result.file_sources[destination].model_dump() == {
+        "remote_id": "author/vision-model",
+        "revision": "c" * 40,
+        "filename": "mmproj-vision-model-4B-f16.gguf",
+        "size_bytes": 3,
+        "sha256": "b" * 64,
+    }
+
+
+async def test_catalog_discovers_a_strongly_matched_external_projector(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    catalog = HuggingFaceCatalog(Settings(data_dir=tmp_path))
+    candidate = CatalogModel(
+        remote_id="HauhauCS/Qwen3.6-27B-Uncensored-HauhauCS-Aggressive",
+        name="Qwen3.6-27B-Uncensored-HauhauCS-Aggressive",
+        pipeline_tag="image-text-to-text",
+        tags=["vision", "multimodal"],
+        downloads=100,
+        compatibility="likely",
+    )
+
+    async def search(**_kwargs: object) -> CatalogPage:
+        return CatalogPage(items=[candidate])
+
+    async def inspect(
+        remote_id: str,
+        revision: str = "main",
+        requested_role: str | None = None,
+    ) -> dict[str, object]:
+        del revision, requested_role
+        assert remote_id == candidate.remote_id
+        return {
+            "revision": "c" * 40,
+            "files": [
+                {
+                    "filename": ("mmproj-Qwen3.6-27B-Uncensored-HauhauCS-Aggressive-f16.gguf"),
+                    "size": 927_606_976,
+                    "sha256": "d" * 64,
+                }
+            ],
+        }
+
+    monkeypatch.setattr(catalog, "search", search)
+    monkeypatch.setattr(catalog, "inspect", inspect)
+    try:
+        result = await catalog.discover_vision_projector(
+            ("SummonGovernance/Qwen3.6-27B-Uncensored-HauhauCS-Aggressive-NVFP4-MTP-GGUF"),
+            [("Qwen3.6-27B-Uncensored-HauhauCS-Aggressive-NVFP4-MTP-Q4_K_P.gguf")],
+        )
+    finally:
+        await catalog.close()
+
+    assert result == {
+        "filename": (
+            "companions/HauhauCS/Qwen3.6-27B-Uncensored-HauhauCS-Aggressive/"
+            "mmproj-Qwen3.6-27B-Uncensored-HauhauCS-Aggressive-f16.gguf"
+        ),
+        "size": 927_606_976,
+        "sha256": "d" * 64,
+        "source_remote_id": candidate.remote_id,
+        "source_revision": "c" * 40,
+        "source_filename": ("mmproj-Qwen3.6-27B-Uncensored-HauhauCS-Aggressive-f16.gguf"),
+    }
 
 
 @pytest.mark.parametrize(
