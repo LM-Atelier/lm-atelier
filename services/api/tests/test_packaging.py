@@ -898,9 +898,10 @@ def test_frozen_installer_contracts_are_explicit() -> None:
     assert '"release-metadata" / "third-party-licenses"' in spec
     assert '"LOCAL_LM_CHAT_ENGINE": "mock"' in frozen_smoke
     assert '"LOCAL_LM_MEDIA_ENGINE": "mock"' in frozen_smoke
-    assert 'runtime_result.get("chat_engine") != "llama.cpp"' in frozen_smoke
-    assert 'runtime_result.get("media_engine") != "comfyui"' in frozen_smoke
-    assert 'runtime_result.get("engine_manifest_available") is not True' in frozen_smoke
+    assert 'runtime_result.get("chat_engine") == "llama.cpp"' in frozen_smoke
+    assert 'runtime_result.get("media_engine") == "comfyui"' in frozen_smoke
+    assert 'runtime_result.get("engine_manifest_available") is True' in frozen_smoke
+    assert "args.pre_manifest_release or (" in frozen_smoke
     assert "--installer-tool" in windows_build
     assert "--installer-tool-version" in windows_build
     assert "--installer-tool-sha256" in windows_build
