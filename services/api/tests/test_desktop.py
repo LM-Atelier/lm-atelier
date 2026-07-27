@@ -20,7 +20,8 @@ def test_default_data_dir_uses_windows_local_app_data(monkeypatch) -> None:  # t
     monkeypatch.setattr(sys, "platform", "win32")
     monkeypatch.setenv("LOCALAPPDATA", r"C:\Users\Tester\AppData\Local")
 
-    assert desktop.default_data_dir() == Path(r"C:\Users\Tester\AppData\Local\LMAtelier\data")
+    expected = Path(r"C:\Users\Tester\AppData\Local") / "LMAtelier" / "data"
+    assert desktop.default_data_dir() == expected
 
 
 def test_default_data_dir_uses_xdg_data_home(monkeypatch) -> None:  # type: ignore[no-untyped-def]
