@@ -7,6 +7,7 @@ import json
 import logging
 import os
 import re
+import sys
 from dataclasses import dataclass, field
 from pathlib import Path, PurePosixPath
 from typing import TYPE_CHECKING, Any, Literal
@@ -801,7 +802,9 @@ class ProcessSupervisor:
     @staticmethod
     def _llama_model_path(path: Path) -> Path:
         """Use the filesystem's short name when llama.cpp would exceed MAX_PATH."""
-        if os.name != "nt" or len(str(path)) < 240:
+        if sys.platform != "win32":
+            return path
+        if len(str(path)) < 240:
             return path
         win_dll = getattr(ctypes, "WinDLL", None)
         if win_dll is None:

@@ -19,7 +19,7 @@ from .subprocess_env import subprocess_environment
 
 def _cpu_model() -> str:
     system = platform.system()
-    if system == "Windows":
+    if sys.platform == "win32":
         try:
             import winreg
 

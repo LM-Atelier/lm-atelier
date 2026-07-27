@@ -12,6 +12,7 @@ import sqlite3
 import ssl
 import subprocess
 import sys
+import sysconfig
 import time
 import uuid
 from datetime import datetime, timezone
@@ -61,6 +62,7 @@ REVIEWED_LICENSE_EXPRESSIONS = {
     "LGPL-2.1-or-later",
     "MIT",
     "MIT AND PSF-2.0",
+    "MIT-0",
     "MIT-CMU",
     "MPL-2.0",
     "MPL-2.0 AND MIT",
@@ -332,9 +334,21 @@ def runtime_components(licenses_root: Path) -> tuple[list[dict[str, Any]], list[
     runtime_root.mkdir(parents=True, exist_ok=True)
     review: list[str] = []
 
-    python_license = Path(sys.base_prefix) / "LICENSE.txt"
-    if not python_license.is_file():
-        review.append(f"CPython license was not found at {python_license}")
+    # Windows installs keep LICENSE.txt at the prefix root; Unix builds
+    # install it into the standard library directory.
+    python_license_candidates = [
+        Path(sys.base_prefix) / "LICENSE.txt",
+        Path(sysconfig.get_path("stdlib")) / "LICENSE.txt",
+    ]
+    python_license = next(
+        (candidate for candidate in python_license_candidates if candidate.is_file()),
+        None,
+    )
+    if python_license is None:
+        review.append(
+            "CPython license was not found at any of: "
+            + ", ".join(str(candidate) for candidate in python_license_candidates)
+        )
         python_files: list[str] = []
     else:
         destination = runtime_root / "CPython-LICENSE.txt"
