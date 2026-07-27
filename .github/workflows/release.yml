@@ -183,6 +183,10 @@ jobs:
             --skip-editable \
             --progress-spinner off \
             --cache-dir temp/pip-audit-cache
+      - name: Install ffmpeg for media pipeline tests
+        run: |
+          sudo apt-get update
+          sudo apt-get install --yes --no-install-recommends ffmpeg
       - name: Run exact-tag verification
         run: ./scripts/verify.sh
 
@@ -664,7 +668,7 @@ jobs:
             cd "$bundle"
             export LC_ALL=C
             for file in *; do
-              if [[ -f "$file" && "$file" != "SHA256SUMS" ]]; then
+              if [[ -f "$file" && "$file" != "SHA256SUMS-linux" ]]; then
                 sha256sum "$file"
               fi
             done
