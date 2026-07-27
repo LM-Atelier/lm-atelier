@@ -2,10 +2,12 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
+from types import SimpleNamespace
 
 import httpx
 import pytest
 
+from local_lm import downloads
 from local_lm.catalog import HuggingFaceCatalog
 from local_lm.config import Settings
 from local_lm.domain import CompatibilityLevel
@@ -139,8 +141,17 @@ def test_default_chat_download_includes_matching_multimodal_projector() -> None:
     ]
 
 
-def test_qwen36_chat_download_selects_main_model_and_vision_projector_only() -> None:
+def test_qwen36_chat_download_selects_main_model_and_vision_projector_only(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     gib = 1024**3
+    # Selection ranks only candidates that fit in system memory, so pin the
+    # host RAM to keep the expectation machine-independent.
+    monkeypatch.setattr(
+        downloads,
+        "psutil",
+        SimpleNamespace(virtual_memory=lambda: SimpleNamespace(total=64 * gib)),
+    )
     request = DownloadRequest(
         remote_id="ggml-org/Qwen3.6-27B-GGUF",
         role="chat",
