@@ -668,7 +668,7 @@ jobs:
             cd "$bundle"
             export LC_ALL=C
             for file in *; do
-              if [[ -f "$file" && "$file" != "SHA256SUMS" ]]; then
+              if [[ -f "$file" && "$file" != "SHA256SUMS-linux" ]]; then
                 sha256sum "$file"
               fi
             done
