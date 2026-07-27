@@ -11,13 +11,13 @@ $RepositoryRoot = (Resolve-Path (Join-Path $PSScriptRoot "..")).Path
 $ApiVersion = "2026-03-10"
 $ExpectedOwnerId = 32660587
 $AllowedActionPatterns = @(
-    "actions/attest@59d89421af93a897026c735860bf21b6eb4f7b26",
+    "actions/attest@f7c74d28b9d84cb8768d0b8ca14a4bac6ef463e6",
     "actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1",
     "actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c",
     "actions/setup-node@820762786026740c76f36085b0efc47a31fe5020",
     "actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97",
     "actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a",
-    "astral-sh/setup-uv@08807647e7069bb48b6ef5acd8ec9567f424441b"
+    "astral-sh/setup-uv@c771a70e6277c0a99b617c7a806ffedaca235ff9"
 )
 
 function Invoke-GitHubApi {
@@ -212,7 +212,7 @@ if (-not $Apply) {
     Write-Host "After the approved visibility change, run:"
     Write-Host "  .\scripts\configure-public-repository.ps1 -Apply"
     Write-Host "Prepared controls:"
-    Write-Host "  - squash-only merges and automatic branch cleanup"
+    Write-Host "  - squash work merges, merge-commit promotions, and branch cleanup"
     Write-Host "  - read-only, SHA-pinned selected Actions"
     Write-Host "  - 30-day Actions log and artifact retention"
     Write-Host "  - protected main/develop branches and v* tags"
@@ -239,7 +239,7 @@ if ($RepositoryState.owner.id -ne $ExpectedOwnerId) {
 
 Invoke-GitHubApi -Method PATCH -Endpoint "repos/$Repository" -Body @{
     allow_auto_merge = $false
-    allow_merge_commit = $false
+    allow_merge_commit = $true
     allow_rebase_merge = $false
     allow_squash_merge = $true
     allow_update_branch = $true
@@ -387,7 +387,7 @@ $ActualTagCreationRules = Invoke-GitHubApi `
 
 Assert-JsonSubset -Label "Repository settings" -Actual $FinalRepository -Expected @{
     allow_auto_merge = $false
-    allow_merge_commit = $false
+    allow_merge_commit = $true
     allow_rebase_merge = $false
     allow_squash_merge = $true
     allow_update_branch = $true
