@@ -6,14 +6,17 @@
 
 # LM Atelier
 
-LM Atelier is a local-first workspace for chatting with AI and creating,
-understanding, and editing images and videos. It keeps conversations and media
+LM Atelier is a local-first workspace for AI chat, image creation and editing,
+video generation, and vision-assisted context. It keeps conversations and media
 on your computer by default and can select an appropriate configured model for
 each request.
 
+![LM Atelier empty local workspace](docs/assets/application-preview.png)
+
 ## Core features
 
-- Local chat, image generation, image editing, video generation, and vision
+- Local chat, image generation and editing, and video generation
+- Vision context for images and representative video frames
 - Auto Mode for routing requests to configured models
 - One-click installation for models with supported, runtime-verified formats
 - Contextual image creation and editing within conversations
