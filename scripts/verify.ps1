@@ -30,7 +30,7 @@ function Resolve-PythonTool {
 
     $Path = Join-Path $PythonTools "$Name.exe"
     if (-not (Test-Path -LiteralPath $Path -PathType Leaf)) {
-        throw "Missing $Path. Create .venv and install services/api[dev] first."
+        throw "Missing $Path. Create .venv and install services/api[dev,package] first."
     }
     return $Path
 }
@@ -51,6 +51,7 @@ try {
     Invoke-Checked "Bandit high-severity scan" $Bandit @(
         "-q", "-lll", "-r", "services/api/local_lm"
     )
+    Invoke-Checked "Version metadata" $Python @("scripts/sync-version.py")
     $VerificationTemp = Join-Path $RepositoryRoot "temp"
     New-Item -ItemType Directory -Force -Path $VerificationTemp | Out-Null
     $PytestTemp = Join-Path $VerificationTemp "verify-pytest-$PID"
@@ -64,23 +65,13 @@ try {
     Invoke-Checked "Web lint" $Npm @("run", "lint")
     Invoke-Checked "Web typecheck" $Npm @("run", "typecheck")
     Invoke-Checked "Web tests" $Npm @("test")
+    Invoke-Checked "Browser suite typecheck" $Npm @("run", "e2e:typecheck")
+    Invoke-Checked "Browser suite discovery" $Npm @("run", "e2e:list")
     Invoke-Checked "Production web build" $Npm @("run", "build")
 
-    Write-Host "==> GitHub workflow YAML"
-    $WorkflowCheck = @'
-from pathlib import Path
-import yaml
-
-paths = sorted(Path('.github/workflows').glob('*.yml'))
-paths += sorted(Path('.github/workflows').glob('*.yaml'))
-if not paths:
-    raise SystemExit('No GitHub workflow files found')
-for path in paths:
-    with path.open('r', encoding='utf-8') as handle:
-        yaml.safe_load(handle)
-    print(path)
-'@
-    Invoke-Checked "GitHub workflow YAML" $Python @("-c", $WorkflowCheck)
+    Invoke-Checked "GitHub workflow policy" $Python @(
+        "scripts/validate-workflows.py"
+    )
 
     Write-Host "==> Windows packaging syntax"
     $PowerShellErrors = @()
@@ -115,39 +106,33 @@ for path in paths:
         }
         Invoke-Checked "Linux packaging syntax" $BashPath @(
             "-n",
-            "scripts/package.sh",
-            "packaging/linux/install.sh",
-            "packaging/linux/rollback.sh",
-            "packaging/linux/start-installed.sh",
-            "packaging/linux/uninstall.sh"
+            "scripts/build-linux-installer.sh",
+            "scripts/smoke-linux-installer.sh",
+            "packaging/linux/self-extracting-installer.sh",
+            "packaging/linux/frozen-uninstall.sh"
         )
     }
 
-    Write-Host "==> Repository hygiene"
-    $Tracked = & $Git ls-files
-    if ($LASTEXITCODE -ne 0) {
-        throw "git ls-files failed with exit code $LASTEXITCODE."
-    }
-    $RuntimePattern =
-        '(^|/)(\.env|\.private|data|models|downloads|artifacts)(/|$)|' +
-        '\.(gguf|safetensors|ckpt|sqlite3?)$'
-    $UnsafeTracked = @($Tracked | Where-Object { $_ -match $RuntimePattern })
-    if ($UnsafeTracked.Count -gt 0) {
-        throw "Private or runtime artifacts are tracked: $($UnsafeTracked -join ', ')"
-    }
+    Invoke-Checked "Repository hygiene" $Python @(
+        "scripts/check-repository-hygiene.py"
+    )
 
-    & $Git grep -I -E `
-        '(hf_[A-Za-z0-9]{20,}|BEGIN (RSA |EC |OPENSSH )?PRIVATE KEY)' `
-        -- . ':!package-lock.json' | Out-Null
-    $SecretScanExit = $LASTEXITCODE
-    if ($SecretScanExit -eq 0) {
-        throw "A likely credential is present in tracked source."
+    Invoke-Checked "Unstaged whitespace check" $Git @("diff", "--check", "--")
+    Invoke-Checked "Staged whitespace check" $Git @(
+        "diff", "--cached", "--check", "--"
+    )
+    if ($env:GITHUB_BASE_REF) {
+        Invoke-Checked "Pull-request whitespace check" $Git @(
+            "diff",
+            "--check",
+            "origin/$($env:GITHUB_BASE_REF)...HEAD",
+            "--"
+        )
+    } else {
+        Invoke-Checked "Latest commit whitespace check" $Git @(
+            "log", "--check", "--format=", "-1", "HEAD", "--"
+        )
     }
-    if ($SecretScanExit -ne 1) {
-        throw "Tracked-source credential scan failed with exit code $SecretScanExit."
-    }
-
-    Invoke-Checked "Git whitespace check" $Git @("diff", "--check", "HEAD", "--")
     Write-Host "All LM Atelier local verification gates passed."
 }
 finally {

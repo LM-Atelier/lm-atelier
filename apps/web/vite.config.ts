@@ -13,6 +13,16 @@ export default defineConfig({
   build: {
     outDir: "dist",
     sourcemap: true,
+    rollupOptions: {
+      output: {
+        manualChunks: {
+          icons: ["lucide-react"],
+          markdown: ["react-markdown", "remark-gfm"],
+          query: ["@tanstack/react-query"],
+          react: ["react", "react-dom"],
+        },
+      },
+    },
   },
   test: {
     environment: "jsdom",

@@ -30,6 +30,14 @@ _PRIOR_IMAGE_EDIT = re.compile(
     r")",
     re.IGNORECASE,
 )
+_PRIOR_IMAGE_SOURCE = re.compile(
+    r"\b(?:previous|prior|earlier|last|above)\s+"
+    r"(?:image|picture|photo|illustration|artwork|logo|icon)\b|"
+    r"^\s*(?:please\s+|now\s+)*(?:use|reuse|remix|restyle|transform|redo|"
+    r"recreate|continue)\b.*\b(?:it|this|that|the\s+"
+    r"(?:image|picture|photo|illustration|artwork|logo|icon))\b",
+    re.IGNORECASE,
+)
 _DISCUSSION = re.compile(
     r"^\s*(?:explain|describe|compare|what|why|how|when|where|who|tell me about|write about)\b",
     re.IGNORECASE,
@@ -67,6 +75,35 @@ _CONTEXT_VIDEO_CREATE = re.compile(
     re.IGNORECASE,
 )
 _MEDIA_CONTEXT_SUMMARY = re.compile(r"^\s*Generated (?:image|video|\d+ images?|\d+ videos?)\b")
+_OUTPUT_COUNT = re.compile(
+    r"\b(?P<count>\d{1,2}|one|two|three|four|five|six|seven|eight|nine|ten|"
+    r"eleven|twelve|thirteen|fourteen|fifteen|sixteen)\s+"
+    r"(?:different\s+|distinct\s+)?"
+    r"(?:images?|pictures?|videos?|clips?|variations?|versions?|options?|renders?)\b",
+    re.IGNORECASE,
+)
+_PER_OUTPUT_DISTRIBUTOR = re.compile(
+    r"\b(?:with\s+)?each(?:\s+(?:one|image|picture|photo|video|clip))?\b\s*",
+    re.IGNORECASE,
+)
+_COUNT_WORDS = {
+    "one": 1,
+    "two": 2,
+    "three": 3,
+    "four": 4,
+    "five": 5,
+    "six": 6,
+    "seven": 7,
+    "eight": 8,
+    "nine": 9,
+    "ten": 10,
+    "eleven": 11,
+    "twelve": 12,
+    "thirteen": 13,
+    "fourteen": 14,
+    "fifteen": 15,
+    "sixteen": 16,
+}
 
 ROUTING_TOOL = {
     "type": "function",
@@ -85,6 +122,7 @@ ROUTING_TOOL = {
                 "confidence": {"type": "number", "minimum": 0, "maximum": 1},
                 "reason": {"type": "string"},
                 "use_prior_image": {"type": "boolean"},
+                "output_count": {"type": "integer", "minimum": 1, "maximum": 16},
             },
             "required": [
                 "mode",
@@ -236,12 +274,34 @@ class ModalityRouter:
         if mode == RoutingMode.TEXT:
             return self._text(normalized, "explicit text mode", 1)
         if mode == RoutingMode.IMAGE:
-            operation = Operation.IMAGE_TO_IMAGE if input_artifact_ids else Operation.TEXT_TO_IMAGE
+            use_prior_image = bool(
+                has_prior_image
+                and not referenced_text
+                and (_PRIOR_IMAGE_EDIT.search(normalized) or _PRIOR_IMAGE_SOURCE.search(normalized))
+            )
+            operation = (
+                Operation.IMAGE_TO_IMAGE
+                if input_artifact_ids or use_prior_image
+                else Operation.TEXT_TO_IMAGE
+            )
             return grounded(
                 self._media(operation, normalized, input_artifact_ids, "explicit image mode", 1)
             )
         if mode == RoutingMode.VIDEO:
-            operation = Operation.IMAGE_TO_VIDEO if input_artifact_ids else Operation.TEXT_TO_VIDEO
+            use_prior_image = bool(
+                has_prior_image
+                and not referenced_text
+                and (
+                    _DIRECT_VIDEO.search(normalized)
+                    or _PRIOR_IMAGE_EDIT.search(normalized)
+                    or _PRIOR_IMAGE_SOURCE.search(normalized)
+                )
+            )
+            operation = (
+                Operation.IMAGE_TO_VIDEO
+                if input_artifact_ids or use_prior_image
+                else Operation.TEXT_TO_VIDEO
+            )
             return grounded(
                 self._media(operation, normalized, input_artifact_ids, "explicit video mode", 1)
             )
@@ -271,7 +331,11 @@ class ModalityRouter:
                 )
             )
 
-        if has_prior_image and not referenced_text and _PRIOR_IMAGE_EDIT.search(normalized):
+        if (
+            (has_prior_image or input_artifact_ids)
+            and not referenced_text
+            and _PRIOR_IMAGE_EDIT.search(normalized)
+        ):
             return grounded(
                 self._media(
                     Operation.IMAGE_TO_IMAGE,
@@ -366,6 +430,7 @@ class ModalityRouter:
         standalone_prompt = arguments.get("standalone_prompt")
         reason = arguments.get("reason")
         use_prior_image = arguments.get("use_prior_image")
+        output_count = arguments.get("output_count", self.requested_output_count(text))
         if (
             mode not in {"text", "image", "video"}
             or not isinstance(confidence, int | float)
@@ -376,6 +441,9 @@ class ModalityRouter:
             or not isinstance(reason, str)
             or not reason.strip()
             or not isinstance(use_prior_image, bool)
+            or isinstance(output_count, bool)
+            or not isinstance(output_count, int)
+            or not 1 <= output_count <= 16
         ):
             raise ValueError("route arguments do not satisfy the schema")
         if mode == "text":
@@ -392,6 +460,7 @@ class ModalityRouter:
             f"model planner: {reason.strip()}",
             float(confidence),
         )
+        plan.output_count = max(output_count, self.requested_output_count(text))
         # A low-confidence model answer cannot override a strong deterministic text safeguard.
         if (
             fallback.operation == Operation.TEXT
@@ -422,6 +491,42 @@ class ModalityRouter:
             operation=operation,
             standalone_prompt=prompt,
             input_artifact_ids=input_artifact_ids,
+            output_count=ModalityRouter.requested_output_count(prompt),
             confidence=confidence,
             reason=reason,
         )
+
+    @staticmethod
+    def requested_output_count(text: str) -> int:
+        match = _OUTPUT_COUNT.search(text)
+        if not match:
+            return 1
+        raw = match.group("count").casefold()
+        return int(raw) if raw.isdigit() else _COUNT_WORDS[raw]
+
+    @staticmethod
+    def per_output_media_prompt(
+        prompt: str,
+        operation: Operation,
+        output_count: int,
+    ) -> str:
+        """Compile one engine prompt from a request for several media outputs."""
+
+        cleaned = prompt.strip()
+        if output_count <= 1 or operation == Operation.TEXT:
+            return cleaned
+        generation_prompt, separator, context = cleaned.partition("\n\nSource chat text:")
+        medium = (
+            "video" if operation in {Operation.TEXT_TO_VIDEO, Operation.IMAGE_TO_VIDEO} else "image"
+        )
+        generation_prompt, substitutions = _OUTPUT_COUNT.subn(
+            f"one {medium}",
+            generation_prompt,
+            count=1,
+        )
+        if not substitutions:
+            return cleaned
+        generation_prompt = _PER_OUTPUT_DISTRIBUTOR.sub("", generation_prompt)
+        generation_prompt = re.sub(r"[ \t]+", " ", generation_prompt)
+        generation_prompt = re.sub(r"\s+([,.;:!?])", r"\1", generation_prompt).strip()
+        return f"{generation_prompt}{separator}{context}" if separator else generation_prompt

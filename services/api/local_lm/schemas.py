@@ -12,12 +12,30 @@ class ApiModel(BaseModel):
     model_config = ConfigDict(from_attributes=True)
 
 
+GenerationSettingsByRole = dict[
+    Literal["chat", "image", "video"],
+    dict[str, Any],
+]
+GenerationPresetIdsByRole = dict[
+    Literal["chat", "image", "video"],
+    str | None,
+]
+
+
+class VisionSettings(ApiModel):
+    max_images: int = Field(default=4, ge=1, le=16)
+    max_video_frames: int = Field(default=6, ge=3, le=16)
+    include_prior_visual: bool = True
+
+
 class ProjectCreate(ApiModel):
     name: str = Field(min_length=1, max_length=200)
     description: str = Field(default="", max_length=10_000)
     instructions: str = Field(default="", max_length=100_000)
     image_workflow_revision_id: str | None = None
     video_workflow_revision_id: str | None = None
+    generation_settings_json: GenerationSettingsByRole = Field(default_factory=dict)
+    generation_preset_ids_json: GenerationPresetIdsByRole = Field(default_factory=dict)
 
 
 class ProjectUpdate(ApiModel):
@@ -27,6 +45,8 @@ class ProjectUpdate(ApiModel):
     archived: bool | None = None
     image_workflow_revision_id: str | None = None
     video_workflow_revision_id: str | None = None
+    generation_settings_json: GenerationSettingsByRole | None = None
+    generation_preset_ids_json: GenerationPresetIdsByRole | None = None
 
 
 class ProjectOut(ApiModel):
@@ -37,6 +57,8 @@ class ProjectOut(ApiModel):
     archived: bool
     image_workflow_revision_id: str | None
     video_workflow_revision_id: str | None
+    generation_settings_json: GenerationSettingsByRole
+    generation_preset_ids_json: GenerationPresetIdsByRole
     created_at: datetime
     updated_at: datetime
 
@@ -45,6 +67,9 @@ class ChatCreate(ApiModel):
     title: str = Field(default="New chat", min_length=1, max_length=240)
     project_id: str | None = None
     routing_mode: RoutingMode = RoutingMode.AUTO
+    generation_settings_json: GenerationSettingsByRole = Field(default_factory=dict)
+    generation_preset_ids_json: GenerationPresetIdsByRole = Field(default_factory=dict)
+    vision_settings_json: VisionSettings = Field(default_factory=VisionSettings)
 
 
 class ChatUpdate(ApiModel):
@@ -54,8 +79,12 @@ class ChatUpdate(ApiModel):
     routing_mode: RoutingMode | None = None
     confirm_uncertain_media: bool | None = None
     active_chat_profile_id: str | None = None
+    active_vision_profile_id: str | None = None
     active_image_profile_id: str | None = None
     active_video_profile_id: str | None = None
+    generation_settings_json: GenerationSettingsByRole | None = None
+    generation_preset_ids_json: GenerationPresetIdsByRole | None = None
+    vision_settings_json: VisionSettings | None = None
 
 
 class ArtifactOut(ApiModel):
@@ -101,6 +130,7 @@ class ArtifactCleanupRequest(ApiModel):
 class ArtifactCleanupResult(ApiModel):
     dry_run: bool
     marked_count: int
+    retention_pending_count: int
     removed_count: int
     reclaimed_bytes: int
 
@@ -122,13 +152,27 @@ class MessagePartOut(ApiModel):
     artifact: ArtifactOut | None = None
 
 
+class ResponseRevisionOut(ApiModel):
+    id: str
+    message_id: str
+    run_id: str | None
+    sequence: int
+    status: str
+    parts: list[MessagePartOut]
+    created_at: datetime
+    updated_at: datetime
+
+
 class MessageOut(ApiModel):
     id: str
     chat_id: str
     parent_id: str | None
     role: str
     status: str
+    transcript_visible: bool
+    active_response_revision_id: str | None
     parts: list[MessagePartOut]
+    response_revisions: list[ResponseRevisionOut] = Field(default_factory=list)
     created_at: datetime
     updated_at: datetime
 
@@ -141,9 +185,13 @@ class ChatOut(ApiModel):
     routing_mode: str
     confirm_uncertain_media: bool
     active_chat_profile_id: str | None
+    active_vision_profile_id: str | None
     active_image_profile_id: str | None
     active_video_profile_id: str | None
     active_head_message_id: str | None
+    generation_settings_json: GenerationSettingsByRole
+    generation_preset_ids_json: GenerationPresetIdsByRole
+    vision_settings_json: VisionSettings
     created_at: datetime
     updated_at: datetime
 
@@ -158,6 +206,8 @@ class TurnRequest(ApiModel):
     parent_message_id: str | None = None
     input_artifact_ids: list[str] = Field(default_factory=list, max_length=16)
     settings: dict[str, Any] = Field(default_factory=dict)
+    ordered_settings: dict[str, dict[str, Any]] = Field(default_factory=dict, max_length=3)
+    output_count: int | None = Field(default=None, ge=1, le=16)
     confirm_media: bool = False
     idempotency_key: str | None = Field(default=None, max_length=200)
 
@@ -174,8 +224,34 @@ class RoutingPlan(ApiModel):
     profile_id: str | None = None
     workflow_id: str | None = None
     parameter_overrides: dict[str, Any] = Field(default_factory=dict)
+    output_count: int = Field(default=1, ge=1, le=16)
     confidence: float = Field(ge=0, le=1)
     reason: str
+
+
+class OrderedStepInput(ApiModel):
+    source_step_id: str = Field(
+        min_length=1,
+        max_length=40,
+        pattern=r"^[a-z][a-z0-9_]*$",
+    )
+    kind: Literal["text_context", "artifact"]
+
+
+class OrderedStepIntent(ApiModel):
+    id: str = Field(min_length=1, max_length=40, pattern=r"^[a-z][a-z0-9_]*$")
+    mode: Literal["text", "image", "video"]
+    prompt: str = Field(min_length=1, max_length=20_000)
+    depends_on: list[str] = Field(default_factory=list, max_length=8)
+    inputs: list[OrderedStepInput] = Field(default_factory=list, max_length=8)
+
+
+class OrderedWorkIntent(ApiModel):
+    planner_version: Literal["ordered-work-v1"] = "ordered-work-v1"
+    steps: list[OrderedStepIntent] = Field(min_length=2, max_length=8)
+    confidence: float = Field(ge=0, le=1)
+    reason: str = Field(min_length=1, max_length=1_000)
+    requires_confirmation: bool = False
 
 
 class RunOut(ApiModel):
@@ -184,10 +260,13 @@ class RunOut(ApiModel):
     chat_id: str
     user_message_id: str
     assistant_message_id: str
+    work_plan_id: str | None
+    work_step_id: str | None
     operation: str
     status: str
     standalone_prompt: str
     profile_id: str | None
+    vision_profile_id: str | None
     workflow_revision_id: str | None
     settings_json: dict[str, Any]
     provenance_json: dict[str, Any]
@@ -205,13 +284,44 @@ class TurnAccepted(ApiModel):
     assistant_message: MessageOut
 
 
+class ProgressV2(ApiModel):
+    version: Literal[2] = 2
+    stage: str
+    stage_progress: float | None = Field(default=None, ge=0, le=1)
+    overall_progress: float | None = Field(default=None, ge=0, le=1)
+    completed_units: int | None = Field(default=None, ge=0)
+    total_units: int | None = Field(default=None, ge=0)
+    unit: str | None = None
+    bytes_reused: int = Field(default=0, ge=0)
+    rate_bytes_per_second: float | None = Field(default=None, ge=0)
+    eta_seconds: int | None = Field(default=None, ge=0)
+    file_index: int | None = Field(default=None, ge=1)
+    file_count: int | None = Field(default=None, ge=1)
+    queue_resource: str | None = None
+    queue_position: int | None = Field(default=None, ge=0)
+    queue_length: int | None = Field(default=None, ge=0)
+    blocked_by: list[str] = Field(default_factory=list)
+    indeterminate: bool = False
+    updated_at: datetime
+
+
 class JobOut(ApiModel):
     id: str
     kind: str
     status: str
     run_id: str | None
+    work_plan_id: str | None
+    work_step_id: str | None
     progress: float
     phase: str
+    progress_json: dict[str, Any]
+    queue_resource: str | None
+    queue_group: str | None
+    queue_priority: int
+    queue_ticket: str | None
+    enqueued_at: datetime | None
+    claim_expires_at: datetime | None
+    heartbeat_at: datetime | None
     payload_json: dict[str, Any]
     result_json: dict[str, Any]
     error: str | None
@@ -219,6 +329,44 @@ class JobOut(ApiModel):
     cancellable: bool
     started_at: datetime | None
     completed_at: datetime | None
+    created_at: datetime
+    updated_at: datetime
+
+
+class WorkStepOut(ApiModel):
+    id: str
+    plan_id: str
+    run_id: str | None
+    ordinal: int
+    display_group: str | None
+    operation: str
+    status: str
+    prompt: str
+    profile_id: str | None
+    workflow_revision_id: str | None
+    settings_json: dict[str, Any]
+    input_bindings_json: list[dict[str, Any]]
+    output_contract_json: list[dict[str, Any]]
+    queue_class: str
+    error: str | None
+    created_at: datetime
+    updated_at: datetime
+
+
+class WorkPlanOut(ApiModel):
+    id: str
+    chat_id: str
+    idempotency_key: str | None
+    source_action: str
+    persistence_scope: str
+    status: str
+    context_head_message_id: str | None
+    transcript_sequence: int
+    priority: int
+    planner_version: str
+    failure_policy: str
+    summary_json: dict[str, Any]
+    steps: list[WorkStepOut]
     created_at: datetime
     updated_at: datetime
 
@@ -233,6 +381,56 @@ class ModelSourceOut(ApiModel):
     updated_at: datetime
 
 
+class InstallArtifact(ApiModel):
+    path: str = Field(min_length=1, max_length=1_000)
+    kind: str = Field(min_length=1, max_length=40)
+    target_folder: str = Field(min_length=1, max_length=80)
+    size_bytes: int | None = Field(default=None, ge=0)
+    sha256: str | None = Field(default=None, pattern=r"^[0-9a-f]{64}$")
+    required: bool = True
+    reuse: Literal["download", "installed", "verified-cache"] = "download"
+
+
+class InstallPlanOut(ApiModel):
+    id: str
+    provider: str
+    remote_id: str
+    revision: str
+    role: str
+    engine: str
+    architecture: str | None
+    family: str | None
+    plan_hash: str
+    resolver_version: str
+    compatibility: str
+    artifacts_json: list[dict[str, Any]]
+    runtime_contract_json: dict[str, Any]
+    activation_probe_json: dict[str, Any]
+    status: str
+    failure_code: str | None
+    failure_reason: str | None
+    created_at: datetime
+    updated_at: datetime
+
+
+class ModelCapabilityEvidenceOut(ApiModel):
+    id: str
+    model_install_id: str
+    evidence_key: str
+    result: str
+    component_hashes_json: dict[str, str]
+    runtime_build: str
+    adapter_contract_version: int
+    launch_contract_version: str
+    workflow_contract_version: str | None
+    hardware_class: str
+    probe_version: str
+    failure_code: str | None
+    failure_reason: str | None
+    details_json: dict[str, Any]
+    probed_at: datetime
+
+
 class ModelInstallOut(ApiModel):
     id: str
     source_id: str | None
@@ -244,6 +442,8 @@ class ModelInstallOut(ApiModel):
     compatibility: str
     manifest_json: dict[str, Any]
     active: bool
+    readiness: Literal["ready", "unverified", "unsupported"] = "unverified"
+    capability_evidence: ModelCapabilityEvidenceOut | None = None
     created_at: datetime
     updated_at: datetime
 
@@ -313,6 +513,7 @@ class ModelProfileOut(ApiModel):
     load_settings_json: dict[str, Any]
     request_settings_json: dict[str, Any]
     is_default: bool
+    input_modalities: list[str] = Field(default_factory=lambda: ["text"])
     created_at: datetime
     updated_at: datetime
 
@@ -481,6 +682,7 @@ class CatalogModel(ApiModel):
     total_size_bytes: int | None = None
     compatibility: str
     compatibility_reasons: list[str] = Field(default_factory=list)
+    required_runtime: str | None = None
 
 
 class CatalogPage(ApiModel):
@@ -500,6 +702,17 @@ class CatalogPreflightRequest(ApiModel):
     role: Literal["chat", "image", "video"]
     engine: str = Field(min_length=1, max_length=32)
     selected_files: list[str] = Field(default_factory=list, max_length=512)
+    auxiliary_kind: (
+        Literal[
+            "lora",
+            "vae",
+            "controlnet",
+            "upscaler",
+            "embedding",
+            "ip_adapter",
+        ]
+        | None
+    ) = None
 
 
 class CatalogPreflightCheck(ApiModel):
@@ -509,12 +722,21 @@ class CatalogPreflightCheck(ApiModel):
     detail: str
 
 
+class CatalogFileSource(ApiModel):
+    remote_id: str = Field(min_length=1, max_length=500)
+    revision: str = Field(min_length=1, max_length=200)
+    filename: str = Field(min_length=1, max_length=1_000)
+    size_bytes: int | None = Field(default=None, ge=0)
+    sha256: str | None = Field(default=None, pattern=r"^[0-9a-fA-F]{64}$")
+
+
 class CatalogPreflight(ApiModel):
     remote_id: str
     source_remote_id: str | None = None
     revision: str
     selected_files: list[str]
     expected_sha256: dict[str, str] = Field(default_factory=dict)
+    file_sources: dict[str, CatalogFileSource] = Field(default_factory=dict)
     comfy_paths: dict[str, str] = Field(default_factory=dict)
     workflow_template_id: str | None = None
     workflow_template_sha256: str | None = None
@@ -524,9 +746,12 @@ class CatalogPreflight(ApiModel):
     estimated_vram_bytes: int | None = None
     can_install: bool
     checks: list[CatalogPreflightCheck]
+    install_plan: InstallPlanOut | None = None
+    auxiliary_kind: str | None = None
 
 
 class DownloadRequest(ApiModel):
+    install_plan_id: str | None = Field(default=None, max_length=40)
     remote_id: str = Field(min_length=1, max_length=500)
     source_remote_id: str | None = Field(default=None, min_length=1, max_length=500)
     revision: str = Field(default="main", min_length=1, max_length=200)
@@ -534,6 +759,7 @@ class DownloadRequest(ApiModel):
     engine: str = Field(min_length=1, max_length=32)
     allow_patterns: list[str] = Field(default_factory=list)
     expected_sha256: dict[str, str] = Field(default_factory=dict)
+    file_sources: dict[str, CatalogFileSource] = Field(default_factory=dict)
     recipe_id: str | None = None
     recipe_version: int | None = None
     comfy_paths: dict[str, str] = Field(default_factory=dict)
@@ -541,6 +767,35 @@ class DownloadRequest(ApiModel):
     workflow_template_id: str | None = None
     workflow_template_sha256: str | None = None
     default_settings: dict[str, Any] = Field(default_factory=dict)
+    auxiliary_kind: (
+        Literal[
+            "lora",
+            "vae",
+            "controlnet",
+            "upscaler",
+            "embedding",
+            "ip_adapter",
+        ]
+        | None
+    ) = None
+
+
+class ModelAssetOut(ApiModel):
+    id: str
+    source_id: str | None
+    name: str
+    kind: str
+    family: str | None
+    size_bytes: int
+    manifest_json: dict[str, Any]
+    active: bool
+    verified_at: datetime | None
+    created_at: datetime
+    updated_at: datetime
+
+
+class ModelAssetUpdate(ApiModel):
+    active: bool
 
 
 class RecipeFile(ApiModel):
@@ -564,7 +819,7 @@ class ReferenceRecipe(ApiModel):
     name: str
     summary: str
     role: Literal["chat", "image", "video"]
-    engine: Literal["llama.cpp", "comfyui"]
+    engine: Literal["llama.cpp", "vllm", "comfyui"]
     operations: list[str]
     license_id: str
     status: Literal["reference-candidate", "certified"]
@@ -603,6 +858,7 @@ class EngineCapabilities(ApiModel):
     version: str
     roles: list[str]
     operations: list[str]
+    input_modalities: list[str] = Field(default_factory=lambda: ["text"])
     formats: list[str]
     devices: list[str]
     streaming: bool
@@ -676,6 +932,12 @@ class SystemInfo(ApiModel):
     support: PlatformAssessment
 
 
+class ApplicationInfo(ApiModel):
+    version: str
+    data_directory: str
+    log_directory: str
+
+
 class WorkerStatus(ApiModel):
     name: Literal["chat", "media"]
     state: Literal["stopped", "starting", "ready", "exited"] = "stopped"
@@ -690,6 +952,26 @@ class WorkerStatus(ApiModel):
     peak_memory_bytes: int | None = None
     active_jobs: int = 0
     queued_jobs: int = 0
+    failure_detail: str | None = None
+    stderr_tail: str | None = None
+    log_path: str | None = None
+
+
+class RuntimeStatus(ApiModel):
+    engine: Literal["llama.cpp", "vllm", "comfyui"]
+    release: str
+    state: Literal["missing", "installing", "ready", "failed", "unsupported"]
+    supported: bool
+    managed: bool = False
+    progress: float = 0
+    progress_json: ProgressV2 | None = None
+    downloaded_bytes: int = 0
+    size_bytes: int | None = None
+    distribution: str
+    license: str
+    security_status: Literal["checksum-pinned", "blocked"] = "checksum-pinned"
+    security_message: str = ""
+    message: str = ""
 
 
 class BackupInfo(ApiModel):

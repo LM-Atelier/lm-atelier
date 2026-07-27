@@ -3,6 +3,7 @@ from __future__ import annotations
 import ipaddress
 from functools import lru_cache
 from pathlib import Path
+from urllib.parse import urlparse
 
 from pydantic import Field, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
@@ -21,20 +22,52 @@ class Settings(BaseSettings):
     host: str = "127.0.0.1"
     port: int = Field(default=12340, ge=1024, le=65535)
     dev: bool = False
-    allow_lan: bool = False
     chat_engine: str = "mock"
     media_engine: str = "mock"
     llama_url: str = "http://127.0.0.1:12341"
     comfy_url: str = "http://127.0.0.1:8188"
     llama_executable: Path | None = None
+    vllm_executable: Path | None = None
     comfy_executable: Path | None = None
     comfy_directory: Path | None = None
+    llama_inactivity_seconds: float = Field(default=600, ge=30, le=7200)
     comfy_inactivity_seconds: float = Field(default=600, ge=30, le=7200)
     worker_startup_seconds: float = Field(default=60, ge=1, le=600)
     worker_shutdown_seconds: float = Field(default=10, ge=1, le=60)
     auto_unload_chat_for_media: bool = True
     hf_token: str | None = None
     max_upload_bytes: int = 100 * 1024 * 1024
+    vision_max_images: int = Field(default=4, ge=1, le=16)
+    vision_max_image_bytes: int = Field(
+        default=20 * 1024 * 1024,
+        ge=1024,
+        le=100 * 1024**2,
+    )
+    vision_max_total_bytes: int = Field(
+        default=32 * 1024 * 1024,
+        ge=1024,
+        le=256 * 1024**2,
+    )
+    vision_max_pixels: int = Field(default=40_000_000, ge=1_000_000, le=200_000_000)
+    vision_max_video_frames: int = Field(default=6, ge=3, le=16)
+    vision_max_video_duration_seconds: int = Field(default=3600, ge=1, le=86_400)
+    vision_max_frame_dimension: int = Field(default=1280, ge=256, le=4096)
+    vision_max_frame_bytes: int = Field(default=5 * 1024 * 1024, ge=64 * 1024, le=20 * 1024**2)
+    vision_sampler_timeout_seconds: int = Field(default=60, ge=5, le=300)
+    vision_bridge_max_tokens: int = Field(default=512, ge=64, le=2048)
+    max_generated_output_bytes: int = Field(
+        default=512 * 1024**2,
+        ge=1024**2,
+        le=16 * 1024**3,
+    )
+    max_media_outputs_per_plan: int = Field(default=8, ge=1, le=16)
+    max_media_plan_work_units: int = Field(default=4_000_000_000, ge=1)
+    max_media_plan_duration_seconds: int = Field(default=300, ge=1, le=3600)
+    max_media_plan_estimated_bytes: int = Field(
+        default=8 * 1024**3,
+        ge=1024**2,
+        le=128 * 1024**3,
+    )
     max_project_import_bytes: int = Field(default=2 * 1024**3, ge=1024**2)
     max_project_archive_entries: int = Field(default=20_000, ge=10, le=100_000)
     artifact_retention_days: int = Field(default=30, ge=1, le=3650)
@@ -57,9 +90,37 @@ class Settings(BaseSettings):
             raise ValueError("host must be localhost or an IP address") from exc
         return str(address)
 
+    @field_validator("llama_url", "comfy_url")
+    @classmethod
+    def validate_worker_url(cls, value: str) -> str:
+        parsed = urlparse(value)
+        if (
+            parsed.scheme != "http"
+            or not parsed.hostname
+            or parsed.username
+            or parsed.password
+            or parsed.query
+            or parsed.fragment
+            or parsed.path not in {"", "/"}
+        ):
+            raise ValueError("worker URLs must be plain loopback HTTP origins")
+        try:
+            loopback = (
+                parsed.hostname == "localhost" or ipaddress.ip_address(parsed.hostname).is_loopback
+            )
+        except ValueError:
+            loopback = False
+        if not loopback:
+            raise ValueError("worker URLs must use a loopback host")
+        try:
+            _ = parsed.port
+        except ValueError as exc:
+            raise ValueError("worker URLs must use a valid port") from exc
+        return value.rstrip("/")
+
     def prepare(self) -> None:
-        if not self.allow_lan and self.host not in {"127.0.0.1", "::1", "localhost"}:
-            raise ValueError("non-loopback binding requires LOCAL_LM_ALLOW_LAN=true")
+        if self.host not in {"127.0.0.1", "::1", "localhost"}:
+            raise ValueError("the public preview supports loopback binding only")
         for path in (
             self.data_dir,
             self.state_dir,

@@ -3,8 +3,9 @@ from __future__ import annotations
 import hashlib
 import json
 import re
+from copy import deepcopy
 from dataclasses import dataclass, replace
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from typing import Any, cast
 from urllib.parse import unquote, urlparse
 
@@ -25,7 +26,131 @@ _RUNTIME_PARAMETERS = {
 }
 _PRIMITIVE_WIDGET_TYPES = {"BOOLEAN", "COMBO", "FLOAT", "INT", "STRING"}
 _CONTROL_AFTER_GENERATE = {"decrement", "fixed", "increment", "randomize"}
-COMFY_TEMPLATE_COMPILER_VERSION = 2
+COMFY_TEMPLATE_COMPILER_VERSION = 5
+DEFAULT_IMAGE_EDIT_DENOISE = 0.9
+_ADAPTIVE_CHECKPOINT_PREFIX = "lma_image_checkpoint_v1_"
+_ADAPTIVE_CHECKPOINT_PLACEHOLDER = "__LM_ATELIER_CHECKPOINT__"
+
+# This is a deliberately narrow capability contract, not a claim that every
+# safetensors file is a runnable checkpoint. It covers ComfyUI's standard
+# single-checkpoint loader and is validated against the live runtime after the
+# model is downloaded, before the install is activated.
+_ADAPTIVE_CHECKPOINT_GRAPH: dict[str, Any] = {
+    "nodes": [
+        {
+            "id": 1,
+            "type": "CheckpointLoaderSimple",
+            "inputs": [],
+            "outputs": [
+                {"name": "MODEL", "type": "MODEL", "links": [1]},
+                {"name": "CLIP", "type": "CLIP", "links": [2, 3]},
+                {"name": "VAE", "type": "VAE", "links": [9]},
+            ],
+            "properties": {"cnr_id": "comfy-core"},
+            "widgets_values": [_ADAPTIVE_CHECKPOINT_PLACEHOLDER],
+        },
+        {
+            "id": 2,
+            "type": "CLIPTextEncode",
+            "title": "Prompt",
+            "inputs": [
+                {"name": "clip", "type": "CLIP", "link": 2},
+                {"name": "text", "type": "STRING", "widget": {"name": "text"}},
+            ],
+            "outputs": [{"name": "CONDITIONING", "type": "CONDITIONING", "links": [4]}],
+            "properties": {"cnr_id": "comfy-core"},
+            "widgets_values": [""],
+        },
+        {
+            "id": 3,
+            "type": "CLIPTextEncode",
+            "title": "Negative Prompt",
+            "inputs": [
+                {"name": "clip", "type": "CLIP", "link": 3},
+                {"name": "text", "type": "STRING", "widget": {"name": "text"}},
+            ],
+            "outputs": [{"name": "CONDITIONING", "type": "CONDITIONING", "links": [5]}],
+            "properties": {"cnr_id": "comfy-core"},
+            "widgets_values": [""],
+        },
+        {
+            "id": 4,
+            "type": "EmptyLatentImage",
+            "inputs": [
+                {"name": "width", "type": "INT", "widget": {"name": "width"}},
+                {"name": "height", "type": "INT", "widget": {"name": "height"}},
+                {
+                    "name": "batch_size",
+                    "type": "INT",
+                    "widget": {"name": "batch_size"},
+                },
+            ],
+            "outputs": [{"name": "LATENT", "type": "LATENT", "links": [6]}],
+            "properties": {"cnr_id": "comfy-core"},
+            "widgets_values": [512, 512, 1],
+        },
+        {
+            "id": 5,
+            "type": "KSampler",
+            "inputs": [
+                {"name": "model", "type": "MODEL", "link": 1},
+                {"name": "seed", "type": "INT", "widget": {"name": "seed"}},
+                {"name": "steps", "type": "INT", "widget": {"name": "steps"}},
+                {"name": "cfg", "type": "FLOAT", "widget": {"name": "cfg"}},
+                {
+                    "name": "sampler_name",
+                    "type": "COMBO",
+                    "widget": {"name": "sampler_name"},
+                },
+                {"name": "scheduler", "type": "COMBO", "widget": {"name": "scheduler"}},
+                {"name": "positive", "type": "CONDITIONING", "link": 4},
+                {"name": "negative", "type": "CONDITIONING", "link": 5},
+                {"name": "latent_image", "type": "LATENT", "link": 6},
+                {"name": "denoise", "type": "FLOAT", "widget": {"name": "denoise"}},
+            ],
+            "outputs": [{"name": "LATENT", "type": "LATENT", "links": [7]}],
+            "properties": {"cnr_id": "comfy-core"},
+            "widgets_values": [-1, "randomize", 20, 7.0, "euler", "normal", 1.0],
+        },
+        {
+            "id": 6,
+            "type": "VAEDecode",
+            "inputs": [
+                {"name": "samples", "type": "LATENT", "link": 7},
+                {"name": "vae", "type": "VAE", "link": 9},
+            ],
+            "outputs": [{"name": "IMAGE", "type": "IMAGE", "links": [8]}],
+            "properties": {"cnr_id": "comfy-core"},
+            "widgets_values": [],
+        },
+        {
+            "id": 7,
+            "type": "SaveImage",
+            "inputs": [
+                {"name": "images", "type": "IMAGE", "link": 8},
+                {
+                    "name": "filename_prefix",
+                    "type": "STRING",
+                    "widget": {"name": "filename_prefix"},
+                },
+            ],
+            "outputs": [],
+            "properties": {"cnr_id": "comfy-core"},
+            "widgets_values": ["LM Atelier"],
+        },
+    ],
+    "links": [
+        [1, 1, 0, 5, 0, "MODEL"],
+        [2, 1, 1, 2, 0, "CLIP"],
+        [3, 1, 1, 3, 0, "CLIP"],
+        [4, 2, 0, 5, 6, "CONDITIONING"],
+        [5, 3, 0, 5, 7, "CONDITIONING"],
+        [6, 4, 0, 5, 8, "LATENT"],
+        [7, 5, 0, 6, 0, "LATENT"],
+        [8, 6, 0, 7, 0, "IMAGE"],
+        [9, 1, 2, 6, 1, "VAE"],
+    ],
+}
 
 
 @dataclass(frozen=True)
@@ -47,6 +172,7 @@ class ComfyTemplate:
     score: int
     sha256: str
     dependencies: tuple[ComfyModelDependency, ...]
+    runtime_adaptive: bool = False
 
     @property
     def remote_id(self) -> str:
@@ -64,7 +190,7 @@ class ComfyTemplate:
     def comfy_paths(self) -> dict[str, str]:
         result: dict[str, str] = {}
         for dependency in self.dependencies:
-            parent = str(Path(dependency.path).parent).replace("\\", "/")
+            parent = str(PurePosixPath(dependency.path).parent)
             result[dependency.directory] = "." if parent == "." else parent
         return result
 
@@ -122,9 +248,100 @@ class ComfyTemplateRegistry:
             )
         return sorted(matches, key=lambda item: item.id)
 
-    def get(self, template_id: str, role: str) -> ComfyTemplate:
+    def adaptive_checkpoint(
+        self,
+        remote_id: str,
+        revision: str,
+        selected_files: list[str],
+        role: str,
+        *,
+        comfy_paths: dict[str, str] | None = None,
+    ) -> ComfyTemplate | None:
+        """Return the narrow standard-checkpoint contract when it is safe to try.
+
+        Architecture compatibility cannot be proven from a Hub filename. The
+        returned workflow therefore remains provisional until ComfyUI loads and
+        validates the downloaded checkpoint.
+        """
+
+        if role != "image" or len(selected_files) != 1:
+            return None
+        selected = PurePosixPath(selected_files[0])
+        if (
+            selected.is_absolute()
+            or ".." in selected.parts
+            or selected.suffix.casefold() != ".safetensors"
+            or not selected.name
+        ):
+            return None
+        parent = str(selected.parent)
+        expected_paths = {"checkpoints": "." if parent == "." else parent}
+        if comfy_paths is not None and comfy_paths != expected_paths:
+            return None
+        binding = {
+            "contract": 1,
+            "remote_id": remote_id.casefold(),
+            "revision": revision,
+            "selected_file": str(selected),
+        }
+        binding_json = json.dumps(binding, sort_keys=True, separators=(",", ":"))
+        identifier = (
+            _ADAPTIVE_CHECKPOINT_PREFIX + hashlib.sha256(binding_json.encode()).hexdigest()[:20]
+        )
+        template_hash = hashlib.sha256(
+            json.dumps(
+                {
+                    "binding": binding,
+                    "graph": _ADAPTIVE_CHECKPOINT_GRAPH,
+                },
+                sort_keys=True,
+                separators=(",", ":"),
+            ).encode()
+        ).hexdigest()
+        dependency = ComfyModelDependency(
+            remote_id=remote_id,
+            revision=revision,
+            path=str(selected),
+            directory="checkpoints",
+            name=selected.name,
+            url="",
+        )
+        return ComfyTemplate(
+            id=identifier,
+            path=Path(identifier),
+            role=role,
+            operation="text_to_image",
+            score=100,
+            sha256=template_hash,
+            dependencies=(dependency,),
+            runtime_adaptive=True,
+        )
+
+    def get(
+        self,
+        template_id: str,
+        role: str,
+        *,
+        remote_id: str | None = None,
+        revision: str | None = None,
+        selected_files: list[str] | None = None,
+        comfy_paths: dict[str, str] | None = None,
+    ) -> ComfyTemplate:
         if not re.fullmatch(r"[A-Za-z0-9_.-]+", template_id):
             raise ValueError("invalid ComfyUI template identifier")
+        if template_id.startswith(_ADAPTIVE_CHECKPOINT_PREFIX):
+            if remote_id is None or revision is None or selected_files is None:
+                raise ValueError("adaptive ComfyUI template requires a pinned model binding")
+            adaptive = self.adaptive_checkpoint(
+                remote_id,
+                revision,
+                selected_files,
+                role,
+                comfy_paths=comfy_paths,
+            )
+            if adaptive and adaptive.id == template_id:
+                return adaptive
+            raise ValueError("adaptive ComfyUI template binding does not match the download")
         for path in self._template_files():
             if path.stem != template_id:
                 continue
@@ -156,9 +373,24 @@ class ComfyTemplateRegistry:
         object_info: dict[str, Any],
         *,
         validate_model_choices: bool = True,
+        remote_id: str | None = None,
+        revision: str | None = None,
+        selected_files: list[str] | None = None,
+        comfy_paths: dict[str, str] | None = None,
     ) -> CompiledComfyTemplate:
-        template = self.get(template_id, role)
-        ui_graph = _read_json(template.path)
+        template = self.get(
+            template_id,
+            role,
+            remote_id=remote_id,
+            revision=revision,
+            selected_files=selected_files,
+            comfy_paths=comfy_paths,
+        )
+        if template.runtime_adaptive:
+            ui_graph = deepcopy(_ADAPTIVE_CHECKPOINT_GRAPH)
+            ui_graph["nodes"][0]["widgets_values"] = [template.dependencies[0].name]
+        else:
+            ui_graph = _read_json(template.path)
         api_graph, input_schema = _compile_ui_graph(
             ui_graph,
             object_info,
@@ -185,8 +417,17 @@ class ComfyTemplateRegistry:
         remote_id: str,
         selected_files: list[str],
         comfy_paths: dict[str, str],
+        *,
+        revision: str = "main",
     ) -> ComfyTemplate:
-        template = self.get(template_id, role)
+        template = self.get(
+            template_id,
+            role,
+            remote_id=remote_id,
+            revision=revision,
+            selected_files=selected_files,
+            comfy_paths=comfy_paths,
+        )
         if template.remote_id.lower() != remote_id.lower():
             raise ValueError("download repository does not match the ComfyUI template")
         if set(template.selected_files) != set(selected_files):
@@ -325,6 +566,105 @@ def _model_dependencies(value: dict[str, Any]) -> list[ComfyModelDependency]:
     return sorted(dependencies.values(), key=lambda item: (item.directory, item.path))
 
 
+def derive_image_to_image(
+    compiled: CompiledComfyTemplate,
+    object_info: dict[str, Any],
+) -> CompiledComfyTemplate | None:
+    """Derive a standard whole-image edit graph when the runtime supports it."""
+    if (
+        getattr(compiled.template, "role", None) != "image"
+        or getattr(compiled.template, "operation", None) != "text_to_image"
+        or not all(isinstance(object_info.get(name), dict) for name in ("LoadImage", "VAEEncode"))
+    ):
+        return None
+    graph = deepcopy(compiled.api_graph)
+    empty_latents = {
+        node_id
+        for node_id, node in graph.items()
+        if re.fullmatch(
+            r"Empty[A-Za-z0-9_]*LatentImage",
+            str(node.get("class_type") or ""),
+        )
+    }
+    latent_inputs: list[tuple[str, str]] = []
+    for node_id, node in graph.items():
+        inputs = node.get("inputs")
+        if not isinstance(inputs, dict):
+            continue
+        connection = inputs.get("latent_image")
+        if (
+            isinstance(connection, list)
+            and len(connection) == 2
+            and str(connection[0]) in empty_latents
+        ):
+            latent_inputs.append((node_id, "latent_image"))
+    vae_connection = next(
+        (
+            inputs["vae"]
+            for node in graph.values()
+            if str(node.get("class_type") or "") == "VAEDecode"
+            and isinstance((inputs := node.get("inputs")), dict)
+            and isinstance(inputs.get("vae"), list)
+            and len(inputs["vae"]) == 2
+        ),
+        None,
+    )
+    if not latent_inputs or vae_connection is None:
+        return None
+    load_id = _available_node_id(graph, "lma-load-image")
+    encode_id = _available_node_id(graph, "lma-vae-encode")
+    graph[load_id] = {
+        "inputs": {"image": "${input_image}"},
+        "class_type": "LoadImage",
+        "_meta": {"title": "Edit source image"},
+    }
+    graph[encode_id] = {
+        "inputs": {"pixels": [load_id, 0], "vae": deepcopy(vae_connection)},
+        "class_type": "VAEEncode",
+        "_meta": {"title": "Encode edit source"},
+    }
+    for node_id, input_name in latent_inputs:
+        graph[node_id]["inputs"][input_name] = [encode_id, 0]
+    schema = deepcopy(compiled.input_schema)
+    properties = schema.get("properties")
+    if isinstance(properties, dict):
+        for name in ("width", "height", "batch_size"):
+            properties.pop(name, None)
+        denoise = properties.get("denoise")
+        if isinstance(denoise, dict):
+            denoise.update(
+                {
+                    "title": "Edit strength",
+                    "description": (
+                        "Higher values make the requested change more visible; "
+                        "lower values preserve more of the source."
+                    ),
+                    "default": DEFAULT_IMAGE_EDIT_DENOISE,
+                    "x-lm-atelier-visibility": "basic",
+                }
+            )
+    contract = {
+        "base": compiled.template.sha256,
+        "operation": "image_to_image",
+        "transform": "load-image-vae-encode-v3",
+    }
+    derived_hash = hashlib.sha256(
+        json.dumps(contract, sort_keys=True, separators=(",", ":")).encode()
+    ).hexdigest()
+    template = replace(
+        compiled.template,
+        id=f"{compiled.template.id}_image_to_image",
+        operation="image_to_image",
+        sha256=derived_hash,
+    )
+    return CompiledComfyTemplate(
+        template=template,
+        ui_graph=deepcopy(compiled.ui_graph),
+        api_graph=graph,
+        input_schema=schema,
+    )
+
+
 def _parse_huggingface_url(url: str) -> tuple[str, str, str] | None:
     parsed = urlparse(url)
     if parsed.scheme != "https" or parsed.netloc.lower() != "huggingface.co":
@@ -338,6 +678,15 @@ def _parse_huggingface_url(url: str) -> tuple[str, str, str] | None:
     if any(part in {"", ".", ".."} for part in file_parts):
         return None
     return f"{owner}/{name}", revision, "/".join(file_parts)
+
+
+def _available_node_id(graph: dict[str, Any], preferred: str) -> str:
+    if preferred not in graph:
+        return preferred
+    suffix = 2
+    while f"{preferred}-{suffix}" in graph:
+        suffix += 1
+    return f"{preferred}-{suffix}"
 
 
 def _compile_ui_graph(

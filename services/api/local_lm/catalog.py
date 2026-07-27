@@ -6,14 +6,15 @@ import json
 import os
 import re
 from datetime import UTC, datetime, timedelta
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from typing import Any, cast
-from urllib.parse import urlparse
+from urllib.parse import quote, urlparse
 
 import httpx
 
 from .config import Settings
 from .domain import CompatibilityLevel
+from .gguf import automatic_mmproj_selection, gguf_identity_tokens
 from .schemas import CatalogModel, CatalogPage
 
 SORTS = {
@@ -26,6 +27,7 @@ SORTS = {
 
 _QUANTIZATION = re.compile(r"^(?:q\d(?:_[a-z0-9]+)*|i?q\d(?:_[a-z0-9]+)*|fp\d+|bf16)$", re.I)
 _PARAMETERS = re.compile(r"(?:^|[-_ ])(\d+(?:\.\d+)?)\s*([bmk])(?:$|[-_ ])", re.I)
+_REMOTE_ID = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]*/[A-Za-z0-9][A-Za-z0-9_.-]*$")
 _CACHE_VERSION = 3
 
 
@@ -104,7 +106,12 @@ class HuggingFaceCatalog:
             response = await self._client.get(url, params=None if cursor else params)
             response.raise_for_status()
             payload = response.json()
-            raw_items = [item for item in payload if isinstance(item, dict)]
+            raw_items = [
+                item
+                for item in payload
+                if isinstance(item, dict)
+                and self._valid_remote_id(str(item.get("id") or item.get("modelId") or ""))
+            ]
             if max_size_bytes is not None:
                 raw_items = await self._hydrate_file_sizes(raw_items, role)
             items = [self._normalize(item, role) for item in raw_items]
@@ -179,6 +186,8 @@ class HuggingFaceCatalog:
     async def inspect(
         self, remote_id: str, revision: str = "main", requested_role: str | None = None
     ) -> dict[str, Any]:
+        if not self._valid_remote_id(remote_id):
+            raise ValueError("remote_id must be in owner/model form")
         cache = self._cache_path("detail", remote_id, revision, requested_role)
         try:
             response = await self._client.get(
@@ -213,6 +222,168 @@ class HuggingFaceCatalog:
         }
         self._write_cache(cache, json.dumps(result, default=str))
         return result
+
+    async def inspect_file_prefix(
+        self,
+        remote_id: str,
+        revision: str,
+        filename: str,
+        *,
+        max_bytes: int,
+    ) -> bytes:
+        """Fetch and cache a bounded immutable file prefix for static inspection."""
+
+        if not self._valid_remote_id(remote_id):
+            raise ValueError("remote_id must be in owner/model form")
+        if max_bytes < 1 or max_bytes > 16 * 1024 * 1024 + 8:
+            raise ValueError("metadata prefix size is outside the supported bounds")
+        path = PurePosixPath(filename.replace("\\", "/"))
+        if (
+            not filename
+            or len(filename) > 1_000
+            or path.is_absolute()
+            or any(part in {"", ".", ".."} or ":" in part for part in path.parts)
+        ):
+            raise ValueError("metadata filename must be a safe relative path")
+        if not revision or len(revision) > 200 or any(character < " " for character in revision):
+            raise ValueError("metadata revision is invalid")
+        cache = self._binary_cache_path(
+            "file-prefix",
+            remote_id,
+            revision,
+            path.as_posix(),
+            max_bytes,
+        )
+        if cache.is_file():
+            content = cache.read_bytes()
+            if len(content) <= max_bytes:
+                return content
+        encoded_path = "/".join(quote(part, safe="") for part in path.parts)
+        encoded_revision = quote(revision, safe="")
+        content_buffer = bytearray()
+        async with self._client.stream(
+            "GET",
+            f"/{remote_id}/resolve/{encoded_revision}/{encoded_path}",
+            headers={"range": f"bytes=0-{max_bytes - 1}"},
+        ) as response:
+            response.raise_for_status()
+            async for chunk in response.aiter_bytes():
+                content_buffer.extend(chunk)
+                if len(content_buffer) > max_bytes:
+                    raise ValueError("model metadata exceeds the inspection limit")
+        result = bytes(content_buffer)
+        self._write_binary_cache(cache, result)
+        return result
+
+    async def discover_vision_projector(
+        self,
+        remote_id: str,
+        selected_model_files: list[str],
+    ) -> dict[str, Any] | None:
+        """Find one strongly matched, data-only GGUF projector in a related public repo."""
+
+        if not self._valid_remote_id(remote_id) or not selected_model_files:
+            return None
+        model_tokens = set().union(
+            *(gguf_identity_tokens(PurePosixPath(path).name) for path in selected_model_files)
+        )
+        search_tokens = sorted(model_tokens - {"mtp", "nvfp", "p", "full", "base", "chat"})
+        if len(search_tokens) < 4:
+            return None
+        page = await self.search(
+            query=" ".join(search_tokens),
+            sort="downloads",
+            limit=30,
+        )
+        source_text = " ".join([remote_id, *selected_model_files]).casefold()
+        candidates = [
+            item
+            for item in page.items
+            if item.remote_id != remote_id
+            and (
+                item.pipeline_tag == "image-text-to-text"
+                or bool({"vision", "multimodal", "image-text-to-text"} & set(item.tags))
+            )
+        ]
+        candidates.sort(
+            key=lambda item: (
+                PurePosixPath(item.remote_id).parent.name.casefold() not in model_tokens,
+                -len(model_tokens & gguf_identity_tokens(item.remote_id.rsplit("/", 1)[-1])),
+                -(item.downloads or 0),
+                item.remote_id.casefold(),
+            )
+        )
+        matches: list[tuple[tuple[int, int, int], dict[str, Any]]] = []
+        for candidate in candidates[:12]:
+            try:
+                detail = await self.inspect(candidate.remote_id, "main", None)
+                projector_path = automatic_mmproj_selection(
+                    detail.get("files") or [],
+                    selected_model_files,
+                )
+                if not projector_path:
+                    continue
+                projector = next(
+                    (
+                        item
+                        for item in detail.get("files") or []
+                        if str(item.get("filename") or "") == projector_path
+                    ),
+                    None,
+                )
+                if not isinstance(projector, dict):
+                    continue
+                size = projector.get("size")
+                sha256 = projector.get("sha256")
+                if (
+                    not isinstance(size, int)
+                    or isinstance(size, bool)
+                    or size <= 0
+                    or not isinstance(sha256, str)
+                    or not re.fullmatch(r"[0-9a-fA-F]{64}", sha256)
+                ):
+                    continue
+                projector_tokens = gguf_identity_tokens(PurePosixPath(projector_path).name)
+                overlap = len(model_tokens & projector_tokens)
+                if overlap < min(4, len(model_tokens)):
+                    continue
+                owner = candidate.remote_id.split("/", 1)[0].casefold()
+                score = (
+                    1 if owner in model_tokens or owner in source_text else 0,
+                    overlap,
+                    len(
+                        model_tokens & gguf_identity_tokens(candidate.remote_id.rsplit("/", 1)[-1])
+                    ),
+                )
+                destination = (
+                    PurePosixPath("companions")
+                    / candidate.remote_id.split("/", 1)[0]
+                    / candidate.remote_id.split("/", 1)[1]
+                    / PurePosixPath(projector_path).name
+                ).as_posix()
+                matches.append(
+                    (
+                        score,
+                        {
+                            "filename": destination,
+                            "size": size,
+                            "sha256": sha256.lower(),
+                            "source_remote_id": candidate.remote_id,
+                            "source_revision": str(detail.get("revision") or "main"),
+                            "source_filename": projector_path,
+                        },
+                    )
+                )
+            except (httpx.HTTPError, ValueError):
+                continue
+        if not matches:
+            return None
+        matches.sort(key=lambda item: (item[0], item[1]["source_remote_id"]), reverse=True)
+        best_score, best = matches[0]
+        tied = [item for score, item in matches if score == best_score]
+        if len(tied) > 1 and len({item["sha256"] for item in tied}) > 1:
+            return None
+        return best
 
     async def close(self) -> None:
         await self._client.aclose()
@@ -256,11 +427,21 @@ class HuggingFaceCatalog:
         ).hexdigest()
         return self._cache_dir / f"{key}.json"
 
+    def _binary_cache_path(self, *parts: object) -> Path:
+        return self._cache_path(*parts).with_suffix(".bin")
+
     @staticmethod
     def _write_cache(path: Path, content: str) -> None:
         path.parent.mkdir(parents=True, exist_ok=True)
         temporary = path.with_suffix(".partial")
         temporary.write_text(content, encoding="utf-8")
+        os.replace(temporary, path)
+
+    @staticmethod
+    def _write_binary_cache(path: Path, content: bytes) -> None:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        temporary = path.with_suffix(".partial")
+        temporary.write_bytes(content)
         os.replace(temporary, path)
 
     @staticmethod
@@ -301,6 +482,10 @@ class HuggingFaceCatalog:
         if parsed.path != "/api/models":
             raise ValueError("catalog cursor path is invalid")
         return cursor
+
+    @staticmethod
+    def _valid_remote_id(remote_id: str) -> bool:
+        return bool(_REMOTE_ID.fullmatch(remote_id))
 
     @staticmethod
     def _filter_items(
@@ -394,6 +579,11 @@ class HuggingFaceCatalog:
             tags=tags,
             filenames=filenames,
         )
+        required_runtime = cls._required_runtime(
+            requested_role=requested_role,
+            tags=tags,
+            filenames=filenames,
+        )
         remote_id = str(item.get("id") or item.get("modelId") or "")
         return CatalogModel(
             remote_id=remote_id,
@@ -417,6 +607,7 @@ class HuggingFaceCatalog:
             total_size_bytes=sum(sizes) or None,
             compatibility=compatibility.value,
             compatibility_reasons=reasons,
+            required_runtime=required_runtime,
         )
 
     @staticmethod
@@ -439,6 +630,32 @@ class HuggingFaceCatalog:
             return None
 
     @staticmethod
+    def _required_runtime(
+        *,
+        requested_role: str | None,
+        tags: list[str],
+        filenames: list[str],
+    ) -> str | None:
+        if requested_role != "chat":
+            return None
+        lower_files = [name.lower() for name in filenames]
+        lower_tags = {tag.lower() for tag in tags}
+        if any(name.endswith(".gguf") for name in lower_files) or "gguf" in lower_tags:
+            return "llama.cpp"
+        if HuggingFaceCatalog._is_modelopt_snapshot(lower_tags, lower_files):
+            return "vllm"
+        return None
+
+    @staticmethod
+    def _is_modelopt_snapshot(lower_tags: set[str], lower_files: list[str]) -> bool:
+        has_safe_weights = any(name.endswith(".safetensors") for name in lower_files)
+        has_quant_config = any(
+            PurePosixPath(name).name == "hf_quant_config.json" for name in lower_files
+        )
+        has_modelopt_tag = bool(lower_tags.intersection({"modelopt", "nvidia modelopt", "nvfp4"}))
+        return has_safe_weights and (has_quant_config or has_modelopt_tag)
+
+    @staticmethod
     def _compatibility(
         *,
         requested_role: str | None,
@@ -458,6 +675,8 @@ class HuggingFaceCatalog:
                 if unsafe_note:
                     reasons.append(unsafe_note)
                 return CompatibilityLevel.LIKELY, reasons
+            if HuggingFaceCatalog._is_modelopt_snapshot(lower_tags, lower_files):
+                return CompatibilityLevel.ADVANCED, ["requires the managed vLLM ModelOpt runtime"]
             return CompatibilityLevel.ADVANCED, ["no GGUF artifact detected"]
         if requested_role == "image":
             if pipeline_tag in {"text-to-image", "image-to-image"}:
@@ -467,4 +686,14 @@ class HuggingFaceCatalog:
             if pipeline_tag in {"text-to-video", "image-to-video"}:
                 return CompatibilityLevel.ADVANCED, ["video pipeline requires a verified workflow"]
             return CompatibilityLevel.ADVANCED, ["requires a verified ComfyUI recipe"]
+        if requested_role == "lora":
+            has_safetensors = any(name.endswith(".safetensors") for name in lower_files)
+            has_lora_marker = (
+                any("lora" in name for name in lower_files)
+                or "lora" in lower_tags
+                or "adapter" in lower_tags
+            )
+            if has_safetensors and has_lora_marker and not unsafe_note:
+                return CompatibilityLevel.LIKELY, ["data-only LoRA candidate"]
+            return CompatibilityLevel.ADVANCED, ["requires safetensors LoRA verification"]
         return CompatibilityLevel.ADVANCED, ["select a model role for compatibility guidance"]

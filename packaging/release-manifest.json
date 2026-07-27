@@ -10,7 +10,7 @@
   ],
   "prerequisites": {
     "python": "Bundled in official installers",
-    "network": "Not required to install; required only for optional model downloads and online catalog data",
+    "network": "Not required to install or use configured local runtimes; required for catalog data and model or engine downloads",
     "ffmpeg": "Optional for video posters and mock video",
     "node": "Not required when using an official installer"
   },
@@ -18,10 +18,20 @@
     "windows": "single per-user setup executable",
     "linux": "single self-extracting per-user .run installer"
   },
+  "runtime_scope": {
+    "windows": {
+      "chat": "Managed llama.cpp setup where the pinned runtime is compatible. ModelOpt/NVFP4 via vLLM is implemented as an audited-pending runtime tier and is not yet automatically installed or certified.",
+      "media": "Managed ComfyUI setup is limited to the reviewed compatible NVIDIA runtime; model, workflow, and hardware certification remains release-matrix specific"
+    },
+    "linux": {
+      "chat": "Managed llama.cpp setup where the pinned runtime is compatible; certification remains release-matrix specific",
+      "media": "No verified managed ComfyUI runtime; image/video require an externally configured compatible media engine and are not certified"
+    }
+  },
   "data_policy": {
-    "update": "Application files are replaced without changing user data",
-    "rollback": "Install an earlier application release without changing user data",
-    "uninstall": "Application files are removed; user data is preserved unless purge is explicit"
+    "update": "The installer leaves local data in place; back it up before updating",
+    "rollback": "Application downgrades and data-schema rollback are not guaranteed",
+    "uninstall": "Application files are removed; explicit purge removes only the default installer data directory, not custom data or OS-vault credentials"
   },
   "bundled_engines": false,
   "signature_status": "unsigned-development-build"

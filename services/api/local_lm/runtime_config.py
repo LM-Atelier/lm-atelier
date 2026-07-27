@@ -10,6 +10,7 @@ RUNTIME_ENV_KEYS = (
     "LOCAL_LM_CHAT_ENGINE",
     "LOCAL_LM_MEDIA_ENGINE",
     "LOCAL_LM_LLAMA_EXECUTABLE",
+    "LOCAL_LM_VLLM_EXECUTABLE",
     "LOCAL_LM_LLAMA_URL",
     "LOCAL_LM_COMFY_EXECUTABLE",
     "LOCAL_LM_COMFY_DIRECTORY",
@@ -48,6 +49,29 @@ def configure_persisted_runtime(
     }
     if explicit or (saved and merged != saved):
         _write_runtime_config(runtime_config_path(data_dir), merged)
+
+
+def persist_runtime_values(
+    data_dir: Path,
+    values: Mapping[str, str],
+    environment: MutableMapping[str, str] | None = None,
+) -> None:
+    """Persist an allowlisted runtime update and apply it to this process."""
+
+    active_environment = environment if environment is not None else os.environ
+    path = runtime_config_path(data_dir)
+    merged = _read_runtime_config(path)
+    for key, value in values.items():
+        if key not in RUNTIME_ENV_KEYS:
+            raise ValueError(f"runtime configuration key is not allowed: {key}")
+        cleaned = value.strip()
+        if cleaned:
+            merged[key] = cleaned
+            active_environment[key] = cleaned
+        else:
+            merged.pop(key, None)
+            active_environment.pop(key, None)
+    _write_runtime_config(path, merged)
 
 
 def _read_runtime_config(path: Path) -> dict[str, str]:

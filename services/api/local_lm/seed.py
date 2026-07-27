@@ -6,10 +6,15 @@ from sqlalchemy.orm import Session
 from .config import Settings
 from .domain import ModelRole, Operation
 from .models import ModelInstall, ModelProfile, WorkflowDefinition, WorkflowRevision
-from .profile_service import ensure_profile_for_install
+from .profile_service import (
+    ensure_profile_for_install,
+    reconcile_profile_bindings,
+    retire_profiles_for_installs,
+)
 
 
 def seed_defaults(session: Session, settings: Settings) -> None:
+    reconcile_profile_bindings(session)
     profile_specs = [
         ("Default", ModelRole.CHAT.value, settings.chat_engine),
         ("Default", ModelRole.IMAGE.value, settings.media_engine),
@@ -77,6 +82,7 @@ def _reconcile_media_install_replacements(session: Session) -> None:
         ).all()
     )
     claimed_sources: set[tuple[str, str, str]] = set()
+    superseded_install_ids: set[str] = set()
     for install in installs:
         template_id = install.manifest_json.get("workflow_template_id")
         source_remote_id = install.manifest_json.get("source_remote_id")
@@ -85,6 +91,7 @@ def _reconcile_media_install_replacements(session: Session) -> None:
         key = (install.role, install.engine, source_remote_id.casefold())
         if key in claimed_sources:
             install.active = False
+            superseded_install_ids.add(install.id)
             continue
         claimed_sources.add(key)
         for candidate in installs:
@@ -100,3 +107,5 @@ def _reconcile_media_install_replacements(session: Session) -> None:
                 and source_remote_id.casefold() in identities
             ):
                 candidate.active = False
+                superseded_install_ids.add(candidate.id)
+    retire_profiles_for_installs(session, superseded_install_ids)

@@ -4,6 +4,25 @@
 !.env.example
 *.pem
 *.key
+*.age
+*.asc
+*.csr
+*.der
+*.gpg
+*.kdbx
+*.mobileprovision
+*.ovpn
+*.pkcs8
+*.ppk
+*.p12
+*.pfx
+*.jks
+*.keystore
+.npmrc
+.pypirc
+.netrc
+credentials.json
+service-account*.json
 
 # Python
 __pycache__/
@@ -24,10 +43,18 @@ release/
 coverage/
 .vite/
 .next/
+playwright-report/
+test-results/
+blob-report/
 
 # Local application state
 .private/
+backups/
+cache/
+caches/
 data/
+diagnostics/
+logs/
 models/
 downloads/
 outputs/
@@ -45,9 +72,71 @@ artifacts/
 *.pt
 *.pth
 *.onnx
+*.png
+*.jpg
+*.jpeg
+*.gif
+*.webp
+*.bmp
 *.mp4
 *.webm
 *.mov
+*.avi
+*.mkv
+*.wav
+*.flac
+*.mp3
+*.m4a
+*.aac
+*.zip
+*.7z
+*.rar
+*.tar
+*.tar.gz
+*.tgz
+*.bz2
+*.xz
+*.zst
+
+# Generated packages and native binaries
+*.a
+*.apk
+*.appimage
+*.appx
+*.bin
+*.cab
+*.class
+*.deb
+*.dll
+*.dmg
+*.egg
+*.exe
+*.ipa
+*.iso
+*.jar
+*.lib
+*.msi
+*.msix
+*.msu
+*.node
+*.nupkg
+*.o
+*.obj
+*.pkg
+*.pyd
+*.pyc
+*.pyo
+*.rpm
+*.run
+*.so
+*.dylib
+*.war
+*.wasm
+*.whl
+
+# Reviewed public brand/documentation assets
+!docs/assets/application-preview.png
+!docs/assets/social-preview.png
 
 # Editors and operating systems
 .idea/
