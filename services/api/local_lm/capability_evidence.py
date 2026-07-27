@@ -39,8 +39,8 @@ def current_capability_evidence(
         else None
     )
     runtime_name = (
-        cast(Literal["llama.cpp", "comfyui"], install.engine)
-        if install.engine in {"llama.cpp", "comfyui"}
+        cast(Literal["llama.cpp", "vllm", "comfyui"], install.engine)
+        if install.engine in {"llama.cpp", "vllm", "comfyui"}
         else None
     )
     current_runtime = runtimes.status(runtime_name) if runtimes and runtime_name else None

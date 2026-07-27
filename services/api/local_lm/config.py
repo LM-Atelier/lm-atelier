@@ -27,6 +27,7 @@ class Settings(BaseSettings):
     llama_url: str = "http://127.0.0.1:12341"
     comfy_url: str = "http://127.0.0.1:8188"
     llama_executable: Path | None = None
+    vllm_executable: Path | None = None
     comfy_executable: Path | None = None
     comfy_directory: Path | None = None
     llama_inactivity_seconds: float = Field(default=600, ge=30, le=7200)

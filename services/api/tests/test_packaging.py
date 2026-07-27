@@ -477,12 +477,16 @@ def test_release_and_engine_manifests_are_pinned_and_versioned() -> None:
     assert engines["engines"]["llama.cpp"]["pinned_release"] != "latest"
     assert engines["engines"]["comfyui"]["pinned_release"] != "latest"
     for engine in engines["engines"].values():
-        assert engine["runtime_assets"]
+        assert engine["runtime_assets"] or engine["security_status"] == "blocked"
         for asset in engine["runtime_assets"].values():
             assert asset["url"].startswith("https://github.com/")
             assert len(asset["sha256"]) == 64
             assert asset["size_bytes"] > 0
     assert engines["engines"]["comfyui"]["distribution"] == "external-gpl-3.0"
+    vllm = engines["engines"]["vllm"]
+    assert vllm["security_status"] == "blocked"
+    assert vllm["security_message"]
+    assert vllm["runtime_assets"] == {}
     comfy = engines["engines"]["comfyui"]
     assert comfy["security_status"] == "checksum-pinned"
     assert comfy["runtime_assets"]["windows-x86_64-nvidia-cu13"]["dependency_inventory_count"] == 89

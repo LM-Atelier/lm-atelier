@@ -146,4 +146,31 @@ describe("resolveWorkflowSettings", () => {
 
     expect(fields).toEqual([imageField]);
   });
+
+  it("promotes workflow controls to the requested detail level", () => {
+    const fields = resolveWorkflowSettings(
+      [],
+      {
+        properties: {
+          denoise: {
+            type: "number",
+            title: "Edit strength",
+            default: 0.9,
+            minimum: 0,
+            maximum: 1,
+            "x-lm-atelier-visibility": "basic",
+          },
+        },
+      },
+    );
+
+    expect(fields).toEqual([
+      expect.objectContaining({
+        key: "denoise",
+        label: "Edit strength",
+        default: 0.9,
+        visibility: "basic",
+      }),
+    ]);
+  });
 });

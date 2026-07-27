@@ -11,6 +11,11 @@ from typing import Any
 import pytest
 
 from local_lm.adapters.base import ChatEvent, ChatRequest, MediaRequest
+from local_lm.comfy_templates import (
+    ComfyModelDependency,
+    ComfyTemplate,
+    CompiledComfyTemplate,
+)
 from local_lm.config import Settings
 from local_lm.db import SessionLocal, configure_database, init_db
 from local_lm.domain import JobKind, JobStatus
@@ -29,9 +34,11 @@ from local_lm.models import (
     ModelComponentManifest,
     ModelInstall,
     ModelProfile,
+    WorkflowDefinition,
+    WorkflowRevision,
 )
 from local_lm.scheduler import ResourceScheduler
-from local_lm.schemas import DownloadRequest
+from local_lm.schemas import CatalogFileSource, DownloadRequest
 
 
 class FakeWorker:
@@ -175,10 +182,15 @@ async def test_planned_chat_activation_requires_completion_and_records_evidence(
             self.stopped.append(name)
 
     processes = FakeProcesses()
+
+    def active_adapter() -> FakeChatAdapter:
+        assert processes.loaded
+        return FakeChatAdapter()
+
     manager = DownloadManager(
         settings,
         EventBroker(),
-        chat_adapter=FakeChatAdapter(),  # type: ignore[arg-type]
+        chat_adapter=active_adapter,
         processes=processes,  # type: ignore[arg-type]
     )
     with SessionLocal() as session:
@@ -458,6 +470,210 @@ async def test_unknown_gguf_plan_installs_and_activates_with_one_request(
         assert session.query(ModelProfile).count() == 1
         assert session.query(ModelComponentManifest).count() == 1
         assert session.query(ModelCapabilityEvidence).count() == 1
+
+
+async def test_chat_plan_downloads_a_pinned_projector_from_a_companion_repo(
+    settings: Settings,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    settings.prepare()
+    configure_database(settings)
+    init_db()
+    model_content = gguf_bytes("qwen")
+    projector_content = gguf_bytes("clip")
+    model_digest = hashlib.sha256(model_content).hexdigest()
+    projector_digest = hashlib.sha256(projector_content).hexdigest()
+    model_name = "Descriptive-Qwen-27B-Q4_K_M.gguf"
+    source_projector_name = "mmproj-Descriptive-Qwen-27B-f16.gguf"
+    projector_name = f"companions/author/model/{source_projector_name}"
+    inspection = inspect_repository_metadata(
+        {
+            model_name: model_content,
+            projector_name: projector_content,
+        },
+        [model_name, projector_name],
+        role="chat",
+    )
+    resolved = resolve_install_plan(
+        remote_id="converter/model",
+        revision="a" * 40,
+        role="chat",
+        engine="llama.cpp",
+        selected_files=[
+            {
+                "filename": model_name,
+                "size": len(model_content),
+                "sha256": model_digest,
+            },
+            {
+                "filename": projector_name,
+                "size": len(projector_content),
+                "sha256": projector_digest,
+                "source_remote_id": "author/model",
+                "source_revision": "b" * 40,
+                "source_filename": source_projector_name,
+            },
+        ],
+        inspection=inspection,
+    )
+    with SessionLocal() as session:
+        plan = persist_install_plan(session, resolved)
+        session.commit()
+        request = DownloadRequest(
+            install_plan_id=plan.id,
+            remote_id=plan.remote_id,
+            revision=plan.revision,
+            role="chat",
+            engine=plan.engine,
+            allow_patterns=[model_name, projector_name],
+            expected_sha256={
+                model_name: model_digest,
+                projector_name: projector_digest,
+            },
+            file_sources={
+                projector_name: CatalogFileSource(
+                    remote_id="author/model",
+                    revision="b" * 40,
+                    filename=source_projector_name,
+                    size_bytes=len(projector_content),
+                    sha256=projector_digest,
+                )
+            },
+        )
+        session.add(
+            Job(
+                id="job_companion_projector",
+                kind=JobKind.DOWNLOAD.value,
+                status=JobStatus.QUEUED.value,
+                payload_json=request.model_dump(mode="json"),
+            )
+        )
+        session.commit()
+
+    class ChatAdapter:
+        async def capabilities(self) -> object:
+            return SimpleNamespace(
+                healthy=True,
+                version="llama-vision",
+                input_modalities=["text", "image"],
+            )
+
+        async def count_tokens(self, _messages: list[dict[str, Any]]) -> int:
+            return 3
+
+        async def stream(self, _request: ChatRequest):  # type: ignore[no-untyped-def]
+            yield ChatEvent(type="token", text="OK")
+            yield ChatEvent(type="complete")
+
+    class Processes:
+        runtimes = None
+
+        def statuses(self) -> list[object]:
+            return [SimpleNamespace(name="chat", running=False, profile_id=None)]
+
+        async def load_chat(
+            self,
+            _profile: ModelProfile,
+            _install: ModelInstall,
+        ) -> None:
+            return None
+
+        async def stop(self, _name: str) -> None:
+            return None
+
+    def model_info(remote_id: str, **_kwargs: object) -> object:
+        if remote_id == "converter/model":
+            return SimpleNamespace(
+                siblings=[
+                    SimpleNamespace(
+                        rfilename=model_name,
+                        size=len(model_content),
+                        lfs={"sha256": model_digest},
+                    )
+                ],
+                sha="a" * 40,
+                pipeline_tag="text-generation",
+                tags=["gguf"],
+                gated=False,
+            )
+        assert remote_id == "author/model"
+        return SimpleNamespace(
+            siblings=[
+                SimpleNamespace(
+                    rfilename=source_projector_name,
+                    size=len(projector_content),
+                    lfs={"sha256": projector_digest},
+                )
+            ],
+            sha="b" * 40,
+            pipeline_tag="image-text-to-text",
+            tags=["vision"],
+            gated=False,
+        )
+
+    manager = DownloadManager(
+        settings,
+        EventBroker(),
+        chat_adapter=ChatAdapter(),  # type: ignore[arg-type]
+        processes=Processes(),  # type: ignore[arg-type]
+    )
+    manager._api = SimpleNamespace(model_info=model_info)  # type: ignore[assignment]
+    transfers: list[tuple[str, str, str]] = []
+
+    async def download_file(**kwargs: Any) -> str:
+        transfers.append((kwargs["remote_id"], kwargs["revision"], kwargs["filename"]))
+        content = projector_content if kwargs["remote_id"] == "author/model" else model_content
+        target = kwargs["staging"] / kwargs["filename"]
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_bytes(content)
+        return str(target)
+
+    monkeypatch.setattr(manager, "_download_file", download_file)
+    await manager._download("job_companion_projector")
+
+    assert transfers == [
+        ("converter/model", "a" * 40, model_name),
+        ("author/model", "b" * 40, source_projector_name),
+    ]
+    with SessionLocal() as session:
+        job = session.get(Job, "job_companion_projector")
+        install = session.query(ModelInstall).one()
+        assert job and job.status == JobStatus.COMPLETE.value, job.error if job else None
+        assert install.active is True
+        assert install.manifest_json["file_sources"][projector_name]["remote_id"] == "author/model"
+        components = {
+            component.relative_path for component in session.query(ModelComponentManifest)
+        }
+        assert components == {model_name, projector_name}
+        assert session.query(ModelCapabilityEvidence).one().result == "ready"
+
+
+def test_companion_relocation_rejects_a_worker_path_outside_staging(
+    tmp_path: Path,
+) -> None:
+    staging = tmp_path / "staging"
+    staging.mkdir()
+    expected = staging / "mmproj-model.gguf"
+    expected.write_bytes(b"expected")
+    outside = tmp_path / "outside.gguf"
+    outside.write_bytes(b"outside")
+
+    with pytest.raises(ValueError, match="unexpected local path"):
+        DownloadManager._relocate_companion_download(
+            staging=staging,
+            source_filename="mmproj-model.gguf",
+            destination_filename="companions/author/model/mmproj-model.gguf",
+            downloaded_path=str(outside),
+        )
+
+    relocated = DownloadManager._relocate_companion_download(
+        staging=staging,
+        source_filename="mmproj-model.gguf",
+        destination_filename="companions/author/model/mmproj-model.gguf",
+        downloaded_path=str(expected),
+    )
+    assert Path(relocated).read_bytes() == b"expected"
+    assert not expected.exists()
 
 
 async def test_lora_plan_installs_as_a_verified_auxiliary_asset(
@@ -949,6 +1165,93 @@ async def test_adaptive_checkpoint_activation_runs_a_small_bounded_generation(
         "denoise": 1.0,
     }
     assert adapter.timeout_seconds == 300
+
+
+async def test_workflow_refresh_adds_an_image_edit_contract_for_existing_installs(
+    settings: Settings,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    settings.prepare()
+    configure_database(settings)
+    init_db()
+    object_info = {"LoadImage": {"input": {}}, "VAEEncode": {"input": {}}}
+
+    class MediaAdapter:
+        async def object_info(self) -> dict[str, object]:
+            return object_info
+
+    dependency = ComfyModelDependency(
+        remote_id="Comfy-Org/z_image_turbo",
+        revision="main",
+        path="z_image.safetensors",
+        directory="diffusion_models",
+        name="z_image.safetensors",
+        url="",
+    )
+    compiled = CompiledComfyTemplate(
+        template=ComfyTemplate(
+            id="image_z_image_turbo",
+            path=settings.data_dir / "template.json",
+            role="image",
+            operation="text_to_image",
+            score=1_000,
+            sha256="a" * 64,
+            dependencies=(dependency,),
+        ),
+        ui_graph={"nodes": []},
+        api_graph={
+            "empty": {"class_type": "EmptySD3LatentImage", "inputs": {}},
+            "vae": {"class_type": "VAELoader", "inputs": {}},
+            "sampler": {
+                "class_type": "KSampler",
+                "inputs": {"latent_image": ["empty", 0], "denoise": "${denoise}"},
+            },
+            "decode": {
+                "class_type": "VAEDecode",
+                "inputs": {"samples": ["sampler", 0], "vae": ["vae", 0]},
+            },
+        },
+        input_schema={"type": "object", "properties": {"denoise": {"default": 1.0}}},
+    )
+    manager = DownloadManager(
+        settings,
+        EventBroker(),
+        media_adapter=MediaAdapter(),  # type: ignore[arg-type]
+    )
+    monkeypatch.setattr(manager.comfy_templates, "compile", lambda *_args, **_kwargs: compiled)
+    with SessionLocal() as session:
+        session.add(
+            ModelInstall(
+                id="model_z_image_existing",
+                name="Z-Image Turbo",
+                role="image",
+                engine="comfyui",
+                local_path=str(settings.model_dir / "z-image"),
+                manifest_json={
+                    "workflow_template_id": "image_z_image_turbo",
+                    "workflow_template_sha256": "a" * 64,
+                    "remote_id": "Comfy-Org/z_image_turbo",
+                    "revision": "main",
+                    "files": ["z_image.safetensors"],
+                    "comfy_paths": {"diffusion_models": "."},
+                },
+                active=True,
+            )
+        )
+        session.commit()
+
+    assert await manager.refresh_installed_media_workflows() == 2
+    with SessionLocal() as session:
+        definitions = session.query(WorkflowDefinition).all()
+        assert {definition.operation for definition in definitions} == {
+            "text_to_image",
+            "image_to_image",
+        }
+        edit = next(item for item in definitions if item.operation == "image_to_image")
+        revision = session.get(WorkflowRevision, edit.current_revision_id)
+        assert revision is not None
+        assert revision.dependencies_json["model_install_ids"] == ["model_z_image_existing"]
+        assert revision.api_graph_json["lma-load-image"]["inputs"]["image"] == ("${input_image}")
 
 
 async def test_media_activation_waits_for_the_shared_compute_lease(

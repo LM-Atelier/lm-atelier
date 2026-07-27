@@ -50,6 +50,22 @@
       ],
       "certification": "hardware-pending"
     },
+    "vllm": {
+      "source": "https://github.com/vllm-project/vllm",
+      "pinned_release": "v0.25.0",
+      "distribution": "external",
+      "license": "Apache-2.0",
+      "security_status": "blocked",
+      "security_message": "Automatic ModelOpt/NVFP4 setup is paused until the complete Windows vLLM, PyTorch, and CUDA dependency bundle has a pinned inventory and security review. Model downloads remain disabled so LM Atelier does not leave unusable multi-gigabyte installs.",
+      "runtime_assets": {},
+      "required_contract": [
+        "GET /health",
+        "GET /version",
+        "POST /v1/chat/completions",
+        "POST /tokenize"
+      ],
+      "certification": "hardware-pending"
+    },
     "comfyui": {
       "source": "https://github.com/Comfy-Org/ComfyUI",
       "pinned_release": "v0.28.0",

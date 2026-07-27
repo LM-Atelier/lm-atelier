@@ -358,7 +358,13 @@ function useArtifactSource(artifactId: string | null): string | null {
   return artifactId ? `/api/artifacts/${encodeURIComponent(artifactId)}/content` : null;
 }
 
-function ArtifactPart({ part }: { part: MessagePart }) {
+function ArtifactPart({
+  part,
+  onEditImage,
+}: {
+  part: MessagePart;
+  onEditImage?: (artifactId: string) => void;
+}) {
   const proxyId = typeof part.metadata_json.browser_proxy_artifact_id === "string" ? part.metadata_json.browser_proxy_artifact_id : null;
   const posterId = typeof part.metadata_json.poster_artifact_id === "string"
     ? part.metadata_json.poster_artifact_id
@@ -381,6 +387,7 @@ function ArtifactPart({ part }: { part: MessagePart }) {
         <img src={source} alt={preview ? "Generation preview" : inputReference ? "Attached image" : "Generated result"} loading="lazy" />
         <figcaption>
           <ImageIcon size={14} /> {preview ? "Generation preview" : inputReference ? "Attached image" : "Generated image"}
+          {!preview && onEditImage && <button type="button" onClick={() => onEditImage(part.artifact_id!)}>Edit</button>}
           {!preview && <a href={source} download>Download</a>}
         </figcaption>
       </figure>
@@ -585,12 +592,24 @@ function PendingResponseStatus({ label, startedAt }: { label: string; startedAt:
   );
 }
 
-function PartView({ part, liveText, markdown = false }: { part: MessagePart; liveText?: string; markdown?: boolean }) {
+function PartView({
+  part,
+  liveText,
+  markdown = false,
+  onEditImage,
+}: {
+  part: MessagePart;
+  liveText?: string;
+  markdown?: boolean;
+  onEditImage?: (artifactId: string) => void;
+}) {
   if (part.type === "text") {
     const text = liveText || part.text || "";
     return markdown ? <MarkdownText text={text} /> : <div className="message-text">{text}</div>;
   }
-  if (part.type === "image" || part.type === "video" || part.type === "attachment") return <ArtifactPart part={part} />;
+  if (part.type === "image" || part.type === "video" || part.type === "attachment") {
+    return <ArtifactPart part={part} onEditImage={onEditImage} />;
+  }
   if (part.type === "progress") {
     const progress = Number(part.metadata_json.progress ?? 0);
     const indeterminate = part.metadata_json.indeterminate === true;
@@ -620,6 +639,7 @@ function MessageBubble({
   onEdit,
   onSelectRevision,
   onCancelQueued,
+  onEditImage,
 }: {
   message: Message;
   liveText?: string;
@@ -627,6 +647,7 @@ function MessageBubble({
   onEdit?: (messageId: string, text: string) => void;
   onSelectRevision?: (messageId: string, revisionId: string) => void;
   onCancelQueued?: () => void;
+  onEditImage?: (artifactId: string) => void;
 }) {
   const visibleParts = message.parts.filter((part) => part.type !== "generation_metadata");
   const userText = visibleParts.filter((part) => part.type === "text").map((part) => part.text || "").join("\n");
@@ -682,7 +703,7 @@ function MessageBubble({
     <article className={`message ${message.role}`}>
       <div className="avatar">{message.role === "user" ? "You" : <Bot size={19} />}</div>
       <div className="message-content">
-        {editing ? <div className="message-edit"><textarea aria-label="Edit message" rows={4} value={draft} onChange={(event) => setDraft(event.target.value)} /><div><button onClick={() => { setDraft(userText); setEditing(false); }}>Cancel</button><button className="primary" disabled={!draft.trim()} onClick={() => { onEdit?.(message.id, draft.trim()); setEditing(false); }}>Send edited message</button></div></div> : renderedParts.map((part) => <PartView key={part.id} part={part} liveText={liveText} markdown={message.role === "assistant"} />)}
+        {editing ? <div className="message-edit"><textarea aria-label="Edit message" rows={4} value={draft} onChange={(event) => setDraft(event.target.value)} /><div><button onClick={() => { setDraft(userText); setEditing(false); }}>Cancel</button><button className="primary" disabled={!draft.trim()} onClick={() => { onEdit?.(message.id, draft.trim()); setEditing(false); }}>Send edited message</button></div></div> : renderedParts.map((part) => <PartView key={part.id} part={part} liveText={liveText} markdown={message.role === "assistant"} onEditImage={onEditImage} />)}
         {liveText && !visibleParts.some((part) => part.type === "text") && (
           <MarkdownText text={liveText} />
         )}
@@ -1105,6 +1126,7 @@ function Composer({
   onStopAndSend,
   workflows,
   project,
+  editTarget,
 }: {
   chat: ChatDetail;
   engines: EngineCapabilities[];
@@ -1125,13 +1147,29 @@ function Composer({
   ) => void;
   workflows: Workflow[];
   project?: Project;
+  editTarget?: { artifactId: string; requestId: number } | null;
 }) {
   const [text, setText] = useState("");
   const mode = chat.routing_mode;
   const [settingsOpen, setSettingsOpen] = useState(false);
-  const [attachments, setAttachments] = useState<string[]>([]);
+  const [attachments, setAttachments] = useState<
+    { id: string; kind: "image" | "video" }[]
+  >([]);
   const [uploading, setUploading] = useState(false);
   const fileInput = useRef<HTMLInputElement>(null);
+  const textInput = useRef<HTMLTextAreaElement>(null);
+  const consumedEditRequest = useRef<number | null>(null);
+  useEffect(() => {
+    if (!editTarget || consumedEditRequest.current === editTarget.requestId) return;
+    consumedEditRequest.current = editTarget.requestId;
+    setAttachments((current) => (
+      current.some((item) => item.id === editTarget.artifactId)
+        ? current
+        : [...current, { id: editTarget.artifactId, kind: "image" }]
+    ));
+    onMode("image");
+    textInput.current?.focus();
+  }, [editTarget, onMode]);
   const priorVisual = activeBranchMessages(chat).some((message) =>
     message.parts.some((part) =>
       Boolean(part.artifact_id)
@@ -1165,7 +1203,7 @@ function Composer({
     dispatch(
       text.trim(),
       mode,
-      attachments,
+      attachments.map((item) => item.id),
       mode === "auto" ? {} : normalizeSettingsForFields(settings, fields),
     );
     setText("");
@@ -1177,7 +1215,10 @@ function Composer({
     setUploading(true);
     try {
       const id = await api.upload(file);
-      setAttachments((current) => [...current, id]);
+      setAttachments((current) => [
+        ...current,
+        { id, kind: file.type.startsWith("video/") ? "video" : "image" },
+      ]);
     } finally {
       setUploading(false);
     }
@@ -1188,11 +1229,37 @@ function Composer({
       <div className="composer-wrap">
         {attachments.length > 0 && (
           <div className="attachment-strip">
-            {attachments.map((id) => <span key={id}><Paperclip size={13} />{id.slice(0, 18)}<button aria-label={`Remove attachment ${id.slice(0, 18)}`} onClick={() => setAttachments((items) => items.filter((item) => item !== id))}><X size={12} /></button></span>)}
+            {attachments.map((attachment) => (
+              <span key={attachment.id}>
+                <Paperclip size={13} />
+                {attachment.id.slice(0, 18)}
+                {attachment.kind === "image" && (
+                  <button
+                    className="attachment-edit"
+                    aria-label="Edit attached image"
+                    onClick={() => {
+                      onMode("image");
+                      textInput.current?.focus();
+                    }}
+                  >
+                    Edit
+                  </button>
+                )}
+                <button
+                  aria-label={`Remove attachment ${attachment.id.slice(0, 18)}`}
+                  onClick={() => setAttachments((items) => (
+                    items.filter((item) => item.id !== attachment.id)
+                  ))}
+                >
+                  <X size={12} />
+                </button>
+              </span>
+            ))}
           </div>
         )}
         <div className="composer">
           <textarea
+            ref={textInput}
             aria-label="Message"
             value={text}
             onChange={(event) => setText(event.target.value)}
@@ -1442,6 +1509,7 @@ function ChatView({
   onRetryStep: (stepId: string) => void;
 }) {
   const endRef = useRef<HTMLDivElement>(null);
+  const [editTarget, setEditTarget] = useState<{ artifactId: string; requestId: number } | null>(null);
   useEffect(() => {
     if (typeof endRef.current?.scrollIntoView === "function") {
       endRef.current.scrollIntoView({ behavior: "smooth" });
@@ -1527,6 +1595,10 @@ function ChatView({
                     ? () => onCancelPlan(messagePlan.id)
                     : undefined
                 }
+                onEditImage={busy ? undefined : (artifactId) => setEditTarget({
+                  artifactId,
+                  requestId: Date.now(),
+                })}
               />
             </Fragment>
           );
@@ -1553,7 +1625,7 @@ function ChatView({
         ))}
         <div ref={endRef} />
       </div>
-      <Composer chat={chat} engines={engines} stoppable={stoppable} settings={settings} onSettings={onSettings} presets={presets} presetId={presetId} onPreset={onPreset} onMode={onMode} onSend={onSend} onStop={onStop} onStopAndSend={onStopAndSend} workflows={workflows} project={project} />
+      <Composer chat={chat} engines={engines} stoppable={stoppable} settings={settings} onSettings={onSettings} presets={presets} presetId={presetId} onPreset={onPreset} onMode={onMode} onSend={onSend} onStop={onStop} onStopAndSend={onStopAndSend} workflows={workflows} project={project} editTarget={editTarget} />
     </div>
   );
 }
@@ -1563,11 +1635,13 @@ function ModelCard({
   role,
   onDownload,
   status,
+  runtime,
 }: {
   model: CatalogModel;
   role: string;
   onDownload: () => void;
   status: "idle" | "preparing" | "downloading" | "installed";
+  runtime?: RuntimeStatus;
 }) {
   const label = {
     idle: "Install",
@@ -1581,18 +1655,28 @@ function ModelCard({
     advanced_import: "Advanced import",
     unsupported: "Unsupported",
   }[model.compatibility] ?? model.compatibility.replace("_", " ");
+  const runtimeUnavailable = Boolean(
+    model.required_runtime === "vllm" && (!runtime || !runtime.supported),
+  );
+  const displayCompatibility = model.required_runtime === "vllm"
+    ? runtimeUnavailable
+      ? "Needs vLLM"
+      : "Automatic test available"
+    : compatibilityLabel;
   const actionLabel = status === "idle" && model.compatibility === "unsupported"
     ? "No workflow"
-    : label;
+    : status === "idle" && runtimeUnavailable
+      ? "Needs vLLM"
+      : label;
   return (
     <article className="model-card">
       <div className="model-icon">{role === "video" ? <Film /> : role === "image" || role === "lora" ? <ImageIcon /> : <Bot />}</div>
       <div className="model-copy">
         <h3>{model.name}</h3><p>{model.author} · {model.pipeline_tag || model.library_name || "model"}</p>
-        <div className="badges"><span className={`badge ${model.compatibility}`}>{compatibilityLabel}</span>{model.gated && <span className="badge">Gated</span>}{model.formats.slice(0, 2).map((format) => <span className="badge" key={format}>{format}</span>)}{model.quantizations.slice(0, 2).map((value) => <span className="badge" key={value}>{value}</span>)}</div>
+        <div className="badges"><span className={`badge ${model.compatibility}`}>{displayCompatibility}</span>{model.gated && <span className="badge">Gated</span>}{model.formats.slice(0, 2).map((format) => <span className="badge" key={format}>{format}</span>)}{model.quantizations.slice(0, 2).map((value) => <span className="badge" key={value}>{value}</span>)}</div>
         <small>{formatDate(model.last_modified)}{model.compatibility_reasons.length ? ` · ${model.compatibility_reasons.join(" · ")}` : ""}</small>
       </div>
-      <div className="model-stats">{model.trending_score != null && <span title="Hugging Face trending score"><Sparkles size={14} />{model.trending_score.toLocaleString()}</span>}<span><Download size={14} />{model.downloads?.toLocaleString() ?? "—"}</span><button className="primary compact-button" title={model.compatibility === "unsupported" ? model.compatibility_reasons.join(" ") : undefined} onClick={onDownload} disabled={status !== "idle" || model.compatibility === "unsupported"}>{actionLabel}</button></div>
+      <div className="model-stats">{model.trending_score != null && <span title="Hugging Face trending score"><Sparkles size={14} />{model.trending_score.toLocaleString()}</span>}<span><Download size={14} />{model.downloads?.toLocaleString() ?? "—"}</span><button className="primary compact-button" title={model.compatibility === "unsupported" || runtimeUnavailable ? model.compatibility_reasons.join(" ") : undefined} onClick={onDownload} disabled={status !== "idle" || model.compatibility === "unsupported" || runtimeUnavailable}>{actionLabel}</button></div>
     </article>
   );
 }
@@ -1749,11 +1833,15 @@ function ModelsView() {
   const jobs = useQuery({ queryKey: ["jobs"], queryFn: api.jobs, refetchInterval: 3_000 });
   const storage = useQuery({ queryKey: ["model-storage"], queryFn: api.modelStorage });
   const profiles = useQuery({ queryKey: ["profiles"], queryFn: api.profiles });
+  const runtimes = useQuery({ queryKey: ["runtimes"], queryFn: api.runtimes });
+  const runtimeFor = (model: CatalogModel) => runtimes.data?.find(
+    (runtime) => runtime.engine === model.required_runtime,
+  );
   const download = useMutation({
     mutationFn: async ({ model, selectedRole }: { model: CatalogModel; selectedRole: string }) => {
       const auxiliaryKind = selectedRole === "lora" ? "lora" : null;
       const installRole = auxiliaryKind ? "image" : selectedRole;
-      const engine = installRole === "chat" ? "llama.cpp" : "comfyui";
+      const engine = model.required_runtime ?? (installRole === "chat" ? "llama.cpp" : "comfyui");
       const preflight = auxiliaryKind
         ? await api.catalogPreflight(
             model.remote_id,
@@ -1790,6 +1878,7 @@ function ModelsView() {
         preflight.revision,
         preflight.selected_files,
         preflight.expected_sha256,
+        preflight.file_sources ?? {},
         preflight.comfy_paths,
         preflight.workflow_template_id,
         preflight.workflow_template_sha256,
@@ -1928,7 +2017,7 @@ function ModelsView() {
         {installRecipe.error && <div className="callout error" role="alert">{installRecipe.error.message}</div>}
         <div className="recipe-grid">{recipes.data?.map((recipe) => <RecipeCard key={recipe.id} recipe={recipe} pending={installRecipe.isPending && installRecipe.variables === recipe.id} onInstall={() => installRecipe.mutate(recipe.id)} />)}</div>
       </section>
-      {(role === "image" || role === "video") && readyModels.length > 0 && <section className="workflow-ready-models"><div className="section-heading"><div><small>Declarative workflow available</small><h2>Automatic setup candidates</h2></div></div><div className="model-grid">{readyModels.map((model) => <ModelCard key={model.remote_id} model={model} role={role} status={statusFor(model)} onDownload={() => download.mutate({ model, selectedRole: role })} />)}</div></section>}
+      {(role === "image" || role === "video") && readyModels.length > 0 && <section className="workflow-ready-models"><div className="section-heading"><div><small>Declarative workflow available</small><h2>Automatic setup candidates</h2></div></div><div className="model-grid">{readyModels.map((model) => <ModelCard key={model.remote_id} model={model} role={role} runtime={runtimeFor(model)} status={statusFor(model)} onDownload={() => download.mutate({ model, selectedRole: role })} />)}</div></section>}
       <div className="toolbar">
         <form className="search-box" onSubmit={(event) => { event.preventDefault(); setSubmitted(query); }}><Search size={18} /><input value={query} onChange={(event) => setQuery(event.target.value)} placeholder="Search models" /></form>
         <select aria-label="Model role" value={role} onChange={(event) => setRole(event.target.value)}><option value="chat">Chat</option><option value="image">Image</option><option value="video">Video</option><option value="lora">LoRA</option></select>
@@ -1996,7 +2085,7 @@ function ModelsView() {
       {catalog.isLoading && <div className="loading-line" />}
       {catalog.error && <div className="callout error action-callout" role="alert"><span>{catalog.error.message}</span><button className="secondary compact-button" disabled={catalog.isFetching} onClick={() => void catalog.refetch()}>Retry</button></div>}
       {catalogIsStale && !catalog.error && <div className="callout warning action-callout" role="status"><span>Showing saved results while Hugging Face is unavailable.</span><button className="secondary compact-button" disabled={catalog.isFetching} onClick={() => void catalog.refetch()}>Refresh</button></div>}
-      <div className="model-grid">{catalogItems.map((model) => <ModelCard key={model.remote_id} model={model} role={role} status={statusFor(model)} onDownload={() => download.mutate({ model, selectedRole: role })} />)}</div>
+      <div className="model-grid">{catalogItems.map((model) => <ModelCard key={model.remote_id} model={model} role={role} runtime={runtimeFor(model)} status={statusFor(model)} onDownload={() => download.mutate({ model, selectedRole: role })} />)}</div>
       {catalog.hasNextPage && <div className="load-more"><button className="secondary" disabled={catalog.isFetchingNextPage} onClick={() => void catalog.fetchNextPage()}>{catalog.isFetchingNextPage ? "Loading…" : "Load more models"}</button></div>}
       {importOpen && (
         <AccessibleDialog
@@ -2009,7 +2098,7 @@ function ModelsView() {
           <label>Display name<input value={importName} onChange={(event) => setImportName(event.target.value)} /></label>
           <label>Absolute local path<input value={importPath} onChange={(event) => setImportPath(event.target.value)} placeholder="/path/to/model.gguf" /></label>
           <label>Role<select value={importRole} onChange={(event) => { const next = event.target.value; setImportRole(next); setImportEngine(next === "chat" ? "llama.cpp" : "comfyui"); }}><option value="chat">Chat</option><option value="image">Image</option><option value="video">Video</option></select></label>
-          <label>Runtime<select value={importEngine} onChange={(event) => setImportEngine(event.target.value)}><option value="llama.cpp">llama.cpp</option><option value="comfyui">ComfyUI</option></select></label>
+          <label>Runtime<select value={importEngine} onChange={(event) => setImportEngine(event.target.value)}><option value="llama.cpp">llama.cpp</option><option value="vllm">vLLM (ModelOpt/NVFP4)</option><option value="comfyui">ComfyUI</option></select></label>
           {importModel.error && <div className="callout error" role="alert">{importModel.error.message}</div>}
           <footer><button className="secondary" onClick={() => setImportOpen(false)}>Cancel</button><button className="primary" disabled={!importName.trim() || !importPath.trim() || importModel.isPending} onClick={() => importModel.mutate()}>{importModel.isPending ? "Importing…" : "Import model"}</button></footer>
         </AccessibleDialog>

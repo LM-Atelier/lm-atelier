@@ -26,7 +26,8 @@ _RUNTIME_PARAMETERS = {
 }
 _PRIMITIVE_WIDGET_TYPES = {"BOOLEAN", "COMBO", "FLOAT", "INT", "STRING"}
 _CONTROL_AFTER_GENERATE = {"decrement", "fixed", "increment", "randomize"}
-COMFY_TEMPLATE_COMPILER_VERSION = 2
+COMFY_TEMPLATE_COMPILER_VERSION = 5
+DEFAULT_IMAGE_EDIT_DENOISE = 0.9
 _ADAPTIVE_CHECKPOINT_PREFIX = "lma_image_checkpoint_v1_"
 _ADAPTIVE_CHECKPOINT_PLACEHOLDER = "__LM_ATELIER_CHECKPOINT__"
 
@@ -565,6 +566,105 @@ def _model_dependencies(value: dict[str, Any]) -> list[ComfyModelDependency]:
     return sorted(dependencies.values(), key=lambda item: (item.directory, item.path))
 
 
+def derive_image_to_image(
+    compiled: CompiledComfyTemplate,
+    object_info: dict[str, Any],
+) -> CompiledComfyTemplate | None:
+    """Derive a standard whole-image edit graph when the runtime supports it."""
+    if (
+        getattr(compiled.template, "role", None) != "image"
+        or getattr(compiled.template, "operation", None) != "text_to_image"
+        or not all(isinstance(object_info.get(name), dict) for name in ("LoadImage", "VAEEncode"))
+    ):
+        return None
+    graph = deepcopy(compiled.api_graph)
+    empty_latents = {
+        node_id
+        for node_id, node in graph.items()
+        if re.fullmatch(
+            r"Empty[A-Za-z0-9_]*LatentImage",
+            str(node.get("class_type") or ""),
+        )
+    }
+    latent_inputs: list[tuple[str, str]] = []
+    for node_id, node in graph.items():
+        inputs = node.get("inputs")
+        if not isinstance(inputs, dict):
+            continue
+        connection = inputs.get("latent_image")
+        if (
+            isinstance(connection, list)
+            and len(connection) == 2
+            and str(connection[0]) in empty_latents
+        ):
+            latent_inputs.append((node_id, "latent_image"))
+    vae_connection = next(
+        (
+            inputs["vae"]
+            for node in graph.values()
+            if str(node.get("class_type") or "") == "VAEDecode"
+            and isinstance((inputs := node.get("inputs")), dict)
+            and isinstance(inputs.get("vae"), list)
+            and len(inputs["vae"]) == 2
+        ),
+        None,
+    )
+    if not latent_inputs or vae_connection is None:
+        return None
+    load_id = _available_node_id(graph, "lma-load-image")
+    encode_id = _available_node_id(graph, "lma-vae-encode")
+    graph[load_id] = {
+        "inputs": {"image": "${input_image}"},
+        "class_type": "LoadImage",
+        "_meta": {"title": "Edit source image"},
+    }
+    graph[encode_id] = {
+        "inputs": {"pixels": [load_id, 0], "vae": deepcopy(vae_connection)},
+        "class_type": "VAEEncode",
+        "_meta": {"title": "Encode edit source"},
+    }
+    for node_id, input_name in latent_inputs:
+        graph[node_id]["inputs"][input_name] = [encode_id, 0]
+    schema = deepcopy(compiled.input_schema)
+    properties = schema.get("properties")
+    if isinstance(properties, dict):
+        for name in ("width", "height", "batch_size"):
+            properties.pop(name, None)
+        denoise = properties.get("denoise")
+        if isinstance(denoise, dict):
+            denoise.update(
+                {
+                    "title": "Edit strength",
+                    "description": (
+                        "Higher values make the requested change more visible; "
+                        "lower values preserve more of the source."
+                    ),
+                    "default": DEFAULT_IMAGE_EDIT_DENOISE,
+                    "x-lm-atelier-visibility": "basic",
+                }
+            )
+    contract = {
+        "base": compiled.template.sha256,
+        "operation": "image_to_image",
+        "transform": "load-image-vae-encode-v3",
+    }
+    derived_hash = hashlib.sha256(
+        json.dumps(contract, sort_keys=True, separators=(",", ":")).encode()
+    ).hexdigest()
+    template = replace(
+        compiled.template,
+        id=f"{compiled.template.id}_image_to_image",
+        operation="image_to_image",
+        sha256=derived_hash,
+    )
+    return CompiledComfyTemplate(
+        template=template,
+        ui_graph=deepcopy(compiled.ui_graph),
+        api_graph=graph,
+        input_schema=schema,
+    )
+
+
 def _parse_huggingface_url(url: str) -> tuple[str, str, str] | None:
     parsed = urlparse(url)
     if parsed.scheme != "https" or parsed.netloc.lower() != "huggingface.co":
@@ -578,6 +678,15 @@ def _parse_huggingface_url(url: str) -> tuple[str, str, str] | None:
     if any(part in {"", ".", ".."} for part in file_parts):
         return None
     return f"{owner}/{name}", revision, "/".join(file_parts)
+
+
+def _available_node_id(graph: dict[str, Any], preferred: str) -> str:
+    if preferred not in graph:
+        return preferred
+    suffix = 2
+    while f"{preferred}-{suffix}" in graph:
+        suffix += 1
+    return f"{preferred}-{suffix}"
 
 
 def _compile_ui_graph(

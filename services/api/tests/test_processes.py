@@ -424,6 +424,126 @@ async def test_media_first_use_provisions_missing_runtime(
     assert captured["command"][1] == str((runtime / "main.py").resolve())
 
 
+async def test_vllm_chat_launches_complete_modelopt_snapshot(
+    settings,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:  # type: ignore[no-untyped-def]
+    model_dir = tmp_path / "modelopt-snapshot"
+    model_dir.mkdir()
+    (model_dir / "config.json").write_text("{}", encoding="utf-8")
+    (model_dir / "hf_quant_config.json").write_text(
+        '{"quantization": "NVFP4"}',
+        encoding="utf-8",
+    )
+    weights = model_dir / "model-00001-of-00001.safetensors"
+    weights.write_bytes(b"modelopt")
+    executable = tmp_path / "python.exe"
+    executable.write_bytes(b"runtime")
+    settings.vllm_executable = executable
+    supervisor = ProcessSupervisor(settings)
+    captured: dict[str, object] = {}
+
+    async def replace(
+        name: str,
+        command: list[str],
+        health_url: str,
+        profile_id: str | None = None,
+        *,
+        estimated_memory_bytes: int | None = None,
+    ) -> None:
+        captured.update(
+            name=name,
+            command=command,
+            health_url=health_url,
+            profile_id=profile_id,
+            estimated_memory_bytes=estimated_memory_bytes,
+        )
+
+    monkeypatch.setattr(supervisor, "_replace", replace)
+    profile = ModelProfile(
+        id="profile_nvfp4",
+        model_install_id="model_nvfp4",
+        name="NVFP4 vision",
+        role="chat",
+        engine="vllm",
+        load_settings_json={
+            "context_length": 4096,
+            "cpu_offload_gb": 2,
+        },
+    )
+    install = ModelInstall(
+        id="model_nvfp4",
+        name="NVFP4 vision",
+        role="chat",
+        engine="vllm",
+        local_path=str(model_dir),
+        manifest_json={
+            "files": [
+                "config.json",
+                "hf_quant_config.json",
+                weights.name,
+            ]
+        },
+        active=True,
+    )
+
+    await supervisor.load_chat(profile, install)
+
+    command = captured["command"]
+    assert isinstance(command, list)
+    assert command[:3] == [
+        str(executable.resolve()),
+        "-m",
+        "vllm.entrypoints.openai.api_server",
+    ]
+    assert command[command.index("--model") + 1] == str(model_dir.resolve())
+    assert command[command.index("--quantization") + 1] == "modelopt"
+    assert command[command.index("--max-model-len") + 1] == "4096"
+    assert command[command.index("--cpu-offload-gb") + 1] == "2.0"
+    assert captured["health_url"] == settings.llama_url + "/health"
+    assert captured["profile_id"] == profile.id
+    assert captured["estimated_memory_bytes"] == ProcessSupervisor._estimate_chat_memory(
+        sum(path.stat().st_size for path in model_dir.iterdir()),
+        profile.load_settings_json,
+    )
+    assert settings.chat_engine == "vllm"
+
+
+async def test_vllm_chat_rejects_incomplete_snapshot(
+    settings,
+    tmp_path: Path,
+) -> None:  # type: ignore[no-untyped-def]
+    model_dir = tmp_path / "incomplete-modelopt"
+    model_dir.mkdir()
+    (model_dir / "config.json").write_text("{}", encoding="utf-8")
+    (model_dir / "model.safetensors").write_bytes(b"weights")
+    executable = tmp_path / "python.exe"
+    executable.write_bytes(b"runtime")
+    settings.vllm_executable = executable
+    supervisor = ProcessSupervisor(settings)
+    profile = ModelProfile(
+        id="profile_incomplete_nvfp4",
+        model_install_id="model_incomplete_nvfp4",
+        name="Incomplete NVFP4",
+        role="chat",
+        engine="vllm",
+        load_settings_json={},
+    )
+    install = ModelInstall(
+        id="model_incomplete_nvfp4",
+        name="Incomplete NVFP4",
+        role="chat",
+        engine="vllm",
+        local_path=str(model_dir),
+        manifest_json={},
+        active=True,
+    )
+
+    with pytest.raises(ValueError, match="missing ModelOpt metadata"):
+        await supervisor.load_chat(profile, install)
+
+
 async def test_chat_launches_split_gguf_from_first_shard(
     settings,
     tmp_path: Path,

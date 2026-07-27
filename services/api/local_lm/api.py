@@ -11,6 +11,7 @@ from contextlib import suppress
 from pathlib import Path, PurePosixPath
 from typing import TYPE_CHECKING, Annotated, Any, Literal, cast
 
+import httpx
 from fastapi import APIRouter, Depends, File, HTTPException, Query, Request, Response, UploadFile
 from sqlalchemy import and_, func, or_, select, text
 from sqlalchemy.exc import SQLAlchemyError
@@ -48,6 +49,11 @@ from .engines import (
     EngineNotConfiguredError,
     EngineRegistry,
     EngineSchemaUnavailableError,
+)
+from .gguf import (
+    GGUFSelectionError,
+    automatic_gguf_selection,
+    automatic_mmproj_selection,
 )
 from .hardware import collect_system_info
 from .model_manifests import (
@@ -420,9 +426,11 @@ async def runtime_status(request: Request) -> list[RuntimeStatus]:
 
 @router.post("/runtimes/{engine}/install", response_model=RuntimeStatus, status_code=202)
 async def install_runtime(engine: str, request: Request) -> RuntimeStatus:
-    if engine not in {"llama.cpp", "comfyui"}:
-        raise HTTPException(422, "runtime must be llama.cpp or comfyui")
-    status = _services(request).runtimes.start(cast(Literal["llama.cpp", "comfyui"], engine))
+    if engine not in {"llama.cpp", "vllm", "comfyui"}:
+        raise HTTPException(422, "runtime must be llama.cpp, vllm, or comfyui")
+    status = _services(request).runtimes.start(
+        cast(Literal["llama.cpp", "vllm", "comfyui"], engine)
+    )
     if status.state == "unsupported":
         raise HTTPException(422, status.message)
     return status
@@ -1785,6 +1793,25 @@ async def catalog_preflight(
             f"{owner}/{name}", payload.revision, payload.role
         )
         detail = CatalogDetail.model_validate(raw_detail)
+        if payload.role == "chat" and payload.engine == "llama.cpp":
+            try:
+                initial_selection = (
+                    list(payload.selected_files)
+                    if payload.selected_files
+                    else automatic_gguf_selection(
+                        detail.files,
+                        collect_system_info(services.settings).memory_total_bytes,
+                    )
+                )
+                if not automatic_mmproj_selection(detail.files, initial_selection):
+                    companion = await services.catalog.discover_vision_projector(
+                        detail.model.remote_id,
+                        initial_selection,
+                    )
+                    if companion:
+                        detail = detail.model_copy(update={"files": [*detail.files, companion]})
+            except (GGUFSelectionError, httpx.HTTPError, ValueError):
+                pass
     except Exception as exc:
         raise HTTPException(
             503,
@@ -1815,15 +1842,23 @@ async def catalog_preflight(
             if path.casefold().endswith((".gguf", ".safetensors"))
         ][:8]
 
+        file_metadata = {str(item.get("filename") or ""): item for item in resolved_detail.files}
+
         async def fetch_prefix(path: str) -> tuple[str, bytes] | None:
             if not callable(inspect_prefix):
                 return None
             try:
+                source = file_metadata.get(path) or {}
+                source_remote_id = str(
+                    source.get("source_remote_id") or resolved_detail.model.remote_id
+                )
+                source_revision = str(source.get("source_revision") or resolved_detail.revision)
+                source_filename = str(source.get("source_filename") or path)
                 if path.casefold().endswith(".safetensors"):
                     prefix = await inspect_prefix(
-                        resolved_detail.model.remote_id,
-                        resolved_detail.revision,
-                        path,
+                        source_remote_id,
+                        source_revision,
+                        source_filename,
                         max_bytes=8,
                     )
                     if len(prefix) < 8:
@@ -1837,9 +1872,9 @@ async def catalog_preflight(
                 return (
                     path,
                     await inspect_prefix(
-                        resolved_detail.model.remote_id,
-                        resolved_detail.revision,
-                        path,
+                        source_remote_id,
+                        source_revision,
+                        source_filename,
                         max_bytes=limit,
                     ),
                 )
@@ -2192,6 +2227,19 @@ async def create_download(payload: DownloadRequest, request: Request, session: S
                 "engine": plan.engine,
                 "allow_patterns": planned_files,
                 "expected_sha256": planned_hashes,
+                "file_sources": {
+                    str(item["path"]): {
+                        "remote_id": str(item["source_remote_id"]),
+                        "revision": str(item["source_revision"]),
+                        "filename": str(item["source_path"]),
+                        "size_bytes": item.get("size_bytes"),
+                        "sha256": item.get("sha256"),
+                    }
+                    for item in plan.artifacts_json
+                    if item.get("source_remote_id")
+                    and item.get("source_revision")
+                    and item.get("source_path")
+                },
                 "source_remote_id": runtime.get("source_remote_id"),
                 "comfy_paths": runtime.get("comfy_paths") or {},
                 "workflow_template_id": runtime.get("workflow_template_id"),

@@ -2460,9 +2460,122 @@ describe("App", () => {
       ["model-q4.gguf"],
       { "model-q4.gguf": "a".repeat(64) },
       {},
+      {},
       null,
       null,
       "plan-chat",
+    ));
+  });
+
+  it("gates ModelOpt downloads on vLLM readiness and selects vLLM when ready", async () => {
+    const model = {
+      provider: "huggingface",
+      remote_id: "owner/qwen-nvfp4",
+      name: "qwen-nvfp4",
+      author: "owner",
+      pipeline_tag: "image-text-to-text",
+      tags: ["modelopt", "nvfp4", "safetensors"],
+      downloads: 12,
+      likes: 2,
+      trending_score: 1,
+      created_at: "2026-07-26T00:00:00Z",
+      last_modified: "2026-07-26T00:00:00Z",
+      gated: false,
+      private: false,
+      library_name: "transformers",
+      architecture: "qwen3_5",
+      formats: ["safetensors"],
+      quantizations: ["nvfp4"],
+      parameter_count: 27_000_000_000,
+      license_id: "apache-2.0",
+      total_size_bytes: 20 * 1024 ** 3,
+      compatibility: "advanced_import",
+      compatibility_reasons: ["requires the managed vLLM ModelOpt runtime"],
+      required_runtime: "vllm",
+    };
+    vi.mocked(api.catalog).mockResolvedValue({ items: [model], next_cursor: null });
+    vi.mocked(api.runtimes).mockResolvedValue([
+      {
+        engine: "vllm",
+        release: "v0.25.0",
+        state: "unsupported",
+        supported: false,
+        managed: false,
+        progress: 0,
+        downloaded_bytes: 0,
+        size_bytes: null,
+        distribution: "external",
+        license: "Apache-2.0",
+        security_status: "blocked",
+        security_message: "Dependency review pending.",
+        message: "Dependency review pending.",
+      },
+    ]);
+    const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+    const rendered = render(
+      <QueryClientProvider client={client}>
+        <App />
+      </QueryClientProvider>,
+    );
+    fireEvent.click(await screen.findByText("Model library"));
+    expect(await screen.findByRole("button", { name: "Needs vLLM" })).toBeDisabled();
+
+    rendered.unmount();
+    vi.mocked(api.runtimes).mockResolvedValue([
+      {
+        engine: "vllm",
+        release: "v0.25.0",
+        state: "ready",
+        supported: true,
+        managed: true,
+        progress: 1,
+        downloaded_bytes: 0,
+        size_bytes: null,
+        distribution: "external",
+        license: "Apache-2.0",
+        security_status: "checksum-pinned",
+        security_message: "",
+        message: "Ready.",
+      },
+    ]);
+    vi.mocked(api.catalogPreflight).mockResolvedValue({
+      remote_id: model.remote_id,
+      source_remote_id: null,
+      revision: "main",
+      selected_files: ["config.json", "hf_quant_config.json", "model.safetensors"],
+      expected_sha256: {},
+      comfy_paths: {},
+      workflow_template_id: null,
+      workflow_template_sha256: null,
+      download_bytes: model.total_size_bytes,
+      available_disk_bytes: model.total_size_bytes * 2,
+      estimated_ram_bytes: null,
+      estimated_vram_bytes: model.total_size_bytes,
+      can_install: true,
+      install_plan: {
+        id: "plan-nvfp4",
+        plan_hash: "b".repeat(64),
+        compatibility: "supported",
+        family: "qwen",
+        failure_code: null,
+        failure_reason: null,
+      },
+      checks: [],
+    });
+    const readyClient = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+    render(
+      <QueryClientProvider client={readyClient}>
+        <App />
+      </QueryClientProvider>,
+    );
+    fireEvent.click(await screen.findByText("Model library"));
+    fireEvent.click(await screen.findByRole("button", { name: "Install" }));
+    await waitFor(() => expect(api.catalogPreflight).toHaveBeenCalledWith(
+      model.remote_id,
+      "chat",
+      "vllm",
+      "main",
+      [],
     ));
   });
 
@@ -2543,6 +2656,7 @@ describe("App", () => {
       "main",
       ["atelier-ink.safetensors"],
       { "atelier-ink.safetensors": "a".repeat(64) },
+      {},
       { loras: "." },
       null,
       null,
@@ -3365,6 +3479,16 @@ describe("App", () => {
               title,
               default: "",
             },
+            ...(operation === "image_to_image" ? {
+              denoise: {
+                type: "number",
+                title: "Edit strength",
+                default: 0.9,
+                minimum: 0,
+                maximum: 1,
+                "x-lm-atelier-visibility": "basic",
+              },
+            } : {}),
           },
         },
         dependencies_json: {},
@@ -3401,6 +3525,56 @@ describe("App", () => {
     fireEvent.click(screen.getByRole("button", { name: "Turn settings" }));
     expect(screen.getByLabelText(/Edit image exclusion/)).toBeInTheDocument();
     expect(screen.queryByLabelText(/Fresh image exclusion/)).not.toBeInTheDocument();
+    expect(screen.getByLabelText("Edit strength")).toHaveValue(0.9);
+    fireEvent.click(screen.getByRole("button", { name: "Close settings" }));
+    fireEvent.click(screen.getByRole("button", { name: "Edit" }));
+    await waitFor(() => expect(api.updateChat).toHaveBeenCalledWith(chat.id, { routing_mode: "image" }));
+    expect(screen.getByText("sha256:prior")).toBeInTheDocument();
+    expect(composer).toHaveFocus();
+  });
+
+  it("offers image editing immediately after an image is attached", async () => {
+    const stamp = "2026-07-26T00:00:00Z";
+    const chat = {
+      id: "chat-new-image-edit",
+      project_id: null,
+      title: "New image edit",
+      archived: false,
+      routing_mode: "auto" as const,
+      confirm_uncertain_media: false,
+      active_chat_profile_id: null,
+      active_image_profile_id: null,
+      active_video_profile_id: null,
+      active_head_message_id: null,
+      created_at: stamp,
+      updated_at: stamp,
+    };
+    localStorage.setItem("local-lm-chat", chat.id);
+    vi.mocked(api.chats).mockResolvedValue([chat]);
+    vi.mocked(api.chat).mockResolvedValue({ ...chat, messages: [] });
+    vi.mocked(api.upload).mockResolvedValue("sha256:uploaded-image");
+    vi.mocked(api.updateChat).mockResolvedValue({ ...chat, routing_mode: "image" });
+    const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+    render(
+      <QueryClientProvider client={client}>
+        <App />
+      </QueryClientProvider>,
+    );
+
+    const composer = await screen.findByRole("textbox", { name: "Message" });
+    const attach = screen.getByRole("button", { name: "Attach file" });
+    const input = attach.parentElement?.querySelector<HTMLInputElement>('input[type="file"]');
+    expect(input).not.toBeNull();
+    fireEvent.change(input!, {
+      target: { files: [new File(["image"], "source.png", { type: "image/png" })] },
+    });
+    fireEvent.click(await screen.findByRole("button", { name: "Edit attached image" }));
+
+    await waitFor(() => expect(api.updateChat).toHaveBeenCalledWith(chat.id, {
+      routing_mode: "image",
+    }));
+    expect(composer).toHaveFocus();
+    expect(screen.getByText("sha256:uploaded-im")).toBeInTheDocument();
   });
 
   it("applies turn controls to send, edit-and-branch, and regenerate actions", async () => {
