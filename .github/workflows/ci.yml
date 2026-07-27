@@ -72,6 +72,10 @@ jobs:
             --skip-editable \
             --progress-spinner off \
             --cache-dir temp/pip-audit-cache
+      - name: Install ffmpeg for media pipeline tests
+        run: |
+          sudo apt-get update
+          sudo apt-get install --yes --no-install-recommends ffmpeg
       - name: Run repository verification
         run: ./scripts/verify.sh
       - name: Install golden-path browser
