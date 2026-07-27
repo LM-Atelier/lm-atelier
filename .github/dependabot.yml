@@ -12,6 +12,10 @@ updates:
     groups:
       web-dependencies:
         patterns: ["*"]
+        update-types: ["minor", "patch"]
+      web-major-upgrades:
+        patterns: ["*"]
+        update-types: ["major"]
 
   - package-ecosystem: uv
     directory: /services/api
