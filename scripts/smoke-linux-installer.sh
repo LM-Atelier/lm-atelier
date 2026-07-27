@@ -99,15 +99,28 @@ fi
 test -x "$LM_ATELIER_INSTALL_ROOT/lm-atelier"
 test -L "$HOME/.local/bin/lm-atelier"
 test -f "$HOME/.local/share/applications/lm-atelier.desktop"
-.venv/bin/python scripts/inventory-frozen-payload.py \
-  --payload-root "$LM_ATELIER_INSTALL_ROOT" \
-  --verify-only \
-  --installer-extras linux
+pre_manifest_release=0
+if [[ -f "$LM_ATELIER_INSTALL_ROOT/_internal/payload-manifest.json" ]]; then
+  .venv/bin/python scripts/inventory-frozen-payload.py \
+    --payload-root "$LM_ATELIER_INSTALL_ROOT" \
+    --verify-only \
+    --installer-extras linux
+else
+  # Releases before the payload manifest existed cannot verify; the
+  # upgraded payload verification below still covers the new installer.
+  echo "Skipping payload verification for a pre-manifest release."
+  pre_manifest_release=1
+fi
 
-.venv/bin/python scripts/smoke-frozen.py \
-  "$LM_ATELIER_INSTALL_ROOT/lm-atelier" \
-  --version "$initial_version" \
+initial_smoke_arguments=(
+  "$LM_ATELIER_INSTALL_ROOT/lm-atelier"
+  --version "$initial_version"
   --port 12443
+)
+if [[ "$pre_manifest_release" == "1" ]]; then
+  initial_smoke_arguments+=(--pre-manifest-release)
+fi
+.venv/bin/python scripts/smoke-frozen.py "${initial_smoke_arguments[@]}"
 
 mkdir -p "$managed_data_root"
 printf '%s\n' "preserve" > "$managed_data_root/installer-smoke-preserve"

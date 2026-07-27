@@ -29,10 +29,15 @@ is_managed_install() {
     grep -qx 'lm-atelier-managed-install-v1' "$root/$managed_marker"; then
     return 0
   fi
-  [[ -x "$root/lm-atelier" ]] &&
-    [[ -x "$root/uninstall.sh" ]] &&
-    [[ -f "$root/_internal/release-manifest.json" ]] &&
+  [[ -x "$root/lm-atelier" ]] || return 1
+  [[ -x "$root/uninstall.sh" ]] || return 1
+  if [[ -f "$root/_internal/release-manifest.json" ]]; then
     grep -q '"application": "LM Atelier"' "$root/_internal/release-manifest.json"
+  else
+    # v0.1.x payloads predate the bundled release manifest; identify them
+    # by the application's own migration package instead.
+    [[ -d "$root/_internal/local_lm/migrations" ]]
+  fi
 }
 
 launcher_points_to_install() {
