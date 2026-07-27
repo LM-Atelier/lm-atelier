@@ -3522,6 +3522,50 @@ describe("App", () => {
     expect(composer).toHaveFocus();
   });
 
+  it("offers image editing immediately after an image is attached", async () => {
+    const stamp = "2026-07-26T00:00:00Z";
+    const chat = {
+      id: "chat-new-image-edit",
+      project_id: null,
+      title: "New image edit",
+      archived: false,
+      routing_mode: "auto" as const,
+      confirm_uncertain_media: false,
+      active_chat_profile_id: null,
+      active_image_profile_id: null,
+      active_video_profile_id: null,
+      active_head_message_id: null,
+      created_at: stamp,
+      updated_at: stamp,
+    };
+    localStorage.setItem("local-lm-chat", chat.id);
+    vi.mocked(api.chats).mockResolvedValue([chat]);
+    vi.mocked(api.chat).mockResolvedValue({ ...chat, messages: [] });
+    vi.mocked(api.upload).mockResolvedValue("sha256:uploaded-image");
+    vi.mocked(api.updateChat).mockResolvedValue({ ...chat, routing_mode: "image" });
+    const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+    render(
+      <QueryClientProvider client={client}>
+        <App />
+      </QueryClientProvider>,
+    );
+
+    const composer = await screen.findByRole("textbox", { name: "Message" });
+    const attach = screen.getByRole("button", { name: "Attach file" });
+    const input = attach.parentElement?.querySelector<HTMLInputElement>('input[type="file"]');
+    expect(input).not.toBeNull();
+    fireEvent.change(input!, {
+      target: { files: [new File(["image"], "source.png", { type: "image/png" })] },
+    });
+    fireEvent.click(await screen.findByRole("button", { name: "Edit attached image" }));
+
+    await waitFor(() => expect(api.updateChat).toHaveBeenCalledWith(chat.id, {
+      routing_mode: "image",
+    }));
+    expect(composer).toHaveFocus();
+    expect(screen.getByText("sha256:uploaded-im")).toBeInTheDocument();
+  });
+
   it("applies turn controls to send, edit-and-branch, and regenerate actions", async () => {
     const stamp = "2026-07-22T00:00:00Z";
     const chat = {

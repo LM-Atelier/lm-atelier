@@ -1152,7 +1152,9 @@ function Composer({
   const [text, setText] = useState("");
   const mode = chat.routing_mode;
   const [settingsOpen, setSettingsOpen] = useState(false);
-  const [attachments, setAttachments] = useState<string[]>([]);
+  const [attachments, setAttachments] = useState<
+    { id: string; kind: "image" | "video" }[]
+  >([]);
   const [uploading, setUploading] = useState(false);
   const fileInput = useRef<HTMLInputElement>(null);
   const textInput = useRef<HTMLTextAreaElement>(null);
@@ -1161,7 +1163,9 @@ function Composer({
     if (!editTarget || consumedEditRequest.current === editTarget.requestId) return;
     consumedEditRequest.current = editTarget.requestId;
     setAttachments((current) => (
-      current.includes(editTarget.artifactId) ? current : [...current, editTarget.artifactId]
+      current.some((item) => item.id === editTarget.artifactId)
+        ? current
+        : [...current, { id: editTarget.artifactId, kind: "image" }]
     ));
     onMode("image");
     textInput.current?.focus();
@@ -1199,7 +1203,7 @@ function Composer({
     dispatch(
       text.trim(),
       mode,
-      attachments,
+      attachments.map((item) => item.id),
       mode === "auto" ? {} : normalizeSettingsForFields(settings, fields),
     );
     setText("");
@@ -1211,7 +1215,10 @@ function Composer({
     setUploading(true);
     try {
       const id = await api.upload(file);
-      setAttachments((current) => [...current, id]);
+      setAttachments((current) => [
+        ...current,
+        { id, kind: file.type.startsWith("video/") ? "video" : "image" },
+      ]);
     } finally {
       setUploading(false);
     }
@@ -1222,7 +1229,32 @@ function Composer({
       <div className="composer-wrap">
         {attachments.length > 0 && (
           <div className="attachment-strip">
-            {attachments.map((id) => <span key={id}><Paperclip size={13} />{id.slice(0, 18)}<button aria-label={`Remove attachment ${id.slice(0, 18)}`} onClick={() => setAttachments((items) => items.filter((item) => item !== id))}><X size={12} /></button></span>)}
+            {attachments.map((attachment) => (
+              <span key={attachment.id}>
+                <Paperclip size={13} />
+                {attachment.id.slice(0, 18)}
+                {attachment.kind === "image" && (
+                  <button
+                    className="attachment-edit"
+                    aria-label="Edit attached image"
+                    onClick={() => {
+                      onMode("image");
+                      textInput.current?.focus();
+                    }}
+                  >
+                    Edit
+                  </button>
+                )}
+                <button
+                  aria-label={`Remove attachment ${attachment.id.slice(0, 18)}`}
+                  onClick={() => setAttachments((items) => (
+                    items.filter((item) => item.id !== attachment.id)
+                  ))}
+                >
+                  <X size={12} />
+                </button>
+              </span>
+            ))}
           </div>
         )}
         <div className="composer">

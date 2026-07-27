@@ -5,7 +5,13 @@ from pathlib import Path
 
 import pytest
 
-from local_lm.comfy_templates import ComfyTemplateRegistry
+from local_lm.comfy_templates import (
+    ComfyModelDependency,
+    ComfyTemplate,
+    ComfyTemplateRegistry,
+    CompiledComfyTemplate,
+    derive_image_to_image,
+)
 from local_lm.config import Settings
 
 
@@ -491,3 +497,66 @@ def test_registry_compiles_subgraph_and_runtime_bindings(tmp_path: Path) -> None
         "type": "integer",
         "default": 1024,
     }
+
+
+def test_text_to_image_graph_derives_a_standard_image_edit_workflow(tmp_path: Path) -> None:
+    dependency = ComfyModelDependency(
+        remote_id="Comfy-Org/z_image_turbo",
+        revision="main",
+        path="z_image.safetensors",
+        directory="diffusion_models",
+        name="z_image.safetensors",
+        url="",
+    )
+    compiled = CompiledComfyTemplate(
+        template=ComfyTemplate(
+            id="image_z_image_turbo",
+            path=tmp_path / "template.json",
+            role="image",
+            operation="text_to_image",
+            score=1_000,
+            sha256="a" * 64,
+            dependencies=(dependency,),
+        ),
+        ui_graph={"nodes": []},
+        api_graph={
+            "empty": {"class_type": "EmptySD3LatentImage", "inputs": {}},
+            "vae": {"class_type": "VAELoader", "inputs": {}},
+            "sampler": {
+                "class_type": "KSampler",
+                "inputs": {"latent_image": ["empty", 0], "denoise": "${denoise}"},
+            },
+            "decode": {
+                "class_type": "VAEDecode",
+                "inputs": {"samples": ["sampler", 0], "vae": ["vae", 0]},
+            },
+        },
+        input_schema={
+            "type": "object",
+            "properties": {
+                "prompt": {"type": "string"},
+                "width": {"type": "integer", "default": 1024},
+                "height": {"type": "integer", "default": 1024},
+                "batch_size": {"type": "integer", "default": 1},
+                "denoise": {"type": "number", "default": 1.0},
+            },
+        },
+    )
+
+    derived = derive_image_to_image(
+        compiled,
+        {"LoadImage": {"input": {}}, "VAEEncode": {"input": {}}},
+    )
+
+    assert derived is not None
+    assert derived.template.operation == "image_to_image"
+    assert derived.api_graph["lma-load-image"]["inputs"] == {"image": "${input_image}"}
+    assert derived.api_graph["lma-vae-encode"]["inputs"] == {
+        "pixels": ["lma-load-image", 0],
+        "vae": ["vae", 0],
+    }
+    assert derived.api_graph["sampler"]["inputs"]["latent_image"] == [
+        "lma-vae-encode",
+        0,
+    ]
+    assert set(derived.input_schema["properties"]) == {"prompt", "denoise"}

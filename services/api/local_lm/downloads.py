@@ -33,6 +33,7 @@ from .comfy_templates import (
     COMFY_TEMPLATE_COMPILER_VERSION,
     ComfyTemplateRegistry,
     CompiledComfyTemplate,
+    derive_image_to_image,
 )
 from .config import Settings
 from .domain import CompatibilityLevel, JobKind, JobStatus, new_id, utcnow
@@ -1805,6 +1806,13 @@ class DownloadManager:
                     compiled,
                     activated_install,
                 )
+                image_edit = derive_image_to_image(compiled, refreshed_object_info)
+                if image_edit:
+                    self._ensure_template_workflow(
+                        session,
+                        image_edit,
+                        activated_install,
+                    )
                 if request.install_plan_id and capabilities:
                     self._record_capability_evidence(
                         session,
@@ -1905,6 +1913,22 @@ class DownloadManager:
                     revision = self._ensure_template_workflow(session, compiled, install)
                     if revision.id != before:
                         refreshed += 1
+                    image_edit = derive_image_to_image(compiled, object_info)
+                    if image_edit:
+                        edit_before = session.scalar(
+                            select(WorkflowDefinition.current_revision_id).where(
+                                WorkflowDefinition.name
+                                == _template_workflow_name(image_edit.template.id),
+                                WorkflowDefinition.operation == image_edit.template.operation,
+                            )
+                        )
+                        edit_revision = self._ensure_template_workflow(
+                            session,
+                            image_edit,
+                            install,
+                        )
+                        if edit_revision.id != edit_before:
+                            refreshed += 1
                 except (KeyError, TypeError, ValueError):
                     logger.exception(
                         "Could not refresh ComfyUI workflow for model %s",

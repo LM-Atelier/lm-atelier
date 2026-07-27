@@ -11,6 +11,11 @@ from typing import Any
 import pytest
 
 from local_lm.adapters.base import ChatEvent, ChatRequest, MediaRequest
+from local_lm.comfy_templates import (
+    ComfyModelDependency,
+    ComfyTemplate,
+    CompiledComfyTemplate,
+)
 from local_lm.config import Settings
 from local_lm.db import SessionLocal, configure_database, init_db
 from local_lm.domain import JobKind, JobStatus
@@ -29,6 +34,8 @@ from local_lm.models import (
     ModelComponentManifest,
     ModelInstall,
     ModelProfile,
+    WorkflowDefinition,
+    WorkflowRevision,
 )
 from local_lm.scheduler import ResourceScheduler
 from local_lm.schemas import CatalogFileSource, DownloadRequest
@@ -1158,6 +1165,93 @@ async def test_adaptive_checkpoint_activation_runs_a_small_bounded_generation(
         "denoise": 1.0,
     }
     assert adapter.timeout_seconds == 300
+
+
+async def test_workflow_refresh_adds_an_image_edit_contract_for_existing_installs(
+    settings: Settings,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    settings.prepare()
+    configure_database(settings)
+    init_db()
+    object_info = {"LoadImage": {"input": {}}, "VAEEncode": {"input": {}}}
+
+    class MediaAdapter:
+        async def object_info(self) -> dict[str, object]:
+            return object_info
+
+    dependency = ComfyModelDependency(
+        remote_id="Comfy-Org/z_image_turbo",
+        revision="main",
+        path="z_image.safetensors",
+        directory="diffusion_models",
+        name="z_image.safetensors",
+        url="",
+    )
+    compiled = CompiledComfyTemplate(
+        template=ComfyTemplate(
+            id="image_z_image_turbo",
+            path=settings.data_dir / "template.json",
+            role="image",
+            operation="text_to_image",
+            score=1_000,
+            sha256="a" * 64,
+            dependencies=(dependency,),
+        ),
+        ui_graph={"nodes": []},
+        api_graph={
+            "empty": {"class_type": "EmptySD3LatentImage", "inputs": {}},
+            "vae": {"class_type": "VAELoader", "inputs": {}},
+            "sampler": {
+                "class_type": "KSampler",
+                "inputs": {"latent_image": ["empty", 0], "denoise": "${denoise}"},
+            },
+            "decode": {
+                "class_type": "VAEDecode",
+                "inputs": {"samples": ["sampler", 0], "vae": ["vae", 0]},
+            },
+        },
+        input_schema={"type": "object", "properties": {"denoise": {"default": 1.0}}},
+    )
+    manager = DownloadManager(
+        settings,
+        EventBroker(),
+        media_adapter=MediaAdapter(),  # type: ignore[arg-type]
+    )
+    monkeypatch.setattr(manager.comfy_templates, "compile", lambda *_args, **_kwargs: compiled)
+    with SessionLocal() as session:
+        session.add(
+            ModelInstall(
+                id="model_z_image_existing",
+                name="Z-Image Turbo",
+                role="image",
+                engine="comfyui",
+                local_path=str(settings.model_dir / "z-image"),
+                manifest_json={
+                    "workflow_template_id": "image_z_image_turbo",
+                    "workflow_template_sha256": "a" * 64,
+                    "remote_id": "Comfy-Org/z_image_turbo",
+                    "revision": "main",
+                    "files": ["z_image.safetensors"],
+                    "comfy_paths": {"diffusion_models": "."},
+                },
+                active=True,
+            )
+        )
+        session.commit()
+
+    assert await manager.refresh_installed_media_workflows() == 2
+    with SessionLocal() as session:
+        definitions = session.query(WorkflowDefinition).all()
+        assert {definition.operation for definition in definitions} == {
+            "text_to_image",
+            "image_to_image",
+        }
+        edit = next(item for item in definitions if item.operation == "image_to_image")
+        revision = session.get(WorkflowRevision, edit.current_revision_id)
+        assert revision is not None
+        assert revision.dependencies_json["model_install_ids"] == ["model_z_image_existing"]
+        assert revision.api_graph_json["lma-load-image"]["inputs"]["image"] == ("${input_image}")
 
 
 async def test_media_activation_waits_for_the_shared_compute_lease(

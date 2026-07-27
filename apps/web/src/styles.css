@@ -180,6 +180,7 @@ h1, h2, h3 { margin: 0; }
 .attachment-strip { display: flex; gap: 6px; margin: 0 8px 6px; }
 .attachment-strip > span { display: inline-flex; align-items: center; gap: 5px; background: var(--panel-3); border: 1px solid var(--border); border-radius: 8px; font-size: 11px; padding: 5px 7px; }
 .attachment-strip button { min-width: 24px; min-height: 24px; border: 0; border-radius: 5px; background: transparent; padding: 0; color: #9ba3af; display: grid; place-items: center; cursor: pointer; }
+.attachment-strip .attachment-edit { width: auto; padding: 0 5px; color: var(--accent); }
 
 .empty-state { height: 100%; min-height: 260px; display: flex; flex-direction: column; justify-content: center; align-items: center; text-align: center; color: #818a98; padding: 30px; }
 .empty-state h2 { color: #e8ebf1; font-size: 20px; margin-top: 14px; }
