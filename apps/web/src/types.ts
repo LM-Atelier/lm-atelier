@@ -463,6 +463,13 @@ export interface CatalogPreflight {
   revision: string;
   selected_files: string[];
   expected_sha256: Record<string, string>;
+  file_sources?: Record<string, {
+    remote_id: string;
+    revision: string;
+    filename: string;
+    size_bytes: number | null;
+    sha256: string | null;
+  }>;
   comfy_paths: Record<string, string>;
   workflow_template_id: string | null;
   workflow_template_sha256: string | null;

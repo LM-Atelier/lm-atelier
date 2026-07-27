@@ -31,7 +31,7 @@ from local_lm.models import (
     ModelProfile,
 )
 from local_lm.scheduler import ResourceScheduler
-from local_lm.schemas import DownloadRequest
+from local_lm.schemas import CatalogFileSource, DownloadRequest
 
 
 class FakeWorker:
@@ -463,6 +463,182 @@ async def test_unknown_gguf_plan_installs_and_activates_with_one_request(
         assert session.query(ModelProfile).count() == 1
         assert session.query(ModelComponentManifest).count() == 1
         assert session.query(ModelCapabilityEvidence).count() == 1
+
+
+async def test_chat_plan_downloads_a_pinned_projector_from_a_companion_repo(
+    settings: Settings,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    settings.prepare()
+    configure_database(settings)
+    init_db()
+    model_content = gguf_bytes("qwen")
+    projector_content = gguf_bytes("clip")
+    model_digest = hashlib.sha256(model_content).hexdigest()
+    projector_digest = hashlib.sha256(projector_content).hexdigest()
+    model_name = "Descriptive-Qwen-27B-Q4_K_M.gguf"
+    source_projector_name = "mmproj-Descriptive-Qwen-27B-f16.gguf"
+    projector_name = f"companions/author/model/{source_projector_name}"
+    inspection = inspect_repository_metadata(
+        {
+            model_name: model_content,
+            projector_name: projector_content,
+        },
+        [model_name, projector_name],
+        role="chat",
+    )
+    resolved = resolve_install_plan(
+        remote_id="converter/model",
+        revision="a" * 40,
+        role="chat",
+        engine="llama.cpp",
+        selected_files=[
+            {
+                "filename": model_name,
+                "size": len(model_content),
+                "sha256": model_digest,
+            },
+            {
+                "filename": projector_name,
+                "size": len(projector_content),
+                "sha256": projector_digest,
+                "source_remote_id": "author/model",
+                "source_revision": "b" * 40,
+                "source_filename": source_projector_name,
+            },
+        ],
+        inspection=inspection,
+    )
+    with SessionLocal() as session:
+        plan = persist_install_plan(session, resolved)
+        session.commit()
+        request = DownloadRequest(
+            install_plan_id=plan.id,
+            remote_id=plan.remote_id,
+            revision=plan.revision,
+            role="chat",
+            engine=plan.engine,
+            allow_patterns=[model_name, projector_name],
+            expected_sha256={
+                model_name: model_digest,
+                projector_name: projector_digest,
+            },
+            file_sources={
+                projector_name: CatalogFileSource(
+                    remote_id="author/model",
+                    revision="b" * 40,
+                    filename=source_projector_name,
+                    size_bytes=len(projector_content),
+                    sha256=projector_digest,
+                )
+            },
+        )
+        session.add(
+            Job(
+                id="job_companion_projector",
+                kind=JobKind.DOWNLOAD.value,
+                status=JobStatus.QUEUED.value,
+                payload_json=request.model_dump(mode="json"),
+            )
+        )
+        session.commit()
+
+    class ChatAdapter:
+        async def capabilities(self) -> object:
+            return SimpleNamespace(
+                healthy=True,
+                version="llama-vision",
+                input_modalities=["text", "image"],
+            )
+
+        async def count_tokens(self, _messages: list[dict[str, Any]]) -> int:
+            return 3
+
+        async def stream(self, _request: ChatRequest):  # type: ignore[no-untyped-def]
+            yield ChatEvent(type="token", text="OK")
+            yield ChatEvent(type="complete")
+
+    class Processes:
+        runtimes = None
+
+        def statuses(self) -> list[object]:
+            return [SimpleNamespace(name="chat", running=False, profile_id=None)]
+
+        async def load_chat(
+            self,
+            _profile: ModelProfile,
+            _install: ModelInstall,
+        ) -> None:
+            return None
+
+        async def stop(self, _name: str) -> None:
+            return None
+
+    def model_info(remote_id: str, **_kwargs: object) -> object:
+        if remote_id == "converter/model":
+            return SimpleNamespace(
+                siblings=[
+                    SimpleNamespace(
+                        rfilename=model_name,
+                        size=len(model_content),
+                        lfs={"sha256": model_digest},
+                    )
+                ],
+                sha="a" * 40,
+                pipeline_tag="text-generation",
+                tags=["gguf"],
+                gated=False,
+            )
+        assert remote_id == "author/model"
+        return SimpleNamespace(
+            siblings=[
+                SimpleNamespace(
+                    rfilename=source_projector_name,
+                    size=len(projector_content),
+                    lfs={"sha256": projector_digest},
+                )
+            ],
+            sha="b" * 40,
+            pipeline_tag="image-text-to-text",
+            tags=["vision"],
+            gated=False,
+        )
+
+    manager = DownloadManager(
+        settings,
+        EventBroker(),
+        chat_adapter=ChatAdapter(),  # type: ignore[arg-type]
+        processes=Processes(),  # type: ignore[arg-type]
+    )
+    manager._api = SimpleNamespace(model_info=model_info)  # type: ignore[assignment]
+    transfers: list[tuple[str, str, str]] = []
+
+    async def download_file(**kwargs: Any) -> str:
+        transfers.append((kwargs["remote_id"], kwargs["revision"], kwargs["filename"]))
+        content = projector_content if kwargs["remote_id"] == "author/model" else model_content
+        target = kwargs["staging"] / kwargs["filename"]
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_bytes(content)
+        return str(target)
+
+    monkeypatch.setattr(manager, "_download_file", download_file)
+    await manager._download("job_companion_projector")
+
+    assert transfers == [
+        ("converter/model", "a" * 40, model_name),
+        ("author/model", "b" * 40, source_projector_name),
+    ]
+    with SessionLocal() as session:
+        job = session.get(Job, "job_companion_projector")
+        install = session.query(ModelInstall).one()
+        assert job and job.status == JobStatus.COMPLETE.value, job.error if job else None
+        assert install.active is True
+        assert install.manifest_json["file_sources"][projector_name]["remote_id"] == "author/model"
+        components = {
+            component.relative_path for component in session.query(ModelComponentManifest)
+        }
+        assert components == {model_name, projector_name}
+        assert session.query(ModelCapabilityEvidence).one().result == "ready"
 
 
 async def test_lora_plan_installs_as_a_verified_auxiliary_asset(

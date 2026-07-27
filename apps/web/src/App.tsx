@@ -1806,6 +1806,7 @@ function ModelsView() {
         preflight.revision,
         preflight.selected_files,
         preflight.expected_sha256,
+        preflight.file_sources ?? {},
         preflight.comfy_paths,
         preflight.workflow_template_id,
         preflight.workflow_template_sha256,

@@ -722,12 +722,21 @@ class CatalogPreflightCheck(ApiModel):
     detail: str
 
 
+class CatalogFileSource(ApiModel):
+    remote_id: str = Field(min_length=1, max_length=500)
+    revision: str = Field(min_length=1, max_length=200)
+    filename: str = Field(min_length=1, max_length=1_000)
+    size_bytes: int | None = Field(default=None, ge=0)
+    sha256: str | None = Field(default=None, pattern=r"^[0-9a-fA-F]{64}$")
+
+
 class CatalogPreflight(ApiModel):
     remote_id: str
     source_remote_id: str | None = None
     revision: str
     selected_files: list[str]
     expected_sha256: dict[str, str] = Field(default_factory=dict)
+    file_sources: dict[str, CatalogFileSource] = Field(default_factory=dict)
     comfy_paths: dict[str, str] = Field(default_factory=dict)
     workflow_template_id: str | None = None
     workflow_template_sha256: str | None = None
@@ -750,6 +759,7 @@ class DownloadRequest(ApiModel):
     engine: str = Field(min_length=1, max_length=32)
     allow_patterns: list[str] = Field(default_factory=list)
     expected_sha256: dict[str, str] = Field(default_factory=dict)
+    file_sources: dict[str, CatalogFileSource] = Field(default_factory=dict)
     recipe_id: str | None = None
     recipe_version: int | None = None
     comfy_paths: dict[str, str] = Field(default_factory=dict)

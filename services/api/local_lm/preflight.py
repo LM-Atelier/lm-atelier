@@ -13,6 +13,7 @@ from .gguf import (
 )
 from .schemas import (
     CatalogDetail,
+    CatalogFileSource,
     CatalogPreflight,
     CatalogPreflightCheck,
     CatalogPreflightRequest,
@@ -281,6 +282,25 @@ def assess_catalog_install(
         and isinstance(files[name].get("sha256"), str)
         and re.fullmatch(r"[0-9a-fA-F]{64}", str(files[name]["sha256"]))
     }
+    file_sources = {
+        name: CatalogFileSource(
+            remote_id=str(files[name]["source_remote_id"]),
+            revision=str(files[name]["source_revision"]),
+            filename=str(files[name]["source_filename"]),
+            size_bytes=(
+                int(files[name]["size"])
+                if isinstance(files[name].get("size"), int)
+                and not isinstance(files[name]["size"], bool)
+                else None
+            ),
+            sha256=expected_sha256.get(name),
+        )
+        for name in selected
+        if name in files
+        and files[name].get("source_remote_id")
+        and files[name].get("source_revision")
+        and files[name].get("source_filename")
+    }
     checksum_complete = bool(selected) and len(expected_sha256) == len(selected)
     checks.append(
         _check(
@@ -435,6 +455,7 @@ def assess_catalog_install(
         revision=resolved_revision,
         selected_files=selected,
         expected_sha256=expected_sha256,
+        file_sources=file_sources,
         download_bytes=download_bytes,
         available_disk_bytes=system.disk_free_bytes,
         estimated_ram_bytes=estimated_ram,

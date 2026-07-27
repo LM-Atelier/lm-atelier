@@ -14,6 +14,7 @@ import httpx
 
 from .config import Settings
 from .domain import CompatibilityLevel
+from .gguf import automatic_mmproj_selection, gguf_identity_tokens
 from .schemas import CatalogModel, CatalogPage
 
 SORTS = {
@@ -273,6 +274,116 @@ class HuggingFaceCatalog:
         result = bytes(content_buffer)
         self._write_binary_cache(cache, result)
         return result
+
+    async def discover_vision_projector(
+        self,
+        remote_id: str,
+        selected_model_files: list[str],
+    ) -> dict[str, Any] | None:
+        """Find one strongly matched, data-only GGUF projector in a related public repo."""
+
+        if not self._valid_remote_id(remote_id) or not selected_model_files:
+            return None
+        model_tokens = set().union(
+            *(gguf_identity_tokens(PurePosixPath(path).name) for path in selected_model_files)
+        )
+        search_tokens = sorted(model_tokens - {"mtp", "nvfp", "p", "full", "base", "chat"})
+        if len(search_tokens) < 4:
+            return None
+        page = await self.search(
+            query=" ".join(search_tokens),
+            sort="downloads",
+            limit=30,
+        )
+        source_text = " ".join([remote_id, *selected_model_files]).casefold()
+        candidates = [
+            item
+            for item in page.items
+            if item.remote_id != remote_id
+            and (
+                item.pipeline_tag == "image-text-to-text"
+                or bool({"vision", "multimodal", "image-text-to-text"} & set(item.tags))
+            )
+        ]
+        candidates.sort(
+            key=lambda item: (
+                PurePosixPath(item.remote_id).parent.name.casefold() not in model_tokens,
+                -len(model_tokens & gguf_identity_tokens(item.remote_id.rsplit("/", 1)[-1])),
+                -(item.downloads or 0),
+                item.remote_id.casefold(),
+            )
+        )
+        matches: list[tuple[tuple[int, int, int], dict[str, Any]]] = []
+        for candidate in candidates[:12]:
+            try:
+                detail = await self.inspect(candidate.remote_id, "main", None)
+                projector_path = automatic_mmproj_selection(
+                    detail.get("files") or [],
+                    selected_model_files,
+                )
+                if not projector_path:
+                    continue
+                projector = next(
+                    (
+                        item
+                        for item in detail.get("files") or []
+                        if str(item.get("filename") or "") == projector_path
+                    ),
+                    None,
+                )
+                if not isinstance(projector, dict):
+                    continue
+                size = projector.get("size")
+                sha256 = projector.get("sha256")
+                if (
+                    not isinstance(size, int)
+                    or isinstance(size, bool)
+                    or size <= 0
+                    or not isinstance(sha256, str)
+                    or not re.fullmatch(r"[0-9a-fA-F]{64}", sha256)
+                ):
+                    continue
+                projector_tokens = gguf_identity_tokens(PurePosixPath(projector_path).name)
+                overlap = len(model_tokens & projector_tokens)
+                if overlap < min(4, len(model_tokens)):
+                    continue
+                owner = candidate.remote_id.split("/", 1)[0].casefold()
+                score = (
+                    1 if owner in model_tokens or owner in source_text else 0,
+                    overlap,
+                    len(
+                        model_tokens & gguf_identity_tokens(candidate.remote_id.rsplit("/", 1)[-1])
+                    ),
+                )
+                destination = (
+                    PurePosixPath("companions")
+                    / candidate.remote_id.split("/", 1)[0]
+                    / candidate.remote_id.split("/", 1)[1]
+                    / PurePosixPath(projector_path).name
+                ).as_posix()
+                matches.append(
+                    (
+                        score,
+                        {
+                            "filename": destination,
+                            "size": size,
+                            "sha256": sha256.lower(),
+                            "source_remote_id": candidate.remote_id,
+                            "source_revision": str(detail.get("revision") or "main"),
+                            "source_filename": projector_path,
+                        },
+                    )
+                )
+            except (httpx.HTTPError, ValueError):
+                continue
+        if not matches:
+            return None
+        matches.sort(key=lambda item: (item[0], item[1]["source_remote_id"]), reverse=True)
+        best_score, best = matches[0]
+        tied = [item for score, item in matches if score == best_score]
+        if len(tied) > 1 and len({item["sha256"] for item in tied}) > 1:
+            return None
+        return best
 
     async def close(self) -> None:
         await self._client.aclose()

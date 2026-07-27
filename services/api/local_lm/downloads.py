@@ -14,11 +14,12 @@ import sys
 from collections.abc import Callable
 from contextlib import suppress
 from pathlib import Path, PurePosixPath
+from types import SimpleNamespace
 from typing import TYPE_CHECKING, Any
 
 import psutil
 from huggingface_hub import HfApi
-from sqlalchemy import select
+from sqlalchemy import select, update
 from sqlalchemy.orm import Session
 
 from .adapters.base import ChatAdapter, ChatRequest, MediaRequest
@@ -55,6 +56,7 @@ from .model_planner import (
     media_workflow_contract_version,
 )
 from .models import (
+    Chat,
     InstallPlan,
     Job,
     ModelAssetInstall,
@@ -809,7 +811,65 @@ class DownloadManager:
                     revision=request.revision,
                     files_metadata=True,
                 )
-                siblings = list(info.siblings or [])
+                siblings: list[Any] = list(info.siblings or [])
+                file_download_sources: dict[str, tuple[str, str, str]] = {}
+                for destination_name, file_source in request.file_sources.items():
+                    if (
+                        not self._safe_relative_filename(destination_name)
+                        or not self._safe_relative_filename(file_source.filename)
+                        or not _REMOTE_ID.fullmatch(file_source.remote_id)
+                    ):
+                        raise ValueError(
+                            "companion file source contains an unsafe path or model ID"
+                        )
+                    if any(
+                        str(getattr(sibling, "rfilename", "") or "") == destination_name
+                        for sibling in siblings
+                    ):
+                        raise ValueError("companion destination conflicts with the primary model")
+                    source_info = await asyncio.to_thread(
+                        self._api.model_info,
+                        file_source.remote_id,
+                        revision=file_source.revision,
+                        files_metadata=True,
+                    )
+                    resolved_source_revision = str(source_info.sha or file_source.revision)
+                    if resolved_source_revision != file_source.revision:
+                        raise ValueError("companion revision changed; run the install check again")
+                    source_sibling = next(
+                        (
+                            sibling
+                            for sibling in source_info.siblings or []
+                            if str(getattr(sibling, "rfilename", "") or "") == file_source.filename
+                        ),
+                        None,
+                    )
+                    if source_sibling is None:
+                        raise ValueError(
+                            "companion file is no longer present; run the install check again"
+                        )
+                    live_size = int(getattr(source_sibling, "size", 0) or 0)
+                    live_sha256 = self._sibling_sha256(source_sibling)
+                    if file_source.size_bytes is not None and live_size != file_source.size_bytes:
+                        raise ValueError("companion size changed; run the install check again")
+                    if (
+                        file_source.sha256
+                        and live_sha256
+                        and file_source.sha256.lower() != live_sha256
+                    ):
+                        raise ValueError("companion SHA-256 changed; run the install check again")
+                    siblings.append(
+                        SimpleNamespace(
+                            rfilename=destination_name,
+                            size=live_size,
+                            lfs={"sha256": live_sha256} if live_sha256 else None,
+                        )
+                    )
+                    file_download_sources[destination_name] = (
+                        file_source.remote_id,
+                        resolved_source_revision,
+                        file_source.filename,
+                    )
                 filenames = self._select_files(request, siblings)
                 if not filenames:
                     raise ValueError("no files matched the requested model selection")
@@ -834,6 +894,11 @@ class DownloadManager:
                     )
 
                 revision = str(info.sha or request.revision)
+                for filename in filenames:
+                    file_download_sources.setdefault(
+                        filename,
+                        (request.remote_id, revision, filename),
+                    )
                 staging_key = (
                     f"plan-{plan.plan_hash}" if request.install_plan_id and plan else job_id
                 )
@@ -870,8 +935,13 @@ class DownloadManager:
                     filename for filename in filenames if filename not in reused_by_file
                 ]
                 parallel_paths: dict[str, str] = {}
-                if request.install_plan_id and len(missing_files) > 1:
+                batch_sources = {file_download_sources[filename] for filename in missing_files}
+                can_batch_sources = len(batch_sources) == 1 and all(
+                    file_download_sources[filename][2] == filename for filename in missing_files
+                )
+                if request.install_plan_id and len(missing_files) > 1 and can_batch_sources:
                     batch_size = sum(file_sizes.get(filename, 0) for filename in missing_files)
+                    batch_remote_id, batch_revision, _ = next(iter(batch_sources))
                     with SessionLocal() as session:
                         job = session.get(Job, job_id)
                         if not job or job.status == JobStatus.CANCELLED.value:
@@ -891,9 +961,9 @@ class DownloadManager:
                     await self.scheduler.publish_job(job_id)
                     parallel_paths = await self._download_files_parallel(
                         job_id=job_id,
-                        remote_id=request.remote_id,
+                        remote_id=batch_remote_id,
                         filenames=missing_files,
-                        revision=revision,
+                        revision=batch_revision,
                         staging=staging,
                         completed_bytes=completed_bytes,
                         total_size=total_size or None,
@@ -938,16 +1008,27 @@ class DownloadManager:
                         downloaded_path = parallel_paths[filename]
                         actual_hash = None
                     else:
+                        source_remote_id, source_revision, source_filename = file_download_sources[
+                            filename
+                        ]
                         downloaded_path = await self._download_file(
                             job_id=job_id,
-                            remote_id=request.remote_id,
-                            filename=filename,
-                            revision=revision,
+                            remote_id=source_remote_id,
+                            filename=source_filename,
+                            revision=source_revision,
                             staging=staging,
                             file_size=file_sizes.get(filename) or None,
                             completed_bytes=completed_bytes,
                             total_size=total_size or None,
                         )
+                        if source_filename != filename:
+                            source_path = Path(downloaded_path)
+                            target_path = staging.joinpath(*PurePosixPath(filename).parts)
+                            target_path.parent.mkdir(parents=True, exist_ok=True)
+                            if target_path.exists():
+                                target_path.unlink()
+                            os.replace(source_path, target_path)
+                            downloaded_path = str(target_path)
                         actual_hash = None
                     if expected_hash or request.install_plan_id:
                         with SessionLocal() as session:
@@ -1211,6 +1292,10 @@ class DownloadManager:
                             "revision": revision,
                             "files": filenames,
                             "expected_sha256": resolved_sha256,
+                            "file_sources": {
+                                name: source.model_dump(mode="json")
+                                for name, source in request.file_sources.items()
+                            },
                             "recipe_id": request.recipe_id,
                             "recipe_version": request.recipe_version,
                             "comfy_paths": request.comfy_paths,
@@ -1547,6 +1632,12 @@ class DownloadManager:
                     activated,
                     default_settings=default_settings,
                 )
+                superseded_install_ids = self._deactivate_superseded_chat_installs(
+                    session,
+                    activated,
+                    profile,
+                    str(activated.manifest_json.get("remote_id") or ""),
+                )
                 self._record_capability_evidence(
                     session,
                     activated,
@@ -1568,7 +1659,7 @@ class DownloadManager:
                     "model_install_id": activated.id,
                     "profile_id": profile.id,
                     "workflow_revision_id": None,
-                    "superseded_model_install_ids": [],
+                    "superseded_model_install_ids": superseded_install_ids,
                 }
                 session.commit()
                 return profile.id
@@ -1822,6 +1913,67 @@ class DownloadManager:
                     )
             session.commit()
         return refreshed
+
+    @staticmethod
+    def _deactivate_superseded_chat_installs(
+        session: Session,
+        current: ModelInstall,
+        current_profile: ModelProfile,
+        source_remote_id: str | None,
+    ) -> list[str]:
+        """Replace same-source chat installs while preserving profile selections."""
+
+        if not source_remote_id:
+            return []
+        source_key = source_remote_id.casefold()
+        candidates = list(
+            session.scalars(
+                select(ModelInstall).where(
+                    ModelInstall.id != current.id,
+                    ModelInstall.role == current.role,
+                    ModelInstall.engine == current.engine,
+                    ModelInstall.active.is_(True),
+                )
+            ).all()
+        )
+        superseded = [
+            candidate
+            for candidate in candidates
+            if source_key
+            in {
+                str(candidate.manifest_json.get("remote_id") or "").casefold(),
+                str(candidate.manifest_json.get("source_remote_id") or "").casefold(),
+            }
+        ]
+        if not superseded:
+            return []
+        superseded_ids = {install.id for install in superseded}
+        profiles = list(
+            session.scalars(
+                select(ModelProfile).where(ModelProfile.model_install_id.in_(superseded_ids))
+            ).all()
+        )
+        profile_ids = {profile.id for profile in profiles}
+        inherit_default = any(profile.is_default for profile in profiles)
+        for install in superseded:
+            install.active = False
+        for profile in profiles:
+            profile.is_default = False
+        session.flush()
+        if inherit_default:
+            current_profile.is_default = True
+        if profile_ids:
+            session.execute(
+                update(Chat)
+                .where(Chat.active_chat_profile_id.in_(profile_ids))
+                .values(active_chat_profile_id=current_profile.id)
+            )
+            session.execute(
+                update(Chat)
+                .where(Chat.active_vision_profile_id.in_(profile_ids))
+                .values(active_vision_profile_id=current_profile.id)
+            )
+        return sorted(superseded_ids)
 
     @staticmethod
     def _deactivate_superseded_media_installs(

@@ -120,6 +120,52 @@ def test_static_inspector_distinguishes_lora_from_primary_checkpoint() -> None:
     assert plan.failure_code == "auxiliary_asset_not_primary"
 
 
+def test_chat_install_plan_binds_external_projector_provenance() -> None:
+    model_path = "model-Q4_K_M.gguf"
+    projector_path = "companions/author/model/mmproj-model-f16.gguf"
+    inspection = inspect_repository_metadata(
+        {
+            model_path: _gguf({"general.architecture": "vision"}),
+            projector_path: _gguf(
+                {
+                    "general.architecture": "clip",
+                    "clip.projector_type": "mlp",
+                }
+            ),
+        },
+        [model_path, projector_path],
+        role="chat",
+    )
+    plan = resolve_install_plan(
+        remote_id="converter/model-gguf",
+        revision="a" * 40,
+        role="chat",
+        engine="llama.cpp",
+        selected_files=[
+            {
+                "filename": model_path,
+                "size": 10,
+                "sha256": "b" * 64,
+            },
+            {
+                "filename": projector_path,
+                "size": 3,
+                "sha256": "c" * 64,
+                "source_remote_id": "author/model",
+                "source_revision": "d" * 40,
+                "source_filename": "mmproj-model-f16.gguf",
+            },
+        ],
+        inspection=inspection,
+    )
+
+    projector = next(item for item in plan.artifacts if item.kind == "projector")
+    assert projector.source_remote_id == "author/model"
+    assert projector.source_revision == "d" * 40
+    assert projector.source_path == "mmproj-model-f16.gguf"
+    assert plan.compatibility == "supported"
+
+
 def test_static_inspector_accepts_lora_only_as_a_typed_auxiliary_plan() -> None:
     inspection = inspect_repository_metadata(
         {

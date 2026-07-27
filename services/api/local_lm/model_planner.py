@@ -14,7 +14,7 @@ from .domain import new_id
 from .model_manifests import ModelManifestInspection
 from .models import InstallPlan
 
-INSTALL_RESOLVER_VERSION = "install-resolver-v2"
+INSTALL_RESOLVER_VERSION = "install-resolver-v3"
 ACTIVATION_PROBE_VERSION = "activation-probe-v2"
 LAUNCH_CONTRACT_VERSION = "worker-launch-v1"
 
@@ -39,6 +39,9 @@ class PlannedArtifact:
     sha256: str | None
     required: bool = True
     reuse: str = "download"
+    source_remote_id: str | None = None
+    source_revision: str | None = None
+    source_path: str | None = None
 
     def as_dict(self) -> dict[str, Any]:
         return {
@@ -49,6 +52,9 @@ class PlannedArtifact:
             "sha256": self.sha256,
             "required": self.required,
             "reuse": self.reuse,
+            "source_remote_id": self.source_remote_id,
+            "source_revision": self.source_revision,
+            "source_path": self.source_path,
         }
 
 
@@ -152,6 +158,11 @@ def resolve_install_plan(
                 else None
             ),
             sha256=(str(item["sha256"]).lower() if isinstance(item.get("sha256"), str) else None),
+            source_remote_id=(
+                str(item["source_remote_id"]) if item.get("source_remote_id") else None
+            ),
+            source_revision=(str(item["source_revision"]) if item.get("source_revision") else None),
+            source_path=(str(item["source_filename"]) if item.get("source_filename") else None),
         )
         for item in selected_files
     )

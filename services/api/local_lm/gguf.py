@@ -161,7 +161,7 @@ def automatic_mmproj_selection(
     model_paths = [PurePosixPath(name) for name in selected_model_files]
     if not model_paths:
         return None
-    model_tokens = set().union(*(_identity_tokens(path.name) for path in model_paths))
+    model_tokens = set().union(*(gguf_identity_tokens(path.name) for path in model_paths))
     model_parents = {path.parent.as_posix().casefold() for path in model_paths}
     candidates: list[GGUFFile] = []
     for record in (GGUFFile.from_mapping(item) for item in items):
@@ -182,7 +182,7 @@ def automatic_mmproj_selection(
     def rank(candidate: GGUFFile) -> tuple[int, int, int, int, str]:
         path = PurePosixPath(candidate.filename)
         name = path.name.casefold()
-        projector_tokens = _identity_tokens(path.name)
+        projector_tokens = gguf_identity_tokens(path.name)
         overlap = len(model_tokens & projector_tokens)
         precision = next(
             (priority for value, priority in _MMPROJ_PRECISION_PRIORITY.items() if value in name),
@@ -212,7 +212,7 @@ def _records(items: Iterable[Mapping[str, Any]]) -> list[GGUFFile]:
     return records
 
 
-def _identity_tokens(filename: str) -> set[str]:
+def gguf_identity_tokens(filename: str) -> set[str]:
     return {
         token
         for token in re.findall(r"[a-z]+|\d+b?", filename.casefold())
