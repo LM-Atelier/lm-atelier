@@ -99,10 +99,16 @@ fi
 test -x "$LM_ATELIER_INSTALL_ROOT/lm-atelier"
 test -L "$HOME/.local/bin/lm-atelier"
 test -f "$HOME/.local/share/applications/lm-atelier.desktop"
-.venv/bin/python scripts/inventory-frozen-payload.py \
-  --payload-root "$LM_ATELIER_INSTALL_ROOT" \
-  --verify-only \
-  --installer-extras linux
+if [[ -f "$LM_ATELIER_INSTALL_ROOT/_internal/payload-manifest.json" ]]; then
+  .venv/bin/python scripts/inventory-frozen-payload.py \
+    --payload-root "$LM_ATELIER_INSTALL_ROOT" \
+    --verify-only \
+    --installer-extras linux
+else
+  # Releases before the payload manifest existed cannot verify; the
+  # upgraded payload verification below still covers the new installer.
+  echo "Skipping payload verification for a pre-manifest release."
+fi
 
 .venv/bin/python scripts/smoke-frozen.py \
   "$LM_ATELIER_INSTALL_ROOT/lm-atelier" \
