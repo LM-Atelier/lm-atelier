@@ -167,12 +167,19 @@ try {
         throw "The Start-menu shortcut was not created."
     }
 
-    Invoke-Checked "Installed payload verification" $Python @(
-        "scripts/inventory-frozen-payload.py",
-        "--payload-root", $InstallRoot,
-        "--verify-only",
-        "--installer-extras", "windows"
-    )
+    $PayloadManifest = Join-Path $InstallRoot "_internal\payload-manifest.json"
+    if (Test-Path -LiteralPath $PayloadManifest -PathType Leaf) {
+        Invoke-Checked "Installed payload verification" $Python @(
+            "scripts/inventory-frozen-payload.py",
+            "--payload-root", $InstallRoot,
+            "--verify-only",
+            "--installer-extras", "windows"
+        )
+    } else {
+        # Releases before the payload manifest existed cannot verify; the
+        # upgraded payload verification below still covers the new installer.
+        Write-Host "Skipping payload verification for a pre-manifest release."
+    }
     Invoke-Checked "Installed application smoke test" $Python @(
         "scripts/smoke-frozen.py",
         $Application,
