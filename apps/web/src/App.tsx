@@ -358,7 +358,13 @@ function useArtifactSource(artifactId: string | null): string | null {
   return artifactId ? `/api/artifacts/${encodeURIComponent(artifactId)}/content` : null;
 }
 
-function ArtifactPart({ part }: { part: MessagePart }) {
+function ArtifactPart({
+  part,
+  onEditImage,
+}: {
+  part: MessagePart;
+  onEditImage?: (artifactId: string) => void;
+}) {
   const proxyId = typeof part.metadata_json.browser_proxy_artifact_id === "string" ? part.metadata_json.browser_proxy_artifact_id : null;
   const posterId = typeof part.metadata_json.poster_artifact_id === "string"
     ? part.metadata_json.poster_artifact_id
@@ -381,6 +387,7 @@ function ArtifactPart({ part }: { part: MessagePart }) {
         <img src={source} alt={preview ? "Generation preview" : inputReference ? "Attached image" : "Generated result"} loading="lazy" />
         <figcaption>
           <ImageIcon size={14} /> {preview ? "Generation preview" : inputReference ? "Attached image" : "Generated image"}
+          {!preview && onEditImage && <button type="button" onClick={() => onEditImage(part.artifact_id!)}>Edit</button>}
           {!preview && <a href={source} download>Download</a>}
         </figcaption>
       </figure>
@@ -585,12 +592,24 @@ function PendingResponseStatus({ label, startedAt }: { label: string; startedAt:
   );
 }
 
-function PartView({ part, liveText, markdown = false }: { part: MessagePart; liveText?: string; markdown?: boolean }) {
+function PartView({
+  part,
+  liveText,
+  markdown = false,
+  onEditImage,
+}: {
+  part: MessagePart;
+  liveText?: string;
+  markdown?: boolean;
+  onEditImage?: (artifactId: string) => void;
+}) {
   if (part.type === "text") {
     const text = liveText || part.text || "";
     return markdown ? <MarkdownText text={text} /> : <div className="message-text">{text}</div>;
   }
-  if (part.type === "image" || part.type === "video" || part.type === "attachment") return <ArtifactPart part={part} />;
+  if (part.type === "image" || part.type === "video" || part.type === "attachment") {
+    return <ArtifactPart part={part} onEditImage={onEditImage} />;
+  }
   if (part.type === "progress") {
     const progress = Number(part.metadata_json.progress ?? 0);
     const indeterminate = part.metadata_json.indeterminate === true;
@@ -620,6 +639,7 @@ function MessageBubble({
   onEdit,
   onSelectRevision,
   onCancelQueued,
+  onEditImage,
 }: {
   message: Message;
   liveText?: string;
@@ -627,6 +647,7 @@ function MessageBubble({
   onEdit?: (messageId: string, text: string) => void;
   onSelectRevision?: (messageId: string, revisionId: string) => void;
   onCancelQueued?: () => void;
+  onEditImage?: (artifactId: string) => void;
 }) {
   const visibleParts = message.parts.filter((part) => part.type !== "generation_metadata");
   const userText = visibleParts.filter((part) => part.type === "text").map((part) => part.text || "").join("\n");
@@ -682,7 +703,7 @@ function MessageBubble({
     <article className={`message ${message.role}`}>
       <div className="avatar">{message.role === "user" ? "You" : <Bot size={19} />}</div>
       <div className="message-content">
-        {editing ? <div className="message-edit"><textarea aria-label="Edit message" rows={4} value={draft} onChange={(event) => setDraft(event.target.value)} /><div><button onClick={() => { setDraft(userText); setEditing(false); }}>Cancel</button><button className="primary" disabled={!draft.trim()} onClick={() => { onEdit?.(message.id, draft.trim()); setEditing(false); }}>Send edited message</button></div></div> : renderedParts.map((part) => <PartView key={part.id} part={part} liveText={liveText} markdown={message.role === "assistant"} />)}
+        {editing ? <div className="message-edit"><textarea aria-label="Edit message" rows={4} value={draft} onChange={(event) => setDraft(event.target.value)} /><div><button onClick={() => { setDraft(userText); setEditing(false); }}>Cancel</button><button className="primary" disabled={!draft.trim()} onClick={() => { onEdit?.(message.id, draft.trim()); setEditing(false); }}>Send edited message</button></div></div> : renderedParts.map((part) => <PartView key={part.id} part={part} liveText={liveText} markdown={message.role === "assistant"} onEditImage={onEditImage} />)}
         {liveText && !visibleParts.some((part) => part.type === "text") && (
           <MarkdownText text={liveText} />
         )}
@@ -1105,6 +1126,7 @@ function Composer({
   onStopAndSend,
   workflows,
   project,
+  editTarget,
 }: {
   chat: ChatDetail;
   engines: EngineCapabilities[];
@@ -1125,6 +1147,7 @@ function Composer({
   ) => void;
   workflows: Workflow[];
   project?: Project;
+  editTarget?: { artifactId: string; requestId: number } | null;
 }) {
   const [text, setText] = useState("");
   const mode = chat.routing_mode;
@@ -1132,6 +1155,17 @@ function Composer({
   const [attachments, setAttachments] = useState<string[]>([]);
   const [uploading, setUploading] = useState(false);
   const fileInput = useRef<HTMLInputElement>(null);
+  const textInput = useRef<HTMLTextAreaElement>(null);
+  const consumedEditRequest = useRef<number | null>(null);
+  useEffect(() => {
+    if (!editTarget || consumedEditRequest.current === editTarget.requestId) return;
+    consumedEditRequest.current = editTarget.requestId;
+    setAttachments((current) => (
+      current.includes(editTarget.artifactId) ? current : [...current, editTarget.artifactId]
+    ));
+    onMode("image");
+    textInput.current?.focus();
+  }, [editTarget, onMode]);
   const priorVisual = activeBranchMessages(chat).some((message) =>
     message.parts.some((part) =>
       Boolean(part.artifact_id)
@@ -1193,6 +1227,7 @@ function Composer({
         )}
         <div className="composer">
           <textarea
+            ref={textInput}
             aria-label="Message"
             value={text}
             onChange={(event) => setText(event.target.value)}
@@ -1442,6 +1477,7 @@ function ChatView({
   onRetryStep: (stepId: string) => void;
 }) {
   const endRef = useRef<HTMLDivElement>(null);
+  const [editTarget, setEditTarget] = useState<{ artifactId: string; requestId: number } | null>(null);
   useEffect(() => {
     if (typeof endRef.current?.scrollIntoView === "function") {
       endRef.current.scrollIntoView({ behavior: "smooth" });
@@ -1527,6 +1563,10 @@ function ChatView({
                     ? () => onCancelPlan(messagePlan.id)
                     : undefined
                 }
+                onEditImage={busy ? undefined : (artifactId) => setEditTarget({
+                  artifactId,
+                  requestId: Date.now(),
+                })}
               />
             </Fragment>
           );
@@ -1553,7 +1593,7 @@ function ChatView({
         ))}
         <div ref={endRef} />
       </div>
-      <Composer chat={chat} engines={engines} stoppable={stoppable} settings={settings} onSettings={onSettings} presets={presets} presetId={presetId} onPreset={onPreset} onMode={onMode} onSend={onSend} onStop={onStop} onStopAndSend={onStopAndSend} workflows={workflows} project={project} />
+      <Composer chat={chat} engines={engines} stoppable={stoppable} settings={settings} onSettings={onSettings} presets={presets} presetId={presetId} onPreset={onPreset} onMode={onMode} onSend={onSend} onStop={onStop} onStopAndSend={onStopAndSend} workflows={workflows} project={project} editTarget={editTarget} />
     </div>
   );
 }

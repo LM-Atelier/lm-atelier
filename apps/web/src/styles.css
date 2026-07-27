@@ -158,6 +158,8 @@ h1, h2, h3 { margin: 0; }
 .media-card.preview img { filter: saturate(.82); }
 .media-card figcaption { display: flex; align-items: center; gap: 7px; padding: 9px 12px; color: #858e9e; font-size: 12px; }
 .media-card figcaption a { margin-left: auto; color: var(--accent); }
+.media-card figcaption button { margin-left: auto; border: 0; padding: 0; color: var(--accent); background: transparent; cursor: pointer; }
+.media-card figcaption button + a { margin-left: 4px; }
 .composer-wrap { position: absolute; bottom: 0; left: 0; right: 0; padding: 35px max(24px, calc((100% - 860px) / 2)) 18px; background: linear-gradient(transparent, var(--bg) 28%); }
 .composer { background: var(--panel); border: 1px solid var(--border); border-radius: 16px; padding: 12px 13px 10px; box-shadow: 0 16px 50px #0007; }
 .composer:focus-within { border-color: #4269a8; box-shadow: 0 16px 50px #0007, 0 0 0 2px #315a9a26; }

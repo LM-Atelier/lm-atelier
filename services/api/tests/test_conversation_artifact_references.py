@@ -49,6 +49,22 @@ async def _image_turn(
     return accepted, run
 
 
+def test_image_edit_media_prompt_preserves_unrequested_details() -> None:
+    run = Run(
+        operation="image_to_image",
+        standalone_prompt="Replace the jacket with a green coat",
+        provenance_json={
+            "image_edit": {"policy": "preserve_unrequested_details_v1"},
+        },
+    )
+
+    assert ConversationOrchestrator._media_prompt(run) == (
+        "Edit the supplied image. Preserve every visual detail that the requested "
+        "change does not require, including each person's identity and physical "
+        "appearance. Requested change: Replace the jacket with a green coat"
+    )
+
+
 async def test_turn_inputs_are_durable_message_parts_and_context(
     client: AsyncClient,
 ) -> None:
@@ -66,6 +82,11 @@ async def test_turn_inputs_are_durable_message_parts_and_context(
         "Restyle this reference",
         input_artifact_ids=[artifact_id],
     )
+    assert accepted["run"]["settings_json"]["denoise"] == 0.35
+    assert accepted["run"]["provenance_json"]["image_edit"] == {
+        "policy": "preserve_unrequested_details_v1",
+        "default_change_strength_applied": True,
+    }
     input_part = next(
         part
         for part in accepted["user_message"]["parts"]
@@ -90,6 +111,31 @@ async def test_turn_inputs_are_durable_message_parts_and_context(
     cleanup = await client.post("/api/artifacts/cleanup", json={"dry_run": False})
     assert cleanup.status_code == 200
     assert (await client.get(f"/api/artifacts/{artifact_id}")).status_code == 200
+
+
+async def test_explicit_image_edit_strength_remains_authoritative(
+    client: AsyncClient,
+) -> None:
+    uploaded = await client.post(
+        "/api/artifacts",
+        files={"file": ("reference.png", b"explicit-edit-image", "image/png")},
+    )
+    artifact_id = uploaded.json()["id"]
+    chat = (await client.post("/api/chats", json={"title": "Explicit edit"})).json()
+
+    accepted, _completed = await _image_turn(
+        client,
+        chat["id"],
+        "Replace the jacket",
+        input_artifact_ids=[artifact_id],
+        settings={"denoise": 0.62},
+    )
+
+    assert accepted["run"]["settings_json"]["denoise"] == 0.62
+    assert accepted["run"]["provenance_json"]["image_edit"] == {
+        "policy": "preserve_unrequested_details_v1",
+        "default_change_strength_applied": False,
+    }
 
 
 async def test_legacy_provenance_inputs_remain_live_and_reconstruct_context(

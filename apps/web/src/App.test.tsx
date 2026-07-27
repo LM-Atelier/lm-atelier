@@ -3515,6 +3515,11 @@ describe("App", () => {
     fireEvent.click(screen.getByRole("button", { name: "Turn settings" }));
     expect(screen.getByLabelText(/Edit image exclusion/)).toBeInTheDocument();
     expect(screen.queryByLabelText(/Fresh image exclusion/)).not.toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "Close settings" }));
+    fireEvent.click(screen.getByRole("button", { name: "Edit" }));
+    await waitFor(() => expect(api.updateChat).toHaveBeenCalledWith(chat.id, { routing_mode: "image" }));
+    expect(screen.getByText("sha256:prior")).toBeInTheDocument();
+    expect(composer).toHaveFocus();
   });
 
   it("applies turn controls to send, edit-and-branch, and regenerate actions", async () => {
