@@ -41,7 +41,13 @@ function Invoke-GitHubApi {
         $Output = & gh @Arguments
     } else {
         $Json = $Body | ConvertTo-Json -Depth 20 -Compress
-        $Output = $Json | & gh @Arguments --input -
+        $BodyFile = [System.IO.Path]::GetTempFileName()
+        try {
+            [System.IO.File]::WriteAllText($BodyFile, $Json)
+            $Output = & gh @Arguments --input $BodyFile
+        } finally {
+            Remove-Item -LiteralPath $BodyFile -Force
+        }
     }
     if ($LASTEXITCODE -ne 0) {
         throw "GitHub API request failed: $Method $Endpoint"
