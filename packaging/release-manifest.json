@@ -10,7 +10,7 @@
   ],
   "prerequisites": {
     "python": "Bundled in official installers",
-    "network": "Not required to install; required only for optional model downloads and online catalog data",
+    "network": "Not required to install or use configured local runtimes; required for catalog data and model or engine downloads",
     "ffmpeg": "Optional for video posters and mock video",
     "node": "Not required when using an official installer"
   },
