@@ -442,6 +442,21 @@ async def _collect_media_events(
             id="redacted-execution-error",
         ),
         pytest.param(
+            json.dumps(
+                {
+                    "type": "execution_error",
+                    "data": {
+                        "prompt_id": "prompt-invalid",
+                        "node_type": "KSampler",
+                        "exception_type": "OSError",
+                        "exception_message": "[Errno 22] Invalid argument",
+                    },
+                }
+            ),
+            "ComfyUI KSampler failed (OSError, errno 22)",
+            id="bounded-execution-error",
+        ),
+        pytest.param(
             "x" * (1024 * 1024 + 1),
             "ComfyUI returned an oversized progress event",
             id="oversized-event",
