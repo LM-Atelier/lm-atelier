@@ -1,6 +1,6 @@
 {
   "name": "lm-atelier",
-  "version": "0.1.7",
+  "version": "0.1.8",
   "description": "Local-first chat, image, and video AI workspace with swappable models",
   "author": "LM Atelier contributors",
   "maintainers": [
