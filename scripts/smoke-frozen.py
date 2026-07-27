@@ -25,6 +25,14 @@ def main() -> int:
     parser.add_argument("application", type=Path)
     parser.add_argument("--version", required=True)
     parser.add_argument("--port", type=int, default=12440)
+    parser.add_argument(
+        "--pre-manifest-release",
+        action="store_true",
+        help=(
+            "Accept the reduced runtime self-test contract of releases that "
+            "predate the payload manifest."
+        ),
+    )
     args = parser.parse_args()
 
     application = args.application.resolve()
@@ -128,12 +136,15 @@ def main() -> int:
             raise RuntimeError(
                 f"Frozen runtime self-test returned invalid output: {runtime.stderr}"
             ) from exc
+        engine_report_ok = args.pre_manifest_release or (
+            runtime_result.get("chat_engine") == "llama.cpp"
+            and runtime_result.get("media_engine") == "comfyui"
+            and runtime_result.get("engine_manifest_available") is True
+        )
         if (
             runtime.returncode != 0
             or runtime_result.get("version") != args.version
-            or runtime_result.get("chat_engine") != "llama.cpp"
-            or runtime_result.get("media_engine") != "comfyui"
-            or runtime_result.get("engine_manifest_available") is not True
+            or not engine_report_ok
         ):
             raise RuntimeError(f"Frozen runtime self-test failed: {runtime_result}")
     print(f"Frozen application smoke test passed: {application}")
