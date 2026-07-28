@@ -76,11 +76,11 @@ _CONTEXT_VIDEO_CREATE = re.compile(
 )
 _MEDIA_CONTEXT_SUMMARY = re.compile(r"^\s*Generated (?:image|video|\d+ images?|\d+ videos?)\b")
 _ANOTHER_GENERATION = re.compile(
-    r"^\s*(?:please\s+|now\s+|ok(?:ay)?[,\s]+)*"
+    r"^\s*(?:(?:please|now|ok(?:ay)?),?\s+)*"
     r"(?:(?:make|generate|create|do|give)\s+(?:me\s+|us\s+)?(?:another|one\s+more|a\s+new)"
     r"(?:\s+(?:one|image|picture|photo|video|clip|variation|version))?"
     r"|another(?:\s+one)?|one\s+more)"
-    r"\s*[.!]*\s*$",
+    r"[\s.!]*$",
     re.IGNORECASE,
 )
 _GENERATED_PROMPT = re.compile(
@@ -89,14 +89,14 @@ _GENERATED_PROMPT = re.compile(
     re.DOTALL,
 )
 _ORDINAL_SELECTION = re.compile(
-    r"^\s*(?:please\s+|now\s+|ok(?:ay)?[,\s]+)*"
+    r"^\s*(?:(?:please|now|ok(?:ay)?),?\s+)*"
     r"(?:make|generate|create|draw|render|do|give)\s+(?:me\s+|us\s+)?"
     r"(?:the\s+)?"
     r"(?:(?P<ordinal>first|second|third|fourth|fifth|sixth|seventh|eighth|ninth|tenth)"
     r"|(?:number\s+|#\s*)(?P<number>\d{1,2}))"
     r"(?:\s+(?:one|suggestion|option|idea|prompt))?"
     r"(?:\s+as\s+(?:an?\s+)?(?P<medium>image|picture|video|animation))?"
-    r"\s*[.!]*\s*$",
+    r"[\s.!]*$",
     re.IGNORECASE,
 )
 _ORDINAL_WORDS = {
