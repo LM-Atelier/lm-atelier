@@ -515,3 +515,11 @@ h1, h2, h3 { margin: 0; }
   .lora-stack-item { grid-template-columns: 1fr 1fr; }
   .lora-stack-item > select, .lora-stack-item > .row-actions { grid-column: 1 / -1; }
 }
+
+.callout.error { display: flex; align-items: center; gap: 10px; }
+.callout.error > span:first-child { flex: 1; min-width: 0; overflow-wrap: anywhere; }
+.callout-dismiss { display: inline-flex; align-items: center; border: 0; border-radius: 6px; background: transparent; color: inherit; padding: 3px; cursor: pointer; opacity: 0.75; }
+.callout-dismiss:hover { opacity: 1; background: rgba(255, 255, 255, 0.08); }
+.message-timestamp { color: #5d6572; font-variant-numeric: tabular-nums; }
+.composer-wrap.drop-active .composer { outline: 2px dashed #6f7886; outline-offset: 3px; }
+.drop-hint { text-align: center; color: #9aa3b1; font-size: 12px; padding-bottom: 6px; }

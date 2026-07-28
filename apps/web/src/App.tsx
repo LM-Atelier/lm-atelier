@@ -36,6 +36,7 @@ import {
   Pause,
   Play,
   Plus,
+  Quote,
   RotateCcw,
   Search,
   Send,
@@ -461,7 +462,7 @@ function MediaLibraryView() {
         <select aria-label="Media type" value={kind} onChange={(event) => setKind(event.target.value)}><option value="">Images and videos</option><option value="image">Images</option><option value="video">Videos</option></select>
       </div>
       {cleanup.data && <div className="callout success" role="status">{cleanup.data.removed_count > 0 && <>Removed {cleanup.data.removed_count} artifact{cleanup.data.removed_count === 1 ? "" : "s"} and reclaimed {formatBytes(cleanup.data.reclaimed_bytes)}. </>}{cleanup.data.marked_count > 0 ? `${cleanup.data.marked_count} newly unreferenced artifact${cleanup.data.marked_count === 1 ? "" : "s"} entered the ${storage.data?.retention_days ?? 30}-day recovery window.` : cleanup.data.retention_pending_count > 0 ? `${cleanup.data.retention_pending_count} artifact${cleanup.data.retention_pending_count === 1 ? "" : "s"} ${cleanup.data.retention_pending_count === 1 ? "remains" : "remain"} in the recovery window; none are eligible yet.` : cleanup.data.removed_count === 0 ? "Nothing needed cleanup." : null}</div>}
-      {(cleanup.error || deleteArtifact.error) && <div className="callout error" role="alert">{cleanup.error?.message || deleteArtifact.error?.message}</div>}
+      {(cleanup.error || deleteArtifact.error) && <ErrorCallout message={cleanup.error?.message || deleteArtifact.error?.message} />}
       {artifacts.data?.length ? <div className="media-grid">{artifacts.data.map((artifact) => {
         const source = `/api/artifacts/${encodeURIComponent(artifact.id)}/content`;
         const proxyId = typeof artifact.metadata_json.browser_proxy_artifact_id === "string" ? artifact.metadata_json.browser_proxy_artifact_id : null;
@@ -490,6 +491,50 @@ async function copyToClipboard(text: string): Promise<void> {
   const copied = document.execCommand("copy");
   textarea.remove();
   if (!copied) throw new Error("Clipboard access is unavailable");
+}
+
+function ErrorCallout({
+  message,
+  action,
+}: {
+  message?: string | null;
+  action?: ReactNode;
+}) {
+  const [dismissed, setDismissed] = useState<string | null>(null);
+  if (!message || dismissed === message) return null;
+  return (
+    <div className={`callout error${action ? " action-callout" : ""}`} role="alert">
+      <span>{message}</span>
+      {action}
+      <button
+        type="button"
+        className="callout-dismiss"
+        aria-label="Dismiss error"
+        onClick={() => setDismissed(message)}
+      >
+        <X size={13} />
+      </button>
+    </div>
+  );
+}
+
+function MessageTimestamp({ at }: { at: string }) {
+  const date = new Date(at);
+  if (Number.isNaN(date.getTime())) return null;
+  const sameDay = date.toDateString() === new Date().toDateString();
+  const label = sameDay
+    ? date.toLocaleTimeString([], { hour: "numeric", minute: "2-digit" })
+    : date.toLocaleString([], {
+        month: "short",
+        day: "numeric",
+        hour: "numeric",
+        minute: "2-digit",
+      });
+  return (
+    <time className="message-timestamp" dateTime={at} title={date.toLocaleString()}>
+      {label}
+    </time>
+  );
 }
 
 function CopyTextButton({
@@ -640,6 +685,7 @@ function MessageBubble({
   onSelectRevision,
   onCancelQueued,
   onEditImage,
+  onQuote,
 }: {
   message: Message;
   liveText?: string;
@@ -648,6 +694,7 @@ function MessageBubble({
   onSelectRevision?: (messageId: string, revisionId: string) => void;
   onCancelQueued?: () => void;
   onEditImage?: (artifactId: string) => void;
+  onQuote?: (text: string) => void;
 }) {
   const visibleParts = message.parts.filter((part) => part.type !== "generation_metadata");
   const userText = visibleParts.filter((part) => part.type === "text").map((part) => part.text || "").join("\n");
@@ -708,12 +755,13 @@ function MessageBubble({
           <MarkdownText text={liveText} />
         )}
         {showChatStartup && <PendingResponseStatus label={chatProgress?.text || "Starting chat"} startedAt={message.created_at} />}
-        {message.role === "user" && message.status === "complete" && !editing && (onEdit || copyableText) && <div className="message-meta">{onEdit && <button onClick={() => setEditing(true)}>Edit and branch</button>}{copyableText && <CopyTextButton text={copyableText} label="Copy user message" />}</div>}
+        {message.role === "user" && message.status === "complete" && !editing && <div className="message-meta"><MessageTimestamp at={message.created_at} />{onEdit && <button onClick={() => setEditing(true)}>Edit and branch</button>}{copyableText && <CopyTextButton text={copyableText} label="Copy user message" />}</div>}
         {message.role === "assistant" && message.status === "cancelled" && !visibleParts.some((part) => part.type === "error") && (
           <div className="message-meta"><span>Generation cancelled</span></div>
         )}
         {message.role === "assistant" && message.status === "complete" && (
           <div className="message-meta">
+            <MessageTimestamp at={message.created_at} />
             {autoProfileName && <span>Auto chose {autoProfileName}{autoSelectionDetail}</span>}
             {contextLimit > 0 && (
               <span>
@@ -722,6 +770,11 @@ function MessageBubble({
               </span>
             )}
             {copyableText && <CopyTextButton text={copyableText} label="Copy assistant message" />}
+            {copyableText && onQuote && (
+              <button onClick={() => onQuote(copyableText)} aria-label="Quote response">
+                <Quote size={13} /> Quote
+              </button>
+            )}
             {regenerationPending && <span>Regenerating…</span>}
             {completedRevisions.length > 1 && onSelectRevision && (
               <span className="response-revision-controls">
@@ -1127,6 +1180,7 @@ function Composer({
   workflows,
   project,
   editTarget,
+  quoteTarget,
 }: {
   chat: ChatDetail;
   engines: EngineCapabilities[];
@@ -1148,6 +1202,7 @@ function Composer({
   workflows: Workflow[];
   project?: Project;
   editTarget?: { artifactId: string; requestId: number } | null;
+  quoteTarget?: { text: string; requestId: number } | null;
 }) {
   const [text, setText] = useState("");
   const mode = chat.routing_mode;
@@ -1156,6 +1211,7 @@ function Composer({
     { id: string; kind: "image" | "video" }[]
   >([]);
   const [uploading, setUploading] = useState(false);
+  const [dropActive, setDropActive] = useState(false);
   const fileInput = useRef<HTMLInputElement>(null);
   const textInput = useRef<HTMLTextAreaElement>(null);
   const consumedEditRequest = useRef<number | null>(null);
@@ -1170,6 +1226,18 @@ function Composer({
     onMode("image");
     textInput.current?.focus();
   }, [editTarget, onMode]);
+  const consumedQuoteRequest = useRef<number | null>(null);
+  useEffect(() => {
+    if (!quoteTarget || consumedQuoteRequest.current === quoteTarget.requestId) return;
+    consumedQuoteRequest.current = quoteTarget.requestId;
+    const quoted = quoteTarget.text
+      .trim()
+      .split("\n")
+      .map((line) => `> ${line}`)
+      .join("\n");
+    setText((current) => (current.trim() ? `${quoted}\n\n${current}` : `${quoted}\n\n`));
+    textInput.current?.focus();
+  }, [quoteTarget]);
   const priorVisual = activeBranchMessages(chat).some((message) =>
     message.parts.some((part) =>
       Boolean(part.artifact_id)
@@ -1226,7 +1294,27 @@ function Composer({
 
   return (
     <>
-      <div className="composer-wrap">
+      <div
+        className={`composer-wrap${dropActive ? " drop-active" : ""}`}
+        onDragOver={(event) => {
+          if (!Array.from(event.dataTransfer.types).includes("Files")) return;
+          event.preventDefault();
+          setDropActive(true);
+        }}
+        onDragLeave={(event) => {
+          if (event.currentTarget.contains(event.relatedTarget as Node)) return;
+          setDropActive(false);
+        }}
+        onDrop={(event) => {
+          event.preventDefault();
+          setDropActive(false);
+          const files = Array.from(event.dataTransfer.files).filter(
+            (file) => file.type.startsWith("image/") || file.type.startsWith("video/"),
+          );
+          for (const file of files) void upload(file);
+        }}
+      >
+        {dropActive && <div className="drop-hint">Drop images or videos to attach</div>}
         {attachments.length > 0 && (
           <div className="attachment-strip">
             {attachments.map((attachment) => (
@@ -1510,6 +1598,7 @@ function ChatView({
 }) {
   const endRef = useRef<HTMLDivElement>(null);
   const [editTarget, setEditTarget] = useState<{ artifactId: string; requestId: number } | null>(null);
+  const [quoteTarget, setQuoteTarget] = useState<{ text: string; requestId: number } | null>(null);
   useEffect(() => {
     if (typeof endRef.current?.scrollIntoView === "function") {
       endRef.current.scrollIntoView({ behavior: "smooth" });
@@ -1599,6 +1688,7 @@ function ChatView({
                   artifactId,
                   requestId: Date.now(),
                 })}
+                onQuote={(text) => setQuoteTarget({ text, requestId: Date.now() })}
               />
             </Fragment>
           );
@@ -1625,7 +1715,7 @@ function ChatView({
         ))}
         <div ref={endRef} />
       </div>
-      <Composer chat={chat} engines={engines} stoppable={stoppable} settings={settings} onSettings={onSettings} presets={presets} presetId={presetId} onPreset={onPreset} onMode={onMode} onSend={onSend} onStop={onStop} onStopAndSend={onStopAndSend} workflows={workflows} project={project} editTarget={editTarget} />
+      <Composer chat={chat} engines={engines} stoppable={stoppable} settings={settings} onSettings={onSettings} presets={presets} presetId={presetId} onPreset={onPreset} onMode={onMode} onSend={onSend} onStop={onStop} onStopAndSend={onStopAndSend} workflows={workflows} project={project} editTarget={editTarget} quoteTarget={quoteTarget} />
     </div>
   );
 }
@@ -2013,8 +2103,8 @@ function ModelsView() {
       <section className="recipe-section">
         <div className="section-heading"><div><h2>Reference recipes</h2></div></div>
         {recipes.isLoading && <div className="loading-line" />}
-        {recipes.error && <div className="callout error" role="alert">{recipes.error.message}</div>}
-        {installRecipe.error && <div className="callout error" role="alert">{installRecipe.error.message}</div>}
+        {recipes.error && <ErrorCallout message={recipes.error.message} />}
+        {installRecipe.error && <ErrorCallout message={installRecipe.error.message} />}
         <div className="recipe-grid">{recipes.data?.map((recipe) => <RecipeCard key={recipe.id} recipe={recipe} pending={installRecipe.isPending && installRecipe.variables === recipe.id} onInstall={() => installRecipe.mutate(recipe.id)} />)}</div>
       </section>
       {(role === "image" || role === "video") && readyModels.length > 0 && <section className="workflow-ready-models"><div className="section-heading"><div><small>Declarative workflow available</small><h2>Automatic setup candidates</h2></div></div><div className="model-grid">{readyModels.map((model) => <ModelCard key={model.remote_id} model={model} role={role} runtime={runtimeFor(model)} status={statusFor(model)} onDownload={() => download.mutate({ model, selectedRole: role })} />)}</div></section>}
@@ -2081,9 +2171,9 @@ function ModelsView() {
           ))}
         </div>
       </section>}
-      {(download.error || deleteModel.error || cleanupDownloads.error || updateUseCase.error || setDefaultModel.error || updateModelAsset.error || deleteModelAsset.error) && <div className="callout error" role="alert">{download.error?.message || deleteModel.error?.message || cleanupDownloads.error?.message || updateUseCase.error?.message || setDefaultModel.error?.message || updateModelAsset.error?.message || deleteModelAsset.error?.message}</div>}
+      {(download.error || deleteModel.error || cleanupDownloads.error || updateUseCase.error || setDefaultModel.error || updateModelAsset.error || deleteModelAsset.error) && <ErrorCallout message={download.error?.message || deleteModel.error?.message || cleanupDownloads.error?.message || updateUseCase.error?.message || setDefaultModel.error?.message || updateModelAsset.error?.message || deleteModelAsset.error?.message} />}
       {catalog.isLoading && <div className="loading-line" />}
-      {catalog.error && <div className="callout error action-callout" role="alert"><span>{catalog.error.message}</span><button className="secondary compact-button" disabled={catalog.isFetching} onClick={() => void catalog.refetch()}>Retry</button></div>}
+      <ErrorCallout message={catalog.error?.message} action={<button className="secondary compact-button" disabled={catalog.isFetching} onClick={() => void catalog.refetch()}>Retry</button>} />
       {catalogIsStale && !catalog.error && <div className="callout warning action-callout" role="status"><span>Showing saved results while Hugging Face is unavailable.</span><button className="secondary compact-button" disabled={catalog.isFetching} onClick={() => void catalog.refetch()}>Refresh</button></div>}
       <div className="model-grid">{catalogItems.map((model) => <ModelCard key={model.remote_id} model={model} role={role} runtime={runtimeFor(model)} status={statusFor(model)} onDownload={() => download.mutate({ model, selectedRole: role })} />)}</div>
       {catalog.hasNextPage && <div className="load-more"><button className="secondary" disabled={catalog.isFetchingNextPage} onClick={() => void catalog.fetchNextPage()}>{catalog.isFetchingNextPage ? "Loading…" : "Load more models"}</button></div>}
@@ -2099,7 +2189,7 @@ function ModelsView() {
           <label>Absolute local path<input value={importPath} onChange={(event) => setImportPath(event.target.value)} placeholder="/path/to/model.gguf" /></label>
           <label>Role<select value={importRole} onChange={(event) => { const next = event.target.value; setImportRole(next); setImportEngine(next === "chat" ? "llama.cpp" : "comfyui"); }}><option value="chat">Chat</option><option value="image">Image</option><option value="video">Video</option></select></label>
           <label>Runtime<select value={importEngine} onChange={(event) => setImportEngine(event.target.value)}><option value="llama.cpp">llama.cpp</option><option value="vllm">vLLM (ModelOpt/NVFP4)</option><option value="comfyui">ComfyUI</option></select></label>
-          {importModel.error && <div className="callout error" role="alert">{importModel.error.message}</div>}
+          {importModel.error && <ErrorCallout message={importModel.error.message} />}
           <footer><button className="secondary" onClick={() => setImportOpen(false)}>Cancel</button><button className="primary" disabled={!importName.trim() || !importPath.trim() || importModel.isPending} onClick={() => importModel.mutate()}>{importModel.isPending ? "Importing…" : "Import model"}</button></footer>
         </AccessibleDialog>
       )}
@@ -2166,7 +2256,7 @@ function CustomNodesPanel() {
   const rollback = useMutation({ mutationFn: api.rollbackCustomNode, onSuccess: refresh });
   const remove = useMutation({ mutationFn: api.removeCustomNode, onSuccess: refresh });
   const error = install.error || trust.error || update.error || rollback.error || remove.error;
-  return <section className="custom-nodes"><div className="detail-title"><div><h2>Custom nodes</h2><p>Pinned sources stay disabled until you review and trust the exact revision. Stop ComfyUI before changing nodes.</p></div></div><div className="custom-node-install"><input aria-label="Custom node name" placeholder="Node name" value={name} onChange={(event) => setName(event.target.value)} /><input aria-label="Custom node source" placeholder="https://github.com/owner/repository" value={sourceUrl} onChange={(event) => setSourceUrl(event.target.value)} /><input aria-label="Custom node commit" placeholder="Full 40-character commit SHA" value={revision} onChange={(event) => setRevision(event.target.value)} /><button className="primary" disabled={!name.trim() || !sourceUrl.trim() || revision.trim().length !== 40 || install.isPending} onClick={() => { if (window.confirm("Download this pinned repository for review? Its code will remain untrusted.")) install.mutate(); }}>Install pinned source</button></div>{error && <div className="callout error" role="alert">{error.message}</div>}<div className="profile-table custom-node-list">{nodes.data?.map((node) => <div key={node.id}><span className={`badge ${node.trusted ? "likely" : "advanced_import"}`}>{node.trusted ? "Trusted" : "Review required"}</span><span><strong>{node.name}</strong><small>{node.source_url}<br />{node.revision}</small></span><details><summary>Security</summary><pre>{JSON.stringify(node.security_json, null, 2)}</pre></details><span className="row-actions"><button className="secondary compact-button" onClick={() => { const next = window.prompt("Full pinned commit SHA", node.revision); if (next?.trim() && next.trim() !== node.revision) update.mutate({ id: node.id, revision: next.trim() }); }}>Update</button>{node.previous_revision && <button className="secondary compact-button" onClick={() => rollback.mutate(node.id)}>Rollback</button>}<button className="secondary compact-button" onClick={() => node.trusted ? trust.mutate({ id: node.id, trusted: false }) : window.confirm("I reviewed this exact pinned revision and trust its code to run in ComfyUI.") && trust.mutate({ id: node.id, trusted: true })}>{node.trusted ? "Revoke trust" : "Trust revision"}</button><button className="secondary compact-button danger" onClick={() => window.confirm(`Remove ${node.name}?`) && remove.mutate(node.id)}>Remove</button></span></div>)}</div></section>;
+  return <section className="custom-nodes"><div className="detail-title"><div><h2>Custom nodes</h2><p>Pinned sources stay disabled until you review and trust the exact revision. Stop ComfyUI before changing nodes.</p></div></div><div className="custom-node-install"><input aria-label="Custom node name" placeholder="Node name" value={name} onChange={(event) => setName(event.target.value)} /><input aria-label="Custom node source" placeholder="https://github.com/owner/repository" value={sourceUrl} onChange={(event) => setSourceUrl(event.target.value)} /><input aria-label="Custom node commit" placeholder="Full 40-character commit SHA" value={revision} onChange={(event) => setRevision(event.target.value)} /><button className="primary" disabled={!name.trim() || !sourceUrl.trim() || revision.trim().length !== 40 || install.isPending} onClick={() => { if (window.confirm("Download this pinned repository for review? Its code will remain untrusted.")) install.mutate(); }}>Install pinned source</button></div>{error && <ErrorCallout message={error.message} />}<div className="profile-table custom-node-list">{nodes.data?.map((node) => <div key={node.id}><span className={`badge ${node.trusted ? "likely" : "advanced_import"}`}>{node.trusted ? "Trusted" : "Review required"}</span><span><strong>{node.name}</strong><small>{node.source_url}<br />{node.revision}</small></span><details><summary>Security</summary><pre>{JSON.stringify(node.security_json, null, 2)}</pre></details><span className="row-actions"><button className="secondary compact-button" onClick={() => { const next = window.prompt("Full pinned commit SHA", node.revision); if (next?.trim() && next.trim() !== node.revision) update.mutate({ id: node.id, revision: next.trim() }); }}>Update</button>{node.previous_revision && <button className="secondary compact-button" onClick={() => rollback.mutate(node.id)}>Rollback</button>}<button className="secondary compact-button" onClick={() => node.trusted ? trust.mutate({ id: node.id, trusted: false }) : window.confirm("I reviewed this exact pinned revision and trust its code to run in ComfyUI.") && trust.mutate({ id: node.id, trusted: true })}>{node.trusted ? "Revoke trust" : "Trust revision"}</button><button className="secondary compact-button danger" onClick={() => window.confirm(`Remove ${node.name}?`) && remove.mutate(node.id)}>Remove</button></span></div>)}</div></section>;
 }
 
 function WorkflowsView() {
@@ -2221,7 +2311,7 @@ function WorkflowsView() {
   return (
     <div className="page-view">
       <header className="page-header"><div><h1>Workflows</h1></div><div className="storage-actions"><input ref={importInput} hidden type="file" accept="application/json,.json" onChange={(event) => { void importBundle(event.target.files?.[0]); event.target.value = ""; }} /><button className="secondary" onClick={() => importInput.current?.click()}>Import bundle</button><button className="primary" onClick={openCreate}><Plus size={17} />New workflow</button></div></header>
-      {(importBundleMutation.error || clone.error || restore.error || exportBundle.error || openInComfy.error) && <div className="callout error" role="alert">{(importBundleMutation.error || clone.error || restore.error || exportBundle.error || openInComfy.error)?.message}</div>}
+      {(importBundleMutation.error || clone.error || restore.error || exportBundle.error || openInComfy.error) && <ErrorCallout message={(importBundleMutation.error || clone.error || restore.error || exportBundle.error || openInComfy.error)?.message} />}
       {selected && <div className="storage-actions"><button className="secondary" onClick={() => openInComfy.mutate(selected.id)}>Download UI graph and open in ComfyUI</button></div>}
       <div className="workflow-layout">
         <div className="workflow-list">{workflows.data?.map((workflow) => <button key={workflow.id} className={selected?.id === workflow.id ? "selected" : ""} onClick={() => { setSelectedId(workflow.id); setSelectedRevisionId(workflow.current_revision_id); }}><WorkflowIcon size={18} /><span><strong>{workflow.name}</strong><small>{workflow.operation} · {workflow.revisions.length} revision{workflow.revisions.length === 1 ? "" : "s"}</small></span></button>)}</div>
@@ -2244,7 +2334,7 @@ function WorkflowsView() {
           <label>Declared input schema JSON<textarea rows={6} value={inputSchema} onChange={(event) => setInputSchema(event.target.value)} /></label>
           <label>Dependencies JSON<textarea rows={5} value={dependencies} onChange={(event) => setDependencies(event.target.value)} /></label>
           <label className="toggle-row"><span><strong>Trust this workflow</strong><small>Only enable after reviewing every node and dependency.</small></span><input type="checkbox" checked={trusted} onChange={(event) => setTrusted(event.target.checked)} /></label>
-          {save.error && <div className="callout error" role="alert">{save.error.message}</div>}
+          {save.error && <ErrorCallout message={save.error.message} />}
           <footer><button className="secondary" onClick={() => setNewOpen(false)}>Cancel</button><button className="primary" disabled={!name.trim() || save.isPending} onClick={() => save.mutate()}>{save.isPending ? "Saving…" : editing ? "Create revision" : "Save workflow"}</button></footer>
         </AccessibleDialog>
       )}
@@ -2326,7 +2416,7 @@ function ProfileEditor({
         })}
         {!engine && <p className="muted">No capability schema is available for this profile engine.</p>}
       </div>
-      {error && <div className="callout error" role="alert">{error.message}</div>}
+      {error && <ErrorCallout message={error.message} />}
       <footer className="editor-actions"><button className="secondary danger" onClick={() => remove.mutate()} disabled={remove.isPending}>Delete profile</button><button className="secondary" onClick={() => reset.mutate()} disabled={reset.isPending}>Reset settings</button><button className="secondary" onClick={() => exportBundle.mutate()}>Export</button><button className="secondary" onClick={() => clone.mutate()}>Clone</button><button className="primary" onClick={() => save.mutate()} disabled={!name.trim() || save.isPending}>Save profile</button></footer>
     </AccessibleDialog>
   );
@@ -2367,7 +2457,7 @@ function PresetEditor({
       <label className="toggle-row"><span><strong>Default {preset.role} preset</strong></span><input type="checkbox" checked={isDefault} onChange={(event) => setIsDefault(event.target.checked)} /></label>
       <div className="segmented compact" role="group" aria-label="Preset setting detail">{(["basic", "advanced", "expert"] as Visibility[]).map((level) => <button type="button" key={level} className={visibility === level ? "active" : ""} aria-pressed={visibility === level} onClick={() => setVisibility(level)}>{level}</button>)}</div>
       <div className="settings-list embedded">{fields.map((field) => <div className="scoped-setting" key={`${field.scope}:${field.key}:${JSON.stringify(settings[field.key])}`}><span className="scope-label">{field.scope}</span><SettingControl field={field} value={settings[field.key] ?? field.default} onChange={(value) => setSettings({ ...settings, [field.key]: value })} /></div>)}</div>
-      {error && <div className="callout error" role="alert">{error.message}</div>}
+      {error && <ErrorCallout message={error.message} />}
       <footer className="editor-actions"><button className="secondary danger" onClick={() => remove.mutate()}>Delete</button><button className="secondary" onClick={() => reset.mutate()}>Reset</button><button className="secondary" onClick={() => exportBundle.mutate()}>Export</button><button className="secondary" onClick={() => clone.mutate()}>Clone</button><button className="primary" onClick={() => save.mutate()} disabled={!name.trim() || save.isPending}>Save preset</button></footer>
     </AccessibleDialog>
   );
@@ -2675,22 +2765,22 @@ function SettingsView({ engines }: { engines: EngineCapabilities[] }) {
         </div>
         {credential.data?.source === "environment" && <p className="muted runtime-note">The LOCAL_LM_HF_TOKEN environment variable currently takes precedence. Unset it before managing the token here.</p>}
         {credential.data && !credential.data.vault_available && <div className="callout error" role="alert">No supported operating-system credential vault is available. Configure one or use LOCAL_LM_HF_TOKEN for this process.</div>}
-        {(credential.error || saveCredential.error || removeCredential.error) && <div className="callout error" role="alert">{(credential.error || saveCredential.error || removeCredential.error)?.message}</div>}
+        {(credential.error || saveCredential.error || removeCredential.error) && <ErrorCallout message={(credential.error || saveCredential.error || removeCredential.error)?.message} />}
       </section>
-      <section><h2>Engines</h2><div className="engine-grid">{engines.map((engine) => <article className="engine-card" key={`${engine.engine}:${engine.roles.join()}`}><header><div className="model-icon"><Cpu /></div><div><h3>{engine.engine}</h3><p>{engine.roles.join(" · ")} · {engine.version}</p></div><StatusDot healthy={engine.healthy} label={`${engine.engine} engine`} /></header>{engine.roles.includes("chat") && <div className="capability-list"><button className="secondary compact-button" onClick={() => toolProbe.mutate()} disabled={toolProbe.isPending}>{toolProbe.isPending ? "Testing…" : "Test structured tools"}</button></div>}</article>)}</div>{toolProbe.data && <div className={`callout ${toolProbe.data.passed ? "success" : "error"}`} role={toolProbe.data.passed ? "status" : "alert"}>{toolProbe.data.passed ? `Structured tool schema passed on ${toolProbe.data.engine} ${toolProbe.data.version}.` : `Structured tool schema failed: ${toolProbe.data.error || "unknown response"}`}</div>}{toolProbe.error && <div className="callout error" role="alert">{toolProbe.error.message}</div>}<div className="runtime-setup-grid">{runtimes.data?.map((runtime) => <RuntimeSetupCard key={runtime.engine} runtime={runtime} installPending={installRuntime.isPending} onInstall={(engine) => installRuntime.mutate(engine)} />)}</div>{(runtimes.error || installRuntime.error) && <div className="callout error" role="alert">{(runtimes.error || installRuntime.error)?.message}</div>}</section>
+      <section><h2>Engines</h2><div className="engine-grid">{engines.map((engine) => <article className="engine-card" key={`${engine.engine}:${engine.roles.join()}`}><header><div className="model-icon"><Cpu /></div><div><h3>{engine.engine}</h3><p>{engine.roles.join(" · ")} · {engine.version}</p></div><StatusDot healthy={engine.healthy} label={`${engine.engine} engine`} /></header>{engine.roles.includes("chat") && <div className="capability-list"><button className="secondary compact-button" onClick={() => toolProbe.mutate()} disabled={toolProbe.isPending}>{toolProbe.isPending ? "Testing…" : "Test structured tools"}</button></div>}</article>)}</div>{toolProbe.data && <div className={`callout ${toolProbe.data.passed ? "success" : "error"}`} role={toolProbe.data.passed ? "status" : "alert"}>{toolProbe.data.passed ? `Structured tool schema passed on ${toolProbe.data.engine} ${toolProbe.data.version}.` : `Structured tool schema failed: ${toolProbe.data.error || "unknown response"}`}</div>}{toolProbe.error && <ErrorCallout message={toolProbe.error.message} />}<div className="runtime-setup-grid">{runtimes.data?.map((runtime) => <RuntimeSetupCard key={runtime.engine} runtime={runtime} installPending={installRuntime.isPending} onInstall={(engine) => installRuntime.mutate(engine)} />)}</div>{(runtimes.error || installRuntime.error) && <ErrorCallout message={(runtimes.error || installRuntime.error)?.message} />}</section>
       <section><h2>Machine</h2>{system.data && <div className="metric-grid"><div className="cpu-metric"><Cpu /><span><strong>{system.data.cpu_model}</strong><small>CPU model</small></span></div><div><HardDrive /><span><strong>{formatBytes(system.data.disk_free_bytes)}</strong> disk free</span></div></div>}<div className="device-list">{system.data?.devices.filter((device) => device.kind !== "cpu").map((device) => <div key={device.id}><span className="device-icon"><Cpu size={18} /></span><span><strong>{device.name}</strong><small>{device.backend}</small></span></div>)}</div></section>
       <section>
         <div className="detail-title"><div><h2>Model profiles</h2></div><button className="secondary" onClick={() => profileImport.current?.click()}>Import profile</button></div>
         <input ref={profileImport} hidden type="file" accept="application/json,.json" onChange={(event) => { void importBundle(event.target.files?.[0], "profile"); event.target.value = ""; }} />
         <div className="profile-table interactive">{profiles.data?.map((profile: ModelProfile) => <div key={profile.id}><span className="badge">{profile.role}</span><strong>{profile.name}{profile.is_default ? " · default" : ""}</strong><span title={profile.use_case}>{profile.use_case || "No Auto use case yet"}</span><span className="row-actions">{!profile.is_default && <button className="secondary compact-button" aria-label={`Set ${profile.name} as default ${profile.role} model`} disabled={setDefaultProfile.isPending} onClick={() => setDefaultProfile.mutate(profile)}>Set default</button>}{profile.role === "chat" && profile.model_install_id && <button className="secondary compact-button" aria-label={`Load profile: ${profile.name}`} disabled={chatWorkerBusy || loadChat.isPending} title={chatWorkerBusy ? "Wait for active and queued jobs before changing the worker" : "Load this chat profile"} onClick={() => loadChat.mutate(profile.id)}>Load</button>}<button className="secondary compact-button" aria-label={`Edit profile: ${profile.name}`} onClick={() => setSelectedProfile(profile)}>Edit</button></span></div>)}</div>
-        {setDefaultProfile.error && <div className="callout error" role="alert">{setDefaultProfile.error.message}</div>}
+        {setDefaultProfile.error && <ErrorCallout message={setDefaultProfile.error.message} />}
       </section>
       <section>
         <div className="detail-title"><div><h2>Generation presets</h2><p>Reuse response length, sampling, image size, video length, and seed settings.</p></div><button className="secondary" onClick={() => presetImport.current?.click()}>Import preset</button></div>
         <input ref={presetImport} hidden type="file" accept="application/json,.json" onChange={(event) => { void importBundle(event.target.files?.[0], "preset"); event.target.value = ""; }} />
         <div className="preset-create"><input aria-label="New preset name" placeholder="New preset name" value={presetName} onChange={(event) => setPresetName(event.target.value)} /><select aria-label="New preset role" value={presetRole} onChange={(event) => setPresetRole(event.target.value as GenerationPreset["role"])}><option value="chat">Chat</option><option value="image">Image</option><option value="video">Video</option></select><button className="primary" disabled={!presetName.trim() || createPreset.isPending} onClick={() => createPreset.mutate()}><Plus size={15} />Create preset</button></div>
         <div className="profile-table interactive">{presets.data?.map((preset) => <div key={preset.id}><span className="badge">{preset.role}</span><strong>{preset.name}{preset.is_default ? " · default" : ""}</strong><span>{Object.keys(preset.settings_json).length} overrides</span><button className="secondary compact-button" aria-label={`Edit preset: ${preset.name}`} onClick={() => setSelectedPreset(preset)}>Edit</button></div>)}</div>
-        {(createPreset.error || importError) && <div className="callout error" role="alert">{createPreset.error?.message || importError}</div>}
+        {(createPreset.error || importError) && <ErrorCallout message={createPreset.error?.message || importError} />}
       </section>
       <section>
         <div className="detail-title"><div><h2>Workers</h2></div></div>
@@ -2706,11 +2796,9 @@ function SettingsView({ engines }: { engines: EngineCapabilities[] }) {
             />
           ))}
         </div>
-        {(loadChat.error || startMedia.error || stopWorker.error) && (
-          <div className="callout error" role="alert">
-            {(loadChat.error || startMedia.error || stopWorker.error)?.message}
-          </div>
-        )}
+        <ErrorCallout
+          message={(loadChat.error || startMedia.error || stopWorker.error)?.message}
+        />
       </section>
       <section>
         <div className="detail-title">
@@ -2805,7 +2893,7 @@ function SettingsView({ engines }: { engines: EngineCapabilities[] }) {
             {backupFeedback.message}
           </div>
         )}
-        {backups.error && <div className="callout error" role="alert">{backups.error.message}</div>}
+        {backups.error && <ErrorCallout message={backups.error.message} />}
       </section>
       <section>
         <div className="detail-title">
@@ -2827,7 +2915,7 @@ function SettingsView({ engines }: { engines: EngineCapabilities[] }) {
             </nav>
           </div>
         </div>}
-        {(about.error || system.error) && <div className="callout error" role="alert">About information is unavailable.</div>}
+        {(about.error || system.error) && <ErrorCallout message="About information is unavailable." />}
       </section>
       {selectedProfile && <ProfileEditor profile={selectedProfile} engines={engines} onClose={() => setSelectedProfile(null)} />}
       {selectedPreset && <PresetEditor preset={selectedPreset} engines={engines} onClose={() => setSelectedPreset(null)} />}
