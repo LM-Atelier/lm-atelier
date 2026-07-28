@@ -83,6 +83,9 @@ button:focus-visible, a:focus-visible, input:focus-visible, textarea:focus-visib
 .chat-main:hover, .chat-main.active { background: var(--panel-2); color: #eef0f5; }
 .sidebar-chat-row > .inline-add { opacity: 0; }.sidebar-chat-row:hover > .inline-add, .sidebar-chat-row:focus-within > .inline-add { opacity: 1; }
 .sidebar-footer { margin-top: auto; border-top: 1px solid var(--border); padding-top: 9px; }
+.setup-nav-state { margin-left: auto; color: var(--muted); font-size: 9px; }
+.setup-nav-state.ready { color: var(--success); }
+.setup-nav-state.action_required { color: var(--atelier-soft); }
 .connection { display: flex; align-items: center; gap: 7px; color: #717a88; font-size: 11px; padding: 9px 10px 2px; }
 .status-dot { width: 8px; height: 8px; display: inline-block; border-radius: 50%; background: #5d6572; box-shadow: 0 0 0 3px #5d65721c; flex: none; }
 .status-dot.healthy { background: var(--success); box-shadow: 0 0 0 3px #60d7a71f; }
@@ -324,6 +327,25 @@ h1, h2, h3 { margin: 0; }
 .project-generation-defaults .generation-settings-actions { padding: 12px 17px; }
 .modal textarea { resize: vertical; font: 12px/1.5 "SFMono-Regular", Consolas, monospace; }
 .modal footer { justify-content: flex-end; border-top: 1px solid var(--border); padding-top: 15px; }
+.setup-wizard { width: min(820px, 96vw); }
+.setup-intro { margin: 8px 0 16px; color: var(--muted); font-size: 13px; }
+.setup-role-grid { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 10px; }
+.setup-role { display: grid; align-content: start; gap: 11px; min-width: 0; border: 1px solid var(--border); border-radius: 12px; background: var(--panel-2); padding: 14px; }
+.setup-role.ready { border-color: #34694f; }
+.setup-role.in_progress { border-color: #47658e; }
+.setup-role.action_required { border-color: #765c38; }
+.setup-role > header { display: grid; grid-template-columns: auto 1fr auto; align-items: center; gap: 9px; }
+.setup-role > header > span:nth-child(2) { display: grid; gap: 2px; }
+.setup-role > header small, .setup-role > p, .setup-job small, .setup-actions > small { color: var(--muted); font-size: 10px; }
+.setup-role > header > svg { width: 17px; color: var(--muted); }
+.setup-role.ready > header > svg { color: var(--success); }
+.setup-role.action_required > header > svg { color: var(--atelier-soft); }
+.setup-role-icon { width: 31px; height: 31px; display: grid; place-items: center; border-radius: 9px; background: var(--panel-3); color: var(--blue-soft); }
+.setup-role-icon svg { width: 17px; }
+.setup-role > p { min-height: 32px; margin: 0; line-height: 1.45; }
+.setup-job, .setup-actions { display: grid; gap: 7px; }
+.setup-actions .secondary { width: 100%; }
+.spin { animation: spin 1s linear infinite; }
 .prompt-helper-dialog { width: min(860px, 96vw); overflow: hidden; }
 .prompt-helper-body { display: grid; gap: 14px; min-height: 0; }
 .prompt-helper-draft { margin-bottom: 0 !important; }
@@ -535,6 +557,7 @@ h1, h2, h3 { margin: 0; }
   .support-summary { grid-template-columns: 1fr; }.support-summary ul { grid-column: auto; }.support-flags { justify-content: flex-start; }
   .modal-backdrop:not(.settings-drawer-backdrop) { align-items: end; padding: 10px; }
   .modal:not(.settings-drawer) { width: 100%; max-height: 94vh; border-radius: 15px 15px 8px 8px; }
+  .setup-role-grid { grid-template-columns: 1fr; }
   .prompt-helper-compose { grid-template-columns: 1fr; }
   .prompt-helper-compose button { justify-self: end; }
   .prompt-helper-actions > span:last-child { width: 100%; justify-content: flex-end; }

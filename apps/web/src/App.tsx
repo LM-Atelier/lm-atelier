@@ -88,6 +88,8 @@ import type {
   ReferenceRecipe,
   RoutingMode,
   RuntimeStatus,
+  SetupReadinessReport,
+  SetupRoleReadiness,
   SettingField,
   SystemInfo,
   TurnAccepted,
@@ -111,6 +113,7 @@ const visibilityRank: Record<Visibility, number> = { basic: 0, advanced: 1, expe
 const AUTO_PROFILE_ID = "__auto__";
 const RECENT_UNSUCCESSFUL_JOB_LIMIT = 3;
 const DISMISSED_JOB_ISSUES_KEY = "lm-atelier-dismissed-job-issues-before";
+const SETUP_DISMISSED_KEY = "lm-atelier-setup-dismissed";
 const PRIOR_VISUAL_EDIT = /^\s*(?:please\s+|now\s+)*(?:(?:make|change|turn|edit|modify|adjust)\s+(?:it|this|that|the\s+(?:image|picture|photo|illustration|artwork|logo|icon))\b|(?:add|remove|replace|recolor|crop|resize|brighten|darken|blur|sharpen|rotate|flip)\b)/i;
 const PRIOR_VISUAL_SOURCE = /\b(?:previous|prior|earlier|last|above)\s+(?:image|picture|photo|illustration|artwork|logo|icon)\b|^\s*(?:please\s+|now\s+)*(?:use|reuse|remix|restyle|transform|redo|recreate|continue)\b.*\b(?:it|this|that|the\s+(?:image|picture|photo|illustration|artwork|logo|icon))\b/i;
 const DIRECT_PRIOR_VIDEO = /^\s*(?:animate|make (?:it|this|that) move)\b/i;
@@ -134,6 +137,7 @@ const AUTHORITATIVE_QUERY_ROOTS = new Set([
   "projects",
   "recipes",
   "runtimes",
+  "setup-readiness",
   "system",
   "workers",
   "workflow-catalog-models",
@@ -2448,11 +2452,11 @@ function InstalledAssetRow({
   );
 }
 
-function ModelsView() {
+function ModelsView({ initialRole }: { initialRole: EngineRole }) {
   const client = useQueryClient();
   const [query, setQuery] = useState("");
   const [submitted, setSubmitted] = useState("");
-  const [role, setRole] = useState("chat");
+  const [role, setRole] = useState<string>(initialRole);
   const [sort, setSort] = useState("trending");
   const [compatibility, setCompatibility] = useState("");
   const [fileFormat, setFileFormat] = useState("");
@@ -3714,7 +3718,9 @@ function Sidebar({
   workflows,
   currentChatId,
   view,
+  setupState,
   onChat,
+  onSetup,
   onView,
   onNewChat,
   onNewProject,
@@ -3732,7 +3738,9 @@ function Sidebar({
   workflows: Workflow[];
   currentChatId: string | null;
   view: View;
+  setupState?: SetupReadinessReport["state"] | undefined;
   onChat: (id: string) => void;
+  onSetup: () => void;
   onView: (view: View) => void;
   onNewChat: (projectId?: string | null) => void;
   onNewProject: () => void;
@@ -3792,7 +3800,17 @@ function Sidebar({
         </div>
         {unfiled.length > 0 && <div className="sidebar-section"><div className="section-title"><span>Chats</span></div><div className="chat-list standalone">{unfiled.map(chatRow)}</div></div>}
       </div>
-      <div className="sidebar-footer"><button className={view === "settings" ? "active" : ""} aria-current={view === "settings" ? "page" : undefined} onClick={() => { onView("settings"); setMobileOpen(false); }}><Settings />Settings</button></div>
+      <div className="sidebar-footer">
+        <button onClick={() => { onSetup(); setMobileOpen(false); }}>
+          <Sparkles />Setup
+          {setupState && (
+            <small className={`setup-nav-state ${setupState}`}>
+              {setupState === "ready" ? "Ready" : setupState === "in_progress" ? "Working" : "Action needed"}
+            </small>
+          )}
+        </button>
+        <button className={view === "settings" ? "active" : ""} aria-current={view === "settings" ? "page" : undefined} onClick={() => { onView("settings"); setMobileOpen(false); }}><Settings />Settings</button>
+      </div>
       {managedChat && <ChatManager chat={managedChat} projects={projects} onClose={() => setManagedChat(null)} onSave={(values) => { onUpdateChat(managedChat.id, values); setManagedChat(null); }} onDelete={(deleteGeneratedMedia) => { onDeleteChat(managedChat.id, deleteGeneratedMedia); setManagedChat(null); }} />}
       {managedProject && <ProjectManager project={managedProject} engines={engines} presets={presets} workflows={workflows} onClose={() => setManagedProject(null)} onSave={(values) => { onUpdateProject(managedProject.id, values); setManagedProject(null); }} onDelete={() => { onDeleteProject(managedProject.id); setManagedProject(null); }} onExport={(includeMedia) => onExportProject(managedProject.id, includeMedia)} />}
     </aside>
@@ -3847,6 +3865,209 @@ function jobProgressText(job: Job): string {
     pieces.push(formatEta(progress.eta_seconds));
   }
   return pieces.filter(Boolean).join(" · ");
+}
+
+function setupRoleName(role: SetupRoleReadiness["role"]): string {
+  return role === "chat" ? "Chat" : role === "image" ? "Image" : "Video";
+}
+
+function recipeFitsSystem(recipe: ReferenceRecipe, system: SystemInfo): boolean {
+  if (system.memory_total_bytes < recipe.hardware.minimum_ram_gb * 1024 ** 3) return false;
+  if (recipe.total_size_bytes != null && system.disk_free_bytes < recipe.total_size_bytes) return false;
+  if (recipe.hardware.minimum_vram_gb == null) return true;
+  return system.devices.some(
+    (device) =>
+      device.total_memory_bytes != null
+      && device.total_memory_bytes >= recipe.hardware.minimum_vram_gb! * 1024 ** 3,
+  );
+}
+
+function SetupWizard({
+  report,
+  onClose,
+  onOpenModels,
+  onOpenWorkflows,
+}: {
+  report: SetupReadinessReport;
+  onClose: () => void;
+  onOpenModels: (role: SetupRoleReadiness["role"]) => void;
+  onOpenWorkflows: () => void;
+}) {
+  const client = useQueryClient();
+  const recipes = useQuery({ queryKey: ["recipes"], queryFn: api.recipes });
+  const system = useQuery({ queryKey: ["system"], queryFn: api.system });
+  const jobs = useQuery({
+    queryKey: ["jobs"],
+    queryFn: api.jobs,
+    refetchInterval: report.state === "ready" ? false : 3_000,
+  });
+  const refresh = () => {
+    void client.invalidateQueries({ queryKey: ["setup-readiness"] });
+    void client.invalidateQueries({ queryKey: ["jobs"] });
+    void client.invalidateQueries({ queryKey: ["models"] });
+    void client.invalidateQueries({ queryKey: ["profiles"] });
+    void client.invalidateQueries({ queryKey: ["runtimes"] });
+    void client.invalidateQueries({ queryKey: ["workers"] });
+    void client.invalidateQueries({ queryKey: ["workflows"] });
+  };
+  const installRecipe = useMutation({
+    mutationFn: (recipeId: string) => api.installRecipe(recipeId),
+    onSuccess: refresh,
+  });
+  const retryInstall = useMutation({
+    mutationFn: (jobId: string) => api.resumeDownload(jobId),
+    onSuccess: refresh,
+  });
+  const installRuntime = useMutation({
+    mutationFn: (engine: RuntimeStatus["engine"]) => api.installRuntime(engine),
+    onSuccess: refresh,
+  });
+  const restartWorker = useMutation({
+    mutationFn: (role: SetupRoleReadiness) => {
+      if (role.role === "chat" && role.profile_id) return api.loadChatWorker(role.profile_id);
+      if (role.role !== "chat") return api.startMediaWorker();
+      throw new Error("Choose a chat model before starting its worker.");
+    },
+    onSuccess: refresh,
+  });
+  const suitableRecipes = (role: SetupRoleReadiness["role"]) => (
+    !system.data
+      ? []
+      : (recipes.data ?? [])
+        .filter((recipe) => recipe.role === role && recipeFitsSystem(recipe, system.data))
+        .sort((left, right) => (
+          Number(right.certified) - Number(left.certified)
+          || (left.total_size_bytes ?? Number.MAX_SAFE_INTEGER)
+            - (right.total_size_bytes ?? Number.MAX_SAFE_INTEGER)
+        ))
+  );
+  const performAction = (role: SetupRoleReadiness) => {
+    if (role.next_action === "retry_install" && role.job_id) {
+      retryInstall.mutate(role.job_id);
+      return;
+    }
+    if (
+      ["install_runtime", "retry_runtime"].includes(role.next_action ?? "")
+      && ["llama.cpp", "vllm", "comfyui"].includes(role.engine ?? "")
+    ) {
+      installRuntime.mutate(role.engine as RuntimeStatus["engine"]);
+      return;
+    }
+    if (role.next_action === "restart_worker") {
+      restartWorker.mutate(role);
+      return;
+    }
+    if (["repair_workflow", "review_workflow"].includes(role.next_action ?? "")) {
+      onOpenWorkflows();
+      return;
+    }
+    onOpenModels(role.role);
+  };
+  const actionLabel = (role: SetupRoleReadiness): string => {
+    if (role.next_action === "retry_install") return "Retry install";
+    if (role.next_action === "install_runtime") return "Install runtime";
+    if (role.next_action === "retry_runtime") return "Retry runtime";
+    if (role.next_action === "restart_worker") return "Restart worker";
+    if (["repair_workflow", "review_workflow"].includes(role.next_action ?? "")) {
+      return "Review workflows";
+    }
+    return `Choose ${role.role} model`;
+  };
+  const pendingRole = restartWorker.variables?.role;
+  const error = installRecipe.error || retryInstall.error || installRuntime.error || restartWorker.error;
+
+  return (
+    <AccessibleDialog
+      title={report.state === "ready" ? "Setup complete" : "Set up LM Atelier"}
+      eyebrow="Local models"
+      closeLabel="Close setup"
+      onClose={onClose}
+      className="setup-wizard"
+    >
+      <p className="setup-intro">
+        Install each model with one click. A role is Ready only after its local activation check passes.
+      </p>
+      <div className="setup-role-grid" aria-live="polite">
+        {report.roles.map((role) => {
+          const issue = role.checks.find((check) => check.status !== "pass")
+            ?? role.checks.at(-1);
+          const job = jobs.data?.find((candidate) => candidate.id === role.job_id);
+          const recipe = role.next_action === "select_model"
+            ? suitableRecipes(role.role)[0]
+            : undefined;
+          const actionPending = (
+            (retryInstall.isPending && retryInstall.variables === role.job_id)
+            || (installRuntime.isPending && installRuntime.variables === role.engine)
+            || (restartWorker.isPending && pendingRole === role.role)
+          );
+          return (
+            <article className={`setup-role ${role.state}`} key={role.role}>
+              <header>
+                <span className="setup-role-icon">
+                  {role.role === "chat" ? <Bot /> : role.role === "image" ? <ImageIcon /> : <Film />}
+                </span>
+                <span><strong>{setupRoleName(role.role)}</strong><small>{role.state === "ready" ? "Ready" : role.state === "in_progress" ? "In progress" : "Action needed"}</small></span>
+                {role.state === "ready" ? <Check aria-hidden="true" /> : role.state === "in_progress" ? <LoaderCircle className="spin" aria-hidden="true" /> : <Activity aria-hidden="true" />}
+              </header>
+              <p>{issue?.message ?? "Setup status is unavailable."}</p>
+              {job && (
+                <div className="setup-job">
+                  <small>{jobProgressText(job)}</small>
+                  <div
+                    className="progress-track"
+                    role="progressbar"
+                    aria-label={`${setupRoleName(role.role)} setup progress`}
+                    aria-valuemin={0}
+                    aria-valuemax={100}
+                    aria-valuenow={jobProgressFraction(job) === null
+                      ? undefined
+                      : Math.round(jobProgressFraction(job)! * 100)}
+                  >
+                    <div
+                      className={jobProgressFraction(job) === null ? "indeterminate" : undefined}
+                      style={jobProgressFraction(job) === null
+                        ? undefined
+                        : { width: `${jobProgressFraction(job)! * 100}%` }}
+                    />
+                  </div>
+                </div>
+              )}
+              {role.state === "action_required" && (
+                <div className="setup-actions">
+                  {recipe && (
+                    <button
+                      className="primary compact-button"
+                      disabled={installRecipe.isPending}
+                      onClick={() => installRecipe.mutate(recipe.id)}
+                    >
+                      {installRecipe.isPending && installRecipe.variables === recipe.id
+                        ? "Starting…"
+                        : `Install ${recipe.name}`}
+                    </button>
+                  )}
+                  <button
+                    className={recipe ? "secondary compact-button" : "primary compact-button"}
+                    disabled={actionPending}
+                    onClick={() => performAction(role)}
+                  >
+                    {actionPending ? "Working…" : actionLabel(role)}
+                  </button>
+                  {recipe && <small>Reference candidate · {formatBytes(recipe.total_size_bytes)}</small>}
+                </div>
+              )}
+            </article>
+          );
+        })}
+      </div>
+      {error && <ErrorCallout message={error.message} />}
+      {recipes.error && <ErrorCallout message="Reference choices are temporarily unavailable. You can still browse the model library." />}
+      <footer>
+        <button className={report.state === "ready" ? "primary" : "secondary"} onClick={onClose}>
+          {report.state === "ready" ? "Done" : "Not now"}
+        </button>
+      </footer>
+    </AccessibleDialog>
+  );
 }
 
 function JobsPanel() {
@@ -3984,10 +4205,22 @@ function JobsPanel() {
 export default function App() {
   const client = useQueryClient();
   const [view, setView] = useState<View>("chat");
+  const [modelLibraryRole, setModelLibraryRole] = useState<EngineRole>("chat");
+  const [setupOpen, setSetupOpen] = useState<boolean | null>(null);
   const [currentChatId, setCurrentChatId] = useState<string | null>(() => localStorage.getItem("local-lm-chat"));
   const [liveText, setLiveText] = useState<Record<string, string>>({});
   const [chatDrafts, setChatDrafts] = useState<Record<string, Partial<Chat>>>({});
   const [pendingTurns, setPendingTurns] = useState<Record<string, PendingTurn[]>>({});
+  const setupReadiness = useQuery({
+    queryKey: ["setup-readiness"],
+    queryFn: api.setupReadiness,
+    refetchInterval: (query) => query.state.data?.state === "ready" ? false : 3_000,
+  });
+  const setupVisible = setupOpen ?? Boolean(
+    setupReadiness.data
+    && setupReadiness.data.state !== "ready"
+    && sessionStorage.getItem(SETUP_DISMISSED_KEY) !== "1",
+  );
   const projects = useQuery({
     queryKey: ["projects"],
     queryFn: () => api.projects(true),
@@ -4094,6 +4327,7 @@ export default function App() {
           void client.invalidateQueries({ queryKey: ["work-plans"] });
         }
         if (event.type.includes("progress") || event.type.startsWith("download.")) void client.invalidateQueries({ queryKey: ["jobs"] });
+        if (event.type.startsWith("download.") || event.type.startsWith("worker.") || event.type.startsWith("runtime.")) void client.invalidateQueries({ queryKey: ["setup-readiness"] });
         if (event.type === "run.progress") void client.invalidateQueries({ queryKey: ["chat"] });
         if (event.type === "download.completed") {
           void client.invalidateQueries({ queryKey: ["models"] });
@@ -4360,7 +4594,7 @@ export default function App() {
   const allProjects = useMemo(() => projects.data ?? [], [projects.data]);
   const activeContent = useMemo(() => {
     if (view === "media") return <MediaLibraryView />;
-    if (view === "models") return <ModelsView />;
+    if (view === "models") return <ModelsView key={modelLibraryRole} initialRole={modelLibraryRole} />;
     if (view === "workflows") return <WorkflowsView />;
     if (view === "settings") return <SettingsView engines={engines.data ?? []} />;
     const displayedChat = chat.data
@@ -4450,13 +4684,50 @@ export default function App() {
         });
       }
     }} />;
-  }, [view, engines.data, profiles.data, presets.data, workflows.data, allProjects, chat.data, chatDrafts, liveText, pendingTurns, workPlans.data, send, regenerate, selectResponseRevision, branch, stop, cancelWorkPlan, cancelWorkStep, retryWorkStep, updateChat, client]);
+  }, [view, modelLibraryRole, engines.data, profiles.data, presets.data, workflows.data, allProjects, chat.data, chatDrafts, liveText, pendingTurns, workPlans.data, send, regenerate, selectResponseRevision, branch, stop, cancelWorkPlan, cancelWorkStep, retryWorkStep, updateChat, client]);
 
   return (
     <div className="app-shell">
       <a className="skip-link" href="#main-content">Skip to main content</a>
-      <Sidebar projects={allProjects} chats={allChats} engines={engines.data ?? []} presets={presets.data ?? []} workflows={workflows.data ?? []} currentChatId={activeChatId} view={view} onChat={(id) => { setCurrentChatId(id); localStorage.setItem("local-lm-chat", id); setView("chat"); focusMainContent(); }} onView={(nextView) => { setView(nextView); focusMainContent(); }} onNewChat={(projectId) => createChat.mutate(projectId)} onNewProject={() => { const name = window.prompt("Project name"); if (name?.trim()) createProject.mutate(name.trim()); }} onExportProject={(id, includeMedia) => exportProject.mutate({ id, includeMedia })} onImportProject={(file) => importProject.mutate(file)} onUpdateChat={(id, values) => manageChat.mutate({ id, values })} onDeleteChat={(id, deleteGeneratedMedia) => deleteChat.mutate({ id, deleteGeneratedMedia })} onUpdateProject={(id, values) => updateProject.mutate({ id, values })} onDeleteProject={(id) => deleteProject.mutate(id)} />
+      <Sidebar projects={allProjects} chats={allChats} engines={engines.data ?? []} presets={presets.data ?? []} workflows={workflows.data ?? []} currentChatId={activeChatId} view={view} setupState={setupReadiness.data?.state} onSetup={() => setSetupOpen(true)} onChat={(id) => { setCurrentChatId(id); localStorage.setItem("local-lm-chat", id); setView("chat"); focusMainContent(); }} onView={(nextView) => { setView(nextView); focusMainContent(); }} onNewChat={(projectId) => createChat.mutate(projectId)} onNewProject={() => { const name = window.prompt("Project name"); if (name?.trim()) createProject.mutate(name.trim()); }} onExportProject={(id, includeMedia) => exportProject.mutate({ id, includeMedia })} onImportProject={(file) => importProject.mutate(file)} onUpdateChat={(id, values) => manageChat.mutate({ id, values })} onDeleteChat={(id, deleteGeneratedMedia) => deleteChat.mutate({ id, deleteGeneratedMedia })} onUpdateProject={(id, values) => updateProject.mutate({ id, values })} onDeleteProject={(id) => deleteProject.mutate(id)} />
       <main id="main-content" tabIndex={-1}>{activeContent}</main>
+      {setupOpen === true && !setupReadiness.data && (
+        <AccessibleDialog
+          title="Checking local setup"
+          eyebrow="Local models"
+          closeLabel="Close setup"
+          onClose={() => {
+            sessionStorage.setItem(SETUP_DISMISSED_KEY, "1");
+            setSetupOpen(false);
+          }}
+          className="setup-wizard"
+        >
+          {setupReadiness.error
+            ? <ErrorCallout message={setupReadiness.error.message} action={<button className="secondary compact-button" onClick={() => void setupReadiness.refetch()}>Retry</button>} />
+            : <div className="submission-progress"><LoaderCircle size={17} /><span>Checking models and runtimes…</span></div>}
+          <footer><button className="secondary" onClick={() => setSetupOpen(false)}>Not now</button></footer>
+        </AccessibleDialog>
+      )}
+      {setupVisible && setupReadiness.data && (
+        <SetupWizard
+          report={setupReadiness.data}
+          onClose={() => {
+            sessionStorage.setItem(SETUP_DISMISSED_KEY, "1");
+            setSetupOpen(false);
+          }}
+          onOpenModels={(role) => {
+            setModelLibraryRole(role);
+            setView("models");
+            setSetupOpen(false);
+            focusMainContent();
+          }}
+          onOpenWorkflows={() => {
+            setView("workflows");
+            setSetupOpen(false);
+            focusMainContent();
+          }}
+        />
+      )}
       <JobsPanel />
       {(send.error || regenerate.error || selectResponseRevision.error || branch.error || stop.error || cancelWorkPlan.error || cancelWorkStep.error || retryWorkStep.error || updateChat.error || createChat.error || createProject.error || importProject.error || manageChat.error || deleteChat.error || updateProject.error || deleteProject.error) && <div className="toast error" role="alert"><X size={16} />{(send.error || regenerate.error || selectResponseRevision.error || branch.error || stop.error || cancelWorkPlan.error || cancelWorkStep.error || retryWorkStep.error || updateChat.error || createChat.error || createProject.error || importProject.error || manageChat.error || deleteChat.error || updateProject.error || deleteProject.error)?.message}</div>}
     </div>
