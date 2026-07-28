@@ -686,7 +686,7 @@ def derive_image_to_image(
     contract = {
         "base": compiled.template.sha256,
         "operation": "image_to_image",
-        "transform": "load-image-vae-encode-v4",
+        "transform": "load-image-vae-encode-v5",
     }
     derived_hash = hashlib.sha256(
         json.dumps(contract, sort_keys=True, separators=(",", ":")).encode()

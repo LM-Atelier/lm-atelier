@@ -77,6 +77,9 @@ export function workflowImageEditCalibration(
   const parameter = editStrength?.parameter;
   const minimum = finiteNumber(editStrength?.minimum);
   const maximum = finiteNumber(editStrength?.maximum);
+  const parameterSchema = typeof parameter === "string"
+    ? record(properties?.[parameter])
+    : null;
   if (
     contract?.version !== 1
     || typeof parameter !== "string"
@@ -84,7 +87,8 @@ export function workflowImageEditCalibration(
     || minimum === null
     || maximum === null
     || minimum >= maximum
-    || !record(properties?.[parameter])
+    || parameterSchema?.type !== "number"
+    || !(Object.hasOwn(parameterSchema, "default") || Object.hasOwn(parameterSchema, "const"))
     || !recommended
   ) return null;
   const requiredScopes: ImageEditScope[] = ["minimal", "localized", "replacement", "global"];
@@ -98,16 +102,26 @@ export function workflowImageEditCalibration(
   if (fallback !== null && (fallback < minimum || fallback > maximum)) return null;
   normalizedRecommended.fallback = fallback
     ?? Math.min(Math.max(strength.fallback, minimum), maximum);
-  const schedule = record(contract.schedule);
-  const stepsParameter = typeof schedule?.steps_parameter === "string"
-    && record(properties?.[schedule.steps_parameter])
-    ? schedule.steps_parameter
-    : null;
-  const rawMinimumSteps = record(schedule?.minimum_effective_steps);
+  const rawSchedule = contract.schedule;
+  const schedule = record(rawSchedule);
+  if (rawSchedule !== undefined && !schedule) return null;
+  let stepsParameter: string | null = null;
   const minimumEffectiveSteps: Partial<Record<ImageEditScope, number>> = {};
-  for (const scope of ["localized", "replacement", "global"] as ImageEditScope[]) {
-    const value = finiteNumber(rawMinimumSteps?.[scope]);
-    if (value !== null && Number.isInteger(value) && value > 0) {
+  if (schedule) {
+    const candidate = schedule.steps_parameter;
+    const stepsSchema = typeof candidate === "string" ? record(properties?.[candidate]) : null;
+    if (
+      typeof candidate !== "string"
+      || !stepsSchema
+      || !["integer", "number"].includes(String(stepsSchema.type))
+      || !(Object.hasOwn(stepsSchema, "default") || Object.hasOwn(stepsSchema, "const"))
+    ) return null;
+    stepsParameter = candidate;
+    const rawMinimumSteps = record(schedule.minimum_effective_steps);
+    if (!rawMinimumSteps) return null;
+    for (const scope of ["localized", "replacement", "global"] as ImageEditScope[]) {
+      const value = finiteNumber(rawMinimumSteps[scope]);
+      if (value === null || value <= 0 || value > 10_000) return null;
       minimumEffectiveSteps[scope] = value;
     }
   }
