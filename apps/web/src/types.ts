@@ -125,6 +125,9 @@ export interface Chat {
 export interface ChatDetail extends Chat {
   messages: Message[];
 }
+export interface PromptHelperDetail extends ChatDetail {
+  draft_prompt: string;
+}
 
 export interface Run {
   id: string;

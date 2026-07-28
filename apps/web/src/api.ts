@@ -25,6 +25,7 @@ import type {
   ModelProfile,
   ModelProfileBundle,
   PlatformMatrixEntry,
+  PromptHelperDetail,
   Project,
   ReferenceRecipe,
   RoutingMode,
@@ -149,7 +150,19 @@ export const api = {
       delete_generated_media: String(deleteGeneratedMedia),
     });
     return request<void>(`/api/chats/${id}?${parameters}`, { method: "DELETE" });
-  },
+  },  createPromptHelper: (sourceChatId: string, draftPrompt: string) =>
+    request<PromptHelperDetail>("/api/prompt-helpers", {
+      method: "POST",
+      body: JSON.stringify({ source_chat_id: sourceChatId, draft_prompt: draftPrompt }),
+    }),
+  promptHelper: (id: string) => request<PromptHelperDetail>(`/api/prompt-helpers/${id}`),
+  updatePromptHelper: (id: string, draftPrompt: string) =>
+    request<PromptHelperDetail>(`/api/prompt-helpers/${id}`, {
+      method: "PATCH",
+      body: JSON.stringify({ draft_prompt: draftPrompt }),
+    }),
+  deletePromptHelper: (id: string) =>
+    request<void>(`/api/prompt-helpers/${id}`, { method: "DELETE" }),
   sendTurn: async (
     chatId: string,
     text: string,

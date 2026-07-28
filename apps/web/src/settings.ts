@@ -173,3 +173,37 @@ function isStricterMultiple(candidate: number, base: number): boolean {
 function titleCase(value: string): string {
   return value.replaceAll("_", " ").replace(/\b\w/g, (character) => character.toUpperCase());
 }
+const PROMPT_PREVIEW_LIMITS: ReadonlyArray<[readonly string[], number]> = [
+  [["steps", "num_inference_steps", "inference_steps", "sampling_steps"], 8],
+  [["width", "image_width", "output_width"], 512],
+  [["height", "image_height", "output_height"], 512],
+  [["frames", "num_frames", "frame_count"], 16],
+  [["duration", "duration_seconds", "video_duration"], 2],
+  [["batch_size", "batch_count", "num_images", "image_count"], 1],
+];
+
+export function promptPreviewSettings(fields: SettingField[]): Record<string, unknown> {
+  const settings: Record<string, unknown> = {};
+  for (const field of fields) {
+    if (!field.available || field.scope === "load" || !["integer", "number"].includes(field.type)) {
+      continue;
+    }
+    const normalizedKey = field.key.trim().toLowerCase().replaceAll("-", "_");
+    const target = PROMPT_PREVIEW_LIMITS.find(([keys]) => keys.includes(normalizedKey))?.[1];
+    if (target === undefined) continue;
+    const baseline = typeof field.default === "number" && Number.isFinite(field.default)
+      ? Math.min(field.default, target)
+      : target;
+    const minimum = field.minimum ?? Number.NEGATIVE_INFINITY;
+    const maximum = field.maximum ?? Number.POSITIVE_INFINITY;
+    let value = Math.min(Math.max(baseline, minimum), maximum);
+    const multiple = field.multiple_of ?? field.step;
+    if (multiple != null && multiple > 0 && Number.isFinite(multiple)) {
+      const origin = Number.isFinite(minimum) ? minimum : 0;
+      value = origin + Math.floor((value - origin) / multiple) * multiple;
+      value = Math.min(Math.max(value, minimum), maximum);
+    }
+    settings[field.key] = field.type === "integer" ? Math.round(value) : value;
+  }
+  return settings;
+}
