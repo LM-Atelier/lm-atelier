@@ -99,6 +99,15 @@
     "reasons": ["minimal_adjustment", "preservation_requested"]
   },
   {
+    "name": "explicit replacement preserving lighting",
+    "prompt": "Keep the mannequin face, body, pose, pants, camera framing, lighting, and background unchanged. Replace only the plain red crew-neck shirt with a royal-blue tailored blazer.",
+    "scope": "replacement",
+    "confidence": "high",
+    "minimum": 0.58,
+    "maximum": 0.74,
+    "reasons": ["subject_replacement", "preservation_requested"]
+  },
+  {
     "name": "unsupported language fallback",
     "prompt": "把衣服改成绿色",
     "scope": "fallback",

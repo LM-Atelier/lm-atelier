@@ -239,6 +239,9 @@ def _has_bounded_replacement_pair(normalized: str) -> bool:
     for verb_index, token in enumerate(tokens):
         if token not in _REPLACEMENT_VERBS:
             continue
+        prefix = tokens[max(0, verb_index - 2) : verb_index]
+        if "not" in prefix or "never" in prefix or prefix[-2:] == ["don", "t"]:
+            continue
         end = min(len(tokens), verb_index + _REPLACEMENT_PAIR_WINDOW + 1)
         for target_index in range(verb_index + 1, end):
             candidate = tokens[target_index]
@@ -342,15 +345,16 @@ def estimate_image_edit_strength(
 
     minimal_signal = _has_phrase(normalized, _MINIMAL_PHRASES) or bool(words & _MINIMAL_WORDS)
     preservation_signal = EditReason.PRESERVATION_REQUESTED in reasons
+    replacement_pair = _has_bounded_replacement_pair(normalized)
     if _has_phrase(normalized, _GLOBAL_PHRASES) or words & _GLOBAL_WORDS:
         scope = EditScope.GLOBAL
         confidence = EditConfidence.HIGH
         reasons.insert(0, EditReason.GLOBAL_TRANSFORMATION)
-    elif preservation_signal and minimal_signal:
+    elif preservation_signal and minimal_signal and not replacement_pair:
         scope = EditScope.MINIMAL
         confidence = EditConfidence.HIGH
         reasons.insert(0, EditReason.MINIMAL_ADJUSTMENT)
-    elif _has_phrase(normalized, _REPLACEMENT_PHRASES) or _has_bounded_replacement_pair(normalized):
+    elif _has_phrase(normalized, _REPLACEMENT_PHRASES) or replacement_pair:
         scope = EditScope.REPLACEMENT
         confidence = EditConfidence.HIGH
         reasons.insert(0, EditReason.SUBJECT_REPLACEMENT)
