@@ -1238,8 +1238,35 @@ async def test_workflow_refresh_adds_an_image_edit_contract_for_existing_install
                 active=True,
             )
         )
+        legacy_definition = WorkflowDefinition(
+            name="ComfyUI template · image_z_image_turbo_image_to_image",
+            operation="image_to_image",
+            description="Existing generated workflow",
+        )
+        session.add(legacy_definition)
+        session.flush()
+        legacy_revision = WorkflowRevision(
+            workflow_id=legacy_definition.id,
+            version=1,
+            engine="comfyui",
+            ui_graph_json={"legacy": True},
+            api_graph_json={"legacy": {"class_type": "Legacy"}},
+            input_schema_json={
+                "type": "object",
+                "properties": {"denoise": {"type": "number", "default": 0.9}},
+            },
+            dependencies_json={
+                "model_install_ids": ["model_z_image_existing"],
+                "compiler_version": "legacy",
+                "template_sha256": "b" * 64,
+            },
+            trusted=True,
+        )
+        session.add(legacy_revision)
+        session.flush()
+        legacy_definition.current_revision_id = legacy_revision.id
+        legacy_revision_id = legacy_revision.id
         session.commit()
-
     assert await manager.refresh_installed_media_workflows() == 2
     with SessionLocal() as session:
         definitions = session.query(WorkflowDefinition).all()
@@ -1250,8 +1277,14 @@ async def test_workflow_refresh_adds_an_image_edit_contract_for_existing_install
         edit = next(item for item in definitions if item.operation == "image_to_image")
         revision = session.get(WorkflowRevision, edit.current_revision_id)
         assert revision is not None
+        revisions = sorted(edit.revisions, key=lambda item: item.version)
+        assert [item.version for item in revisions] == [1, 2]
+        assert revisions[0].id == legacy_revision_id
+        assert revisions[0].api_graph_json == {"legacy": {"class_type": "Legacy"}}
+        assert "x-lm-atelier-edit-calibration" not in revisions[0].input_schema_json
         assert revision.dependencies_json["model_install_ids"] == ["model_z_image_existing"]
         assert revision.api_graph_json["lma-load-image"]["inputs"]["image"] == ("${input_image}")
+        assert revision.input_schema_json["x-lm-atelier-edit-calibration"]["version"] == 1
 
 
 async def test_media_activation_waits_for_the_shared_compute_lease(

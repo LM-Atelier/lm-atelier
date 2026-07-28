@@ -826,6 +826,7 @@ class ConversationOrchestrator:
                 (EditSettingSource.TURN, request_settings),
             ),
             inherited_auto=inherited_image_edit_strength,
+            workflow_schema=(workflow_revision.input_schema_json if workflow_revision else None),
         )
         lora_resolution = None
         if plan.operation != Operation.TEXT and effective_settings.get("loras"):
@@ -1478,6 +1479,9 @@ class ConversationOrchestrator:
                     ),
                     (EditSettingSource.CHAT, self._scoped_generation_settings(chat, role)),
                     (EditSettingSource.TURN, step_overrides),
+                ),
+                workflow_schema=(
+                    workflow_revision.input_schema_json if workflow_revision else None
                 ),
             )
             lora_resolution = None
