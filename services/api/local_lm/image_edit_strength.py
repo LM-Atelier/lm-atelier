@@ -1,12 +1,17 @@
 from __future__ import annotations
 
+import math
 from collections.abc import Mapping, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from enum import StrEnum
 from typing import Any
 
 from .domain import Operation
 from .schemas import SettingField
+from .workflow_edit_calibration import (
+    WorkflowEditCalibration,
+    safe_workflow_edit_calibration,
+)
 
 ESTIMATOR_VERSION = "prompt-edit-strength-v1"
 STRENGTH_PARAMETER = "denoise"
@@ -43,6 +48,8 @@ class EditReason(StrEnum):
     INHERITED_AUTO_VALUE = "inherited_auto_value"
     EXPLICIT_VALUE = "explicit_value"
     EXPLICIT_AUTO_MODE = "explicit_auto_mode"
+    WORKFLOW_CALIBRATION = "workflow_calibration"
+    SCHEDULE_MINIMUM_APPLIED = "schedule_minimum_applied"
 
 
 class EditSettingSource(StrEnum):
@@ -67,6 +74,10 @@ class ImageEditStrengthResolution:
     maximum: float
     source_scope: EditSettingSource | None = None
     reused: bool = False
+    parameter: str = STRENGTH_PARAMETER
+    calibration_version: int | None = None
+    calibration_hash: str | None = None
+    schedule_adjustment: dict[str, int | float | str] | None = None
 
     @property
     def default_applied(self) -> bool:
@@ -75,7 +86,7 @@ class ImageEditStrengthResolution:
     def provenance(self) -> dict[str, Any]:
         result: dict[str, Any] = {
             "mode": self.mode.value,
-            "parameter": STRENGTH_PARAMETER,
+            "parameter": self.parameter,
             "value": self.value,
             "applied_bounds": {"minimum": self.minimum, "maximum": self.maximum},
             "reason_codes": [reason.value for reason in self.reason_codes],
@@ -91,6 +102,13 @@ class ImageEditStrengthResolution:
             )
         elif self.source_scope is not None:
             result["source_scope"] = self.source_scope.value
+        if self.calibration_version is not None and self.calibration_hash is not None:
+            result["workflow_calibration"] = {
+                "version": self.calibration_version,
+                "hash": self.calibration_hash,
+            }
+        if self.schedule_adjustment is not None:
+            result["schedule_adjustment"] = self.schedule_adjustment
         return result
 
 
@@ -210,13 +228,80 @@ def _clamp(value: float, minimum: float, maximum: float) -> float:
     return round(min(max(value, minimum), maximum), 4)
 
 
-def _strength_bounds(fields: Sequence[SettingField]) -> tuple[float, float]:
-    field = next((item for item in fields if item.key == STRENGTH_PARAMETER), None)
-    minimum = float(field.minimum) if field and field.minimum is not None else 0.0
-    maximum = float(field.maximum) if field and field.maximum is not None else 1.0
+def _strength_bounds(
+    fields: Sequence[SettingField],
+    parameter: str,
+    calibration: WorkflowEditCalibration | None = None,
+) -> tuple[float, float]:
+    field = next((item for item in fields if item.key == parameter), None)
+    minimum = (
+        float(field.minimum)
+        if field and field.minimum is not None
+        else calibration.minimum
+        if calibration
+        else 0.0
+    )
+    maximum = (
+        float(field.maximum)
+        if field and field.maximum is not None
+        else calibration.maximum
+        if calibration
+        else 1.0
+    )
     if minimum > maximum:
         minimum, maximum = maximum, minimum
     return minimum, maximum
+
+
+def _calibrated_auto_resolution(
+    resolution: ImageEditStrengthResolution,
+    calibration: WorkflowEditCalibration | None,
+    effective_settings: Mapping[str, Any],
+) -> ImageEditStrengthResolution:
+    if calibration is None:
+        return resolution
+    scope = resolution.scope or EditScope.FALLBACK
+    value = _clamp(
+        calibration.recommended.get(scope.value, resolution.value),
+        resolution.minimum,
+        resolution.maximum,
+    )
+    reasons = (*resolution.reason_codes, EditReason.WORKFLOW_CALIBRATION)
+    schedule_adjustment: dict[str, int | float | str] | None = None
+    steps_parameter = calibration.steps_parameter
+    minimum_effective_steps = calibration.minimum_effective_steps.get(scope.value)
+    raw_steps = effective_settings.get(steps_parameter) if steps_parameter else None
+    if (
+        minimum_effective_steps is not None
+        and isinstance(raw_steps, int | float)
+        and not isinstance(raw_steps, bool)
+        and math.isfinite(float(raw_steps))
+        and float(raw_steps) > 0
+    ):
+        resolved_steps = float(raw_steps)
+        required_strength = minimum_effective_steps / resolved_steps
+        adjusted = _clamp(max(value, required_strength), resolution.minimum, resolution.maximum)
+        if adjusted > value:
+            assert steps_parameter is not None
+            schedule_adjustment = {
+                "steps_parameter": steps_parameter,
+                "resolved_steps": round(resolved_steps, 4),
+                "minimum_effective_steps": minimum_effective_steps,
+                "value_before": value,
+                "value_after": adjusted,
+                "effective_steps": round(adjusted * resolved_steps, 4),
+            }
+            value = adjusted
+            reasons = (*reasons, EditReason.SCHEDULE_MINIMUM_APPLIED)
+    return replace(
+        resolution,
+        value=value,
+        reason_codes=reasons,
+        parameter=calibration.parameter,
+        calibration_version=calibration.version,
+        calibration_hash=calibration.contract_hash,
+        schedule_adjustment=schedule_adjustment,
+    )
 
 
 def estimate_image_edit_strength(
@@ -283,21 +368,24 @@ def resolve_image_edit_strength(
     explicit_layers: Sequence[tuple[EditSettingSource, Mapping[str, Any]]],
     *,
     inherited_auto: Mapping[str, Any] | None = None,
+    workflow_schema: Mapping[str, Any] | None = None,
 ) -> ImageEditStrengthResolution | None:
+    calibration = safe_workflow_edit_calibration(workflow_schema)
+    parameter = calibration.parameter if calibration else STRENGTH_PARAMETER
     if operation == Operation.TEXT_TO_IMAGE:
-        field = next((item for item in fields if item.key == STRENGTH_PARAMETER), None)
+        field = next((item for item in fields if item.key == parameter), None)
         if field is not None:
-            effective_settings[STRENGTH_PARAMETER] = field.default
+            effective_settings[parameter] = field.default
         return None
     if operation != Operation.IMAGE_TO_IMAGE:
         return None
 
-    minimum, maximum = _strength_bounds(fields)
+    minimum, maximum = _strength_bounds(fields, parameter, calibration)
     explicit_source: EditSettingSource | None = None
     explicit_auto = False
     for source, layer in reversed(explicit_layers):
         raw_mode = layer.get(STRENGTH_MODE_PARAMETER)
-        raw_strength = layer.get(STRENGTH_PARAMETER)
+        raw_strength = layer.get(parameter)
         if raw_mode == EditStrengthMode.AUTO.value:
             explicit_auto = True
             explicit_source = source
@@ -312,11 +400,17 @@ def resolve_image_edit_strength(
         if raw_mode == EditStrengthMode.MANUAL.value:
             explicit_source = source
             break
-    if inherited_auto is not None and explicit_source == EditSettingSource.TURN:
+
+    inherited_parameter = inherited_auto.get("parameter") if inherited_auto else None
+    if (
+        inherited_auto is not None
+        and explicit_source == EditSettingSource.TURN
+        and inherited_parameter in {None, parameter}
+    ):
         inherited_value = inherited_auto.get("value")
         if isinstance(inherited_value, int | float) and not isinstance(inherited_value, bool):
             value = _clamp(float(inherited_value), minimum, maximum)
-            effective_settings[STRENGTH_PARAMETER] = value
+            effective_settings[parameter] = value
             raw_scope = inherited_auto.get("scope")
             raw_confidence = inherited_auto.get("confidence")
             try:
@@ -340,25 +434,28 @@ def resolve_image_edit_strength(
                 minimum=minimum,
                 maximum=maximum,
                 reused=True,
+                parameter=parameter,
+                calibration_version=calibration.version if calibration else None,
+                calibration_hash=calibration.contract_hash if calibration else None,
             )
 
     if explicit_auto:
         resolution = estimate_image_edit_strength(prompt, minimum=minimum, maximum=maximum)
-        resolution = ImageEditStrengthResolution(
-            mode=resolution.mode,
-            value=resolution.value,
-            scope=resolution.scope,
-            confidence=resolution.confidence,
+        resolution = replace(
+            resolution,
             reason_codes=(*resolution.reason_codes, EditReason.EXPLICIT_AUTO_MODE),
-            minimum=resolution.minimum,
-            maximum=resolution.maximum,
         )
-        effective_settings[STRENGTH_PARAMETER] = resolution.value
+        resolution = _calibrated_auto_resolution(
+            resolution,
+            calibration,
+            effective_settings,
+        )
+        effective_settings[parameter] = resolution.value
         return resolution
 
     if explicit_source is not None:
-        value = float(effective_settings[STRENGTH_PARAMETER])
-        effective_settings[STRENGTH_PARAMETER] = value
+        value = float(effective_settings[parameter])
+        effective_settings[parameter] = value
         return ImageEditStrengthResolution(
             mode=EditStrengthMode.MANUAL,
             value=value,
@@ -368,8 +465,12 @@ def resolve_image_edit_strength(
             minimum=minimum,
             maximum=maximum,
             source_scope=explicit_source,
+            parameter=parameter,
+            calibration_version=calibration.version if calibration else None,
+            calibration_hash=calibration.contract_hash if calibration else None,
         )
 
     resolution = estimate_image_edit_strength(prompt, minimum=minimum, maximum=maximum)
-    effective_settings[STRENGTH_PARAMETER] = resolution.value
+    resolution = _calibrated_auto_resolution(resolution, calibration, effective_settings)
+    effective_settings[parameter] = resolution.value
     return resolution

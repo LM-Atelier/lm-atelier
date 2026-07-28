@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import math
 import re
 from copy import deepcopy
 from dataclasses import dataclass, replace
@@ -10,6 +11,10 @@ from typing import Any, cast
 from urllib.parse import unquote, urlparse
 
 from .config import Settings
+from .workflow_edit_calibration import (
+    EDIT_CALIBRATION_SCHEMA_KEY,
+    standard_edit_calibration,
+)
 
 _RUNTIME_PARAMETERS = {
     "batch_size": "batch_size",
@@ -632,21 +637,56 @@ def derive_image_to_image(
             properties.pop(name, None)
         denoise = properties.get("denoise")
         if isinstance(denoise, dict):
+            raw_minimum = denoise.get("minimum", 0.0)
+            raw_maximum = denoise.get("maximum", 1.0)
+            minimum = (
+                float(raw_minimum)
+                if isinstance(raw_minimum, int | float)
+                and not isinstance(raw_minimum, bool)
+                and math.isfinite(raw_minimum)
+                else 0.0
+            )
+            maximum = (
+                float(raw_maximum)
+                if isinstance(raw_maximum, int | float)
+                and not isinstance(raw_maximum, bool)
+                and math.isfinite(raw_maximum)
+                else 1.0
+            )
+            if minimum >= maximum:
+                minimum, maximum = 0.0, 1.0
             denoise.update(
                 {
+                    "type": "number",
                     "title": "Edit strength",
                     "description": (
                         "Higher values make the requested change more visible; "
                         "lower values preserve more of the source."
                     ),
-                    "default": DEFAULT_IMAGE_EDIT_DENOISE,
+                    "default": min(max(DEFAULT_IMAGE_EDIT_DENOISE, minimum), maximum),
+                    "minimum": minimum,
+                    "maximum": maximum,
                     "x-lm-atelier-visibility": "basic",
                 }
+            )
+            steps = properties.get("steps")
+            steps_parameter = (
+                "steps"
+                if isinstance(steps, dict)
+                and steps.get("type") in {"integer", "number"}
+                and any(key in steps for key in ("default", "const"))
+                else None
+            )
+            schema[EDIT_CALIBRATION_SCHEMA_KEY] = standard_edit_calibration(
+                parameter="denoise",
+                minimum=minimum,
+                maximum=maximum,
+                steps_parameter=steps_parameter,
             )
     contract = {
         "base": compiled.template.sha256,
         "operation": "image_to_image",
-        "transform": "load-image-vae-encode-v3",
+        "transform": "load-image-vae-encode-v4",
     }
     derived_hash = hashlib.sha256(
         json.dumps(contract, sort_keys=True, separators=(",", ":")).encode()

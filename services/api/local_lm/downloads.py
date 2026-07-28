@@ -78,6 +78,7 @@ from .progress import completed_progress, update_job_progress
 from .scheduler import ResourceScheduler
 from .schemas import DownloadRequest
 from .subprocess_env import subprocess_environment
+from .workflow_edit_calibration import validate_workflow_edit_calibration
 
 if TYPE_CHECKING:
     from .adapters.comfyui import ComfyUIAdapter
@@ -2109,6 +2110,7 @@ class DownloadManager:
             "extensions": ({"lora": lora_extension} if lora_extension else {}),
         }
         validate_lora_workflow_contract(compiled.api_graph, input_schema, dependencies)
+        validate_workflow_edit_calibration(input_schema)
         revision = WorkflowRevision(
             workflow_id=definition.id,
             version=version,

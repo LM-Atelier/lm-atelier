@@ -221,3 +221,182 @@ def test_large_adversarial_prompt_is_handled_without_regex_backtracking() -> Non
 
     assert resolution.scope == "minimal"
     assert resolution.value == 0.38
+
+
+def _calibrated_schema(
+    *,
+    parameter: str = "strength",
+    replacement: float = 0.6,
+) -> dict[str, object]:
+    return {
+        "type": "object",
+        "properties": {
+            parameter: {
+                "type": "number",
+                "default": 0.9,
+                "minimum": 0.0,
+                "maximum": 1.0,
+            },
+            "steps": {"type": "integer", "default": 4},
+        },
+        "x-lm-atelier-edit-calibration": {
+            "version": 1,
+            "edit_strength": {
+                "parameter": parameter,
+                "minimum": 0.0,
+                "maximum": 1.0,
+                "recommended": {
+                    "minimal": 0.3,
+                    "localized": 0.45,
+                    "replacement": replacement,
+                    "global": 0.8,
+                    "fallback": 0.5,
+                },
+            },
+            "schedule": {
+                "steps_parameter": "steps",
+                "minimum_effective_steps": {
+                    "localized": 2,
+                    "replacement": 3,
+                    "global": 3,
+                },
+            },
+        },
+    }
+
+
+def test_workflow_calibration_uses_custom_parameter_and_short_step_budget() -> None:
+    fields = [
+        SettingField(
+            key="strength",
+            label="Change strength",
+            type="number",
+            default=0.9,
+            minimum=0,
+            maximum=1,
+            step=0.01,
+            scope="workflow",
+        ),
+        SettingField(
+            key="steps",
+            label="Steps",
+            type="integer",
+            default=4,
+            minimum=1,
+            maximum=100,
+            step=1,
+            scope="workflow",
+        ),
+    ]
+    settings = {"strength": 0.9, "steps": 4}
+
+    resolution = resolve_image_edit_strength(
+        Operation.IMAGE_TO_IMAGE,
+        "Replace the jacket",
+        fields,
+        settings,
+        (),
+        workflow_schema=_calibrated_schema(),
+    )
+
+    assert resolution is not None
+    assert resolution.value == 0.75
+    assert settings == {"strength": 0.75, "steps": 4}
+    provenance = resolution.provenance()
+    assert provenance["parameter"] == "strength"
+    assert provenance["reason_codes"] == [
+        "subject_replacement",
+        "workflow_calibration",
+        "schedule_minimum_applied",
+    ]
+    assert provenance["workflow_calibration"]["version"] == 1
+    assert len(provenance["workflow_calibration"]["hash"]) == 64
+    assert provenance["schedule_adjustment"] == {
+        "steps_parameter": "steps",
+        "resolved_steps": 4.0,
+        "minimum_effective_steps": 3,
+        "value_before": 0.6,
+        "value_after": 0.75,
+        "effective_steps": 3.0,
+    }
+
+
+def test_runtime_bounds_win_over_calibration_and_bound_schedule_adjustment() -> None:
+    fields = [
+        SettingField(
+            key="strength",
+            label="Change strength",
+            type="number",
+            default=0.7,
+            minimum=0.2,
+            maximum=0.7,
+            step=0.01,
+            scope="workflow",
+        ),
+        SettingField(
+            key="steps",
+            label="Steps",
+            type="integer",
+            default=2,
+            minimum=1,
+            maximum=100,
+            step=1,
+            scope="workflow",
+        ),
+    ]
+    settings = {"strength": 0.7, "steps": 2}
+
+    resolution = resolve_image_edit_strength(
+        Operation.IMAGE_TO_IMAGE,
+        "Replace the jacket",
+        fields,
+        settings,
+        (),
+        workflow_schema=_calibrated_schema(replacement=0.6),
+    )
+
+    assert resolution is not None
+    assert resolution.value == 0.7
+    assert resolution.maximum == 0.7
+    assert settings["strength"] == 0.7
+    assert resolution.provenance()["schedule_adjustment"]["effective_steps"] == 1.4
+
+
+def test_calibration_never_changes_an_explicit_manual_value() -> None:
+    fields = [
+        SettingField(
+            key="strength",
+            label="Change strength",
+            type="number",
+            default=0.9,
+            minimum=0,
+            maximum=1,
+            step=0.01,
+            scope="workflow",
+        ),
+        SettingField(
+            key="steps",
+            label="Steps",
+            type="integer",
+            default=1,
+            minimum=1,
+            maximum=100,
+            step=1,
+            scope="workflow",
+        ),
+    ]
+    settings = {"strength": 0.43, "steps": 1}
+
+    resolution = resolve_image_edit_strength(
+        Operation.IMAGE_TO_IMAGE,
+        "Replace the jacket",
+        fields,
+        settings,
+        ((EditSettingSource.TURN, {"strength": 0.43}),),
+        workflow_schema=_calibrated_schema(),
+    )
+
+    assert resolution is not None
+    assert resolution.value == 0.43
+    assert resolution.provenance()["mode"] == "manual"
+    assert "schedule_adjustment" not in resolution.provenance()

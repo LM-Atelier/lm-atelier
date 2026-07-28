@@ -20,6 +20,7 @@ from .models import (
 )
 from .profile_service import AUTO_PROFILE_ID
 from .project_portability import redact_local_paths
+from .workflow_edit_calibration import validate_workflow_edit_calibration
 
 ModelRoleName = Literal["chat", "image", "video"]
 OperationName = Literal[
@@ -321,6 +322,7 @@ def dependency_source_index(dependencies: PortableDependencies) -> DependencySou
         versions: set[int] = set()
         workflow_revision_ids: set[str] = set()
         for revision in workflow.revisions:
+            validate_workflow_edit_calibration(revision.input_schema)
             if revision.source_id in revision_operations:
                 raise ValueError(
                     "project manifest contains duplicate workflow revision dependency ids"

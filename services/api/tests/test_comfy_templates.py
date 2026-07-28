@@ -524,7 +524,11 @@ def test_text_to_image_graph_derives_a_standard_image_edit_workflow(tmp_path: Pa
             "vae": {"class_type": "VAELoader", "inputs": {}},
             "sampler": {
                 "class_type": "KSampler",
-                "inputs": {"latent_image": ["empty", 0], "denoise": "${denoise}"},
+                "inputs": {
+                    "latent_image": ["empty", 0],
+                    "denoise": "${denoise}",
+                    "steps": "${steps}",
+                },
             },
             "decode": {
                 "class_type": "VAEDecode",
@@ -539,6 +543,7 @@ def test_text_to_image_graph_derives_a_standard_image_edit_workflow(tmp_path: Pa
                 "height": {"type": "integer", "default": 1024},
                 "batch_size": {"type": "integer", "default": 1},
                 "denoise": {"type": "number", "default": 1.0},
+                "steps": {"type": "integer", "default": 4},
             },
         },
     )
@@ -559,14 +564,39 @@ def test_text_to_image_graph_derives_a_standard_image_edit_workflow(tmp_path: Pa
         "lma-vae-encode",
         0,
     ]
-    assert set(derived.input_schema["properties"]) == {"prompt", "denoise"}
+    assert set(derived.input_schema["properties"]) == {"prompt", "denoise", "steps"}
     assert derived.input_schema["properties"]["denoise"] == {
         "type": "number",
         "default": 0.9,
+        "minimum": 0.0,
+        "maximum": 1.0,
         "title": "Edit strength",
         "description": (
             "Higher values make the requested change more visible; "
             "lower values preserve more of the source."
         ),
         "x-lm-atelier-visibility": "basic",
+    }
+    assert derived.input_schema["x-lm-atelier-edit-calibration"] == {
+        "version": 1,
+        "edit_strength": {
+            "parameter": "denoise",
+            "minimum": 0.0,
+            "maximum": 1.0,
+            "recommended": {
+                "minimal": 0.38,
+                "localized": 0.5,
+                "replacement": 0.66,
+                "global": 0.82,
+                "fallback": 0.56,
+            },
+        },
+        "schedule": {
+            "steps_parameter": "steps",
+            "minimum_effective_steps": {
+                "localized": 2,
+                "replacement": 3,
+                "global": 3,
+            },
+        },
     }
