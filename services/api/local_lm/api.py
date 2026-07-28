@@ -56,6 +56,7 @@ from .gguf import (
     automatic_mmproj_selection,
 )
 from .hardware import collect_system_info
+from .image_edit_strength import STRENGTH_MODE_PARAMETER
 from .model_manifests import (
     MAX_METADATA_BYTES,
     MAX_WEIGHT_HEADER_BYTES,
@@ -583,10 +584,21 @@ async def _validate_generation_defaults(
         for role, settings in scoped.items():
             if len(settings) > 256 or any(len(key) > 200 for key in settings):
                 raise HTTPException(422, f"{role} generation defaults are too large")
+            request_settings = settings
+            if STRENGTH_MODE_PARAMETER in settings:
+                mode = settings[STRENGTH_MODE_PARAMETER]
+                if role != ModelRole.IMAGE.value or mode not in {"auto", "manual"}:
+                    raise HTTPException(
+                        422,
+                        "image edit strength mode must be auto or manual for image defaults",
+                    )
+                request_settings = {
+                    key: value for key, value in settings.items() if key != STRENGTH_MODE_PARAMETER
+                }
             fields = await _engine_role_fields(request, role)
             request_fields = [field for field in fields if field.scope != "load"]
             load_keys = {field.key for field in fields if field.scope == "load"}
-            disallowed = sorted(load_keys & set(settings))
+            disallowed = sorted(load_keys & set(request_settings))
             if disallowed:
                 raise HTTPException(
                     422,
@@ -594,7 +606,7 @@ async def _validate_generation_defaults(
                     f"{', '.join(disallowed)}",
                 )
             try:
-                validate_settings(settings, request_fields)
+                validate_settings(request_settings, request_fields)
             except ValueError as exc:
                 raise HTTPException(422, str(exc)) from exc
 

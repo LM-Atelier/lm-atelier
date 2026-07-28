@@ -5226,6 +5226,16 @@ async def test_generation_default_contract_rejects_invalid_bindings(
         json={"generation_settings_json": {"chat": {"context_length": 16_384}}},
     )
     assert load_setting.status_code == 422
+    invalid_image_edit_mode = await client.patch(
+        f"/api/chats/{chat['id']}",
+        json={"generation_settings_json": {"image": {"_image_edit_strength_mode": "sometimes"}}},
+    )
+    assert invalid_image_edit_mode.status_code == 422
+    wrong_image_edit_role = await client.patch(
+        f"/api/chats/{chat['id']}",
+        json={"generation_settings_json": {"video": {"_image_edit_strength_mode": "auto"}}},
+    )
+    assert wrong_image_edit_role.status_code == 422
     unknown_role = await client.patch(
         f"/api/chats/{chat['id']}",
         json={"generation_settings_json": {"music": {"temperature": 0.2}}},

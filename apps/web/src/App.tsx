@@ -50,6 +50,11 @@ import {
 } from "lucide-react";
 import { api, connectEvents } from "./api";
 import {
+  estimateImageEditStrength,
+  IMAGE_EDIT_STRENGTH_MODE_KEY,
+  type ImageEditStrengthMode,
+} from "./imageEditStrength";
+import {
   normalizeSettingsForFields,
   resolveCapabilitySettings,
   resolveWorkflowSettings,
@@ -1002,6 +1007,85 @@ function SettingControl({
   );
 }
 
+function ImageEditStrengthControl({
+  field,
+  prompt,
+  layers,
+  values,
+  onValues,
+}: {
+  field: SettingField;
+  prompt: string;
+  layers: Array<Record<string, unknown> | undefined>;
+  values: Record<string, unknown>;
+  onValues: (values: Record<string, unknown>) => void;
+}) {
+  let mode: ImageEditStrengthMode = "auto";
+  for (const layer of [...layers].reverse()) {
+    if (!layer) continue;
+    const declared = layer[IMAGE_EDIT_STRENGTH_MODE_KEY];
+    if (declared === "auto" || declared === "manual") {
+      mode = declared;
+      break;
+    }
+    if (typeof layer.denoise === "number") {
+      mode = "manual";
+      break;
+    }
+  }
+  const estimate = estimateImageEditStrength(
+    prompt,
+    field.minimum ?? 0,
+    field.maximum ?? 1,
+  );
+  let manualValue = estimate.value;
+  for (const layer of layers) {
+    if (typeof layer?.denoise === "number") manualValue = layer.denoise;
+  }
+  const selectAuto = () => {
+    const next: Record<string, unknown> = {
+      ...values,
+      [IMAGE_EDIT_STRENGTH_MODE_KEY]: "auto",
+    };
+    delete next.denoise;
+    onValues(next);
+  };
+  const selectManual = () => onValues({
+    ...values,
+    [IMAGE_EDIT_STRENGTH_MODE_KEY]: "manual",
+    denoise: typeof values.denoise === "number" ? values.denoise : manualValue,
+  });
+  return (
+    <div className="setting-row image-edit-strength-control">
+      <span>
+        <strong>Change strength</strong>
+        <small>{mode === "auto" ? `Predicted: ${estimate.scope}` : "Set for this chat"}</small>
+      </span>
+      <div className="image-edit-strength-inputs">
+        <div className="segmented compact" role="group" aria-label="Image edit change strength mode">
+          <button type="button" aria-pressed={mode === "auto"} className={mode === "auto" ? "active" : ""} onClick={selectAuto}>Auto</button>
+          <button type="button" aria-pressed={mode === "manual"} className={mode === "manual" ? "active" : ""} onClick={selectManual}>Manual</button>
+        </div>
+        {mode === "manual" && (
+          <input
+            aria-label="Manual change strength"
+            type="number"
+            value={manualValue}
+            min={field.minimum ?? undefined}
+            max={field.maximum ?? undefined}
+            step={field.step ?? 0.01}
+            onChange={(event) => onValues({
+              ...values,
+              [IMAGE_EDIT_STRENGTH_MODE_KEY]: "manual",
+              denoise: Number(event.target.value),
+            })}
+          />
+        )}
+      </div>
+    </div>
+  );
+}
+
 function GenerationSettingsPanel({
   role,
   engines,
@@ -1013,6 +1097,9 @@ function GenerationSettingsPanel({
   workflowSchema,
   inheritedValues = {},
   inheritedPresetId = null,
+  profileValues = {},
+  imageEdit = false,
+  imageEditPrompt = "",
   presetLabel = `${role} preset`,
   resetLabel,
   onReset,
@@ -1027,6 +1114,9 @@ function GenerationSettingsPanel({
   workflowSchema?: Record<string, unknown>;
   inheritedValues?: Record<string, unknown>;
   inheritedPresetId?: string | null;
+  profileValues?: Record<string, unknown>;
+  imageEdit?: boolean;
+  imageEditPrompt?: string;
   presetLabel?: string;
   resetLabel: string;
   onReset: () => void;
@@ -1038,18 +1128,22 @@ function GenerationSettingsPanel({
   const inheritedPreset = rolePresets.find((preset) => preset.id === inheritedPresetId);
   const selectedPreset = rolePresets.find((preset) => preset.id === presetId);
   const inheritedName = inheritedPreset?.name ?? defaultPreset?.name;
-  const fields = resolveWorkflowSettings(
+  const allFields = resolveWorkflowSettings(
     resolveCapabilitySettings(engine, role),
     workflowSchema,
-  ).filter(
+  );
+  const denoiseField = allFields.find((field) => field.key === "denoise" && field.available);
+  const fields = allFields.filter(
     (field) =>
       field.scope !== "load"
       && visibilityRank[field.visibility] <= visibilityRank[visibility]
-      && field.available,
+      && field.available
+      && field.key !== "denoise",
   );
   const effectiveValue = (field: SettingField): unknown => {
     let value = field.default;
     for (const layer of [
+      profileValues,
       defaultPreset?.settings_json,
       inheritedPreset?.settings_json,
       inheritedValues,
@@ -1091,6 +1185,22 @@ function GenerationSettingsPanel({
             ))}
           </select>
         </label>
+        {imageEdit && denoiseField && (
+          <ImageEditStrengthControl
+            field={denoiseField}
+            prompt={imageEditPrompt}
+            layers={[
+              profileValues,
+              defaultPreset?.settings_json,
+              inheritedPreset?.settings_json,
+              inheritedValues,
+              selectedPreset?.settings_json,
+              values,
+            ]}
+            values={values}
+            onValues={onValues}
+          />
+        )}
         {fields.map((field) => (
           <SettingControl
             key={`${field.scope}:${field.key}:${JSON.stringify(values[field.key])}`}
@@ -1121,6 +1231,9 @@ function SettingsDrawer({
   workflowSchema,
   inheritedValues,
   inheritedPresetId,
+  profileValues,
+  imageEdit,
+  imageEditPrompt,
 }: {
   open: boolean;
   onClose: () => void;
@@ -1134,6 +1247,9 @@ function SettingsDrawer({
   workflowSchema?: Record<string, unknown>;
   inheritedValues?: Record<string, unknown>;
   inheritedPresetId?: string | null;
+  profileValues?: Record<string, unknown>;
+  imageEdit: boolean;
+  imageEditPrompt: string;
 }) {
   const role = roleForMode(mode);
   if (!open) return null;
@@ -1157,6 +1273,9 @@ function SettingsDrawer({
         workflowSchema={workflowSchema}
         inheritedValues={inheritedValues}
         inheritedPresetId={inheritedPresetId}
+        profileValues={profileValues}
+        imageEdit={imageEdit}
+        imageEditPrompt={imageEditPrompt}
         resetLabel="Reset chat overrides"
         onReset={() => onValues({})}
       />
@@ -1167,6 +1286,7 @@ function SettingsDrawer({
 function Composer({
   chat,
   engines,
+  profiles,
   stoppable,
   settings,
   onSettings,
@@ -1184,6 +1304,7 @@ function Composer({
 }: {
   chat: ChatDetail;
   engines: EngineCapabilities[];
+  profiles: ModelProfile[];
   stoppable: boolean;
   settings: Record<string, unknown>;
   onSettings: (settings: Record<string, unknown>) => void;
@@ -1238,10 +1359,18 @@ function Composer({
     setText((current) => (current.trim() ? `${quoted}\n\n${current}` : `${quoted}\n\n`));
     textInput.current?.focus();
   }, [quoteTarget]);
-  const priorVisual = activeBranchMessages(chat).some((message) =>
+  const branchMessages = activeBranchMessages(chat);
+  const priorVisual = branchMessages.some((message) =>
     message.parts.some((part) =>
       Boolean(part.artifact_id)
       && (part.type === "image" || part.type === "video")
+      && part.metadata_json.preview !== true
+    )
+  );
+  const priorImage = branchMessages.some((message) =>
+    message.parts.some((part) =>
+      Boolean(part.artifact_id)
+      && part.type === "image"
       && part.metadata_json.preview !== true
     )
   );
@@ -1252,6 +1381,16 @@ function Composer({
       || PRIOR_VISUAL_SOURCE.test(text)
       || (mode === "video" && DIRECT_PRIOR_VIDEO.test(text))
     );
+  const imageEdit = mode === "image" && (
+    attachments.some((attachment) => attachment.kind === "image")
+    || (priorImage && usePriorVisual)
+  );
+  const imageProfile = profiles.find((profile) => profile.id === chat.active_image_profile_id)
+    ?? profiles.find((profile) => profile.role === "image" && profile.is_default);
+  const profileValues = {
+    ...(imageProfile?.load_settings_json ?? {}),
+    ...(imageProfile?.request_settings_json ?? {}),
+  };
   const workflowSchema = workflowSchemaForTurn(
     workflows,
     project,
@@ -1422,6 +1561,9 @@ function Composer({
         workflowSchema={workflowSchema}
         inheritedValues={project?.generation_settings_json?.[roleForMode(mode)]}
         inheritedPresetId={project?.generation_preset_ids_json?.[roleForMode(mode)]}
+        profileValues={profileValues}
+        imageEdit={imageEdit}
+        imageEditPrompt={text}
       />
     </>
   );
@@ -1715,7 +1857,7 @@ function ChatView({
         ))}
         <div ref={endRef} />
       </div>
-      <Composer chat={chat} engines={engines} stoppable={stoppable} settings={settings} onSettings={onSettings} presets={presets} presetId={presetId} onPreset={onPreset} onMode={onMode} onSend={onSend} onStop={onStop} onStopAndSend={onStopAndSend} workflows={workflows} project={project} editTarget={editTarget} quoteTarget={quoteTarget} />
+      <Composer chat={chat} engines={engines} profiles={profiles} stoppable={stoppable} settings={settings} onSettings={onSettings} presets={presets} presetId={presetId} onPreset={onPreset} onMode={onMode} onSend={onSend} onStop={onStop} onStopAndSend={onStopAndSend} workflows={workflows} project={project} editTarget={editTarget} quoteTarget={quoteTarget} />
     </div>
   );
 }
