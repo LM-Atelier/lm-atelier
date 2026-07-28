@@ -1026,9 +1026,10 @@ class SetupReadinessCheck(ApiModel):
 class SetupRoleReadiness(ApiModel):
     role: Literal["chat", "image", "video"]
     state: Literal["ready", "in_progress", "action_required"]
-    verification_level: Literal["activation_probe"] = "activation_probe"
+    verification_level: Literal["generation_probe"] = "generation_probe"
     engine: str | None = None
     job_id: str | None = None
+    verification_id: str | None = None
     install_id: str | None = None
     profile_id: str | None = None
     workflow_revision_id: str | None = None
@@ -1037,9 +1038,19 @@ class SetupRoleReadiness(ApiModel):
 
 
 class SetupReadinessReport(ApiModel):
-    version: Literal[1] = 1
+    version: Literal[2] = 2
     state: Literal["ready", "in_progress", "action_required"]
     roles: list[SetupRoleReadiness]
+
+
+class SetupVerificationOut(ApiModel):
+    id: str
+    role: Literal["chat", "image", "video"]
+    state: Literal["queued", "running", "ready", "failed"]
+    job_id: str | None
+    failure_code: str | None
+    started_at: datetime | None
+    completed_at: datetime | None
 
 
 class BackupInfo(ApiModel):

@@ -516,6 +516,40 @@ class ModelCapabilityEvidence(TimestampMixin, Base):
     probed_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
 
 
+class SetupVerification(TimestampMixin, Base):
+    __tablename__ = "setup_verifications"
+    __table_args__ = (
+        UniqueConstraint("evidence_key", name="uq_setup_verification_evidence_key"),
+        Index("ix_setup_verifications_role_state", "role", "state"),
+    )
+
+    id: Mapped[str] = mapped_column(
+        String(40),
+        primary_key=True,
+        default=lambda: new_id("verify"),
+    )
+    role: Mapped[str] = mapped_column(String(16))
+    evidence_key: Mapped[str] = mapped_column(String(64), unique=True)
+    state: Mapped[str] = mapped_column(String(24), default="queued")
+    model_install_id: Mapped[str] = mapped_column(
+        ForeignKey("model_installs.id", ondelete="CASCADE"),
+    )
+    profile_id: Mapped[str] = mapped_column(
+        ForeignKey("model_profiles.id", ondelete="CASCADE"),
+    )
+    workflow_revision_id: Mapped[str | None] = mapped_column(
+        ForeignKey("workflow_revisions.id", ondelete="CASCADE"),
+        nullable=True,
+    )
+    chat_id: Mapped[str | None] = mapped_column(String(40), nullable=True, unique=True, index=True)
+    run_id: Mapped[str | None] = mapped_column(String(40), nullable=True)
+    job_id: Mapped[str | None] = mapped_column(String(40), nullable=True)
+    input_artifact_id: Mapped[str | None] = mapped_column(String(40), nullable=True)
+    failure_code: Mapped[str | None] = mapped_column(String(80), nullable=True)
+    started_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    completed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+
+
 class ModelProfile(TimestampMixin, Base):
     __tablename__ = "model_profiles"
 

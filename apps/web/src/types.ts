@@ -372,9 +372,10 @@ export interface SetupReadinessCheck {
 export interface SetupRoleReadiness {
   role: "chat" | "image" | "video";
   state: "ready" | "in_progress" | "action_required";
-  verification_level: "activation_probe";
+  verification_level: "generation_probe";
   engine: string | null;
   job_id: string | null;
+  verification_id: string | null;
   install_id: string | null;
   profile_id: string | null;
   workflow_revision_id: string | null;
@@ -383,9 +384,19 @@ export interface SetupRoleReadiness {
 }
 
 export interface SetupReadinessReport {
-  version: 1;
+  version: 2;
   state: "ready" | "in_progress" | "action_required";
   roles: SetupRoleReadiness[];
+}
+
+export interface SetupVerification {
+  id: string;
+  role: "chat" | "image" | "video";
+  state: "queued" | "running" | "ready" | "failed";
+  job_id: string | null;
+  failure_code: string | null;
+  started_at: string | null;
+  completed_at: string | null;
 }
 
 export interface BackupInfo {

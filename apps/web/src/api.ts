@@ -31,6 +31,7 @@ import type {
   RoutingMode,
   RuntimeStatus,
   SetupReadinessReport,
+  SetupVerification,
   SystemInfo,
   ToolCapabilityProbe,
   TurnAccepted,
@@ -127,6 +128,8 @@ async function request<T>(
 export const api = {
   initialize: ensureSession,
   setupReadiness: () => request<SetupReadinessReport>("/api/setup/readiness"),
+  verifySetupRole: (role: SetupVerification["role"]) =>
+    request<SetupVerification>(`/api/setup/verify/${role}`, { method: "POST" }),
   projects: (includeArchived = false, query = "") =>
     request<Project[]>(`/api/projects?${new URLSearchParams({ include_archived: String(includeArchived), query })}`),
   createProject: (name: string) =>

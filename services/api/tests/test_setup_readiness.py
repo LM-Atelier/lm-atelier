@@ -20,10 +20,12 @@ from local_lm.models import (
     ModelCapabilityEvidence,
     ModelInstall,
     ModelProfile,
+    SetupVerification,
     WorkflowDefinition,
     WorkflowRevision,
 )
 from local_lm.schemas import RuntimeStatus, WorkerStatus
+from local_lm.setup_verification import verification_evidence_key
 
 pytestmark = pytest.mark.asyncio
 
@@ -163,6 +165,28 @@ def _add_workflow(
     return definition, revision
 
 
+def _add_verification(
+    install: ModelInstall,
+    profile: ModelProfile,
+    capability_evidence: ModelCapabilityEvidence,
+    workflow: WorkflowRevision | None = None,
+) -> SetupVerification:
+    return SetupVerification(
+        role=install.role,
+        evidence_key=verification_evidence_key(
+            install.role,  # type: ignore[arg-type]
+            install,
+            profile,
+            workflow,
+            capability_evidence,
+        ),
+        state="ready",
+        model_install_id=install.id,
+        profile_id=profile.id,
+        workflow_revision_id=workflow.id if workflow else None,
+    )
+
+
 async def test_fresh_setup_reports_one_stable_model_action_per_role(
     client: AsyncClient,
 ) -> None:
@@ -170,14 +194,14 @@ async def test_fresh_setup_reports_one_stable_model_action_per_role(
 
     assert response.status_code == 200
     payload = response.json()
-    assert payload["version"] == 1
+    assert payload["version"] == 2
     assert payload["state"] == "action_required"
     assert [role["role"] for role in payload["roles"]] == ["chat", "image", "video"]
     for role in payload["roles"]:
         assert role["state"] == "action_required"
         assert role["next_action"] == "select_model"
         assert [check["code"] for check in role["checks"]] == ["model_missing"]
-        assert role["verification_level"] == "activation_probe"
+        assert role["verification_level"] == "generation_probe"
 
 
 async def test_partial_setup_reports_role_specific_install_progress(
@@ -289,22 +313,36 @@ async def test_ready_roles_surface_worker_failure_without_requiring_residency(
     video = _add_install(role="video", engine="comfyui", template_sha256="c" * 64)
     image_workflow = _add_workflow(image, "text_to_image")
     video_workflow = _add_workflow(video, "image_to_video")
+    chat_profile = _add_profile(chat)
+    image_profile = _add_profile(image)
+    video_profile = _add_profile(video)
+    chat_evidence = _add_evidence(settings, chat)
+    image_evidence = _add_evidence(settings, image)
+    video_evidence = _add_evidence(settings, video)
     with SessionLocal() as session:
         session.add_all([chat, image, video])
         session.flush()
         session.add_all(
             [
-                _add_profile(chat),
-                _add_profile(image),
-                _add_profile(video),
-                _add_evidence(settings, chat),
-                _add_evidence(settings, image),
-                _add_evidence(settings, video),
+                chat_profile,
+                image_profile,
+                video_profile,
+                chat_evidence,
+                image_evidence,
+                video_evidence,
             ]
         )
         session.add_all([image_workflow[0], video_workflow[0]])
         session.flush()
         session.add_all([image_workflow[1], video_workflow[1]])
+        session.flush()
+        session.add_all(
+            [
+                _add_verification(chat, chat_profile, chat_evidence),
+                _add_verification(image, image_profile, image_evidence, image_workflow[1]),
+                _add_verification(video, video_profile, video_evidence, video_workflow[1]),
+            ]
+        )
         session.commit()
 
     _set_runtime_and_worker_state(app, monkeypatch, workers=_workers(chat_state="exited"))
@@ -321,7 +359,8 @@ async def test_ready_roles_surface_worker_failure_without_requiring_residency(
     assert ready["state"] == "ready"
     assert {role["state"] for role in ready["roles"]} == {"ready"}
     chat_ready = next(role for role in ready["roles"] if role["role"] == "chat")
-    assert chat_ready["checks"][-1]["code"] == "worker_on_demand"
+    assert any(check["code"] == "worker_on_demand" for check in chat_ready["checks"])
+    assert chat_ready["checks"][-1]["code"] == "generation_verified"
 
     mismatched_workers = _workers()
     mismatched_workers[0] = mismatched_workers[0].model_copy(update={"profile_id": "profile_other"})
@@ -329,7 +368,7 @@ async def test_ready_roles_surface_worker_failure_without_requiring_residency(
     mismatched = (await client.get("/api/setup/readiness")).json()
     mismatched_chat = next(role for role in mismatched["roles"] if role["role"] == "chat")
     assert mismatched_chat["state"] == "ready"
-    assert mismatched_chat["checks"][-1]["code"] == "worker_on_demand"
+    assert any(check["code"] == "worker_on_demand" for check in mismatched_chat["checks"])
 
 
 def response_text(payload: object) -> str:

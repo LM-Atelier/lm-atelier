@@ -9,7 +9,7 @@ afterEach(() => {
 });
 
 it("requests the read-only setup readiness contract", async () => {
-  const report = { version: 1, state: "ready", roles: [] };
+  const report = { version: 2, state: "ready", roles: [] };
   const fetchMock = vi.fn()
     .mockResolvedValueOnce(
       new Response(JSON.stringify({ csrf_token: "csrf" }), {
@@ -31,6 +31,37 @@ it("requests the read-only setup readiness contract", async () => {
   expect(fetchMock.mock.calls[1][1]?.method).toBeUndefined();
 });
 
+it("starts setup verification with the local CSRF contract", async () => {
+  const verification = {
+    id: "verify-image",
+    role: "image",
+    state: "queued",
+    job_id: "job-image",
+    failure_code: null,
+    started_at: null,
+    completed_at: null,
+  };
+  const fetchMock = vi.fn()
+    .mockResolvedValueOnce(
+      new Response(JSON.stringify({ csrf_token: "csrf" }), {
+        status: 200,
+        headers: { "content-type": "application/json" },
+      }),
+    )
+    .mockResolvedValueOnce(
+      new Response(JSON.stringify(verification), {
+        status: 202,
+        headers: { "content-type": "application/json" },
+      }),
+    );
+  vi.stubGlobal("fetch", fetchMock);
+
+  const { api } = await import("./api");
+  await expect(api.verifySetupRole("image")).resolves.toEqual(verification);
+  expect(fetchMock.mock.calls[1][0]).toBe("/api/setup/verify/image");
+  expect(fetchMock.mock.calls[1][1]?.method).toBe("POST");
+  expect(new Headers(fetchMock.mock.calls[1][1]?.headers).get("x-local-lm-csrf")).toBe("csrf");
+});
 it("confirms a bounded ordered plan without changing Auto mode", async () => {
   const confirm = vi.fn(() => true);
   vi.stubGlobal("confirm", confirm);
