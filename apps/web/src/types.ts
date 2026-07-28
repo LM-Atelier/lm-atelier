@@ -362,6 +362,32 @@ export interface RuntimeStatus {
   message: string;
 }
 
+export interface SetupReadinessCheck {
+  code: string;
+  status: "pass" | "pending" | "fail";
+  message: string;
+  action: string | null;
+}
+
+export interface SetupRoleReadiness {
+  role: "chat" | "image" | "video";
+  state: "ready" | "in_progress" | "action_required";
+  verification_level: "activation_probe";
+  engine: string | null;
+  job_id: string | null;
+  install_id: string | null;
+  profile_id: string | null;
+  workflow_revision_id: string | null;
+  next_action: string | null;
+  checks: SetupReadinessCheck[];
+}
+
+export interface SetupReadinessReport {
+  version: 1;
+  state: "ready" | "in_progress" | "action_required";
+  roles: SetupRoleReadiness[];
+}
+
 export interface BackupInfo {
   name: string;
   size_bytes: number;

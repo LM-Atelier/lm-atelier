@@ -30,6 +30,7 @@ import type {
   ReferenceRecipe,
   RoutingMode,
   RuntimeStatus,
+  SetupReadinessReport,
   SystemInfo,
   ToolCapabilityProbe,
   TurnAccepted,
@@ -125,6 +126,7 @@ async function request<T>(
 
 export const api = {
   initialize: ensureSession,
+  setupReadiness: () => request<SetupReadinessReport>("/api/setup/readiness"),
   projects: (includeArchived = false, query = "") =>
     request<Project[]>(`/api/projects?${new URLSearchParams({ include_archived: String(includeArchived), query })}`),
   createProject: (name: string) =>

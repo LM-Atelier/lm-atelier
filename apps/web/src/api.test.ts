@@ -8,6 +8,29 @@ afterEach(() => {
   localStorage.clear();
 });
 
+it("requests the read-only setup readiness contract", async () => {
+  const report = { version: 1, state: "ready", roles: [] };
+  const fetchMock = vi.fn()
+    .mockResolvedValueOnce(
+      new Response(JSON.stringify({ csrf_token: "csrf" }), {
+        status: 200,
+        headers: { "content-type": "application/json" },
+      }),
+    )
+    .mockResolvedValueOnce(
+      new Response(JSON.stringify(report), {
+        status: 200,
+        headers: { "content-type": "application/json" },
+      }),
+    );
+  vi.stubGlobal("fetch", fetchMock);
+
+  const { api } = await import("./api");
+  await expect(api.setupReadiness()).resolves.toEqual(report);
+  expect(fetchMock.mock.calls[1][0]).toBe("/api/setup/readiness");
+  expect(fetchMock.mock.calls[1][1]?.method).toBeUndefined();
+});
+
 it("confirms a bounded ordered plan without changing Auto mode", async () => {
   const confirm = vi.fn(() => true);
   vi.stubGlobal("confirm", confirm);
