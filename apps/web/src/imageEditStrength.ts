@@ -1,4 +1,5 @@
 export const IMAGE_EDIT_STRENGTH_MODE_KEY = "_image_edit_strength_mode";
+export const IMAGE_EDIT_CALIBRATION_SCHEMA_KEY = "x-lm-atelier-edit-calibration";
 
 export type ImageEditScope = "minimal" | "localized" | "replacement" | "global" | "fallback";
 export type ImageEditStrengthMode = "auto" | "manual";
@@ -7,6 +8,14 @@ export interface ImageEditStrengthEstimate {
   scope: ImageEditScope;
   value: number;
   confidence: "low" | "medium" | "high";
+}
+export interface WorkflowImageEditCalibration {
+  parameter: string;
+  minimum: number;
+  maximum: number;
+  recommended: Record<ImageEditScope, number>;
+  stepsParameter: string | null;
+  minimumEffectiveSteps: Partial<Record<ImageEditScope, number>>;
 }
 
 const strength: Record<ImageEditScope, number> = {
@@ -48,6 +57,69 @@ const preservationPhrases = [
   "preserve identity", "preserve the rest", "without altering", "without changing",
 ];
 
+function record(value: unknown): Record<string, unknown> | null {
+  return value !== null && typeof value === "object" && !Array.isArray(value)
+    ? value as Record<string, unknown>
+    : null;
+}
+
+function finiteNumber(value: unknown): number | null {
+  return typeof value === "number" && Number.isFinite(value) ? value : null;
+}
+
+export function workflowImageEditCalibration(
+  schema: Record<string, unknown> | undefined,
+): WorkflowImageEditCalibration | null {
+  const contract = record(schema?.[IMAGE_EDIT_CALIBRATION_SCHEMA_KEY]);
+  const editStrength = record(contract?.edit_strength);
+  const recommended = record(editStrength?.recommended);
+  const properties = record(schema?.properties);
+  const parameter = editStrength?.parameter;
+  const minimum = finiteNumber(editStrength?.minimum);
+  const maximum = finiteNumber(editStrength?.maximum);
+  if (
+    contract?.version !== 1
+    || typeof parameter !== "string"
+    || !parameter
+    || minimum === null
+    || maximum === null
+    || minimum >= maximum
+    || !record(properties?.[parameter])
+    || !recommended
+  ) return null;
+  const requiredScopes: ImageEditScope[] = ["minimal", "localized", "replacement", "global"];
+  const normalizedRecommended = {} as Record<ImageEditScope, number>;
+  for (const scope of requiredScopes) {
+    const value = finiteNumber(recommended[scope]);
+    if (value === null || value < minimum || value > maximum) return null;
+    normalizedRecommended[scope] = value;
+  }
+  const fallback = finiteNumber(recommended.fallback);
+  if (fallback !== null && (fallback < minimum || fallback > maximum)) return null;
+  normalizedRecommended.fallback = fallback
+    ?? Math.min(Math.max(strength.fallback, minimum), maximum);
+  const schedule = record(contract.schedule);
+  const stepsParameter = typeof schedule?.steps_parameter === "string"
+    && record(properties?.[schedule.steps_parameter])
+    ? schedule.steps_parameter
+    : null;
+  const rawMinimumSteps = record(schedule?.minimum_effective_steps);
+  const minimumEffectiveSteps: Partial<Record<ImageEditScope, number>> = {};
+  for (const scope of ["localized", "replacement", "global"] as ImageEditScope[]) {
+    const value = finiteNumber(rawMinimumSteps?.[scope]);
+    if (value !== null && Number.isInteger(value) && value > 0) {
+      minimumEffectiveSteps[scope] = value;
+    }
+  }
+  return {
+    parameter,
+    minimum,
+    maximum,
+    recommended: normalizedRecommended,
+    stepsParameter,
+    minimumEffectiveSteps,
+  };
+}
 function normalize(prompt: string): { text: string; words: Set<string> } {
   let normalized = "";
   for (const character of prompt.toLocaleLowerCase("en-US")) {
@@ -70,6 +142,7 @@ export function estimateImageEditStrength(
   prompt: string,
   minimum = 0,
   maximum = 1,
+  recommended: Record<ImageEditScope, number> = strength,
 ): ImageEditStrengthEstimate {
   const { text, words } = normalize(prompt);
   const minimal = hasPhrase(text, minimalPhrases) || intersects(words, minimalWords);
@@ -101,6 +174,31 @@ export function estimateImageEditStrength(
   return {
     scope,
     confidence,
-    value: Math.round(Math.min(Math.max(strength[scope], minimum), maximum) * 10_000) / 10_000,
+    value: Math.round(Math.min(Math.max(recommended[scope], minimum), maximum) * 10_000) / 10_000,
   };
+}
+export function calibratedImageEditStrength(
+  prompt: string,
+  calibration: WorkflowImageEditCalibration | null,
+  resolvedSteps?: unknown,
+): ImageEditStrengthEstimate {
+  if (!calibration) return estimateImageEditStrength(prompt);
+  const estimate = estimateImageEditStrength(
+    prompt,
+    calibration.minimum,
+    calibration.maximum,
+    calibration.recommended,
+  );
+  const minimumSteps = calibration.minimumEffectiveSteps[estimate.scope];
+  if (
+    typeof resolvedSteps !== "number"
+    || !Number.isFinite(resolvedSteps)
+    || resolvedSteps <= 0
+    || minimumSteps === undefined
+  ) return estimate;
+  const value = Math.min(
+    Math.max(estimate.value, minimumSteps / resolvedSteps, calibration.minimum),
+    calibration.maximum,
+  );
+  return { ...estimate, value: Math.round(value * 10_000) / 10_000 };
 }

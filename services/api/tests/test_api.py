@@ -7,6 +7,7 @@ import json
 import threading
 import zipfile
 from collections.abc import AsyncIterator
+from copy import deepcopy
 from datetime import UTC, datetime, timedelta
 from pathlib import Path, PurePosixPath
 from types import SimpleNamespace
@@ -6237,3 +6238,86 @@ async def test_comfy_catalog_preflight_blocks_an_unreviewed_managed_runtime(
     runtime_check = next(check for check in payload["checks"] if check["id"] == "runtime")
     assert runtime_check["status"] == "block"
     assert "security advisories" in runtime_check["detail"]
+
+
+async def test_workflow_edit_calibration_is_validated_and_portable(
+    client: AsyncClient,
+) -> None:
+    input_schema = {
+        "type": "object",
+        "properties": {
+            "strength": {"type": "number", "default": 0.9},
+            "steps": {"type": "integer", "default": 4},
+        },
+        "x-lm-atelier-edit-calibration": {
+            "version": 1,
+            "edit_strength": {
+                "parameter": "strength",
+                "minimum": 0.0,
+                "maximum": 1.0,
+                "recommended": {
+                    "minimal": 0.3,
+                    "localized": 0.45,
+                    "replacement": 0.6,
+                    "global": 0.8,
+                    "fallback": 0.5,
+                },
+            },
+            "schedule": {
+                "steps_parameter": "steps",
+                "minimum_effective_steps": {
+                    "localized": 2,
+                    "replacement": 3,
+                    "global": 3,
+                },
+            },
+        },
+    }
+    created = await client.post(
+        "/api/workflows",
+        json={
+            "name": "Calibrated edit",
+            "operation": "image_to_image",
+            "engine": "mock",
+            "api_graph": {"node": {"class_type": "Mock"}},
+            "input_schema": input_schema,
+            "trusted": True,
+        },
+    )
+    assert created.status_code == 201, created.text
+    workflow = created.json()
+
+    exported = await client.get(f"/api/workflows/{workflow['id']}/export")
+    assert exported.status_code == 200
+    assert exported.json()["input_schema"] == input_schema
+    bundle = exported.json()
+    bundle["name"] = "Imported calibrated edit"
+    imported = await client.post("/api/workflows/import", json=bundle)
+    assert imported.status_code == 201, imported.text
+    assert imported.json()["revisions"][0]["input_schema_json"] == input_schema
+
+    invalid_schema = deepcopy(input_schema)
+    invalid_schema["x-lm-atelier-edit-calibration"]["edit_strength"]["parameter"] = "missing"
+    rejected_create = await client.post(
+        "/api/workflows",
+        json={
+            "name": "Invalid calibrated edit",
+            "operation": "image_to_image",
+            "engine": "mock",
+            "api_graph": {"node": {"class_type": "Mock"}},
+            "input_schema": invalid_schema,
+        },
+    )
+    assert rejected_create.status_code == 422
+    assert "must identify a numeric workflow setting" in rejected_create.text
+
+    rejected_revision = await client.post(
+        f"/api/workflows/{workflow['id']}/revisions",
+        json={
+            "api_graph": {"node": {"class_type": "MockV2"}},
+            "input_schema": invalid_schema,
+            "trusted": True,
+        },
+    )
+    assert rejected_revision.status_code == 422
+    assert "must identify a numeric workflow setting" in rejected_revision.text

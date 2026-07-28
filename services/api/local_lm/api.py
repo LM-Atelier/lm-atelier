@@ -178,6 +178,7 @@ from .settings_registry import (
     validate_settings,
     workflow_settings,
 )
+from .workflow_edit_calibration import validate_workflow_edit_calibration
 
 if TYPE_CHECKING:
     from .main import Services
@@ -1037,8 +1038,14 @@ async def regenerate_message(
         input_artifact_ids=orchestrator.input_artifact_ids_for_run(session, prior_run),
         settings={**prior_settings, **payload.settings},
     )
+    prior_strength = _inherited_auto_image_edit_strength(prior_run)
+    inherited_parameter = (
+        prior_strength.get("parameter")
+        if prior_strength and isinstance(prior_strength.get("parameter"), str)
+        else "denoise"
+    )
     inherited_image_edit_strength = (
-        None if "denoise" in payload.settings else _inherited_auto_image_edit_strength(prior_run)
+        None if inherited_parameter in payload.settings else prior_strength
     )
     return await _accept_turn(
         orchestrator,
@@ -3776,6 +3783,7 @@ async def create_workflow(payload: WorkflowCreate, session: SessionDep) -> Workf
             payload.input_schema,
             payload.dependencies,
         )
+        validate_workflow_edit_calibration(payload.input_schema)
     except ValueError as exc:
         raise HTTPException(422, str(exc)) from exc
     definition = WorkflowDefinition(
@@ -3912,6 +3920,7 @@ async def create_workflow_revision(
             payload.input_schema,
             payload.dependencies,
         )
+        validate_workflow_edit_calibration(payload.input_schema)
     except ValueError as exc:
         raise HTTPException(422, str(exc)) from exc
     version = (
@@ -3994,6 +4003,7 @@ async def validate_workflow(
         )
         declared_fields = workflow_settings(base_fields, revision.input_schema_json)
         validate_settings(defaults(declared_fields), declared_fields)
+        validate_workflow_edit_calibration(revision.input_schema_json)
     except ValueError as exc:
         errors.append(f"invalid workflow input schema: {exc}")
     dependencies = revision.dependencies_json

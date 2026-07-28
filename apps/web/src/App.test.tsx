@@ -3493,7 +3493,7 @@ describe("App", () => {
               default: "",
             },
             ...(operation === "image_to_image" ? {
-              denoise: {
+              strength: {
                 type: "number",
                 title: "Edit strength",
                 default: 0.9,
@@ -3501,8 +3501,34 @@ describe("App", () => {
                 maximum: 1,
                 "x-lm-atelier-visibility": "basic",
               },
+              steps: { type: "integer", title: "Steps", default: 4 },
             } : {}),
           },
+          ...(operation === "image_to_image" ? {
+            "x-lm-atelier-edit-calibration": {
+              version: 1,
+              edit_strength: {
+                parameter: "strength",
+                minimum: 0,
+                maximum: 1,
+                recommended: {
+                  minimal: 0.3,
+                  localized: 0.45,
+                  replacement: 0.6,
+                  global: 0.8,
+                  fallback: 0.5,
+                },
+              },
+              schedule: {
+                steps_parameter: "steps",
+                minimum_effective_steps: {
+                  localized: 2,
+                  replacement: 3,
+                  global: 3,
+                },
+              },
+            },
+          } : {}),
         },
         dependencies_json: {},
         trusted: true,
@@ -3548,7 +3574,7 @@ describe("App", () => {
       generation_settings_json: {
         image: {
           _image_edit_strength_mode: "manual",
-          denoise: 0.5,
+          strength: 0.5,
         },
       },
     }));

@@ -1,5 +1,9 @@
 import { describe, expect, it } from "vitest";
-import { estimateImageEditStrength } from "./imageEditStrength";
+import {
+  calibratedImageEditStrength,
+  estimateImageEditStrength,
+  workflowImageEditCalibration,
+} from "./imageEditStrength";
 
 describe("estimateImageEditStrength", () => {
   it.each([
@@ -20,5 +24,59 @@ describe("estimateImageEditStrength", () => {
 
   it("clamps the estimate to workflow bounds", () => {
     expect(estimateImageEditStrength("Restyle the image", 0.6, 0.7).value).toBe(0.7);
+  });
+});
+
+describe("workflow image edit calibration", () => {
+  const schema = {
+    type: "object",
+    properties: {
+      strength: { type: "number", default: 0.9 },
+      steps: { type: "integer", default: 4 },
+    },
+    "x-lm-atelier-edit-calibration": {
+      version: 1,
+      edit_strength: {
+        parameter: "strength",
+        minimum: 0,
+        maximum: 1,
+        recommended: {
+          minimal: 0.3,
+          localized: 0.45,
+          replacement: 0.6,
+          global: 0.8,
+          fallback: 0.5,
+        },
+      },
+      schedule: {
+        steps_parameter: "steps",
+        minimum_effective_steps: {
+          localized: 2,
+          replacement: 3,
+          global: 3,
+        },
+      },
+    },
+  };
+
+  it("reads a custom strength parameter and applies the short-step budget", () => {
+    const calibration = workflowImageEditCalibration(schema);
+
+    expect(calibration?.parameter).toBe("strength");
+    expect(calibratedImageEditStrength("Replace the jacket", calibration, 4)).toEqual({
+      scope: "replacement",
+      value: 0.75,
+      confidence: "high",
+    });
+  });
+
+  it("ignores malformed optional contracts", () => {
+    expect(workflowImageEditCalibration({
+      ...schema,
+      "x-lm-atelier-edit-calibration": {
+        ...schema["x-lm-atelier-edit-calibration"],
+        version: 2,
+      },
+    })).toBeNull();
   });
 });

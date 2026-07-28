@@ -50,9 +50,12 @@ import {
 } from "lucide-react";
 import { api, connectEvents } from "./api";
 import {
+  calibratedImageEditStrength,
   estimateImageEditStrength,
   IMAGE_EDIT_STRENGTH_MODE_KEY,
   type ImageEditStrengthMode,
+  type WorkflowImageEditCalibration,
+  workflowImageEditCalibration,
 } from "./imageEditStrength";
 import {
   normalizeSettingsForFields,
@@ -1009,12 +1012,18 @@ function SettingControl({
 
 function ImageEditStrengthControl({
   field,
+  parameter,
+  calibration,
+  resolvedSteps,
   prompt,
   layers,
   values,
   onValues,
 }: {
   field: SettingField;
+  parameter: string;
+  calibration: WorkflowImageEditCalibration | null;
+  resolvedSteps: unknown;
   prompt: string;
   layers: Array<Record<string, unknown> | undefined>;
   values: Record<string, unknown>;
@@ -1028,32 +1037,35 @@ function ImageEditStrengthControl({
       mode = declared;
       break;
     }
-    if (typeof layer.denoise === "number") {
+    if (typeof layer[parameter] === "number") {
       mode = "manual";
       break;
     }
   }
-  const estimate = estimateImageEditStrength(
-    prompt,
-    field.minimum ?? 0,
-    field.maximum ?? 1,
-  );
+  const activeCalibration = calibration ? {
+    ...calibration,
+    minimum: field.minimum ?? calibration.minimum,
+    maximum: field.maximum ?? calibration.maximum,
+  } : null;
+  const estimate = activeCalibration
+    ? calibratedImageEditStrength(prompt, activeCalibration, resolvedSteps)
+    : estimateImageEditStrength(prompt, field.minimum ?? 0, field.maximum ?? 1);
   let manualValue = estimate.value;
   for (const layer of layers) {
-    if (typeof layer?.denoise === "number") manualValue = layer.denoise;
+    if (typeof layer?.[parameter] === "number") manualValue = layer[parameter];
   }
   const selectAuto = () => {
     const next: Record<string, unknown> = {
       ...values,
       [IMAGE_EDIT_STRENGTH_MODE_KEY]: "auto",
     };
-    delete next.denoise;
+    delete next[parameter];
     onValues(next);
   };
   const selectManual = () => onValues({
     ...values,
     [IMAGE_EDIT_STRENGTH_MODE_KEY]: "manual",
-    denoise: typeof values.denoise === "number" ? values.denoise : manualValue,
+    [parameter]: typeof values[parameter] === "number" ? values[parameter] : manualValue,
   });
   return (
     <div className="setting-row image-edit-strength-control">
@@ -1077,7 +1089,7 @@ function ImageEditStrengthControl({
             onChange={(event) => onValues({
               ...values,
               [IMAGE_EDIT_STRENGTH_MODE_KEY]: "manual",
-              denoise: Number(event.target.value),
+              [parameter]: Number(event.target.value),
             })}
           />
         )}
@@ -1085,7 +1097,6 @@ function ImageEditStrengthControl({
     </div>
   );
 }
-
 function GenerationSettingsPanel({
   role,
   engines,
@@ -1132,13 +1143,17 @@ function GenerationSettingsPanel({
     resolveCapabilitySettings(engine, role),
     workflowSchema,
   );
-  const denoiseField = allFields.find((field) => field.key === "denoise" && field.available);
+  const editCalibration = workflowImageEditCalibration(workflowSchema);
+  const strengthParameter = editCalibration?.parameter ?? "denoise";
+  const strengthField = allFields.find(
+    (field) => field.key === strengthParameter && field.available,
+  );
   const fields = allFields.filter(
     (field) =>
       field.scope !== "load"
       && visibilityRank[field.visibility] <= visibilityRank[visibility]
       && field.available
-      && field.key !== "denoise",
+      && field.key !== strengthParameter,
   );
   const effectiveValue = (field: SettingField): unknown => {
     let value = field.default;
@@ -1156,6 +1171,10 @@ function GenerationSettingsPanel({
     }
     return value;
   };
+  const stepsField = editCalibration?.stepsParameter
+    ? allFields.find((field) => field.key === editCalibration.stepsParameter)
+    : undefined;
+  const resolvedEditSteps = stepsField ? effectiveValue(stepsField) : undefined;
   return (
     <div className="generation-settings-panel">
       <div className="segmented compact">
@@ -1185,9 +1204,12 @@ function GenerationSettingsPanel({
             ))}
           </select>
         </label>
-        {imageEdit && denoiseField && (
+        {imageEdit && strengthField && (
           <ImageEditStrengthControl
-            field={denoiseField}
+            field={strengthField}
+            parameter={strengthParameter}
+            calibration={editCalibration}
+            resolvedSteps={resolvedEditSteps}
             prompt={imageEditPrompt}
             layers={[
               profileValues,
