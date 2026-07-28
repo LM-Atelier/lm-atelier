@@ -84,10 +84,21 @@ async def test_turn_inputs_are_durable_message_parts_and_context(
         "Restyle this reference",
         input_artifact_ids=[artifact_id],
     )
-    assert accepted["run"]["settings_json"]["denoise"] == 0.9
+    assert accepted["run"]["settings_json"]["denoise"] == 0.82
     assert accepted["run"]["provenance_json"]["image_edit"] == {
         "policy": "preserve_unrequested_details_v1",
         "default_change_strength_applied": True,
+        "strength": {
+            "mode": "auto",
+            "parameter": "denoise",
+            "value": 0.82,
+            "applied_bounds": {"minimum": 0.0, "maximum": 1.0},
+            "reason_codes": ["global_transformation"],
+            "reused": False,
+            "scope": "global",
+            "confidence": "high",
+            "estimator_version": "prompt-edit-strength-v1",
+        },
     }
     input_part = next(
         part
@@ -137,6 +148,15 @@ async def test_explicit_image_edit_strength_remains_authoritative(
     assert accepted["run"]["provenance_json"]["image_edit"] == {
         "policy": "preserve_unrequested_details_v1",
         "default_change_strength_applied": False,
+        "strength": {
+            "mode": "manual",
+            "parameter": "denoise",
+            "value": 0.62,
+            "applied_bounds": {"minimum": 0.0, "maximum": 1.0},
+            "reason_codes": ["explicit_value"],
+            "reused": False,
+            "source_scope": "turn",
+        },
     }
 
 
@@ -394,3 +414,151 @@ async def test_project_round_trip_preserves_durable_and_legacy_turn_inputs(
         assert ConversationOrchestrator.input_artifact_ids_for_run(session, imported_legacy) == [
             legacy_id
         ]
+
+
+async def test_prior_image_follow_up_uses_prompt_aware_strength(
+    client: AsyncClient,
+) -> None:
+    chat = (await client.post("/api/chats", json={"title": "Prompt-aware follow-up"})).json()
+    first, first_run = await _image_turn(client, chat["id"], "Make an image of a red apple")
+
+    follow_up = await client.post(
+        f"/api/chats/{chat['id']}/turns",
+        json={
+            "text": "Make it green",
+            "mode": "auto",
+            "parent_message_id": first["assistant_message"]["id"],
+        },
+    )
+
+    assert follow_up.status_code == 202, follow_up.text
+    run = follow_up.json()["run"]
+    assert run["operation"] == "image_to_image"
+    assert run["provenance_json"]["input_artifact_ids"] == [_output_artifact_id(first_run)]
+    assert run["settings_json"]["denoise"] == 0.5
+    assert run["provenance_json"]["image_edit"]["strength"] == {
+        "mode": "auto",
+        "parameter": "denoise",
+        "value": 0.5,
+        "applied_bounds": {"minimum": 0.0, "maximum": 1.0},
+        "reason_codes": ["localized_change"],
+        "reused": False,
+        "scope": "localized",
+        "confidence": "medium",
+        "estimator_version": "prompt-edit-strength-v1",
+    }
+
+
+async def test_text_to_image_keeps_workflow_default_strength(client: AsyncClient) -> None:
+    chat = (await client.post("/api/chats", json={"title": "Text to image default"})).json()
+
+    response = await client.post(
+        f"/api/chats/{chat['id']}/turns",
+        json={"text": "Make an image of a red apple", "mode": "image"},
+    )
+
+    assert response.status_code == 202, response.text
+    run = response.json()["run"]
+    assert run["operation"] == "text_to_image"
+    assert run["settings_json"]["denoise"] == 1
+    assert run["provenance_json"]["image_edit"] is None
+
+
+async def test_ordered_image_edit_uses_the_shared_strength_resolver(
+    client: AsyncClient,
+) -> None:
+    uploaded = await client.post(
+        "/api/artifacts",
+        files={"file": ("reference.png", b"ordered-edit-image", "image/png")},
+    )
+    artifact_id = uploaded.json()["id"]
+    chat = (await client.post("/api/chats", json={"title": "Ordered edit"})).json()
+    payload = {
+        "text": "Make an image with the person in a new suit, then animate it into a video",
+        "mode": "auto",
+        "input_artifact_ids": [artifact_id],
+    }
+    preview = await client.post(f"/api/chats/{chat['id']}/turns", json=payload)
+    assert preview.status_code == 409
+
+    response = await client.post(
+        f"/api/chats/{chat['id']}/turns",
+        json={**payload, "confirm_media": True},
+    )
+
+    assert response.status_code == 202, response.text
+    run = response.json()["run"]
+    assert run["operation"] == "image_to_image"
+    assert run["settings_json"]["denoise"] == 0.66
+    assert run["provenance_json"]["image_edit"]["strength"]["scope"] == "replacement"
+
+
+async def test_regeneration_reuses_auto_image_edit_strength(client: AsyncClient) -> None:
+    uploaded = await client.post(
+        "/api/artifacts",
+        files={"file": ("reference.png", b"regenerated-edit-image", "image/png")},
+    )
+    artifact_id = uploaded.json()["id"]
+    chat = (await client.post("/api/chats", json={"title": "Regenerated edit"})).json()
+    accepted, _completed = await _image_turn(
+        client,
+        chat["id"],
+        "Replace the jacket with a green coat",
+        input_artifact_ids=[artifact_id],
+    )
+
+    response = await client.post(
+        f"/api/messages/{accepted['assistant_message']['id']}/regenerate",
+        json={"settings": {}},
+    )
+
+    assert response.status_code == 202, response.text
+    run = response.json()["run"]
+    assert run["settings_json"]["denoise"] == 0.66
+    strength = run["provenance_json"]["image_edit"]["strength"]
+    assert strength["mode"] == "auto"
+    assert strength["scope"] == "replacement"
+    assert strength["reason_codes"] == ["inherited_auto_value"]
+    assert strength["reused"] is True
+
+    await _wait_for_run(client, run["id"])
+    overridden = await client.post(
+        f"/api/messages/{accepted['assistant_message']['id']}/regenerate",
+        json={"settings": {"denoise": 0.61}},
+    )
+    assert overridden.status_code == 202, overridden.text
+    overridden_run = overridden.json()["run"]
+    assert overridden_run["settings_json"]["denoise"] == 0.61
+    overridden_strength = overridden_run["provenance_json"]["image_edit"]["strength"]
+    assert overridden_strength["mode"] == "manual"
+    assert overridden_strength["source_scope"] == "turn"
+    assert overridden_strength["reused"] is False
+
+
+async def test_edit_and_branch_reuses_inherited_auto_strength(client: AsyncClient) -> None:
+    uploaded = await client.post(
+        "/api/artifacts",
+        files={"file": ("reference.png", b"branched-edit-image", "image/png")},
+    )
+    artifact_id = uploaded.json()["id"]
+    chat = (await client.post("/api/chats", json={"title": "Branched edit"})).json()
+    accepted, _completed = await _image_turn(
+        client,
+        chat["id"],
+        "Replace the jacket with a green coat",
+        input_artifact_ids=[artifact_id],
+    )
+
+    branched = await client.post(
+        f"/api/messages/{accepted['user_message']['id']}/branch",
+        json={"text": "Replace the jacket with a blue coat"},
+    )
+
+    assert branched.status_code == 202, branched.text
+    run = branched.json()["run"]
+    assert run["settings_json"]["denoise"] == 0.66
+    strength = run["provenance_json"]["image_edit"]["strength"]
+    assert strength["mode"] == "auto"
+    assert strength["scope"] == "replacement"
+    assert strength["reason_codes"] == ["inherited_auto_value"]
+    assert strength["reused"] is True
