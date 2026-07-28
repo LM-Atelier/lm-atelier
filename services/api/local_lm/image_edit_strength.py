@@ -10,6 +10,7 @@ from .schemas import SettingField
 
 ESTIMATOR_VERSION = "prompt-edit-strength-v1"
 STRENGTH_PARAMETER = "denoise"
+STRENGTH_MODE_PARAMETER = "_image_edit_strength_mode"
 
 
 class EditStrengthMode(StrEnum):
@@ -41,6 +42,7 @@ class EditReason(StrEnum):
     UNSUPPORTED_LANGUAGE = "unsupported_language"
     INHERITED_AUTO_VALUE = "inherited_auto_value"
     EXPLICIT_VALUE = "explicit_value"
+    EXPLICIT_AUTO_MODE = "explicit_auto_mode"
 
 
 class EditSettingSource(StrEnum):
@@ -282,20 +284,34 @@ def resolve_image_edit_strength(
     *,
     inherited_auto: Mapping[str, Any] | None = None,
 ) -> ImageEditStrengthResolution | None:
+    if operation == Operation.TEXT_TO_IMAGE:
+        field = next((item for item in fields if item.key == STRENGTH_PARAMETER), None)
+        if field is not None:
+            effective_settings[STRENGTH_PARAMETER] = field.default
+        return None
     if operation != Operation.IMAGE_TO_IMAGE:
         return None
 
     minimum, maximum = _strength_bounds(fields)
-    explicit_source = next(
-        (
-            source
-            for source, layer in reversed(explicit_layers)
-            if isinstance(layer.get(STRENGTH_PARAMETER), int | float)
-            and not isinstance(layer.get(STRENGTH_PARAMETER), bool)
-            and minimum <= float(layer[STRENGTH_PARAMETER]) <= maximum
-        ),
-        None,
-    )
+    explicit_source: EditSettingSource | None = None
+    explicit_auto = False
+    for source, layer in reversed(explicit_layers):
+        raw_mode = layer.get(STRENGTH_MODE_PARAMETER)
+        raw_strength = layer.get(STRENGTH_PARAMETER)
+        if raw_mode == EditStrengthMode.AUTO.value:
+            explicit_auto = True
+            explicit_source = source
+            break
+        if (
+            isinstance(raw_strength, int | float)
+            and not isinstance(raw_strength, bool)
+            and minimum <= float(raw_strength) <= maximum
+        ):
+            explicit_source = source
+            break
+        if raw_mode == EditStrengthMode.MANUAL.value:
+            explicit_source = source
+            break
     if inherited_auto is not None and explicit_source == EditSettingSource.TURN:
         inherited_value = inherited_auto.get("value")
         if isinstance(inherited_value, int | float) and not isinstance(inherited_value, bool):
@@ -325,6 +341,20 @@ def resolve_image_edit_strength(
                 maximum=maximum,
                 reused=True,
             )
+
+    if explicit_auto:
+        resolution = estimate_image_edit_strength(prompt, minimum=minimum, maximum=maximum)
+        resolution = ImageEditStrengthResolution(
+            mode=resolution.mode,
+            value=resolution.value,
+            scope=resolution.scope,
+            confidence=resolution.confidence,
+            reason_codes=(*resolution.reason_codes, EditReason.EXPLICIT_AUTO_MODE),
+            minimum=resolution.minimum,
+            maximum=resolution.maximum,
+        )
+        effective_settings[STRENGTH_PARAMETER] = resolution.value
+        return resolution
 
     if explicit_source is not None:
         value = float(effective_settings[STRENGTH_PARAMETER])

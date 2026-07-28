@@ -203,6 +203,9 @@ h1, h2, h3 { margin: 0; }
 .setting-row span { display: flex; flex-direction: column; gap: 3px; }
 .setting-row strong { font-size: 13px; }
 .setting-row small { color: var(--muted); line-height: 1.3; }
+.image-edit-strength-inputs { display: grid; gap: 7px; }
+.image-edit-strength-inputs .segmented.compact { margin: 0; }
+.image-edit-strength-inputs .segmented button { padding: 6px 4px; font-size: 11px; }
 .setting-row input, .setting-row select, .toolbar select, .modal input, .modal select, .modal textarea { width: 100%; color: #e8ebef; border: 1px solid var(--border); border-radius: 8px; background: var(--panel-2); padding: 8px 9px; outline: 0; }
 .lora-stack-control { align-items: flex-start; }
 .lora-stack { display: grid; gap: 9px; min-width: min(100%, 580px); }

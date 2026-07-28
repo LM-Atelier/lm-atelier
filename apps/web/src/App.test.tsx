@@ -24,6 +24,19 @@ const imageSetting: SettingField = {
   help: "Exclude unwanted image details.",
 };
 
+const editStrengthSetting: SettingField = {
+  ...imageSetting,
+  key: "denoise",
+  label: "Change strength",
+  type: "number",
+  default: 1,
+  minimum: 0,
+  maximum: 1,
+  step: 0.01,
+  visibility: "advanced",
+  help: "For image edits, lower values preserve more of the source image.",
+};
+
 const videoSetting: SettingField = {
   ...imageSetting,
   key: "frames",
@@ -3525,7 +3538,27 @@ describe("App", () => {
     fireEvent.click(screen.getByRole("button", { name: "Turn settings" }));
     expect(screen.getByLabelText(/Edit image exclusion/)).toBeInTheDocument();
     expect(screen.queryByLabelText(/Fresh image exclusion/)).not.toBeInTheDocument();
-    expect(screen.getByLabelText("Edit strength")).toHaveValue(0.9);
+    expect(screen.getByRole("button", { name: "Auto" })).toHaveAttribute("aria-pressed", "true");
+    expect(screen.getByText("Predicted: localized")).toBeInTheDocument();
+    expect(screen.queryByLabelText("Manual change strength")).not.toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole("button", { name: "Manual" }));
+    expect(screen.getByLabelText("Manual change strength")).toHaveValue(0.5);
+    await waitFor(() => expect(api.updateChat).toHaveBeenCalledWith(chat.id, {
+      generation_settings_json: {
+        image: {
+          _image_edit_strength_mode: "manual",
+          denoise: 0.5,
+        },
+      },
+    }));
+    fireEvent.click(screen.getByRole("button", { name: "Auto" }));
+    expect(screen.queryByLabelText("Manual change strength")).not.toBeInTheDocument();
+    await waitFor(() => expect(api.updateChat).toHaveBeenCalledWith(chat.id, {
+      generation_settings_json: {
+        image: { _image_edit_strength_mode: "auto" },
+      },
+    }));
     fireEvent.click(screen.getByRole("button", { name: "Close settings" }));
     fireEvent.click(screen.getByRole("button", { name: "Edit" }));
     await waitFor(() => expect(api.updateChat).toHaveBeenCalledWith(chat.id, { routing_mode: "image" }));
@@ -3540,7 +3573,7 @@ describe("App", () => {
       project_id: null,
       title: "New image edit",
       archived: false,
-      routing_mode: "auto" as const,
+      routing_mode: "image" as const,
       confirm_uncertain_media: false,
       active_chat_profile_id: null,
       active_image_profile_id: null,
@@ -3552,6 +3585,14 @@ describe("App", () => {
     localStorage.setItem("local-lm-chat", chat.id);
     vi.mocked(api.chats).mockResolvedValue([chat]);
     vi.mocked(api.chat).mockResolvedValue({ ...chat, messages: [] });
+    vi.mocked(api.engines).mockResolvedValue([{
+      ...roleAwareMediaEngine,
+      settings: [imageSetting, editStrengthSetting, videoSetting],
+      settings_by_role: {
+        image: [imageSetting, editStrengthSetting],
+        video: [videoSetting],
+      },
+    }]);
     vi.mocked(api.upload).mockResolvedValue("sha256:uploaded-image");
     vi.mocked(api.updateChat).mockResolvedValue({ ...chat, routing_mode: "image" });
     const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
@@ -3562,6 +3603,11 @@ describe("App", () => {
     );
 
     const composer = await screen.findByRole("textbox", { name: "Message" });
+    expect(screen.getByRole("combobox", { name: "Generation mode" })).toHaveValue("image");
+    fireEvent.click(screen.getByRole("button", { name: "Turn settings" }));
+    expect(screen.queryByRole("group", { name: "Image edit change strength mode" })).not.toBeInTheDocument();
+    expect(screen.queryByLabelText("Manual change strength")).not.toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "Close settings" }));
     const attach = screen.getByRole("button", { name: "Attach file" });
     const input = attach.parentElement?.querySelector<HTMLInputElement>('input[type="file"]');
     expect(input).not.toBeNull();
@@ -3575,6 +3621,10 @@ describe("App", () => {
     }));
     expect(composer).toHaveFocus();
     expect(screen.getByText("sha256:uploaded-im")).toBeInTheDocument();
+    fireEvent.change(composer, { target: { value: "Replace the jacket" } });
+    fireEvent.click(screen.getByRole("button", { name: "Turn settings" }));
+    expect(screen.getByRole("group", { name: "Image edit change strength mode" })).toBeInTheDocument();
+    expect(screen.getByText("Predicted: replacement")).toBeInTheDocument();
   });
 
   it("applies turn controls to send, edit-and-branch, and regenerate actions", async () => {
