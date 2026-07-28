@@ -3,7 +3,7 @@ import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import App from "./App";
 import { api, connectEvents } from "./api";
-import type { BackupInfo, Chat, ChatDetail, EngineCapabilities, SettingField, TurnAccepted } from "./types";
+import type { BackupInfo, Chat, ChatDetail, EngineCapabilities, Job, SettingField, TurnAccepted } from "./types";
 
 const clipboardWrite = vi.fn();
 
@@ -1840,6 +1840,7 @@ describe("App", () => {
     );
     expect(await screen.findByAltText("Generation preview")).toBeInTheDocument();
     expect(screen.getByText("Generation preview")).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Animate" })).not.toBeInTheDocument();
   });
 
   it("copies complete messages and fenced code blocks", async () => {
@@ -3189,6 +3190,51 @@ describe("App", () => {
     fireEvent.click(screen.getByRole("button", { name: "Cancel" }));
     await waitFor(() => expect(api.deletePromptHelper).toHaveBeenCalledWith("chat-preview-helper"));
   });
+  it("labels image-to-video recipe onboarding without a certification claim", async () => {
+    vi.mocked(api.recipes).mockResolvedValue([{
+      id: "wan-i2v-candidate",
+      version: 1,
+      name: "Wan image animation",
+      summary: "Pinned image-to-video reference path.",
+      role: "video",
+      engine: "comfyui",
+      operations: ["image_to_video"],
+      license_id: "Apache-2.0",
+      status: "reference-candidate",
+      certified: false,
+      remote_id: "synthetic/wan-i2v",
+      revision: "a".repeat(40),
+      files: [],
+      total_size_bytes: 1024,
+      hardware: {
+        tier: "high-end-gpu",
+        minimum_ram_gb: 32,
+        recommended_ram_gb: 64,
+        minimum_vram_gb: 20,
+        recommended_vram_gb: 24,
+        guidance: "Requires supported high-memory hardware.",
+      },
+      default_settings: {},
+      workflow_path: "workflow.json",
+      node_policy: "ComfyUI core nodes only",
+      notes: [],
+    }]);
+    vi.mocked(api.installRecipe).mockResolvedValue({} as Job);
+    const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+    render(
+      <QueryClientProvider client={client}>
+        <App />
+      </QueryClientProvider>,
+    );
+
+    fireEvent.click(await screen.findByText("Model library"));
+    expect(await screen.findByText("Wan image animation")).toBeInTheDocument();
+    expect(screen.getByText("Reference candidate")).toBeInTheDocument();
+    expect(screen.getByText("Image → video")).toBeInTheDocument();
+    expect(screen.queryByText("Certified")).not.toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "Install recipe" }));
+    await waitFor(() => expect(api.installRecipe).toHaveBeenCalledWith("wan-i2v-candidate"));
+  });
   it("shows an Auto submission while model routing is pending", async () => {
     const stamp = "2026-07-22T00:00:00Z";
     const chat = {
@@ -3842,6 +3888,111 @@ describe("App", () => {
     expect(composer).toHaveFocus();
   });
 
+  it("animates a completed image through the image-to-video workflow path", async () => {
+    const stamp = "2026-07-28T00:00:00Z";
+    const chat: Chat = {
+      id: "chat-animate-image",
+      project_id: null,
+      title: "Animate image",
+      archived: false,
+      routing_mode: "image",
+      confirm_uncertain_media: false,
+      active_chat_profile_id: null,
+      active_image_profile_id: null,
+      active_video_profile_id: null,
+      active_head_message_id: "assistant-image",
+      created_at: stamp,
+      updated_at: stamp,
+    };
+    const detail: ChatDetail = {
+      ...chat,
+      messages: [{
+        id: "assistant-image",
+        chat_id: chat.id,
+        parent_id: null,
+        role: "assistant",
+        status: "complete",
+        parts: [{
+          id: "image-part",
+          position: 0,
+          type: "image",
+          text: null,
+          artifact_id: "sha256:animate-source",
+          metadata_json: {},
+        }],
+        created_at: stamp,
+        updated_at: stamp,
+      }],
+    };
+    const workflow = (operation: "text_to_video" | "image_to_video", label: string) => ({
+      id: `workflow-${operation}`,
+      name: label,
+      operation,
+      description: "",
+      current_revision_id: `revision-${operation}`,
+      revisions: [{
+        id: `revision-${operation}`,
+        workflow_id: `workflow-${operation}`,
+        version: 1,
+        engine: "mock",
+        engine_version: null,
+        ui_graph_json: {},
+        api_graph_json: {},
+        input_schema_json: {
+          type: "object",
+          properties: {
+            frames: { type: "integer", title: label, default: 17, minimum: 1, maximum: 81 },
+          },
+        },
+        dependencies_json: {},
+        trusted: true,
+        created_at: stamp,
+      }],
+    });
+    localStorage.setItem("local-lm-chat", chat.id);
+    vi.mocked(api.chats).mockResolvedValue([chat]);
+    let currentDetail = detail;
+    vi.mocked(api.chat).mockImplementation(async () => currentDetail);
+    vi.mocked(api.engines).mockResolvedValue([roleAwareMediaEngine]);
+    vi.mocked(api.workflows).mockResolvedValue([
+      workflow("text_to_video", "Text video frames"),
+      workflow("image_to_video", "Image motion frames"),
+    ]);
+    vi.mocked(api.updateChat).mockImplementation(async (_id, values) => {
+      currentDetail = { ...currentDetail, ...values };
+      return { ...chat, ...values };
+    });
+    vi.mocked(api.sendTurn).mockReturnValue(new Promise(() => {}));
+    const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+    render(
+      <QueryClientProvider client={client}>
+        <App />
+      </QueryClientProvider>,
+    );
+
+    fireEvent.click(await screen.findByRole("button", { name: "Animate" }));
+    await waitFor(() => expect(api.updateChat).toHaveBeenCalledWith(chat.id, { routing_mode: "video" }));
+    const composer = screen.getByRole("textbox", { name: "Message" });
+    expect(composer).toHaveValue("Animate this image");
+    expect(composer).toHaveFocus();
+    expect(screen.getByText("sha256:animate-sou")).toBeInTheDocument();
+    expect(screen.getByRole("combobox", { name: "Generation mode" })).toHaveValue("video");
+
+    fireEvent.click(screen.getByRole("button", { name: "Turn settings" }));
+    expect(await screen.findByRole("spinbutton", { name: /Image motion frames/ })).toBeInTheDocument();
+    expect(screen.queryByRole("spinbutton", { name: /Text video frames/ })).not.toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "Close settings" }));
+    fireEvent.click(screen.getByRole("button", { name: "Send" }));
+
+    await waitFor(() => expect(api.sendTurn).toHaveBeenCalledWith(
+      chat.id,
+      "Animate this image",
+      "video",
+      ["sha256:animate-source"],
+      {},
+      expect.any(String),
+    ));
+  });
   it("offers image editing immediately after an image is attached", async () => {
     const stamp = "2026-07-26T00:00:00Z";
     const chat = {
@@ -4367,5 +4518,9 @@ describe("App", () => {
     expect(await screen.findByText("art_dropped1234567")).toBeInTheDocument();
     expect(vi.mocked(api.upload)).toHaveBeenCalledTimes(1);
     expect(vi.mocked(api.upload)).toHaveBeenCalledWith(image);
+    fireEvent.click(screen.getByRole("button", { name: "Animate attached image" }));
+    await waitFor(() => expect(api.updateChat).toHaveBeenCalledWith("chat-drop", { routing_mode: "video" }));
+    expect(textarea).toHaveValue("Animate this image");
+    expect(textarea).toHaveFocus();
   });
 });
