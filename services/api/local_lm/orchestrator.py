@@ -185,6 +185,8 @@ class ConversationOrchestrator:
         self._tasks: dict[str, asyncio.Task[None]] = {}
         self._media_restart_task: asyncio.Task[None] | None = None
         self._media_restart_after_chat_activity = False
+        self._step_prewarm_plan_id: str | None = None
+        self._step_prewarm_task: asyncio.Task[None] | None = None
         self._chat_guards: dict[str, asyncio.Lock] = {}
         self._chat_planner_ready = asyncio.Event()
         self._chat_planner_ready.set()
@@ -1967,6 +1969,8 @@ class ConversationOrchestrator:
             await asyncio.gather(self._media_restart_task, return_exceptions=True)
             self._media_restart_task = None
         self._media_restart_after_chat_activity = False
+        self._step_prewarm_plan_id = None
+        self._step_prewarm_task = None
 
     def stop_admission(self) -> None:
         self._admission_open = False
@@ -2016,6 +2020,7 @@ class ConversationOrchestrator:
                     }
                     operation = run.operation
                     prompt = run.standalone_prompt
+                    self._arm_step_prewarm(session, run)
                 await self.events.publish("run.created", run_id, event_payload)
                 await self.events.publish(
                     "plan.selected",
@@ -2036,6 +2041,7 @@ class ConversationOrchestrator:
                 finally:
                     if operation == Operation.TEXT.value:
                         self._release_deferred_media_restart()
+                        await self._settle_step_prewarm(job_id)
                     if resume_chat_profile:
                         await self._complete_media_handoff(resume_chat_profile)
         except asyncio.CancelledError:
@@ -2093,6 +2099,7 @@ class ConversationOrchestrator:
             async for event in self.engines.chat.stream(request):
                 if event.type == "delta":
                     self._release_deferred_media_restart()
+                    self._begin_step_prewarm()
                     accumulated += event.text
                     await self.events.publish(
                         "text.delta",
@@ -2818,6 +2825,84 @@ class ConversationOrchestrator:
             return
         self._media_restart_after_chat_activity = False
         self._schedule_media_restart()
+
+    def _arm_step_prewarm(self, session: Session, run: Run) -> None:
+        """Remember that the following ordered step will need the media worker.
+
+        Only a text step whose successor in the same work plan runs on the
+        media worker arms a prewarm, and only while that worker is down.
+        Single-step turns and same-role consecutive steps change nothing.
+        """
+
+        self._step_prewarm_plan_id = None
+        self._step_prewarm_task = None
+        if (
+            run.operation != Operation.TEXT.value
+            or not run.work_plan_id
+            or not run.work_step_id
+            or self.engines.settings.media_engine != "comfyui"
+        ):
+            return
+        step = session.get(WorkStep, run.work_step_id)
+        if not step:
+            return
+        next_step = session.scalar(
+            select(WorkStep).where(
+                WorkStep.plan_id == run.work_plan_id,
+                WorkStep.ordinal == step.ordinal + 1,
+            )
+        )
+        if (
+            not next_step
+            or next_step.operation == Operation.TEXT.value
+            or next_step.status != JobStatus.QUEUED.value
+        ):
+            return
+        media_worker = next(
+            (item for item in self.processes.statuses() if item.name == "media"), None
+        )
+        if media_worker is None or media_worker.running:
+            return
+        self._step_prewarm_plan_id = run.work_plan_id
+
+    def _begin_step_prewarm(self) -> None:
+        """Start the next ordered step's media worker while chat still streams.
+
+        Mirrors the deferred media restart released on chat activity: only the
+        worker process launches now. ComfyUI defers model loads until a prompt
+        executes, so the running text step keeps exclusive use of the device
+        and the media job still claims the primary lease before generating.
+        """
+
+        if self._step_prewarm_plan_id is None or self._step_prewarm_task is not None:
+            return
+        self._schedule_media_restart()
+        self._step_prewarm_task = self._media_restart_task
+
+    async def _settle_step_prewarm(self, job_id: str) -> None:
+        """Finish or abort a plan prewarm once its triggering step stops."""
+
+        if self._step_prewarm_plan_id is None:
+            return
+        with self.session_factory() as session:
+            job = session.get(Job, job_id)
+            completed = job is not None and job.status == JobStatus.COMPLETE.value
+        if completed:
+            # A step that never streamed still warms its successor on success.
+            self._begin_step_prewarm()
+            self._step_prewarm_plan_id = None
+            self._step_prewarm_task = None
+            return
+        task = self._step_prewarm_task
+        self._step_prewarm_plan_id = None
+        self._step_prewarm_task = None
+        if task and not task.done():
+            # Cancellation or failure blocks the rest of the plan, so stop the
+            # in-flight worker launch exactly as close() stops restarts.
+            task.cancel()
+            await asyncio.gather(task, return_exceptions=True)
+            if self._media_restart_task is task:
+                self._media_restart_task = None
 
     async def _restart_media_worker(self) -> None:
         try:
