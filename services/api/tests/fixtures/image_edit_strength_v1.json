@@ -72,6 +72,33 @@
     "reasons": ["minimal_adjustment", "preservation_requested"]
   },
   {
+    "name": "minimal lighting with distant garment noun",
+    "prompt": "Make the studio lighting only slightly warmer and subtly brighter. Keep the mannequin, red shirt, pants, pose, framing, and background unchanged.",
+    "scope": "minimal",
+    "confidence": "high",
+    "minimum": 0.30,
+    "maximum": 0.44,
+    "reasons": ["minimal_adjustment", "preservation_requested"]
+  },
+  {
+    "name": "nearby make shirt replacement",
+    "prompt": "Make the plain red shirt a royal-blue jacket.",
+    "scope": "replacement",
+    "confidence": "high",
+    "minimum": 0.58,
+    "maximum": 0.74,
+    "reasons": ["subject_replacement"]
+  },
+  {
+    "name": "preserve shirt while adjusting light",
+    "prompt": "Make it subtly brighter and keep the red shirt unchanged.",
+    "scope": "minimal",
+    "confidence": "high",
+    "minimum": 0.30,
+    "maximum": 0.44,
+    "reasons": ["minimal_adjustment", "preservation_requested"]
+  },
+  {
     "name": "unsupported language fallback",
     "prompt": "把衣服改成绿色",
     "scope": "fallback",
