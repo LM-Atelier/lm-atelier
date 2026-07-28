@@ -870,6 +870,7 @@ async def _accept_turn(
     use_explicit_parent: bool = False,
     replacement_message_id: str | None = None,
     source_action: str = "send",
+    inherited_image_edit_strength: dict[str, Any] | None = None,
 ) -> TurnAccepted:
     try:
         return await orchestrator.create_turn(
@@ -879,6 +880,7 @@ async def _accept_turn(
             use_explicit_parent=use_explicit_parent,
             replacement_message_id=replacement_message_id,
             source_action=source_action,
+            inherited_image_edit_strength=inherited_image_edit_strength,
         )
     except LookupError as exc:
         raise HTTPException(404, str(exc)) from exc
@@ -934,6 +936,19 @@ async def get_message(message_id: str, session: ConversationSessionDep) -> Messa
     if not message:
         raise HTTPException(404, "message not found")
     return message
+
+
+def _inherited_auto_image_edit_strength(run: Run) -> dict[str, Any] | None:
+    image_edit = run.provenance_json.get("image_edit")
+    if not isinstance(image_edit, dict):
+        return None
+    strength = image_edit.get("strength")
+    if not isinstance(strength, dict) or strength.get("mode") != "auto":
+        return None
+    value = strength.get("value")
+    if not isinstance(value, int | float) or isinstance(value, bool):
+        return None
+    return strength
 
 
 @router.post("/messages/{message_id}/regenerate", response_model=TurnAccepted, status_code=202)
@@ -1010,6 +1025,9 @@ async def regenerate_message(
         input_artifact_ids=orchestrator.input_artifact_ids_for_run(session, prior_run),
         settings={**prior_settings, **payload.settings},
     )
+    inherited_image_edit_strength = (
+        None if "denoise" in payload.settings else _inherited_auto_image_edit_strength(prior_run)
+    )
     return await _accept_turn(
         orchestrator,
         session,
@@ -1018,6 +1036,7 @@ async def regenerate_message(
         use_explicit_parent=True,
         replacement_message_id=message_id,
         source_action="regenerate",
+        inherited_image_edit_strength=inherited_image_edit_strength,
     )
 
 
@@ -1055,6 +1074,7 @@ async def edit_and_branch(
         raise HTTPException(404, "user message not found")
     prior_run = session.scalar(select(Run).where(Run.user_message_id == source.id))
     updates: dict[str, Any] = {"parent_message_id": source.parent_id}
+    inherited_image_edit_strength: dict[str, Any] | None = None
     if prior_run:
         prior_mode = _mode_for_operation(Operation(prior_run.operation))
         mode_was_supplied = "mode" in payload.model_fields_set and payload.mode is not None
@@ -1090,6 +1110,7 @@ async def edit_and_branch(
                     input_schema=(prior_revision.input_schema_json if prior_revision else None),
                     engine=prior_profile.engine if prior_profile else None,
                 )
+                inherited_image_edit_strength = _inherited_auto_image_edit_strength(prior_run)
             except EngineNotConfiguredError as exc:
                 raise HTTPException(409, str(exc)) from exc
             except EngineSchemaUnavailableError as exc:
@@ -1104,6 +1125,7 @@ async def edit_and_branch(
         turn,
         use_explicit_parent=True,
         source_action="edit_and_branch",
+        inherited_image_edit_strength=inherited_image_edit_strength,
     )
 
 
