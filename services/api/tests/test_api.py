@@ -2856,6 +2856,17 @@ async def test_editing_user_message_creates_new_active_branch(client: AsyncClien
     payload = branched.json()
     assert payload["run"]["operation"] == "text"
     assert payload["user_message"]["parent_id"] == first.json()["user_message"]["parent_id"]
+    await wait_for_run(client, payload["run"]["id"])
+    with SessionLocal() as session:
+        branched_run = session.get(Run, payload["run"]["id"])
+        assert branched_run
+        _, source_message_ids = ConversationOrchestrator._context_messages_with_sources(
+            session,
+            branched_run,
+        )
+    assert payload["user_message"]["id"] in source_message_ids
+    assert second.json()["user_message"]["id"] not in source_message_ids
+    assert second.json()["assistant_message"]["id"] not in source_message_ids
     detail = (await client.get(f"/api/chats/{chat['id']}")).json()
     assert detail["active_head_message_id"] == payload["assistant_message"]["id"]
 
@@ -3160,7 +3171,9 @@ async def test_new_turn_uses_persisted_active_branch_head(client: AsyncClient) -
     ] == second.json()["assistant_message"]["id"]
 
 
-async def test_long_chat_records_visible_context_truncation(client: AsyncClient) -> None:
+async def test_long_chat_compacts_context_without_changing_the_transcript(
+    client: AsyncClient,
+) -> None:
     profiles = (await client.get("/api/profiles?role=chat")).json()
     profile = profiles[0]
     updated = await client.patch(
@@ -3188,6 +3201,10 @@ async def test_long_chat_records_visible_context_truncation(client: AsyncClient)
     context = final_run["provenance_json"]["context"]
     assert context["messages_omitted"] > 0
     assert context["input_tokens"] <= context["input_budget"]
+    assert context["compaction"]["active"] is True
+    assert context["compaction"]["source_message_count"] == context["messages_omitted"]
+    assert context["compaction"]["transcript_preserved"] is True
+    assert context["compaction"]["reversible"] is True
     assert final_run["settings_json"]["context_length"] == 512
     assert final_run["provenance_json"]["resolved_settings"]["context_length"] == 512
 
@@ -3195,6 +3212,14 @@ async def test_long_chat_records_visible_context_truncation(client: AsyncClient)
     assistant = [item for item in detail["messages"] if item["role"] == "assistant"][-1]
     metadata = next(part for part in assistant["parts"] if part["type"] == "generation_metadata")
     assert metadata["metadata_json"]["context"]["messages_omitted"] > 0
+    assert metadata["metadata_json"]["context"]["compaction"]["active"] is True
+    assert len(detail["messages"]) == 12
+    assert any(
+        part["text"] and part["text"].startswith("Turn 0:")
+        for message in detail["messages"]
+        for part in message["parts"]
+        if part["type"] == "text"
+    )
 
 
 async def test_turn_rejects_load_only_setting_overrides(client: AsyncClient) -> None:

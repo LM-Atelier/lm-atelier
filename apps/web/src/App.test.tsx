@@ -1599,6 +1599,18 @@ describe("App", () => {
                 },
               },
             },
+            context: {
+              context_limit: 512,
+              input_tokens: 360,
+              messages_omitted: 4,
+              compaction: {
+                active: true,
+                version: "deterministic-excerpts-v1",
+                source_message_count: 4,
+                transcript_preserved: true,
+                reversible: true,
+              },
+            },
           },
         }] : []),
       ],
@@ -1638,6 +1650,8 @@ describe("App", () => {
     expect(screen.queryByText("Old branch")).not.toBeInTheDocument();
     expect(screen.getAllByText("Auto chose Code specialist · matched code, python")).toHaveLength(2);
     expect(screen.getAllByText("LoRA Auto used Atelier Ink — matched ink, watercolor" )).toHaveLength(2);
+    expect(screen.getAllByText("Compacted 4 earlier messages · full transcript preserved")).toHaveLength(2);
+    expect(screen.queryByText(/earlier messages omitted/)).not.toBeInTheDocument();
     fireEvent.click(screen.getAllByText("Edit and branch").at(-1)!);
     expect(screen.getByDisplayValue("Edited question")).toBeInTheDocument();
   });

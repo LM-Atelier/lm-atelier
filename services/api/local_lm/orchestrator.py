@@ -27,6 +27,12 @@ from .auxiliary_assets import (
     workflow_lora_extension,
 )
 from .capability_evidence import current_capability_evidence, evidence_input_modalities
+from .context_compaction import (
+    CONTEXT_COMPACTION_VERSION,
+    MAX_COMPACTION_CHARACTERS,
+    MIN_COMPACTION_CHARACTERS,
+    compact_context_messages,
+)
 from .custom_nodes import custom_node_dependency_errors
 from .db import SessionLocal
 from .domain import (
@@ -2469,7 +2475,7 @@ class ConversationOrchestrator:
     async def _prepare_chat_context(
         self, session: Session, run: Run
     ) -> tuple[list[dict[str, Any]], dict[str, Any], dict[str, Any], bool]:
-        messages = self._context_messages(session, run)
+        messages, source_message_ids = self._context_messages_with_sources(session, run)
         self._commit_before_await(session)
         capabilities = await self.engines.chat_capabilities()
         candidates = self._visual_context_artifacts(session, run)
@@ -2539,6 +2545,10 @@ class ConversationOrchestrator:
                     "images_skipped": len(candidates),
                 }
             )
+        source_message_ids = source_message_ids[: len(messages)] + [None] * max(
+            0,
+            len(messages) - len(source_message_ids),
+        )
         profile = session.get(ModelProfile, run.profile_id) if run.profile_id else None
         context_limit = int(
             (profile.load_settings_json if profile else {}).get("context_length", 8192)
@@ -2550,20 +2560,11 @@ class ConversationOrchestrator:
         input_budget = max(64, context_limit - output_limit - safety_tokens)
 
         self._commit_before_await(session)
-        input_tokens = await self.engines.chat.count_tokens(messages)
-        omitted = 0
-        system_messages = 1 if messages and messages[0].get("role") == "system" else 0
-        while input_tokens > input_budget and len(messages) > system_messages + 1:
-            remove_count = 1
-            if (
-                messages[system_messages].get("role") == MessageRole.USER.value
-                and len(messages) > system_messages + 2
-                and messages[system_messages + 1].get("role") == MessageRole.ASSISTANT.value
-            ):
-                remove_count = 2
-            del messages[system_messages : system_messages + remove_count]
-            omitted += remove_count
-            input_tokens = await self.engines.chat.count_tokens(messages)
+        messages, input_tokens, omitted, compaction = await self._fit_chat_context(
+            messages,
+            source_message_ids,
+            input_budget,
+        )
         if input_tokens > input_budget:
             raise ValueError(
                 "The current instructions and message exceed this profile's context window. "
@@ -2572,7 +2573,7 @@ class ConversationOrchestrator:
 
         request_settings = {**run.settings_json, "max_tokens": output_limit}
         metadata = {
-            "policy": "preserve-system-and-newest",
+            "policy": "compact-oldest-preserve-system-and-newest",
             "context_limit": context_limit,
             "input_budget": input_budget,
             "input_tokens": input_tokens,
@@ -2581,10 +2582,109 @@ class ConversationOrchestrator:
             "safety_tokens": safety_tokens,
             "messages_included": len(messages),
             "messages_omitted": omitted,
+            "compaction": compaction,
             "output_adjusted": output_limit != requested_output,
             "vision": vision_metadata,
         }
         return messages, request_settings, metadata, capabilities.tool_calling
+
+    async def _fit_chat_context(
+        self,
+        messages: list[dict[str, Any]],
+        source_message_ids: list[str | None],
+        input_budget: int,
+    ) -> tuple[list[dict[str, Any]], int, int, dict[str, Any]]:
+        remaining = list(messages)
+        remaining_sources = list(source_message_ids)
+        removed: list[dict[str, Any]] = []
+        removed_sources: list[str | None] = []
+        system_messages = (
+            1 if remaining and remaining[0].get("role") == MessageRole.SYSTEM.value else 0
+        )
+
+        def remove_oldest() -> bool:
+            if len(remaining) <= system_messages + 1:
+                return False
+            remove_count = 1
+            if (
+                remaining[system_messages].get("role") == MessageRole.USER.value
+                and len(remaining) > system_messages + 2
+                and remaining[system_messages + 1].get("role") == MessageRole.ASSISTANT.value
+            ):
+                remove_count = 2
+            removed.extend(remaining[system_messages : system_messages + remove_count])
+            removed_sources.extend(
+                remaining_sources[system_messages : system_messages + remove_count]
+            )
+            del remaining[system_messages : system_messages + remove_count]
+            del remaining_sources[system_messages : system_messages + remove_count]
+            return True
+
+        input_tokens = await self.engines.chat.count_tokens(remaining)
+        while input_tokens > input_budget and remove_oldest():
+            input_tokens = await self.engines.chat.count_tokens(remaining)
+        if not removed:
+            return (
+                remaining,
+                input_tokens,
+                0,
+                {
+                    "active": False,
+                    "version": CONTEXT_COMPACTION_VERSION,
+                    "reason": "not_needed",
+                    "transcript_preserved": True,
+                    "reversible": True,
+                },
+            )
+
+        max_characters = min(
+            MAX_COMPACTION_CHARACTERS,
+            max(MIN_COMPACTION_CHARACTERS, input_budget * 2),
+        )
+        while removed:
+            folded = compact_context_messages(
+                removed,
+                removed_sources,
+                max_characters=max_characters,
+            )
+            candidate = list(remaining)
+            candidate.insert(system_messages, folded.message)
+            candidate_tokens = await self.engines.chat.count_tokens(candidate)
+            if candidate_tokens <= input_budget:
+                return (
+                    candidate,
+                    candidate_tokens,
+                    len(removed),
+                    {
+                        **folded.provenance,
+                        "fold_tokens": max(0, candidate_tokens - input_tokens),
+                    },
+                )
+            if max_characters > MIN_COMPACTION_CHARACTERS:
+                max_characters = max(
+                    MIN_COMPACTION_CHARACTERS,
+                    int(max_characters * 0.7),
+                )
+                continue
+            if not remove_oldest():
+                break
+            input_tokens = await self.engines.chat.count_tokens(remaining)
+            while input_tokens > input_budget and remove_oldest():
+                input_tokens = await self.engines.chat.count_tokens(remaining)
+
+        return (
+            remaining,
+            input_tokens,
+            len(removed),
+            {
+                "active": False,
+                "version": CONTEXT_COMPACTION_VERSION,
+                "reason": "insufficient_budget",
+                "source_message_count": len(removed),
+                "transcript_preserved": True,
+                "reversible": True,
+            },
+        )
 
     async def _attach_visual_context(
         self,
@@ -4598,14 +4698,24 @@ class ConversationOrchestrator:
 
     @staticmethod
     def _context_messages(session: Session, run: Run) -> list[dict[str, str]]:
+        messages, _ = ConversationOrchestrator._context_messages_with_sources(session, run)
+        return messages
+
+    @staticmethod
+    def _context_messages_with_sources(
+        session: Session,
+        run: Run,
+    ) -> tuple[list[dict[str, str]], list[str | None]]:
         chat = session.get(Chat, run.chat_id)
         if not chat:
-            return []
+            return [], []
         messages: list[dict[str, str]] = []
+        source_message_ids: list[str | None] = []
         if chat.project_id:
             project = session.get(Project, chat.project_id)
             if project and project.instructions:
                 messages.append({"role": "system", "content": project.instructions})
+                source_message_ids.append(None)
         plan = session.get(WorkPlan, run.work_plan_id) if run.work_plan_id else None
         if plan:
             rows = [
@@ -4641,6 +4751,7 @@ class ConversationOrchestrator:
             )
             if text:
                 messages.append({"role": message.role, "content": text})
+                source_message_ids.append(message.id)
         provenance = run.provenance_json if isinstance(run.provenance_json, dict) else {}
         compiled_step = provenance.get("compiled_step")
         if run.operation == Operation.TEXT.value and isinstance(compiled_step, dict):
@@ -4658,10 +4769,12 @@ class ConversationOrchestrator:
                                 "content": item["text"].strip(),
                             }
                         )
+                        source_message_ids.append(None)
             step_prompt = compiled_step.get("prompt")
             if isinstance(step_prompt, str) and step_prompt.strip():
                 messages.append({"role": MessageRole.USER.value, "content": step_prompt.strip()})
-        return messages
+                source_message_ids.append(None)
+        return messages, source_message_ids
 
     @staticmethod
     def _message_context_text(
