@@ -89,6 +89,7 @@ from .ordered_planning import OrderedPlanCompiler, OrderedPlanConfirmationRequir
 from .processes import ProcessSupervisor
 from .profile_service import AUTO_PROFILE_ID
 from .progress import completed_progress, update_job_progress
+from .prompt_helpers import PROMPT_HELPER_SCOPE, prompt_helper_system_message
 from .routing import ModalityRouter, RouteConfirmationRequired
 from .scheduler import ResourceScheduler
 from .schemas import (
@@ -4061,6 +4062,10 @@ class ConversationOrchestrator:
         session: Session, chat: Chat, parent_message_id: str | None
     ) -> list[dict[str, str]]:
         messages: list[dict[str, str]] = []
+        if chat.scope == PROMPT_HELPER_SCOPE:
+            messages.append(
+                {"role": "system", "content": prompt_helper_system_message(chat.draft_prompt)}
+            )
         if chat.project_id:
             project = session.get(Project, chat.project_id)
             if project and project.instructions:
@@ -4711,6 +4716,11 @@ class ConversationOrchestrator:
             return [], []
         messages: list[dict[str, str]] = []
         source_message_ids: list[str | None] = []
+        if chat.scope == PROMPT_HELPER_SCOPE:
+            messages.append(
+                {"role": "system", "content": prompt_helper_system_message(chat.draft_prompt)}
+            )
+            source_message_ids.append(None)
         if chat.project_id:
             project = session.get(Project, chat.project_id)
             if project and project.instructions:

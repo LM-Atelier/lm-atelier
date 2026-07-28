@@ -97,6 +97,10 @@ vi.mock("./api", () => ({
     createChat: vi.fn(),
     updateChat: vi.fn(),
     deleteChat: vi.fn(),
+    createPromptHelper: vi.fn(),
+    promptHelper: vi.fn(),
+    updatePromptHelper: vi.fn(),
+    deletePromptHelper: vi.fn(),
     exportProject: vi.fn(),
     importProject: vi.fn(),
     artifacts: vi.fn().mockResolvedValue([]),
@@ -3028,6 +3032,163 @@ describe("App", () => {
     expect(screen.queryByText("Negative prompt")).not.toBeInTheDocument();
   });
 
+  it("adopts a refined prompt and deletes the isolated workshop", async () => {
+    const stamp = "2026-07-28T00:00:00Z";
+    const chat: Chat = {
+      id: "chat-workshop",
+      project_id: null,
+      title: "Workshop source",
+      archived: false,
+      routing_mode: "text",
+      confirm_uncertain_media: false,
+      active_chat_profile_id: null,
+      active_image_profile_id: null,
+      active_video_profile_id: null,
+      active_head_message_id: null,
+      created_at: stamp,
+      updated_at: stamp,
+    };
+    const helper = {
+      ...chat,
+      id: "chat-helper",
+      title: "Prompt workshop",
+      archived: true,
+      draft_prompt: "A blue cup",
+      active_head_message_id: "helper-assistant",
+      messages: [
+        {
+          id: "helper-user",
+          chat_id: "chat-helper",
+          parent_id: null,
+          role: "user" as const,
+          status: "complete" as const,
+          parts: [{ id: "helper-user-text", position: 0, type: "text" as const, text: "Improve the current draft", artifact_id: null, metadata_json: {} }],
+          created_at: stamp,
+          updated_at: stamp,
+        },
+        {
+          id: "helper-assistant",
+          chat_id: "chat-helper",
+          parent_id: "helper-user",
+          role: "assistant" as const,
+          status: "complete" as const,
+          parts: [{ id: "helper-answer", position: 0, type: "text" as const, text: "A cobalt ceramic cup in soft window light", artifact_id: null, metadata_json: {} }],
+          created_at: stamp,
+          updated_at: stamp,
+        },
+      ],
+    };
+    localStorage.setItem("local-lm-chat", chat.id);
+    vi.mocked(api.chats).mockResolvedValue([chat]);
+    vi.mocked(api.chat).mockResolvedValue({ ...chat, messages: [] });
+    vi.mocked(api.createPromptHelper).mockResolvedValue({ ...helper, messages: [] });
+    vi.mocked(api.promptHelper).mockResolvedValue(helper);
+    vi.mocked(api.updatePromptHelper).mockResolvedValue(helper);
+    vi.mocked(api.deletePromptHelper).mockResolvedValue(undefined);
+    vi.mocked(api.sendTurn).mockResolvedValue({} as TurnAccepted);
+    const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+    render(
+      <QueryClientProvider client={client}>
+        <App />
+      </QueryClientProvider>,
+    );
+
+    const composer = await screen.findByRole("textbox", { name: "Message" });
+    fireEvent.change(composer, { target: { value: "A blue cup" } });
+    fireEvent.click(screen.getByRole("button", { name: "Open prompt workshop" }));
+
+    expect(await screen.findByRole("dialog", { name: "Prompt workshop" })).toBeVisible();
+    const adopt = await screen.findByRole("button", { name: "Use latest response as draft" });
+    await waitFor(() => expect(adopt).toBeEnabled());
+    fireEvent.click(adopt);
+    expect(screen.getByRole("textbox", { name: "Draft prompt" })).toHaveValue(
+      "A cobalt ceramic cup in soft window light",
+    );
+    await waitFor(() => expect(screen.getByRole("button", { name: "Use prompt" })).toBeEnabled());
+    fireEvent.click(screen.getByRole("button", { name: "Use prompt" }));
+
+    await waitFor(() => expect(api.deletePromptHelper).toHaveBeenCalledWith("chat-helper"));
+    expect(await screen.findByRole("textbox", { name: "Message" })).toHaveValue(
+      "A cobalt ceramic cup in soft window light",
+    );
+    expect(screen.queryByRole("dialog", { name: "Prompt workshop" })).not.toBeInTheDocument();
+  });
+
+  it("queues prompt previews with capability-derived low-cost settings", async () => {
+    const stamp = "2026-07-28T00:00:00Z";
+    const chat: Chat = {
+      id: "chat-preview-workshop",
+      project_id: null,
+      title: "Preview workshop source",
+      archived: false,
+      routing_mode: "image",
+      confirm_uncertain_media: false,
+      active_chat_profile_id: null,
+      active_image_profile_id: null,
+      active_video_profile_id: null,
+      active_head_message_id: null,
+      created_at: stamp,
+      updated_at: stamp,
+    };
+    const helper = {
+      ...chat,
+      id: "chat-preview-helper",
+      title: "Prompt workshop",
+      archived: true,
+      routing_mode: "text" as const,
+      draft_prompt: "A copper kettle",
+      messages: [],
+    };
+    const numericField = (key: string, value: number): SettingField => ({
+      ...imageSetting,
+      key,
+      label: key,
+      type: "integer",
+      default: value,
+      minimum: 1,
+      maximum: 2048,
+    });
+    localStorage.setItem("local-lm-chat", chat.id);
+    vi.mocked(api.chats).mockResolvedValue([chat]);
+    vi.mocked(api.chat).mockResolvedValue({ ...chat, messages: [] });
+    vi.mocked(api.engines).mockResolvedValue([{
+      ...roleAwareMediaEngine,
+      settings_by_role: {
+        image: [numericField("width", 1024), numericField("steps", 30), numericField("seed", -1)],
+        video: [videoSetting],
+      },
+    }]);
+    vi.mocked(api.createPromptHelper).mockResolvedValue(helper);
+    vi.mocked(api.promptHelper).mockResolvedValue(helper);
+    vi.mocked(api.updatePromptHelper).mockResolvedValue(helper);
+    vi.mocked(api.deletePromptHelper).mockResolvedValue(undefined);
+    vi.mocked(api.sendTurn).mockResolvedValue({} as TurnAccepted);
+    const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+    render(
+      <QueryClientProvider client={client}>
+        <App />
+      </QueryClientProvider>,
+    );
+
+    const composer = await screen.findByRole("textbox", { name: "Message" });
+    fireEvent.change(composer, { target: { value: "A copper kettle" } });
+    fireEvent.click(screen.getByRole("button", { name: "Open prompt workshop" }));
+    await waitFor(() => expect(api.sendTurn).toHaveBeenCalledTimes(1));
+    const preview = await screen.findByRole("button", { name: "Preview image" });
+    await waitFor(() => expect(preview).toBeEnabled());
+    fireEvent.click(preview);
+
+    await waitFor(() => expect(api.sendTurn).toHaveBeenCalledTimes(2));
+    expect(vi.mocked(api.sendTurn).mock.calls[1]).toEqual([
+      "chat-preview-helper",
+      "A copper kettle",
+      "image",
+      [],
+      { width: 512, steps: 8 },
+    ]);
+    fireEvent.click(screen.getByRole("button", { name: "Cancel" }));
+    await waitFor(() => expect(api.deletePromptHelper).toHaveBeenCalledWith("chat-preview-helper"));
+  });
   it("shows an Auto submission while model routing is pending", async () => {
     const stamp = "2026-07-22T00:00:00Z";
     const chat = {

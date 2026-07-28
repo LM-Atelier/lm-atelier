@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import {
   normalizeSettingsForFields,
+  promptPreviewSettings,
   resolveCapabilitySettings,
   resolveWorkflowSettings,
 } from "./settings";
@@ -172,5 +173,42 @@ describe("resolveWorkflowSettings", () => {
         visibility: "basic",
       }),
     ]);
+  });
+  it("derives bounded low-cost preview values from capability fields", () => {
+    const field = (
+      key: string,
+      defaultValue: number,
+      minimum: number | null,
+      maximum: number | null,
+      overrides: Partial<SettingField> = {},
+    ): SettingField => ({
+      ...imageField,
+      key,
+      label: key,
+      type: "integer",
+      default: defaultValue,
+      minimum,
+      maximum,
+      ...overrides,
+    });
+
+    expect(promptPreviewSettings([
+      field("width", 1024, 256, 2048, { multiple_of: 64 }),
+      field("height", 384, 256, 2048, { multiple_of: 64 }),
+      field("steps", 30, 12, 100),
+      field("num_frames", 49, 1, 81),
+      field("duration_seconds", 6, 1, 10),
+      field("batch_size", 4, 1, 8),
+      field("seed", -1, -1, 2 ** 31),
+      field("image_width", 1024, 256, 2048, { scope: "load" }),
+      field("output_height", 1024, 256, 2048, { available: false }),
+    ])).toEqual({
+      width: 512,
+      height: 384,
+      steps: 12,
+      num_frames: 16,
+      duration_seconds: 2,
+      batch_size: 1,
+    });
   });
 });

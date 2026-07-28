@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import copy
 import json
 import logging
 import math
@@ -14,7 +15,7 @@ from typing import TYPE_CHECKING, Annotated, Any, Literal, cast
 
 import httpx
 from fastapi import APIRouter, Depends, File, HTTPException, Query, Request, Response, UploadFile
-from sqlalchemy import and_, func, or_, select, text
+from sqlalchemy import Select, and_, func, or_, select, text
 from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.orm import Session, selectinload
 from starlette.responses import FileResponse
@@ -99,6 +100,11 @@ from .profile_service import (
     validate_profile_install,
 )
 from .progress import update_job_progress
+from .prompt_helpers import (
+    PROMPT_HELPER_SCOPE,
+    STANDARD_CHAT_SCOPE,
+    prompt_preview_settings,
+)
 from .recipes import get_reference_recipe, list_reference_recipes, recipe_download_request
 from .routing import RouteConfirmationRequired
 from .schemas import (
@@ -151,6 +157,9 @@ from .schemas import (
     ProjectCreate,
     ProjectOut,
     ProjectUpdate,
+    PromptHelperCreate,
+    PromptHelperDetail,
+    PromptHelperUpdate,
     ReferenceRecipe,
     RegenerateRequest,
     RunOut,
@@ -723,7 +732,9 @@ async def list_chats(
     include_archived: bool = False,
     query: str = Query(default="", max_length=500),
 ) -> list[Chat]:
-    statement = select(Chat).order_by(Chat.updated_at.desc())
+    statement = (
+        select(Chat).where(Chat.scope == STANDARD_CHAT_SCOPE).order_by(Chat.updated_at.desc())
+    )
     if project_id:
         statement = statement.where(Chat.project_id == project_id)
     if not include_archived:
@@ -774,11 +785,116 @@ async def get_chat(chat_id: str, session: ConversationSessionDep) -> Chat:
             .selectinload(ResponseRevision.parts)
             .selectinload(ResponseRevisionPart.artifact),
         )
-        .where(Chat.id == chat_id)
+        .where(Chat.id == chat_id, Chat.scope == STANDARD_CHAT_SCOPE)
     )
     if not chat:
         raise HTTPException(404, "chat not found")
     return chat
+
+
+def _prompt_helper_query(helper_id: str) -> Select[tuple[Chat]]:
+    return (
+        select(Chat)
+        .options(
+            selectinload(Chat.messages)
+            .selectinload(Message.parts)
+            .selectinload(MessagePart.artifact),
+            selectinload(Chat.messages)
+            .selectinload(Message.response_revisions)
+            .selectinload(ResponseRevision.parts)
+            .selectinload(ResponseRevisionPart.artifact),
+        )
+        .where(Chat.id == helper_id, Chat.scope == PROMPT_HELPER_SCOPE)
+    )
+
+
+@router.post("/prompt-helpers", response_model=PromptHelperDetail, status_code=201)
+async def create_prompt_helper(
+    payload: PromptHelperCreate,
+    request: Request,
+    session: ConversationSessionDep,
+) -> Chat:
+    source = session.get(Chat, payload.source_chat_id)
+    if not source or source.scope != STANDARD_CHAT_SCOPE:
+        raise HTTPException(404, "source chat not found")
+    generation_settings = copy.deepcopy(source.generation_settings_json)
+    for role in (ModelRole.IMAGE.value, ModelRole.VIDEO.value):
+        try:
+            fields = await _engine_role_fields(request, role)
+        except HTTPException as exc:
+            if exc.status_code not in {409, 503}:
+                raise
+            continue
+        preview_defaults = prompt_preview_settings(fields)
+        if preview_defaults:
+            generation_settings[role] = {
+                **generation_settings.get(role, {}),
+                **preview_defaults,
+            }
+    helper = Chat(
+        title="Prompt workshop",
+        archived=True,
+        scope=PROMPT_HELPER_SCOPE,
+        draft_prompt=payload.draft_prompt.strip(),
+        routing_mode=RoutingMode.TEXT.value,
+        confirm_uncertain_media=False,
+        active_chat_profile_id=source.active_chat_profile_id,
+        active_vision_profile_id=source.active_vision_profile_id,
+        active_image_profile_id=source.active_image_profile_id,
+        active_video_profile_id=source.active_video_profile_id,
+        generation_settings_json=generation_settings,
+        generation_preset_ids_json=copy.deepcopy(source.generation_preset_ids_json),
+        vision_settings_json=copy.deepcopy(source.vision_settings_json),
+    )
+    session.add(helper)
+    session.commit()
+    return session.scalar(_prompt_helper_query(helper.id)) or helper
+
+
+@router.get("/prompt-helpers/{helper_id}", response_model=PromptHelperDetail)
+async def get_prompt_helper(
+    helper_id: str,
+    session: ConversationSessionDep,
+) -> Chat:
+    helper = session.scalar(_prompt_helper_query(helper_id))
+    if not helper:
+        raise HTTPException(404, "prompt helper not found")
+    return helper
+
+
+@router.patch("/prompt-helpers/{helper_id}", response_model=PromptHelperDetail)
+async def update_prompt_helper(
+    helper_id: str,
+    payload: PromptHelperUpdate,
+    session: ConversationSessionDep,
+) -> Chat:
+    helper = session.scalar(_prompt_helper_query(helper_id))
+    if not helper:
+        raise HTTPException(404, "prompt helper not found")
+    helper.draft_prompt = payload.draft_prompt.strip()
+    session.commit()
+    return session.scalar(_prompt_helper_query(helper_id)) or helper
+
+
+@router.delete("/prompt-helpers/{helper_id}", status_code=204)
+async def delete_prompt_helper(
+    helper_id: str,
+    request: Request,
+    session: ConversationSessionDep,
+) -> Response:
+    helper = session.get(Chat, helper_id)
+    if not helper or helper.scope != PROMPT_HELPER_SCOPE:
+        raise HTTPException(404, "prompt helper not found")
+    services = _services(request)
+    async with services.orchestrator.prepare_chat_deletion(helper_id):
+        session.expire_all()
+        helper = session.get(Chat, helper_id)
+        if not helper or helper.scope != PROMPT_HELPER_SCOPE:
+            raise HTTPException(404, "prompt helper not found")
+        services.artifacts.delete_chat_generated_media(session, helper_id)
+        session.delete(helper)
+        session.commit()
+    return Response(status_code=204)
 
 
 @router.patch("/chats/{chat_id}", response_model=ChatOut)
@@ -789,7 +905,7 @@ async def update_chat(
     session: ConversationSessionDep,
 ) -> Chat:
     chat = session.get(Chat, chat_id)
-    if not chat:
+    if not chat or chat.scope != STANDARD_CHAT_SCOPE:
         raise HTTPException(404, "chat not found")
     values = payload.model_dump(exclude_unset=True, mode="json")
     await _validate_generation_defaults(request, session, values)
@@ -852,13 +968,13 @@ async def delete_chat(
     delete_generated_media: bool = Query(False),
 ) -> Response:
     chat = session.get(Chat, chat_id)
-    if not chat:
+    if not chat or chat.scope != STANDARD_CHAT_SCOPE:
         raise HTTPException(404, "chat not found")
     services = _services(request)
     async with services.orchestrator.prepare_chat_deletion(chat_id):
         session.expire_all()
         chat = session.get(Chat, chat_id)
-        if not chat:
+        if not chat or chat.scope != STANDARD_CHAT_SCOPE:
             raise HTTPException(404, "chat not found")
         if delete_generated_media:
             services.artifacts.delete_chat_generated_media(session, chat_id)

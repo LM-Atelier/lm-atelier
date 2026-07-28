@@ -72,6 +72,8 @@ class Chat(TimestampMixin, Base):
     )
     title: Mapped[str] = mapped_column(String(240), default="New chat")
     archived: Mapped[bool] = mapped_column(Boolean, default=False, index=True)
+    scope: Mapped[str] = mapped_column(String(24), default="standard", index=True)
+    draft_prompt: Mapped[str] = mapped_column(Text, default="")
     routing_mode: Mapped[str] = mapped_column(String(16), default=RoutingMode.AUTO.value)
     confirm_uncertain_media: Mapped[bool] = mapped_column(Boolean, default=True)
     active_chat_profile_id: Mapped[str | None] = mapped_column(String(40), nullable=True)
