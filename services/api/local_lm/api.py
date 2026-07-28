@@ -83,6 +83,7 @@ from .models import (
     ResponseRevision,
     ResponseRevisionPart,
     Run,
+    SetupVerification,
     WorkflowDefinition,
     WorkflowRevision,
     WorkPlan,
@@ -166,6 +167,7 @@ from .schemas import (
     RuntimeStatus,
     SettingField,
     SetupReadinessReport,
+    SetupVerificationOut,
     StorageCleanupResult,
     SystemInfo,
     ToolCapabilityProbe,
@@ -190,6 +192,15 @@ from .settings_registry import (
     workflow_settings,
 )
 from .setup_readiness import setup_readiness_report
+from .setup_verification import (
+    ACTIVE_VERIFICATION_STATES,
+    SETUP_VERIFICATION_SCOPE,
+    current_setup_verification,
+    ingest_synthetic_setup_image,
+    setup_verification_prompt,
+    setup_verification_settings,
+    verification_evidence_key,
+)
 from .workflow_edit_calibration import validate_workflow_edit_calibration
 
 if TYPE_CHECKING:
@@ -450,6 +461,170 @@ async def get_setup_readiness(
         services.runtimes,
         services.processes.statuses(),
     )
+
+
+@router.post(
+    "/setup/verify/{role}",
+    response_model=SetupVerificationOut,
+    status_code=202,
+)
+async def start_setup_verification(
+    role: Literal["chat", "image", "video"],
+    request: Request,
+    session: ConversationSessionDep,
+) -> SetupVerification:
+    services = _services(request)
+    report = setup_readiness_report(
+        session,
+        services.settings,
+        services.runtimes,
+        services.processes.statuses(),
+    )
+    readiness = next(item for item in report.roles if item.role == role)
+    blocking = [
+        check
+        for check in readiness.checks
+        if check.status != "pass" and not check.code.startswith("generation_verification")
+    ]
+    if blocking:
+        raise HTTPException(409, blocking[0].message)
+    if not readiness.install_id or not readiness.profile_id:
+        raise HTTPException(409, "Finish model activation and profile setup first.")
+
+    install = session.get(ModelInstall, readiness.install_id)
+    profile = session.get(ModelProfile, readiness.profile_id)
+    workflow = (
+        session.get(WorkflowRevision, readiness.workflow_revision_id)
+        if readiness.workflow_revision_id
+        else None
+    )
+    if not install or not profile:
+        raise HTTPException(409, "The selected setup changed. Refresh and try again.")
+    capability_evidence = current_capability_evidence(
+        session,
+        install,
+        services.settings,
+        services.runtimes,
+    )
+    if not capability_evidence:
+        raise HTTPException(409, "The model activation evidence changed. Refresh and try again.")
+
+    existing = current_setup_verification(
+        session,
+        role,
+        install,
+        profile,
+        workflow,
+        capability_evidence,
+    )
+    if existing and (existing.state in ACTIVE_VERIFICATION_STATES or existing.state == "ready"):
+        return existing
+
+    fields = await _engine_role_fields(request, role)
+    settings = setup_verification_settings(fields, role)
+    verification = existing or SetupVerification(
+        role=role,
+        evidence_key=verification_evidence_key(
+            role,
+            install,
+            profile,
+            workflow,
+            capability_evidence,
+        ),
+        model_install_id=install.id,
+        profile_id=profile.id,
+        workflow_revision_id=workflow.id if workflow else None,
+    )
+    verification.state = "queued"
+    verification.failure_code = None
+    verification.started_at = None
+    verification.completed_at = None
+    verification.run_id = None
+    verification.job_id = None
+    verification.input_artifact_id = None
+    if not existing:
+        session.add(verification)
+    session.flush()
+
+    routing_mode = RoutingMode.TEXT if role == "chat" else RoutingMode(role)
+    chat = Chat(
+        title="Setup verification",
+        archived=True,
+        scope=SETUP_VERIFICATION_SCOPE,
+        routing_mode=routing_mode.value,
+        confirm_uncertain_media=False,
+        active_chat_profile_id=profile.id if role == "chat" else AUTO_PROFILE_ID,
+        active_vision_profile_id=AUTO_PROFILE_ID,
+        active_image_profile_id=profile.id if role == "image" else AUTO_PROFILE_ID,
+        active_video_profile_id=profile.id if role == "video" else AUTO_PROFILE_ID,
+        generation_settings_json={role: settings},
+    )
+    session.add(chat)
+    session.flush()
+    verification.chat_id = chat.id
+
+    input_artifact_ids: list[str] = []
+    if workflow:
+        definition = session.get(WorkflowDefinition, workflow.workflow_id)
+        if definition and definition.operation in {"image_to_image", "image_to_video"}:
+            artifact = ingest_synthetic_setup_image(
+                session,
+                services.artifacts,
+                verification.id,
+            )
+            verification.input_artifact_id = artifact.id
+            input_artifact_ids.append(artifact.id)
+    session.commit()
+
+    try:
+        accepted = await _accept_turn(
+            services.orchestrator,
+            session,
+            chat.id,
+            TurnRequest(
+                text=setup_verification_prompt(role),
+                mode=routing_mode,
+                input_artifact_ids=input_artifact_ids,
+                settings=settings,
+                confirm_media=True,
+                idempotency_key=f"setup-verification:{verification.id}",
+            ),
+            source_action="setup_verification",
+        )
+    except Exception:
+        session.expire_all()
+        current = session.get(SetupVerification, verification.id)
+        if current:
+            current.state = "failed"
+            current.failure_code = "generation_not_started"
+            current.completed_at = utcnow()
+            if current.input_artifact_id and (
+                failed_artifact := session.get(Artifact, current.input_artifact_id)
+            ):
+                services.artifacts.delete_library_artifact(session, failed_artifact)
+            if current.chat_id and (failed_chat := session.get(Chat, current.chat_id)):
+                session.delete(failed_chat)
+            current.chat_id = None
+            current.input_artifact_id = None
+            session.commit()
+        raise
+
+    session.expire_all()
+    current = session.get(SetupVerification, verification.id)
+    if not current:
+        raise HTTPException(500, "Setup verification state was lost.")
+    job = session.scalar(select(Job).where(Job.run_id == accepted.run.id))
+    if current.state in ACTIVE_VERIFICATION_STATES:
+        current.run_id = accepted.run.id
+        current.job_id = job.id if job else None
+        if job:
+            job.payload_json = {
+                **job.payload_json,
+                "setup_verification_id": current.id,
+            }
+        session.commit()
+        session.refresh(current)
+    return current
 
 
 @router.post("/runtimes/{engine}/install", response_model=RuntimeStatus, status_code=202)
@@ -1371,7 +1546,7 @@ async def cancel_work_step(
     step_id: str,
     request: Request,
     session: ConversationSessionDep,
-) -> Job:
+) -> Job | JobOut:
     job = session.scalar(select(Job).where(Job.work_step_id == step_id))
     if not job:
         raise HTTPException(404, "work step job not found")
@@ -1441,10 +1616,16 @@ async def cancel_job(
     job_id: str,
     request: Request,
     session: ConversationSessionDep,
-) -> Job:
+) -> Job | JobOut:
     job = session.get(Job, job_id)
     if not job:
         raise HTTPException(404, "job not found")
+    verification_snapshot = (
+        JobOut.model_validate(job)
+        if isinstance(job.payload_json, dict)
+        and isinstance(job.payload_json.get("setup_verification_id"), str)
+        else None
+    )
     if job.kind == JobKind.DOWNLOAD.value:
         changed = await _services(request).downloads.cancel(job_id)
     else:
@@ -1454,6 +1635,25 @@ async def cancel_job(
     session.expire_all()
     refreshed = session.get(Job, job_id)
     if not refreshed:
+        if verification_snapshot:
+            progress = {
+                **verification_snapshot.progress_json,
+                "stage": "cancelled",
+                "indeterminate": True,
+                "updated_at": utcnow().isoformat(),
+            }
+            return verification_snapshot.model_copy(
+                update={
+                    "status": "cancelled",
+                    "phase": "cancelled",
+                    "progress_json": progress,
+                    "payload_json": {},
+                    "result_json": {},
+                    "error": None,
+                    "cancellable": False,
+                    "completed_at": utcnow(),
+                }
+            )
         raise HTTPException(404, "job not found")
     return refreshed
 

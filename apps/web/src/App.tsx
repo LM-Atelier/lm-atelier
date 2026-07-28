@@ -3929,6 +3929,9 @@ function SetupWizard({
       throw new Error("Choose a chat model before starting its worker.");
     },
     onSuccess: refresh,
+  });  const verifyRole = useMutation({
+    mutationFn: (role: SetupRoleReadiness["role"]) => api.verifySetupRole(role),
+    onSuccess: refresh,
   });
   const suitableRecipes = (role: SetupRoleReadiness["role"]) => (
     !system.data
@@ -3942,6 +3945,10 @@ function SetupWizard({
         ))
   );
   const performAction = (role: SetupRoleReadiness) => {
+    if (role.next_action === "verify_generation") {
+      verifyRole.mutate(role.role);
+      return;
+    }
     if (role.next_action === "retry_install" && role.job_id) {
       retryInstall.mutate(role.job_id);
       return;
@@ -3964,6 +3971,7 @@ function SetupWizard({
     onOpenModels(role.role);
   };
   const actionLabel = (role: SetupRoleReadiness): string => {
+    if (role.next_action === "verify_generation") return "Run quick test";
     if (role.next_action === "retry_install") return "Retry install";
     if (role.next_action === "install_runtime") return "Install runtime";
     if (role.next_action === "retry_runtime") return "Retry runtime";
@@ -3974,7 +3982,7 @@ function SetupWizard({
     return `Choose ${role.role} model`;
   };
   const pendingRole = restartWorker.variables?.role;
-  const error = installRecipe.error || retryInstall.error || installRuntime.error || restartWorker.error;
+  const error = installRecipe.error || retryInstall.error || installRuntime.error || restartWorker.error || verifyRole.error;
 
   return (
     <AccessibleDialog
@@ -3985,7 +3993,7 @@ function SetupWizard({
       className="setup-wizard"
     >
       <p className="setup-intro">
-        Install each model with one click. A role is Ready only after its local activation check passes.
+        Install each model with one click. Ready means activation passed and a quick local generation completed.
       </p>
       <div className="setup-role-grid" aria-live="polite">
         {report.roles.map((role) => {
@@ -3999,6 +4007,7 @@ function SetupWizard({
             (retryInstall.isPending && retryInstall.variables === role.job_id)
             || (installRuntime.isPending && installRuntime.variables === role.engine)
             || (restartWorker.isPending && pendingRole === role.role)
+            || (verifyRole.isPending && verifyRole.variables === role.role)
           );
           return (
             <article className={`setup-role ${role.state}`} key={role.role}>
@@ -4327,7 +4336,7 @@ export default function App() {
           void client.invalidateQueries({ queryKey: ["work-plans"] });
         }
         if (event.type.includes("progress") || event.type.startsWith("download.")) void client.invalidateQueries({ queryKey: ["jobs"] });
-        if (event.type.startsWith("download.") || event.type.startsWith("worker.") || event.type.startsWith("runtime.")) void client.invalidateQueries({ queryKey: ["setup-readiness"] });
+        if (event.type.startsWith("download.") || event.type.startsWith("worker.") || event.type.startsWith("runtime.") || event.type.startsWith("setup.verification")) void client.invalidateQueries({ queryKey: ["setup-readiness"] });
         if (event.type === "run.progress") void client.invalidateQueries({ queryKey: ["chat"] });
         if (event.type === "download.completed") {
           void client.invalidateQueries({ queryKey: ["models"] });

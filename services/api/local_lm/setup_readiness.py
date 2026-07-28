@@ -23,6 +23,7 @@ from .schemas import (
     SetupRoleReadiness,
     WorkerStatus,
 )
+from .setup_verification import current_setup_verification
 
 if TYPE_CHECKING:
     from .runtime_provisioning import RuntimeProvisioner
@@ -258,10 +259,57 @@ def _role_readiness(
         expected_profile_id=profile.id if role == "chat" else None,
     )
     checks.append(worker_check)
+    verification = None
+    if worker_check.status == "pass":
+        verification = current_setup_verification(
+            session,
+            role,
+            install,
+            profile,
+            workflow,
+            evidence,
+        )
+        if verification is None:
+            checks.append(
+                _check(
+                    "generation_verification_required",
+                    "fail",
+                    "Run one quick local generation test.",
+                    "verify_generation",
+                )
+            )
+        elif verification.state in {"queued", "running"}:
+            checks.append(
+                _check(
+                    "generation_verification_running",
+                    "pending",
+                    "The local generation test is running.",
+                    "wait_for_verification",
+                )
+            )
+        elif verification.state == "ready":
+            checks.append(
+                _check(
+                    "generation_verified",
+                    "pass",
+                    "A local generation completed with this setup.",
+                )
+            )
+        else:
+            checks.append(
+                _check(
+                    "generation_verification_failed",
+                    "fail",
+                    "The local generation test did not complete.",
+                    "verify_generation",
+                )
+            )
     return _role_result(
         role,
         checks,
         engine=install.engine,
+        job_id=verification.job_id if verification else None,
+        verification_id=verification.id if verification else None,
         install_id=install.id,
         profile_id=profile.id,
         workflow_revision_id=workflow.id if workflow else None,
@@ -480,6 +528,7 @@ def _role_result(
     *,
     engine: str | None = None,
     job_id: str | None = None,
+    verification_id: str | None = None,
     install_id: str | None = None,
     profile_id: str | None = None,
     workflow_revision_id: str | None = None,
@@ -499,6 +548,7 @@ def _role_result(
         state=state,
         engine=engine,
         job_id=job_id,
+        verification_id=verification_id,
         install_id=install_id,
         profile_id=profile_id,
         workflow_revision_id=workflow_revision_id,

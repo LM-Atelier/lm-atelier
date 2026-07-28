@@ -88,7 +88,8 @@ const roleAwareMediaEngine: EngineCapabilities = {
 vi.mock("./api", () => ({
   api: {
     initialize: vi.fn().mockResolvedValue(undefined),
-    setupReadiness: vi.fn().mockResolvedValue({ version: 1, state: "ready", roles: [] }),
+    setupReadiness: vi.fn().mockResolvedValue({ version: 2, state: "ready", roles: [] }),
+    verifySetupRole: vi.fn(),
     projects: vi.fn().mockResolvedValue([]),
     chats: vi.fn().mockResolvedValue([]),
     chat: vi.fn(),
@@ -253,17 +254,18 @@ function setupRole(
   return {
     role,
     state,
-    verification_level: "activation_probe",
+    verification_level: "generation_probe",
     engine: role === "chat" ? "llama.cpp" : "comfyui",
     job_id: null,
+    verification_id: state === "ready" ? `verification-${role}` : null,
     install_id: state === "ready" ? `install-${role}` : null,
     profile_id: state === "ready" ? `profile-${role}` : null,
     workflow_revision_id: state === "ready" && role !== "chat" ? `workflow-${role}` : null,
     next_action: nextAction,
     checks: [{
-      code: state === "ready" ? "activation_ready" : nextAction === "select_model" ? "model_missing" : "setup_issue",
+      code: state === "ready" ? "generation_verified" : nextAction === "select_model" ? "model_missing" : "setup_issue",
       status: state === "ready" ? "pass" : state === "in_progress" ? "pending" : "fail",
-      message: state === "ready" ? "The model passed the current bounded activation probe." : "Setup needs attention.",
+      message: state === "ready" ? "A local generation completed with this setup." : "Setup needs attention.",
       action: nextAction,
     }],
     ...overrides,
@@ -274,7 +276,7 @@ function setupReport(...roles: SetupRoleReadiness[]): SetupReadinessReport {
   const state = roles.some((role) => role.state === "action_required")
     ? "action_required"
     : roles.some((role) => role.state === "in_progress") ? "in_progress" : "ready";
-  return { version: 1, state, roles };
+  return { version: 2, state, roles };
 }
 
 describe("App", () => {
@@ -287,7 +289,7 @@ describe("App", () => {
     });
     localStorage.clear();
     sessionStorage.clear();
-    vi.mocked(api.setupReadiness).mockResolvedValue({ version: 1, state: "ready", roles: [] });
+    vi.mocked(api.setupReadiness).mockResolvedValue({ version: 2, state: "ready", roles: [] });
     vi.mocked(api.projects).mockResolvedValue([]);
     vi.mocked(api.profiles).mockResolvedValue([]);
     vi.mocked(api.presets).mockResolvedValue([]);
@@ -367,6 +369,40 @@ describe("App", () => {
     expect(screen.queryByRole("dialog", { name: "Set up LM Atelier" })).not.toBeInTheDocument();
   });
 
+  it("runs the bounded local generation test from a configured role", async () => {
+    vi.mocked(api.setupReadiness).mockResolvedValue(setupReport(
+      setupRole("chat"),
+      setupRole("image", "action_required", "verify_generation", {
+        verification_id: null,
+        checks: [{
+          code: "generation_verification_required",
+          status: "fail",
+          message: "Run one quick local generation test.",
+          action: "verify_generation",
+        }],
+      }),
+      setupRole("video"),
+    ));
+    vi.mocked(api.verifySetupRole).mockResolvedValue({
+      id: "verify-image",
+      role: "image",
+      state: "queued",
+      job_id: "job-image",
+      failure_code: null,
+      started_at: null,
+      completed_at: null,
+    });
+    const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+    render(
+      <QueryClientProvider client={client}>
+        <App />
+      </QueryClientProvider>,
+    );
+
+    expect(await screen.findByText("Run one quick local generation test.")).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "Run quick test" }));
+    await waitFor(() => expect(api.verifySetupRole).toHaveBeenCalledWith("image"));
+  });
   it("offers only a hardware-eligible one-click reference recipe", async () => {
     vi.mocked(api.setupReadiness).mockResolvedValue(setupReport(
       setupRole("chat", "action_required", "select_model"),
