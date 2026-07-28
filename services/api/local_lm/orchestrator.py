@@ -107,6 +107,13 @@ from .settings_registry import (
     validate_settings,
     workflow_settings,
 )
+from .setup_verification import (
+    SETUP_VERIFICATION_SCOPE,
+    finalize_setup_verification,
+    mark_setup_verification_running,
+    recover_terminal_setup_verifications,
+    setup_verification_for_chat,
+)
 from .vision import PreparedVisualContext, VisionContextService
 from .work_plans import plan_status_summary, refresh_plan_status
 
@@ -314,6 +321,9 @@ class ConversationOrchestrator:
                                 )
                             for artifact_id in preview_ids:
                                 self.artifacts.delete_temporary_preview(session, artifact_id)
+            session.commit()
+        with self.session_factory() as session:
+            recover_terminal_setup_verifications(session, self.artifacts)
             session.commit()
         for job_id, run_id in queued:
             self.start(job_id, run_id)
@@ -744,6 +754,7 @@ class ConversationOrchestrator:
             plan.operation,
             project_id=chat.project_id,
             model_install_id=profile.model_install_id if profile else None,
+            preferred_revision_id=self._setup_verification_workflow_id(session, chat),
         )
         if plan.operation != Operation.TEXT and not workflow_revision:
             semantic_fallback = {
@@ -2089,6 +2100,8 @@ class ConversationOrchestrator:
             await asyncio.gather(cancelled_task, return_exceptions=True)
         await self.scheduler.publish_job(job_id)
         await self.events.publish("run.cancelled", run_id, {"job_id": job_id})
+        if run_id:
+            await self._finalize_setup_verification_run(job_id, run_id)
         return True
 
     async def close(self) -> None:
@@ -2147,6 +2160,12 @@ class ConversationOrchestrator:
                     run.status = RunStatus.RUNNING.value
                     run.started_at = job.started_at or utcnow()
                     self._set_work_status(session, run, JobStatus.RUNNING.value)
+                    mark_setup_verification_running(
+                        session,
+                        run.chat_id,
+                        run_id=run.id,
+                        job_id=job.id,
+                    )
                     session.commit()
                     event_payload = {
                         "job_id": job_id,
@@ -2189,6 +2208,35 @@ class ConversationOrchestrator:
         except Exception as exc:
             detail = str(exc).strip() or f"Generation failed ({type(exc).__name__})"
             await self._fail(job_id, run_id, detail)
+        await self._finalize_setup_verification_run(job_id, run_id)
+
+    async def _finalize_setup_verification_run(self, job_id: str, run_id: str) -> None:
+        finalized = False
+        state: str | None = None
+        role: str | None = None
+        with self.session_factory() as session:
+            job = session.get(Job, job_id)
+            run = session.get(Run, run_id)
+            chat_id = getattr(run, "chat_id", None)
+            if not job or not run or not chat_id:
+                return
+            verification = setup_verification_for_chat(session, chat_id)
+            if verification:
+                role = verification.role
+                finalized = finalize_setup_verification(
+                    session,
+                    self.artifacts,
+                    chat_id,
+                    job,
+                )
+                state = verification.state
+                session.commit()
+        if finalized:
+            await self.events.publish(
+                "setup.verification.completed",
+                role or "setup",
+                {"role": role, "state": state},
+            )
 
     async def _execute_chat(self, job_id: str, run_id: str) -> None:
         await self._set_chat_phase(job_id, run_id, "Preparing chat model")
@@ -4482,6 +4530,13 @@ class ConversationOrchestrator:
             return JobKind.VIDEO
         return JobKind.IMAGE
 
+    @staticmethod
+    def _setup_verification_workflow_id(session: Session, chat: Chat) -> str | None:
+        if chat.scope != SETUP_VERIFICATION_SCOPE:
+            return None
+        verification = setup_verification_for_chat(session, chat.id)
+        return verification.workflow_revision_id if verification else None
+
     def _workflow_for_operation(
         self,
         session: Session,
@@ -4489,8 +4544,25 @@ class ConversationOrchestrator:
         *,
         project_id: str | None = None,
         model_install_id: str | None = None,
+        preferred_revision_id: str | None = None,
     ) -> WorkflowRevision | None:
         if operation == Operation.TEXT:
+            return None
+        if preferred_revision_id:
+            revision = session.get(WorkflowRevision, preferred_revision_id)
+            definition = session.get(WorkflowDefinition, revision.workflow_id) if revision else None
+            dependencies = revision.dependencies_json.get("model_install_ids") if revision else None
+            declared_installs = (
+                {str(item) for item in dependencies} if isinstance(dependencies, list) else set()
+            )
+            if (
+                revision
+                and definition
+                and definition.operation == operation.value
+                and self._workflow_matches_engine(revision)
+                and (not declared_installs or model_install_id in declared_installs)
+            ):
+                return revision
             return None
         if project_id:
             project = session.get(Project, project_id)
