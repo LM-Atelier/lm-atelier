@@ -439,6 +439,7 @@ async def test_image_turn_resolves_verified_lora_stack_and_provenance(
     run = await wait_for_run(client, response.json()["run"]["id"])
     assert run["status"] == "complete"
     auxiliary = run["provenance_json"]["auxiliary_assets"]
+    assert auxiliary["selection"] == {"mode": "explicit"}
     assert auxiliary["graph_transform_version"] == "lora-graph-v1"
     assert len(auxiliary["effective_graph_sha256"]) == 64
     assert auxiliary["lora_stack"] == [
@@ -455,6 +456,89 @@ async def test_image_turn_resolves_verified_lora_stack_and_provenance(
             "enabled": True,
         }
     ]
+
+
+async def test_image_turn_automatically_selects_lora_unless_stack_is_explicit(
+    client: AsyncClient,
+) -> None:
+    with SessionLocal() as session:
+        definition = session.scalar(
+            select(WorkflowDefinition).where(WorkflowDefinition.operation == "text_to_image")
+        )
+        assert definition and definition.current_revision_id
+        revision = session.get(WorkflowRevision, definition.current_revision_id)
+        assert revision
+        graph = {
+            "1": {
+                "class_type": "CheckpointLoaderSimple",
+                "inputs": {"ckpt_name": "mock.safetensors"},
+            },
+            "2": {"class_type": "CLIPTextEncode", "inputs": {"clip": ["1", 1]}},
+            "3": {"class_type": "KSampler", "inputs": {"model": ["1", 0]}},
+        }
+        extension = checkpoint_lora_extension(graph)
+        assert extension
+        revision.api_graph_json = graph
+        revision.input_schema_json = {
+            "type": "object",
+            "properties": {
+                "loras": {"type": "array", "default": [], "maxItems": 8},
+            },
+        }
+        revision.dependencies_json = {"extensions": {"lora": extension}}
+        lora = ModelAssetInstall(
+            name="Workshop Ink",
+            kind="lora",
+            family="sdxl",
+            local_path="C:/managed/workshop-ink",
+            size_bytes=1024,
+            manifest_json={
+                "sha256": "b" * 64,
+                "comfy_name": "workshop-ink.safetensors",
+            },
+            active=True,
+            use_case="ink workshop",
+            auto_apply=True,
+            default_model_strength=0.72,
+            default_clip_strength=0.61,
+            verified_at=utcnow(),
+        )
+        session.add(lora)
+        session.commit()
+        lora_id = lora.id
+
+    chat = (await client.post("/api/chats", json={"title": "Automatic LoRA"})).json()
+    automatic = await client.post(
+        f"/api/chats/{chat['id']}/turns",
+        json={"text": "Create an ink workshop at night", "mode": "image"},
+    )
+    assert automatic.status_code == 202
+    automatic_run = await wait_for_run(client, automatic.json()["run"]["id"])
+    automatic_auxiliary = automatic_run["provenance_json"]["auxiliary_assets"]
+    assert automatic_run["settings_json"]["loras"] == [
+        {
+            "asset_id": lora_id,
+            "model_strength": 0.72,
+            "clip_strength": 0.61,
+            "enabled": True,
+        }
+    ]
+    assert automatic_auxiliary["selection"]["mode"] == "automatic"
+    assert automatic_auxiliary["selection"]["selected"][0]["reason"] == "exact use case"
+    assert "Create an ink workshop at night" not in str(automatic_auxiliary)
+
+    explicit_empty = await client.post(
+        f"/api/chats/{chat['id']}/turns",
+        json={
+            "text": "Create another ink workshop at night",
+            "mode": "image",
+            "settings": {"loras": []},
+        },
+    )
+    assert explicit_empty.status_code == 202
+    explicit_run = await wait_for_run(client, explicit_empty.json()["run"]["id"])
+    assert explicit_run["settings_json"]["loras"] == []
+    assert explicit_run["provenance_json"]["auxiliary_assets"] is None
 
 
 async def test_verified_model_asset_can_be_toggled_and_deleted_safely(
@@ -481,6 +565,23 @@ async def test_verified_model_asset_can_be_toggled_and_deleted_safely(
         session.add(asset)
         session.commit()
         asset_id = asset.id
+
+    configured = await client.patch(
+        f"/api/model-assets/{asset_id}",
+        json={
+            "use_case": "ink illustration",
+            "auto_apply": True,
+            "default_model_strength": 0.8,
+            "default_clip_strength": 0.7,
+        },
+    )
+    assert configured.status_code == 200
+    assert configured.json()["use_case"] == "ink illustration"
+    assert configured.json()["auto_apply"] is True
+    assert configured.json()["default_model_strength"] == 0.8
+    assert configured.json()["default_clip_strength"] == 0.7
+    invalid = await client.patch(f"/api/model-assets/{asset_id}", json={"use_case": ""})
+    assert invalid.status_code == 422
 
     disabled = await client.patch(f"/api/model-assets/{asset_id}", json={"active": False})
     assert disabled.status_code == 200

@@ -441,6 +441,10 @@ class ModelAssetInstall(TimestampMixin, Base):
     size_bytes: Mapped[int] = mapped_column(Integer, default=0)
     manifest_json: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
     active: Mapped[bool] = mapped_column(Boolean, default=False, index=True)
+    use_case: Mapped[str] = mapped_column(Text, default="")
+    auto_apply: Mapped[bool] = mapped_column(Boolean, default=False)
+    default_model_strength: Mapped[float] = mapped_column(Float, default=1.0)
+    default_clip_strength: Mapped[float] = mapped_column(Float, default=1.0)
     verified_at: Mapped[datetime | None] = mapped_column(
         DateTime(timezone=True),
         nullable=True,

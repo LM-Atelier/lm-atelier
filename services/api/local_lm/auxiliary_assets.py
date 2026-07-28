@@ -7,11 +7,13 @@ import math
 from dataclasses import dataclass
 from typing import Any
 
+from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from .models import ModelAssetInstall, ModelInstall, WorkflowRevision
 
 LORA_GRAPH_TRANSFORM_VERSION = "lora-graph-v1"
+LORA_AUTO_SELECTION_VERSION = "lora-use-case-v1"
 MAX_LORA_STACK_SIZE = 8
 MAX_LORA_STRENGTH = 4.0
 SUPPORTED_AUXILIARY_KINDS = {
@@ -37,6 +39,139 @@ class ResolvedLoraStack:
     settings: list[dict[str, Any]]
     provenance: list[dict[str, Any]]
     graph_sha256: str
+
+
+@dataclass(frozen=True)
+class AutomaticLoraSelection:
+    settings: list[dict[str, Any]]
+    provenance: dict[str, Any]
+
+
+_LORA_MATCH_STOP_WORDS = {
+    "a",
+    "an",
+    "and",
+    "apply",
+    "art",
+    "for",
+    "image",
+    "images",
+    "in",
+    "look",
+    "make",
+    "of",
+    "on",
+    "or",
+    "photo",
+    "picture",
+    "style",
+    "the",
+    "to",
+    "use",
+    "with",
+}
+
+
+def select_automatic_lora_stack(
+    session: Session,
+    revision: WorkflowRevision,
+    prompt: str,
+) -> AutomaticLoraSelection:
+    """Select a small deterministic LoRA stack from user-authored use cases."""
+
+    if not workflow_lora_extension(revision):
+        return AutomaticLoraSelection([], _automatic_selection_provenance([]))
+    prompt_text = _normalized_match_text(prompt)
+    prompt_terms = set(_meaningful_terms(prompt_text))
+    if not prompt_terms:
+        return AutomaticLoraSelection([], _automatic_selection_provenance([]))
+    base_families = _workflow_families(session, revision)
+    assets = session.scalars(
+        select(ModelAssetInstall).where(
+            ModelAssetInstall.kind == "lora",
+            ModelAssetInstall.active.is_(True),
+            ModelAssetInstall.auto_apply.is_(True),
+            ModelAssetInstall.verified_at.is_not(None),
+        )
+    ).all()
+    ranked: list[tuple[int, float, int, str, str, ModelAssetInstall, list[str], str]] = []
+    for asset in assets:
+        family = asset.family.casefold() if asset.family else None
+        if base_families and (not family or family not in base_families):
+            continue
+        comfy_name = asset.manifest_json.get("comfy_name")
+        sha256 = asset.manifest_json.get("sha256")
+        if (
+            not isinstance(comfy_name, str)
+            or not comfy_name
+            or not isinstance(sha256, str)
+            or len(sha256) != 64
+        ):
+            continue
+        use_case_text = _normalized_match_text(asset.use_case)
+        use_case_terms = set(_meaningful_terms(use_case_text))
+        if not use_case_terms:
+            continue
+        matched_terms = sorted(use_case_terms & prompt_terms)
+        exact = bool(use_case_text and f" {use_case_text} " in f" {prompt_text} ")
+        coverage = len(matched_terms) / len(use_case_terms)
+        if not exact and (
+            (len(use_case_terms) == 1 and not matched_terms)
+            or (len(use_case_terms) > 1 and (len(matched_terms) < 2 or coverage < 0.5))
+        ):
+            continue
+        match_type = "exact use case" if exact else "shared use-case terms"
+        ranked.append(
+            (
+                -int(exact),
+                -coverage,
+                -len(matched_terms),
+                asset.name.casefold(),
+                asset.id,
+                asset,
+                matched_terms,
+                match_type,
+            )
+        )
+    ranked.sort(key=lambda item: item[:5])
+    selected: list[dict[str, Any]] = []
+    provenance: list[dict[str, Any]] = []
+    for _, _, _, _, _, asset, matched_terms, match_type in ranked[:MAX_LORA_STACK_SIZE]:
+        setting = {
+            "asset_id": asset.id,
+            "model_strength": asset.default_model_strength,
+            "clip_strength": asset.default_clip_strength,
+            "enabled": True,
+        }
+        selected.append(setting)
+        provenance.append(
+            {
+                **setting,
+                "name": asset.name,
+                "use_case": asset.use_case,
+                "matched_terms": matched_terms,
+                "reason": match_type,
+            }
+        )
+    return AutomaticLoraSelection(selected, _automatic_selection_provenance(provenance))
+
+
+def _automatic_selection_provenance(selected: list[dict[str, Any]]) -> dict[str, Any]:
+    return {
+        "mode": "automatic",
+        "selector_version": LORA_AUTO_SELECTION_VERSION,
+        "selected": selected,
+    }
+
+
+def _normalized_match_text(value: str) -> str:
+    return " ".join(
+        "".join(character.casefold() if character.isalnum() else " " for character in value).split()
+    )
+
+
+def _meaningful_terms(value: str) -> list[str]:
+    return [term for term in value.split() if len(term) >= 3 and term not in _LORA_MATCH_STOP_WORDS]
 
 
 def checkpoint_lora_extension(graph: dict[str, Any]) -> dict[str, list[Any]] | None:

@@ -488,10 +488,16 @@ export const api = {
     request<ModelAssetInstall[]>(
       `/api/model-assets${kind ? `?${new URLSearchParams({ kind })}` : ""}`,
     ),
-  updateModelAsset: (id: string, active: boolean) =>
+  updateModelAsset: (
+    id: string,
+    values: Partial<Pick<
+      ModelAssetInstall,
+      "active" | "use_case" | "auto_apply" | "default_model_strength" | "default_clip_strength"
+    >>,
+  ) =>
     request<ModelAssetInstall>(`/api/model-assets/${id}`, {
       method: "PATCH",
-      body: JSON.stringify({ active }),
+      body: JSON.stringify(values),
     }),
   deleteModelAsset: (id: string) =>
     request<void>(`/api/model-assets/${id}`, { method: "DELETE" }),
