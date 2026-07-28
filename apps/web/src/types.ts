@@ -335,6 +335,7 @@ export interface WorkerStatus {
   command: string[];
   exit_code: number | null;
   estimated_memory_bytes: number | null;
+  startup_duration_ms?: number | null;
   current_memory_bytes: number | null;
   peak_memory_bytes: number | null;
   active_jobs: number;

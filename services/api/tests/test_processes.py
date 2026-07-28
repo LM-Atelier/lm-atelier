@@ -254,6 +254,46 @@ async def test_worker_subprocess_does_not_inherit_application_or_cloud_secrets(
     await supervisor.close()
 
 
+async def test_worker_status_records_spawn_to_health_duration(
+    settings,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:  # type: ignore[no-untyped-def]
+    settings.prepare()
+    supervisor = ProcessSupervisor(settings)
+    ticks = iter((100.0, 100.456))
+
+    class FakeProcess:
+        pid = os.getpid()
+        returncode: int | None = None
+
+        def terminate(self) -> None:
+            self.returncode = 0
+
+        async def wait(self) -> int:
+            return self.returncode or 0
+
+    async def create_process(*_command: str, **_kwargs: object) -> FakeProcess:
+        return FakeProcess()
+
+    async def capture_output(_record: object) -> None:
+        return None
+
+    async def healthy(_record: object, _url: str) -> None:
+        return None
+
+    monkeypatch.setattr("local_lm.processes.time.perf_counter", lambda: next(ticks))
+    monkeypatch.setattr(asyncio, "create_subprocess_exec", create_process)
+    monkeypatch.setattr(supervisor, "_capture_process_output", capture_output)
+    monkeypatch.setattr(supervisor, "_wait_healthy", healthy)
+
+    await supervisor._replace("chat", ["worker"], "http://127.0.0.1/health")
+
+    status = supervisor.statuses()[0]
+    assert status.state == "ready"
+    assert status.startup_duration_ms == 456
+    await supervisor.close()
+
+
 async def test_worker_health_probe_ignores_proxy_environment(
     settings,
     monkeypatch: pytest.MonkeyPatch,
