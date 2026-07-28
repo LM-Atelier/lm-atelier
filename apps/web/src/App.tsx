@@ -373,9 +373,11 @@ function useArtifactSource(artifactId: string | null): string | null {
 function ArtifactPart({
   part,
   onEditImage,
+  onAnimateImage,
 }: {
   part: MessagePart;
   onEditImage?: (artifactId: string) => void;
+  onAnimateImage?: (artifactId: string) => void;
 }) {
   const proxyId = typeof part.metadata_json.browser_proxy_artifact_id === "string" ? part.metadata_json.browser_proxy_artifact_id : null;
   const posterId = typeof part.metadata_json.poster_artifact_id === "string"
@@ -400,6 +402,7 @@ function ArtifactPart({
         <figcaption>
           <ImageIcon size={14} /> {preview ? "Generation preview" : inputReference ? "Attached image" : "Generated image"}
           {!preview && onEditImage && <button type="button" onClick={() => onEditImage(part.artifact_id!)}>Edit</button>}
+          {!preview && onAnimateImage && <button type="button" onClick={() => onAnimateImage(part.artifact_id!)}>Animate</button>}
           {!preview && <a href={source} download>Download</a>}
         </figcaption>
       </figure>
@@ -653,18 +656,20 @@ function PartView({
   liveText,
   markdown = false,
   onEditImage,
+  onAnimateImage,
 }: {
   part: MessagePart;
   liveText?: string;
   markdown?: boolean;
   onEditImage?: (artifactId: string) => void;
+  onAnimateImage?: (artifactId: string) => void;
 }) {
   if (part.type === "text") {
     const text = liveText || part.text || "";
     return markdown ? <MarkdownText text={text} /> : <div className="message-text">{text}</div>;
   }
   if (part.type === "image" || part.type === "video" || part.type === "attachment") {
-    return <ArtifactPart part={part} onEditImage={onEditImage} />;
+    return <ArtifactPart part={part} onEditImage={onEditImage} onAnimateImage={onAnimateImage} />;
   }
   if (part.type === "progress") {
     const progress = Number(part.metadata_json.progress ?? 0);
@@ -696,6 +701,7 @@ function MessageBubble({
   onSelectRevision,
   onCancelQueued,
   onEditImage,
+  onAnimateImage,
   onQuote,
 }: {
   message: Message;
@@ -705,6 +711,7 @@ function MessageBubble({
   onSelectRevision?: (messageId: string, revisionId: string) => void;
   onCancelQueued?: () => void;
   onEditImage?: (artifactId: string) => void;
+  onAnimateImage?: (artifactId: string) => void;
   onQuote?: (text: string) => void;
 }) {
   const visibleParts = message.parts.filter((part) => part.type !== "generation_metadata");
@@ -780,7 +787,7 @@ function MessageBubble({
     <article className={`message ${message.role}`}>
       <div className="avatar">{message.role === "user" ? "You" : <Bot size={19} />}</div>
       <div className="message-content">
-        {editing ? <div className="message-edit"><textarea aria-label="Edit message" rows={4} value={draft} onChange={(event) => setDraft(event.target.value)} /><div><button onClick={() => { setDraft(userText); setEditing(false); }}>Cancel</button><button className="primary" disabled={!draft.trim()} onClick={() => { onEdit?.(message.id, draft.trim()); setEditing(false); }}>Send edited message</button></div></div> : renderedParts.map((part) => <PartView key={part.id} part={part} liveText={liveText} markdown={message.role === "assistant"} onEditImage={onEditImage} />)}
+        {editing ? <div className="message-edit"><textarea aria-label="Edit message" rows={4} value={draft} onChange={(event) => setDraft(event.target.value)} /><div><button onClick={() => { setDraft(userText); setEditing(false); }}>Cancel</button><button className="primary" disabled={!draft.trim()} onClick={() => { onEdit?.(message.id, draft.trim()); setEditing(false); }}>Send edited message</button></div></div> : renderedParts.map((part) => <PartView key={part.id} part={part} liveText={liveText} markdown={message.role === "assistant"} onEditImage={onEditImage} onAnimateImage={onAnimateImage} />)}
         {liveText && !visibleParts.some((part) => part.type === "text") && (
           <MarkdownText text={liveText} />
         )}
@@ -1585,7 +1592,7 @@ function Composer({
   onStopAndSend,
   workflows,
   project,
-  editTarget,
+  visualTarget,
   quoteTarget,
 }: {
   chat: ChatDetail;
@@ -1608,7 +1615,7 @@ function Composer({
   ) => void;
   workflows: Workflow[];
   project?: Project;
-  editTarget?: { artifactId: string; requestId: number } | null;
+  visualTarget?: { artifactId: string; mode: "image" | "video"; requestId: number } | null;
   quoteTarget?: { text: string; requestId: number } | null;
 }) {
   const [text, setText] = useState("");
@@ -1622,18 +1629,23 @@ function Composer({
   const [dropActive, setDropActive] = useState(false);
   const fileInput = useRef<HTMLInputElement>(null);
   const textInput = useRef<HTMLTextAreaElement>(null);
-  const consumedEditRequest = useRef<number | null>(null);
+  const consumedVisualRequest = useRef<number | null>(null);
   useEffect(() => {
-    if (!editTarget || consumedEditRequest.current === editTarget.requestId) return;
-    consumedEditRequest.current = editTarget.requestId;
+    if (!visualTarget || consumedVisualRequest.current === visualTarget.requestId) return;
+    consumedVisualRequest.current = visualTarget.requestId;
     setAttachments((current) => (
-      current.some((item) => item.id === editTarget.artifactId)
+      current.some((item) => item.id === visualTarget.artifactId)
         ? current
-        : [...current, { id: editTarget.artifactId, kind: "image" }]
+        : [...current, { id: visualTarget.artifactId, kind: "image" }]
     ));
-    onMode("image");
+    onMode(visualTarget.mode);
+    if (visualTarget.mode === "video") {
+      window.setTimeout(() => {
+        setText((current) => current.trim() ? current : "Animate this image");
+      }, 0);
+    }
     textInput.current?.focus();
-  }, [editTarget, onMode]);
+  }, [visualTarget, onMode]);
   const consumedQuoteRequest = useRef<number | null>(null);
   useEffect(() => {
     if (!quoteTarget || consumedQuoteRequest.current === quoteTarget.requestId) return;
@@ -1748,16 +1760,29 @@ function Composer({
                 <Paperclip size={13} />
                 {attachment.id.slice(0, 18)}
                 {attachment.kind === "image" && (
-                  <button
-                    className="attachment-edit"
-                    aria-label="Edit attached image"
-                    onClick={() => {
-                      onMode("image");
-                      textInput.current?.focus();
-                    }}
-                  >
-                    Edit
-                  </button>
+                  <>
+                    <button
+                      className="attachment-edit"
+                      aria-label="Edit attached image"
+                      onClick={() => {
+                        onMode("image");
+                        textInput.current?.focus();
+                      }}
+                    >
+                      Edit
+                    </button>
+                    <button
+                      className="attachment-edit"
+                      aria-label="Animate attached image"
+                      onClick={() => {
+                        onMode("video");
+                        setText((current) => current.trim() ? current : "Animate this image");
+                        textInput.current?.focus();
+                      }}
+                    >
+                      Animate
+                    </button>
+                  </>
                 )}
                 <button
                   aria-label={`Remove attachment ${attachment.id.slice(0, 18)}`}
@@ -2049,7 +2074,7 @@ function ChatView({
   onRetryStep: (stepId: string) => void;
 }) {
   const endRef = useRef<HTMLDivElement>(null);
-  const [editTarget, setEditTarget] = useState<{ artifactId: string; requestId: number } | null>(null);
+  const [visualTarget, setVisualTarget] = useState<{ artifactId: string; mode: "image" | "video"; requestId: number } | null>(null);
   const [quoteTarget, setQuoteTarget] = useState<{ text: string; requestId: number } | null>(null);
   useEffect(() => {
     if (typeof endRef.current?.scrollIntoView === "function") {
@@ -2136,8 +2161,14 @@ function ChatView({
                     ? () => onCancelPlan(messagePlan.id)
                     : undefined
                 }
-                onEditImage={busy ? undefined : (artifactId) => setEditTarget({
+                onEditImage={busy ? undefined : (artifactId) => setVisualTarget({
                   artifactId,
+                  mode: "image",
+                  requestId: Date.now(),
+                })}
+                onAnimateImage={busy ? undefined : (artifactId) => setVisualTarget({
+                  artifactId,
+                  mode: "video",
                   requestId: Date.now(),
                 })}
                 onQuote={(text) => setQuoteTarget({ text, requestId: Date.now() })}
@@ -2167,7 +2198,7 @@ function ChatView({
         ))}
         <div ref={endRef} />
       </div>
-      <Composer chat={chat} engines={engines} profiles={profiles} stoppable={stoppable} settings={settings} onSettings={onSettings} presets={presets} presetId={presetId} onPreset={onPreset} onMode={onMode} onSend={onSend} onStop={onStop} onStopAndSend={onStopAndSend} workflows={workflows} project={project} editTarget={editTarget} quoteTarget={quoteTarget} />
+      <Composer chat={chat} engines={engines} profiles={profiles} stoppable={stoppable} settings={settings} onSettings={onSettings} presets={presets} presetId={presetId} onPreset={onPreset} onMode={onMode} onSend={onSend} onStop={onStop} onStopAndSend={onStopAndSend} workflows={workflows} project={project} visualTarget={visualTarget} quoteTarget={quoteTarget} />
     </div>
   );
 }
@@ -2223,6 +2254,13 @@ function ModelCard({
   );
 }
 
+function recipeOperationLabel(operation: string): string {
+  return operation
+    .split("_")
+    .map((part) => part === "to" ? "→" : part)
+    .join(" ")
+    .replace(/^\w/, (character) => character.toUpperCase());
+}
 function RecipeCard({ recipe, pending, onInstall }: { recipe: ReferenceRecipe; pending: boolean; onInstall: () => void }) {
   const memory = recipe.hardware.minimum_vram_gb
     ? `${recipe.hardware.minimum_vram_gb} GB+ VRAM`
@@ -2234,10 +2272,10 @@ function RecipeCard({ recipe, pending, onInstall }: { recipe: ReferenceRecipe; p
         <div><small>{recipe.role} · recipe v{recipe.version}</small><h3>{recipe.name}</h3></div>
       </header>
       <p>{recipe.summary}</p>
-      <div className="recipe-badges"><span className="badge likely">Pinned recipe</span><span className="badge">{recipe.license_id}</span><span className="badge">{recipe.node_policy || recipe.engine}</span></div>
+      <div className="recipe-badges"><span className={`badge ${recipe.certified ? "likely" : ""}`}>{recipe.certified ? "Certified" : "Reference candidate"}</span>{recipe.operations.map((operation) => <span className="badge" key={operation}>{recipeOperationLabel(operation)}</span>)}<span className="badge">{recipe.license_id}</span><span className="badge">{recipe.node_policy || recipe.engine}</span></div>
       <div className="recipe-meta"><span><HardDrive size={14} />{formatBytes(recipe.total_size_bytes)}</span><span><Gauge size={14} />{memory}</span></div>
       <small>{recipe.hardware.guidance}</small>
-      <button className="primary" onClick={onInstall} disabled={pending}>{pending ? "Queued" : "Install pinned recipe"}</button>
+      <button className="primary" onClick={onInstall} disabled={pending}>{pending ? "Queued" : "Install recipe"}</button>
     </article>
   );
 }
