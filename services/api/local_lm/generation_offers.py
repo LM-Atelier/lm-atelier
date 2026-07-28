@@ -139,8 +139,8 @@ async def extract_generation_offer(
 
 
 def is_explicit_generation_assent(text: str) -> bool:
-    normalized = re.sub(r"[.!?]+$", "", " ".join(text.casefold().split())).strip()
-    normalized = re.sub(r"\s*,\s*", " ", normalized)
+    normalized = " ".join(text.casefold().split()).rstrip(".!?")
+    normalized = " ".join(normalized.replace(",", " ").split())
     if normalized in _EXPLICIT_ASSENTS:
         return True
     return bool(

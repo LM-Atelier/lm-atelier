@@ -216,6 +216,28 @@ def test_explicit_generation_assents_are_narrowly_recognized(text: str) -> None:
 
 
 @pytest.mark.parametrize(
+    ("text", "expected"),
+    [
+        ("Yes" + "!" * 100_000, True),
+        ("Yes," + " " * 100_000 + "please", True),
+        ("No" + "!" * 100_000, False),
+        ("Yes," + " " * 100_000 + "but change it", False),
+    ],
+    ids=[
+        "punctuation-assent",
+        "spacing-assent",
+        "punctuation-refusal",
+        "spacing-qualified-reply",
+    ],
+)
+def test_assent_normalization_is_linear_on_long_repeated_input(
+    text: str,
+    expected: bool,
+) -> None:
+    assert is_explicit_generation_assent(text) is expected
+
+
+@pytest.mark.parametrize(
     "text",
     [
         "No thanks",
