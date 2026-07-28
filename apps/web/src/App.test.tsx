@@ -3,7 +3,7 @@ import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import App from "./App";
 import { api, connectEvents } from "./api";
-import type { BackupInfo, Chat, ChatDetail, EngineCapabilities, Job, SettingField, TurnAccepted } from "./types";
+import type { BackupInfo, Chat, ChatDetail, EngineCapabilities, Job, SettingField, SetupReadinessReport, SetupRoleReadiness, TurnAccepted } from "./types";
 
 const clipboardWrite = vi.fn();
 
@@ -88,6 +88,7 @@ const roleAwareMediaEngine: EngineCapabilities = {
 vi.mock("./api", () => ({
   api: {
     initialize: vi.fn().mockResolvedValue(undefined),
+    setupReadiness: vi.fn().mockResolvedValue({ version: 1, state: "ready", roles: [] }),
     projects: vi.fn().mockResolvedValue([]),
     chats: vi.fn().mockResolvedValue([]),
     chat: vi.fn(),
@@ -243,6 +244,39 @@ vi.mock("./api", () => ({
   }),
 }));
 
+function setupRole(
+  role: SetupRoleReadiness["role"],
+  state: SetupRoleReadiness["state"] = "ready",
+  nextAction: string | null = null,
+  overrides: Partial<SetupRoleReadiness> = {},
+): SetupRoleReadiness {
+  return {
+    role,
+    state,
+    verification_level: "activation_probe",
+    engine: role === "chat" ? "llama.cpp" : "comfyui",
+    job_id: null,
+    install_id: state === "ready" ? `install-${role}` : null,
+    profile_id: state === "ready" ? `profile-${role}` : null,
+    workflow_revision_id: state === "ready" && role !== "chat" ? `workflow-${role}` : null,
+    next_action: nextAction,
+    checks: [{
+      code: state === "ready" ? "activation_ready" : nextAction === "select_model" ? "model_missing" : "setup_issue",
+      status: state === "ready" ? "pass" : state === "in_progress" ? "pending" : "fail",
+      message: state === "ready" ? "The model passed the current bounded activation probe." : "Setup needs attention.",
+      action: nextAction,
+    }],
+    ...overrides,
+  };
+}
+
+function setupReport(...roles: SetupRoleReadiness[]): SetupReadinessReport {
+  const state = roles.some((role) => role.state === "action_required")
+    ? "action_required"
+    : roles.some((role) => role.state === "in_progress") ? "in_progress" : "ready";
+  return { version: 1, state, roles };
+}
+
 describe("App", () => {
   beforeEach(() => {
     vi.clearAllMocks();
@@ -253,6 +287,7 @@ describe("App", () => {
     });
     localStorage.clear();
     sessionStorage.clear();
+    vi.mocked(api.setupReadiness).mockResolvedValue({ version: 1, state: "ready", roles: [] });
     vi.mocked(api.projects).mockResolvedValue([]);
     vi.mocked(api.profiles).mockResolvedValue([]);
     vi.mocked(api.presets).mockResolvedValue([]);
@@ -306,6 +341,148 @@ describe("App", () => {
     fireEvent.click(modelLibrary);
     expect(modelLibrary).toHaveAttribute("aria-current", "page");
     await waitFor(() => expect(document.getElementById("main-content")).toHaveFocus());
+  });
+
+  it("opens incomplete setup once, resumes it, and routes to the exact model role", async () => {
+    vi.mocked(api.setupReadiness).mockResolvedValue(setupReport(
+      setupRole("chat"),
+      setupRole("image", "action_required", "select_model"),
+      setupRole("video"),
+    ));
+    const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+    render(
+      <QueryClientProvider client={client}>
+        <App />
+      </QueryClientProvider>,
+    );
+
+    expect(await screen.findByRole("dialog", { name: "Set up LM Atelier" })).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "Not now" }));
+    expect(screen.queryByRole("dialog", { name: "Set up LM Atelier" })).not.toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole("button", { name: /Setup Action needed/ }));
+    expect(await screen.findByRole("dialog", { name: "Set up LM Atelier" })).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "Choose image model" }));
+    expect(await screen.findByLabelText("Model role")).toHaveValue("image");
+    expect(screen.queryByRole("dialog", { name: "Set up LM Atelier" })).not.toBeInTheDocument();
+  });
+
+  it("offers only a hardware-eligible one-click reference recipe", async () => {
+    vi.mocked(api.setupReadiness).mockResolvedValue(setupReport(
+      setupRole("chat", "action_required", "select_model"),
+      setupRole("image"),
+      setupRole("video"),
+    ));
+    vi.mocked(api.recipes).mockResolvedValue([
+      {
+        id: "too-large",
+        version: 1,
+        name: "Too Large Chat",
+        summary: "Synthetic",
+        role: "chat",
+        engine: "llama.cpp",
+        operations: ["text"],
+        license_id: "apache-2.0",
+        status: "reference-candidate",
+        certified: false,
+        remote_id: "test/too-large",
+        revision: "main",
+        files: [],
+        total_size_bytes: 2_000,
+        hardware: { tier: "cpu", minimum_ram_gb: 64, recommended_ram_gb: 64, minimum_vram_gb: null, recommended_vram_gb: null, guidance: "Synthetic" },
+        default_settings: {},
+        workflow_path: null,
+        node_policy: null,
+        notes: [],
+      },
+      {
+        id: "starter-chat",
+        version: 1,
+        name: "Starter Chat",
+        summary: "Synthetic",
+        role: "chat",
+        engine: "llama.cpp",
+        operations: ["text"],
+        license_id: "apache-2.0",
+        status: "reference-candidate",
+        certified: false,
+        remote_id: "test/starter",
+        revision: "main",
+        files: [],
+        total_size_bytes: 1_000,
+        hardware: { tier: "cpu", minimum_ram_gb: 8, recommended_ram_gb: 16, minimum_vram_gb: null, recommended_vram_gb: null, guidance: "Synthetic" },
+        default_settings: {},
+        workflow_path: null,
+        node_policy: null,
+        notes: [],
+      },
+    ]);
+    vi.mocked(api.installRecipe).mockResolvedValue({ id: "job-recipe" } as Job);
+    const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+    render(
+      <QueryClientProvider client={client}>
+        <App />
+      </QueryClientProvider>,
+    );
+
+    const install = await screen.findByRole("button", { name: "Install Starter Chat" });
+    expect(screen.queryByRole("button", { name: "Install Too Large Chat" })).not.toBeInTheDocument();
+    fireEvent.click(install);
+    await waitFor(() => expect(api.installRecipe).toHaveBeenCalledWith("starter-chat"));
+  });
+
+  it("shows structured setup progress and repairs a missing runtime", async () => {
+    vi.mocked(api.setupReadiness).mockResolvedValue(setupReport(
+      setupRole("chat", "in_progress", "wait_for_install", { job_id: "download-chat" }),
+      setupRole("image", "action_required", "install_runtime", { engine: "comfyui", install_id: "install-image" }),
+      setupRole("video"),
+    ));
+    vi.mocked(api.jobs).mockResolvedValue([{
+      id: "download-chat",
+      kind: "download",
+      status: "running",
+      run_id: null,
+      progress: 0.42,
+      phase: "Downloading",
+      progress_json: {
+        version: 2,
+        stage: "Downloading model",
+        stage_progress: 0.42,
+        overall_progress: 0.42,
+        completed_units: 42,
+        total_units: 100,
+        unit: "bytes",
+        bytes_reused: 0,
+        rate_bytes_per_second: null,
+        eta_seconds: null,
+        file_index: 1,
+        file_count: 1,
+        queue_resource: "network",
+        queue_position: null,
+        queue_length: null,
+        blocked_by: [],
+        indeterminate: false,
+        updated_at: new Date().toISOString(),
+      },
+      payload_json: {},
+      result_json: {},
+      error: null,
+      attempt: 0,
+      cancellable: true,
+      created_at: "2026-07-28T00:00:00Z",
+      updated_at: "2026-07-28T00:00:00Z",
+    }]);
+    vi.mocked(api.installRuntime).mockResolvedValue({} as never);
+    const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+    render(
+      <QueryClientProvider client={client}>
+        <App />
+      </QueryClientProvider>,
+    );
+
+    expect(await screen.findByRole("progressbar", { name: "Chat setup progress" })).toHaveAttribute("aria-valuenow", "42");
+    fireEvent.click(screen.getByRole("button", { name: "Install runtime" }));
+    await waitFor(() => expect(api.installRuntime).toHaveBeenCalledWith("comfyui"));
   });
 
   it("refreshes the visible chat when media generation progress changes", async () => {
