@@ -479,3 +479,133 @@ async def test_ambiguous_auto_route_has_a_bounded_model_planner(
 
     assert plan.operation == Operation.TEXT
     assert plan.reason == "no clear media creation intent"
+
+
+_IMAGE_SUMMARY = (
+    "Generated image requested with this prompt (visual contents not inspected): "
+    '"A lighthouse on a basalt cliff at dusk, oil painting".'
+)
+_VIDEO_SUMMARY = (
+    "Generated video requested with this prompt (visual contents not inspected): "
+    '"A paper boat drifting down a rain-soaked street".'
+)
+_SUGGESTION_LIST = (
+    "Here are some image ideas:\n"
+    "1. A fox curled beneath a snow-covered pine\n"
+    "2. A tram crossing a viaduct in golden fog\n"
+    "3. A tidepool reflecting a violet aurora"
+)
+
+
+@pytest.mark.parametrize(
+    ("text", "summary", "expected_operation", "expected_prompt"),
+    [
+        (
+            "Make me another",
+            _IMAGE_SUMMARY,
+            Operation.TEXT_TO_IMAGE,
+            "A lighthouse on a basalt cliff at dusk, oil painting",
+        ),
+        (
+            "one more",
+            _VIDEO_SUMMARY,
+            Operation.TEXT_TO_VIDEO,
+            "A paper boat drifting down a rain-soaked street",
+        ),
+        (
+            "please generate another one",
+            _IMAGE_SUMMARY,
+            Operation.TEXT_TO_IMAGE,
+            "A lighthouse on a basalt cliff at dusk, oil painting",
+        ),
+    ],
+)
+def test_repeat_command_reuses_the_last_generation_prompt(
+    text: str,
+    summary: str,
+    expected_operation: Operation,
+    expected_prompt: str,
+) -> None:
+    plan = ModalityRouter().plan(
+        text=text,
+        mode=RoutingMode.AUTO,
+        input_artifact_ids=[],
+        conversation=[{"role": "assistant", "content": summary}],
+    )
+
+    assert plan.operation == expected_operation
+    assert plan.standalone_prompt == expected_prompt
+
+
+def test_repeat_command_without_a_generation_stays_text() -> None:
+    plan = ModalityRouter().plan(
+        text="Make me another one",
+        mode=RoutingMode.AUTO,
+        input_artifact_ids=[],
+        conversation=[{"role": "assistant", "content": "Only prose here."}],
+    )
+
+    assert plan.operation == Operation.TEXT
+
+
+@pytest.mark.parametrize(
+    ("text", "expected_operation", "expected_prompt"),
+    [
+        (
+            "Make me the first one",
+            Operation.TEXT_TO_IMAGE,
+            "A fox curled beneath a snow-covered pine",
+        ),
+        (
+            "generate #3",
+            Operation.TEXT_TO_IMAGE,
+            "A tidepool reflecting a violet aurora",
+        ),
+        (
+            "Make the second one as a video",
+            Operation.TEXT_TO_VIDEO,
+            "A tram crossing a viaduct in golden fog",
+        ),
+    ],
+)
+def test_ordinal_selection_resolves_the_listed_suggestion(
+    text: str,
+    expected_operation: Operation,
+    expected_prompt: str,
+) -> None:
+    plan = ModalityRouter().plan(
+        text=text,
+        mode=RoutingMode.AUTO,
+        input_artifact_ids=[],
+        conversation=[{"role": "assistant", "content": _SUGGESTION_LIST}],
+    )
+
+    assert plan.operation == expected_operation
+    assert plan.standalone_prompt == expected_prompt
+
+
+def test_ordinal_selection_beyond_the_list_stays_text() -> None:
+    plan = ModalityRouter().plan(
+        text="Make me the tenth one",
+        mode=RoutingMode.AUTO,
+        input_artifact_ids=[],
+        conversation=[{"role": "assistant", "content": _SUGGESTION_LIST}],
+    )
+
+    assert plan.operation == Operation.TEXT
+
+
+def test_ordinal_selection_skips_media_summaries_to_find_the_list() -> None:
+    plan = ModalityRouter().plan(
+        text="Make me the first one",
+        mode=RoutingMode.AUTO,
+        input_artifact_ids=[],
+        conversation=[
+            {"role": "assistant", "content": _SUGGESTION_LIST},
+            {"role": "user", "content": "Nice ideas"},
+            {"role": "assistant", "content": _IMAGE_SUMMARY},
+        ],
+    )
+
+    assert plan.operation == Operation.TEXT_TO_IMAGE
+    assert plan.standalone_prompt == "A fox curled beneath a snow-covered pine"

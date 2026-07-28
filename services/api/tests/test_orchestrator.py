@@ -8,7 +8,15 @@ from unittest.mock import AsyncMock, Mock
 import pytest
 
 from local_lm.adapters.base import ChatEvent, MediaEvent
-from local_lm.models import Job, Message, MessagePart, ModelInstall, ModelProfile, Run
+from local_lm.models import (
+    Job,
+    Message,
+    MessagePart,
+    ModelInstall,
+    ModelProfile,
+    Run,
+    WorkStep,
+)
 from local_lm.orchestrator import ConversationOrchestrator
 from local_lm.schemas import WorkerStatus
 
@@ -290,6 +298,170 @@ async def test_media_execution_awaits_inflight_handoff_restart() -> None:
     await ensure_task
 
     assert start_calls == 1
+
+
+def _plan_prewarm_orchestrator(  # type: ignore[no-untyped-def]
+    next_step,
+    *,
+    media_running: bool = False,
+    start_media=None,
+    job=None,
+):
+    current_step = SimpleNamespace(ordinal=1)
+
+    class FakeSession:
+        def __enter__(self):  # type: ignore[no-untyped-def]
+            return self
+
+        def __exit__(self, *_args):  # type: ignore[no-untyped-def]
+            return None
+
+        def get(self, model, identity):  # type: ignore[no-untyped-def]
+            return {
+                (WorkStep, "step-current"): current_step,
+                (Job, "job-current"): job,
+            }.get((model, identity))
+
+        def scalar(self, _query):  # type: ignore[no-untyped-def]
+            return next_step
+
+    processes = SimpleNamespace(
+        statuses=Mock(
+            return_value=[
+                WorkerStatus(
+                    name="media",
+                    state="ready" if media_running else "stopped",
+                    managed=media_running,
+                    running=media_running,
+                )
+            ]
+        ),
+        start_media=start_media or AsyncMock(),
+    )
+    orchestrator = ConversationOrchestrator(
+        engines=SimpleNamespace(settings=SimpleNamespace(media_engine="comfyui")),
+        artifacts=Mock(),
+        events=Mock(),
+        scheduler=Mock(),
+        processes=processes,
+        session_factory=FakeSession,
+    )
+    return orchestrator, processes, FakeSession
+
+
+def _ordered_text_run():  # type: ignore[no-untyped-def]
+    return SimpleNamespace(
+        operation="text",
+        work_plan_id="plan-1",
+        work_step_id="step-current",
+    )
+
+
+async def test_ordered_text_step_prewarms_the_following_media_step() -> None:
+    next_step = SimpleNamespace(operation="text_to_image", status="queued")
+    orchestrator, processes, session_factory = _plan_prewarm_orchestrator(next_step)
+
+    with session_factory() as session:
+        orchestrator._arm_step_prewarm(session, _ordered_text_run())
+
+    assert orchestrator._step_prewarm_plan_id == "plan-1"
+    processes.start_media.assert_not_awaited()
+
+    orchestrator._begin_step_prewarm()
+    prewarm_task = orchestrator._step_prewarm_task
+    assert prewarm_task is not None
+    assert prewarm_task is orchestrator._media_restart_task
+    await prewarm_task
+
+    processes.start_media.assert_awaited_once()
+
+
+async def test_ordered_text_step_does_not_prewarm_a_text_successor() -> None:
+    next_step = SimpleNamespace(operation="text", status="queued")
+    orchestrator, processes, session_factory = _plan_prewarm_orchestrator(next_step)
+
+    with session_factory() as session:
+        orchestrator._arm_step_prewarm(session, _ordered_text_run())
+    orchestrator._begin_step_prewarm()
+
+    assert orchestrator._step_prewarm_plan_id is None
+    assert orchestrator._step_prewarm_task is None
+    processes.start_media.assert_not_awaited()
+
+
+async def test_single_step_turns_never_arm_a_prewarm() -> None:
+    orchestrator, processes, session_factory = _plan_prewarm_orchestrator(None)
+    run = SimpleNamespace(operation="text", work_plan_id=None, work_step_id=None)
+
+    with session_factory() as session:
+        orchestrator._arm_step_prewarm(session, run)
+    orchestrator._begin_step_prewarm()
+
+    assert orchestrator._step_prewarm_plan_id is None
+    processes.start_media.assert_not_awaited()
+
+
+async def test_running_media_worker_skips_the_prewarm() -> None:
+    next_step = SimpleNamespace(operation="text_to_image", status="queued")
+    orchestrator, processes, session_factory = _plan_prewarm_orchestrator(
+        next_step, media_running=True
+    )
+
+    with session_factory() as session:
+        orchestrator._arm_step_prewarm(session, _ordered_text_run())
+    orchestrator._begin_step_prewarm()
+
+    assert orchestrator._step_prewarm_plan_id is None
+    processes.start_media.assert_not_awaited()
+
+
+async def test_completed_step_without_streaming_still_prewarms() -> None:
+    next_step = SimpleNamespace(operation="text_to_video", status="queued")
+    job = SimpleNamespace(status="complete")
+    orchestrator, processes, session_factory = _plan_prewarm_orchestrator(next_step, job=job)
+
+    with session_factory() as session:
+        orchestrator._arm_step_prewarm(session, _ordered_text_run())
+    await orchestrator._settle_step_prewarm("job-current")
+    if orchestrator._media_restart_task:
+        await orchestrator._media_restart_task
+
+    assert orchestrator._step_prewarm_plan_id is None
+    processes.start_media.assert_awaited_once()
+
+
+@pytest.mark.parametrize("job_status", ["cancelled", "failed"])
+async def test_unsuccessful_step_stops_the_inflight_prewarm(job_status: str) -> None:
+    start_entered = asyncio.Event()
+    start_release = asyncio.Event()
+    start_finished = False
+
+    async def start_media() -> None:
+        nonlocal start_finished
+        start_entered.set()
+        await start_release.wait()
+        start_finished = True
+
+    next_step = SimpleNamespace(operation="text_to_image", status="queued")
+    job = SimpleNamespace(status=job_status)
+    orchestrator, _processes, session_factory = _plan_prewarm_orchestrator(
+        next_step, start_media=start_media, job=job
+    )
+
+    with session_factory() as session:
+        orchestrator._arm_step_prewarm(session, _ordered_text_run())
+    orchestrator._begin_step_prewarm()
+    prewarm_task = orchestrator._step_prewarm_task
+    assert prewarm_task is not None
+    await start_entered.wait()
+
+    await orchestrator._settle_step_prewarm("job-current")
+
+    assert prewarm_task.cancelled()
+    assert start_finished is False
+    assert orchestrator._step_prewarm_plan_id is None
+    assert orchestrator._step_prewarm_task is None
+    assert orchestrator._media_restart_task is None
 
 
 async def test_external_media_handoff_only_resumes_chat() -> None:
