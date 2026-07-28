@@ -758,6 +758,10 @@ function MessageBubble({
   const inputTokens = Number(usage?.prompt_tokens ?? context?.input_tokens ?? 0);
   const contextLimit = Number(context?.context_limit ?? 0);
   const omitted = Number(context?.messages_omitted ?? 0);
+  const contextCompaction = context?.compaction as Record<string, unknown> | undefined;
+  const compactedMessages = contextCompaction?.active
+    ? Number(contextCompaction.source_message_count ?? omitted)
+    : 0;
   const completedRevisions = (message.response_revisions ?? [])
     .filter((revision) => revision.status === "complete")
     .sort((left, right) => left.sequence - right.sequence);
@@ -796,7 +800,15 @@ function MessageBubble({
             {contextLimit > 0 && (
               <span>
                 Context {inputTokens.toLocaleString()} / {contextLimit.toLocaleString()} tokens
-                {omitted > 0 ? ` · ${omitted} earlier message${omitted === 1 ? "" : "s"} omitted` : ""}
+                {omitted > 0 && compactedMessages === 0
+                  ? ` · ${omitted} earlier message${omitted === 1 ? "" : "s"} omitted`
+                  : ""}
+              </span>
+            )}
+            {compactedMessages > 0 && (
+              <span>
+                Compacted {compactedMessages} earlier message
+                {compactedMessages === 1 ? "" : "s"} · full transcript preserved
               </span>
             )}
             {copyableText && <CopyTextButton text={copyableText} label="Copy assistant message" />}
