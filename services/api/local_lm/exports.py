@@ -47,6 +47,7 @@ from .project_dependencies import (
     parse_dependency_manifest,
 )
 from .project_portability import has_local_path, redact_local_paths
+from .prompt_helpers import STANDARD_CHAT_SCOPE
 from .schemas import ChatDetail, ProjectOut, RunOut, VisionSettings
 
 _CAS_IMPORT_SESSION_KEY = "lm_atelier_project_import_cas"
@@ -125,7 +126,7 @@ class ProjectExporter:
                 .selectinload(ResponseRevision.parts)
                 .selectinload(ResponseRevisionPart.artifact),
             )
-            .where(Chat.project_id == project_id)
+            .where(Chat.project_id == project_id, Chat.scope == STANDARD_CHAT_SCOPE)
             .order_by(Chat.created_at)
         ).all()
         runs = session.scalars(

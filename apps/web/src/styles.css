@@ -323,6 +323,21 @@ h1, h2, h3 { margin: 0; }
 .project-generation-defaults .generation-settings-actions { padding: 12px 17px; }
 .modal textarea { resize: vertical; font: 12px/1.5 "SFMono-Regular", Consolas, monospace; }
 .modal footer { justify-content: flex-end; border-top: 1px solid var(--border); padding-top: 15px; }
+.prompt-helper-dialog { width: min(860px, 96vw); overflow: hidden; }
+.prompt-helper-body { display: grid; gap: 14px; min-height: 0; }
+.prompt-helper-draft { margin-bottom: 0 !important; }
+.prompt-helper-draft textarea { min-height: 130px; font: inherit; line-height: 1.5; }
+.prompt-helper-conversation { max-height: 280px; overflow-y: auto; border: 1px solid var(--border); border-radius: 11px; background: #11100e; padding: 14px; }
+.prompt-helper-conversation .message { margin-bottom: 18px; }
+.prompt-helper-conversation .message:last-child { margin-bottom: 0; }
+.prompt-helper-conversation .media-card { max-width: 520px; }
+.prompt-helper-conversation .message-meta { display: none; }
+.prompt-helper-adopt { justify-self: start; }
+.prompt-helper-compose { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 9px; align-items: end; }
+.prompt-helper-compose textarea { resize: vertical; font: inherit; }
+.prompt-helper-compose button { min-height: 38px; }
+.prompt-helper-actions, .prompt-helper-actions > span { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 8px; }
+.prompt-helper-actions > span:last-child { margin-left: auto; }
 
 .settings-page section { margin: 35px 0; }
 .settings-page section > h2 { font-size: 17px; margin-bottom: 13px; }
@@ -519,6 +534,9 @@ h1, h2, h3 { margin: 0; }
   .support-summary { grid-template-columns: 1fr; }.support-summary ul { grid-column: auto; }.support-flags { justify-content: flex-start; }
   .modal-backdrop:not(.settings-drawer-backdrop) { align-items: end; padding: 10px; }
   .modal:not(.settings-drawer) { width: 100%; max-height: 94vh; border-radius: 15px 15px 8px 8px; }
+  .prompt-helper-compose { grid-template-columns: 1fr; }
+  .prompt-helper-compose button { justify-self: end; }
+  .prompt-helper-actions > span:last-child { width: 100%; justify-content: flex-end; }
   .project-defaults-heading { align-items: flex-start; }
   .project-defaults-heading .compact-button { white-space: nowrap; }
   .project-generation-defaults .setting-row { grid-template-columns: minmax(0, 1fr) 96px; }
