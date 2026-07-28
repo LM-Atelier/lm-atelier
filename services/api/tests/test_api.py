@@ -1334,6 +1334,7 @@ async def test_worker_management_reports_missing_local_binaries(client: AsyncCli
     assert all(item["state"] == "stopped" for item in workers.json())
     assert all(item["active_jobs"] == 0 and item["queued_jobs"] == 0 for item in workers.json())
     assert all(item["current_memory_bytes"] is None for item in workers.json())
+    assert all(item["startup_duration_ms"] is None for item in workers.json())
     assert all(item["failure_detail"] is None for item in workers.json())
     assert all(item["stderr_tail"] is None for item in workers.json())
     assert {item["log_path"] for item in workers.json()} == {
