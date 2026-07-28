@@ -68,9 +68,9 @@ def test_standard_contract_is_valid_and_hashes_deterministically() -> None:
     assert first.parameter == "strength"
     assert first.recommended["replacement"] == 0.66
     assert first.minimum_effective_steps == {
-        "localized": 2,
-        "replacement": 3,
-        "global": 3,
+        "localized": 2.0,
+        "replacement": 7.2,
+        "global": 3.0,
     }
     assert len(first.contract_hash) == 64
 
@@ -101,7 +101,7 @@ def test_absent_contract_remains_backward_compatible() -> None:
             lambda contract: contract["schedule"]["minimum_effective_steps"].update(
                 {"replacement": 0}
             ),
-            "integers from 1 to 10000",
+            "greater than 0 and at most 10000",
         ),
         (
             lambda contract: contract.update({"unexpected": True}),

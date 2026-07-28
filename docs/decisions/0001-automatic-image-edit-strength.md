@@ -16,6 +16,8 @@ Image-to-image requests use a local, deterministic, versioned prompt estimator w
 
 An immutable workflow revision may declare a versioned `x-lm-atelier-edit-calibration` contract. It maps semantic strength to a numeric workflow parameter, supplies per-scope recommendations and bounds, and may identify a resolved step parameter with minimum effective edit budgets. Live setting bounds take precedence. A short schedule may raise an Auto value only within those bounds; it never changes an explicit Manual value or assumes a scheduler or model family.
 
+The standard derived-edit contract uses a 7.2 effective-step floor for replacement edits. This is a conservative threshold supported by an eight-step synthetic Z-Image outfit test; it is not a general model or hardware certification claim.
+
 Missing or malformed optional calibration falls back to the general `denoise` policy. Standard derived image-edit workflows publish the contract as new revisions, preserving historical workflow identity. There is no repository or model-name lookup table.
 
 Explicit profile, preset, project, chat, and per-turn values remain exact and authoritative. Regeneration and inherited branches reuse an earlier Auto value unless the user supplies a new value for the workflow's declared parameter. Text-to-image behavior does not change.

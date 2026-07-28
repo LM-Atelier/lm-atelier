@@ -14,6 +14,7 @@ from local_lm.image_edit_strength import (
     resolve_image_edit_strength,
 )
 from local_lm.schemas import SettingField
+from local_lm.workflow_edit_calibration import standard_edit_calibration
 
 _FIXTURES = json.loads(
     (Path(__file__).parent / "fixtures" / "image_edit_strength_v1.json").read_text(encoding="utf-8")
@@ -400,3 +401,64 @@ def test_calibration_never_changes_an_explicit_manual_value() -> None:
     assert resolution.value == 0.43
     assert resolution.provenance()["mode"] == "manual"
     assert "schedule_adjustment" not in resolution.provenance()
+
+
+@pytest.mark.parametrize(
+    ("steps", "expected", "adjusted"),
+    [(8, 0.9, True), (20, 0.66, False)],
+)
+def test_standard_replacement_budget_tracks_resolved_schedule(
+    steps: int,
+    expected: float,
+    adjusted: bool,
+) -> None:
+    fields = [
+        _FIELDS[0],
+        SettingField(
+            key="steps",
+            label="Steps",
+            type="integer",
+            default=steps,
+            minimum=1,
+            maximum=100,
+            step=1,
+            scope="workflow",
+        ),
+    ]
+    schema = {
+        "type": "object",
+        "properties": {
+            "denoise": {
+                "type": "number",
+                "default": 0.9,
+                "minimum": 0.0,
+                "maximum": 1.0,
+            },
+            "steps": {"type": "integer", "default": steps},
+        },
+        "x-lm-atelier-edit-calibration": standard_edit_calibration(
+            parameter="denoise",
+            minimum=0.0,
+            maximum=1.0,
+            steps_parameter="steps",
+        ),
+    }
+    settings = {"denoise": 0.9, "steps": steps}
+
+    resolution = resolve_image_edit_strength(
+        Operation.IMAGE_TO_IMAGE,
+        "Replace the shirt with a blue jacket",
+        fields,
+        settings,
+        (),
+        workflow_schema=schema,
+    )
+
+    assert resolution is not None
+    assert resolution.value == expected
+    assert settings["denoise"] == expected
+    provenance = resolution.provenance()
+    assert ("schedule_adjustment" in provenance) is adjusted
+    if adjusted:
+        assert provenance["schedule_adjustment"]["minimum_effective_steps"] == 7.2
+        assert provenance["schedule_adjustment"]["effective_steps"] == 7.2

@@ -32,7 +32,7 @@ describe("workflow image edit calibration", () => {
     type: "object",
     properties: {
       strength: { type: "number", default: 0.9 },
-      steps: { type: "integer", default: 4 },
+      steps: { type: "integer", default: 8 },
     },
     "x-lm-atelier-edit-calibration": {
       version: 1,
@@ -52,7 +52,7 @@ describe("workflow image edit calibration", () => {
         steps_parameter: "steps",
         minimum_effective_steps: {
           localized: 2,
-          replacement: 3,
+          replacement: 7.2,
           global: 3,
         },
       },
@@ -63,9 +63,9 @@ describe("workflow image edit calibration", () => {
     const calibration = workflowImageEditCalibration(schema);
 
     expect(calibration?.parameter).toBe("strength");
-    expect(calibratedImageEditStrength("Replace the jacket", calibration, 4)).toEqual({
+    expect(calibratedImageEditStrength("Replace the jacket", calibration, 8)).toEqual({
       scope: "replacement",
-      value: 0.75,
+      value: 0.9,
       confidence: "high",
     });
   });
@@ -76,6 +76,20 @@ describe("workflow image edit calibration", () => {
       "x-lm-atelier-edit-calibration": {
         ...schema["x-lm-atelier-edit-calibration"],
         version: 2,
+      },
+    })).toBeNull();
+    expect(workflowImageEditCalibration({
+      ...schema,
+      "x-lm-atelier-edit-calibration": {
+        ...schema["x-lm-atelier-edit-calibration"],
+        schedule: {
+          ...schema["x-lm-atelier-edit-calibration"].schedule,
+          minimum_effective_steps: {
+            localized: 2,
+            replacement: 0,
+            global: 3,
+          },
+        },
       },
     })).toBeNull();
   });

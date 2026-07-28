@@ -20,7 +20,7 @@ _DEFAULT_RECOMMENDED = {
 }
 _DEFAULT_MINIMUM_EFFECTIVE_STEPS = {
     "localized": 2,
-    "replacement": 3,
+    "replacement": 7.2,
     "global": 3,
 }
 
@@ -33,7 +33,7 @@ class WorkflowEditCalibration:
     maximum: float
     recommended: dict[str, float]
     steps_parameter: str | None
-    minimum_effective_steps: dict[str, int]
+    minimum_effective_steps: dict[str, float]
     contract_hash: str
 
 
@@ -127,7 +127,7 @@ def validate_workflow_edit_calibration(
         recommended[scope] = value
 
     steps_parameter: str | None = None
-    minimum_effective_steps: dict[str, int] = {}
+    minimum_effective_steps: dict[str, float] = {}
     schedule = raw.get("schedule")
     if schedule is not None:
         if not isinstance(schedule, Mapping):
@@ -159,13 +159,16 @@ def validate_workflow_edit_calibration(
             required=set(_SCHEDULE_SCOPES),
         )
         for scope in _SCHEDULE_SCOPES:
-            value = raw_minimum_steps[scope]
-            if isinstance(value, bool) or not isinstance(value, int) or not 1 <= value <= 10_000:
+            numeric = _finite_number(
+                raw_minimum_steps[scope],
+                "workflow edit calibration minimum effective steps",
+            )
+            if not 0 < numeric <= 10_000:
                 raise ValueError(
                     "workflow edit calibration minimum effective steps must be "
-                    "integers from 1 to 10000"
+                    "greater than 0 and at most 10000"
                 )
-            minimum_effective_steps[scope] = value
+            minimum_effective_steps[scope] = numeric
 
     normalized = {
         "version": EDIT_CALIBRATION_VERSION,
