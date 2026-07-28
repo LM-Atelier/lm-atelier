@@ -2,63 +2,483 @@
   "schema_version": 1,
   "description": "Deterministic modality-routing regression corpus. Cases are synthetic and contain no user data.",
   "cases": [
-    {"id": "text-01", "text": "Explain how image generation works", "mode": "auto", "expected": "text"},
-    {"id": "text-02", "text": "Compare the best local video models", "mode": "auto", "expected": "text"},
-    {"id": "text-03", "text": "Write a short story about a lighthouse", "mode": "auto", "expected": "text"},
-    {"id": "text-04", "text": "Create a Python function that sorts names", "mode": "auto", "expected": "text"},
-    {"id": "text-05", "text": "Generate a list of five dinner ideas", "mode": "auto", "expected": "text"},
-    {"id": "text-06", "text": "How do I make a video loop smoothly?", "mode": "auto", "expected": "text"},
-    {"id": "text-07", "text": "Describe the composition of this photo", "mode": "auto", "expected": "text"},
-    {"id": "text-08", "text": "Analyze why this illustration feels balanced", "mode": "auto", "expected": "text"},
-    {"id": "text-09", "text": "Tell me about diffusion schedulers", "mode": "auto", "expected": "text"},
-    {"id": "text-10", "text": "Brainstorm several logo concepts in prose", "mode": "auto", "expected": "text"},
-    {"id": "text-11", "text": "Summarize our discussion of animation", "mode": "auto", "expected": "text"},
-    {"id": "text-12", "text": "What makes generated portraits look realistic?", "mode": "auto", "expected": "text"},
-    {"id": "text-13", "text": "Make an image of a fox", "mode": "text", "expected": "text"},
-    {"id": "text-14", "text": "Render a video of the ocean", "mode": "text", "expected": "text"},
-    {"id": "text-15", "text": "Maybe we should discuss image models", "mode": "auto", "expected": "text"},
-    {"id": "text-16", "text": "Proofread this image prompt for clarity", "mode": "auto", "expected": "text"},
-
-    {"id": "image-01", "text": "Draw a lighthouse in a storm", "mode": "auto", "expected": "text_to_image"},
-    {"id": "image-02", "text": "Create an image of a friendly robot", "mode": "auto", "expected": "text_to_image"},
-    {"id": "image-03", "text": "Render a poster of a lunar garden", "mode": "auto", "expected": "text_to_image"},
-    {"id": "image-04", "text": "Paint a portrait of an old astronomer", "mode": "auto", "expected": "text_to_image"},
-    {"id": "image-05", "text": "Design a logo for a quiet bookshop", "mode": "auto", "expected": "text_to_image"},
-    {"id": "image-06", "text": "Illustrate a glass city in the rain", "mode": "auto", "expected": "text_to_image"},
-    {"id": "image-07", "text": "Maybe create an image of a quiet harbor", "mode": "auto", "expected": "text_to_image"},
-    {"id": "image-08", "text": "Explain image generation", "mode": "image", "expected": "text_to_image"},
-    {"id": "image-09", "text": "Turn that into an image", "mode": "auto", "expected": "text_to_image", "conversation": [{"role": "assistant", "content": "A brass whale swims between floating gardens."}]},
-    {"id": "image-10", "text": "Make an image based on the previous story", "mode": "auto", "expected": "text_to_image", "conversation": [{"role": "assistant", "content": "At dusk, paper lanterns drifted over a silver forest."}]},
-    {"id": "image-11", "text": "Make it green", "mode": "auto", "expected": "image_to_image", "has_prior_image": true},
-    {"id": "image-12", "text": "Add a small red hat", "mode": "auto", "expected": "image_to_image", "has_prior_image": true},
-    {"id": "image-13", "text": "Remove the background", "mode": "auto", "expected": "image_to_image", "input_artifact_ids": ["sha256:input"]},
-    {"id": "image-14", "text": "Create a wallpaper showing a misty valley", "mode": "auto", "expected": "text_to_image"},
-    {"id": "image-15", "text": "Visualize an icon for a weather app", "mode": "auto", "expected": "text_to_image"},
-    {"id": "image-16", "text": "Use this input but make it a woodcut", "mode": "image", "expected": "image_to_image", "input_artifact_ids": ["sha256:input"]},
-    {"id": "image-17", "text": "Make it green", "mode": "image", "expected": "image_to_image", "has_prior_image": true},
-    {"id": "image-18", "text": "Use the previous image in a watercolor style", "mode": "image", "expected": "image_to_image", "has_prior_image": true},
-    {"id": "image-19", "text": "Create a fresh image of a green apple", "mode": "image", "expected": "text_to_image", "has_prior_image": true},
-    {"id": "image-20", "text": "Illustrate the previous story", "mode": "image", "expected": "text_to_image", "has_prior_image": true, "conversation": [{"role": "assistant", "content": "A glass orchard floated above a quiet sea."}]},
-
-    {"id": "video-01", "text": "Generate a short video of a sunrise", "mode": "auto", "expected": "text_to_video"},
-    {"id": "video-02", "text": "Create an animation of falling leaves", "mode": "auto", "expected": "text_to_video"},
-    {"id": "video-03", "text": "Render a video of a train crossing snow", "mode": "auto", "expected": "text_to_video"},
-    {"id": "video-04", "text": "Produce a movie clip of a tiny spaceship", "mode": "auto", "expected": "text_to_video"},
-    {"id": "video-05", "text": "Animate this scene", "mode": "auto", "expected": "text_to_video"},
-    {"id": "video-06", "text": "Make it move", "mode": "auto", "expected": "image_to_video", "has_prior_image": true},
-    {"id": "video-07", "text": "Animate that", "mode": "auto", "expected": "image_to_video", "input_artifact_ids": ["sha256:input"]},
-    {"id": "video-08", "text": "Turn that into an animation", "mode": "auto", "expected": "text_to_video", "conversation": [{"role": "assistant", "content": "A clockwork bird circles a coral tower."}]},
-    {"id": "video-09", "text": "Write about rain", "mode": "video", "expected": "text_to_video"},
-    {"id": "video-10", "text": "Use this image to make a video", "mode": "video", "expected": "image_to_video", "input_artifact_ids": ["sha256:input"]},
-    {"id": "video-11", "text": "Maybe generate a video of ocean waves", "mode": "auto", "expected": "text_to_video"},
-    {"id": "video-12", "text": "Create footage of fireflies over a lake", "mode": "auto", "expected": "text_to_video"},
-    {"id": "video-13", "text": "Make a video from the previous description", "mode": "auto", "expected": "text_to_video", "conversation": [{"role": "assistant", "content": "A desert observatory under a meteor shower."}]},
-    {"id": "video-14", "text": "Animate it with a slow camera orbit", "mode": "auto", "expected": "image_to_video", "has_prior_image": true},
-    {"id": "video-15", "text": "Generate an animation from this picture", "mode": "auto", "expected": "image_to_video", "input_artifact_ids": ["sha256:input"]},
-    {"id": "video-16", "text": "Explain why video diffusion flickers", "mode": "video", "expected": "text_to_video"},
-    {"id": "video-17", "text": "Make it move", "mode": "video", "expected": "image_to_video", "has_prior_image": true},
-    {"id": "video-18", "text": "Animate the previous picture with a slow camera orbit", "mode": "video", "expected": "image_to_video", "has_prior_image": true},
-    {"id": "video-19", "text": "Create a fresh video of a green apple", "mode": "video", "expected": "text_to_video", "has_prior_image": true},
-    {"id": "video-20", "text": "Make a video from the previous description", "mode": "video", "expected": "text_to_video", "has_prior_image": true, "conversation": [{"role": "assistant", "content": "A desert observatory under a meteor shower."}]}
+    {
+      "id": "text-01",
+      "text": "Explain how image generation works",
+      "mode": "auto",
+      "expected": "text"
+    },
+    {
+      "id": "text-02",
+      "text": "Compare the best local video models",
+      "mode": "auto",
+      "expected": "text"
+    },
+    {
+      "id": "text-03",
+      "text": "Write a short story about a lighthouse",
+      "mode": "auto",
+      "expected": "text"
+    },
+    {
+      "id": "text-04",
+      "text": "Create a Python function that sorts names",
+      "mode": "auto",
+      "expected": "text"
+    },
+    {
+      "id": "text-05",
+      "text": "Generate a list of five dinner ideas",
+      "mode": "auto",
+      "expected": "text"
+    },
+    {
+      "id": "text-06",
+      "text": "How do I make a video loop smoothly?",
+      "mode": "auto",
+      "expected": "text"
+    },
+    {
+      "id": "text-07",
+      "text": "Describe the composition of this photo",
+      "mode": "auto",
+      "expected": "text"
+    },
+    {
+      "id": "text-08",
+      "text": "Analyze why this illustration feels balanced",
+      "mode": "auto",
+      "expected": "text"
+    },
+    {
+      "id": "text-09",
+      "text": "Tell me about diffusion schedulers",
+      "mode": "auto",
+      "expected": "text"
+    },
+    {
+      "id": "text-10",
+      "text": "Brainstorm several logo concepts in prose",
+      "mode": "auto",
+      "expected": "text"
+    },
+    {
+      "id": "text-11",
+      "text": "Summarize our discussion of animation",
+      "mode": "auto",
+      "expected": "text"
+    },
+    {
+      "id": "text-12",
+      "text": "What makes generated portraits look realistic?",
+      "mode": "auto",
+      "expected": "text"
+    },
+    {
+      "id": "text-13",
+      "text": "Make an image of a fox",
+      "mode": "text",
+      "expected": "text"
+    },
+    {
+      "id": "text-14",
+      "text": "Render a video of the ocean",
+      "mode": "text",
+      "expected": "text"
+    },
+    {
+      "id": "text-15",
+      "text": "Maybe we should discuss image models",
+      "mode": "auto",
+      "expected": "text"
+    },
+    {
+      "id": "text-16",
+      "text": "Proofread this image prompt for clarity",
+      "mode": "auto",
+      "expected": "text"
+    },
+    {
+      "id": "image-01",
+      "text": "Draw a lighthouse in a storm",
+      "mode": "auto",
+      "expected": "text_to_image"
+    },
+    {
+      "id": "image-02",
+      "text": "Create an image of a friendly robot",
+      "mode": "auto",
+      "expected": "text_to_image"
+    },
+    {
+      "id": "image-03",
+      "text": "Render a poster of a lunar garden",
+      "mode": "auto",
+      "expected": "text_to_image"
+    },
+    {
+      "id": "image-04",
+      "text": "Paint a portrait of an old astronomer",
+      "mode": "auto",
+      "expected": "text_to_image"
+    },
+    {
+      "id": "image-05",
+      "text": "Design a logo for a quiet bookshop",
+      "mode": "auto",
+      "expected": "text_to_image"
+    },
+    {
+      "id": "image-06",
+      "text": "Illustrate a glass city in the rain",
+      "mode": "auto",
+      "expected": "text_to_image"
+    },
+    {
+      "id": "image-07",
+      "text": "Maybe create an image of a quiet harbor",
+      "mode": "auto",
+      "expected": "text_to_image"
+    },
+    {
+      "id": "image-08",
+      "text": "Explain image generation",
+      "mode": "image",
+      "expected": "text_to_image"
+    },
+    {
+      "id": "image-09",
+      "text": "Turn that into an image",
+      "mode": "auto",
+      "expected": "text_to_image",
+      "conversation": [
+        {
+          "role": "assistant",
+          "content": "A brass whale swims between floating gardens."
+        }
+      ]
+    },
+    {
+      "id": "image-10",
+      "text": "Make an image based on the previous story",
+      "mode": "auto",
+      "expected": "text_to_image",
+      "conversation": [
+        {
+          "role": "assistant",
+          "content": "At dusk, paper lanterns drifted over a silver forest."
+        }
+      ]
+    },
+    {
+      "id": "image-11",
+      "text": "Make it green",
+      "mode": "auto",
+      "expected": "image_to_image",
+      "has_prior_image": true
+    },
+    {
+      "id": "image-12",
+      "text": "Add a small red hat",
+      "mode": "auto",
+      "expected": "image_to_image",
+      "has_prior_image": true
+    },
+    {
+      "id": "image-13",
+      "text": "Remove the background",
+      "mode": "auto",
+      "expected": "image_to_image",
+      "input_artifact_ids": [
+        "sha256:input"
+      ]
+    },
+    {
+      "id": "image-14",
+      "text": "Create a wallpaper showing a misty valley",
+      "mode": "auto",
+      "expected": "text_to_image"
+    },
+    {
+      "id": "image-15",
+      "text": "Visualize an icon for a weather app",
+      "mode": "auto",
+      "expected": "text_to_image"
+    },
+    {
+      "id": "image-16",
+      "text": "Use this input but make it a woodcut",
+      "mode": "image",
+      "expected": "image_to_image",
+      "input_artifact_ids": [
+        "sha256:input"
+      ]
+    },
+    {
+      "id": "image-17",
+      "text": "Make it green",
+      "mode": "image",
+      "expected": "image_to_image",
+      "has_prior_image": true
+    },
+    {
+      "id": "image-18",
+      "text": "Use the previous image in a watercolor style",
+      "mode": "image",
+      "expected": "image_to_image",
+      "has_prior_image": true
+    },
+    {
+      "id": "image-19",
+      "text": "Create a fresh image of a green apple",
+      "mode": "image",
+      "expected": "text_to_image",
+      "has_prior_image": true
+    },
+    {
+      "id": "image-20",
+      "text": "Illustrate the previous story",
+      "mode": "image",
+      "expected": "text_to_image",
+      "has_prior_image": true,
+      "conversation": [
+        {
+          "role": "assistant",
+          "content": "A glass orchard floated above a quiet sea."
+        }
+      ]
+    },
+    {
+      "id": "video-01",
+      "text": "Generate a short video of a sunrise",
+      "mode": "auto",
+      "expected": "text_to_video"
+    },
+    {
+      "id": "video-02",
+      "text": "Create an animation of falling leaves",
+      "mode": "auto",
+      "expected": "text_to_video"
+    },
+    {
+      "id": "video-03",
+      "text": "Render a video of a train crossing snow",
+      "mode": "auto",
+      "expected": "text_to_video"
+    },
+    {
+      "id": "video-04",
+      "text": "Produce a movie clip of a tiny spaceship",
+      "mode": "auto",
+      "expected": "text_to_video"
+    },
+    {
+      "id": "video-05",
+      "text": "Animate this scene",
+      "mode": "auto",
+      "expected": "text_to_video"
+    },
+    {
+      "id": "video-06",
+      "text": "Make it move",
+      "mode": "auto",
+      "expected": "image_to_video",
+      "has_prior_image": true
+    },
+    {
+      "id": "video-07",
+      "text": "Animate that",
+      "mode": "auto",
+      "expected": "image_to_video",
+      "input_artifact_ids": [
+        "sha256:input"
+      ]
+    },
+    {
+      "id": "video-08",
+      "text": "Turn that into an animation",
+      "mode": "auto",
+      "expected": "text_to_video",
+      "conversation": [
+        {
+          "role": "assistant",
+          "content": "A clockwork bird circles a coral tower."
+        }
+      ]
+    },
+    {
+      "id": "video-09",
+      "text": "Write about rain",
+      "mode": "video",
+      "expected": "text_to_video"
+    },
+    {
+      "id": "video-10",
+      "text": "Use this image to make a video",
+      "mode": "video",
+      "expected": "image_to_video",
+      "input_artifact_ids": [
+        "sha256:input"
+      ]
+    },
+    {
+      "id": "video-11",
+      "text": "Maybe generate a video of ocean waves",
+      "mode": "auto",
+      "expected": "text_to_video"
+    },
+    {
+      "id": "video-12",
+      "text": "Create footage of fireflies over a lake",
+      "mode": "auto",
+      "expected": "text_to_video"
+    },
+    {
+      "id": "video-13",
+      "text": "Make a video from the previous description",
+      "mode": "auto",
+      "expected": "text_to_video",
+      "conversation": [
+        {
+          "role": "assistant",
+          "content": "A desert observatory under a meteor shower."
+        }
+      ]
+    },
+    {
+      "id": "video-14",
+      "text": "Animate it with a slow camera orbit",
+      "mode": "auto",
+      "expected": "image_to_video",
+      "has_prior_image": true
+    },
+    {
+      "id": "video-15",
+      "text": "Generate an animation from this picture",
+      "mode": "auto",
+      "expected": "image_to_video",
+      "input_artifact_ids": [
+        "sha256:input"
+      ]
+    },
+    {
+      "id": "video-16",
+      "text": "Explain why video diffusion flickers",
+      "mode": "video",
+      "expected": "text_to_video"
+    },
+    {
+      "id": "video-17",
+      "text": "Make it move",
+      "mode": "video",
+      "expected": "image_to_video",
+      "has_prior_image": true
+    },
+    {
+      "id": "video-18",
+      "text": "Animate the previous picture with a slow camera orbit",
+      "mode": "video",
+      "expected": "image_to_video",
+      "has_prior_image": true
+    },
+    {
+      "id": "video-19",
+      "text": "Create a fresh video of a green apple",
+      "mode": "video",
+      "expected": "text_to_video",
+      "has_prior_image": true
+    },
+    {
+      "id": "video-20",
+      "text": "Make a video from the previous description",
+      "mode": "video",
+      "expected": "text_to_video",
+      "has_prior_image": true,
+      "conversation": [
+        {
+          "role": "assistant",
+          "content": "A desert observatory under a meteor shower."
+        }
+      ]
+    },
+    {
+      "id": "repeat-01",
+      "text": "Make me another",
+      "mode": "auto",
+      "conversation": [
+        {
+          "role": "assistant",
+          "content": "Generated image requested with this prompt (visual contents not inspected): \"A lighthouse on a basalt cliff at dusk, oil painting\"."
+        }
+      ],
+      "expected": "text_to_image"
+    },
+    {
+      "id": "repeat-02",
+      "text": "one more",
+      "mode": "auto",
+      "conversation": [
+        {
+          "role": "assistant",
+          "content": "Generated video requested with this prompt (visual contents not inspected): \"A paper boat drifting down a rain-soaked street\"."
+        }
+      ],
+      "expected": "text_to_video"
+    },
+    {
+      "id": "repeat-03",
+      "text": "Make me another one",
+      "mode": "auto",
+      "conversation": [],
+      "expected": "text"
+    },
+    {
+      "id": "select-01",
+      "text": "Make me the first one",
+      "mode": "auto",
+      "conversation": [
+        {
+          "role": "assistant",
+          "content": "Here are some image ideas:\n1. A fox curled beneath a snow-covered pine\n2. A tram crossing a viaduct in golden fog\n3. A tidepool reflecting a violet aurora"
+        }
+      ],
+      "expected": "text_to_image"
+    },
+    {
+      "id": "select-02",
+      "text": "generate #3",
+      "mode": "auto",
+      "conversation": [
+        {
+          "role": "assistant",
+          "content": "Here are some image ideas:\n1. A fox curled beneath a snow-covered pine\n2. A tram crossing a viaduct in golden fog\n3. A tidepool reflecting a violet aurora"
+        }
+      ],
+      "expected": "text_to_image"
+    },
+    {
+      "id": "select-03",
+      "text": "Make the second one as a video",
+      "mode": "auto",
+      "conversation": [
+        {
+          "role": "assistant",
+          "content": "Here are some image ideas:\n1. A fox curled beneath a snow-covered pine\n2. A tram crossing a viaduct in golden fog\n3. A tidepool reflecting a violet aurora"
+        }
+      ],
+      "expected": "text_to_video"
+    },
+    {
+      "id": "select-04",
+      "text": "Make me the first one",
+      "mode": "auto",
+      "conversation": [
+        {
+          "role": "assistant",
+          "content": "No list here, only prose."
+        }
+      ],
+      "expected": "text"
+    }
   ]
 }
