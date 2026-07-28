@@ -163,6 +163,14 @@ _REPLACEMENT_TARGETS = {
     "wardrobe",
 }
 _REPLACEMENT_VERBS = {"change", "dress", "give", "make", "replace", "swap"}
+_REPLACEMENT_PAIR_WINDOW = 10
+_REPLACEMENT_PAIR_BLOCKERS = {
+    "keep",
+    "preserve",
+    "retain",
+    "unchanged",
+    "without",
+}
 _LOCALIZED_PHRASES = (
     "add a",
     "add an",
@@ -191,6 +199,7 @@ _MINIMAL_WORDS = {
     "slight",
     "slightly",
     "subtle",
+    "subtly",
 }
 _PRESERVATION_PHRASES = (
     "do not alter",
@@ -198,6 +207,7 @@ _PRESERVATION_PHRASES = (
     "don t alter",
     "don t change",
     "keep everything else",
+    "keep the",
     "preserve identity",
     "preserve the rest",
     "without altering",
@@ -222,6 +232,21 @@ def _normalize_prompt(prompt: str) -> tuple[str, set[str], bool]:
 def _has_phrase(normalized: str, phrases: Sequence[str]) -> bool:
     padded = f" {normalized} "
     return any(f" {phrase} " in padded for phrase in phrases)
+
+
+def _has_bounded_replacement_pair(normalized: str) -> bool:
+    tokens = normalized.split()
+    for verb_index, token in enumerate(tokens):
+        if token not in _REPLACEMENT_VERBS:
+            continue
+        end = min(len(tokens), verb_index + _REPLACEMENT_PAIR_WINDOW + 1)
+        for target_index in range(verb_index + 1, end):
+            candidate = tokens[target_index]
+            if candidate in _REPLACEMENT_PAIR_BLOCKERS:
+                break
+            if candidate in _REPLACEMENT_TARGETS:
+                return True
+    return False
 
 
 def _clamp(value: float, minimum: float, maximum: float) -> float:
@@ -325,9 +350,7 @@ def estimate_image_edit_strength(
         scope = EditScope.MINIMAL
         confidence = EditConfidence.HIGH
         reasons.insert(0, EditReason.MINIMAL_ADJUSTMENT)
-    elif _has_phrase(normalized, _REPLACEMENT_PHRASES) or (
-        bool(words & _REPLACEMENT_TARGETS) and bool(words & _REPLACEMENT_VERBS)
-    ):
+    elif _has_phrase(normalized, _REPLACEMENT_PHRASES) or _has_bounded_replacement_pair(normalized):
         scope = EditScope.REPLACEMENT
         confidence = EditConfidence.HIGH
         reasons.insert(0, EditReason.SUBJECT_REPLACEMENT)
