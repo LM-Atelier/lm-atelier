@@ -165,6 +165,7 @@ from .schemas import (
     RunOut,
     RuntimeStatus,
     SettingField,
+    SetupReadinessReport,
     StorageCleanupResult,
     SystemInfo,
     ToolCapabilityProbe,
@@ -188,6 +189,7 @@ from .settings_registry import (
     validate_settings,
     workflow_settings,
 )
+from .setup_readiness import setup_readiness_report
 from .workflow_edit_calibration import validate_workflow_edit_calibration
 
 if TYPE_CHECKING:
@@ -434,6 +436,20 @@ async def worker_status(request: Request, session: SessionDep) -> list[WorkerSta
 @router.get("/runtimes", response_model=list[RuntimeStatus])
 async def runtime_status(request: Request) -> list[RuntimeStatus]:
     return _services(request).runtimes.statuses()
+
+
+@router.get("/setup/readiness", response_model=SetupReadinessReport)
+async def get_setup_readiness(
+    request: Request,
+    session: SessionDep,
+) -> SetupReadinessReport:
+    services = _services(request)
+    return setup_readiness_report(
+        session,
+        services.settings,
+        services.runtimes,
+        services.processes.statuses(),
+    )
 
 
 @router.post("/runtimes/{engine}/install", response_model=RuntimeStatus, status_code=202)
