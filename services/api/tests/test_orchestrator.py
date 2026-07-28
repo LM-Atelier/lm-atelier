@@ -7,7 +7,7 @@ from unittest.mock import AsyncMock, Mock
 
 import pytest
 
-from local_lm.adapters.base import ChatEvent, MediaEvent
+from local_lm.adapters.base import ChatEvent, MediaEvent, estimate_chat_tokens
 from local_lm.models import (
     Job,
     Message,
@@ -19,6 +19,45 @@ from local_lm.models import (
 )
 from local_lm.orchestrator import ConversationOrchestrator
 from local_lm.schemas import WorkerStatus
+
+
+async def test_context_folding_preserves_system_and_current_messages() -> None:
+    messages = [
+        {"role": "system", "content": "Keep the project instruction."},
+        {"role": "user", "content": "Old user detail " * 30},
+        {"role": "assistant", "content": "Old assistant detail " * 30},
+        {"role": "user", "content": "Current request must remain."},
+    ]
+    source_ids = [None, "old-user", "old-assistant", "current-user"]
+    engines = SimpleNamespace(
+        chat=SimpleNamespace(
+            count_tokens=AsyncMock(side_effect=lambda value: estimate_chat_tokens(value))
+        ),
+        settings=SimpleNamespace(),
+    )
+    orchestrator = ConversationOrchestrator(
+        engines=engines,
+        artifacts=Mock(),
+        events=Mock(),
+        scheduler=Mock(),
+        processes=Mock(),
+    )
+
+    fitted, tokens, omitted, compaction = await orchestrator._fit_chat_context(
+        messages,
+        source_ids,
+        input_budget=160,
+    )
+
+    assert tokens <= 160
+    assert fitted[0] == messages[0]
+    assert fitted[-1] == messages[-1]
+    assert fitted[1]["role"] == "assistant"
+    assert "Earlier conversation compacted" in fitted[1]["content"]
+    assert omitted == 2
+    assert compaction["active"] is True
+    assert compaction["source_message_ids"] == ["old-user", "old-assistant"]
+    assert compaction["transcript_preserved"] is True
 
 
 async def test_managed_chat_worker_is_aligned_to_the_run_profile() -> None:
