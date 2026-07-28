@@ -75,6 +75,43 @@ _CONTEXT_VIDEO_CREATE = re.compile(
     re.IGNORECASE,
 )
 _MEDIA_CONTEXT_SUMMARY = re.compile(r"^\s*Generated (?:image|video|\d+ images?|\d+ videos?)\b")
+_ANOTHER_GENERATION = re.compile(
+    r"^\s*(?:please\s+|now\s+|ok(?:ay)?[,\s]+)*"
+    r"(?:(?:make|generate|create|do|give)\s+(?:me\s+|us\s+)?(?:another|one\s+more|a\s+new)"
+    r"(?:\s+(?:one|image|picture|photo|video|clip|variation|version))?"
+    r"|another(?:\s+one)?|one\s+more)"
+    r"\s*[.!]*\s*$",
+    re.IGNORECASE,
+)
+_GENERATED_PROMPT = re.compile(
+    r"^\s*Generated (?P<media>image|video|\d+ images?|\d+ videos?)\b"
+    r'.*?prompt \(visual contents not inspected\): "(?P<prompt>.*)"\.\s*$',
+    re.DOTALL,
+)
+_ORDINAL_SELECTION = re.compile(
+    r"^\s*(?:please\s+|now\s+|ok(?:ay)?[,\s]+)*"
+    r"(?:make|generate|create|draw|render|do|give)\s+(?:me\s+|us\s+)?"
+    r"(?:the\s+)?"
+    r"(?:(?P<ordinal>first|second|third|fourth|fifth|sixth|seventh|eighth|ninth|tenth)"
+    r"|(?:number\s+|#\s*)(?P<number>\d{1,2}))"
+    r"(?:\s+(?:one|suggestion|option|idea|prompt))?"
+    r"(?:\s+as\s+(?:an?\s+)?(?P<medium>image|picture|video|animation))?"
+    r"\s*[.!]*\s*$",
+    re.IGNORECASE,
+)
+_ORDINAL_WORDS = {
+    "first": 1,
+    "second": 2,
+    "third": 3,
+    "fourth": 4,
+    "fifth": 5,
+    "sixth": 6,
+    "seventh": 7,
+    "eighth": 8,
+    "ninth": 9,
+    "tenth": 10,
+}
+_LIST_ITEM = re.compile(r"^\s*(?:\d{1,2}[.)]\s+|[-*•]\s+)(?P<item>\S.*?)\s*$")
 _OUTPUT_COUNT = re.compile(
     r"\b(?P<count>\d{1,2}|one|two|three|four|five|six|seven|eight|nine|ten|"
     r"eleven|twelve|thirteen|fourteen|fifteen|sixteen)\s+"
@@ -182,6 +219,11 @@ class ModalityRouter:
                     "other chat text, extract its concrete visual subjects, setting, mood, and "
                     "style into the standalone prompt; never leave an unresolved reference such "
                     "as 'the previous story'. Keep the standalone prompt concise. "
+                    "When the user asks for another of the last generation, reuse that "
+                    "generation's quoted prompt as the standalone prompt. When the user "
+                    "selects an item from a list in an earlier assistant answer, such as "
+                    "'make me the first one', build the standalone prompt from that "
+                    "list item's text. "
                     "Always call choose_route and do not answer normally.\n"
                     f"Prior generated image available: {'yes' if has_prior_image else 'no'}."
                 ),
@@ -305,6 +347,43 @@ class ModalityRouter:
             return grounded(
                 self._media(operation, normalized, input_artifact_ids, "explicit video mode", 1)
             )
+
+        if not input_artifact_ids and _ANOTHER_GENERATION.match(normalized):
+            repeat = self._last_generation(conversation or [])
+            if repeat:
+                modality, prompt = repeat
+                operation = (
+                    Operation.TEXT_TO_VIDEO if modality == "video" else Operation.TEXT_TO_IMAGE
+                )
+                return self._media(
+                    operation,
+                    prompt,
+                    [],
+                    "repeat of the last generation's prompt",
+                    0.96,
+                )
+
+        selection = None if input_artifact_ids else _ORDINAL_SELECTION.match(normalized)
+        if selection:
+            items = self._listed_suggestions(conversation or [])
+            ordinal = selection.group("ordinal")
+            index = (
+                _ORDINAL_WORDS[ordinal.casefold()] if ordinal else int(selection.group("number"))
+            ) - 1
+            if 0 <= index < len(items):
+                medium = (selection.group("medium") or "image").casefold()
+                operation = (
+                    Operation.TEXT_TO_VIDEO
+                    if medium in {"video", "animation"}
+                    else Operation.TEXT_TO_IMAGE
+                )
+                return self._media(
+                    operation,
+                    items[index],
+                    [],
+                    f"selected suggestion {index + 1} from the last assistant list",
+                    0.95,
+                )
 
         if _DISCUSSION.search(normalized) and not re.search(
             r"\b(?:for me|now|instead)\b", normalized, re.IGNORECASE
@@ -469,6 +548,39 @@ class ModalityRouter:
         ):
             return fallback
         return plan
+
+    @staticmethod
+    def _last_generation(conversation: list[dict[str, Any]]) -> tuple[str, str] | None:
+        """Return the modality and prompt of the most recent generated-media summary."""
+        for message in reversed(conversation):
+            if message.get("role") != "assistant":
+                continue
+            content = str(message.get("content") or "")
+            if not _MEDIA_CONTEXT_SUMMARY.match(content):
+                continue
+            match = _GENERATED_PROMPT.match(content)
+            if not match:
+                return None
+            modality = "video" if "video" in match.group("media") else "image"
+            return modality, match.group("prompt")
+        return None
+
+    @staticmethod
+    def _listed_suggestions(conversation: list[dict[str, Any]]) -> list[str]:
+        """Return list items from the most recent assistant text answer."""
+        for message in reversed(conversation):
+            if message.get("role") != "assistant":
+                continue
+            content = str(message.get("content") or "")
+            if _MEDIA_CONTEXT_SUMMARY.match(content):
+                continue
+            items = []
+            for line in content.splitlines():
+                match = _LIST_ITEM.match(line)
+                if match:
+                    items.append(match.group("item"))
+            return items
+        return []
 
     @staticmethod
     def _text(prompt: str, reason: str, confidence: float) -> RoutingPlan:
