@@ -5,6 +5,13 @@ const MODEL_NAME = "Tiny Safe Fixture";
 const STORY_PROMPT = "Write a two-sentence story about an orchard robot named Pip.";
 const IMAGE_PROMPT = "Make an image based on the previous story, with Pip under an apple tree.";
 
+async function dismissSetup(page: Page) {
+  const setupDialog = page.getByRole("dialog", { name: "Set up LM Atelier" });
+  await expect(setupDialog).toBeVisible();
+  await setupDialog.getByRole("button", { name: "Not now" }).click();
+  await expect(setupDialog).toBeHidden();
+}
+
 async function createSession(request: APIRequestContext): Promise<string> {
   const response = await request.post("/api/session");
   expect(response.ok()).toBeTruthy();
@@ -111,6 +118,7 @@ test("persists a streamed text and contextual image golden path", async ({
 
   await page.goto("/");
   await expect(page.locator(".brand > span")).toContainText("LM Atelier");
+  await dismissSetup(page);
   const previewPath = process.env.LM_ATELIER_E2E_PREVIEW_PATH?.trim();
   if (previewPath) {
     await page.setViewportSize({ width: 1440, height: 900 });
@@ -208,6 +216,7 @@ test("persists a streamed text and contextual image golden path", async ({
   try {
     const restartedPage = await restartedContext.newPage();
     await restartedPage.goto("/");
+    await dismissSetup(restartedPage);
     await expectPersistedConversation(restartedPage);
   } finally {
     await restartedContext.close();
@@ -219,6 +228,7 @@ test("persists a streamed text and contextual image golden path", async ({
   try {
     const mobilePage = await mobileContext.newPage();
     await mobilePage.goto("/");
+    await dismissSetup(mobilePage);
     await expectPersistedConversation(mobilePage);
     await expect(mobilePage.getByRole("textbox", { name: "Message" })).toBeVisible();
     await expect(mobilePage.getByRole("combobox", { name: "Generation mode" })).toBeVisible();
