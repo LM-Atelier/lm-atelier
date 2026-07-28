@@ -26,7 +26,6 @@ from .auxiliary_assets import (
     workflow_lora_extension,
 )
 from .capability_evidence import current_capability_evidence, evidence_input_modalities
-from .comfy_templates import DEFAULT_IMAGE_EDIT_DENOISE
 from .custom_nodes import custom_node_dependency_errors
 from .db import SessionLocal
 from .domain import (
@@ -52,6 +51,11 @@ from .generation_offers import (
     ordered_intent_for_offer,
     routing_plan_for_offer,
     should_extract_generation_offer,
+)
+from .image_edit_strength import (
+    EditSettingSource,
+    ImageEditStrengthResolution,
+    resolve_image_edit_strength,
 )
 from .models import (
     Artifact,
@@ -315,6 +319,7 @@ class ConversationOrchestrator:
         use_explicit_parent: bool = False,
         replacement_message_id: str | None = None,
         source_action: str = "send",
+        inherited_image_edit_strength: dict[str, Any] | None = None,
     ) -> TurnAccepted:
         if not self._admission_open:
             raise RuntimeError(
@@ -328,6 +333,7 @@ class ConversationOrchestrator:
                 use_explicit_parent=use_explicit_parent,
                 replacement_message_id=replacement_message_id,
                 source_action=source_action,
+                inherited_image_edit_strength=inherited_image_edit_strength,
             )
 
     async def _create_turn(
@@ -339,6 +345,7 @@ class ConversationOrchestrator:
         use_explicit_parent: bool = False,
         replacement_message_id: str | None = None,
         source_action: str = "send",
+        inherited_image_edit_strength: dict[str, Any] | None = None,
     ) -> TurnAccepted:
         # Never resolve an idempotency key until its URL-scoped chat has been
         # validated. Otherwise a key from one chat could disclose another
@@ -375,6 +382,7 @@ class ConversationOrchestrator:
                 use_explicit_parent=use_explicit_parent,
                 replacement_message_id=replacement_message_id,
                 source_action=source_action,
+                inherited_image_edit_strength=inherited_image_edit_strength,
             )
 
         owner_token, replay = await self._claim_or_replay_turn(
@@ -403,6 +411,7 @@ class ConversationOrchestrator:
                 use_explicit_parent=use_explicit_parent,
                 replacement_message_id=replacement_message_id,
                 source_action=source_action,
+                inherited_image_edit_strength=inherited_image_edit_strength,
             )
         finally:
             self._release_turn_claim(session, chat_id, key, owner_token)
@@ -508,6 +517,7 @@ class ConversationOrchestrator:
         use_explicit_parent: bool = False,
         replacement_message_id: str | None = None,
         source_action: str = "send",
+        inherited_image_edit_strength: dict[str, Any] | None = None,
     ) -> TurnAccepted:
         chat = session.get(Chat, chat_id)
         if not chat:
@@ -788,15 +798,34 @@ class ConversationOrchestrator:
             ),
             turn_overrides=request_settings,
         )
-        edit_default_applied = self._apply_image_edit_default(
+        image_edit_strength = resolve_image_edit_strength(
             plan.operation,
+            plan.standalone_prompt if accepted_offer else request.text,
+            fields,
             effective_settings,
-            request_settings,
-            default_preset.settings_json if default_preset else {},
-            project_preset.settings_json if project_preset else {},
-            self._scoped_generation_settings(project, role),
-            chat_preset.settings_json if chat_preset else {},
-            self._scoped_generation_settings(chat, role),
+            (
+                (EditSettingSource.PROFILE_LOAD, profile.load_settings_json if profile else {}),
+                (
+                    EditSettingSource.PROFILE_REQUEST,
+                    profile.request_settings_json if profile else {},
+                ),
+                (
+                    EditSettingSource.DEFAULT_PRESET,
+                    default_preset.settings_json if default_preset else {},
+                ),
+                (
+                    EditSettingSource.PROJECT_PRESET,
+                    project_preset.settings_json if project_preset else {},
+                ),
+                (EditSettingSource.PROJECT, self._scoped_generation_settings(project, role)),
+                (
+                    EditSettingSource.CHAT_PRESET,
+                    chat_preset.settings_json if chat_preset else {},
+                ),
+                (EditSettingSource.CHAT, self._scoped_generation_settings(chat, role)),
+                (EditSettingSource.TURN, request_settings),
+            ),
+            inherited_auto=inherited_image_edit_strength,
         )
         lora_resolution = None
         if plan.operation != Operation.TEXT and effective_settings.get("loras"):
@@ -1125,14 +1154,7 @@ class ConversationOrchestrator:
                     "count": output_count,
                     "slot": output_slot,
                 },
-                "image_edit": (
-                    {
-                        "policy": "preserve_unrequested_details_v1",
-                        "default_change_strength_applied": edit_default_applied,
-                    }
-                    if plan.operation == Operation.IMAGE_TO_IMAGE
-                    else None
-                ),
+                "image_edit": self._image_edit_provenance(image_edit_strength),
                 "auxiliary_assets": (
                     {
                         "lora_stack": lora_resolution.provenance,
@@ -1427,15 +1449,36 @@ class ConversationOrchestrator:
                 ),
                 turn_overrides=step_overrides,
             )
-            edit_default_applied = self._apply_image_edit_default(
+            image_edit_strength = resolve_image_edit_strength(
                 operation,
+                step_intent.prompt,
+                fields,
                 effective_settings,
-                step_overrides,
-                default_preset.settings_json if default_preset else {},
-                project_preset.settings_json if project_preset else {},
-                self._scoped_generation_settings(project, role),
-                chat_preset.settings_json if chat_preset else {},
-                self._scoped_generation_settings(chat, role),
+                (
+                    (
+                        EditSettingSource.PROFILE_LOAD,
+                        profile.load_settings_json if profile else {},
+                    ),
+                    (
+                        EditSettingSource.PROFILE_REQUEST,
+                        profile.request_settings_json if profile else {},
+                    ),
+                    (
+                        EditSettingSource.DEFAULT_PRESET,
+                        default_preset.settings_json if default_preset else {},
+                    ),
+                    (
+                        EditSettingSource.PROJECT_PRESET,
+                        project_preset.settings_json if project_preset else {},
+                    ),
+                    (EditSettingSource.PROJECT, self._scoped_generation_settings(project, role)),
+                    (
+                        EditSettingSource.CHAT_PRESET,
+                        chat_preset.settings_json if chat_preset else {},
+                    ),
+                    (EditSettingSource.CHAT, self._scoped_generation_settings(chat, role)),
+                    (EditSettingSource.TURN, step_overrides),
+                ),
             )
             lora_resolution = None
             if operation != Operation.TEXT and effective_settings.get("loras"):
@@ -1473,7 +1516,7 @@ class ConversationOrchestrator:
                     "role": role,
                     "settings": effective_settings,
                     "model_selection": model_selection,
-                    "edit_default_applied": edit_default_applied,
+                    "image_edit_strength": image_edit_strength,
                     "preset_layers": preset_layers,
                     "effective_preset": preset_layers[-1] if preset_layers else None,
                     "estimate": estimate,
@@ -1726,14 +1769,7 @@ class ConversationOrchestrator:
                     "resolved_settings": resolved["settings"],
                     "generation_estimate": resolved["generation_estimate"],
                     "plan_step_estimate": resolved["estimate"],
-                    "image_edit": (
-                        {
-                            "policy": "preserve_unrequested_details_v1",
-                            "default_change_strength_applied": resolved["edit_default_applied"],
-                        }
-                        if operation == Operation.IMAGE_TO_IMAGE
-                        else None
-                    ),
+                    "image_edit": self._image_edit_provenance(resolved["image_edit_strength"]),
                     "auxiliary_assets": (
                         {
                             "lora_stack": resolved["lora_resolution"].provenance,
@@ -4245,21 +4281,16 @@ class ConversationOrchestrator:
         }
 
     @staticmethod
-    def _apply_image_edit_default(
-        operation: Operation,
-        effective_settings: dict[str, Any],
-        *explicit_layers: dict[str, Any],
-    ) -> bool:
-        if operation != Operation.IMAGE_TO_IMAGE:
-            return False
-        if any("denoise" in layer for layer in explicit_layers):
-            return False
-        # A denoise value of 1 is necessary for text-to-image, but it replaces
-        # nearly the entire source during image-to-image. Use a moderate default
-        # that can visibly apply edits while keeping explicit presets and scoped
-        # settings authoritative.
-        effective_settings["denoise"] = DEFAULT_IMAGE_EDIT_DENOISE
-        return True
+    def _image_edit_provenance(
+        resolution: ImageEditStrengthResolution | None,
+    ) -> dict[str, Any] | None:
+        if resolution is None:
+            return None
+        return {
+            "policy": "preserve_unrequested_details_v1",
+            "default_change_strength_applied": resolution.default_applied,
+            "strength": resolution.provenance(),
+        }
 
     @staticmethod
     def _media_prompt(run: Run) -> str:

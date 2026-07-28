@@ -1,0 +1,83 @@
+[
+  {
+    "name": "minimal lighting adjustment",
+    "prompt": "Slightly brighten the lighting and keep everything else the same.",
+    "scope": "minimal",
+    "confidence": "high",
+    "minimum": 0.30,
+    "maximum": 0.44,
+    "reasons": ["minimal_adjustment", "preservation_requested"]
+  },
+  {
+    "name": "localized recolor",
+    "prompt": "Make it green.",
+    "scope": "localized",
+    "confidence": "medium",
+    "minimum": 0.42,
+    "maximum": 0.58,
+    "reasons": ["localized_change"]
+  },
+  {
+    "name": "outfit replacement",
+    "prompt": "Give the person a new formal outfit without changing their face.",
+    "scope": "replacement",
+    "confidence": "high",
+    "minimum": 0.58,
+    "maximum": 0.74,
+    "reasons": ["subject_replacement", "preservation_requested"]
+  },
+  {
+    "name": "background replacement",
+    "prompt": "Replace the background with a quiet library.",
+    "scope": "replacement",
+    "confidence": "high",
+    "minimum": 0.58,
+    "maximum": 0.74,
+    "reasons": ["subject_replacement"]
+  },
+  {
+    "name": "replacement containing scene noun",
+    "prompt": "Replace the background with a moonlit city scene.",
+    "scope": "replacement",
+    "confidence": "high",
+    "minimum": 0.58,
+    "maximum": 0.74,
+    "reasons": ["subject_replacement"]
+  },
+  {
+    "name": "global restyle",
+    "prompt": "Restyle the entire image as a watercolor painting.",
+    "scope": "global",
+    "confidence": "high",
+    "minimum": 0.72,
+    "maximum": 0.90,
+    "reasons": ["global_transformation"]
+  },
+  {
+    "name": "ambiguous request",
+    "prompt": "Make this better.",
+    "scope": "fallback",
+    "confidence": "low",
+    "minimum": 0.52,
+    "maximum": 0.60,
+    "reasons": ["ambiguous_request"]
+  },
+  {
+    "name": "negated clothing change",
+    "prompt": "Do not change the clothing; just brighten the lighting.",
+    "scope": "minimal",
+    "confidence": "high",
+    "minimum": 0.30,
+    "maximum": 0.44,
+    "reasons": ["minimal_adjustment", "preservation_requested"]
+  },
+  {
+    "name": "unsupported language fallback",
+    "prompt": "把衣服改成绿色",
+    "scope": "fallback",
+    "confidence": "low",
+    "minimum": 0.52,
+    "maximum": 0.60,
+    "reasons": ["unsupported_language"]
+  }
+]
