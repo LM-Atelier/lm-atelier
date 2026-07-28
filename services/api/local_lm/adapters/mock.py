@@ -46,7 +46,50 @@ class MockChatAdapter:
 
     async def stream(self, request: ChatRequest):  # type: ignore[no-untyped-def]
         self._cancelled.discard(request.run_id)
-        if request.tools:
+        tool_name = (
+            str(request.tools[0].get("function", {}).get("name", "")) if request.tools else ""
+        )
+        if tool_name == "offer_generation":
+            prompt = next(
+                (
+                    str(message.get("content", ""))
+                    for message in reversed(request.messages)
+                    if message.get("role") == "user"
+                ),
+                "",
+            )
+            if re.search(r"\boffer\b.*\b(?:image|video)\s+prompts?\b", prompt, re.IGNORECASE):
+                count = 2 if re.search(r"\b(?:two|2)\b", prompt, re.IGNORECASE) else 1
+                mode = "video" if re.search(r"\bvideo\b", prompt, re.IGNORECASE) else "image"
+                arguments: dict[str, Any] = {
+                    "message": (
+                        f"Generate {'these' if count > 1 else 'this'} {mode} "
+                        f"prompt{'s' if count > 1 else ''}?"
+                    ),
+                    "items": [
+                        {"mode": mode, "prompt": f"Mock {mode} prompt {index}."}
+                        for index in range(1, count + 1)
+                    ],
+                }
+                yield ChatEvent(
+                    type="tool_delta",
+                    data={
+                        "tool_calls": [
+                            {
+                                "index": 0,
+                                "id": "mock-offer",
+                                "type": "function",
+                                "function": {
+                                    "name": "offer_generation",
+                                    "arguments": json.dumps(arguments),
+                                },
+                            }
+                        ]
+                    },
+                )
+                yield ChatEvent(type="complete", data={"finish_reason": "tool_calls"})
+                return
+        if request.tools and tool_name != "offer_generation":
             prompt = next(
                 (
                     str(message.get("content", ""))

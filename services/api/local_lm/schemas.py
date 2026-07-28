@@ -229,6 +229,20 @@ class RoutingPlan(ApiModel):
     reason: str
 
 
+class GenerationOfferItem(ApiModel):
+    model_config = ConfigDict(from_attributes=True, extra="forbid")
+
+    mode: Literal["image", "video"]
+    prompt: str = Field(min_length=1, max_length=20_000)
+
+
+class GenerationOffer(ApiModel):
+    model_config = ConfigDict(from_attributes=True, extra="forbid")
+
+    message: str = Field(min_length=1, max_length=1_000)
+    items: list[GenerationOfferItem] = Field(min_length=1, max_length=8)
+
+
 class OrderedStepInput(ApiModel):
     source_step_id: str = Field(
         min_length=1,

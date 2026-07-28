@@ -44,6 +44,15 @@ from .domain import (
 )
 from .engines import EngineRegistry
 from .events import EventBroker
+from .generation_offers import (
+    extract_generation_offer,
+    generation_offer_from_metadata,
+    generation_offer_metadata,
+    is_explicit_generation_assent,
+    ordered_intent_for_offer,
+    routing_plan_for_offer,
+    should_extract_generation_offer,
+)
 from .models import (
     Artifact,
     Chat,
@@ -72,6 +81,7 @@ from .progress import completed_progress, update_job_progress
 from .routing import ModalityRouter, RouteConfirmationRequired
 from .scheduler import ResourceScheduler
 from .schemas import (
+    GenerationOffer,
     MessageOut,
     OrderedWorkIntent,
     RunOut,
@@ -580,9 +590,24 @@ class ConversationOrchestrator:
                 raise LookupError(f"input artifact not found: {artifact_id}")
             explicit_artifacts[artifact_id] = artifact
 
+        accepted_offer = None
+        if (
+            replacement_message is None
+            and not explicit_artifacts
+            and is_explicit_generation_assent(request.text)
+        ):
+            parent_message = session.get(Message, parent_message_id) if parent_message_id else None
+            accepted_offer = self._generation_offer_for_message(parent_message)
+        if accepted_offer:
+            request = request.model_copy(
+                update={"settings": {}, "ordered_settings": {}, "output_count": None}
+            )
+
         mode = request.mode or RoutingMode(chat.routing_mode)
         ordered_intent = None
-        if replacement_message is None:
+        if accepted_offer and len(accepted_offer.items) > 1:
+            ordered_intent = ordered_intent_for_offer(accepted_offer)
+        elif replacement_message is None:
             ordered_intent = OrderedPlanCompiler.deterministic(
                 request.text,
                 mode,
@@ -604,6 +629,8 @@ class ConversationOrchestrator:
                     ),
                     has_media_input=bool(explicit_artifacts),
                 )
+        if accepted_offer and ordered_intent and not request.confirm_media:
+            raise OrderedPlanConfirmationRequired(ordered_intent)
         if (
             ordered_intent
             and chat.confirm_uncertain_media
@@ -632,26 +659,31 @@ class ConversationOrchestrator:
         )
         has_prior_image = prior_image is not None
         routing_context = self._routing_context(session, chat, context_head_message_id)
-        planner_available = (
-            await self._chat_planner_available() if mode == RoutingMode.AUTO else True
-        )
-        if planner_available:
-            plan = await self.router.plan_with_model(
-                adapter=self.engines.chat,
-                text=request.text,
-                mode=mode,
-                input_artifact_ids=request.input_artifact_ids,
-                has_prior_image=has_prior_image,
-                conversation=routing_context,
-            )
+        if accepted_offer:
+            plan = routing_plan_for_offer(accepted_offer)
+            if not request.confirm_media:
+                raise RouteConfirmationRequired(plan)
         else:
-            plan = self.router.plan(
-                text=request.text,
-                mode=mode,
-                input_artifact_ids=request.input_artifact_ids,
-                has_prior_image=has_prior_image,
-                conversation=routing_context,
+            planner_available = (
+                await self._chat_planner_available() if mode == RoutingMode.AUTO else True
             )
+            if planner_available:
+                plan = await self.router.plan_with_model(
+                    adapter=self.engines.chat,
+                    text=request.text,
+                    mode=mode,
+                    input_artifact_ids=request.input_artifact_ids,
+                    has_prior_image=has_prior_image,
+                    conversation=routing_context,
+                )
+            else:
+                plan = self.router.plan(
+                    text=request.text,
+                    mode=mode,
+                    input_artifact_ids=request.input_artifact_ids,
+                    has_prior_image=has_prior_image,
+                    conversation=routing_context,
+                )
         if (
             mode == RoutingMode.AUTO
             and chat.confirm_uncertain_media
@@ -2063,9 +2095,12 @@ class ConversationOrchestrator:
             run = session.get(Run, run_id)
             if not run:
                 return
-            messages, request_settings, context_metadata = await self._prepare_chat_context(
-                session, run
-            )
+            (
+                messages,
+                request_settings,
+                context_metadata,
+                tool_calling_available,
+            ) = await self._prepare_chat_context(session, run)
             run.provenance_json = {
                 **run.provenance_json,
                 "context": context_metadata,
@@ -2119,6 +2154,7 @@ class ConversationOrchestrator:
                         self._persist_streamed_text(assistant_id, accumulated)
                         last_persisted_length = len(accumulated)
                         last_persisted_at = now
+
                 elif event.type == "cancelled":
                     if accumulated:
                         self._persist_streamed_text(assistant_id, accumulated.rstrip())
@@ -2137,6 +2173,21 @@ class ConversationOrchestrator:
                 self._persist_streamed_text(assistant_id, accumulated.rstrip())
             raise
 
+        text_output = accumulated.rstrip()
+        offer_relevant = should_extract_generation_offer(text_output) or any(
+            message.get("role") == MessageRole.USER.value
+            and isinstance(message.get("content"), str)
+            and should_extract_generation_offer(message["content"])
+            for message in messages[-2:]
+        )
+        offer = (
+            await extract_generation_offer(self.engines.chat, text_output)
+            if tool_calling_available and offer_relevant
+            else None
+        )
+        if offer and offer.message not in text_output:
+            text_output = "\n\n".join(value for value in (text_output, offer.message) if value)
+
         completed_assistant_id = assistant_id
         with self.session_factory() as session:
             message = session.get(Message, assistant_id)
@@ -2149,21 +2200,20 @@ class ConversationOrchestrator:
                 (part for part in message.parts if part.type == PartType.TEXT.value), None
             )
             if text_part:
-                text_part.text = accumulated.rstrip()
+                text_part.text = text_output
             else:
                 self._replace_parts(
                     message,
-                    [MessagePart(position=0, type=PartType.TEXT.value, text=accumulated.rstrip())],
+                    [MessagePart(position=0, type=PartType.TEXT.value, text=text_output)],
                 )
             context_metadata = dict(run.provenance_json.get("context", {}))
             if usage := completion_metadata.get("usage"):
                 context_metadata["usage"] = usage
-            text_output = accumulated.rstrip()
             self._complete(
                 session,
                 run,
                 job,
-                {"characters": len(accumulated), "context": context_metadata},
+                {"characters": len(text_output), "context": context_metadata},
             )
             run.provenance_json = {
                 **run.provenance_json,
@@ -2185,6 +2235,7 @@ class ConversationOrchestrator:
                 "context": context_metadata,
                 "completion": completion_metadata,
                 "provenance": run.provenance_json,
+                **({"generation_offer": generation_offer_metadata(offer)} if offer else {}),
             }
             if metadata_part:
                 metadata_part.metadata_json = metadata
@@ -2321,7 +2372,7 @@ class ConversationOrchestrator:
 
     async def _prepare_chat_context(
         self, session: Session, run: Run
-    ) -> tuple[list[dict[str, Any]], dict[str, Any], dict[str, Any]]:
+    ) -> tuple[list[dict[str, Any]], dict[str, Any], dict[str, Any], bool]:
         messages = self._context_messages(session, run)
         self._commit_before_await(session)
         capabilities = await self.engines.chat_capabilities()
@@ -2437,7 +2488,7 @@ class ConversationOrchestrator:
             "output_adjusted": output_limit != requested_output,
             "vision": vision_metadata,
         }
-        return messages, request_settings, metadata
+        return messages, request_settings, metadata, capabilities.tool_calling
 
     async def _attach_visual_context(
         self,
@@ -3790,6 +3841,23 @@ class ConversationOrchestrator:
             )
             if run and run.standalone_prompt.strip():
                 return run.standalone_prompt.strip()
+        return None
+
+    @staticmethod
+    def _generation_offer_for_message(message: Message | None) -> GenerationOffer | None:
+        if (
+            not message
+            or message.role != MessageRole.ASSISTANT.value
+            or message.status != MessageStatus.COMPLETE.value
+            or not message.transcript_visible
+        ):
+            return None
+        for part in message.parts:
+            if part.type != PartType.GENERATION_METADATA.value:
+                continue
+            offer = generation_offer_from_metadata(part.metadata_json.get("generation_offer"))
+            if offer:
+                return offer
         return None
 
     @staticmethod
