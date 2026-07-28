@@ -3942,4 +3942,104 @@ describe("App", () => {
     expect(screen.getByRole("combobox", { name: "image preset" })).toHaveValue(imagePreset.id);
     expect(screen.getByLabelText(/Negative prompt/)).toHaveValue("no fog");
   });
+
+  it("shows message timestamps and quotes an answer into the composer", async () => {
+    localStorage.setItem("local-lm-chat", "chat-quote");
+    const stamp = "2026-07-22T15:30:00Z";
+    vi.mocked(api.chat).mockResolvedValue({
+      id: "chat-quote",
+      project_id: null,
+      title: "Quoting",
+      archived: false,
+      routing_mode: "auto",
+      confirm_uncertain_media: false,
+      active_chat_profile_id: null,
+      active_image_profile_id: null,
+      active_video_profile_id: null,
+      active_head_message_id: "a1",
+      created_at: stamp,
+      updated_at: stamp,
+      messages: [
+        {
+          id: "u1",
+          chat_id: "chat-quote",
+          parent_id: null,
+          role: "user",
+          status: "complete" as const,
+          parts: [{ id: "u1-part", position: 0, type: "text" as const, text: "Question", artifact_id: null, metadata_json: {} }],
+          created_at: stamp,
+          updated_at: stamp,
+        },
+        {
+          id: "a1",
+          chat_id: "chat-quote",
+          parent_id: "u1",
+          role: "assistant",
+          status: "complete" as const,
+          parts: [{ id: "a1-part", position: 0, type: "text" as const, text: "Line one\nLine two", artifact_id: null, metadata_json: {} }],
+          created_at: stamp,
+          updated_at: stamp,
+        },
+      ],
+    });
+    const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+    const { container } = render(
+      <QueryClientProvider client={client}>
+        <App />
+      </QueryClientProvider>,
+    );
+    fireEvent.click(await screen.findByRole("button", { name: "Quote response" }));
+    expect(container.querySelectorAll("time.message-timestamp")).toHaveLength(2);
+    const textarea = screen.getByLabelText("Message") as HTMLTextAreaElement;
+    expect(textarea.value).toBe("> Line one\n> Line two\n\n");
+  });
+
+  it("dismisses a model catalog error callout", async () => {
+    vi.mocked(api.catalog).mockRejectedValue(new Error("Catalog unreachable"));
+    const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+    render(
+      <QueryClientProvider client={client}>
+        <App />
+      </QueryClientProvider>,
+    );
+    fireEvent.click(await screen.findByText("Model library"));
+    expect(await screen.findByText("Catalog unreachable")).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "Dismiss error" }));
+    expect(screen.queryByText("Catalog unreachable")).not.toBeInTheDocument();
+  });
+
+  it("attaches dropped media files from the composer drop zone", async () => {
+    localStorage.setItem("local-lm-chat", "chat-drop");
+    const stamp = "2026-07-22T00:00:00Z";
+    vi.mocked(api.chat).mockResolvedValue({
+      id: "chat-drop",
+      project_id: null,
+      title: "Dropping",
+      archived: false,
+      routing_mode: "auto",
+      confirm_uncertain_media: false,
+      active_chat_profile_id: null,
+      active_image_profile_id: null,
+      active_video_profile_id: null,
+      active_head_message_id: null,
+      created_at: stamp,
+      updated_at: stamp,
+      messages: [],
+    });
+    vi.mocked(api.upload).mockResolvedValue("art_dropped123456789");
+    const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+    render(
+      <QueryClientProvider client={client}>
+        <App />
+      </QueryClientProvider>,
+    );
+    const textarea = await screen.findByLabelText("Message");
+    const wrap = textarea.closest(".composer-wrap")!;
+    const image = new File(["pixels"], "photo.png", { type: "image/png" });
+    const ignored = new File(["text"], "notes.txt", { type: "text/plain" });
+    fireEvent.drop(wrap, { dataTransfer: { files: [image, ignored], types: ["Files"] } });
+    expect(await screen.findByText("art_dropped1234567")).toBeInTheDocument();
+    expect(vi.mocked(api.upload)).toHaveBeenCalledTimes(1);
+    expect(vi.mocked(api.upload)).toHaveBeenCalledWith(image);
+  });
 });
