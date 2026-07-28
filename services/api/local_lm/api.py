@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import math
 import os
 import shutil
 import stat
@@ -2423,24 +2424,58 @@ async def update_model_asset(
     asset = session.get(ModelAssetInstall, asset_id)
     if not asset:
         raise HTTPException(404, "model asset not found")
-    if payload.active and not asset.verified_at:
+    values = payload.model_dump(exclude_unset=True, exclude_none=True)
+    if not values:
+        return asset
+    lora_fields = {
+        "use_case",
+        "auto_apply",
+        "default_model_strength",
+        "default_clip_strength",
+    }
+    if set(values) & lora_fields and asset.kind != "lora":
+        raise HTTPException(422, "automatic selection metadata is only available for LoRAs")
+    if "use_case" in values:
+        values["use_case"] = values["use_case"].strip()
+    for field in ("default_model_strength", "default_clip_strength"):
+        value = values.get(field)
+        if value is not None and not math.isfinite(value):
+            raise HTTPException(422, f"{field} must be finite")
+    next_use_case = values.get("use_case", asset.use_case).strip()
+    next_auto_apply = values.get("auto_apply", asset.auto_apply)
+    if next_auto_apply and not next_use_case:
+        raise HTTPException(422, "automatic LoRA selection requires a use case")
+    if next_auto_apply and not asset.verified_at:
+        raise HTTPException(409, "only a verified LoRA can be selected automatically")
+    if values.get("active") is True and not asset.verified_at:
         raise HTTPException(409, "only a verified model asset can be enabled")
-    async with services.scheduler.lease("primary"):
-        previous_active = asset.active
-        was_running = next(
-            worker.running for worker in services.processes.statuses() if worker.name == "media"
-        )
-        asset.active = payload.active
+
+    active_changed = "active" in values and values["active"] != asset.active
+
+    def apply_values() -> None:
+        for field, value in values.items():
+            setattr(asset, field, value)
         session.commit()
-        if was_running:
-            try:
-                await services.processes.start_media()
-            except Exception:
-                asset.active = previous_active
-                session.commit()
-                with suppress(Exception):
+
+    if active_changed:
+        async with services.scheduler.lease("primary"):
+            previous_values = {field: getattr(asset, field) for field in values}
+            was_running = next(
+                worker.running for worker in services.processes.statuses() if worker.name == "media"
+            )
+            apply_values()
+            if was_running:
+                try:
                     await services.processes.start_media()
-                raise
+                except Exception:
+                    for field, value in previous_values.items():
+                        setattr(asset, field, value)
+                    session.commit()
+                    with suppress(Exception):
+                        await services.processes.start_media()
+                    raise
+    else:
+        apply_values()
     session.refresh(asset)
     return asset
 

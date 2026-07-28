@@ -1015,6 +1015,10 @@ describe("App", () => {
         metadata: { trigger_words: ["ink wash"] },
       },
       active: true,
+      use_case: "",
+      auto_apply: false,
+      default_model_strength: 1,
+      default_clip_strength: 1,
       verified_at: stamp,
       created_at: stamp,
       updated_at: stamp,
@@ -1581,6 +1585,19 @@ describe("App", () => {
                 matched_terms: ["code", "python"],
                 fallback: false,
               },
+              auxiliary_assets: {
+                selection: {
+                  mode: "automatic",
+                  selector_version: "lora-use-case-v1",
+                  selected: [{
+                    asset_id: "asset-ink",
+                    name: "Atelier Ink",
+                    use_case: "ink watercolor",
+                    matched_terms: ["ink", "watercolor"],
+                    reason: "exact use case",
+                  }],
+                },
+              },
             },
           },
         }] : []),
@@ -1620,6 +1637,7 @@ describe("App", () => {
     expect(screen.queryByText("Old follow-up")).not.toBeInTheDocument();
     expect(screen.queryByText("Old branch")).not.toBeInTheDocument();
     expect(screen.getAllByText("Auto chose Code specialist · matched code, python")).toHaveLength(2);
+    expect(screen.getAllByText("LoRA Auto used Atelier Ink — matched ink, watercolor" )).toHaveLength(2);
     fireEvent.click(screen.getAllByText("Edit and branch").at(-1)!);
     expect(screen.getByDisplayValue("Edited question")).toBeInTheDocument();
   });
@@ -2235,6 +2253,63 @@ describe("App", () => {
       { use_case: "Python programming and code review" },
     ));
     expect(await screen.findByText("Python programming and code review")).toBeInTheDocument();
+  });
+
+  it("edits opt-in Auto rules and default strengths for an installed LoRA", async () => {
+    const asset = {
+      id: "asset-auto-ink",
+      source_id: null,
+      name: "Atelier Ink",
+      kind: "lora",
+      family: "sdxl",
+      size_bytes: 1024,
+      manifest_json: {},
+      active: true,
+      use_case: "",
+      auto_apply: false,
+      default_model_strength: 1,
+      default_clip_strength: 1,
+      verified_at: "2026-07-22T00:00:00Z",
+      created_at: "2026-07-22T00:00:00Z",
+      updated_at: "2026-07-22T00:00:00Z",
+    };
+    vi.mocked(api.modelAssets).mockResolvedValue([asset]);
+    vi.mocked(api.updateModelAsset).mockImplementation(async (_id, values) => {
+      const updated = { ...asset, ...values };
+      vi.mocked(api.modelAssets).mockResolvedValue([updated]);
+      return updated;
+    });
+    const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+    render(
+      <QueryClientProvider client={client}>
+        <App />
+      </QueryClientProvider>,
+    );
+
+    fireEvent.click(await screen.findByText("Model library"));
+    fireEvent.click(await screen.findByRole("button", { name: "Edit Auto rules" }));
+    fireEvent.change(screen.getByLabelText("Auto use case for Atelier Ink"), {
+      target: { value: "Watercolor landscapes" },
+    });
+    fireEvent.change(screen.getByLabelText("Default model strength for Atelier Ink"), {
+      target: { value: "0.75" },
+    });
+    fireEvent.change(screen.getByLabelText("Default CLIP strength for Atelier Ink"), {
+      target: { value: "0.65" },
+    });
+    fireEvent.click(screen.getByLabelText("Use Atelier Ink automatically"));
+    fireEvent.click(screen.getByRole("button", { name: "Save" }));
+
+    await waitFor(() => expect(api.updateModelAsset).toHaveBeenCalledWith(
+      asset.id,
+      {
+        use_case: "Watercolor landscapes",
+        auto_apply: true,
+        default_model_strength: 0.75,
+        default_clip_strength: 0.65,
+      },
+    ));
+    expect(await screen.findByText("Auto · Watercolor landscapes")).toBeInTheDocument();
   });
 
   it("sets an installed model as the default for its type", async () => {

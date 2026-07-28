@@ -803,13 +803,21 @@ class ModelAssetOut(ApiModel):
     size_bytes: int
     manifest_json: dict[str, Any]
     active: bool
+    use_case: str
+    auto_apply: bool
+    default_model_strength: float
+    default_clip_strength: float
     verified_at: datetime | None
     created_at: datetime
     updated_at: datetime
 
 
 class ModelAssetUpdate(ApiModel):
-    active: bool
+    active: bool | None = None
+    use_case: str | None = Field(default=None, max_length=1_000)
+    auto_apply: bool | None = None
+    default_model_strength: float | None = Field(default=None, ge=-4, le=4)
+    default_clip_strength: float | None = Field(default=None, ge=-4, le=4)
 
 
 class RecipeFile(ApiModel):

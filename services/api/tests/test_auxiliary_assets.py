@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import json
+
 import pytest
 from httpx2 import AsyncClient
 
@@ -7,6 +9,7 @@ from local_lm.auxiliary_assets import (
     LORA_GRAPH_TRANSFORM_VERSION,
     checkpoint_lora_extension,
     resolve_lora_stack,
+    select_automatic_lora_stack,
     transform_lora_graph,
     validate_lora_workflow_contract,
 )
@@ -205,3 +208,86 @@ async def test_lora_stack_rejects_duplicates_incompatible_and_unavailable_assets
             assert "unavailable" in str(exc)
         else:  # pragma: no cover
             raise AssertionError("inactive LoRA was accepted")
+
+
+async def test_automatic_lora_selection_is_conservative_deterministic_and_prompt_free(
+    client: AsyncClient,
+) -> None:
+    del client
+    with SessionLocal() as session:
+        revision = _workflow(session)
+        watercolor = _asset(session, "Watercolor", "d" * 64)
+        watercolor.use_case = "watercolor landscapes"
+        watercolor.auto_apply = True
+        watercolor.default_model_strength = 0.75
+        watercolor.default_clip_strength = 0.6
+        portrait = _asset(session, "Portrait", "e" * 64)
+        portrait.use_case = "portrait lighting"
+        portrait.auto_apply = True
+        portrait.default_model_strength = 0.9
+        portrait.default_clip_strength = 0.8
+        incompatible = _asset(session, "Flux", "f" * 64)
+        incompatible.family = "flux"
+        incompatible.use_case = "watercolor landscapes"
+        incompatible.auto_apply = True
+        inactive = _asset(session, "Inactive", "1" * 64)
+        inactive.use_case = "watercolor landscapes"
+        inactive.auto_apply = True
+        inactive.active = False
+        unverified = _asset(session, "Unverified", "2" * 64)
+        unverified.use_case = "watercolor landscapes"
+        unverified.auto_apply = True
+        unverified.verified_at = None
+        session.flush()
+
+        prompt = "Create watercolor landscapes with dramatic portrait lighting"
+        selected = select_automatic_lora_stack(session, revision, prompt)
+        repeated = select_automatic_lora_stack(session, revision, prompt)
+
+    assert selected == repeated
+    assert [item["asset_id"] for item in selected.settings] == [portrait.id, watercolor.id]
+    assert selected.settings == [
+        {
+            "asset_id": portrait.id,
+            "model_strength": 0.9,
+            "clip_strength": 0.8,
+            "enabled": True,
+        },
+        {
+            "asset_id": watercolor.id,
+            "model_strength": 0.75,
+            "clip_strength": 0.6,
+            "enabled": True,
+        },
+    ]
+    assert selected.provenance["mode"] == "automatic"
+    assert selected.provenance["selector_version"] == "lora-use-case-v1"
+    assert prompt not in json.dumps(selected.provenance)
+    assert selected.provenance["selected"][0]["matched_terms"] == ["lighting", "portrait"]
+
+
+async def test_automatic_lora_selection_requires_a_meaningful_conservative_match(
+    client: AsyncClient,
+) -> None:
+    del client
+    with SessionLocal() as session:
+        revision = _workflow(session)
+        broad = _asset(session, "Broad", "3" * 64)
+        broad.use_case = "image style"
+        broad.auto_apply = True
+        partial = _asset(session, "Partial", "4" * 64)
+        partial.use_case = "cinematic product photography"
+        partial.auto_apply = True
+        substring = _asset(session, "Substring", "5" * 64)
+        substring.use_case = "car"
+        substring.auto_apply = True
+        session.flush()
+
+        selected = select_automatic_lora_stack(
+            session,
+            revision,
+            "Create a cinematic cartoon portrait",
+        )
+
+    assert selected.settings == []
+    assert selected.provenance["selected"] == []
