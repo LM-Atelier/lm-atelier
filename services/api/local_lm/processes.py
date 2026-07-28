@@ -8,6 +8,7 @@ import logging
 import os
 import re
 import sys
+import time
 from dataclasses import dataclass, field
 from pathlib import Path, PurePosixPath
 from typing import TYPE_CHECKING, Any, Literal
@@ -137,6 +138,7 @@ class WorkerRecord:
     profile_id: str | None = None
     state: Literal["starting", "ready"] = "starting"
     estimated_memory_bytes: int | None = None
+    startup_duration_ms: int | None = None
     peak_memory_bytes: int = 0
     stderr_tail: bytearray = field(default_factory=bytearray)
     output_task: asyncio.Task[None] | None = None
@@ -207,6 +209,7 @@ class ProcessSupervisor:
                     command=self._safe_command(record.command) if record else [],
                     exit_code=record.process.returncode if record else None,
                     estimated_memory_bytes=record.estimated_memory_bytes if record else None,
+                    startup_duration_ms=record.startup_duration_ms if record else None,
                     current_memory_bytes=current_memory,
                     peak_memory_bytes=(record.peak_memory_bytes or None) if record else None,
                     failure_detail=failure_detail,
@@ -529,6 +532,7 @@ class ProcessSupervisor:
     ) -> None:
         async with self._locks[name]:
             await self._stop_unlocked(name)
+            startup_started_at = time.perf_counter()
             log_path = self.settings.log_dir / f"{name}-worker.log"
             worker_log = _RotatingWorkerLog(log_path)
             try:
@@ -558,8 +562,14 @@ class ProcessSupervisor:
             self._workers[name] = record
             try:
                 await self._wait_healthy(record, health_url)
+                record.startup_duration_ms = round(
+                    (time.perf_counter() - startup_started_at) * 1_000
+                )
                 record.state = "ready"
             except Exception as exc:
+                record.startup_duration_ms = round(
+                    (time.perf_counter() - startup_started_at) * 1_000
+                )
                 record.failure_detail = self._sanitize_diagnostic(str(exc)).rstrip(".") + "."
                 await self._terminate_record(record)
                 message = record.failure_detail

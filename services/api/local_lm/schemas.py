@@ -989,6 +989,7 @@ class WorkerStatus(ApiModel):
     command: list[str] = Field(default_factory=list)
     exit_code: int | None = None
     estimated_memory_bytes: int | None = None
+    startup_duration_ms: int | None = Field(default=None, ge=0)
     current_memory_bytes: int | None = None
     peak_memory_bytes: int | None = None
     active_jobs: int = 0
