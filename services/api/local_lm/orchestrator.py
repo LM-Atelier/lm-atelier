@@ -22,6 +22,7 @@ from .artifacts import ArtifactStore
 from .auxiliary_assets import (
     LORA_GRAPH_TRANSFORM_VERSION,
     resolve_lora_stack,
+    select_automatic_lora_stack,
     transform_lora_graph,
     workflow_lora_extension,
 )
@@ -798,6 +799,29 @@ class ConversationOrchestrator:
             ),
             turn_overrides=request_settings,
         )
+        lora_selection = None
+        lora_setting_layers = (
+            profile.load_settings_json if profile else {},
+            profile.request_settings_json if profile else {},
+            default_preset.settings_json if default_preset else {},
+            project_preset.settings_json if project_preset else {},
+            self._scoped_generation_settings(project, role),
+            chat_preset.settings_json if chat_preset else {},
+            self._scoped_generation_settings(chat, role),
+            request_settings,
+        )
+        if (
+            plan.operation in {Operation.TEXT_TO_IMAGE, Operation.IMAGE_TO_IMAGE}
+            and workflow_revision
+            and not any("loras" in layer for layer in lora_setting_layers)
+        ):
+            lora_selection = select_automatic_lora_stack(
+                session,
+                workflow_revision,
+                plan.standalone_prompt if accepted_offer else request.text,
+            )
+            if lora_selection.settings:
+                effective_settings["loras"] = lora_selection.settings
         image_edit_strength = resolve_image_edit_strength(
             plan.operation,
             plan.standalone_prompt if accepted_offer else request.text,
@@ -1159,6 +1183,9 @@ class ConversationOrchestrator:
                 "auxiliary_assets": (
                     {
                         "lora_stack": lora_resolution.provenance,
+                        "selection": (
+                            lora_selection.provenance if lora_selection else {"mode": "explicit"}
+                        ),
                         "graph_transform_version": LORA_GRAPH_TRANSFORM_VERSION,
                         "effective_graph_sha256": lora_resolution.graph_sha256,
                     }
@@ -1450,6 +1477,29 @@ class ConversationOrchestrator:
                 ),
                 turn_overrides=step_overrides,
             )
+            lora_selection = None
+            lora_setting_layers = (
+                profile.load_settings_json if profile else {},
+                profile.request_settings_json if profile else {},
+                default_preset.settings_json if default_preset else {},
+                project_preset.settings_json if project_preset else {},
+                self._scoped_generation_settings(project, role),
+                chat_preset.settings_json if chat_preset else {},
+                self._scoped_generation_settings(chat, role),
+                step_overrides,
+            )
+            if (
+                operation in {Operation.TEXT_TO_IMAGE, Operation.IMAGE_TO_IMAGE}
+                and workflow_revision
+                and not any("loras" in layer for layer in lora_setting_layers)
+            ):
+                lora_selection = select_automatic_lora_stack(
+                    session,
+                    workflow_revision,
+                    step_intent.prompt,
+                )
+                if lora_selection.settings:
+                    effective_settings["loras"] = lora_selection.settings
             image_edit_strength = resolve_image_edit_strength(
                 operation,
                 step_intent.prompt,
@@ -1526,6 +1576,7 @@ class ConversationOrchestrator:
                     "estimate": estimate,
                     "generation_estimate": generation_estimate,
                     "lora_resolution": lora_resolution,
+                    "lora_selection": lora_selection,
                 }
             )
 
@@ -1777,6 +1828,11 @@ class ConversationOrchestrator:
                     "auxiliary_assets": (
                         {
                             "lora_stack": resolved["lora_resolution"].provenance,
+                            "selection": (
+                                resolved["lora_selection"].provenance
+                                if resolved["lora_selection"]
+                                else {"mode": "explicit"}
+                            ),
                             "graph_transform_version": LORA_GRAPH_TRANSFORM_VERSION,
                             "effective_graph_sha256": resolved["lora_resolution"].graph_sha256,
                         }

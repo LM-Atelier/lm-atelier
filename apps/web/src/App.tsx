@@ -77,6 +77,7 @@ import type {
   Job,
   Message,
   MessagePart,
+  ModelAssetInstall,
   ModelInstall,
   ModelProfile,
   ModelProfileBundle,
@@ -738,6 +739,21 @@ function MessageBubble({
     : modelSelection?.mode === "auto" && modelSelection.fallback
       ? " · general fallback"
       : "";
+  const auxiliaryAssets = provenance?.auxiliary_assets as Record<string, unknown> | undefined;
+  const loraSelection = auxiliaryAssets?.selection as Record<string, unknown> | undefined;
+  const automaticLoras = loraSelection?.mode === "automatic" && Array.isArray(loraSelection.selected)
+    ? loraSelection.selected.filter(
+        (item): item is Record<string, unknown> => Boolean(item) && typeof item === "object",
+      )
+    : [];
+  const automaticLoraNames = automaticLoras
+    .map((item) => String(item.name ?? ""))
+    .filter(Boolean);
+  const automaticLoraTerms = Array.from(new Set(automaticLoras.flatMap((item) => (
+    Array.isArray(item.matched_terms)
+      ? item.matched_terms.filter((term): term is string => typeof term === "string")
+      : []
+  )))).slice(0, 3);
   const usage = context?.usage as Record<string, unknown> | undefined;
   const inputTokens = Number(usage?.prompt_tokens ?? context?.input_tokens ?? 0);
   const contextLimit = Number(context?.context_limit ?? 0);
@@ -771,6 +787,12 @@ function MessageBubble({
           <div className="message-meta">
             <MessageTimestamp at={message.created_at} />
             {autoProfileName && <span>Auto chose {autoProfileName}{autoSelectionDetail}</span>}
+            {automaticLoraNames.length > 0 && (
+              <span>
+                LoRA Auto used {automaticLoraNames.join(", ")}
+                {automaticLoraTerms.length > 0 ? ` — matched ${automaticLoraTerms.join(", ")}` : ""}
+              </span>
+            )}
             {contextLimit > 0 && (
               <span>
                 Context {inputTokens.toLocaleString()} / {contextLimit.toLocaleString()} tokens
@@ -2018,6 +2040,110 @@ function InstalledModelRow({
   );
 }
 
+type ModelAssetUpdateValues = Partial<Pick<
+  ModelAssetInstall,
+  "active" | "use_case" | "auto_apply" | "default_model_strength" | "default_clip_strength"
+>>;
+
+function InstalledAssetRow({
+  asset,
+  saving,
+  deleting,
+  onUpdate,
+  onDelete,
+}: {
+  asset: ModelAssetInstall;
+  saving: boolean;
+  deleting: boolean;
+  onUpdate: (values: ModelAssetUpdateValues) => Promise<boolean>;
+  onDelete: () => void;
+}) {
+  const [editing, setEditing] = useState(false);
+  const [useCase, setUseCase] = useState(asset.use_case);
+  const [autoApply, setAutoApply] = useState(asset.auto_apply);
+  const [modelStrength, setModelStrength] = useState(String(asset.default_model_strength));
+  const [clipStrength, setClipStrength] = useState(String(asset.default_clip_strength));
+  const beginEditing = () => {
+    setUseCase(asset.use_case);
+    setAutoApply(asset.auto_apply);
+    setModelStrength(String(asset.default_model_strength));
+    setClipStrength(String(asset.default_clip_strength));
+    setEditing(true);
+  };
+  const parsedModelStrength = Number(modelStrength);
+  const parsedClipStrength = Number(clipStrength);
+  const strengthsValid = Number.isFinite(parsedModelStrength)
+    && Math.abs(parsedModelStrength) <= 4
+    && Number.isFinite(parsedClipStrength)
+    && Math.abs(parsedClipStrength) <= 4;
+  const unchanged = useCase.trim() === asset.use_case
+    && autoApply === asset.auto_apply
+    && parsedModelStrength === asset.default_model_strength
+    && parsedClipStrength === asset.default_clip_strength;
+  const save = async () => {
+    if (!strengthsValid || (autoApply && !useCase.trim())) return;
+    const saved = await onUpdate({
+      use_case: useCase.trim(),
+      auto_apply: autoApply,
+      default_model_strength: parsedModelStrength,
+      default_clip_strength: parsedClipStrength,
+    });
+    if (saved) setEditing(false);
+  };
+  return (
+    <div className={editing ? "editing" : ""}>
+      <span className="badge">{asset.kind.replace("_", " ")}</span>
+      <span className="model-install-copy">
+        <strong>{asset.name}</strong>
+        <small>{asset.active ? "Ready" : "Disabled"}{asset.family ? ` · ${asset.family}` : ""}</small>
+        {asset.kind === "lora" && asset.auto_apply && asset.use_case && (
+          <small>Auto · {asset.use_case}</small>
+        )}
+      </span>
+      <span className="model-install-size">{formatBytes(asset.size_bytes)}</span>
+      <span className="row-actions">
+        <button
+          className="secondary compact-button"
+          disabled={!asset.verified_at || saving}
+          onClick={() => void onUpdate({ active: !asset.active })}
+        >
+          {asset.active ? "Disable" : "Enable"}
+        </button>
+        {asset.kind === "lora" && (
+          <button className="secondary compact-button" disabled={editing || saving} onClick={beginEditing}>
+            Edit Auto rules
+          </button>
+        )}
+        <button className="secondary compact-button danger" disabled={deleting} onClick={onDelete}>Delete</button>
+      </span>
+      {editing && asset.kind === "lora" && (
+        <form className="model-use-case-editor lora-auto-editor" onSubmit={(event) => { event.preventDefault(); void save(); }}>
+          <label>
+            Use case
+            <textarea aria-label={`Auto use case for ${asset.name}`} rows={2} value={useCase} onChange={(event) => setUseCase(event.target.value)} placeholder="Watercolor landscapes, product photography…" />
+          </label>
+          <label>
+            Model strength
+            <input aria-label={`Default model strength for ${asset.name}`} type="number" min="-4" max="4" step="0.05" value={modelStrength} onChange={(event) => setModelStrength(event.target.value)} />
+          </label>
+          <label>
+            CLIP strength
+            <input aria-label={`Default CLIP strength for ${asset.name}`} type="number" min="-4" max="4" step="0.05" value={clipStrength} onChange={(event) => setClipStrength(event.target.value)} />
+          </label>
+          <label className="lora-auto-toggle">
+            <input aria-label={`Use ${asset.name} automatically`} type="checkbox" checked={autoApply} onChange={(event) => setAutoApply(event.target.checked)} />
+            Use automatically
+          </label>
+          <span className="row-actions">
+            <button type="button" className="secondary compact-button" disabled={saving} onClick={() => setEditing(false)}>Cancel</button>
+            <button type="submit" className="primary compact-button" disabled={saving || unchanged || !strengthsValid || (autoApply && !useCase.trim())}>{saving ? "Saving…" : "Save"}</button>
+          </span>
+        </form>
+      )}
+    </div>
+  );
+}
+
 function ModelsView() {
   const client = useQueryClient();
   const [query, setQuery] = useState("");
@@ -2190,9 +2316,14 @@ function ModelsView() {
     },
   });
   const updateModelAsset = useMutation({
-    mutationFn: ({ id, active }: { id: string; active: boolean }) =>
-      api.updateModelAsset(id, active),
-    onSuccess: () => void client.invalidateQueries({ queryKey: ["model-assets"] }),
+    mutationFn: ({ id, values }: { id: string; values: ModelAssetUpdateValues }) =>
+      api.updateModelAsset(id, values),
+    onSuccess: (updated) => {
+      client.setQueryData<ModelAssetInstall[]>(["model-assets"], (current) =>
+        current?.map((asset) => asset.id === updated.id ? updated : asset) ?? [updated],
+      );
+      void client.invalidateQueries({ queryKey: ["model-assets"] });
+    },
   });
   const deleteModelAsset = useMutation({
     mutationFn: api.deleteModelAsset,
@@ -2320,18 +2451,21 @@ function ModelsView() {
         <div className="section-heading"><h2>Installed workflow assets</h2></div>
         <div className="profile-table model-installs">
           {modelAssets.data?.map((asset) => (
-            <div key={asset.id}>
-              <span className="badge">{asset.kind.replace("_", " ")}</span>
-              <span className="model-install-copy">
-                <strong>{asset.name}</strong>
-                <small>{asset.active ? "Ready" : "Disabled"}{asset.family ? ` · ${asset.family}` : ""}</small>
-              </span>
-              <span className="model-install-size">{formatBytes(asset.size_bytes)}</span>
-              <span className="row-actions">
-                <button className="secondary compact-button" disabled={!asset.verified_at || updateModelAsset.isPending} onClick={() => updateModelAsset.mutate({ id: asset.id, active: !asset.active })}>{asset.active ? "Disable" : "Enable"}</button>
-                <button className="secondary compact-button danger" disabled={deleteModelAsset.isPending} onClick={() => window.confirm(`Delete ${asset.name}?`) && deleteModelAsset.mutate(asset.id)}>Delete</button>
-              </span>
-            </div>
+            <InstalledAssetRow
+              key={asset.id}
+              asset={asset}
+              saving={updateModelAsset.isPending && updateModelAsset.variables?.id === asset.id}
+              deleting={deleteModelAsset.isPending && deleteModelAsset.variables === asset.id}
+              onUpdate={async (values) => {
+                try {
+                  await updateModelAsset.mutateAsync({ id: asset.id, values });
+                  return true;
+                } catch {
+                  return false;
+                }
+              }}
+              onDelete={() => window.confirm(`Delete ${asset.name}?`) && deleteModelAsset.mutate(asset.id)}
+            />
           ))}
         </div>
       </section>}

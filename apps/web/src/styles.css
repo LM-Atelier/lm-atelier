@@ -400,6 +400,11 @@ h1, h2, h3 { margin: 0; }
 .model-use-case-editor { grid-column: 2 / -1; display: grid; grid-template-columns: minmax(180px, 1fr) auto auto; align-items: end; gap: 7px; }
 .model-use-case-editor textarea { width: 100%; resize: vertical; color: #e8ebef; border: 1px solid var(--border); border-radius: 8px; background: var(--panel-2); padding: 8px 9px; outline: 0; font: inherit; line-height: 1.4; }
 .model-use-case-editor textarea:focus { border-color: var(--accent); }
+.lora-auto-editor { grid-template-columns: minmax(180px, 1fr) 105px 105px auto auto; }
+.lora-auto-editor label { display: grid; gap: 5px; color: var(--muted); font-size: 10px; }
+.lora-auto-editor input[type="number"] { width: 100%; color: #e8ebef; border: 1px solid var(--border); border-radius: 8px; background: var(--panel-2); padding: 8px 9px; outline: 0; font: inherit; }
+.lora-auto-editor input[type="number"]:focus { border-color: var(--accent); }
+.lora-auto-editor .lora-auto-toggle { display: flex; align-items: center; gap: 7px; min-height: 32px; white-space: nowrap; }
 .preset-create { display: grid; grid-template-columns: minmax(180px, 1fr) 120px auto; gap: 9px; margin-bottom: 11px; }
 .preset-create input, .preset-create select { color: #e8ebef; border: 1px solid var(--border); border-radius: 8px; background: var(--panel-2); padding: 9px; outline: 0; }
 .settings-editor { width: min(780px, 96vw); }
@@ -490,6 +495,8 @@ h1, h2, h3 { margin: 0; }
   .model-installs .model-install-size { display: none; }
   .model-installs .row-actions { grid-column: 2; justify-content: flex-start; }
   .model-use-case-editor { grid-column: 1 / -1; grid-template-columns: 1fr auto auto; }
+  .lora-auto-editor { grid-template-columns: 1fr 1fr; }
+  .lora-auto-editor > label:first-child, .lora-auto-editor > .row-actions { grid-column: 1 / -1; }
   .preset-create { grid-template-columns: 1fr; }
   .messages { padding-inline: 16px; }
   .composer-wrap { padding-inline: 12px; }

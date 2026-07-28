@@ -401,6 +401,10 @@ export interface ModelAssetInstall {
   size_bytes: number;
   manifest_json: Record<string, unknown>;
   active: boolean;
+  use_case: string;
+  auto_apply: boolean;
+  default_model_strength: number;
+  default_clip_strength: number;
   verified_at: string | null;
   created_at: string;
   updated_at: string;
