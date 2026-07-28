@@ -8,6 +8,7 @@ import pytest
 from local_lm.domain import Operation
 from local_lm.image_edit_strength import (
     ESTIMATOR_VERSION,
+    STRENGTH_MODE_PARAMETER,
     EditSettingSource,
     estimate_image_edit_strength,
     resolve_image_edit_strength,
@@ -90,6 +91,47 @@ def test_each_numeric_settings_scope_is_authoritative(source: EditSettingSource)
     assert resolution.provenance()["mode"] == "manual"
 
 
+def test_scoped_auto_mode_overrides_lower_manual_strength() -> None:
+    settings = {"denoise": 0.47}
+    resolution = resolve_image_edit_strength(
+        Operation.IMAGE_TO_IMAGE,
+        "Replace the jacket",
+        _FIELDS,
+        settings,
+        (
+            (EditSettingSource.PROFILE_REQUEST, {"denoise": 0.47}),
+            (EditSettingSource.CHAT, {STRENGTH_MODE_PARAMETER: "auto"}),
+        ),
+    )
+
+    assert resolution is not None
+    assert resolution.value == 0.66
+    assert resolution.provenance()["mode"] == "auto"
+    assert resolution.provenance()["reason_codes"] == [
+        "subject_replacement",
+        "explicit_auto_mode",
+    ]
+
+
+def test_turn_numeric_strength_overrides_scoped_auto_mode() -> None:
+    settings = {"denoise": 0.61}
+    resolution = resolve_image_edit_strength(
+        Operation.IMAGE_TO_IMAGE,
+        "Replace the jacket",
+        _FIELDS,
+        settings,
+        (
+            (EditSettingSource.CHAT, {STRENGTH_MODE_PARAMETER: "auto"}),
+            (EditSettingSource.TURN, {"denoise": 0.61}),
+        ),
+    )
+
+    assert resolution is not None
+    assert resolution.value == 0.61
+    assert resolution.provenance()["mode"] == "manual"
+    assert resolution.source_scope == EditSettingSource.TURN
+
+
 def test_invalid_stored_strength_does_not_suppress_auto() -> None:
     settings = {"denoise": 1}
     resolution = resolve_image_edit_strength(
@@ -160,13 +202,13 @@ def test_inherited_auto_strength_is_reused() -> None:
 
 
 def test_text_to_image_settings_are_unchanged() -> None:
-    settings = {"denoise": 1}
+    settings = {"denoise": 0.41}
     resolution = resolve_image_edit_strength(
         Operation.TEXT_TO_IMAGE,
         "Restyle the entire image",
         _FIELDS,
         settings,
-        (),
+        ((EditSettingSource.CHAT, {"denoise": 0.41}),),
     )
 
     assert resolution is None

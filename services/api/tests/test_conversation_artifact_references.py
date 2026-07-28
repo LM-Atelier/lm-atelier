@@ -562,3 +562,56 @@ async def test_edit_and_branch_reuses_inherited_auto_strength(client: AsyncClien
     assert strength["scope"] == "replacement"
     assert strength["reason_codes"] == ["inherited_auto_value"]
     assert strength["reused"] is True
+
+
+async def test_chat_auto_mode_overrides_inherited_numeric_edit_strength(
+    client: AsyncClient,
+) -> None:
+    uploaded = await client.post(
+        "/api/artifacts",
+        files={"file": ("reference.png", b"auto-mode-edit-image", "image/png")},
+    )
+    artifact_id = uploaded.json()["id"]
+    chat = (await client.post("/api/chats", json={"title": "Auto edit mode"})).json()
+    updated = await client.patch(
+        f"/api/chats/{chat['id']}",
+        json={
+            "generation_settings_json": {
+                "image": {
+                    "denoise": 0.41,
+                    "_image_edit_strength_mode": "auto",
+                }
+            }
+        },
+    )
+    assert updated.status_code == 200
+
+    accepted, _completed = await _image_turn(
+        client,
+        chat["id"],
+        "Replace the jacket with a green coat",
+        input_artifact_ids=[artifact_id],
+    )
+
+    assert accepted["run"]["settings_json"]["denoise"] == 0.66
+    strength = accepted["run"]["provenance_json"]["image_edit"]["strength"]
+    assert strength["mode"] == "auto"
+    assert strength["reason_codes"] == ["subject_replacement", "explicit_auto_mode"]
+
+
+async def test_text_to_image_ignores_chat_edit_strength(client: AsyncClient) -> None:
+    chat = (await client.post("/api/chats", json={"title": "Fresh image strength"})).json()
+    updated = await client.patch(
+        f"/api/chats/{chat['id']}",
+        json={"generation_settings_json": {"image": {"denoise": 0.41}}},
+    )
+    assert updated.status_code == 200
+
+    response = await client.post(
+        f"/api/chats/{chat['id']}/turns",
+        json={"text": "Make an image of a red apple", "mode": "image"},
+    )
+
+    assert response.status_code == 202, response.text
+    assert response.json()["run"]["operation"] == "text_to_image"
+    assert response.json()["run"]["settings_json"]["denoise"] == 1
