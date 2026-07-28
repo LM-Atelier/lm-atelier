@@ -77,7 +77,7 @@ class ImageEditStrengthResolution:
     parameter: str = STRENGTH_PARAMETER
     calibration_version: int | None = None
     calibration_hash: str | None = None
-    schedule_adjustment: dict[str, int | float | str] | None = None
+    schedule_adjustment: dict[str, float | str] | None = None
 
     @property
     def default_applied(self) -> bool:
@@ -267,7 +267,7 @@ def _calibrated_auto_resolution(
         resolution.maximum,
     )
     reasons = (*resolution.reason_codes, EditReason.WORKFLOW_CALIBRATION)
-    schedule_adjustment: dict[str, int | float | str] | None = None
+    schedule_adjustment: dict[str, float | str] | None = None
     steps_parameter = calibration.steps_parameter
     minimum_effective_steps = calibration.minimum_effective_steps.get(scope.value)
     raw_steps = effective_settings.get(steps_parameter) if steps_parameter else None

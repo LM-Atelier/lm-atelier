@@ -595,7 +595,7 @@ def test_text_to_image_graph_derives_a_standard_image_edit_workflow(tmp_path: Pa
             "steps_parameter": "steps",
             "minimum_effective_steps": {
                 "localized": 2,
-                "replacement": 3,
+                "replacement": 7.2,
                 "global": 3,
             },
         },
