@@ -1016,6 +1016,32 @@ class RuntimeStatus(ApiModel):
     message: str = ""
 
 
+class SetupReadinessCheck(ApiModel):
+    code: str = Field(min_length=1, max_length=80)
+    status: Literal["pass", "pending", "fail"]
+    message: str = Field(min_length=1, max_length=240)
+    action: str | None = Field(default=None, min_length=1, max_length=80)
+
+
+class SetupRoleReadiness(ApiModel):
+    role: Literal["chat", "image", "video"]
+    state: Literal["ready", "in_progress", "action_required"]
+    verification_level: Literal["activation_probe"] = "activation_probe"
+    engine: str | None = None
+    job_id: str | None = None
+    install_id: str | None = None
+    profile_id: str | None = None
+    workflow_revision_id: str | None = None
+    next_action: str | None = None
+    checks: list[SetupReadinessCheck] = Field(default_factory=list)
+
+
+class SetupReadinessReport(ApiModel):
+    version: Literal[1] = 1
+    state: Literal["ready", "in_progress", "action_required"]
+    roles: list[SetupRoleReadiness]
+
+
 class BackupInfo(ApiModel):
     name: str
     size_bytes: int
