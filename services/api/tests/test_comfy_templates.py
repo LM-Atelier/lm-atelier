@@ -686,6 +686,106 @@ def test_registry_compiles_modern_combo_widgets(tmp_path: Path) -> None:
     }
 
 
+def test_registry_normalizes_advanced_image_output_to_the_core_contract(
+    tmp_path: Path,
+) -> None:
+    registry = _registry(tmp_path)
+    assert registry.settings.comfy_directory is not None
+    templates = (
+        registry.settings.comfy_directory
+        / ".venv"
+        / "Lib"
+        / "site-packages"
+        / "comfyui_workflow_templates_json"
+        / "templates"
+    )
+    template = {
+        "nodes": [
+            {
+                "id": 1,
+                "type": "CheckpointLoaderSimple",
+                "inputs": [],
+                "outputs": [{"name": "IMAGE", "type": "IMAGE", "links": [1]}],
+                "properties": {
+                    "cnr_id": "comfy-core",
+                    "models": [
+                        {
+                            "name": "model.safetensors",
+                            "url": (
+                                "https://huggingface.co/owner/model/resolve/"
+                                f"{'a' * 40}/model.safetensors"
+                            ),
+                            "directory": "checkpoints",
+                        }
+                    ],
+                },
+                "widgets_values": ["model.safetensors"],
+            },
+            {
+                "id": 2,
+                "type": "SaveImageAdvanced",
+                "inputs": [{"name": "images", "type": "IMAGE", "link": 1}],
+                "outputs": [],
+                "properties": {"cnr_id": "comfy-core"},
+                "widgets_values": ["Official_Template", "png", "8-bit", "sRGB"],
+            },
+        ],
+        "links": [[1, 1, 0, 2, 0, "IMAGE"]],
+    }
+    (templates / "image_advanced_output.json").write_text(
+        json.dumps(template),
+        encoding="utf-8",
+    )
+    object_info = {
+        "CheckpointLoaderSimple": {
+            "input": {
+                "required": {
+                    "ckpt_name": [["model.safetensors"]],
+                }
+            },
+            "input_order": {"required": ["ckpt_name"]},
+        },
+        "SaveImageAdvanced": {
+            "input": {
+                "required": {
+                    "images": ["IMAGE"],
+                    "filename_prefix": ["STRING", {"default": "ComfyUI"}],
+                    "format": [
+                        "COMFY_DYNAMICCOMBO_V3",
+                        {"options": [{"key": "png"}]},
+                    ],
+                }
+            },
+            "input_order": {
+                "required": ["images", "filename_prefix", "format"],
+            },
+            "output_node": True,
+        },
+        "SaveImage": {
+            "input": {
+                "required": {
+                    "images": ["IMAGE"],
+                    "filename_prefix": ["STRING", {"default": "ComfyUI"}],
+                }
+            },
+            "input_order": {"required": ["images", "filename_prefix"]},
+            "output_node": True,
+            "display_name": "Save Image",
+        },
+    }
+
+    compiled = registry.compile("image_advanced_output", "image", object_info)
+
+    assert compiled.api_graph["2"] == {
+        "inputs": {
+            "images": ["1", 0],
+            "filename_prefix": "Official_Template",
+        },
+        "class_type": "SaveImage",
+        "_meta": {"title": "Save Image"},
+    }
+
+
 def test_registry_rejects_a_template_model_missing_from_the_running_runtime(
     tmp_path: Path,
 ) -> None:
