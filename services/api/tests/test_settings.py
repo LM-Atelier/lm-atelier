@@ -172,6 +172,27 @@ def test_empty_workflow_schema_preserves_legacy_role_settings() -> None:
     assert workflow_settings(VIDEO_SETTINGS, {}) == VIDEO_SETTINGS
 
 
+def test_workflow_read_only_controls_drop_obsolete_overrides() -> None:
+    fields = workflow_settings(
+        IMAGE_SETTINGS,
+        {
+            "type": "object",
+            "properties": {
+                "steps": {"readOnly": True},
+            },
+        },
+    )
+
+    assert "steps" not in {field.key for field in fields}
+    resolved = resolve_generation_settings(
+        fields,
+        profile_defaults=[{"steps": 40}],
+    )
+    assert "steps" not in resolved
+    with pytest.raises(ValueError, match="unsupported settings: steps"):
+        validate_settings({"steps": 40}, fields)
+
+
 def test_persisted_generation_settings_resolve_by_scope() -> None:
     request_fields = [field for field in CHAT_SETTINGS if field.scope != "load"]
     resolved = resolve_generation_settings(

@@ -32,7 +32,7 @@ _RUNTIME_PARAMETERS = {
 }
 _PRIMITIVE_WIDGET_TYPES = {"BOOLEAN", "COMBO", "FLOAT", "INT", "STRING"}
 _CONTROL_AFTER_GENERATE = {"decrement", "fixed", "increment", "randomize"}
-COMFY_TEMPLATE_COMPILER_VERSION = 12
+COMFY_TEMPLATE_COMPILER_VERSION = 13
 DEFAULT_IMAGE_EDIT_DENOISE = 0.9
 _ADAPTIVE_CHECKPOINT_PREFIX = "lma_image_checkpoint_v1_"
 _ADAPTIVE_CHECKPOINT_PLACEHOLDER = "__LM_ATELIER_CHECKPOINT__"
@@ -1002,7 +1002,12 @@ def _compile_ui_graph(
                 _bind_runtime_parameter(inputs, input_name, runtime_name, schema_properties)
                 overridden_inputs.add(input_name)
         for input_name in list(inputs):
-            if input_name in overridden_inputs or (node_id, input_name) in linked_inputs:
+            if input_name in overridden_inputs:
+                continue
+            if (node_id, input_name) in linked_inputs:
+                runtime_name = _runtime_parameter(input_name, node)
+                if runtime_name and runtime_name not in schema_properties:
+                    schema_properties[runtime_name] = {"readOnly": True}
                 continue
             runtime_name = _runtime_parameter(input_name, node)
             if runtime_name:
@@ -1029,6 +1034,8 @@ def _compile_ui_graph(
                 "title": str(node.get("title") or node_info.get("display_name") or class_type)
             },
         }
+    for runtime_name in sorted(set(_RUNTIME_PARAMETERS.values()) | {"negative_prompt"}):
+        schema_properties.setdefault(runtime_name, {"readOnly": True})
     return api_graph, {"type": "object", "properties": schema_properties}
 
 
