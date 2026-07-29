@@ -2461,29 +2461,66 @@ async def catalog_preflight(
         )
 
     inspected: dict[tuple[str, str], CatalogDetail] = {}
-    viable: list[tuple[int, ComfyTemplate, CatalogDetail]] = []
-    best_score = candidates[0].score
+    viable: list[tuple[int, int, ComfyTemplate, CatalogDetail]] = []
     for candidate in candidates:
-        if candidate.score != best_score:
+        if viable and candidate.score < viable[0][0]:
             break
-        key = (candidate.remote_id, candidate.revision)
-        resolved = inspected.get(key)
-        if not resolved:
-            try:
-                raw_resolved = await services.catalog.inspect(
-                    candidate.remote_id,
-                    candidate.revision,
-                    payload.role,
+        bundled_files: list[dict[str, Any]] = []
+        primary_detail: CatalogDetail | None = None
+        unavailable = False
+        for dependency in candidate.dependencies:
+            key = (dependency.remote_id.casefold(), dependency.revision)
+            source_detail = inspected.get(key)
+            if source_detail is None:
+                try:
+                    raw_source = await services.catalog.inspect(
+                        dependency.remote_id,
+                        dependency.revision,
+                        payload.role,
+                    )
+                    source_detail = CatalogDetail.model_validate(raw_source)
+                except Exception:
+                    unavailable = True
+                    break
+                inspected[key] = source_detail
+            source_file = next(
+                (
+                    item
+                    for item in source_detail.files
+                    if str(item.get("filename") or "") == dependency.path
+                ),
+                None,
+            )
+            if source_file is None:
+                unavailable = True
+                break
+            if dependency.remote_id.casefold() == candidate.remote_id.casefold():
+                primary_detail = source_detail
+                bundled_files.append(dict(source_file))
+            else:
+                bundled_files.append(
+                    {
+                        **source_file,
+                        "filename": dependency.path,
+                        "source_remote_id": dependency.remote_id,
+                        "source_revision": source_detail.revision,
+                        "source_filename": dependency.path,
+                    }
                 )
-                resolved = CatalogDetail.model_validate(raw_resolved)
-            except Exception:
-                continue
-            inspected[key] = resolved
-        files = {str(item.get("filename") or ""): item for item in resolved.files}
-        if not all(filename in files for filename in candidate.selected_files):
+        if unavailable or primary_detail is None:
             continue
-        size = sum(int(files[filename].get("size") or 0) for filename in candidate.selected_files)
-        viable.append((size, candidate, resolved))
+        any_gated = any(
+            inspected[(dependency.remote_id.casefold(), dependency.revision)].model.gated
+            for dependency in candidate.dependencies
+        )
+        bundled_model = primary_detail.model.model_copy(
+            update={"gated": primary_detail.model.gated or any_gated}
+        )
+        bundled_detail = primary_detail.model_copy(
+            update={"model": bundled_model, "files": bundled_files}
+        )
+        size = sum(int(item.get("size") or 0) for item in bundled_files)
+        viable.append((candidate.score, size, candidate, bundled_detail))
     if not viable:
         result = assess_catalog_install(detail, payload, services.settings, system)
         checks = [
@@ -2512,10 +2549,13 @@ async def catalog_preflight(
             detail,
         )
 
-    _, template, resolved_detail = min(viable, key=lambda item: (item[0], item[1].id))
+    _, _, template, resolved_detail = min(
+        viable,
+        key=lambda item: (-item[0], item[1], item[2].id),
+    )
     resolved_payload = payload.model_copy(
         update={
-            "revision": template.revision,
+            "revision": resolved_detail.revision,
             "selected_files": template.selected_files,
         }
     )
