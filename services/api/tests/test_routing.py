@@ -273,6 +273,69 @@ async def test_prior_image_edit_routes_without_a_model_planner() -> None:
     assert plan.reason == "clear prior-image edit request"
 
 
+@pytest.mark.parametrize(
+    "text",
+    [
+        "Make her top red",
+        "Change his jacket to black",
+        "Recolor their shoes white",
+        "Increase the brightness",
+        "Reduce saturation slightly",
+        "Give the person a blue coat",
+        "Remove the coffee cup",
+        "Replace the background with a beach",
+    ],
+)
+async def test_natural_language_prior_image_edits_route_without_a_model_planner(
+    text: str,
+) -> None:
+    plan = await ModalityRouter().plan_with_model(
+        adapter=UnexpectedChatAdapter(),
+        text=text,
+        mode=RoutingMode.AUTO,
+        input_artifact_ids=[],
+        has_prior_image=True,
+    )
+
+    assert plan.operation == Operation.IMAGE_TO_IMAGE
+    assert plan.reason == "clear prior-image edit request"
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "Write a poem about her red top",
+        "Explain how to increase brightness in a photograph",
+        "Describe the background",
+        "Make her a list of outfit ideas",
+        "Change the subject of this paragraph",
+        "Remove ambiguity from this paragraph",
+        "Replace the word cat with dog in this sentence",
+        "Add a paragraph about the color blue",
+    ],
+)
+def test_visual_edit_language_does_not_override_clear_text_requests(text: str) -> None:
+    plan = ModalityRouter().plan(
+        text=text,
+        mode=RoutingMode.AUTO,
+        input_artifact_ids=[],
+        has_prior_image=True,
+    )
+
+    assert plan.operation == Operation.TEXT
+
+
+def test_visual_text_on_an_image_remains_an_image_edit() -> None:
+    plan = ModalityRouter().plan(
+        text="Replace the word SALE with OPEN on the sign",
+        mode=RoutingMode.AUTO,
+        input_artifact_ids=[],
+        has_prior_image=True,
+    )
+
+    assert plan.operation == Operation.IMAGE_TO_IMAGE
+
+
 def test_prior_image_motion_request_still_routes_to_video() -> None:
     plan = ModalityRouter().plan(
         text="Make it move",

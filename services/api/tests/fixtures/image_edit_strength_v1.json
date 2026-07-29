@@ -18,6 +18,15 @@
     "reasons": ["localized_change"]
   },
   {
+    "name": "localized garment recolor",
+    "prompt": "Make her top red while keeping everything else unchanged.",
+    "scope": "localized",
+    "confidence": "high",
+    "minimum": 0.42,
+    "maximum": 0.58,
+    "reasons": ["localized_change", "preservation_requested"]
+  },
+  {
     "name": "outfit replacement",
     "prompt": "Give the person a new formal outfit without changing their face.",
     "scope": "replacement",
@@ -106,6 +115,24 @@
     "minimum": 0.58,
     "maximum": 0.74,
     "reasons": ["subject_replacement", "preservation_requested"]
+  },
+  {
+    "name": "natural language top recolor",
+    "prompt": "Make her top red.",
+    "scope": "localized",
+    "confidence": "high",
+    "minimum": 0.42,
+    "maximum": 0.58,
+    "reasons": ["localized_change"]
+  },
+  {
+    "name": "natural language brightness adjustment",
+    "prompt": "Increase the brightness.",
+    "scope": "minimal",
+    "confidence": "high",
+    "minimum": 0.30,
+    "maximum": 0.44,
+    "reasons": ["minimal_adjustment"]
   },
   {
     "name": "unsupported language fallback",

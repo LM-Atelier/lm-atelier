@@ -32,7 +32,7 @@ _RUNTIME_PARAMETERS = {
 }
 _PRIMITIVE_WIDGET_TYPES = {"BOOLEAN", "COMBO", "FLOAT", "INT", "STRING"}
 _CONTROL_AFTER_GENERATE = {"decrement", "fixed", "increment", "randomize"}
-COMFY_TEMPLATE_COMPILER_VERSION = 9
+COMFY_TEMPLATE_COMPILER_VERSION = 10
 DEFAULT_IMAGE_EDIT_DENOISE = 0.9
 _ADAPTIVE_CHECKPOINT_PREFIX = "lma_image_checkpoint_v1_"
 _ADAPTIVE_CHECKPOINT_PLACEHOLDER = "__LM_ATELIER_CHECKPOINT__"
@@ -878,7 +878,7 @@ def _compile_ui_graph(
     }
     flat_nodes: dict[str, dict[str, Any]] = {}
     links: list[tuple[str, int, str, int]] = []
-    group_inputs: dict[str, dict[int, list[tuple[str, int, str]]]] = {}
+    group_inputs: dict[str, dict[int, list[tuple[str, int, str, str]]]] = {}
     group_outputs: dict[str, dict[int, tuple[str, int]]] = {}
     parameter_overrides: dict[tuple[str, str], str] = {}
 
@@ -890,7 +890,7 @@ def _compile_ui_graph(
         if not subgraph:
             flat_nodes[node_id] = node
             continue
-        subgraph_input_targets: dict[int, list[tuple[str, int, str]]] = {}
+        subgraph_input_targets: dict[int, list[tuple[str, int, str, str]]] = {}
         outputs: dict[int, tuple[str, int]] = {}
         subgraph_inputs = [item for item in subgraph.get("inputs", []) if isinstance(item, dict)]
         for link in subgraph.get("links", []):
@@ -901,13 +901,13 @@ def _compile_ui_graph(
             origin_key = f"{node_id}:{origin}"
             target_key = f"{node_id}:{target}"
             if origin == "-10":
-                parameter = (
-                    str(subgraph_inputs[origin_slot].get("name") or "")
-                    if origin_slot < len(subgraph_inputs)
-                    else ""
+                parameter_definition = (
+                    subgraph_inputs[origin_slot] if origin_slot < len(subgraph_inputs) else {}
                 )
+                parameter = str(parameter_definition.get("name") or "")
+                parameter_label = str(parameter_definition.get("label") or "")
                 subgraph_input_targets.setdefault(origin_slot, []).append(
-                    (target_key, target_slot, parameter)
+                    (target_key, target_slot, parameter, parameter_label)
                 )
                 continue
             if target == "-20":
@@ -921,7 +921,7 @@ def _compile_ui_graph(
         group_inputs[node_id] = subgraph_input_targets
         group_outputs[node_id] = outputs
         for targets in subgraph_input_targets.values():
-            for target_key, target_slot, parameter in targets:
+            for target_key, target_slot, parameter, parameter_label in targets:
                 target_node = flat_nodes.get(target_key)
                 if not target_node:
                     continue
@@ -929,10 +929,11 @@ def _compile_ui_graph(
                 if target_slot >= len(target_inputs):
                     continue
                 input_name = str(target_inputs[target_slot].get("name") or "")
-                runtime_name = (
-                    "prompt"
-                    if parameter == "text"
-                    else _runtime_parameter(parameter or input_name, target_node)
+                runtime_name = _subgraph_runtime_parameter(
+                    parameter,
+                    parameter_label,
+                    input_name,
+                    target_node,
                 )
                 if runtime_name:
                     parameter_overrides[(target_key, input_name)] = runtime_name
@@ -944,7 +945,7 @@ def _compile_ui_graph(
         origin, origin_slot, target, target_slot = normalized
         resolved_origin = group_outputs.get(origin, {}).get(origin_slot, (origin, origin_slot))
         if target in group_inputs:
-            for inner_target, inner_slot, _ in group_inputs[target].get(target_slot, []):
+            for inner_target, inner_slot, _, _ in group_inputs[target].get(target_slot, []):
                 links.append((*resolved_origin, inner_target, inner_slot))
         else:
             links.append((*resolved_origin, target, target_slot))
@@ -993,10 +994,14 @@ def _compile_ui_graph(
         for (target_id, input_name), connection in linked_inputs.items():
             if target_id == node_id:
                 inputs[input_name] = connection
+        overridden_inputs: set[str] = set()
         for (target_id, input_name), runtime_name in parameter_overrides.items():
             if target_id == node_id:
                 _bind_runtime_parameter(inputs, input_name, runtime_name, schema_properties)
+                overridden_inputs.add(input_name)
         for input_name in list(inputs):
+            if input_name in overridden_inputs:
+                continue
             runtime_name = _runtime_parameter(input_name, node)
             if runtime_name:
                 _bind_runtime_parameter(inputs, input_name, runtime_name, schema_properties)
@@ -1127,9 +1132,48 @@ def _widget_default(spec: Any) -> Any:
 
 
 def _runtime_parameter(input_name: str, node: dict[str, Any]) -> str | None:
-    if input_name == "text" and str(node.get("type")) == "CLIPTextEncode":
-        return "prompt"
+    if input_name in {"prompt", "text"} and _is_conditioning_text_input(
+        input_name,
+        node,
+    ):
+        title = str(node.get("title") or "").casefold()
+        return "negative_prompt" if "negative" in title else "prompt"
     return _RUNTIME_PARAMETERS.get(input_name)
+
+
+def _subgraph_runtime_parameter(
+    parameter: str,
+    parameter_label: str,
+    input_name: str,
+    node: dict[str, Any],
+) -> str | None:
+    aliases = {
+        "negative": "negative_prompt",
+        "negative_prompt": "negative_prompt",
+        "negative_text": "negative_prompt",
+        "positive": "prompt",
+        "positive_prompt": "prompt",
+        "positive_text": "prompt",
+        "prompt": "prompt",
+        "text": "prompt",
+    }
+    for value in (parameter_label, parameter):
+        normalized = re.sub(r"[^a-z0-9]+", "_", value.casefold()).strip("_")
+        if runtime_name := aliases.get(normalized):
+            return runtime_name
+    return _runtime_parameter(parameter or input_name, node) or _runtime_parameter(
+        input_name,
+        node,
+    )
+
+
+def _is_conditioning_text_input(input_name: str, node: dict[str, Any]) -> bool:
+    if input_name not in {"prompt", "text"}:
+        return False
+    return any(
+        isinstance(output, dict) and str(output.get("type") or "") == "CONDITIONING"
+        for output in node.get("outputs") or []
+    )
 
 
 def _bind_runtime_parameter(
