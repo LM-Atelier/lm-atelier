@@ -6300,6 +6300,160 @@ async def test_comfy_catalog_preflight_offers_a_provisional_adaptive_checkpoint(
     assert workflow_check["status"] == "warn"
 
 
+async def test_comfy_catalog_preflight_pins_a_multirepository_official_bundle(
+    client: AsyncClient,
+    settings: Settings,
+    tmp_path: Path,
+    monkeypatch,
+) -> None:  # type: ignore[no-untyped-def]
+    settings.media_engine = "comfyui"
+    external_runtime = tmp_path / "external-comfy"
+    external_runtime.mkdir()
+    settings.comfy_executable = external_runtime / "python.exe"
+    settings.comfy_executable.write_bytes(b"external runtime")
+    settings.comfy_directory = external_runtime / "ComfyUI"
+    templates = (
+        settings.comfy_directory
+        / ".venv"
+        / "Lib"
+        / "site-packages"
+        / "comfyui_workflow_templates_json"
+        / "templates"
+    )
+    templates.mkdir(parents=True)
+    (settings.comfy_directory / "main.py").write_text("", encoding="utf-8")
+    dependencies = [
+        (
+            "diffusion_models",
+            "model.safetensors",
+            "https://huggingface.co/owner/primary/resolve/main/weights/model.safetensors",
+        ),
+        (
+            "text_encoders",
+            "encoder.safetensors",
+            "https://huggingface.co/owner/text/resolve/main/encoders/encoder.safetensors",
+        ),
+        (
+            "vae",
+            "vae.safetensors",
+            "https://huggingface.co/owner/vae/resolve/main/vae.safetensors",
+        ),
+    ]
+    nodes = [
+        {
+            "id": index,
+            "type": "ModelLoader",
+            "inputs": [],
+            "outputs": [],
+            "properties": {
+                "cnr_id": "comfy-core",
+                "models": [{"directory": directory, "name": name, "url": url}],
+            },
+            "widgets_values": [name],
+        }
+        for index, (directory, name, url) in enumerate(dependencies, start=1)
+    ]
+    nodes.append(
+        {
+            "id": 10,
+            "type": "SaveImage",
+            "inputs": [],
+            "outputs": [],
+            "properties": {"cnr_id": "comfy-core"},
+            "widgets_values": ["multi-repo"],
+        }
+    )
+    (templates / "image_multi_repo_edit.json").write_text(
+        json.dumps({"nodes": nodes, "links": []}),
+        encoding="utf-8",
+    )
+    (templates / "index.json").write_text(
+        json.dumps([{"name": "image_multi_repo_edit", "date": "2026-07-10"}]),
+        encoding="utf-8",
+    )
+    revisions = {
+        "owner/primary": "a" * 40,
+        "owner/text": "b" * 40,
+        "owner/vae": "c" * 40,
+    }
+    source_files = {
+        "owner/primary": ("weights/model.safetensors", 2_048, "d" * 64),
+        "owner/text": ("encoders/encoder.safetensors", 1_024, "e" * 64),
+        "owner/vae": ("vae.safetensors", 512, "f" * 64),
+    }
+
+    async def inspect(
+        _catalog: HuggingFaceCatalog,
+        remote_id: str,
+        revision: str = "main",
+        requested_role: str | None = None,
+    ) -> dict:  # type: ignore[type-arg]
+        del revision, requested_role
+        filename, size, sha256 = source_files[remote_id]
+        return {
+            "model": {
+                "remote_id": remote_id,
+                "name": remote_id.rsplit("/", 1)[-1],
+                "license_id": "apache-2.0",
+                "architecture": "FluxPipeline",
+                "pipeline_tag": "image-to-image",
+                "formats": ["safetensors"],
+                "compatibility": "likely",
+                "compatibility_reasons": ["image pipeline metadata detected"],
+            },
+            "revision": revisions[remote_id],
+            "files": [{"filename": filename, "size": size, "sha256": sha256}],
+        }
+
+    async def inspect_file_prefix(*args, **kwargs) -> bytes:  # type: ignore[no-untyped-def]
+        del args, kwargs
+        raise ValueError("synthetic metadata fallback")
+
+    monkeypatch.setattr(HuggingFaceCatalog, "inspect", inspect)
+    monkeypatch.setattr(HuggingFaceCatalog, "inspect_file_prefix", inspect_file_prefix)
+    response = await client.post(
+        "/api/catalog/owner/primary/preflight",
+        json={
+            "revision": "main",
+            "role": "image",
+            "engine": "comfyui",
+            "selected_files": [],
+        },
+    )
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["can_install"] is True
+    assert payload["revision"] == revisions["owner/primary"]
+    assert payload["selected_files"] == [
+        "weights/model.safetensors",
+        "encoders/encoder.safetensors",
+        "vae.safetensors",
+    ]
+    assert payload["download_bytes"] == 3_584
+    assert payload["workflow_template_id"] == "image_multi_repo_edit"
+    assert payload["file_sources"] == {
+        "encoders/encoder.safetensors": {
+            "remote_id": "owner/text",
+            "revision": revisions["owner/text"],
+            "filename": "encoders/encoder.safetensors",
+            "size_bytes": 1_024,
+            "sha256": "e" * 64,
+        },
+        "vae.safetensors": {
+            "remote_id": "owner/vae",
+            "revision": revisions["owner/vae"],
+            "filename": "vae.safetensors",
+            "size_bytes": 512,
+            "sha256": "f" * 64,
+        },
+    }
+    assert payload["install_plan"]["compatibility"] == "supported"
+    artifacts = {item["path"]: item for item in payload["install_plan"]["artifacts_json"]}
+    assert artifacts["encoders/encoder.safetensors"]["source_remote_id"] == "owner/text"
+    assert artifacts["vae.safetensors"]["source_revision"] == revisions["owner/vae"]
+
+
 async def test_comfy_catalog_preflight_blocks_an_unreviewed_managed_runtime(
     client: AsyncClient,
     settings: Settings,

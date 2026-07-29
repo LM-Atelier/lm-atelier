@@ -14,7 +14,7 @@ from .domain import new_id
 from .model_manifests import ModelManifestInspection
 from .models import InstallPlan
 
-INSTALL_RESOLVER_VERSION = "install-resolver-v3"
+INSTALL_RESOLVER_VERSION = "install-resolver-v4"
 ACTIVATION_PROBE_VERSION = "activation-probe-v2"
 LAUNCH_CONTRACT_VERSION = "worker-launch-v1"
 
@@ -220,7 +220,7 @@ def resolve_install_plan(
         failure_reason = (
             "Automatic media installation accepts data-only safetensors and JSON metadata."
         )
-    elif any(item.kind == "lora" for item in artifacts):
+    elif artifacts and all(item.kind == "lora" for item in artifacts):
         compatibility = "unsupported"
         failure_code = "auxiliary_asset_not_primary"
         failure_reason = "This repository contains a LoRA, not a primary generation model."

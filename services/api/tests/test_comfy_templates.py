@@ -13,6 +13,7 @@ from local_lm.comfy_templates import (
     derive_image_to_image,
 )
 from local_lm.config import Settings
+from local_lm.schemas import CatalogFileSource
 
 
 def _registry(tmp_path: Path) -> ComfyTemplateRegistry:
@@ -203,6 +204,134 @@ def test_registry_prefers_exact_repository_and_rejects_generic_turbo_overlap(
     assert [item.id for item in matches] == ["sdxlturbo_example"]
     assert matches[0].remote_id == "stabilityai/sdxl-turbo"
     assert registry.matches("owner/unrelated-turbo", "image") == []
+
+
+def test_registry_accepts_and_revalidates_a_pinned_multirepository_bundle(
+    tmp_path: Path,
+) -> None:
+    registry = _registry(tmp_path)
+    templates = (
+        registry.settings.comfy_directory
+        / ".venv"
+        / "Lib"
+        / "site-packages"
+        / "comfyui_workflow_templates_json"
+        / "templates"
+    )
+    dependencies = [
+        (
+            "diffusion_models",
+            "model.safetensors",
+            "https://huggingface.co/owner/primary/resolve/main/weights/model.safetensors",
+        ),
+        (
+            "text_encoders",
+            "encoder.safetensors",
+            "https://huggingface.co/owner/text/resolve/main/encoders/encoder.safetensors",
+        ),
+        (
+            "vae",
+            "vae.safetensors",
+            "https://huggingface.co/owner/vae/resolve/main/vae.safetensors",
+        ),
+    ]
+    nodes = [
+        {
+            "id": index,
+            "type": "ModelLoader",
+            "inputs": [],
+            "outputs": [],
+            "properties": {
+                "cnr_id": "comfy-core",
+                "models": [
+                    {
+                        "directory": directory,
+                        "name": name,
+                        "url": url,
+                    }
+                ],
+            },
+            "widgets_values": [name],
+        }
+        for index, (directory, name, url) in enumerate(dependencies, start=1)
+    ]
+    nodes.append(
+        {
+            "id": 10,
+            "type": "SaveImage",
+            "inputs": [],
+            "outputs": [],
+            "properties": {"cnr_id": "comfy-core"},
+            "widgets_values": ["multi-repo"],
+        }
+    )
+    (templates / "image_multi_repo_edit.json").write_text(
+        json.dumps({"nodes": nodes, "links": []}),
+        encoding="utf-8",
+    )
+    (templates / "index.json").write_text(
+        json.dumps(
+            [
+                {
+                    "name": "image_multi_repo_edit",
+                    "title": "General image editing",
+                    "date": "2026-07-10",
+                }
+            ]
+        ),
+        encoding="utf-8",
+    )
+
+    matches = registry.matches("owner/primary", "image")
+
+    assert matches[0].id == "image_multi_repo_edit"
+    assert matches[0].published_date == "2026-07-10"
+    assert matches[0].selected_files == [
+        "weights/model.safetensors",
+        "encoders/encoder.safetensors",
+        "vae.safetensors",
+    ]
+    assert matches[0].comfy_paths == {
+        "diffusion_models": "weights",
+        "text_encoders": "encoders",
+        "vae": ".",
+    }
+    sources = {
+        "encoders/encoder.safetensors": CatalogFileSource(
+            remote_id="owner/text",
+            revision="b" * 40,
+            filename="encoders/encoder.safetensors",
+        ),
+        "vae.safetensors": CatalogFileSource(
+            remote_id="owner/vae",
+            revision="c" * 40,
+            filename="vae.safetensors",
+        ),
+    }
+    validated = registry.validate_download(
+        matches[0].id,
+        "image",
+        "owner/primary",
+        matches[0].selected_files,
+        matches[0].comfy_paths,
+        revision="a" * 40,
+        file_sources=sources,
+    )
+    assert validated.id == matches[0].id
+
+    sources["vae.safetensors"] = sources["vae.safetensors"].model_copy(
+        update={"remote_id": "owner/wrong"}
+    )
+    with pytest.raises(ValueError, match="source binding changed"):
+        registry.validate_download(
+            matches[0].id,
+            "image",
+            "owner/primary",
+            matches[0].selected_files,
+            matches[0].comfy_paths,
+            revision="a" * 40,
+            file_sources=sources,
+        )
 
 
 def _standard_checkpoint_object_info(checkpoint_names: list[str]) -> dict:  # type: ignore[type-arg]

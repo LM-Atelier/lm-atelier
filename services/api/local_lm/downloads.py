@@ -159,6 +159,7 @@ class DownloadManager:
                 request.allow_patterns,
                 request.comfy_paths,
                 revision=request.revision,
+                file_sources=request.file_sources,
             )
             if request.workflow_template_sha256 != template.sha256:
                 raise ValueError("ComfyUI template changed; run the install check again")
