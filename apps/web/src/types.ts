@@ -199,6 +199,12 @@ export interface ProgressV2 {
   queue_length: number | null;
   blocked_by: string[];
   indeterminate: boolean;
+  stage_started_at?: string | null;
+  stage_elapsed_ms?: number;
+  completed_stages?: Array<{
+    stage: string;
+    duration_ms: number;
+  }>;
   updated_at: string;
 }
 

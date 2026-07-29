@@ -3840,6 +3840,14 @@ function formatEta(seconds: number): string {
   return `about ${Math.round(seconds / 60)} min`;
 }
 
+function formatStageElapsed(milliseconds: number): string {
+  const seconds = Math.max(0, Math.round(milliseconds / 1_000));
+  if (seconds < 60) return `${seconds}s`;
+  const minutes = Math.floor(seconds / 60);
+  const remainder = seconds % 60;
+  return remainder ? `${minutes}m ${remainder}s` : `${minutes}m`;
+}
+
 function progressSampleIsFresh(progress: ProgressV2): boolean {
   const updatedAt = Date.parse(progress.updated_at);
   return Number.isFinite(updatedAt) && Math.abs(Date.now() - updatedAt) <= 5_000;
@@ -3848,6 +3856,17 @@ function progressSampleIsFresh(progress: ProgressV2): boolean {
 function jobProgressText(job: Job): string {
   const progress = job.progress_json;
   const pieces = [progress?.stage || job.phase];
+  if (
+    ["queued", "running"].includes(job.status)
+    && typeof progress?.stage_elapsed_ms === "number"
+    && Number.isFinite(progress.stage_elapsed_ms)
+  ) {
+    const startedAt = progress.stage_started_at ? Date.parse(progress.stage_started_at) : NaN;
+    const elapsed = Number.isFinite(startedAt)
+      ? Math.max(progress.stage_elapsed_ms, Date.now() - startedAt)
+      : progress.stage_elapsed_ms;
+    pieces.push(formatStageElapsed(elapsed));
+  }
   const fraction = jobProgressFraction(job);
   if (fraction !== null) pieces.push(`${Math.round(fraction * 100)}%`);
   if (job.status === "queued" && typeof progress?.queue_position === "number") {

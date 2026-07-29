@@ -317,6 +317,11 @@ class TurnAccepted(ApiModel):
     assistant_message: MessageOut
 
 
+class ProgressStageTiming(ApiModel):
+    stage: str
+    duration_ms: int = Field(ge=0)
+
+
 class ProgressV2(ApiModel):
     version: Literal[2] = 2
     stage: str
@@ -335,6 +340,9 @@ class ProgressV2(ApiModel):
     queue_length: int | None = Field(default=None, ge=0)
     blocked_by: list[str] = Field(default_factory=list)
     indeterminate: bool = False
+    stage_started_at: datetime | None = None
+    stage_elapsed_ms: int = Field(default=0, ge=0)
+    completed_stages: list[ProgressStageTiming] = Field(default_factory=list)
     updated_at: datetime
 
 
