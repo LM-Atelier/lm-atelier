@@ -129,6 +129,12 @@ _GLOBAL_PHRASES = (
     "new scene",
     "oil painting",
     "watercolor painting",
+    "apply a shallow depth of field",
+    "convert it to black and white",
+    "desaturate everything",
+    "extend the canvas",
+    "move the subject",
+    "relight the scene",
 )
 _GLOBAL_WORDS = {
     "recompose",
@@ -136,6 +142,9 @@ _GLOBAL_WORDS = {
     "stylize",
     "transform",
     "watercolor",
+    "outpaint",
+    "reframe",
+    "relight",
 }
 _REPLACEMENT_PHRASES = (
     "change the background",
@@ -146,28 +155,40 @@ _REPLACEMENT_PHRASES = (
     "new hairstyle",
     "new outfit",
     "replace the background",
+    "mirror the image",
+    "straighten the horizon",
 )
 _REPLACEMENT_TARGETS = {
     "background",
+    "beard",
     "blazer",
     "boy",
     "clothes",
     "clothing",
     "coat",
     "dress",
+    "expression",
+    "flower",
+    "flowers",
     "girl",
+    "glasses",
     "hair",
     "hairstyle",
+    "hat",
     "hoodie",
     "jacket",
     "man",
+    "necklace",
     "object",
     "outfit",
     "person",
+    "scarf",
     "shirt",
     "shoes",
     "skirt",
+    "smile",
     "subject",
+    "sunglasses",
     "suit",
     "sweatshirt",
     "sweater",
@@ -176,7 +197,7 @@ _REPLACEMENT_TARGETS = {
     "wardrobe",
     "woman",
 }
-_REPLACEMENT_VERBS = {"change", "dress", "give", "make", "replace", "swap"}
+_REPLACEMENT_VERBS = {"change", "dress", "give", "make", "put", "replace", "swap"}
 _REPLACEMENT_PAIR_WINDOW = 10
 _REPLACEMENT_PAIR_BLOCKERS = {
     "keep",
@@ -184,16 +205,6 @@ _REPLACEMENT_PAIR_BLOCKERS = {
     "retain",
     "unchanged",
     "without",
-}
-_COLOR_CHANGE_TARGETS = _REPLACEMENT_TARGETS - {
-    "background",
-    "boy",
-    "girl",
-    "man",
-    "object",
-    "person",
-    "subject",
-    "woman",
 }
 _COLOR_CHANGE_VERBS = {"change", "make", "recolor", "turn"}
 _COLOR_WORDS = {
@@ -230,6 +241,17 @@ _COLOR_WORDS = {
     "white",
     "yellow",
 }
+_COLOR_CHANGE_GLOBAL_TARGETS = {
+    "all",
+    "background",
+    "entire",
+    "everything",
+    "image",
+    "photo",
+    "picture",
+    "scene",
+    "whole",
+}
 _LOCALIZED_PHRASES = (
     "add a",
     "add an",
@@ -241,31 +263,41 @@ _LOCALIZED_PHRASES = (
 _LOCALIZED_WORDS = {"add", "erase", "insert", "recolor", "remove"}
 _MINIMAL_PHRASES = (
     "color correction",
-    "color cast",
     "colour correction",
-    "colour cast",
     "make it brighter",
     "make it darker",
     "slightly brighter",
     "slightly darker",
     "subtle change",
     "warm lighting",
-    "white balance",
+    "cool down the colors",
+    "correct the white balance",
+    "less grainy",
+    "reduce the blue cast",
+    "reduce the highlights",
+    "restore the faded colors",
+    "soften the harsh shadows",
 )
 _MINIMAL_WORDS = {
-    "brighten",
+    "balance",
     "brightness",
-    "darken",
+    "cast",
     "contrast",
     "exposure",
+    "grain",
+    "grainy",
+    "highlights",
     "lighting",
-    "relight",
+    "noise",
+    "shadows",
     "sharpen",
     "slight",
     "slightly",
     "subtle",
     "subtly",
+    "warmth",
 }
+_SELECTIVE_COLOR_WORDS = {"colorize", "colourize", "desaturate"}
 _PRESERVATION_PHRASES = (
     "do not alter",
     "do not change",
@@ -326,7 +358,11 @@ def _has_bounded_color_change(normalized: str) -> bool:
         window = tokens[verb_index + 1 : verb_index + _REPLACEMENT_PAIR_WINDOW + 1]
         if "new" in window or "replace" in window or "swap" in window:
             continue
-        if len(set(window) & _COLOR_CHANGE_TARGETS) == 1 and set(window) & _COLOR_WORDS:
+        colors = set(window) & _COLOR_WORDS
+        if len(colors) != 1:
+            continue
+        color_index = next(index for index, candidate in enumerate(window) if candidate in colors)
+        if not set(window[:color_index]) & _COLOR_CHANGE_GLOBAL_TARGETS:
             return True
     return False
 
@@ -426,7 +462,12 @@ def estimate_image_edit_strength(
     preservation_signal = EditReason.PRESERVATION_REQUESTED in reasons
     replacement_pair = _has_bounded_replacement_pair(normalized)
     color_change = _has_bounded_color_change(normalized)
-    if _has_phrase(normalized, _GLOBAL_PHRASES) or words & _GLOBAL_WORDS:
+    selective_color = bool(words & _SELECTIVE_COLOR_WORDS) and bool(words & {"except", "only"})
+    if selective_color:
+        scope = EditScope.LOCALIZED
+        confidence = EditConfidence.HIGH
+        reasons.insert(0, EditReason.LOCALIZED_CHANGE)
+    elif _has_phrase(normalized, _GLOBAL_PHRASES) or words & _GLOBAL_WORDS:
         scope = EditScope.GLOBAL
         confidence = EditConfidence.HIGH
         reasons.insert(0, EditReason.GLOBAL_TRANSFORMATION)
@@ -434,6 +475,10 @@ def estimate_image_edit_strength(
         scope = EditScope.MINIMAL
         confidence = EditConfidence.HIGH
         reasons.insert(0, EditReason.MINIMAL_ADJUSTMENT)
+    elif _has_phrase(normalized, _LOCALIZED_PHRASES):
+        scope = EditScope.LOCALIZED
+        confidence = EditConfidence.MEDIUM
+        reasons.insert(0, EditReason.LOCALIZED_CHANGE)
     elif color_change:
         scope = EditScope.LOCALIZED
         confidence = EditConfidence.HIGH

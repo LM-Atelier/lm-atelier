@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from collections.abc import Mapping, Sequence
-from typing import TYPE_CHECKING, Literal, cast
+from typing import TYPE_CHECKING, Literal
 
 from sqlalchemy import select
 from sqlalchemy.orm import Session
@@ -58,7 +58,7 @@ def setup_readiness_report(
             runtimes,
             runtime_by_engine,
             worker_by_name,
-            cast(Role, role),
+            role,
         )
         for role in ("chat", "image", "video")
     ]
