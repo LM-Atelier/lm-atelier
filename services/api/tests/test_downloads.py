@@ -91,6 +91,7 @@ class FakeProbeAdapter:
     def __init__(self) -> None:
         self.request: MediaRequest | None = None
         self.timeout_seconds: float | None = None
+        self.input_contents: list[bytes] = []
 
     async def probe_workflow(
         self,
@@ -100,6 +101,7 @@ class FakeProbeAdapter:
     ) -> None:
         self.request = request
         self.timeout_seconds = timeout_seconds
+        self.input_contents = [path.read_bytes() for path in request.input_paths]
 
 
 def gguf_bytes(architecture: str) -> bytes:
@@ -1291,6 +1293,40 @@ async def test_adaptive_checkpoint_activation_runs_a_small_bounded_generation(
         "denoise": 1.0,
     }
     assert adapter.timeout_seconds == 300
+
+
+async def test_native_edit_activation_uses_ephemeral_inputs_for_each_loader(
+    settings: Settings,
+) -> None:
+    adapter = FakeProbeAdapter()
+    manager = DownloadManager(
+        settings,
+        EventBroker(),
+        media_adapter=adapter,  # type: ignore[arg-type]
+    )
+    graph = {
+        "first": {"class_type": "LoadImage", "inputs": {"image": "${input_image_0}"}},
+        "second": {"class_type": "LoadImage", "inputs": {"image": "${input_image_1}"}},
+    }
+    compiled = SimpleNamespace(
+        api_graph=graph,
+        input_schema={
+            "properties": {
+                "input_image_0": {"type": "string"},
+                "input_image_1": {"type": "string"},
+            }
+        },
+        template=SimpleNamespace(operation="image_to_image"),
+    )
+
+    await manager._probe_adaptive_checkpoint(compiled)  # type: ignore[arg-type]
+
+    assert adapter.request
+    assert adapter.request.operation == "image_to_image"
+    assert len(adapter.request.input_paths) == 2
+    assert adapter.input_contents == [adapter.input_contents[0]] * 2
+    assert adapter.input_contents[0].startswith(b"\x89PNG\r\n\x1a\n")
+    assert not adapter.request.input_paths[0].exists()
 
 
 async def test_workflow_refresh_adds_an_image_edit_contract_for_existing_installs(
