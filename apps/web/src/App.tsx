@@ -2074,13 +2074,27 @@ function ChatView({
   onRetryStep: (stepId: string) => void;
 }) {
   const endRef = useRef<HTMLDivElement>(null);
+  const messagesRef = useRef<HTMLDivElement>(null);
+  const followMessages = useRef(true);
+  const previousChatId = useRef<string | undefined>(undefined);
   const [visualTarget, setVisualTarget] = useState<{ artifactId: string; mode: "image" | "video"; requestId: number } | null>(null);
   const [quoteTarget, setQuoteTarget] = useState<{ text: string; requestId: number } | null>(null);
   useEffect(() => {
-    if (typeof endRef.current?.scrollIntoView === "function") {
+    if (previousChatId.current !== chat?.id) {
+      previousChatId.current = chat?.id;
+      followMessages.current = true;
+    }
+    if (followMessages.current && typeof endRef.current?.scrollIntoView === "function") {
       endRef.current.scrollIntoView({ behavior: "smooth" });
     }
-  }, [chat?.messages, liveText, pendingTurns]);
+  }, [chat?.id, chat?.messages, liveText, pendingTurns]);
+  const trackMessageScroll = () => {
+    const viewport = messagesRef.current;
+    if (!viewport) return;
+    followMessages.current = (
+      viewport.scrollHeight - viewport.scrollTop - viewport.clientHeight
+    ) <= 96;
+  };
   if (!chat) return <EmptyState icon={<MessageSquare />} title="Start a local conversation" body="Create a chat and choose a model. Conversations stay on this machine." />;
   const messages = activeBranchMessages(chat);
   const stoppable = messages.some(
@@ -2127,7 +2141,7 @@ function ChatView({
           })}
         </div>
       </div>
-      <div className="messages">
+      <div className="messages" ref={messagesRef} onScroll={trackMessageScroll}>
         {messages.length === 0 && pendingTurns.length === 0 ? (
           <EmptyState icon={<Sparkles />} title="What should we make?" body="Ask anything or create an image or video. Auto mode picks the model." />
         ) : messages.map((message) => {
@@ -3816,7 +3830,16 @@ function Sidebar({
 function jobProgressFraction(job: Job): number | null {
   const progress = job.progress_json;
   if (progress?.indeterminate) return null;
-  const value = progress?.overall_progress ?? progress?.stage_progress;
+  const structured = progress?.overall_progress ?? progress?.stage_progress;
+  if (job.status === "queued" && (structured === null || structured === undefined)) {
+    return null;
+  }
+  const legacy = Number.isFinite(job.progress) ? job.progress : null;
+  const value = structured === null || structured === undefined
+    ? legacy
+    : legacy === null
+      ? structured
+      : Math.max(structured, legacy);
   if (typeof value === "number" && Number.isFinite(value)) {
     return Math.min(1, Math.max(0, value));
   }
