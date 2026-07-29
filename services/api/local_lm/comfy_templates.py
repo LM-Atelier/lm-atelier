@@ -579,6 +579,7 @@ def _supports_dependency_bundle(
     paths: set[str] = set()
     repository_revisions: dict[str, set[str]] = {}
     folder_parents: dict[str, str] = {}
+    parent_folders: dict[str, str] = {}
     for dependency in dependencies:
         path = PurePosixPath(dependency.path)
         if (
@@ -598,6 +599,9 @@ def _supports_dependency_bundle(
         parent = "." if parent == "." else parent
         existing = folder_parents.setdefault(dependency.directory, parent)
         if existing != parent:
+            return False
+        existing_folder = parent_folders.setdefault(parent, dependency.directory)
+        if existing_folder != dependency.directory:
             return False
     return all(len(revisions) == 1 for revisions in repository_revisions.values())
 

@@ -8,7 +8,9 @@ import pytest
 from local_lm.db import SessionLocal
 from local_lm.model_manifests import (
     MAX_METADATA_BYTES,
+    InspectedComponent,
     ModelManifestError,
+    ModelManifestInspection,
     inspect_repository_metadata,
 )
 from local_lm.model_planner import persist_install_plan, resolve_install_plan
@@ -156,6 +158,55 @@ def test_official_workflow_plan_accepts_a_required_lora_with_primary_weights() -
 
     assert plan.compatibility == "supported"
     assert {artifact.kind for artifact in plan.artifacts} == {"diffusion_model", "lora"}
+
+
+def test_official_workflow_plan_uses_unambiguous_declared_component_paths() -> None:
+    selected = [
+        "split/diffusion/model.safetensors",
+        "encoders/text.safetensors",
+        "vae/model.safetensors",
+        "lightning.safetensors",
+    ]
+    inspection = ModelManifestInspection(
+        architecture=None,
+        family=None,
+        components=tuple(
+            InspectedComponent(
+                path=path,
+                kind="unknown_safetensors",
+                target_folder="checkpoints",
+            )
+            for path in selected
+        ),
+        metadata_files=(),
+    )
+    plan = resolve_install_plan(
+        remote_id="synthetic/complete-edit-workflow",
+        revision="a" * 40,
+        role="image",
+        engine="comfyui",
+        selected_files=[
+            {"filename": path, "size": 1_024, "sha256": str(index) * 64}
+            for index, path in enumerate(selected, start=1)
+        ],
+        inspection=inspection,
+        workflow_template_id="synthetic-template",
+        workflow_template_sha256="e" * 64,
+        comfy_paths={
+            "diffusion_models": "split/diffusion",
+            "text_encoders": "encoders",
+            "vae": "vae",
+            "loras": ".",
+        },
+    )
+
+    assert plan.compatibility == "supported"
+    assert [(item.kind, item.target_folder) for item in plan.artifacts] == [
+        ("diffusion_model", "diffusion_models"),
+        ("text_encoder", "text_encoders"),
+        ("vae", "vae"),
+        ("lora", "loras"),
+    ]
 
 
 def test_chat_install_plan_binds_external_projector_provenance() -> None:

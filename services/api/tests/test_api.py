@@ -34,6 +34,7 @@ from local_lm.models import (
     Artifact,
     Chat,
     GenerationPreset,
+    InstallPlan,
     Job,
     Message,
     MessagePart,
@@ -6137,6 +6138,23 @@ async def test_catalog_preflight_selects_a_complete_split_gguf_set(
     )
     assert accepted.status_code == 202
     assert captured["request"].install_plan_id == payload["install_plan"]["id"]
+
+    with SessionLocal() as session:
+        stale_plan = session.get(InstallPlan, payload["install_plan"]["id"])
+        assert stale_plan is not None
+        stale_plan.resolver_version = "install-resolver-v4"
+        session.commit()
+    stale = await client.post(
+        "/api/downloads",
+        json=captured["request"].model_dump(mode="json"),
+    )
+    assert stale.status_code == 422
+    assert "install contract changed" in stale.json()["detail"]
+    with SessionLocal() as session:
+        current_plan = session.get(InstallPlan, payload["install_plan"]["id"])
+        assert current_plan is not None
+        current_plan.resolver_version = payload["install_plan"]["resolver_version"]
+        session.commit()
 
     rejected = await client.post(
         "/api/downloads",
