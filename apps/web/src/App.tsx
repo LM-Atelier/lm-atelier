@@ -54,6 +54,7 @@ import {
   calibratedImageEditStrength,
   estimateImageEditStrength,
   IMAGE_EDIT_STRENGTH_MODE_KEY,
+  resolveImageEditStrengthMode,
   type ImageEditStrengthMode,
   type WorkflowImageEditCalibration,
   workflowImageEditCalibration,
@@ -1064,6 +1065,7 @@ function ImageEditStrengthControl({
   resolvedSteps,
   prompt,
   layers,
+  numericManualLayers,
   values,
   onValues,
 }: {
@@ -1073,22 +1075,15 @@ function ImageEditStrengthControl({
   resolvedSteps: unknown;
   prompt: string;
   layers: Array<Record<string, unknown> | undefined>;
+  numericManualLayers: boolean[];
   values: Record<string, unknown>;
   onValues: (values: Record<string, unknown>) => void;
 }) {
-  let mode: ImageEditStrengthMode = "auto";
-  for (const layer of [...layers].reverse()) {
-    if (!layer) continue;
-    const declared = layer[IMAGE_EDIT_STRENGTH_MODE_KEY];
-    if (declared === "auto" || declared === "manual") {
-      mode = declared;
-      break;
-    }
-    if (typeof layer[parameter] === "number") {
-      mode = "manual";
-      break;
-    }
-  }
+  const mode: ImageEditStrengthMode = resolveImageEditStrengthMode(
+    parameter,
+    layers,
+    numericManualLayers,
+  );
   const activeCalibration = calibration ? {
     ...calibration,
     minimum: field.minimum ?? calibration.minimum,
@@ -1266,6 +1261,7 @@ function GenerationSettingsPanel({
               selectedPreset?.settings_json,
               values,
             ]}
+            numericManualLayers={[false, false, true, true, true, true]}
             values={values}
             onValues={onValues}
           />

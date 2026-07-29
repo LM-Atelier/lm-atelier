@@ -9,6 +9,21 @@ export interface ImageEditStrengthEstimate {
   value: number;
   confidence: "low" | "medium" | "high";
 }
+export function resolveImageEditStrengthMode(
+  parameter: string,
+  layers: Array<Record<string, unknown> | undefined>,
+  numericManualLayers: boolean[],
+): ImageEditStrengthMode {
+  for (let index = layers.length - 1; index >= 0; index -= 1) {
+    const layer = layers[index];
+    if (!layer) continue;
+    const declared = layer[IMAGE_EDIT_STRENGTH_MODE_KEY];
+    if (declared === "auto" || declared === "manual") return declared;
+    if (numericManualLayers[index] && typeof layer[parameter] === "number") return "manual";
+  }
+  return "auto";
+}
+
 export interface WorkflowImageEditCalibration {
   parameter: string;
   minimum: number;
@@ -36,10 +51,12 @@ const replacementPhrases = [
   "new clothing", "new hairstyle", "new outfit", "replace the background",
 ];
 const replacementTargets = new Set([
-  "background", "clothes", "clothing", "coat", "dress", "hair", "hairstyle",
-  "jacket", "object", "outfit", "shirt", "suit", "wardrobe",
+  "background", "blazer", "clothes", "clothing", "coat", "dress", "hair", "hairstyle",
+  "jacket", "object", "outfit", "shirt", "suit", "sweatshirt", "wardrobe",
 ]);
 const replacementVerbs = new Set(["change", "dress", "give", "make", "replace", "swap"]);
+const replacementPairWindow = 10;
+const replacementPairBlockers = new Set(["keep", "preserve", "retain", "unchanged", "without"]);
 const localizedPhrases = [
   "add a", "add an", "make it blue", "make it green", "make it red", "remove the",
 ];
@@ -152,6 +169,26 @@ function intersects(words: Set<string>, candidates: Set<string>): boolean {
   return [...candidates].some((candidate) => words.has(candidate));
 }
 
+function hasBoundedReplacementPair(text: string): boolean {
+  const tokens = text.split(" ").filter(Boolean);
+  for (let verbIndex = 0; verbIndex < tokens.length; verbIndex += 1) {
+    if (!replacementVerbs.has(tokens[verbIndex])) continue;
+    const prefix = tokens.slice(Math.max(0, verbIndex - 2), verbIndex);
+    if (
+      prefix.includes("not")
+      || prefix.includes("never")
+      || prefix.slice(-2).join(" ") === "don t"
+    ) continue;
+    const end = Math.min(tokens.length, verbIndex + replacementPairWindow + 1);
+    for (let targetIndex = verbIndex + 1; targetIndex < end; targetIndex += 1) {
+      const candidate = tokens[targetIndex];
+      if (replacementPairBlockers.has(candidate)) break;
+      if (replacementTargets.has(candidate)) return true;
+    }
+  }
+  return false;
+}
+
 export function estimateImageEditStrength(
   prompt: string,
   minimum = 0,
@@ -161,18 +198,16 @@ export function estimateImageEditStrength(
   const { text, words } = normalize(prompt);
   const minimal = hasPhrase(text, minimalPhrases) || intersects(words, minimalWords);
   const preservation = hasPhrase(text, preservationPhrases);
+  const replacement = hasPhrase(text, replacementPhrases) || hasBoundedReplacementPair(text);
   let scope: ImageEditScope;
   let confidence: ImageEditStrengthEstimate["confidence"];
   if (hasPhrase(text, globalPhrases) || intersects(words, globalWords)) {
     scope = "global";
     confidence = "high";
-  } else if (preservation && minimal) {
+  } else if (preservation && minimal && !replacement) {
     scope = "minimal";
     confidence = "high";
-  } else if (
-    hasPhrase(text, replacementPhrases)
-    || (intersects(words, replacementTargets) && intersects(words, replacementVerbs))
-  ) {
+  } else if (replacement) {
     scope = "replacement";
     confidence = "high";
   } else if (minimal) {

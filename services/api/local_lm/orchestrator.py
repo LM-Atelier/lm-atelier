@@ -726,12 +726,6 @@ class ConversationOrchestrator:
             if not resolved_input_ids and prior_image:
                 resolved_input_ids.append(prior_image)
                 prior_prompt = prior_image_prompt
-            elif resolved_input_ids:
-                prior_prompt = self._latest_media_prompt(
-                    session,
-                    chat.id,
-                    context_head_message_id,
-                )
             if prior_prompt:
                 plan.standalone_prompt = f"{prior_prompt}. Follow-up instruction: {request.text}"
         plan.input_artifact_ids = resolved_input_ids

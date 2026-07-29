@@ -75,8 +75,17 @@ def test_manual_turn_strength_remains_exact_and_authoritative() -> None:
     }
 
 
-@pytest.mark.parametrize("source", list(EditSettingSource))
-def test_each_numeric_settings_scope_is_authoritative(source: EditSettingSource) -> None:
+@pytest.mark.parametrize(
+    "source",
+    [
+        EditSettingSource.PROJECT_PRESET,
+        EditSettingSource.PROJECT,
+        EditSettingSource.CHAT_PRESET,
+        EditSettingSource.CHAT,
+        EditSettingSource.TURN,
+    ],
+)
+def test_user_numeric_settings_scopes_are_authoritative(source: EditSettingSource) -> None:
     settings = {"denoise": 0.47}
     resolution = resolve_image_edit_strength(
         Operation.IMAGE_TO_IMAGE,
@@ -90,6 +99,32 @@ def test_each_numeric_settings_scope_is_authoritative(source: EditSettingSource)
     assert resolution.value == 0.47
     assert resolution.source_scope == source
     assert resolution.provenance()["mode"] == "manual"
+
+
+@pytest.mark.parametrize(
+    "source",
+    [
+        EditSettingSource.PROFILE_LOAD,
+        EditSettingSource.PROFILE_REQUEST,
+        EditSettingSource.DEFAULT_PRESET,
+    ],
+)
+def test_system_numeric_defaults_leave_image_edit_strength_on_auto(
+    source: EditSettingSource,
+) -> None:
+    settings = {"denoise": 0.47}
+    resolution = resolve_image_edit_strength(
+        Operation.IMAGE_TO_IMAGE,
+        "Replace the mannequin's red sweatshirt with a royal-blue blazer",
+        _FIELDS,
+        settings,
+        ((source, {"denoise": 0.47}),),
+    )
+
+    assert resolution is not None
+    assert resolution.value == 0.66
+    assert resolution.source_scope is None
+    assert resolution.provenance()["mode"] == "auto"
 
 
 def test_scoped_auto_mode_overrides_lower_manual_strength() -> None:
@@ -148,14 +183,19 @@ def test_invalid_stored_strength_does_not_suppress_auto() -> None:
     assert resolution.provenance()["mode"] == "auto"
 
 
-def test_profile_strength_is_manual_when_no_turn_override() -> None:
+def test_explicit_profile_manual_mode_remains_authoritative() -> None:
     settings = {"denoise": 0.47}
     resolution = resolve_image_edit_strength(
         Operation.IMAGE_TO_IMAGE,
         "Replace the jacket",
         _FIELDS,
         settings,
-        ((EditSettingSource.PROFILE_REQUEST, {"denoise": 0.47}),),
+        (
+            (
+                EditSettingSource.PROFILE_REQUEST,
+                {STRENGTH_MODE_PARAMETER: "manual", "denoise": 0.47},
+            ),
+        ),
     )
 
     assert resolution is not None
