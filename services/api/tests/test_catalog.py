@@ -581,6 +581,23 @@ def test_catalog_normalizes_filterable_model_metadata() -> None:
     assert model.total_size_bytes == 5_000_000_000
 
 
+def test_catalog_normalizes_modern_comfy_quantization_names() -> None:
+    model = HuggingFaceCatalog._normalize(
+        {
+            "id": "owner/modern-image-model",
+            "tags": ["nvfp4", "license:apache-2.0"],
+            "siblings": [
+                {"rfilename": "diffusion/model_int8_convrot.safetensors"},
+                {"rfilename": "diffusion/model-mxfp8.safetensors"},
+                {"rfilename": "diffusion/model_convrot-w4a4.safetensors"},
+            ],
+        },
+        "image",
+    )
+
+    assert model.quantizations == ["int8_convrot", "mxfp8", "nvfp4", "w4a4_convrot"]
+
+
 def test_catalog_filters_and_rejects_external_cursors() -> None:
     model = HuggingFaceCatalog._normalize(
         {

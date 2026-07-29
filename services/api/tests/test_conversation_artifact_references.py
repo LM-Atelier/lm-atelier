@@ -477,6 +477,81 @@ async def test_prior_image_follow_up_uses_prompt_aware_strength(
     }
 
 
+async def test_common_natural_language_follow_ups_use_latest_image(
+    client: AsyncClient,
+) -> None:
+    cases = [
+        ("Make her top red", 0.5, "localized"),
+        ("Increase the brightness", 0.38, "minimal"),
+    ]
+    for prompt, expected_strength, expected_scope in cases:
+        chat = (
+            await client.post(
+                "/api/chats",
+                json={"title": "Natural edit follow-up"},
+            )
+        ).json()
+        first, first_run = await _image_turn(
+            client,
+            chat["id"],
+            "Make an image of a person",
+        )
+        source_id = _output_artifact_id(first_run)
+
+        follow_up = await client.post(
+            f"/api/chats/{chat['id']}/turns",
+            json={
+                "text": prompt,
+                "mode": "auto",
+                "parent_message_id": first["assistant_message"]["id"],
+            },
+        )
+
+        assert follow_up.status_code == 202, follow_up.text
+        run = follow_up.json()["run"]
+        assert run["operation"] == "image_to_image"
+        assert run["provenance_json"]["input_artifact_ids"] == [source_id]
+        assert run["standalone_prompt"] == (
+            f"Make an image of a person. Follow-up instruction: {prompt}"
+        )
+        assert run["settings_json"]["denoise"] == expected_strength
+        assert run["provenance_json"]["image_edit"]["strength"]["scope"] == (expected_scope)
+
+
+async def test_natural_language_edit_finds_recent_image_after_text_turn(
+    client: AsyncClient,
+) -> None:
+    chat = (await client.post("/api/chats", json={"title": "Recent image ancestry"})).json()
+    image, image_run = await _image_turn(client, chat["id"], "Make an image of a person")
+    source_id = _output_artifact_id(image_run)
+
+    text = await client.post(
+        f"/api/chats/{chat['id']}/turns",
+        json={
+            "text": "Give me a short caption",
+            "mode": "text",
+            "parent_message_id": image["assistant_message"]["id"],
+        },
+    )
+    assert text.status_code == 202, text.text
+    await _wait_for_run(client, text.json()["run"]["id"])
+
+    edit = await client.post(
+        f"/api/chats/{chat['id']}/turns",
+        json={
+            "text": "Make her top red",
+            "mode": "auto",
+            "parent_message_id": text.json()["assistant_message"]["id"],
+        },
+    )
+
+    assert edit.status_code == 202, edit.text
+    run = edit.json()["run"]
+    assert run["operation"] == "image_to_image"
+    assert run["provenance_json"]["input_artifact_ids"] == [source_id]
+    assert run["settings_json"]["denoise"] == 0.5
+
+
 async def test_text_to_image_keeps_workflow_default_strength(client: AsyncClient) -> None:
     chat = (await client.post("/api/chats", json={"title": "Text to image default"})).json()
 

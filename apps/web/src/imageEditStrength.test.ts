@@ -8,19 +8,21 @@ import {
 
 describe("estimateImageEditStrength", () => {
   it.each([
-    ["Slightly brighten the lighting and keep everything else the same.", "minimal", 0.38],
-    ["Make it green.", "localized", 0.50],
-    ["Give the person a new formal outfit without changing their face.", "replacement", 0.66],
-    ["Replace the background with a moonlit city scene.", "replacement", 0.66],
-    ["Replace the mannequin's red sweatshirt with a royal-blue blazer. Keep the mannequin's head, pose, hands, pants, framing, lighting, and background unchanged.", "replacement", 0.66],
-    ["Restyle the entire image as a watercolor painting.", "global", 0.82],
-    ["Make this better.", "fallback", 0.56],
-    ["Do not change the clothing; just brighten the lighting.", "minimal", 0.38],
-  ])("classifies %s", (prompt, scope, value) => {
+    ["Slightly brighten the lighting and keep everything else the same.", "minimal", 0.38, "high"],
+    ["Make it green.", "localized", 0.50, "medium"],
+    ["Give the person a new formal outfit without changing their face.", "replacement", 0.66, "high"],
+    ["Replace the background with a moonlit city scene.", "replacement", 0.66, "high"],
+    ["Replace the mannequin's red sweatshirt with a royal-blue blazer. Keep the mannequin's head, pose, hands, pants, framing, lighting, and background unchanged.", "replacement", 0.66, "high"],
+    ["Make her top red.", "localized", 0.50, "high"],
+    ["Increase the brightness.", "minimal", 0.38, "high"],
+    ["Restyle the entire image as a watercolor painting.", "global", 0.82, "high"],
+    ["Make this better.", "fallback", 0.56, "low"],
+    ["Do not change the clothing; just brighten the lighting.", "minimal", 0.38, "high"],
+  ])("classifies %s", (prompt, scope, value, confidence) => {
     expect(estimateImageEditStrength(prompt)).toEqual({
       scope,
       value,
-      confidence: scope === "localized" ? "medium" : scope === "fallback" ? "low" : "high",
+      confidence,
     });
   });
 
