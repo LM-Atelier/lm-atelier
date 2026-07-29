@@ -879,6 +879,24 @@
       "mode": "auto",
       "has_prior_image": true,
       "expected": "image_to_image"
+    },
+    {
+      "id": "context-edit-transform-01",
+      "text": "Transform the entire photograph into a richly textured gouache illustration while preserving the subjects and composition",
+      "mode": "auto",
+      "input_artifact_ids": [
+        "sha256:synthetic-image"
+      ],
+      "expected": "image_to_image"
+    },
+    {
+      "id": "context-edit-transform-negative-01",
+      "text": "Transform this paragraph into a richly textured description",
+      "mode": "auto",
+      "input_artifact_ids": [
+        "sha256:synthetic-image"
+      ],
+      "expected": "text"
     }
   ]
 }

@@ -292,6 +292,10 @@ async def test_prior_image_edit_routes_without_a_model_planner() -> None:
         "Straighten the horizon",
         "Correct the white balance",
         "Apply a shallow depth of field",
+        (
+            "Transform the entire photograph into a richly textured gouache "
+            "illustration while preserving the subjects and composition"
+        ),
     ],
 )
 async def test_natural_language_prior_image_edits_route_without_a_model_planner(
@@ -325,6 +329,7 @@ async def test_natural_language_prior_image_edits_route_without_a_model_planner(
         "Change the shirt metaphor in the poem",
         "Give him advice about growing a beard",
         "Write instructions for changing a background",
+        "Transform this paragraph into a richly textured description",
     ],
 )
 def test_visual_edit_language_does_not_override_clear_text_requests(text: str) -> None:
