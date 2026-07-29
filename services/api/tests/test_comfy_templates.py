@@ -475,6 +475,150 @@ def test_native_edit_loaders_bind_ordered_runtime_images(
     assert compiled.input_schema["properties"]["input_image_1"] == {"type": "string"}
 
 
+def test_native_image_conditioning_keeps_authored_denoise_constant() -> None:
+    ui_graph = {
+        "nodes": [
+            {
+                "id": 1,
+                "type": "LoadImage",
+                "inputs": [],
+                "outputs": [{"name": "IMAGE", "type": "IMAGE", "links": [1]}],
+                "widgets_values": ["source.png"],
+            },
+            {
+                "id": 2,
+                "type": "NativeEditConditioning",
+                "inputs": [
+                    {"name": "image", "type": "IMAGE", "link": 1},
+                    {"name": "text", "type": "STRING", "widget": {"name": "text"}},
+                ],
+                "outputs": [{"name": "CONDITIONING", "type": "CONDITIONING", "links": [2]}],
+                "widgets_values": ["edit prompt"],
+            },
+            {
+                "id": 3,
+                "type": "KSampler",
+                "inputs": [
+                    {"name": "positive", "type": "CONDITIONING", "link": 2},
+                    {
+                        "name": "denoise",
+                        "type": "FLOAT",
+                        "widget": {"name": "denoise"},
+                    },
+                ],
+                "outputs": [],
+                "widgets_values": [1.0],
+            },
+        ],
+        "links": [
+            [1, 1, 0, 2, 0, "IMAGE"],
+            [2, 2, 0, 3, 0, "CONDITIONING"],
+        ],
+    }
+    object_info = {
+        "LoadImage": {
+            "input": {"required": {"image": [["source.png"], {"image_upload": True}]}},
+            "input_order": {"required": ["image"]},
+        },
+        "NativeEditConditioning": {
+            "input": {
+                "required": {
+                    "image": ["IMAGE"],
+                    "text": ["STRING", {"default": ""}],
+                }
+            },
+            "input_order": {"required": ["image", "text"]},
+        },
+        "KSampler": {
+            "input": {
+                "required": {
+                    "positive": ["CONDITIONING"],
+                    "denoise": ["FLOAT", {"default": 1.0}],
+                }
+            },
+            "input_order": {"required": ["positive", "denoise"]},
+        },
+    }
+
+    graph, schema = _compile_ui_graph(
+        ui_graph,
+        object_info,
+        operation="image_to_image",
+    )
+
+    assert graph["1"]["inputs"]["image"] == "${input_image}"
+    assert graph["2"]["inputs"]["text"] == "${prompt}"
+    assert graph["3"]["inputs"]["denoise"] == 1.0
+    assert schema["properties"]["denoise"] == {"readOnly": True}
+
+
+def test_latent_only_image_edit_still_exposes_denoise() -> None:
+    ui_graph = {
+        "nodes": [
+            {
+                "id": 1,
+                "type": "LoadImage",
+                "inputs": [],
+                "outputs": [{"name": "IMAGE", "type": "IMAGE", "links": [1]}],
+                "widgets_values": ["source.png"],
+            },
+            {
+                "id": 2,
+                "type": "VAEEncode",
+                "inputs": [{"name": "pixels", "type": "IMAGE", "link": 1}],
+                "outputs": [{"name": "LATENT", "type": "LATENT", "links": [2]}],
+                "widgets_values": [],
+            },
+            {
+                "id": 3,
+                "type": "KSampler",
+                "inputs": [
+                    {"name": "latent_image", "type": "LATENT", "link": 2},
+                    {
+                        "name": "denoise",
+                        "type": "FLOAT",
+                        "widget": {"name": "denoise"},
+                    },
+                ],
+                "outputs": [],
+                "widgets_values": [0.7],
+            },
+        ],
+        "links": [
+            [1, 1, 0, 2, 0, "IMAGE"],
+            [2, 2, 0, 3, 0, "LATENT"],
+        ],
+    }
+    object_info = {
+        "LoadImage": {
+            "input": {"required": {"image": [["source.png"], {"image_upload": True}]}},
+            "input_order": {"required": ["image"]},
+        },
+        "VAEEncode": {
+            "input": {"required": {"pixels": ["IMAGE"]}},
+            "input_order": {"required": ["pixels"]},
+        },
+        "KSampler": {
+            "input": {
+                "required": {
+                    "latent_image": ["LATENT"],
+                    "denoise": ["FLOAT", {"default": 1.0}],
+                }
+            },
+            "input_order": {"required": ["latent_image", "denoise"]},
+        },
+    }
+
+    graph, schema = _compile_ui_graph(
+        ui_graph,
+        object_info,
+        operation="image_to_image",
+    )
+
+    assert graph["3"]["inputs"]["denoise"] == "${denoise}"
+    assert schema["properties"]["denoise"] == {"type": "number", "default": 0.7}
+
+
 def _standard_checkpoint_object_info(checkpoint_names: list[str]) -> dict:  # type: ignore[type-arg]
     return {
         "CheckpointLoaderSimple": {

@@ -32,7 +32,7 @@ _RUNTIME_PARAMETERS = {
 }
 _PRIMITIVE_WIDGET_TYPES = {"BOOLEAN", "COMBO", "FLOAT", "INT", "STRING"}
 _CONTROL_AFTER_GENERATE = {"decrement", "fixed", "increment", "randomize"}
-COMFY_TEMPLATE_COMPILER_VERSION = 13
+COMFY_TEMPLATE_COMPILER_VERSION = 14
 DEFAULT_IMAGE_EDIT_DENOISE = 0.9
 _ADAPTIVE_CHECKPOINT_PREFIX = "lma_image_checkpoint_v1_"
 _ADAPTIVE_CHECKPOINT_PLACEHOLDER = "__LM_ATELIER_CHECKPOINT__"
@@ -975,6 +975,11 @@ def _compile_ui_graph(
         if operation in {"image_to_image", "image_to_video"}
         and str(node.get("type")) == "LoadImage"
     ]
+    native_image_conditioning = operation == "image_to_image" and _source_reaches_conditioning(
+        flat_nodes,
+        links,
+        source_nodes,
+    )
     source_indices = {node_id: index for index, node_id in enumerate(source_nodes)}
     for node_id, node in flat_nodes.items():
         class_type = str(node.get("type") or "")
@@ -999,7 +1004,10 @@ def _compile_ui_graph(
         overridden_inputs: set[str] = set()
         for (target_id, input_name), runtime_name in parameter_overrides.items():
             if target_id == node_id and (target_id, input_name) not in linked_inputs:
-                _bind_runtime_parameter(inputs, input_name, runtime_name, schema_properties)
+                if runtime_name == "denoise" and native_image_conditioning:
+                    schema_properties.setdefault("denoise", {"readOnly": True})
+                else:
+                    _bind_runtime_parameter(inputs, input_name, runtime_name, schema_properties)
                 overridden_inputs.add(input_name)
         for input_name in list(inputs):
             if input_name in overridden_inputs:
@@ -1011,7 +1019,10 @@ def _compile_ui_graph(
                 continue
             runtime_name = _runtime_parameter(input_name, node)
             if runtime_name:
-                _bind_runtime_parameter(inputs, input_name, runtime_name, schema_properties)
+                if runtime_name == "denoise" and native_image_conditioning:
+                    schema_properties.setdefault("denoise", {"readOnly": True})
+                else:
+                    _bind_runtime_parameter(inputs, input_name, runtime_name, schema_properties)
         source_index = source_indices.get(node_id)
         if source_index is not None and "image" in inputs:
             runtime_name = (
@@ -1037,6 +1048,38 @@ def _compile_ui_graph(
     for runtime_name in sorted(set(_RUNTIME_PARAMETERS.values()) | {"negative_prompt"}):
         schema_properties.setdefault(runtime_name, {"readOnly": True})
     return api_graph, {"type": "object", "properties": schema_properties}
+
+
+def _source_reaches_conditioning(
+    nodes: dict[str, dict[str, Any]],
+    links: list[tuple[str, int, str, int]],
+    source_nodes: list[str],
+) -> bool:
+    """Detect architecture-native image conditioning without model-name rules."""
+
+    if not source_nodes:
+        return False
+    targets_by_origin: dict[str, list[str]] = {}
+    for origin, _, target, _ in links:
+        targets_by_origin.setdefault(origin, []).append(target)
+    pending = list(source_nodes)
+    visited = set(source_nodes)
+    while pending:
+        origin = pending.pop()
+        for target in targets_by_origin.get(origin, []):
+            if target in visited:
+                continue
+            visited.add(target)
+            node = nodes.get(target)
+            if not node:
+                continue
+            if any(
+                isinstance(output, dict) and str(output.get("type") or "") == "CONDITIONING"
+                for output in node.get("outputs") or []
+            ):
+                return True
+            pending.append(target)
+    return False
 
 
 def _normalize_link(value: Any) -> tuple[str, int, str, int] | None:
