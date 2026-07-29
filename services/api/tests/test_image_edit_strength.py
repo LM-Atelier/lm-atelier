@@ -75,6 +75,25 @@ def test_manual_turn_strength_remains_exact_and_authoritative() -> None:
     }
 
 
+def test_unavailable_strength_parameter_is_not_injected() -> None:
+    settings = {"steps": 4}
+
+    resolution = resolve_image_edit_strength(
+        Operation.IMAGE_TO_IMAGE,
+        "Replace the jacket",
+        [],
+        settings,
+        ((EditSettingSource.PROFILE_REQUEST, {"denoise": 0.41}),),
+        workflow_schema={
+            "type": "object",
+            "properties": {"denoise": {"readOnly": True}},
+        },
+    )
+
+    assert resolution is None
+    assert settings == {"steps": 4}
+
+
 @pytest.mark.parametrize(
     "source",
     [
