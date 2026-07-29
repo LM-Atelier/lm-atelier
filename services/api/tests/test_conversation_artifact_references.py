@@ -11,7 +11,7 @@ from sqlalchemy import select
 from sqlalchemy.orm import selectinload
 
 from local_lm.db import SessionLocal
-from local_lm.domain import MessageStatus, RunStatus
+from local_lm.domain import MessageStatus, Operation, RunStatus
 from local_lm.models import Artifact, Chat, Message, Run
 from local_lm.orchestrator import ConversationOrchestrator
 
@@ -64,6 +64,26 @@ def test_image_edit_media_prompt_preserves_unrequested_details() -> None:
         "skin tone, body proportions, and pose unless the request explicitly changes "
         "them. Do not simply reproduce the source unchanged. Requested edit: "
         "Replace the jacket with a green coat"
+    )
+
+
+def test_image_edit_policy_remains_without_a_strength_control() -> None:
+    provenance = ConversationOrchestrator._image_edit_provenance(
+        Operation.IMAGE_TO_IMAGE,
+        None,
+    )
+
+    assert provenance == {
+        "policy": "preserve_unrequested_details_v1",
+        "default_change_strength_applied": False,
+    }
+    run = Run(
+        operation="image_to_image",
+        standalone_prompt="Remove the background crowd",
+        provenance_json={"image_edit": provenance},
+    )
+    assert "Preserve areas that the edit does not affect." in (
+        ConversationOrchestrator._media_prompt(run)
     )
 
 
