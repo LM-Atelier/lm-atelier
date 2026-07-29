@@ -31,7 +31,7 @@ _RUNTIME_PARAMETERS = {
 }
 _PRIMITIVE_WIDGET_TYPES = {"BOOLEAN", "COMBO", "FLOAT", "INT", "STRING"}
 _CONTROL_AFTER_GENERATE = {"decrement", "fixed", "increment", "randomize"}
-COMFY_TEMPLATE_COMPILER_VERSION = 6
+COMFY_TEMPLATE_COMPILER_VERSION = 7
 DEFAULT_IMAGE_EDIT_DENOISE = 0.9
 _ADAPTIVE_CHECKPOINT_PREFIX = "lma_image_checkpoint_v1_"
 _ADAPTIVE_CHECKPOINT_PLACEHOLDER = "__LM_ATELIER_CHECKPOINT__"
@@ -420,6 +420,7 @@ class ComfyTemplateRegistry:
         api_graph, input_schema = _compile_ui_graph(
             ui_graph,
             object_info,
+            operation=template.operation,
             validate_model_choices=validate_model_choices,
         )
         output_nodes = [
@@ -866,6 +867,7 @@ def _compile_ui_graph(
     ui_graph: dict[str, Any],
     object_info: dict[str, Any],
     *,
+    operation: str,
     validate_model_choices: bool = True,
 ) -> tuple[dict[str, Any], dict[str, Any]]:
     definitions = {
@@ -963,6 +965,13 @@ def _compile_ui_graph(
     text_nodes = [
         node_id for node_id, node in flat_nodes.items() if str(node.get("type")) == "CLIPTextEncode"
     ]
+    source_nodes = [
+        node_id
+        for node_id, node in flat_nodes.items()
+        if operation in {"image_to_image", "image_to_video"}
+        and str(node.get("type")) == "LoadImage"
+    ]
+    source_indices = {node_id: index for index, node_id in enumerate(source_nodes)}
     for node_id, node in flat_nodes.items():
         class_type = str(node.get("type") or "")
         node_info = object_info.get(class_type)
@@ -976,6 +985,7 @@ def _compile_ui_graph(
             node,
             node_info,
             validate_model_choices=validate_model_choices,
+            runtime_input_names={"image"} if node_id in source_indices else set(),
         )
         for (target_id, input_name), connection in linked_inputs.items():
             if target_id == node_id:
@@ -987,6 +997,13 @@ def _compile_ui_graph(
             runtime_name = _runtime_parameter(input_name, node)
             if runtime_name:
                 _bind_runtime_parameter(inputs, input_name, runtime_name, schema_properties)
+        source_index = source_indices.get(node_id)
+        if source_index is not None and "image" in inputs:
+            runtime_name = (
+                "input_image" if len(source_nodes) == 1 else f"input_image_{source_index}"
+            )
+            _bind_runtime_parameter(inputs, "image", runtime_name, schema_properties)
+            schema_properties[runtime_name] = {"type": "string"}
         if class_type == "CLIPTextEncode" and "text" in inputs:
             title = str(node.get("title") or "").lower()
             negative = "negative" in title
@@ -1029,6 +1046,7 @@ def _widget_values(
     node_info: dict[str, Any],
     *,
     validate_model_choices: bool = True,
+    runtime_input_names: set[str] | None = None,
 ) -> dict[str, Any]:
     raw_values = node.get("widgets_values")
     values = list(raw_values) if isinstance(raw_values, list) else [raw_values]
@@ -1062,6 +1080,7 @@ def _widget_values(
                     and isinstance(choices, list)
                     and choices
                     and selected not in choices
+                    and str(name) not in (runtime_input_names or set())
                 ):
                     raise ValueError(
                         f"ComfyUI does not advertise the template value for {name}: {selected}"

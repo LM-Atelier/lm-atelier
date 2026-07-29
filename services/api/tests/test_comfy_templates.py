@@ -362,6 +362,118 @@ def test_registry_accepts_and_revalidates_a_pinned_multirepository_bundle(
         )
 
 
+def test_native_edit_loaders_bind_ordered_runtime_images(
+    tmp_path: Path,
+) -> None:
+    registry = _registry(tmp_path)
+    templates = (
+        registry.settings.comfy_directory
+        / ".venv"
+        / "Lib"
+        / "site-packages"
+        / "comfyui_workflow_templates_json"
+        / "templates"
+    )
+    revision = "a" * 40
+    template = {
+        "nodes": [
+            {
+                "id": 1,
+                "type": "LoadImage",
+                "inputs": [],
+                "outputs": [{"name": "IMAGE", "type": "IMAGE", "links": [1]}],
+                "properties": {"cnr_id": "comfy-core"},
+                "widgets_values": ["sample-a.png", "image"],
+            },
+            {
+                "id": 2,
+                "type": "LoadImage",
+                "inputs": [],
+                "outputs": [{"name": "IMAGE", "type": "IMAGE", "links": []}],
+                "properties": {"cnr_id": "comfy-core"},
+                "widgets_values": ["sample-b.png", "image"],
+            },
+            {
+                "id": 3,
+                "type": "CheckpointLoaderSimple",
+                "inputs": [],
+                "outputs": [],
+                "properties": {
+                    "cnr_id": "comfy-core",
+                    "models": [
+                        {
+                            "directory": "checkpoints",
+                            "name": "model.safetensors",
+                            "url": (
+                                "https://huggingface.co/owner/edit/resolve/"
+                                f"{revision}/model.safetensors"
+                            ),
+                        }
+                    ],
+                },
+                "widgets_values": ["model.safetensors"],
+            },
+            {
+                "id": 4,
+                "type": "SaveImage",
+                "inputs": [{"name": "images", "type": "IMAGE", "link": 1}],
+                "outputs": [],
+                "properties": {"cnr_id": "comfy-core"},
+                "widgets_values": ["native-edit"],
+            },
+        ],
+        "links": [[1, 1, 0, 4, 0, "IMAGE"]],
+    }
+    (templates / "image_native_edit.json").write_text(
+        json.dumps(template),
+        encoding="utf-8",
+    )
+    object_info = {
+        "LoadImage": {
+            "input": {
+                "required": {
+                    "image": [["available.png"], {"image_upload": True}],
+                }
+            },
+            "input_order": {"required": ["image"]},
+        },
+        "CheckpointLoaderSimple": {
+            "input": {
+                "required": {
+                    "ckpt_name": [["model.safetensors"]],
+                }
+            },
+            "input_order": {"required": ["ckpt_name"]},
+        },
+        "SaveImage": {
+            "input": {
+                "required": {
+                    "images": ["IMAGE"],
+                    "filename_prefix": ["STRING", {"default": "ComfyUI"}],
+                }
+            },
+            "input_order": {"required": ["images", "filename_prefix"]},
+            "output_node": True,
+        },
+    }
+
+    compiled = registry.compile(
+        "image_native_edit",
+        "image",
+        object_info,
+        remote_id="owner/edit",
+        revision=revision,
+        selected_files=["model.safetensors"],
+        comfy_paths={"checkpoints": "."},
+    )
+
+    assert compiled.api_graph["1"]["inputs"]["image"] == "${input_image_0}"
+    assert compiled.api_graph["2"]["inputs"]["image"] == "${input_image_1}"
+    assert compiled.api_graph["3"]["inputs"]["ckpt_name"] == "model.safetensors"
+    assert compiled.input_schema["properties"]["input_image_0"] == {"type": "string"}
+    assert compiled.input_schema["properties"]["input_image_1"] == {"type": "string"}
+
+
 def _standard_checkpoint_object_info(checkpoint_names: list[str]) -> dict:  # type: ignore[type-arg]
     return {
         "CheckpointLoaderSimple": {
