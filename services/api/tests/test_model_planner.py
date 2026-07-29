@@ -120,6 +120,44 @@ def test_static_inspector_distinguishes_lora_from_primary_checkpoint() -> None:
     assert plan.failure_code == "auxiliary_asset_not_primary"
 
 
+def test_official_workflow_plan_accepts_a_required_lora_with_primary_weights() -> None:
+    selected = ["model.safetensors", "lightning.safetensors"]
+    inspection = inspect_repository_metadata(
+        {
+            "model.safetensors": _safetensors(["model.diffusion_model.input_blocks.0.weight"]),
+            "lightning.safetensors": _safetensors(
+                ["lora_unet_block.lora_down.weight"],
+                {"ss_network_module": "networks.lora"},
+            ),
+        },
+        selected,
+        role="image",
+    )
+    plan = resolve_install_plan(
+        remote_id="synthetic/complete-edit-workflow",
+        revision="a" * 40,
+        role="image",
+        engine="comfyui",
+        selected_files=[
+            {"filename": selected[0], "size": 2_048, "sha256": "b" * 64},
+            {
+                "filename": selected[1],
+                "size": 1_024,
+                "sha256": "c" * 64,
+                "source_remote_id": "synthetic/lightning",
+                "source_revision": "d" * 40,
+                "source_filename": selected[1],
+            },
+        ],
+        inspection=inspection,
+        workflow_template_id="synthetic-template",
+        workflow_template_sha256="e" * 64,
+    )
+
+    assert plan.compatibility == "supported"
+    assert {artifact.kind for artifact in plan.artifacts} == {"diffusion_model", "lora"}
+
+
 def test_chat_install_plan_binds_external_projector_provenance() -> None:
     model_path = "model-Q4_K_M.gguf"
     projector_path = "companions/author/model/mmproj-model-f16.gguf"

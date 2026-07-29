@@ -31,7 +31,7 @@ _RUNTIME_PARAMETERS = {
 }
 _PRIMITIVE_WIDGET_TYPES = {"BOOLEAN", "COMBO", "FLOAT", "INT", "STRING"}
 _CONTROL_AFTER_GENERATE = {"decrement", "fixed", "increment", "randomize"}
-COMFY_TEMPLATE_COMPILER_VERSION = 5
+COMFY_TEMPLATE_COMPILER_VERSION = 6
 DEFAULT_IMAGE_EDIT_DENOISE = 0.9
 _ADAPTIVE_CHECKPOINT_PREFIX = "lma_image_checkpoint_v1_"
 _ADAPTIVE_CHECKPOINT_PLACEHOLDER = "__LM_ATELIER_CHECKPOINT__"
@@ -178,6 +178,8 @@ class ComfyTemplate:
     sha256: str
     dependencies: tuple[ComfyModelDependency, ...]
     runtime_adaptive: bool = False
+    published_date: str | None = None
+    general_purpose: bool = True
 
     @property
     def remote_id(self) -> str:
@@ -186,6 +188,13 @@ class ComfyTemplate:
     @property
     def revision(self) -> str:
         return self.dependencies[0].revision
+
+    @property
+    def preference_score(self) -> int:
+        date_score = 0
+        if self.published_date and re.fullmatch(r"\d{4}-\d{2}-\d{2}", self.published_date):
+            date_score = int(self.published_date.replace("-", ""))
+        return (100_000_000 if self.general_purpose else 0) + date_score
 
     @property
     def selected_files(self) -> list[str]:
@@ -215,15 +224,18 @@ class ComfyTemplateRegistry:
         self.settings = settings
 
     def matches(self, remote_id: str, role: str) -> list[ComfyTemplate]:
-        return [
-            replace(template, score=1_000)
+        matches = [
+            replace(template, score=1_000 + template.preference_score)
             for template in self.available(role)
             if template.remote_id.casefold() == remote_id.casefold()
         ]
+        return sorted(matches, key=lambda item: (-item.score, item.id))
 
     def available(self, role: str) -> list[ComfyTemplate]:
         matches: list[ComfyTemplate] = []
-        for path in self._template_files():
+        paths = self._template_files()
+        metadata = _template_index_metadata(paths)
+        for path in paths:
             try:
                 raw = _read_json(path)
             except (OSError, ValueError):
@@ -234,12 +246,11 @@ class ComfyTemplateRegistry:
             dependencies = tuple(_model_dependencies(raw))
             if not dependencies:
                 continue
-            repositories = {item.remote_id.lower() for item in dependencies}
-            revisions = {item.revision for item in dependencies}
-            if len(repositories) != 1 or len(revisions) != 1:
+            if not _supports_dependency_bundle(dependencies):
                 continue
             if not _uses_only_core_nodes(raw):
                 continue
+            template_metadata = metadata.get(path.stem, {})
             matches.append(
                 ComfyTemplate(
                     id=path.stem,
@@ -249,6 +260,11 @@ class ComfyTemplateRegistry:
                     score=0,
                     sha256=hashlib.sha256(path.read_bytes()).hexdigest(),
                     dependencies=dependencies,
+                    published_date=_metadata_string(template_metadata, "date"),
+                    general_purpose=_is_general_purpose_template(
+                        template_metadata,
+                        dependencies,
+                    ),
                 )
             )
         return sorted(matches, key=lambda item: item.id)
@@ -355,11 +371,11 @@ class ComfyTemplateRegistry:
             if (
                 _role_for_template(path.stem, raw) != role
                 or not dependencies
-                or len({item.remote_id.lower() for item in dependencies}) != 1
-                or len({item.revision for item in dependencies}) != 1
+                or not _supports_dependency_bundle(dependencies)
                 or not _uses_only_core_nodes(raw)
             ):
                 break
+            template_metadata = _template_index_metadata(self._template_files()).get(path.stem, {})
             return ComfyTemplate(
                 id=path.stem,
                 path=path,
@@ -368,6 +384,11 @@ class ComfyTemplateRegistry:
                 score=0,
                 sha256=hashlib.sha256(path.read_bytes()).hexdigest(),
                 dependencies=dependencies,
+                published_date=_metadata_string(template_metadata, "date"),
+                general_purpose=_is_general_purpose_template(
+                    template_metadata,
+                    dependencies,
+                ),
             )
         raise ValueError(f"ComfyUI template is unavailable: {template_id}")
 
@@ -424,6 +445,7 @@ class ComfyTemplateRegistry:
         comfy_paths: dict[str, str],
         *,
         revision: str = "main",
+        file_sources: dict[str, Any] | None = None,
     ) -> ComfyTemplate:
         template = self.get(
             template_id,
@@ -439,6 +461,25 @@ class ComfyTemplateRegistry:
             raise ValueError("download files do not match the ComfyUI template")
         if template.comfy_paths != comfy_paths:
             raise ValueError("download model paths do not match the ComfyUI template")
+        sources = file_sources or {}
+        expected_companions = {
+            dependency.path: dependency
+            for dependency in template.dependencies
+            if dependency.remote_id.casefold() != remote_id.casefold()
+        }
+        if set(sources) != set(expected_companions):
+            raise ValueError("download companion sources do not match the ComfyUI template")
+        for destination, dependency in expected_companions.items():
+            source = sources[destination]
+            source_remote_id = str(getattr(source, "remote_id", "") or "")
+            source_revision = str(getattr(source, "revision", "") or "")
+            source_filename = str(getattr(source, "filename", "") or "")
+            if (
+                source_remote_id.casefold() != dependency.remote_id.casefold()
+                or source_filename != dependency.path
+                or (dependency.revision != "main" and source_revision != dependency.revision)
+            ):
+                raise ValueError("download companion source binding changed")
         return template
 
     def _template_files(self) -> list[Path]:
@@ -484,6 +525,81 @@ def _tokens(value: str) -> set[str]:
         for token in re.findall(r"[a-z]+|\d+", value.lower())
         if len(token) > 1 or token == "z"
     }
+
+
+def _template_index_metadata(paths: list[Path]) -> dict[str, dict[str, Any]]:
+    index_path = next((path for path in paths if path.name == "index.json"), None)
+    if index_path is None:
+        return {}
+    try:
+        raw = json.loads(index_path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return {}
+    result: dict[str, dict[str, Any]] = {}
+
+    def visit(value: Any) -> None:
+        if isinstance(value, dict):
+            name = value.get("name")
+            if isinstance(name, str) and name:
+                result[name] = value
+            for child in value.values():
+                visit(child)
+        elif isinstance(value, list):
+            for child in value:
+                visit(child)
+
+    visit(raw)
+    return result
+
+
+def _metadata_string(metadata: dict[str, Any], key: str) -> str | None:
+    value = metadata.get(key)
+    return value if isinstance(value, str) and value else None
+
+
+def _metadata_marks_specialized_lora(metadata: dict[str, Any]) -> bool:
+    values = [metadata.get("title"), metadata.get("description")]
+    tags = metadata.get("tags")
+    if isinstance(tags, list):
+        values.extend(tags)
+    return any(isinstance(value, str) and "lora" in value.casefold() for value in values)
+
+
+def _is_general_purpose_template(
+    metadata: dict[str, Any],
+    dependencies: tuple[ComfyModelDependency, ...],
+) -> bool:
+    lora_count = sum(dependency.directory == "loras" for dependency in dependencies)
+    return not _metadata_marks_specialized_lora(metadata) and lora_count <= 1
+
+
+def _supports_dependency_bundle(
+    dependencies: tuple[ComfyModelDependency, ...],
+) -> bool:
+    paths: set[str] = set()
+    repository_revisions: dict[str, set[str]] = {}
+    folder_parents: dict[str, str] = {}
+    for dependency in dependencies:
+        path = PurePosixPath(dependency.path)
+        if (
+            path.is_absolute()
+            or not path.parts
+            or any(part in {"", ".", ".."} or ":" in part for part in path.parts)
+        ):
+            return False
+        identity = path.as_posix().casefold()
+        if identity in paths:
+            return False
+        paths.add(identity)
+        repository_revisions.setdefault(dependency.remote_id.casefold(), set()).add(
+            dependency.revision
+        )
+        parent = str(path.parent)
+        parent = "." if parent == "." else parent
+        existing = folder_parents.setdefault(dependency.directory, parent)
+        if existing != parent:
+            return False
+    return all(len(revisions) == 1 for revisions in repository_revisions.values())
 
 
 def _role_for_template(template_id: str, value: dict[str, Any] | None = None) -> str | None:
@@ -568,7 +684,20 @@ def _model_dependencies(value: dict[str, Any]) -> list[ComfyModelDependency]:
                 url=url,
             )
             dependencies[(remote_id.lower(), path)] = dependency
-    return sorted(dependencies.values(), key=lambda item: (item.directory, item.path))
+    folder_priority = {
+        "checkpoints": 0,
+        "diffusion_models": 1,
+        "unet": 1,
+    }
+    return sorted(
+        dependencies.values(),
+        key=lambda item: (
+            folder_priority.get(item.directory, 10),
+            item.directory,
+            item.path,
+            item.remote_id.casefold(),
+        ),
+    )
 
 
 def derive_image_to_image(
