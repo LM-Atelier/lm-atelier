@@ -160,6 +160,34 @@ async def test_explicit_image_edit_strength_remains_authoritative(
     }
 
 
+async def test_explicit_image_source_does_not_inherit_prior_media_prompt(
+    client: AsyncClient,
+) -> None:
+    chat = (await client.post("/api/chats", json={"title": "Explicit source isolation"})).json()
+    await _image_turn(client, chat["id"], "Add a small blue square badge")
+    uploaded = await client.post(
+        "/api/artifacts",
+        files={"file": ("original.png", b"original-source-image", "image/png")},
+    )
+    artifact_id = uploaded.json()["id"]
+    prompt = (
+        "Make the studio lighting only slightly warmer and subtly brighter. "
+        "Keep everything else unchanged."
+    )
+
+    accepted, _completed = await _image_turn(
+        client,
+        chat["id"],
+        prompt,
+        input_artifact_ids=[artifact_id],
+    )
+
+    run = accepted["run"]
+    assert run["standalone_prompt"] == prompt
+    assert run["provenance_json"]["input_artifact_ids"] == [artifact_id]
+    assert "blue square badge" not in run["standalone_prompt"]
+
+
 async def test_legacy_provenance_inputs_remain_live_and_reconstruct_context(
     client: AsyncClient,
 ) -> None:

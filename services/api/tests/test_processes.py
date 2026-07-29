@@ -436,7 +436,7 @@ async def test_media_first_use_provisions_missing_runtime(
     supervisor = ProcessSupervisor(settings, runtimes)
     model_paths = tmp_path / "extra-model-paths.yaml"
     model_paths.write_text("{}", encoding="utf-8")
-    captured: dict[str, list[str]] = {}
+    captured: dict[str, object] = {}
 
     async def trusted_nodes() -> list[str]:
         return []
@@ -444,7 +444,7 @@ async def test_media_first_use_provisions_missing_runtime(
     async def replace(
         name: str,
         command: list[str],
-        _health_url: str,
+        health_url: str,
         _profile_id: str | None = None,
         *,
         estimated_memory_bytes: int | None = None,
@@ -452,6 +452,7 @@ async def test_media_first_use_provisions_missing_runtime(
         del estimated_memory_bytes
         assert name == "media"
         captured["command"] = command
+        captured["health_url"] = health_url
 
     monkeypatch.setattr(supervisor, "_trusted_comfy_node_folders", trusted_nodes)
     monkeypatch.setattr(supervisor, "_write_comfy_model_paths", lambda *_args: model_paths)
@@ -462,6 +463,7 @@ async def test_media_first_use_provisions_missing_runtime(
     runtimes.ensure.assert_awaited_once_with("comfyui")
     assert captured["command"][0] == str(executable.resolve())
     assert captured["command"][1] == str((runtime / "main.py").resolve())
+    assert captured["health_url"] == settings.comfy_url + "/object_info"
 
 
 async def test_vllm_chat_launches_complete_modelopt_snapshot(

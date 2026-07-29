@@ -160,6 +160,8 @@ _REPLACEMENT_TARGETS = {
     "outfit",
     "shirt",
     "suit",
+    "sweatshirt",
+    "blazer",
     "wardrobe",
 }
 _REPLACEMENT_VERBS = {"change", "dress", "give", "make", "replace", "swap"}
@@ -410,6 +412,13 @@ def resolve_image_edit_strength(
     minimum, maximum = _strength_bounds(fields, parameter, calibration)
     explicit_source: EditSettingSource | None = None
     explicit_auto = False
+    implicit_manual_sources = {
+        EditSettingSource.PROJECT_PRESET,
+        EditSettingSource.PROJECT,
+        EditSettingSource.CHAT_PRESET,
+        EditSettingSource.CHAT,
+        EditSettingSource.TURN,
+    }
     for source, layer in reversed(explicit_layers):
         raw_mode = layer.get(STRENGTH_MODE_PARAMETER)
         raw_strength = layer.get(parameter)
@@ -418,7 +427,8 @@ def resolve_image_edit_strength(
             explicit_source = source
             break
         if (
-            isinstance(raw_strength, int | float)
+            source in implicit_manual_sources
+            and isinstance(raw_strength, int | float)
             and not isinstance(raw_strength, bool)
             and minimum <= float(raw_strength) <= maximum
         ):

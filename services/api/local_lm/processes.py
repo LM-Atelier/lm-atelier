@@ -389,7 +389,7 @@ class ProcessSupervisor:
         ]
         if trusted_custom_nodes:
             command.extend(["--whitelist-custom-nodes", *trusted_custom_nodes])
-        await self._replace("media", command, self.settings.comfy_url + "/system_stats")
+        await self._replace("media", command, self.settings.comfy_url + "/object_info")
         return self.statuses()[1]
 
     async def _trusted_comfy_node_folders(self) -> list[str]:
