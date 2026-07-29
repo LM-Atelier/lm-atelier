@@ -385,7 +385,12 @@ class ArtifactStore:
         )
         if references:
             return False
-        self._delete_artifact(session, artifact)
+        try:
+            self._delete_artifact(session, artifact)
+        except OSError as exc:
+            if getattr(exc, "winerror", None) in {32, 33}:
+                return False
+            raise
         return True
 
     @staticmethod
