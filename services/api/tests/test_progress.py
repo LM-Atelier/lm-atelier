@@ -79,3 +79,78 @@ def test_completed_progress_reaches_exactly_one() -> None:
     assert snapshot["stage_progress"] == 1
     assert snapshot["overall_progress"] == 1
     assert job.progress == 1
+
+
+def test_progress_tracks_current_and_completed_stage_timings() -> None:
+    job = Job(progress=0, phase="queued", progress_json={})
+    started = datetime(2026, 7, 29, tzinfo=UTC)
+
+    first = update_job_progress(
+        job,
+        stage="preparing chat model",
+        indeterminate=True,
+        now=started,
+    )
+    active = update_job_progress(
+        job,
+        stage="preparing chat model",
+        indeterminate=True,
+        now=started + timedelta(seconds=2, milliseconds=250),
+    )
+    transitioned = update_job_progress(
+        job,
+        stage="waiting for first token",
+        indeterminate=True,
+        now=started + timedelta(seconds=3),
+    )
+
+    assert first["stage_started_at"] == "2026-07-29T00:00:00Z"
+    assert first["stage_elapsed_ms"] == 0
+    assert first["completed_stages"] == []
+    assert active["stage_started_at"] == first["stage_started_at"]
+    assert active["stage_elapsed_ms"] == 2_250
+    assert transitioned["stage_elapsed_ms"] == 0
+    assert transitioned["completed_stages"] == [
+        {"stage": "preparing chat model", "duration_ms": 3_000}
+    ]
+
+
+def test_progress_stage_history_is_bounded_and_legacy_safe() -> None:
+    started = datetime(2026, 7, 29, tzinfo=UTC)
+    job = Job(
+        progress=0,
+        phase="legacy",
+        progress_json={
+            "version": 2,
+            "stage": "legacy",
+            "stage_progress": None,
+            "overall_progress": None,
+            "indeterminate": True,
+            "updated_at": started.isoformat(),
+            "completed_stages": [
+                {"stage": "valid", "duration_ms": 5},
+                {"stage": "", "duration_ms": 7},
+                {"stage": "invalid", "duration_ms": True},
+            ],
+        },
+    )
+
+    snapshot = update_job_progress(job, stage="stage-0", now=started)
+    for index in range(1, 30):
+        snapshot = update_job_progress(
+            job,
+            stage=f"stage-{index}",
+            now=started + timedelta(seconds=index),
+        )
+
+    assert snapshot["stage_started_at"] == "2026-07-29T00:00:29Z"
+    assert snapshot["stage_elapsed_ms"] == 0
+    assert len(snapshot["completed_stages"]) == 24
+    assert snapshot["completed_stages"][0] == {
+        "stage": "stage-5",
+        "duration_ms": 1_000,
+    }
+    assert snapshot["completed_stages"][-1] == {
+        "stage": "stage-28",
+        "duration_ms": 1_000,
+    }
