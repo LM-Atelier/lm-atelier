@@ -14,6 +14,8 @@ describe("estimateImageEditStrength", () => {
     ["Replace the background with a moonlit city scene.", "replacement", 0.66, "high"],
     ["Replace the mannequin's red sweatshirt with a royal-blue blazer. Keep the mannequin's head, pose, hands, pants, framing, lighting, and background unchanged.", "replacement", 0.66, "high"],
     ["Make her top red.", "localized", 0.50, "high"],
+    ["Recolor the second person's jacket orange.", "localized", 0.50, "high"],
+    ["Change only the rightmost person into a marble statue.", "replacement", 0.66, "high"],
     ["Increase the brightness.", "minimal", 0.38, "high"],
     ["Restyle the entire image as a watercolor painting.", "global", 0.82, "high"],
     ["Make this better.", "fallback", 0.56, "low"],
