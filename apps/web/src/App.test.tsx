@@ -1332,6 +1332,9 @@ describe("App", () => {
           queue_length: null,
           blocked_by: [],
           indeterminate: false,
+          stage_started_at: stamp,
+          stage_elapsed_ms: 12_000,
+          completed_stages: [],
           updated_at: stamp,
         },
         payload_json: {},
@@ -1385,7 +1388,7 @@ describe("App", () => {
       </QueryClientProvider>,
     );
 
-    expect(await screen.findByText("downloading · 73% · 40 MB/s · about 7 sec"))
+    expect(await screen.findByText("downloading · 12s · 73% · 40 MB/s · about 7 sec"))
       .toBeInTheDocument();
     expect(screen.getByRole("progressbar", { name: "download progress" }))
       .toHaveAttribute("aria-valuenow", "73");
