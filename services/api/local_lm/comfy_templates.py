@@ -32,7 +32,7 @@ _RUNTIME_PARAMETERS = {
 }
 _PRIMITIVE_WIDGET_TYPES = {"BOOLEAN", "COMBO", "FLOAT", "INT", "STRING"}
 _CONTROL_AFTER_GENERATE = {"decrement", "fixed", "increment", "randomize"}
-COMFY_TEMPLATE_COMPILER_VERSION = 10
+COMFY_TEMPLATE_COMPILER_VERSION = 11
 DEFAULT_IMAGE_EDIT_DENOISE = 0.9
 _ADAPTIVE_CHECKPOINT_PREFIX = "lma_image_checkpoint_v1_"
 _ADAPTIVE_CHECKPOINT_PLACEHOLDER = "__LM_ATELIER_CHECKPOINT__"
@@ -929,10 +929,12 @@ def _compile_ui_graph(
                 if target_slot >= len(target_inputs):
                     continue
                 input_name = str(target_inputs[target_slot].get("name") or "")
+                input_type = str(target_inputs[target_slot].get("type") or "")
                 runtime_name = _subgraph_runtime_parameter(
                     parameter,
                     parameter_label,
                     input_name,
+                    input_type,
                     target_node,
                 )
                 if runtime_name:
@@ -996,7 +998,7 @@ def _compile_ui_graph(
                 inputs[input_name] = connection
         overridden_inputs: set[str] = set()
         for (target_id, input_name), runtime_name in parameter_overrides.items():
-            if target_id == node_id:
+            if target_id == node_id and (target_id, input_name) not in linked_inputs:
                 _bind_runtime_parameter(inputs, input_name, runtime_name, schema_properties)
                 overridden_inputs.add(input_name)
         for input_name in list(inputs):
@@ -1145,6 +1147,7 @@ def _subgraph_runtime_parameter(
     parameter: str,
     parameter_label: str,
     input_name: str,
+    input_type: str,
     node: dict[str, Any],
 ) -> str | None:
     aliases = {
@@ -1157,10 +1160,11 @@ def _subgraph_runtime_parameter(
         "prompt": "prompt",
         "text": "prompt",
     }
-    for value in (parameter_label, parameter):
-        normalized = re.sub(r"[^a-z0-9]+", "_", value.casefold()).strip("_")
-        if runtime_name := aliases.get(normalized):
-            return runtime_name
+    if input_type == "STRING":
+        for value in (parameter_label, parameter):
+            normalized = re.sub(r"[^a-z0-9]+", "_", value.casefold()).strip("_")
+            if runtime_name := aliases.get(normalized):
+                return runtime_name
     return _runtime_parameter(parameter or input_name, node) or _runtime_parameter(
         input_name,
         node,

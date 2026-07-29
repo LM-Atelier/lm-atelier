@@ -32,6 +32,11 @@ _PRIOR_IMAGE_EDIT = re.compile(
     r"the\s+(?:background|foreground|sky|lighting|color|colour|"
     r"brightness|contrast|exposure|saturation|person|woman|man|"
     r"girl|boy))\b|"
+    r"(?:make|change|edit|modify|adjust|recolor)\s+(?:only\s+)?(?:the\s+)?"
+    r"(?:leftmost|rightmost|middle|center|first|second|third)\s+"
+    r"(?:person|woman|man|girl|boy)(?:['’]s\b.{0,64}\b"
+    r"(?:top|shirt|blouse|hoodie|sweater|sweatshirt|jacket|coat|dress|"
+    r"outfit|pants|trousers|skirt|shoes|hair)\b|\s+(?:into|to|as)\b)|"
     r"(?:increase|decrease|raise|lower|reduce)\s+(?:the\s+)?"
     r"(?:brightness|contrast|exposure|saturation|warmth|sharpness)\b|"
     r"(?:give|dress|put)\s+(?:her|him|them|the\s+(?:person|subject|woman|"
@@ -68,7 +73,9 @@ _TEXT_EDIT = re.compile(
     r"(?:add|remove|replace|change)\b.{0,80}\b(?:in|from|to)\s+"
     r"(?:this|the)\s+(?:sentence|paragraph|text|answer|response|document|code)|"
     r"change\s+the\s+subject\s+of\s+(?:this|the)\s+"
-    r"(?:sentence|paragraph|text|answer|response|document)"
+    r"(?:sentence|paragraph|text|answer|response|document)|"
+    r"change\s+(?:the\s+)?(?:first|second|third)\s+person\b.{0,60}\b"
+    r"(?:sentence|paragraph|text|document)\b"
     r")\b",
     re.IGNORECASE,
 )

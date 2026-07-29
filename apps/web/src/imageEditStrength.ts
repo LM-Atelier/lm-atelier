@@ -51,15 +51,20 @@ const replacementPhrases = [
   "new clothing", "new hairstyle", "new outfit", "replace the background",
 ];
 const replacementTargets = new Set([
-  "background", "blazer", "clothes", "clothing", "coat", "dress", "hair", "hairstyle",
-  "jacket", "object", "outfit", "shirt", "shoes", "skirt", "suit", "sweatshirt",
-  "sweater", "top", "trousers", "wardrobe",
+  "background", "blazer", "boy", "clothes", "clothing", "coat", "dress", "girl",
+  "hair", "hairstyle", "hoodie", "jacket", "man", "object", "outfit", "person",
+  "shirt", "shoes", "skirt", "subject", "suit", "sweatshirt", "sweater", "top",
+  "trousers", "wardrobe", "woman",
 ]);
 const replacementVerbs = new Set(["change", "dress", "give", "make", "replace", "swap"]);
 const replacementPairWindow = 10;
 const replacementPairBlockers = new Set(["keep", "preserve", "retain", "unchanged", "without"]);
 const colorChangeTargets = new Set(
-  [...replacementTargets].filter((target) => !["background", "object"].includes(target)),
+  [...replacementTargets].filter(
+    (target) => ![
+      "background", "boy", "girl", "man", "object", "person", "subject", "woman",
+    ].includes(target),
+  ),
 );
 const colorChangeVerbs = new Set(["change", "make", "recolor", "turn"]);
 const colorWords = new Set([

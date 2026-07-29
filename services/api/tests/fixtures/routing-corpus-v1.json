@@ -683,6 +683,27 @@
       "mode": "auto",
       "has_prior_image": true,
       "expected": "text"
+    },
+    {
+      "id": "context-edit-positional-01",
+      "text": "Recolor the second person's jacket orange",
+      "mode": "auto",
+      "has_prior_image": true,
+      "expected": "image_to_image"
+    },
+    {
+      "id": "context-edit-positional-02",
+      "text": "Change only the rightmost person into a marble statue",
+      "mode": "auto",
+      "has_prior_image": true,
+      "expected": "image_to_image"
+    },
+    {
+      "id": "context-edit-positional-negative-01",
+      "text": "Change the first person to third person in this paragraph",
+      "mode": "auto",
+      "has_prior_image": true,
+      "expected": "text"
     }
   ]
 }
