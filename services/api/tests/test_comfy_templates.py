@@ -1155,3 +1155,113 @@ def test_subgraph_prompt_labels_bind_custom_conditioning_encoders() -> None:
         "type": "string",
         "default": "",
     }
+
+
+def test_subgraph_prompt_labels_do_not_replace_conditioning_links() -> None:
+    ui_graph = {
+        "nodes": [
+            {
+                "id": 1,
+                "type": "CLIPTextEncode",
+                "inputs": [
+                    {
+                        "name": "text",
+                        "type": "STRING",
+                        "widget": {"name": "text"},
+                    }
+                ],
+                "outputs": [
+                    {
+                        "name": "CONDITIONING",
+                        "type": "CONDITIONING",
+                        "links": [9],
+                    }
+                ],
+                "widgets_values": ["sample prompt"],
+            },
+            {
+                "id": 10,
+                "type": "edit-subgraph",
+                "inputs": [
+                    {
+                        "name": "positive",
+                        "type": "CONDITIONING",
+                        "link": 9,
+                    }
+                ],
+                "outputs": [],
+            },
+        ],
+        "links": [[9, 1, 0, 10, 0, "CONDITIONING"]],
+        "definitions": {
+            "subgraphs": [
+                {
+                    "id": "edit-subgraph",
+                    "inputs": [
+                        {
+                            "name": "positive",
+                            "label": "positive_prompt",
+                            "type": "CONDITIONING",
+                        }
+                    ],
+                    "nodes": [
+                        {
+                            "id": 2,
+                            "type": "ReferenceLatent",
+                            "inputs": [
+                                {
+                                    "name": "conditioning",
+                                    "type": "CONDITIONING",
+                                }
+                            ],
+                            "outputs": [
+                                {
+                                    "name": "CONDITIONING",
+                                    "type": "CONDITIONING",
+                                    "links": [],
+                                }
+                            ],
+                            "widgets_values": [],
+                        }
+                    ],
+                    "links": [
+                        {
+                            "id": 8,
+                            "origin_id": -10,
+                            "origin_slot": 0,
+                            "target_id": 2,
+                            "target_slot": 0,
+                            "type": "CONDITIONING",
+                        }
+                    ],
+                }
+            ]
+        },
+    }
+    object_info = {
+        "CLIPTextEncode": {
+            "input": {
+                "required": {
+                    "text": ["STRING", {"default": ""}],
+                }
+            },
+            "input_order": {"required": ["text"]},
+        },
+        "ReferenceLatent": {
+            "input": {
+                "required": {
+                    "conditioning": ["CONDITIONING"],
+                }
+            },
+            "input_order": {"required": ["conditioning"]},
+        },
+    }
+
+    graph, _ = _compile_ui_graph(
+        ui_graph,
+        object_info,
+        operation="image_to_image",
+    )
+
+    assert graph["1"]["inputs"]["text"] == "${prompt}"
+    assert graph["10:2"]["inputs"]["conditioning"] == ["1", 0]

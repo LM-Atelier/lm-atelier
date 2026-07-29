@@ -284,6 +284,8 @@ async def test_prior_image_edit_routes_without_a_model_planner() -> None:
         "Give the person a blue coat",
         "Remove the coffee cup",
         "Replace the background with a beach",
+        "Recolor the second person's jacket orange",
+        "Change only the rightmost person into a marble statue",
     ],
 )
 async def test_natural_language_prior_image_edits_route_without_a_model_planner(
@@ -312,6 +314,7 @@ async def test_natural_language_prior_image_edits_route_without_a_model_planner(
         "Remove ambiguity from this paragraph",
         "Replace the word cat with dog in this sentence",
         "Add a paragraph about the color blue",
+        "Change the first person to third person in this paragraph",
     ],
 )
 def test_visual_edit_language_does_not_override_clear_text_requests(text: str) -> None:

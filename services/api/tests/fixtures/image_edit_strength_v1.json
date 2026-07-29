@@ -126,6 +126,23 @@
     "reasons": ["localized_change"]
   },
   {
+    "name": "positional hoodie recolor",
+    "prompt": "Recolor the second person's jacket orange.",
+    "scope": "localized",
+    "confidence": "high",
+    "minimum": 0.42,
+    "maximum": 0.58,
+    "reasons": ["localized_change"]
+  },
+  {
+    "name": "positional subject transformation",
+    "prompt": "Change only the rightmost person into a marble statue.",
+    "scope": "replacement",
+    "confidence": "high",
+    "minimum": 0.58,
+    "maximum": 0.74,
+    "reasons": ["subject_replacement"]
+  },  {
     "name": "natural language brightness adjustment",
     "prompt": "Increase the brightness.",
     "scope": "minimal",

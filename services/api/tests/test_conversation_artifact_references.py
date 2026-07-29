@@ -483,6 +483,11 @@ async def test_common_natural_language_follow_ups_use_latest_image(
     cases = [
         ("Make her top red", 0.5, "localized"),
         ("Increase the brightness", 0.38, "minimal"),
+        (
+            "Recolor the second person's jacket orange",
+            0.5,
+            "localized",
+        ),
     ]
     for prompt, expected_strength, expected_scope in cases:
         chat = (

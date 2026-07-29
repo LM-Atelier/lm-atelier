@@ -149,25 +149,32 @@ _REPLACEMENT_PHRASES = (
 )
 _REPLACEMENT_TARGETS = {
     "background",
+    "blazer",
+    "boy",
     "clothes",
     "clothing",
     "coat",
     "dress",
+    "girl",
     "hair",
     "hairstyle",
+    "hoodie",
     "jacket",
+    "man",
     "object",
     "outfit",
+    "person",
     "shirt",
     "shoes",
     "skirt",
+    "subject",
     "suit",
     "sweatshirt",
     "sweater",
     "top",
     "trousers",
-    "blazer",
     "wardrobe",
+    "woman",
 }
 _REPLACEMENT_VERBS = {"change", "dress", "give", "make", "replace", "swap"}
 _REPLACEMENT_PAIR_WINDOW = 10
@@ -178,7 +185,16 @@ _REPLACEMENT_PAIR_BLOCKERS = {
     "unchanged",
     "without",
 }
-_COLOR_CHANGE_TARGETS = _REPLACEMENT_TARGETS - {"background", "object"}
+_COLOR_CHANGE_TARGETS = _REPLACEMENT_TARGETS - {
+    "background",
+    "boy",
+    "girl",
+    "man",
+    "object",
+    "person",
+    "subject",
+    "woman",
+}
 _COLOR_CHANGE_VERBS = {"change", "make", "recolor", "turn"}
 _COLOR_WORDS = {
     "amber",
