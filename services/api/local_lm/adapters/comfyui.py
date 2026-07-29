@@ -401,6 +401,7 @@ class ComfyUIAdapter:
                     phase="queued",
                     data={"prompt_id": prompt_id},
                 )
+                sampler_progress = 0.0
                 messages = socket.__aiter__()
                 while True:
                     try:
@@ -421,7 +422,12 @@ class ComfyUIAdapter:
                         if len(binary) > MAX_ADAPTER_PREVIEW_BYTES:
                             raise RuntimeError("ComfyUI returned an oversized preview event")
                         if preview := _preview_payload(binary):
-                            yield MediaEvent(type="preview", phase="preview", preview=preview)
+                            yield MediaEvent(
+                                type="preview",
+                                progress=sampler_progress,
+                                phase="sampling",
+                                preview=preview,
+                            )
                         continue
                     if len(raw.encode("utf-8")) > MAX_ADAPTER_EVENT_BYTES:
                         raise RuntimeError("ComfyUI returned an oversized progress event")
@@ -449,9 +455,10 @@ class ComfyUIAdapter:
                             ) from exc
                         if not math.isfinite(maximum) or maximum <= 0 or not math.isfinite(value):
                             raise RuntimeError("ComfyUI returned a malformed progress event")
+                        sampler_progress = min(max(value / maximum, 0), 0.99)
                         yield MediaEvent(
                             type="progress",
-                            progress=min(max(value / maximum, 0), 0.99),
+                            progress=sampler_progress,
                             phase="sampling",
                             data={
                                 "prompt_id": prompt_id,
