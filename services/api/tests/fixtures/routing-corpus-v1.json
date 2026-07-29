@@ -248,6 +248,7 @@
         }
       ]
     },
+
     {
       "id": "video-01",
       "text": "Generate a short video of a sunrise",
@@ -478,6 +479,209 @@
           "content": "No list here, only prose."
         }
       ],
+      "expected": "text"
+    },
+    {
+      "id": "context-edit-01",
+      "text": "Make her top red",
+      "mode": "auto",
+      "has_prior_image": true,
+      "expected": "image_to_image"
+    },
+    {
+      "id": "context-edit-02",
+      "text": "Increase the brightness",
+      "mode": "auto",
+      "has_prior_image": true,
+      "expected": "image_to_image"
+    },
+    {
+      "id": "context-edit-03",
+      "text": "Give the person a blue coat",
+      "mode": "auto",
+      "has_prior_image": true,
+      "expected": "image_to_image"
+    },
+    {
+      "id": "context-edit-04",
+      "text": "Replace the background with a beach",
+      "mode": "auto",
+      "has_prior_image": true,
+      "expected": "image_to_image"
+    },
+    {
+      "id": "context-edit-negative-01",
+      "text": "Write a poem about her red top",
+      "mode": "auto",
+      "has_prior_image": true,
+      "expected": "text"
+    },
+    {
+      "id": "context-edit-negative-02",
+      "text": "Explain how to increase brightness in a photograph",
+      "mode": "auto",
+      "has_prior_image": true,
+      "expected": "text"
+    },
+    {
+      "id": "context-edit-negative-03",
+      "text": "Make her a list of outfit ideas",
+      "mode": "auto",
+      "has_prior_image": true,
+      "expected": "text"
+    },
+    {
+      "id": "context-edit-05",
+      "text": "Please make her dress emerald green",
+      "mode": "auto",
+      "has_prior_image": true,
+      "expected": "image_to_image"
+    },
+    {
+      "id": "context-edit-06",
+      "text": "Now change his hair to blonde",
+      "mode": "auto",
+      "has_prior_image": true,
+      "expected": "image_to_image"
+    },
+    {
+      "id": "context-edit-07",
+      "text": "Recolor their shoes white",
+      "mode": "auto",
+      "has_prior_image": true,
+      "expected": "image_to_image"
+    },
+    {
+      "id": "context-edit-08",
+      "text": "Adjust the background to a mountain lake",
+      "mode": "auto",
+      "has_prior_image": true,
+      "expected": "image_to_image"
+    },
+    {
+      "id": "context-edit-09",
+      "text": "Darken the photo",
+      "mode": "auto",
+      "has_prior_image": true,
+      "expected": "image_to_image"
+    },
+    {
+      "id": "context-edit-10",
+      "text": "Crop it tighter",
+      "mode": "auto",
+      "has_prior_image": true,
+      "expected": "image_to_image"
+    },
+    {
+      "id": "context-edit-11",
+      "text": "Remove the coffee cup",
+      "mode": "auto",
+      "has_prior_image": true,
+      "expected": "image_to_image"
+    },
+    {
+      "id": "context-edit-12",
+      "text": "Add sunglasses to her face",
+      "mode": "auto",
+      "has_prior_image": true,
+      "expected": "image_to_image"
+    },
+    {
+      "id": "context-edit-13",
+      "text": "Blur the background",
+      "mode": "auto",
+      "has_prior_image": true,
+      "expected": "image_to_image"
+    },
+    {
+      "id": "context-edit-14",
+      "text": "Flip it horizontally",
+      "mode": "auto",
+      "has_prior_image": true,
+      "expected": "image_to_image"
+    },
+    {
+      "id": "context-edit-15",
+      "text": "Make the sky stormy",
+      "mode": "auto",
+      "has_prior_image": true,
+      "expected": "image_to_image"
+    },
+    {
+      "id": "context-edit-16",
+      "text": "Lower exposure by one stop",
+      "mode": "auto",
+      "has_prior_image": true,
+      "expected": "image_to_image"
+    },
+    {
+      "id": "context-edit-17",
+      "text": "Put her in a black dress",
+      "mode": "auto",
+      "has_prior_image": true,
+      "expected": "image_to_image"
+    },
+    {
+      "id": "context-edit-18",
+      "text": "Replace the word SALE with OPEN on the sign",
+      "mode": "auto",
+      "has_prior_image": true,
+      "expected": "image_to_image"
+    },
+    {
+      "id": "context-edit-negative-04",
+      "text": "Remove ambiguity from this paragraph",
+      "mode": "auto",
+      "has_prior_image": true,
+      "expected": "text"
+    },
+    {
+      "id": "context-edit-negative-05",
+      "text": "Replace the word cat with dog in this sentence",
+      "mode": "auto",
+      "has_prior_image": true,
+      "expected": "text"
+    },
+    {
+      "id": "context-edit-negative-06",
+      "text": "Add a paragraph about the color blue",
+      "mode": "auto",
+      "has_prior_image": true,
+      "expected": "text"
+    },
+    {
+      "id": "context-edit-negative-07",
+      "text": "What color is her top?",
+      "mode": "auto",
+      "has_prior_image": true,
+      "expected": "text"
+    },
+    {
+      "id": "context-edit-negative-08",
+      "text": "Should I change her hair?",
+      "mode": "auto",
+      "has_prior_image": true,
+      "expected": "text"
+    },
+    {
+      "id": "context-edit-negative-09",
+      "text": "I like the blue background",
+      "mode": "auto",
+      "has_prior_image": true,
+      "expected": "text"
+    },
+    {
+      "id": "context-edit-negative-10",
+      "text": "Describe her outfit",
+      "mode": "auto",
+      "has_prior_image": true,
+      "expected": "text"
+    },
+    {
+      "id": "context-edit-negative-11",
+      "text": "Make her a sandwich",
+      "mode": "auto",
+      "has_prior_image": true,
       "expected": "text"
     }
   ]

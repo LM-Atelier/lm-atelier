@@ -159,8 +159,13 @@ _REPLACEMENT_TARGETS = {
     "object",
     "outfit",
     "shirt",
+    "shoes",
+    "skirt",
     "suit",
     "sweatshirt",
+    "sweater",
+    "top",
+    "trousers",
     "blazer",
     "wardrobe",
 }
@@ -172,6 +177,42 @@ _REPLACEMENT_PAIR_BLOCKERS = {
     "retain",
     "unchanged",
     "without",
+}
+_COLOR_CHANGE_TARGETS = _REPLACEMENT_TARGETS - {"background", "object"}
+_COLOR_CHANGE_VERBS = {"change", "make", "recolor", "turn"}
+_COLOR_WORDS = {
+    "amber",
+    "beige",
+    "black",
+    "blonde",
+    "blue",
+    "brown",
+    "burgundy",
+    "charcoal",
+    "coral",
+    "cream",
+    "cyan",
+    "gold",
+    "gray",
+    "green",
+    "grey",
+    "indigo",
+    "ivory",
+    "lavender",
+    "magenta",
+    "maroon",
+    "navy",
+    "orange",
+    "pink",
+    "purple",
+    "red",
+    "silver",
+    "tan",
+    "teal",
+    "turquoise",
+    "violet",
+    "white",
+    "yellow",
 }
 _LOCALIZED_PHRASES = (
     "add a",
@@ -209,6 +250,7 @@ _PRESERVATION_PHRASES = (
     "don t alter",
     "don t change",
     "keep everything else",
+    "keeping everything else",
     "keep the",
     "preserve identity",
     "preserve the rest",
@@ -251,6 +293,19 @@ def _has_bounded_replacement_pair(normalized: str) -> bool:
                 break
             if candidate in _REPLACEMENT_TARGETS:
                 return True
+    return False
+
+
+def _has_bounded_color_change(normalized: str) -> bool:
+    tokens = normalized.split()
+    for verb_index, token in enumerate(tokens):
+        if token not in _COLOR_CHANGE_VERBS:
+            continue
+        window = tokens[verb_index + 1 : verb_index + _REPLACEMENT_PAIR_WINDOW + 1]
+        if "new" in window or "replace" in window or "swap" in window:
+            continue
+        if len(set(window) & _COLOR_CHANGE_TARGETS) == 1 and set(window) & _COLOR_WORDS:
+            return True
     return False
 
 
@@ -348,6 +403,7 @@ def estimate_image_edit_strength(
     minimal_signal = _has_phrase(normalized, _MINIMAL_PHRASES) or bool(words & _MINIMAL_WORDS)
     preservation_signal = EditReason.PRESERVATION_REQUESTED in reasons
     replacement_pair = _has_bounded_replacement_pair(normalized)
+    color_change = _has_bounded_color_change(normalized)
     if _has_phrase(normalized, _GLOBAL_PHRASES) or words & _GLOBAL_WORDS:
         scope = EditScope.GLOBAL
         confidence = EditConfidence.HIGH
@@ -356,6 +412,10 @@ def estimate_image_edit_strength(
         scope = EditScope.MINIMAL
         confidence = EditConfidence.HIGH
         reasons.insert(0, EditReason.MINIMAL_ADJUSTMENT)
+    elif color_change:
+        scope = EditScope.LOCALIZED
+        confidence = EditConfidence.HIGH
+        reasons.insert(0, EditReason.LOCALIZED_CHANGE)
     elif _has_phrase(normalized, _REPLACEMENT_PHRASES) or replacement_pair:
         scope = EditScope.REPLACEMENT
         confidence = EditConfidence.HIGH

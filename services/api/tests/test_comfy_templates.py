@@ -10,6 +10,7 @@ from local_lm.comfy_templates import (
     ComfyTemplate,
     ComfyTemplateRegistry,
     CompiledComfyTemplate,
+    _compile_ui_graph,
     derive_image_to_image,
 )
 from local_lm.config import Settings
@@ -1038,4 +1039,119 @@ def test_text_to_image_graph_derives_a_standard_image_edit_workflow(tmp_path: Pa
                 "global": 3,
             },
         },
+    }
+
+
+def test_subgraph_prompt_labels_bind_custom_conditioning_encoders() -> None:
+    ui_graph = {
+        "nodes": [
+            {
+                "id": 10,
+                "type": "edit-subgraph",
+                "inputs": [],
+                "outputs": [],
+            }
+        ],
+        "links": [],
+        "definitions": {
+            "subgraphs": [
+                {
+                    "id": "edit-subgraph",
+                    "inputs": [
+                        {
+                            "name": "prompt",
+                            "label": "positive_prompt",
+                            "type": "STRING",
+                        },
+                        {
+                            "name": "prompt_1",
+                            "label": "negative_prompt",
+                            "type": "STRING",
+                        },
+                    ],
+                    "nodes": [
+                        {
+                            "id": 1,
+                            "type": "CustomInstructionTextEncode",
+                            "inputs": [
+                                {
+                                    "name": "prompt",
+                                    "type": "STRING",
+                                    "widget": {"name": "prompt"},
+                                }
+                            ],
+                            "outputs": [
+                                {
+                                    "name": "CONDITIONING",
+                                    "type": "CONDITIONING",
+                                    "links": [],
+                                }
+                            ],
+                            "widgets_values": ["sample positive prompt"],
+                        },
+                        {
+                            "id": 2,
+                            "type": "CustomInstructionTextEncode",
+                            "inputs": [
+                                {
+                                    "name": "prompt",
+                                    "type": "STRING",
+                                    "widget": {"name": "prompt"},
+                                }
+                            ],
+                            "outputs": [
+                                {
+                                    "name": "CONDITIONING",
+                                    "type": "CONDITIONING",
+                                    "links": [],
+                                }
+                            ],
+                            "widgets_values": [""],
+                        },
+                    ],
+                    "links": [
+                        {
+                            "id": 1,
+                            "origin_id": -10,
+                            "origin_slot": 0,
+                            "target_id": 1,
+                            "target_slot": 0,
+                            "type": "STRING",
+                        },
+                        {
+                            "id": 2,
+                            "origin_id": -10,
+                            "origin_slot": 1,
+                            "target_id": 2,
+                            "target_slot": 0,
+                            "type": "STRING",
+                        },
+                    ],
+                }
+            ]
+        },
+    }
+    object_info = {
+        "CustomInstructionTextEncode": {
+            "input": {
+                "required": {
+                    "prompt": ["STRING", {"default": ""}],
+                }
+            },
+            "input_order": {"required": ["prompt"]},
+        }
+    }
+
+    graph, schema = _compile_ui_graph(
+        ui_graph,
+        object_info,
+        operation="image_to_image",
+    )
+
+    assert graph["10:1"]["inputs"]["prompt"] == "${prompt}"
+    assert graph["10:2"]["inputs"]["prompt"] == "${negative_prompt}"
+    assert schema["properties"]["prompt"] == {"type": "string"}
+    assert schema["properties"]["negative_prompt"] == {
+        "type": "string",
+        "default": "",
     }

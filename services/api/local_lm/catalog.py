@@ -25,10 +25,22 @@ SORTS = {
     "updated": "lastModified",
 }
 
-_QUANTIZATION = re.compile(r"^(?:q\d(?:_[a-z0-9]+)*|i?q\d(?:_[a-z0-9]+)*|fp\d+|bf16)$", re.I)
+_QUANTIZATION = re.compile(
+    r"^(?:q\d(?:_[a-z0-9]+)*|i?q\d(?:_[a-z0-9]+)*|"
+    r"(?:nv|mx)?fp\d+|bf16|int\d+(?:[_-]?convrot)?)$",
+    re.I,
+)
+_FILENAME_QUANTIZATION = re.compile(
+    r"(?<![a-z0-9])(?:"
+    r"(?P<int_convrot>int\d+[_-]?convrot)|"
+    r"(?P<w4a4_convrot>w4a4[_-]?convrot|convrot[_-]?w4a4)|"
+    r"(?P<standard>q\d(?:_[a-z0-9]+)*|(?:nv|mx)?fp\d+|bf16|int\d+)"
+    r")(?![a-z0-9])",
+    re.I,
+)
 _PARAMETERS = re.compile(r"(?:^|[-_ ])(\d+(?:\.\d+)?)\s*([bmk])(?:$|[-_ ])", re.I)
 _REMOTE_ID = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]*/[A-Za-z0-9][A-Za-z0-9_.-]*$")
-_CACHE_VERSION = 3
+_CACHE_VERSION = 4
 
 
 class HuggingFaceCatalog:
@@ -549,18 +561,7 @@ class HuggingFaceCatalog:
                 if Path(filename).suffix
             }
         )
-        quantizations = sorted(
-            {tag.lower() for tag in tags if _QUANTIZATION.fullmatch(tag)}
-            | {
-                match.group(0).lower()
-                for filename in filenames
-                for match in re.finditer(
-                    r"(?<![a-z0-9])(?:q\d(?:_[a-z0-9]+)*|fp\d+|bf16)(?![a-z0-9])",
-                    filename,
-                    re.I,
-                )
-            }
-        )
+        quantizations = cls._quantizations(tags, filenames)
         license_id = next(
             (tag.split(":", 1)[1] for tag in tags if tag.lower().startswith("license:")), None
         )
@@ -619,6 +620,19 @@ class HuggingFaceCatalog:
             multiplier = {"b": 1_000_000_000, "m": 1_000_000, "k": 1_000}[match.group(2).lower()]
             return int(float(match.group(1)) * multiplier)
         return None
+
+    @staticmethod
+    def _quantizations(tags: list[str], filenames: list[str]) -> list[str]:
+        values = {tag.lower().replace("-", "_") for tag in tags if _QUANTIZATION.fullmatch(tag)}
+        for filename in filenames:
+            for match in _FILENAME_QUANTIZATION.finditer(filename):
+                value = match.group(0).lower().replace("-", "_")
+                if match.lastgroup == "int_convrot":
+                    value = re.sub(r"_?convrot$", "_convrot", value)
+                elif match.lastgroup == "w4a4_convrot":
+                    value = "w4a4_convrot"
+                values.add(value)
+        return sorted(values)
 
     @staticmethod
     def _datetime(value: Any) -> datetime | None:

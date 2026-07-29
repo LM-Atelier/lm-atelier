@@ -25,6 +25,18 @@ _PRIOR_IMAGE_EDIT = re.compile(
     r"^\s*(?:please\s+|now\s+)*(?:"
     r"(?:make|change|turn|edit|modify|adjust)\s+(?:it|this|that|the\s+"
     r"(?:image|picture|photo|illustration|artwork|logo|icon))\b|"
+    r"(?:make|change|edit|modify|adjust|recolor)\s+"
+    r"(?:(?:her|his|their|my|our|your)\s+"
+    r"(?:top|shirt|blouse|sweater|sweatshirt|jacket|coat|dress|outfit|"
+    r"pants|trousers|skirt|shoes|hair)|"
+    r"the\s+(?:background|foreground|sky|lighting|color|colour|"
+    r"brightness|contrast|exposure|saturation|person|woman|man|"
+    r"girl|boy))\b|"
+    r"(?:increase|decrease|raise|lower|reduce)\s+(?:the\s+)?"
+    r"(?:brightness|contrast|exposure|saturation|warmth|sharpness)\b|"
+    r"(?:give|dress|put)\s+(?:her|him|them|the\s+(?:person|subject|woman|"
+    r"man|girl|boy))\b.{0,80}\b(?:top|shirt|blouse|sweater|sweatshirt|"
+    r"jacket|coat|dress|outfit|pants|trousers|skirt|shoes|hair)\b|"
     r"(?:add|remove|replace|recolor|crop|resize|brighten|darken|blur|sharpen|"
     r"rotate|flip)\b"
     r")",
@@ -46,6 +58,18 @@ _TEXT_TASK = re.compile(
     r"^\s*(?:answer|reply|respond|say|write|draft|compose|summari[sz]e|translate|"
     r"rewrite|proofread|review|analy[sz]e|list|count|calculate|compute|solve|"
     r"brainstorm|code|program|create|generate)\b",
+    re.IGNORECASE,
+)
+_TEXT_EDIT = re.compile(
+    r"^\s*(?:please\s+|now\s+)*(?:"
+    r"(?:add|remove|replace|change|edit|modify)\s+(?:the\s+|an?\s+)?"
+    r"(?:wording|grammar|punctuation|ambiguity|typo|sentence|paragraph|"
+    r"text response|answer)|"
+    r"(?:add|remove|replace|change)\b.{0,80}\b(?:in|from|to)\s+"
+    r"(?:this|the)\s+(?:sentence|paragraph|text|answer|response|document|code)|"
+    r"change\s+the\s+subject\s+of\s+(?:this|the)\s+"
+    r"(?:sentence|paragraph|text|answer|response|document)"
+    r")\b",
     re.IGNORECASE,
 )
 _UNCERTAIN = re.compile(r"\b(?:maybe|perhaps|possibly|might want to)\b", re.IGNORECASE)
@@ -389,6 +413,9 @@ class ModalityRouter:
             r"\b(?:for me|now|instead)\b", normalized, re.IGNORECASE
         ):
             return self._text(normalized, "question or discussion phrasing", 0.94)
+
+        if _TEXT_EDIT.search(normalized):
+            return self._text(normalized, "clear text editing request", 0.96)
 
         if (
             _VIDEO_CREATE.search(normalized)

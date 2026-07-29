@@ -52,11 +52,22 @@ const replacementPhrases = [
 ];
 const replacementTargets = new Set([
   "background", "blazer", "clothes", "clothing", "coat", "dress", "hair", "hairstyle",
-  "jacket", "object", "outfit", "shirt", "suit", "sweatshirt", "wardrobe",
+  "jacket", "object", "outfit", "shirt", "shoes", "skirt", "suit", "sweatshirt",
+  "sweater", "top", "trousers", "wardrobe",
 ]);
 const replacementVerbs = new Set(["change", "dress", "give", "make", "replace", "swap"]);
 const replacementPairWindow = 10;
 const replacementPairBlockers = new Set(["keep", "preserve", "retain", "unchanged", "without"]);
+const colorChangeTargets = new Set(
+  [...replacementTargets].filter((target) => !["background", "object"].includes(target)),
+);
+const colorChangeVerbs = new Set(["change", "make", "recolor", "turn"]);
+const colorWords = new Set([
+  "amber", "beige", "black", "blonde", "blue", "brown", "burgundy", "charcoal",
+  "coral", "cream", "cyan", "gold", "gray", "green", "grey", "indigo", "ivory",
+  "lavender", "magenta", "maroon", "navy", "orange", "pink", "purple", "red",
+  "silver", "tan", "teal", "turquoise", "violet", "white", "yellow",
+]);
 const localizedPhrases = [
   "add a", "add an", "make it blue", "make it green", "make it red", "remove the",
 ];
@@ -67,11 +78,13 @@ const minimalPhrases = [
 ];
 const minimalWords = new Set([
   "brightness", "contrast", "exposure", "lighting", "sharpen", "slight", "slightly",
-  "subtle",
+  "subtle", "subtly",
 ]);
 const preservationPhrases = [
   "do not alter", "do not change", "don t alter", "don t change", "keep everything else",
-  "preserve identity", "preserve the rest", "without altering", "without changing",
+  "keeping everything else",
+  "keep the", "preserve identity", "preserve the rest", "without altering",
+  "without changing",
 ];
 
 function record(value: unknown): Record<string, unknown> | null {
@@ -189,6 +202,20 @@ function hasBoundedReplacementPair(text: string): boolean {
   return false;
 }
 
+function hasBoundedColorChange(text: string): boolean {
+  const tokens = text.split(" ").filter(Boolean);
+  for (let verbIndex = 0; verbIndex < tokens.length; verbIndex += 1) {
+    if (!colorChangeVerbs.has(tokens[verbIndex])) continue;
+    const window = tokens.slice(verbIndex + 1, verbIndex + replacementPairWindow + 1);
+    if (window.some((token) => ["new", "replace", "swap"].includes(token))) continue;
+    if (
+      new Set(window.filter((token) => colorChangeTargets.has(token))).size === 1
+      && window.some((token) => colorWords.has(token))
+    ) return true;
+  }
+  return false;
+}
+
 export function estimateImageEditStrength(
   prompt: string,
   minimum = 0,
@@ -199,6 +226,7 @@ export function estimateImageEditStrength(
   const minimal = hasPhrase(text, minimalPhrases) || intersects(words, minimalWords);
   const preservation = hasPhrase(text, preservationPhrases);
   const replacement = hasPhrase(text, replacementPhrases) || hasBoundedReplacementPair(text);
+  const colorChange = hasBoundedColorChange(text);
   let scope: ImageEditScope;
   let confidence: ImageEditStrengthEstimate["confidence"];
   if (hasPhrase(text, globalPhrases) || intersects(words, globalWords)) {
@@ -206,6 +234,9 @@ export function estimateImageEditStrength(
     confidence = "high";
   } else if (preservation && minimal && !replacement) {
     scope = "minimal";
+    confidence = "high";
+  } else if (colorChange) {
+    scope = "localized";
     confidence = "high";
   } else if (replacement) {
     scope = "replacement";
