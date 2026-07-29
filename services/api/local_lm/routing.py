@@ -37,6 +37,8 @@ _PRIOR_IMAGE_EDIT = re.compile(
     r"(?:person|woman|man|girl|boy)(?:['’]s\b.{0,64}\b"
     r"(?:top|shirt|blouse|hoodie|sweater|sweatshirt|jacket|coat|dress|"
     r"outfit|pants|trousers|skirt|shoes|hair)\b|\s+(?:into|to|as)\b)|"
+    r"(?:correct|fix|neutralize|balance)\b.{0,96}\b"
+    r"(?:colou?r\s+cast|white\s+balance|lighting|exposure)\b|"
     r"(?:increase|decrease|raise|lower|reduce)\s+(?:the\s+)?"
     r"(?:brightness|contrast|exposure|saturation|warmth|sharpness)\b|"
     r"(?:give|dress|put)\s+(?:her|him|them|the\s+(?:person|subject|woman|"

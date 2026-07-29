@@ -704,6 +704,13 @@
       "mode": "auto",
       "has_prior_image": true,
       "expected": "text"
+    },
+    {
+      "id": "context-edit-photometric-01",
+      "text": "Correct the harsh green color cast and brighten the foreground subjects",
+      "mode": "auto",
+      "has_prior_image": true,
+      "expected": "image_to_image"
     }
   ]
 }
