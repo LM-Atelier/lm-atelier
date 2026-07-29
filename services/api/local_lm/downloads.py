@@ -321,8 +321,29 @@ class DownloadManager:
         if set(expected) != set(actual):
             raise ValueError("downloaded model components do not match the install plan")
         auxiliary_kind = plan.runtime_contract_json.get("auxiliary_kind")
+        workflow_template_id = plan.runtime_contract_json.get("workflow_template_id")
+        workflow_component_kinds = {
+            "checkpoint",
+            "diffusion_model",
+            "text_encoder",
+            "vae",
+            "clip_vision",
+            "lora",
+            "controlnet",
+            "upscaler",
+            "embedding",
+            "ip_adapter",
+        }
+        validated_kinds: set[str] = set()
         for path, planned_contract in expected.items():
-            inspected_contract = actual[path]
+            raw_inspected_contract = actual[path]
+            inspected_contract = (
+                planned_contract
+                if workflow_template_id
+                and raw_inspected_contract[0] == "unknown_safetensors"
+                and planned_contract[0] in workflow_component_kinds
+                else raw_inspected_contract
+            )
             # Filename-only planning intentionally starts conservatively. A
             # bounded real header may refine generic safe-tensor weights into
             # a more specific declarative component, but never into executable
@@ -337,19 +358,19 @@ class DownloadManager:
                 and planned_contract[0] not in {"checkpoint", "unknown_safetensors"}
             ):
                 raise ValueError(f"downloaded component contract changed for {path}")
-            if not auxiliary_kind and inspected_contract[0] in {
-                "lora",
-                "unknown_safetensors",
-                "metadata",
-            }:
+            if not auxiliary_kind and (
+                inspected_contract[0] in {"unknown_safetensors", "metadata"}
+                or (inspected_contract[0] == "lora" and not workflow_template_id)
+            ):
                 raise ValueError(f"downloaded primary model component is unsupported: {path}")
             if path not in component_hashes:
                 raise ValueError(f"downloaded component could not be verified: {path}")
+            validated_kinds.add(inspected_contract[0])
         if auxiliary_kind:
             if auxiliary_kind != "lora":
                 raise ValueError("this auxiliary asset kind is not enabled")
             return
-        kinds = {item.kind for item in inspection.components}
+        kinds = validated_kinds
         if plan.role == "chat" and "gguf_model" not in kinds:
             raise ValueError("downloaded chat bundle has no primary GGUF model")
         if plan.role in {"image", "video"} and not kinds.intersection(
@@ -409,6 +430,19 @@ class DownloadManager:
             ):
                 continue
             candidates.append(root.joinpath(*component_path.parts))
+        download_root = self.settings.download_dir.resolve()
+        staging_root = staging.resolve()
+        for root in sorted(download_root.glob("plan-*.partial")):
+            if (
+                root.is_symlink()
+                or not root.is_dir()
+                or not re.fullmatch(r"plan-[0-9a-f]{64}\.partial", root.name)
+            ):
+                continue
+            resolved_root = root.resolve()
+            if resolved_root == staging_root or resolved_root.parent != download_root:
+                continue
+            candidates.append(resolved_root.joinpath(*relative.parts))
         return candidates
 
     async def _reuse_verified_file(

@@ -3,6 +3,7 @@ from __future__ import annotations
 import hashlib
 import json
 from dataclasses import dataclass
+from pathlib import PurePosixPath
 from typing import Any, Literal
 
 from sqlalchemy import select
@@ -14,10 +15,23 @@ from .domain import new_id
 from .model_manifests import ModelManifestInspection
 from .models import InstallPlan
 
-INSTALL_RESOLVER_VERSION = "install-resolver-v4"
+INSTALL_RESOLVER_VERSION = "install-resolver-v5"
 ACTIVATION_PROBE_VERSION = "activation-probe-v2"
 LAUNCH_CONTRACT_VERSION = "worker-launch-v1"
 
+_WORKFLOW_COMPONENT_KINDS = {
+    "checkpoints": "checkpoint",
+    "diffusion_models": "diffusion_model",
+    "unet": "diffusion_model",
+    "text_encoders": "text_encoder",
+    "vae": "vae",
+    "clip_vision": "clip_vision",
+    "loras": "lora",
+    "controlnet": "controlnet",
+    "upscale_models": "upscaler",
+    "embeddings": "embedding",
+    "ipadapter": "ip_adapter",
+}
 InstallCompatibility = Literal[
     "supported",
     "unsupported",
@@ -128,6 +142,17 @@ def resolve_install_plan(
     auxiliary_kind: str | None = None,
 ) -> ResolvedInstallPlan:
     metadata_by_path = {component.path: component for component in inspection.components}
+    workflow_contracts = {
+        path: contract
+        for item in selected_files
+        if workflow_template_id
+        and (
+            contract := _workflow_component_contract(
+                path := str(item["filename"]),
+                comfy_paths or {},
+            )
+        )
+    }
     artifacts = tuple(
         PlannedArtifact(
             path=str(item["filename"]),
@@ -137,7 +162,13 @@ def resolve_install_plan(
                     "weights"
                     if engine == "vllm"
                     and str(item["filename"]).casefold().endswith(".safetensors")
-                    else metadata_by_path[str(item["filename"])].kind
+                    else workflow_contracts.get(
+                        str(item["filename"]),
+                        (
+                            metadata_by_path[str(item["filename"])].kind,
+                            metadata_by_path[str(item["filename"])].target_folder,
+                        ),
+                    )[0]
                 )
             ),
             target_folder=(
@@ -150,7 +181,13 @@ def resolve_install_plan(
                     "ip_adapter": "ipadapter",
                 }[auxiliary_kind]
                 if auxiliary_kind
-                else metadata_by_path[str(item["filename"])].target_folder
+                else workflow_contracts.get(
+                    str(item["filename"]),
+                    (
+                        metadata_by_path[str(item["filename"])].kind,
+                        metadata_by_path[str(item["filename"])].target_folder,
+                    ),
+                )[1]
             ),
             size_bytes=(
                 int(item["size"])
@@ -274,6 +311,23 @@ def resolve_install_plan(
         failure_code=failure_code,
         failure_reason=failure_reason,
     )
+
+
+def _workflow_component_contract(
+    path: str,
+    comfy_paths: dict[str, str],
+) -> tuple[str, str] | None:
+    parent = str(PurePosixPath(path).parent)
+    parent = "." if parent == "." else parent
+    folders = [
+        folder
+        for folder, declared_parent in comfy_paths.items()
+        if declared_parent == parent and folder in _WORKFLOW_COMPONENT_KINDS
+    ]
+    if len(folders) != 1:
+        return None
+    folder = folders[0]
+    return _WORKFLOW_COMPONENT_KINDS[folder], folder
 
 
 def persist_install_plan(session: Session, resolved: ResolvedInstallPlan) -> InstallPlan:

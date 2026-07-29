@@ -281,9 +281,37 @@ def test_registry_accepts_and_revalidates_a_pinned_multirepository_bundle(
         ),
         encoding="utf-8",
     )
+    ambiguous_nodes = [
+        nodes[0],
+        {
+            "id": 20,
+            "type": "ModelLoader",
+            "inputs": [],
+            "outputs": [],
+            "properties": {
+                "cnr_id": "comfy-core",
+                "models": [
+                    {
+                        "directory": "vae",
+                        "name": "vae.safetensors",
+                        "url": (
+                            "https://huggingface.co/owner/vae/resolve/main/weights/vae.safetensors"
+                        ),
+                    }
+                ],
+            },
+            "widgets_values": ["vae.safetensors"],
+        },
+        nodes[-1],
+    ]
+    (templates / "image_ambiguous_component_paths.json").write_text(
+        json.dumps({"nodes": ambiguous_nodes, "links": []}),
+        encoding="utf-8",
+    )
 
     matches = registry.matches("owner/primary", "image")
 
+    assert "image_ambiguous_component_paths" not in {item.id for item in matches}
     assert matches[0].id == "image_multi_repo_edit"
     assert matches[0].published_date == "2026-07-10"
     assert matches[0].selected_files == [

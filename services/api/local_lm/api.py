@@ -65,7 +65,11 @@ from .model_manifests import (
     ModelManifestError,
     inspect_repository_metadata,
 )
-from .model_planner import persist_install_plan, resolve_install_plan
+from .model_planner import (
+    INSTALL_RESOLVER_VERSION,
+    persist_install_plan,
+    resolve_install_plan,
+)
 from .models import (
     AppSetting,
     Artifact,
@@ -2618,6 +2622,8 @@ async def create_download(payload: DownloadRequest, request: Request, session: S
                 raise ValueError("install plan is no longer active; run the install check again")
             if plan.compatibility != "supported":
                 raise ValueError(plan.failure_reason or "this model layout is unsupported")
+            if plan.resolver_version != INSTALL_RESOLVER_VERSION:
+                raise ValueError("install contract changed; run the install check again")
             planned_files = [
                 str(item.get("path") or "")
                 for item in plan.artifacts_json

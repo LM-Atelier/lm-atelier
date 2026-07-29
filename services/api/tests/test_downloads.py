@@ -21,7 +21,11 @@ from local_lm.db import SessionLocal, configure_database, init_db
 from local_lm.domain import JobKind, JobStatus
 from local_lm.downloads import DownloadManager
 from local_lm.events import EventBroker
-from local_lm.model_manifests import inspect_repository_metadata
+from local_lm.model_manifests import (
+    InspectedComponent,
+    ModelManifestInspection,
+    inspect_repository_metadata,
+)
 from local_lm.model_planner import (
     media_workflow_contract_version,
     persist_install_plan,
@@ -129,6 +133,88 @@ def safetensors_bytes(
     }
     encoded = json.dumps(header, separators=(",", ":")).encode()
     return len(encoded).to_bytes(8, "little") + encoded
+
+
+def test_official_workflow_staging_honors_declared_safe_component_contracts() -> None:
+    contracts = [
+        ("model.safetensors", "diffusion_model", "diffusion_models"),
+        ("encoder.safetensors", "text_encoder", "text_encoders"),
+        ("vae.safetensors", "vae", "vae"),
+        ("lightning.safetensors", "lora", "loras"),
+    ]
+    plan = SimpleNamespace(
+        family=None,
+        role="image",
+        artifacts_json=[
+            {
+                "path": path,
+                "kind": kind,
+                "target_folder": target,
+                "required": True,
+            }
+            for path, kind, target in contracts
+        ],
+        runtime_contract_json={
+            "auxiliary_kind": None,
+            "workflow_template_id": "official-edit-template",
+        },
+    )
+    inspection = ModelManifestInspection(
+        architecture=None,
+        family=None,
+        components=tuple(
+            InspectedComponent(
+                path=path,
+                kind="lora" if kind == "lora" else "unknown_safetensors",
+                target_folder="loras" if kind == "lora" else "checkpoints",
+            )
+            for path, kind, _target in contracts
+        ),
+        metadata_files=(),
+    )
+    hashes = {path: str(index) * 64 for index, (path, _kind, _target) in enumerate(contracts, 1)}
+
+    DownloadManager._validate_staged_plan(plan, inspection, hashes)  # type: ignore[arg-type]
+
+    mismatched = ModelManifestInspection(
+        architecture=None,
+        family=None,
+        components=(
+            InspectedComponent(
+                path="model.safetensors",
+                kind="lora",
+                target_folder="loras",
+            ),
+            *inspection.components[1:],
+        ),
+        metadata_files=(),
+    )
+    with pytest.raises(ValueError, match="contract changed"):
+        DownloadManager._validate_staged_plan(plan, mismatched, hashes)  # type: ignore[arg-type]
+
+    standalone = SimpleNamespace(
+        family=None,
+        role="image",
+        artifacts_json=[
+            {
+                "path": item.path,
+                "kind": item.kind,
+                "target_folder": item.target_folder,
+                "required": True,
+            }
+            for item in inspection.components
+        ],
+        runtime_contract_json={
+            "auxiliary_kind": None,
+            "workflow_template_id": None,
+        },
+    )
+    with pytest.raises(ValueError, match="unsupported"):
+        DownloadManager._validate_staged_plan(  # type: ignore[arg-type]
+            standalone,
+            inspection,
+            hashes,
+        )
 
 
 async def test_planned_chat_activation_requires_completion_and_records_evidence(
@@ -1071,6 +1157,46 @@ async def test_verified_installed_component_is_reused_without_network_transfer(
 
     assert reused == (staging / "model.gguf", len(content))
     assert (staging / "model.gguf").read_bytes() == content
+
+
+async def test_verified_failed_plan_component_is_reused_by_a_new_plan(
+    settings: Settings,
+) -> None:
+    settings.prepare()
+    configure_database(settings)
+    init_db()
+    manager = DownloadManager(settings, EventBroker())
+    content = b"verified failed plan bytes"
+    digest = hashlib.sha256(content).hexdigest()
+    previous = settings.download_dir / f"plan-{'b' * 64}.partial"
+    previous.mkdir(parents=True)
+    (previous / "weights").mkdir()
+    source = previous / "weights" / "model.safetensors"
+    source.write_bytes(content)
+    staging = settings.download_dir / f"plan-{'a' * 64}.partial"
+    staging.mkdir(parents=True)
+
+    with SessionLocal() as session:
+        candidates = manager._verified_reuse_candidates(
+            session,
+            staging=staging,
+            filename="weights/model.safetensors",
+            expected_sha256=digest,
+        )
+
+    assert source in candidates
+    reused = await manager._reuse_verified_file(
+        candidates=candidates,
+        staging=staging,
+        filename="weights/model.safetensors",
+        expected_sha256=digest,
+        expected_size=len(content),
+    )
+
+    target = staging / "weights" / "model.safetensors"
+    assert reused == (target, len(content))
+    assert target.read_bytes() == content
+    assert source.read_bytes() == content
 
 
 async def test_transfer_monitor_reports_process_tree_bytes(
