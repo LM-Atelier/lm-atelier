@@ -142,8 +142,7 @@
     "minimum": 0.58,
     "maximum": 0.74,
     "reasons": ["subject_replacement"]
-  },
-  {
+  },  {
     "name": "natural language brightness adjustment",
     "prompt": "Increase the brightness.",
     "scope": "minimal",
@@ -162,12 +161,104 @@
     "reasons": ["unsupported_language"]
   },
   {
+    "name": "generic object recolor",
+    "prompt": "Make the car blue.",
+    "scope": "localized",
+    "confidence": "high",
+    "minimum": 0.42,
+    "maximum": 0.58,
+    "reasons": ["localized_change"]
+  },
+  {
+    "name": "facial hair addition",
+    "prompt": "Give him a short beard.",
+    "scope": "replacement",
+    "confidence": "high",
+    "minimum": 0.58,
+    "maximum": 0.74,
+    "reasons": ["subject_replacement"]
+  },
+  {
+    "name": "expression change",
+    "prompt": "Make her smile.",
+    "scope": "replacement",
+    "confidence": "high",
+    "minimum": 0.58,
+    "maximum": 0.74,
+    "reasons": ["subject_replacement"]
+  },
+  {
+    "name": "geometric horizon edit",
+    "prompt": "Straighten the horizon.",
+    "scope": "replacement",
+    "confidence": "high",
+    "minimum": 0.58,
+    "maximum": 0.74,
+    "reasons": ["subject_replacement"]
+  },
+  {
+    "name": "global monochrome conversion",
+    "prompt": "Convert it to black and white.",
+    "scope": "global",
+    "confidence": "high",
+    "minimum": 0.72,
+    "maximum": 0.9,
+    "reasons": ["global_transformation"]
+  },
+  {
+    "name": "canvas extension",
+    "prompt": "Extend the canvas to the left.",
+    "scope": "global",
+    "confidence": "high",
+    "minimum": 0.72,
+    "maximum": 0.9,
+    "reasons": ["global_transformation"]
+  },
+  {
+    "name": "scene relighting",
+    "prompt": "Relight the scene from the left.",
+    "scope": "global",
+    "confidence": "high",
+    "minimum": 0.72,
+    "maximum": 0.9,
+    "reasons": ["global_transformation"]
+  },
+  {
+    "name": "white balance correction",
+    "prompt": "Correct the white balance.",
+    "scope": "minimal",
+    "confidence": "high",
+    "minimum": 0.3,
+    "maximum": 0.44,
+    "reasons": ["minimal_adjustment"]
+  },
+  {
+    "name": "selective desaturation",
+    "prompt": "Desaturate everything except the umbrella.",
+    "scope": "localized",
+    "confidence": "high",
+    "minimum": 0.42,
+    "maximum": 0.58,
+    "reasons": ["localized_change"]
+  },
+  {
+    "name": "generic object replacement",
+    "prompt": "Change the center flower into a sunflower.",
+    "scope": "replacement",
+    "confidence": "high",
+    "minimum": 0.58,
+    "maximum": 0.74,
+    "reasons": ["subject_replacement"]
+  },
+  {
     "name": "multi-clause color cast correction",
     "prompt": "Correct the harsh green color cast and brighten the foreground subjects.",
     "scope": "minimal",
     "confidence": "high",
-    "minimum": 0.30,
+    "minimum": 0.3,
     "maximum": 0.44,
-    "reasons": ["minimal_adjustment"]
+    "reasons": [
+      "minimal_adjustment"
+    ]
   }
 ]

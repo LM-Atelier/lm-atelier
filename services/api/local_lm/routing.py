@@ -81,6 +81,190 @@ _TEXT_EDIT = re.compile(
     r")\b",
     re.IGNORECASE,
 )
+_VISUAL_EDIT_LEADING_VERBS = {
+    "apply",
+    "change",
+    "clean",
+    "convert",
+    "cool",
+    "correct",
+    "enhance",
+    "erase",
+    "extend",
+    "fix",
+    "give",
+    "make",
+    "move",
+    "open",
+    "put",
+    "reduce",
+    "restore",
+    "smooth",
+    "soften",
+    "swap",
+    "turn",
+    "whiten",
+}
+_UNAMBIGUOUS_VISUAL_EDIT_VERBS = {
+    "colorize",
+    "colourize",
+    "denoise",
+    "desaturate",
+    "mirror",
+    "outpaint",
+    "reframe",
+    "relight",
+    "retouch",
+    "straighten",
+    "upscale",
+    "zoom",
+}
+_VISUAL_EDIT_TERMS = {
+    "background",
+    "balance",
+    "beard",
+    "canvas",
+    "car",
+    "cast",
+    "cloud",
+    "clouds",
+    "clutter",
+    "color",
+    "colors",
+    "colour",
+    "colours",
+    "depth",
+    "details",
+    "eyes",
+    "expression",
+    "fabric",
+    "field",
+    "flower",
+    "flowers",
+    "foreground",
+    "freckles",
+    "glare",
+    "glasses",
+    "hair",
+    "hairstyle",
+    "hat",
+    "highlights",
+    "horizon",
+    "image",
+    "lighting",
+    "necklace",
+    "noise",
+    "person",
+    "photo",
+    "picture",
+    "red-eye",
+    "reflections",
+    "roses",
+    "scarf",
+    "scene",
+    "scratch",
+    "shadows",
+    "shirt",
+    "shoes",
+    "sign",
+    "skin",
+    "sky",
+    "sleeve",
+    "smile",
+    "subject",
+    "sunglasses",
+    "teeth",
+    "wall",
+    "water",
+    "white",
+}
+_VISUAL_COLOR_TERMS = {
+    "amber",
+    "beige",
+    "black",
+    "blonde",
+    "blue",
+    "brown",
+    "burgundy",
+    "charcoal",
+    "coral",
+    "cream",
+    "cyan",
+    "gold",
+    "gray",
+    "green",
+    "grey",
+    "indigo",
+    "ivory",
+    "lavender",
+    "magenta",
+    "maroon",
+    "navy",
+    "orange",
+    "pink",
+    "purple",
+    "red",
+    "silver",
+    "tan",
+    "teal",
+    "turquoise",
+    "violet",
+    "white",
+    "yellow",
+}
+_TEXTUAL_TASK_TERMS = {
+    "advice",
+    "code",
+    "document",
+    "grammar",
+    "instructions",
+    "list",
+    "metaphor",
+    "paragraph",
+    "poem",
+    "punctuation",
+    "script",
+    "sentence",
+    "story",
+    "wording",
+}
+_TEXT_MEDIA_TASK_LEADING_VERBS = {"compose", "create", "draft", "generate", "write"}
+
+
+def _intent_tokens(text: str) -> list[str]:
+    return re.findall(r"[a-z0-9]+(?:-[a-z0-9]+)?", text.casefold())
+
+
+def _clear_text_media_task(text: str) -> bool:
+    tokens = _intent_tokens(text)
+    return bool(
+        tokens
+        and tokens[0] in _TEXT_MEDIA_TASK_LEADING_VERBS
+        and set(tokens[1:]) & _TEXTUAL_TASK_TERMS
+    )
+
+
+def _clear_visual_edit_intent(text: str) -> bool:
+    tokens = _intent_tokens(text)
+    if not tokens:
+        return False
+    index = 0
+    while index < len(tokens) and tokens[index] in {"now", "please"}:
+        index += 1
+    if index >= len(tokens):
+        return False
+    remaining = tokens[index:]
+    leading = remaining[0]
+    terms = set(remaining[1:])
+    if terms & _TEXTUAL_TASK_TERMS:
+        return False
+    if leading in _UNAMBIGUOUS_VISUAL_EDIT_VERBS:
+        return True
+    return bool(
+        leading in _VISUAL_EDIT_LEADING_VERBS and terms & (_VISUAL_EDIT_TERMS | _VISUAL_COLOR_TERMS)
+    )
+
+
 _UNCERTAIN = re.compile(r"\b(?:maybe|perhaps|possibly|might want to)\b", re.IGNORECASE)
 _TEXT_CONTEXT_REFERENCE = re.compile(
     r"\b(?:(?:previous|prior|earlier|above|last|preceding)\s+"
@@ -144,7 +328,7 @@ _ORDINAL_WORDS = {
     "ninth": 9,
     "tenth": 10,
 }
-_LIST_ITEM = re.compile(r"^\s*(?:\d{1,2}[.)]\s+|[-*•]\s+)(?P<item>\S.*?)\s*$")
+_LIST_ITEM = re.compile(r"^\s*(?:\d{1,2}[.)]\s+|[-*Ã¢â‚¬Â¢]\s+)(?P<item>\S.*?)\s*$")
 _OUTPUT_COUNT = re.compile(
     r"\b(?P<count>\d{1,2}|one|two|three|four|five|six|seven|eight|nine|ten|"
     r"eleven|twelve|thirteen|fourteen|fifteen|sixteen)\s+"
@@ -426,6 +610,9 @@ class ModalityRouter:
         if _TEXT_EDIT.search(normalized):
             return self._text(normalized, "clear text editing request", 0.96)
 
+        if _clear_text_media_task(normalized):
+            return self._text(normalized, "clear text task about media", 0.96)
+
         if (
             _VIDEO_CREATE.search(normalized)
             or _DIRECT_VIDEO.search(normalized)
@@ -449,7 +636,7 @@ class ModalityRouter:
         if (
             (has_prior_image or input_artifact_ids)
             and not referenced_text
-            and _PRIOR_IMAGE_EDIT.search(normalized)
+            and (_PRIOR_IMAGE_EDIT.search(normalized) or _clear_visual_edit_intent(normalized))
         ):
             return grounded(
                 self._media(

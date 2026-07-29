@@ -287,6 +287,11 @@ async def test_prior_image_edit_routes_without_a_model_planner() -> None:
         "Recolor the second person's jacket orange",
         "Change only the rightmost person into a marble statue",
         "Correct the harsh green color cast and brighten the foreground subjects",
+        "Make the car blue",
+        "Give him a short beard",
+        "Straighten the horizon",
+        "Correct the white balance",
+        "Apply a shallow depth of field",
     ],
 )
 async def test_natural_language_prior_image_edits_route_without_a_model_planner(
@@ -316,6 +321,10 @@ async def test_natural_language_prior_image_edits_route_without_a_model_planner(
         "Replace the word cat with dog in this sentence",
         "Add a paragraph about the color blue",
         "Change the first person to third person in this paragraph",
+        "Generate code that blurs an image",
+        "Change the shirt metaphor in the poem",
+        "Give him advice about growing a beard",
+        "Write instructions for changing a background",
     ],
 )
 def test_visual_edit_language_does_not_override_clear_text_requests(text: str) -> None:
@@ -327,6 +336,17 @@ def test_visual_edit_language_does_not_override_clear_text_requests(text: str) -
     )
 
     assert plan.operation == Operation.TEXT
+
+
+def test_large_visual_edit_intent_is_handled_without_backtracking() -> None:
+    plan = ModalityRouter().plan(
+        text=("please " * 20_000) + "make the car blue",
+        mode=RoutingMode.AUTO,
+        input_artifact_ids=[],
+        has_prior_image=True,
+    )
+
+    assert plan.operation == Operation.IMAGE_TO_IMAGE
 
 
 def test_visual_text_on_an_image_remains_an_image_edit() -> None:
@@ -504,17 +524,23 @@ async def test_clear_auto_route_does_not_invoke_model_planner() -> None:
     assert plan.reason == "clear image creation request"
 
 
-@pytest.mark.asyncio
-async def test_clear_text_task_does_not_invoke_model_planner() -> None:
+@pytest.mark.parametrize(
+    ("text", "reason"),
+    [
+        ("Reply with exactly: Auto ready", "clear text task"),
+        ("Generate code that blurs an image", "clear text task about media"),
+    ],
+)
+async def test_clear_text_task_does_not_invoke_model_planner(text: str, reason: str) -> None:
     plan = await ModalityRouter().plan_with_model(
         adapter=UnexpectedChatAdapter(),
-        text="Reply with exactly: Auto ready",
+        text=text,
         mode=RoutingMode.AUTO,
         input_artifact_ids=[],
     )
 
     assert plan.operation == Operation.TEXT
-    assert plan.reason == "clear text task"
+    assert plan.reason == reason
 
 
 @pytest.mark.asyncio
