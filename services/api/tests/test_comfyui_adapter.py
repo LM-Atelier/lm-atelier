@@ -233,6 +233,111 @@ async def test_websocket_is_connected_before_a_warm_prompt_can_complete(
     assert generated[-1].assets[0].name == "warm.png"
 
 
+async def test_binary_previews_retain_the_latest_sampler_progress(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    prompt_id = "prompt-preview-progress"
+    preview = b"\x89PNG\r\n\x1a\npreview"
+
+    class Socket:
+        def __init__(self) -> None:
+            self.messages = iter(
+                [
+                    json.dumps(
+                        {
+                            "type": "progress",
+                            "data": {"prompt_id": prompt_id, "max": 4, "value": 1},
+                        }
+                    ),
+                    preview,
+                    json.dumps(
+                        {
+                            "type": "progress",
+                            "data": {"prompt_id": prompt_id, "max": 4, "value": 2},
+                        }
+                    ),
+                    preview,
+                    json.dumps(
+                        {
+                            "type": "execution_success",
+                            "data": {"prompt_id": prompt_id},
+                        }
+                    ),
+                ]
+            )
+
+        async def __aenter__(self) -> Socket:
+            return self
+
+        async def __aexit__(self, *_args: Any) -> None:
+            return None
+
+        def __aiter__(self) -> Socket:
+            return self
+
+        async def __anext__(self) -> str | bytes:
+            try:
+                return next(self.messages)
+            except StopIteration as exc:
+                raise StopAsyncIteration from exc
+
+    def connect(*_args: Any, **_kwargs: Any) -> Socket:
+        return Socket()
+
+    async def comfy(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/prompt":
+            return httpx.Response(200, json={"prompt_id": prompt_id, "node_errors": {}})
+        if request.url.path == f"/history/{prompt_id}":
+            return httpx.Response(
+                200,
+                json={
+                    prompt_id: {
+                        "outputs": {
+                            "save": {
+                                "images": [
+                                    {
+                                        "filename": "preview-progress.png",
+                                        "subfolder": "",
+                                        "type": "output",
+                                    }
+                                ]
+                            }
+                        }
+                    }
+                },
+            )
+        if request.url.path == "/view":
+            return httpx.Response(
+                200,
+                content=b"\x89PNG\r\n\x1a\n",
+                headers={"content-type": "image/png"},
+            )
+        raise AssertionError(f"unexpected ComfyUI request: {request.method} {request.url}")
+
+    monkeypatch.setattr("local_lm.adapters.comfyui.websockets.connect", connect)
+    adapter = ComfyUIAdapter("http://comfy.test")
+    await adapter._client.aclose()
+    adapter._client = httpx.AsyncClient(
+        base_url="http://comfy.test",
+        transport=httpx.MockTransport(comfy),
+    )
+    try:
+        events = [
+            event async for event in adapter.generate(media_request(operation="text_to_image"))
+        ]
+    finally:
+        await adapter.close()
+
+    assert [(event.type, event.phase, event.progress) for event in events] == [
+        ("queued", "queued", 0),
+        ("progress", "sampling", 0.25),
+        ("preview", "sampling", 0.25),
+        ("progress", "sampling", 0.5),
+        ("preview", "sampling", 0.5),
+        ("complete", "complete", 1),
+    ]
+
+
 async def test_workflow_probe_requires_a_generated_asset(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

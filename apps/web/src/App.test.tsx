@@ -1398,6 +1398,54 @@ describe("App", () => {
     expect(indeterminate.firstElementChild).toHaveClass("indeterminate");
   });
 
+  it("does not let a zero preview stage hide monotonic job progress", async () => {
+    const stamp = new Date().toISOString();
+    vi.mocked(api.jobs).mockResolvedValue([{
+      id: "image-preview-progress",
+      kind: "image",
+      status: "running",
+      run_id: "run-preview-progress",
+      progress: 0.5,
+      phase: "preview",
+      progress_json: {
+        version: 2,
+        stage: "preview",
+        stage_progress: 0,
+        overall_progress: null,
+        completed_units: null,
+        total_units: null,
+        unit: null,
+        bytes_reused: 0,
+        rate_bytes_per_second: null,
+        eta_seconds: null,
+        file_index: null,
+        file_count: null,
+        queue_resource: "media_compute",
+        queue_position: null,
+        queue_length: null,
+        blocked_by: [],
+        indeterminate: false,
+        updated_at: stamp,
+      },
+      payload_json: {},
+      result_json: {},
+      error: null,
+      attempt: 1,
+      cancellable: true,
+      created_at: stamp,
+      updated_at: stamp,
+    }]);
+    const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+    render(
+      <QueryClientProvider client={client}>
+        <App />
+      </QueryClientProvider>,
+    );
+
+    expect(await screen.findByText("preview · 50%")).toBeInTheDocument();
+    expect(screen.getByRole("progressbar", { name: "image progress" }))
+      .toHaveAttribute("aria-valuenow", "50");
+  });
   it("shows a bounded list of unsuccessful jobs and retries one", async () => {
     const failedJobs = Array.from({ length: 5 }, (_, index) => ({
       id: `job-${index + 1}`,
@@ -2059,6 +2107,97 @@ describe("App", () => {
     expect(screen.queryByRole("button", { name: "Animate" })).not.toBeInTheDocument();
   });
 
+  it("stops following progress refreshes after the user scrolls away", async () => {
+    localStorage.setItem("local-lm-chat", "chat-scroll-intent");
+    const stamp = "2026-07-29T00:00:00Z";
+    const detail: ChatDetail = {
+      id: "chat-scroll-intent",
+      project_id: null,
+      title: "Scroll intent",
+      archived: false,
+      routing_mode: "auto",
+      confirm_uncertain_media: false,
+      active_chat_profile_id: null,
+      active_image_profile_id: null,
+      active_video_profile_id: null,
+      active_head_message_id: "assistant-scroll",
+      created_at: stamp,
+      updated_at: stamp,
+      messages: [
+        {
+          id: "user-scroll",
+          chat_id: "chat-scroll-intent",
+          parent_id: null,
+          role: "user",
+          status: "complete",
+          parts: [{ id: "prompt", position: 0, type: "text", text: "Edit this image", artifact_id: null, metadata_json: {} }],
+          created_at: stamp,
+          updated_at: stamp,
+        },
+        {
+          id: "assistant-scroll",
+          chat_id: "chat-scroll-intent",
+          parent_id: "user-scroll",
+          role: "assistant",
+          status: "pending",
+          parts: [{ id: "progress", position: 0, type: "progress", text: "Sampling", artifact_id: null, metadata_json: { progress: 0.25 } }],
+          created_at: stamp,
+          updated_at: stamp,
+        },
+      ],
+    };
+    vi.mocked(api.chat).mockResolvedValue(detail);
+    const scrollIntoView = vi.fn();
+    Object.defineProperty(HTMLElement.prototype, "scrollIntoView", {
+      configurable: true,
+      value: scrollIntoView,
+    });
+    const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+    try {
+      render(
+        <QueryClientProvider client={client}>
+          <App />
+        </QueryClientProvider>,
+      );
+      expect(await screen.findByText("Edit this image")).toBeInTheDocument();
+      const viewport = document.querySelector(".messages") as HTMLDivElement;
+      Object.defineProperties(viewport, {
+        scrollHeight: { configurable: true, value: 1_000 },
+        clientHeight: { configurable: true, value: 400 },
+        scrollTop: { configurable: true, writable: true, value: 150 },
+      });
+      scrollIntoView.mockClear();
+      fireEvent.scroll(viewport);
+      act(() => {
+        client.setQueryData<ChatDetail>(["chat", detail.id], {
+          ...detail,
+          messages: detail.messages.map((message) => (
+            message.id === "assistant-scroll"
+              ? { ...message, updated_at: "2026-07-29T00:00:01Z" }
+              : message
+          )),
+        });
+      });
+      await act(async () => undefined);
+      expect(scrollIntoView).not.toHaveBeenCalled();
+
+      viewport.scrollTop = 600;
+      fireEvent.scroll(viewport);
+      act(() => {
+        client.setQueryData<ChatDetail>(["chat", detail.id], {
+          ...detail,
+          messages: detail.messages.map((message) => (
+            message.id === "assistant-scroll"
+              ? { ...message, updated_at: "2026-07-29T00:00:02Z" }
+              : message
+          )),
+        });
+      });
+      await waitFor(() => expect(scrollIntoView).toHaveBeenCalledTimes(1));
+    } finally {
+      delete (HTMLElement.prototype as Partial<HTMLElement>).scrollIntoView;
+    }
+  });
   it("copies complete messages and fenced code blocks", async () => {
     localStorage.setItem("local-lm-chat", "chat-copy");
     const stamp = "2026-07-22T00:00:00Z";
