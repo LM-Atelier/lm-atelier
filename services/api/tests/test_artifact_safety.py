@@ -115,6 +115,36 @@ def test_artifact_delete_removes_staged_file_only_after_commit(
     assert not trash.exists()
 
 
+def test_temporary_preview_delete_defers_windows_locked_files(
+    artifact_session: tuple[ArtifactStore, Session],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    store, session = artifact_session
+    artifact = store.ingest_bytes(
+        session,
+        b"\x89PNG\r\n\x1a\npreview",
+        kind=ArtifactKind.IMAGE,
+        media_type="image/png",
+        metadata={"temporary_preview": True},
+    )
+    session.commit()
+    path = store.resolve(artifact)
+    real_replace = os.replace
+
+    def locked_replace(source: str | Path, destination: str | Path) -> None:
+        if Path(source) == path:
+            error = OSError(13, "file is in use")
+            error.winerror = 32  # type: ignore[attr-defined]
+            raise error
+        real_replace(source, destination)
+
+    monkeypatch.setattr("local_lm.artifacts.os.replace", locked_replace)
+
+    assert store.delete_temporary_preview(session, artifact.id) is False
+    assert session.get(Artifact, artifact.id) is not None
+    assert path.read_bytes() == b"\x89PNG\r\n\x1a\npreview"
+
+
 def test_retention_reconciles_crash_interrupted_artifact_deletions(
     artifact_session: tuple[ArtifactStore, Session],
 ) -> None:
