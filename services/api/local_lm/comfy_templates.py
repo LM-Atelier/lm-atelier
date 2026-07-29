@@ -31,7 +31,7 @@ _RUNTIME_PARAMETERS = {
 }
 _PRIMITIVE_WIDGET_TYPES = {"BOOLEAN", "COMBO", "FLOAT", "INT", "STRING"}
 _CONTROL_AFTER_GENERATE = {"decrement", "fixed", "increment", "randomize"}
-COMFY_TEMPLATE_COMPILER_VERSION = 7
+COMFY_TEMPLATE_COMPILER_VERSION = 8
 DEFAULT_IMAGE_EDIT_DENOISE = 0.9
 _ADAPTIVE_CHECKPOINT_PREFIX = "lma_image_checkpoint_v1_"
 _ADAPTIVE_CHECKPOINT_PLACEHOLDER = "__LM_ATELIER_CHECKPOINT__"
@@ -974,6 +974,8 @@ def _compile_ui_graph(
     source_indices = {node_id: index for index, node_id in enumerate(source_nodes)}
     for node_id, node in flat_nodes.items():
         class_type = str(node.get("type") or "")
+        if class_type == "SaveImageAdvanced" and isinstance(object_info.get("SaveImage"), dict):
+            class_type = "SaveImage"
         node_info = object_info.get(class_type)
         if not isinstance(node_info, dict):
             if class_type not in {"MarkdownNote", "Note"}:
