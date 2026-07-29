@@ -286,6 +286,7 @@ async def test_prior_image_edit_routes_without_a_model_planner() -> None:
         "Replace the background with a beach",
         "Recolor the second person's jacket orange",
         "Change only the rightmost person into a marble statue",
+        "Correct the harsh green color cast and brighten the foreground subjects",
     ],
 )
 async def test_natural_language_prior_image_edits_route_without_a_model_planner(

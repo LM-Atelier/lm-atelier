@@ -78,11 +78,14 @@ const localizedPhrases = [
 ];
 const localizedWords = new Set(["add", "erase", "insert", "recolor", "remove"]);
 const minimalPhrases = [
-  "color correction", "colour correction", "make it brighter", "make it darker",
+  "color correction", "color cast", "colour correction", "colour cast",
+  "make it brighter", "make it darker",
   "slightly brighter", "slightly darker", "subtle change", "warm lighting",
+  "white balance",
 ];
 const minimalWords = new Set([
-  "brightness", "contrast", "exposure", "lighting", "sharpen", "slight", "slightly",
+  "brighten", "brightness", "contrast", "darken", "exposure", "lighting", "relight",
+  "sharpen", "slight", "slightly",
   "subtle", "subtly",
 ]);
 const preservationPhrases = [

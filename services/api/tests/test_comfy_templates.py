@@ -1265,3 +1265,51 @@ def test_subgraph_prompt_labels_do_not_replace_conditioning_links() -> None:
 
     assert graph["1"]["inputs"]["text"] == "${prompt}"
     assert graph["10:2"]["inputs"]["conditioning"] == ["1", 0]
+
+
+def test_runtime_parameter_names_do_not_replace_graph_links() -> None:
+    ui_graph = {
+        "nodes": [
+            {
+                "id": 1,
+                "type": "PrimitiveInt",
+                "inputs": [],
+                "outputs": [{"name": "INT", "type": "INT", "links": [1]}],
+                "widgets_values": [40],
+            },
+            {
+                "id": 2,
+                "type": "KSampler",
+                "inputs": [
+                    {
+                        "name": "steps",
+                        "type": "INT",
+                        "widget": {"name": "steps"},
+                        "link": 1,
+                    }
+                ],
+                "outputs": [],
+                "widgets_values": [40],
+            },
+        ],
+        "links": [[1, 1, 0, 2, 0, "INT"]],
+    }
+    object_info = {
+        "PrimitiveInt": {
+            "input": {"required": {"value": ["INT", {"default": 0}]}},
+            "input_order": {"required": ["value"]},
+        },
+        "KSampler": {
+            "input": {"required": {"steps": ["INT", {"default": 20}]}},
+            "input_order": {"required": ["steps"]},
+        },
+    }
+
+    graph, schema = _compile_ui_graph(
+        ui_graph,
+        object_info,
+        operation="image_to_image",
+    )
+
+    assert graph["2"]["inputs"]["steps"] == ["1", 0]
+    assert "steps" not in schema["properties"]

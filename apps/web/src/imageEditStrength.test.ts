@@ -17,6 +17,7 @@ describe("estimateImageEditStrength", () => {
     ["Recolor the second person's jacket orange.", "localized", 0.50, "high"],
     ["Change only the rightmost person into a marble statue.", "replacement", 0.66, "high"],
     ["Increase the brightness.", "minimal", 0.38, "high"],
+    ["Correct the harsh green color cast and brighten the foreground subjects.", "minimal", 0.38, "high"],
     ["Restyle the entire image as a watercolor painting.", "global", 0.82, "high"],
     ["Make this better.", "fallback", 0.56, "low"],
     ["Do not change the clothing; just brighten the lighting.", "minimal", 0.38, "high"],
