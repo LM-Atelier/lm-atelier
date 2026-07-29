@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import {
   calibratedImageEditStrength,
   estimateImageEditStrength,
+  resolveImageEditStrengthMode,
   workflowImageEditCalibration,
 } from "./imageEditStrength";
 
@@ -11,6 +12,7 @@ describe("estimateImageEditStrength", () => {
     ["Make it green.", "localized", 0.50],
     ["Give the person a new formal outfit without changing their face.", "replacement", 0.66],
     ["Replace the background with a moonlit city scene.", "replacement", 0.66],
+    ["Replace the mannequin's red sweatshirt with a royal-blue blazer. Keep the mannequin's head, pose, hands, pants, framing, lighting, and background unchanged.", "replacement", 0.66],
     ["Restyle the entire image as a watercolor painting.", "global", 0.82],
     ["Make this better.", "fallback", 0.56],
     ["Do not change the clothing; just brighten the lighting.", "minimal", 0.38],
@@ -24,6 +26,30 @@ describe("estimateImageEditStrength", () => {
 
   it("clamps the estimate to workflow bounds", () => {
     expect(estimateImageEditStrength("Restyle the image", 0.6, 0.7).value).toBe(0.7);
+  });
+});
+
+describe("image edit strength mode", () => {
+  it("keeps profile and default-preset numeric defaults on Auto", () => {
+    expect(resolveImageEditStrengthMode(
+      "denoise",
+      [{ denoise: 0.41 }, { denoise: 0.55 }, undefined, {}, undefined, {}],
+      [false, false, true, true, true, true],
+    )).toBe("auto");
+  });
+
+  it("preserves legacy user numeric choices and explicit mode precedence", () => {
+    const numericManualLayers = [false, false, true, true, true, true];
+    expect(resolveImageEditStrengthMode(
+      "denoise",
+      [{ _image_edit_strength_mode: "auto" }, {}, undefined, { denoise: 0.62 }, undefined, {}],
+      numericManualLayers,
+    )).toBe("manual");
+    expect(resolveImageEditStrengthMode(
+      "denoise",
+      [{ denoise: 0.41 }, {}, undefined, { denoise: 0.62 }, undefined, { _image_edit_strength_mode: "auto" }],
+      numericManualLayers,
+    )).toBe("auto");
   });
 });
 
