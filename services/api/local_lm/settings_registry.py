@@ -845,6 +845,8 @@ def workflow_settings(
     resolved: list[SettingField] = []
     for field in base_fields:
         property_schema = properties.get(field.key)
+        if isinstance(property_schema, Mapping) and property_schema.get("readOnly") is True:
+            continue
         resolved.append(
             _workflow_setting(field.key, property_schema, field)
             if isinstance(property_schema, Mapping)
