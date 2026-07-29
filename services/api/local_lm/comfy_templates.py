@@ -32,7 +32,7 @@ _RUNTIME_PARAMETERS = {
 }
 _PRIMITIVE_WIDGET_TYPES = {"BOOLEAN", "COMBO", "FLOAT", "INT", "STRING"}
 _CONTROL_AFTER_GENERATE = {"decrement", "fixed", "increment", "randomize"}
-COMFY_TEMPLATE_COMPILER_VERSION = 11
+COMFY_TEMPLATE_COMPILER_VERSION = 12
 DEFAULT_IMAGE_EDIT_DENOISE = 0.9
 _ADAPTIVE_CHECKPOINT_PREFIX = "lma_image_checkpoint_v1_"
 _ADAPTIVE_CHECKPOINT_PLACEHOLDER = "__LM_ATELIER_CHECKPOINT__"
@@ -1002,7 +1002,7 @@ def _compile_ui_graph(
                 _bind_runtime_parameter(inputs, input_name, runtime_name, schema_properties)
                 overridden_inputs.add(input_name)
         for input_name in list(inputs):
-            if input_name in overridden_inputs:
+            if input_name in overridden_inputs or (node_id, input_name) in linked_inputs:
                 continue
             runtime_name = _runtime_parameter(input_name, node)
             if runtime_name:

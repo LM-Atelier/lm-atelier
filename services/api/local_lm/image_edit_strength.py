@@ -241,19 +241,25 @@ _LOCALIZED_PHRASES = (
 _LOCALIZED_WORDS = {"add", "erase", "insert", "recolor", "remove"}
 _MINIMAL_PHRASES = (
     "color correction",
+    "color cast",
     "colour correction",
+    "colour cast",
     "make it brighter",
     "make it darker",
     "slightly brighter",
     "slightly darker",
     "subtle change",
     "warm lighting",
+    "white balance",
 )
 _MINIMAL_WORDS = {
+    "brighten",
     "brightness",
+    "darken",
     "contrast",
     "exposure",
     "lighting",
+    "relight",
     "sharpen",
     "slight",
     "slightly",
