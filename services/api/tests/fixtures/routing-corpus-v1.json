@@ -706,6 +706,174 @@
       "expected": "text"
     },
     {
+      "id": "context-edit-generic-01",
+      "text": "Make the car blue",
+      "mode": "auto",
+      "has_prior_image": true,
+      "expected": "image_to_image"
+    },
+    {
+      "id": "context-edit-generic-02",
+      "text": "Give him a short beard",
+      "mode": "auto",
+      "has_prior_image": true,
+      "expected": "image_to_image"
+    },
+    {
+      "id": "context-edit-generic-03",
+      "text": "Make her smile",
+      "mode": "auto",
+      "has_prior_image": true,
+      "expected": "image_to_image"
+    },
+    {
+      "id": "context-edit-generic-04",
+      "text": "Straighten the horizon",
+      "mode": "auto",
+      "has_prior_image": true,
+      "expected": "image_to_image"
+    },
+    {
+      "id": "context-edit-generic-05",
+      "text": "Convert it to black and white",
+      "mode": "auto",
+      "has_prior_image": true,
+      "expected": "image_to_image"
+    },
+    {
+      "id": "context-edit-generic-06",
+      "text": "Change her hairstyle to a bob",
+      "mode": "auto",
+      "has_prior_image": true,
+      "expected": "image_to_image"
+    },
+    {
+      "id": "context-edit-generic-07",
+      "text": "Put a hat on her",
+      "mode": "auto",
+      "has_prior_image": true,
+      "expected": "image_to_image"
+    },
+    {
+      "id": "context-edit-generic-08",
+      "text": "Mirror the image",
+      "mode": "auto",
+      "has_prior_image": true,
+      "expected": "image_to_image"
+    },
+    {
+      "id": "context-edit-generic-09",
+      "text": "Extend the canvas to the left",
+      "mode": "auto",
+      "has_prior_image": true,
+      "expected": "image_to_image"
+    },
+    {
+      "id": "context-edit-generic-10",
+      "text": "Change the shirt pattern to stripes",
+      "mode": "auto",
+      "has_prior_image": true,
+      "expected": "image_to_image"
+    },
+    {
+      "id": "context-edit-generic-11",
+      "text": "Relight the scene from the left",
+      "mode": "auto",
+      "has_prior_image": true,
+      "expected": "image_to_image"
+    },
+    {
+      "id": "context-edit-generic-12",
+      "text": "Correct the white balance",
+      "mode": "auto",
+      "has_prior_image": true,
+      "expected": "image_to_image"
+    },
+    {
+      "id": "context-edit-generic-13",
+      "text": "Move the subject slightly to the right",
+      "mode": "auto",
+      "has_prior_image": true,
+      "expected": "image_to_image"
+    },
+    {
+      "id": "context-edit-generic-14",
+      "text": "Apply a shallow depth of field",
+      "mode": "auto",
+      "has_prior_image": true,
+      "expected": "image_to_image"
+    },
+    {
+      "id": "context-edit-generic-15",
+      "text": "Change the center flower into a sunflower",
+      "mode": "auto",
+      "has_prior_image": true,
+      "expected": "image_to_image"
+    },
+    {
+      "id": "context-edit-generic-16",
+      "text": "Make only the first cup red",
+      "mode": "auto",
+      "has_prior_image": true,
+      "expected": "image_to_image"
+    },
+    {
+      "id": "context-edit-generic-negative-01",
+      "text": "Generate code that blurs an image",
+      "mode": "auto",
+      "has_prior_image": true,
+      "expected": "text"
+    },
+    {
+      "id": "context-edit-generic-negative-02",
+      "text": "Change the shirt metaphor in the poem",
+      "mode": "auto",
+      "has_prior_image": true,
+      "expected": "text"
+    },
+    {
+      "id": "context-edit-generic-negative-03",
+      "text": "Give him advice about growing a beard",
+      "mode": "auto",
+      "has_prior_image": true,
+      "expected": "text"
+    },
+    {
+      "id": "context-edit-generic-negative-04",
+      "text": "Make her a shopping list",
+      "mode": "auto",
+      "has_prior_image": true,
+      "expected": "text"
+    },
+    {
+      "id": "context-edit-generic-negative-05",
+      "text": "Write instructions for changing a background",
+      "mode": "auto",
+      "has_prior_image": true,
+      "expected": "text"
+    },
+    {
+      "id": "context-edit-generic-negative-06",
+      "text": "Explain how to straighten a horizon",
+      "mode": "auto",
+      "has_prior_image": true,
+      "expected": "text"
+    },
+    {
+      "id": "context-edit-generic-negative-07",
+      "text": "Should I make the wall cream?",
+      "mode": "auto",
+      "has_prior_image": true,
+      "expected": "text"
+    },
+    {
+      "id": "context-edit-generic-negative-08",
+      "text": "Write a caption for this image",
+      "mode": "auto",
+      "has_prior_image": true,
+      "expected": "text"
+    },
+    {
       "id": "context-edit-photometric-01",
       "text": "Correct the harsh green color cast and brighten the foreground subjects",
       "mode": "auto",

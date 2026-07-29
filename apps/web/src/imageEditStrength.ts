@@ -43,29 +43,30 @@ const strength: Record<ImageEditScope, number> = {
 const globalPhrases = [
   "change the entire image", "change the whole image", "complete transformation",
   "different composition", "new composition", "new scene", "oil painting",
-  "watercolor painting",
+  "watercolor painting", "apply a shallow depth of field", "convert it to black and white",
+  "desaturate everything", "extend the canvas", "move the subject", "relight the scene",
 ];
-const globalWords = new Set(["recompose", "restyle", "stylize", "transform", "watercolor"]);
+const globalWords = new Set([
+  "outpaint", "recompose", "reframe", "relight", "restyle", "stylize", "transform",
+  "watercolor",
+]);
 const replacementPhrases = [
   "change the background", "different background", "new background", "new clothes",
   "new clothing", "new hairstyle", "new outfit", "replace the background",
+  "mirror the image", "straighten the horizon",
 ];
 const replacementTargets = new Set([
-  "background", "blazer", "boy", "clothes", "clothing", "coat", "dress", "girl",
-  "hair", "hairstyle", "hoodie", "jacket", "man", "object", "outfit", "person",
-  "shirt", "shoes", "skirt", "subject", "suit", "sweatshirt", "sweater", "top",
-  "trousers", "wardrobe", "woman",
+  "background", "beard", "blazer", "boy", "clothes", "clothing", "coat", "dress",
+  "expression", "flower", "flowers", "girl", "glasses", "hair", "hairstyle", "hat",
+  "hoodie", "jacket", "man", "necklace", "object", "outfit", "person", "scarf",
+  "shirt", "shoes", "skirt", "smile", "subject", "suit", "sunglasses", "sweatshirt",
+  "sweater", "top", "trousers", "wardrobe", "woman",
 ]);
-const replacementVerbs = new Set(["change", "dress", "give", "make", "replace", "swap"]);
+const replacementVerbs = new Set([
+  "change", "dress", "give", "make", "put", "replace", "swap",
+]);
 const replacementPairWindow = 10;
 const replacementPairBlockers = new Set(["keep", "preserve", "retain", "unchanged", "without"]);
-const colorChangeTargets = new Set(
-  [...replacementTargets].filter(
-    (target) => ![
-      "background", "boy", "girl", "man", "object", "person", "subject", "woman",
-    ].includes(target),
-  ),
-);
 const colorChangeVerbs = new Set(["change", "make", "recolor", "turn"]);
 const colorWords = new Set([
   "amber", "beige", "black", "blonde", "blue", "brown", "burgundy", "charcoal",
@@ -73,21 +74,25 @@ const colorWords = new Set([
   "lavender", "magenta", "maroon", "navy", "orange", "pink", "purple", "red",
   "silver", "tan", "teal", "turquoise", "violet", "white", "yellow",
 ]);
+const colorChangeGlobalTargets = new Set([
+  "all", "background", "entire", "everything", "image", "photo", "picture", "scene", "whole",
+]);
 const localizedPhrases = [
   "add a", "add an", "make it blue", "make it green", "make it red", "remove the",
 ];
 const localizedWords = new Set(["add", "erase", "insert", "recolor", "remove"]);
 const minimalPhrases = [
-  "color correction", "color cast", "colour correction", "colour cast",
-  "make it brighter", "make it darker",
+  "color correction", "colour correction", "make it brighter", "make it darker",
   "slightly brighter", "slightly darker", "subtle change", "warm lighting",
-  "white balance",
+  "cool down the colors", "correct the white balance", "less grainy", "reduce the blue cast",
+  "reduce the highlights", "restore the faded colors", "soften the harsh shadows",
 ];
 const minimalWords = new Set([
-  "brighten", "brightness", "contrast", "darken", "exposure", "lighting", "relight",
-  "sharpen", "slight", "slightly",
-  "subtle", "subtly",
+  "balance", "brightness", "cast", "contrast", "exposure", "grain", "grainy",
+  "highlights", "lighting", "noise", "shadows", "sharpen", "slight", "slightly",
+  "subtle", "subtly", "warmth",
 ]);
+const selectiveColorWords = new Set(["colorize", "colourize", "desaturate"]);
 const preservationPhrases = [
   "do not alter", "do not change", "don t alter", "don t change", "keep everything else",
   "keeping everything else",
@@ -216,10 +221,12 @@ function hasBoundedColorChange(text: string): boolean {
     if (!colorChangeVerbs.has(tokens[verbIndex])) continue;
     const window = tokens.slice(verbIndex + 1, verbIndex + replacementPairWindow + 1);
     if (window.some((token) => ["new", "replace", "swap"].includes(token))) continue;
-    if (
-      new Set(window.filter((token) => colorChangeTargets.has(token))).size === 1
-      && window.some((token) => colorWords.has(token))
-    ) return true;
+    const colors = new Set(window.filter((token) => colorWords.has(token)));
+    if (colors.size !== 1) continue;
+    const colorIndex = window.findIndex((token) => colors.has(token));
+    if (!window.slice(0, colorIndex).some((token) => colorChangeGlobalTargets.has(token))) {
+      return true;
+    }
   }
   return false;
 }
@@ -235,14 +242,22 @@ export function estimateImageEditStrength(
   const preservation = hasPhrase(text, preservationPhrases);
   const replacement = hasPhrase(text, replacementPhrases) || hasBoundedReplacementPair(text);
   const colorChange = hasBoundedColorChange(text);
+  const selectiveColor = intersects(words, selectiveColorWords)
+    && ["except", "only"].some((word) => words.has(word));
   let scope: ImageEditScope;
   let confidence: ImageEditStrengthEstimate["confidence"];
-  if (hasPhrase(text, globalPhrases) || intersects(words, globalWords)) {
+  if (selectiveColor) {
+    scope = "localized";
+    confidence = "high";
+  } else if (hasPhrase(text, globalPhrases) || intersects(words, globalWords)) {
     scope = "global";
     confidence = "high";
   } else if (preservation && minimal && !replacement) {
     scope = "minimal";
     confidence = "high";
+  } else if (hasPhrase(text, localizedPhrases)) {
+    scope = "localized";
+    confidence = "medium";
   } else if (colorChange) {
     scope = "localized";
     confidence = "high";
