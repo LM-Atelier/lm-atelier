@@ -1312,4 +1312,5 @@ def test_runtime_parameter_names_do_not_replace_graph_links() -> None:
     )
 
     assert graph["2"]["inputs"]["steps"] == ["1", 0]
-    assert "steps" not in schema["properties"]
+    assert schema["properties"]["steps"] == {"readOnly": True}
+    assert schema["properties"]["cfg"] == {"readOnly": True}
