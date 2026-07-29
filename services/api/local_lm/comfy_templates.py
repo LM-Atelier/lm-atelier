@@ -23,6 +23,7 @@ _RUNTIME_PARAMETERS = {
     "fps": "fps",
     "frames": "frames",
     "height": "height",
+    "noise_seed": "seed",
     "sampler_name": "sampler",
     "scheduler": "scheduler",
     "seed": "seed",
@@ -31,7 +32,7 @@ _RUNTIME_PARAMETERS = {
 }
 _PRIMITIVE_WIDGET_TYPES = {"BOOLEAN", "COMBO", "FLOAT", "INT", "STRING"}
 _CONTROL_AFTER_GENERATE = {"decrement", "fixed", "increment", "randomize"}
-COMFY_TEMPLATE_COMPILER_VERSION = 8
+COMFY_TEMPLATE_COMPILER_VERSION = 9
 DEFAULT_IMAGE_EDIT_DENOISE = 0.9
 _ADAPTIVE_CHECKPOINT_PREFIX = "lma_image_checkpoint_v1_"
 _ADAPTIVE_CHECKPOINT_PLACEHOLDER = "__LM_ATELIER_CHECKPOINT__"
