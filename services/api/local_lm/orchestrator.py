@@ -1191,7 +1191,10 @@ class ConversationOrchestrator:
                     "count": output_count,
                     "slot": output_slot,
                 },
-                "image_edit": self._image_edit_provenance(image_edit_strength),
+                "image_edit": self._image_edit_provenance(
+                    plan.operation,
+                    image_edit_strength,
+                ),
                 "auxiliary_assets": (
                     {
                         "lora_stack": lora_resolution.provenance,
@@ -1836,7 +1839,10 @@ class ConversationOrchestrator:
                     "resolved_settings": resolved["settings"],
                     "generation_estimate": resolved["generation_estimate"],
                     "plan_step_estimate": resolved["estimate"],
-                    "image_edit": self._image_edit_provenance(resolved["image_edit_strength"]),
+                    "image_edit": self._image_edit_provenance(
+                        operation,
+                        resolved["image_edit_strength"],
+                    ),
                     "auxiliary_assets": (
                         {
                             "lora_stack": resolved["lora_resolution"].provenance,
@@ -4489,15 +4495,18 @@ class ConversationOrchestrator:
 
     @staticmethod
     def _image_edit_provenance(
+        operation: Operation,
         resolution: ImageEditStrengthResolution | None,
     ) -> dict[str, Any] | None:
-        if resolution is None:
+        if operation != Operation.IMAGE_TO_IMAGE:
             return None
-        return {
+        result: dict[str, Any] = {
             "policy": "preserve_unrequested_details_v1",
-            "default_change_strength_applied": resolution.default_applied,
-            "strength": resolution.provenance(),
+            "default_change_strength_applied": bool(resolution and resolution.default_applied),
         }
+        if resolution is not None:
+            result["strength"] = resolution.provenance()
+        return result
 
     @staticmethod
     def _media_prompt(run: Run) -> str:

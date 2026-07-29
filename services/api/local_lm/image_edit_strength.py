@@ -536,6 +536,11 @@ def resolve_image_edit_strength(
     if operation != Operation.IMAGE_TO_IMAGE:
         return None
 
+    field = next((item for item in fields if item.key == parameter), None)
+    if field is None:
+        effective_settings.pop(parameter, None)
+        return None
+
     minimum, maximum = _strength_bounds(fields, parameter, calibration)
     explicit_source: EditSettingSource | None = None
     explicit_auto = False
