@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import base64
 import copy
 import fnmatch
 import hashlib
@@ -93,6 +94,21 @@ _VISION_PROBE_DATA_URL = (
     "iVBORw0KGgoAAAANSUhEUgAAABAAAAAQCAIAAACQkWg2AAAAIUlEQVR4nGP8z0AaYCJRPcOo"
     "BmIAE1GqkMCoBmIAyaEEAEAuAR9UPEsJAAAAAElFTkSuQmCC"
 )
+_ACTIVATION_PROBE_PNG = base64.b64decode(_VISION_PROBE_DATA_URL.partition(",")[2])
+_NUMBERED_WORKFLOW_INPUT_IMAGE = re.compile(r"input_image_(?P<index>\d{1,2})\Z")
+
+
+def _workflow_source_image_count(compiled: CompiledComfyTemplate) -> int:
+    input_schema = getattr(compiled, "input_schema", {})
+    properties = input_schema.get("properties") if isinstance(input_schema, dict) else None
+    if not isinstance(properties, dict):
+        return 0
+    count = 1 if "input_image" in properties else 0
+    for name in properties:
+        match = _NUMBERED_WORKFLOW_INPUT_IMAGE.fullmatch(str(name))
+        if match and (index := int(match.group("index"))) < 64:
+            count = max(count, index + 1)
+    return count
 
 
 def _template_workflow_name(template_id: str) -> str:
@@ -1740,32 +1756,43 @@ class DownloadManager:
     ) -> None:
         if not self.media_adapter:
             raise RuntimeError("automatic ComfyUI activation is unavailable")
-        await self.media_adapter.probe_workflow(
-            MediaRequest(
-                run_id=new_id("activation-probe"),
-                operation=getattr(
-                    getattr(compiled, "template", None),
-                    "operation",
-                    "text_to_image",
-                ),
-                prompt="simple geometric shape",
-                negative_prompt="",
-                input_paths=[],
-                workflow=compiled.api_graph,
-                parameters={
-                    "width": 256,
-                    "height": 256,
-                    "batch_size": 1,
-                    "seed": 0,
-                    "steps": 1,
-                    "cfg": 1.0,
-                    "sampler": "euler",
-                    "scheduler": "normal",
-                    "denoise": 1.0,
-                },
-            ),
-            timeout_seconds=300,
+        operation = getattr(
+            getattr(compiled, "template", None),
+            "operation",
+            "text_to_image",
         )
+        source_count = _workflow_source_image_count(compiled)
+        probe_path: Path | None = None
+        try:
+            if source_count:
+                self.settings.state_dir.mkdir(parents=True, exist_ok=True)
+                probe_path = self.settings.state_dir / f"{new_id('activation-probe')}.png"
+                await asyncio.to_thread(probe_path.write_bytes, _ACTIVATION_PROBE_PNG)
+            await self.media_adapter.probe_workflow(
+                MediaRequest(
+                    run_id=new_id("activation-probe"),
+                    operation=operation,
+                    prompt="simple geometric shape",
+                    negative_prompt="",
+                    input_paths=[probe_path] * source_count if probe_path else [],
+                    workflow=compiled.api_graph,
+                    parameters={
+                        "width": 256,
+                        "height": 256,
+                        "batch_size": 1,
+                        "seed": 0,
+                        "steps": 1,
+                        "cfg": 1.0,
+                        "sampler": "euler",
+                        "scheduler": "normal",
+                        "denoise": 1.0,
+                    },
+                ),
+                timeout_seconds=300,
+            )
+        finally:
+            if probe_path:
+                probe_path.unlink(missing_ok=True)
 
     async def _activate_comfy_install(
         self,

@@ -15,14 +15,19 @@ from local_lm.adapters.base import GeneratedAsset, MediaEvent, MediaRequest
 from local_lm.adapters.comfyui import ComfyUIAdapter, _preview_payload
 
 
-def media_request(path: Path | None = None, *, operation: str = "image_to_image") -> MediaRequest:
+def media_request(
+    path: Path | None = None,
+    *,
+    operation: str = "image_to_image",
+    workflow: dict[str, Any] | None = None,
+) -> MediaRequest:
     return MediaRequest(
         run_id="run_conditioning",
         operation=operation,
         prompt="Restyle the source image",
         negative_prompt="blur",
         input_paths=[path] if path else [],
-        workflow={},
+        workflow=workflow or {},
         parameters={"seed": 42},
     )
 
@@ -98,13 +103,22 @@ async def test_conditioning_images_are_staged_and_exposed_as_workflow_parameters
         transport=httpx.MockTransport(upload),
     )
     try:
-        parameters = await adapter._request_parameters(media_request(source))
+        parameters = await adapter._request_parameters(
+            media_request(
+                source,
+                workflow={
+                    "first": "${input_image_0}",
+                    "second": "${input_image_1}",
+                },
+            )
+        )
     finally:
         await adapter.close()
 
     reference = "lm-atelier/lm-atelier-run_conditioning-0.png [temp]"
     assert parameters["input_image"] == reference
     assert parameters["input_image_0"] == reference
+    assert parameters["input_image_1"] == reference
     assert parameters["input_images"] == [reference]
     assert parameters["prompt"] == "Restyle the source image"
     assert parameters["negative_prompt"] == "blur"

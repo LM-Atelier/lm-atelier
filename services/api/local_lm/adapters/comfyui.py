@@ -30,6 +30,23 @@ _MAX_COMFY_JSON_BYTES = 32 * 1024 * 1024
 _MAX_COMFY_OUTPUTS = 64
 _ERROR_LABEL = re.compile(r"[A-Za-z][A-Za-z0-9_.-]{0,79}\Z")
 _ERRNO = re.compile(r"\[Errno (?P<number>\d{1,5})\]")
+_NUMBERED_INPUT_IMAGE = re.compile(r"\$\{input_image_(?P<index>\d{1,2})\}\Z")
+
+
+def _numbered_input_image_indices(workflow: dict[str, Any]) -> list[int]:
+    indices: set[int] = set()
+    stack: list[Any] = [workflow]
+    while stack:
+        value = stack.pop()
+        if isinstance(value, dict):
+            stack.extend(value.values())
+        elif isinstance(value, list):
+            stack.extend(value)
+        elif isinstance(value, str):
+            match = _NUMBERED_INPUT_IMAGE.fullmatch(value)
+            if match and (index := int(match.group("index"))) < 64:
+                indices.add(index)
+    return sorted(indices)
 
 
 def _execution_error_message(data: dict[str, Any]) -> str:
@@ -317,6 +334,11 @@ class ComfyUIAdapter:
             parameters.update(
                 {f"input_image_{index}": reference for index, reference in enumerate(uploaded)}
             )
+            for index in _numbered_input_image_indices(request.workflow):
+                parameters.setdefault(
+                    f"input_image_{index}",
+                    uploaded[min(index, len(uploaded) - 1)],
+                )
         return parameters
 
     async def generate(self, request: MediaRequest) -> AsyncIterator[MediaEvent]:
