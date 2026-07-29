@@ -686,6 +686,76 @@ def test_registry_compiles_modern_combo_widgets(tmp_path: Path) -> None:
     }
 
 
+def test_registry_binds_modern_random_noise_seed(tmp_path: Path) -> None:
+    registry = _registry(tmp_path)
+    assert registry.settings.comfy_directory is not None
+    template_path = (
+        registry.settings.comfy_directory
+        / ".venv"
+        / "Lib"
+        / "site-packages"
+        / "comfyui_workflow_templates_json"
+        / "templates"
+        / "sdxlturbo_example.json"
+    )
+    template = json.loads(template_path.read_text(encoding="utf-8"))
+    template["nodes"].append(
+        {
+            "id": 4,
+            "type": "RandomNoise",
+            "inputs": [],
+            "outputs": [{"name": "NOISE", "type": "NOISE", "links": []}],
+            "properties": {"cnr_id": "comfy-core"},
+            "widgets_values": [720512742793301],
+        }
+    )
+    template_path.write_text(json.dumps(template), encoding="utf-8")
+    object_info = {
+        "CheckpointLoaderSimple": {
+            "input": {
+                "required": {
+                    "ckpt_name": [["sd_xl_turbo_1.0_fp16.safetensors"]],
+                }
+            },
+            "input_order": {"required": ["ckpt_name"]},
+        },
+        "KSamplerSelect": {
+            "input": {
+                "required": {
+                    "sampler_name": [["euler"]],
+                }
+            },
+            "input_order": {"required": ["sampler_name"]},
+        },
+        "RandomNoise": {
+            "input": {
+                "required": {
+                    "noise_seed": ["INT", {"default": 0}],
+                }
+            },
+            "input_order": {"required": ["noise_seed"]},
+        },
+        "SaveImage": {
+            "input": {
+                "required": {
+                    "images": ["IMAGE"],
+                    "filename_prefix": ["STRING", {"default": "ComfyUI"}],
+                }
+            },
+            "input_order": {"required": ["images", "filename_prefix"]},
+            "output_node": True,
+        },
+    }
+
+    compiled = registry.compile("sdxlturbo_example", "image", object_info)
+
+    assert compiled.api_graph["4"]["inputs"]["noise_seed"] == "${seed}"
+    assert compiled.input_schema["properties"]["seed"] == {
+        "type": "integer",
+        "default": -1,
+    }
+
+
 def test_registry_normalizes_advanced_image_output_to_the_core_contract(
     tmp_path: Path,
 ) -> None:
