@@ -69,6 +69,17 @@ from .image_edit_strength import (
     ImageEditStrengthResolution,
     resolve_image_edit_strength,
 )
+from .image_edit_verification import (
+    MAX_ASSESSMENT_CHARACTERS,
+    VERIFICATION_VERSION,
+    ImageEditVerificationJobPayload,
+    VerificationReason,
+    build_image_edit_verification_prompt,
+    decide_image_edit_retry,
+    image_edit_verification_eligibility,
+    image_edit_verification_job_id,
+    parse_image_edit_verification_assessment,
+)
 from .model_planner import media_workflow_contract_version
 from .models import (
     Artifact,
@@ -121,7 +132,7 @@ from .setup_verification import (
     recover_terminal_setup_verifications,
     setup_verification_for_chat,
 )
-from .vision import PreparedVisualContext, VisionContextService
+from .vision import PreparedVisualContext, VisionContextService, VisionInputError
 from .work_plans import plan_status_summary, refresh_plan_status
 
 logger = logging.getLogger(__name__)
@@ -229,7 +240,7 @@ class ConversationOrchestrator:
         self._admission_open = True
 
     def recover_interrupted(self) -> None:
-        queued: list[tuple[str, str]] = []
+        queued: list[tuple[str, str | None]] = []
         with self.session_factory() as session:
             # Turn-creation claims only live while one API process is planning.
             session.execute(delete(TurnCreationClaim))
@@ -259,6 +270,8 @@ class ConversationOrchestrator:
                         run.status = RunStatus.QUEUED.value
                         self._set_work_status(session, run, JobStatus.QUEUED.value)
                         queued.append((job.id, run.id))
+                elif job.kind == JobKind.EDIT_VERIFY.value:
+                    queued.append((job.id, None))
 
             # A running backend operation cannot be proven safe to replay after
             # its process disappears. Preserve partial output and interrupt it.
@@ -266,6 +279,17 @@ class ConversationOrchestrator:
                 select(Job).where(Job.status == JobStatus.RUNNING.value)
             ).all()
             for job in running_jobs:
+                if job.kind == JobKind.EDIT_VERIFY.value:
+                    job.claim_owner = None
+                    job.claim_expires_at = None
+                    job.heartbeat_at = None
+                    self._finish_image_edit_verification(
+                        session,
+                        job,
+                        VerificationReason.ASSESSMENT_INTERRUPTED,
+                        job_status=JobStatus.INTERRUPTED.value,
+                    )
+                    continue
                 job.status = JobStatus.INTERRUPTED.value
                 job.error = "The application restarted before this job completed."
                 job.completed_at = utcnow()
@@ -328,6 +352,7 @@ class ConversationOrchestrator:
                                 )
                             for artifact_id in preview_ids:
                                 self.artifacts.delete_temporary_preview(session, artifact_id)
+
             session.commit()
         with self.session_factory() as session:
             recover_terminal_setup_verifications(session, self.artifacts)
@@ -1931,7 +1956,7 @@ class ConversationOrchestrator:
             self.start(queued_job.id, queued_run.id)
         return accepted
 
-    def start(self, job_id: str, run_id: str) -> None:
+    def start(self, job_id: str, run_id: str | None) -> None:
         if job_id in self._tasks and not self._tasks[job_id].done():
             return
         task = asyncio.create_task(self._execute(job_id, run_id), name=f"local-lm-{job_id}")
@@ -2002,11 +2027,22 @@ class ConversationOrchestrator:
             JobStatus.PAUSED.value,
         }
         with self.session_factory() as session:
-            rows = session.execute(
-                select(Job.id, Job.run_id, Job.status, Run.operation)
-                .join(Run, Job.run_id == Run.id)
-                .where(Run.chat_id == chat_id)
+            rows: list[tuple[str, str | None, str, str | None]] = [
+                (job_id, run_id, status, operation)
+                for job_id, run_id, status, operation in session.execute(
+                    select(Job.id, Job.run_id, Job.status, Run.operation)
+                    .join(Run, Job.run_id == Run.id)
+                    .where(Run.chat_id == chat_id)
+                ).all()
+            ]
+            verification_jobs = session.scalars(
+                select(Job).where(Job.kind == JobKind.EDIT_VERIFY.value)
             ).all()
+            rows.extend(
+                (job.id, None, job.status, None)
+                for job in verification_jobs
+                if job.payload_json.get("chat_id") == chat_id
+            )
 
         cancellable_rows = [
             (job_id, run_id, operation)
@@ -2014,6 +2050,16 @@ class ConversationOrchestrator:
             if status in active_statuses or self._task_is_active(job_id)
         ]
         for job_id, run_id, operation in cancellable_rows:
+            if not run_id:
+                try:
+                    await self.engines.chat.cancel(job_id)
+                except Exception:
+                    logger.warning(
+                        "Could not signal verification cancellation for job %s",
+                        job_id,
+                        exc_info=True,
+                    )
+                continue
             try:
                 if operation == Operation.TEXT.value:
                     await self.engines.chat.cancel(run_id)
@@ -2039,7 +2085,7 @@ class ConversationOrchestrator:
                 if self._tasks.get(job_id) is task:
                     self._tasks.pop(job_id, None)
 
-        cancelled: list[tuple[str, str]] = []
+        cancelled: list[tuple[str, str | None]] = []
         with self.session_factory() as session:
             for job_id, run_id, _status, _operation in rows:
                 job = session.get(Job, job_id)
@@ -2053,7 +2099,8 @@ class ConversationOrchestrator:
 
         for job_id, run_id in cancelled:
             await self.scheduler.publish_job(job_id)
-            await self.events.publish("run.cancelled", run_id, {"job_id": job_id})
+            if run_id:
+                await self.events.publish("run.cancelled", run_id, {"job_id": job_id})
 
     def _task_is_active(self, job_id: str) -> bool:
         task = self._tasks.get(job_id)
@@ -2074,6 +2121,7 @@ class ConversationOrchestrator:
         cancelled_task: asyncio.Task[None] | None = None
         run_id: str | None = None
         operation: str | None = None
+        verification_job = False
         with self.session_factory() as session:
             job = session.get(Job, job_id)
             if not job or job.status in {
@@ -2082,6 +2130,7 @@ class ConversationOrchestrator:
                 JobStatus.CANCELLED.value,
             }:
                 return False
+            verification_job = getattr(job, "kind", None) == JobKind.EDIT_VERIFY.value
             if job.run_id:
                 run = session.get(Run, job.run_id)
                 if run:
@@ -2093,20 +2142,25 @@ class ConversationOrchestrator:
                 cancelled_task = task
             self._mark_cancelled(session, job)
             session.commit()
-        if run_id:
+        if run_id or verification_job:
             try:
-                if operation == Operation.TEXT.value:
+                if verification_job:
+                    await self.engines.chat.cancel(job_id)
+                elif operation == Operation.TEXT.value:
+                    assert run_id is not None
                     await self.engines.chat.cancel(run_id)
                 else:
+                    assert run_id is not None
                     await self.engines.media.cancel(run_id)
             except Exception:
                 logger.warning(
-                    "Could not signal engine cancellation for run %s", run_id, exc_info=True
+                    "Could not signal engine cancellation for job %s", job_id, exc_info=True
                 )
         if cancelled_task:
             await asyncio.gather(cancelled_task, return_exceptions=True)
         await self.scheduler.publish_job(job_id)
-        await self.events.publish("run.cancelled", run_id, {"job_id": job_id})
+        if run_id:
+            await self.events.publish("run.cancelled", run_id, {"job_id": job_id})
         if run_id:
             await self._finalize_setup_verification_run(job_id, run_id)
         return True
@@ -2130,16 +2184,23 @@ class ConversationOrchestrator:
     def stop_admission(self) -> None:
         self._admission_open = False
 
-    async def _execute(self, job_id: str, run_id: str) -> None:
+    async def _execute(self, job_id: str, run_id: str | None) -> None:
+        verification_job = False
+        queued_verification_job_id: str | None = None
         try:
             with self.session_factory() as session:
                 job = session.get(Job, job_id)
-                run = session.get(Run, run_id)
-                if not job or not run:
+                if not job:
                     return
-                operation = run.operation
+                verification_job = getattr(job, "kind", None) == JobKind.EDIT_VERIFY.value
+                run = session.get(Run, run_id) if run_id else None
+                if not verification_job and not run:
+                    return
+                operation = run.operation if run else JobKind.EDIT_VERIFY.value
                 resource = job.queue_resource or (
-                    "interactive_compute" if operation == Operation.TEXT.value else "media_compute"
+                    "interactive_compute"
+                    if operation in {Operation.TEXT.value, JobKind.EDIT_VERIFY.value}
+                    else "media_compute"
                 )
                 group = job.queue_group or "primary"
                 priority = job.queue_priority
@@ -2149,6 +2210,10 @@ class ConversationOrchestrator:
                 group=group,
                 priority=priority,
             ):
+                if verification_job:
+                    await self._execute_image_edit_verification(job_id)
+                    return
+                assert run_id is not None
                 with self.session_factory() as session:
                     job = session.get(Job, job_id)
                     run = session.get(Run, run_id)
@@ -2198,13 +2263,15 @@ class ConversationOrchestrator:
                     if operation == Operation.TEXT.value:
                         await self._execute_chat(job_id, run_id)
                     else:
-                        await self._execute_media(job_id, run_id)
+                        queued_verification_job_id = await self._execute_media(job_id, run_id)
                 finally:
                     if operation == Operation.TEXT.value:
                         self._release_deferred_media_restart()
                         await self._settle_step_prewarm(job_id)
                     if resume_chat_profile:
                         await self._complete_media_handoff(resume_chat_profile)
+                if queued_verification_job_id:
+                    self.start(queued_verification_job_id, None)
         except asyncio.CancelledError:
             with self.session_factory() as session:
                 job = session.get(Job, job_id)
@@ -2213,9 +2280,24 @@ class ConversationOrchestrator:
                     session.commit()
             raise
         except Exception as exc:
+            if verification_job:
+                logger.warning("Image edit verification dispatch failed", exc_info=True)
+                with self.session_factory() as session:
+                    job = session.get(Job, job_id)
+                    if job and job.status != JobStatus.CANCELLED.value:
+                        self._finish_image_edit_verification(
+                            session,
+                            job,
+                            VerificationReason.ASSESSMENT_UNAVAILABLE,
+                        )
+                        session.commit()
+                await self.scheduler.publish_job(job_id)
+                return
+            assert run_id is not None
             detail = str(exc).strip() or f"Generation failed ({type(exc).__name__})"
             await self._fail(job_id, run_id, detail)
-        await self._finalize_setup_verification_run(job_id, run_id)
+        if run_id is not None:
+            await self._finalize_setup_verification_run(job_id, run_id)
 
     async def _finalize_setup_verification_run(self, job_id: str, run_id: str) -> None:
         finalized = False
@@ -3069,13 +3151,16 @@ class ConversationOrchestrator:
         except Exception:
             logger.exception("Could not inspect the next job during media handoff")
             return fallback_profile_id, False
-        if (
-            not isinstance(candidate, tuple)
-            or len(candidate) != 2
-            or not isinstance(candidate[1], str)
-        ):
+        if not isinstance(candidate, tuple) or len(candidate) != 2:
             return fallback_profile_id, False
         with self.session_factory() as session:
+            if candidate[1] is None:
+                job = session.get(Job, candidate[0])
+                if job and job.kind == JobKind.EDIT_VERIFY.value:
+                    profile_id = job.payload_json.get("vision_profile_id")
+                    if isinstance(profile_id, str):
+                        return profile_id, True
+                return fallback_profile_id, False
             run = session.get(Run, candidate[1])
             if run and run.operation == Operation.TEXT.value and isinstance(run.profile_id, str):
                 return run.profile_id, True
@@ -3327,7 +3412,7 @@ class ConversationOrchestrator:
         )
         return evidence.evidence_key
 
-    async def _execute_media(self, job_id: str, run_id: str) -> None:
+    async def _execute_media(self, job_id: str, run_id: str) -> str | None:
         if self.engines.settings.media_engine == "comfyui":
             status = next(item for item in self.processes.statuses() if item.name == "media")
             if not status.running or status.state != "ready":
@@ -3366,7 +3451,7 @@ class ConversationOrchestrator:
         with self.session_factory() as session:
             run = session.get(Run, run_id)
             if not run:
-                return
+                return None
             input_paths: list[Path] = []
             for artifact_id in self.input_artifact_ids_for_run(session, run):
                 artifact = session.get(Artifact, artifact_id)
@@ -3512,7 +3597,7 @@ class ConversationOrchestrator:
                     },
                 )
             elif event.type == "cancelled":
-                return
+                return None
             elif event.type == "complete":
                 completed_assets.extend(event.assets)
 
@@ -3520,12 +3605,13 @@ class ConversationOrchestrator:
             await self._successful_media_capabilities() if completed_assets else None
         )
         completed_assistant_id = assistant_id
+        verification_job_id: str | None = None
         with self.session_factory() as session:
             message = session.get(Message, assistant_id)
             run = session.get(Run, run_id)
             job = session.get(Job, job_id)
             if not message or not run or not job:
-                return
+                return None
             parts: list[MessagePart] = []
             artifact_ids: list[str] = []
             output_provenance: list[dict[str, Any]] = []
@@ -3644,6 +3730,13 @@ class ConversationOrchestrator:
                 "outputs": output_provenance,
                 "timings": {"duration_ms": run.duration_ms},
             }
+            if run.operation == Operation.IMAGE_TO_IMAGE.value:
+                verification_job_id = self._queue_image_edit_verification(
+                    session,
+                    run,
+                    job.id,
+                    artifact_ids,
+                )
             parts.append(
                 MessagePart(
                     position=len(parts),
@@ -3675,6 +3768,531 @@ class ConversationOrchestrator:
                 "assistant_message_id": completed_assistant_id,
             },
         )
+        return verification_job_id
+
+    def _queue_image_edit_verification(
+        self,
+        session: Session,
+        run: Run,
+        source_job_id: str,
+        result_artifact_ids: list[str],
+    ) -> str | None:
+        job_id = image_edit_verification_job_id(run.id)
+        existing = session.get(Job, job_id)
+        if existing:
+            return existing.id
+
+        chat = session.get(Chat, run.chat_id)
+        source_artifact_id = next(
+            (
+                artifact_id
+                for artifact_id in self.input_artifact_ids_for_run(session, run)
+                if (artifact := session.get(Artifact, artifact_id))
+                and artifact.media_type.casefold().startswith("image/")
+            ),
+            None,
+        )
+        result_artifact_id = next(
+            (
+                artifact_id
+                for artifact_id in result_artifact_ids
+                if (artifact := session.get(Artifact, artifact_id))
+                and artifact.media_type.casefold().startswith("image/")
+            ),
+            None,
+        )
+        vision_profile = self._vision_profile_for_chat(session, chat, None) if chat else None
+        eligibility = image_edit_verification_eligibility(
+            run.operation,
+            chat.vision_settings_json if chat else None,
+            vision_profile_id=vision_profile.id if vision_profile else None,
+            source_artifact_id=source_artifact_id,
+            result_artifact_id=result_artifact_id,
+            already_queued=False,
+        )
+        verification: dict[str, Any] = {
+            "version": VERIFICATION_VERSION,
+            "status": "queued" if eligibility.eligible else "skipped",
+            "reason": eligibility.reason.value,
+            "automatic_retry_executed": False,
+        }
+        if not eligibility.eligible:
+            run.provenance_json = {
+                **run.provenance_json,
+                "image_edit_verification": verification,
+            }
+            return None
+
+        assert chat is not None
+        assert vision_profile is not None
+        assert source_artifact_id is not None
+        assert result_artifact_id is not None
+        edit = run.provenance_json.get("image_edit")
+        edit_values = edit if isinstance(edit, dict) else {}
+        strength = edit_values.get("strength")
+        strength_values = strength if isinstance(strength, dict) else {}
+        bounds = strength_values.get("applied_bounds")
+        bound_values = bounds if isinstance(bounds, dict) else {}
+        payload = ImageEditVerificationJobPayload(
+            chat_id=chat.id,
+            source_run_id=run.id,
+            source_job_id=source_job_id,
+            source_artifact_id=source_artifact_id,
+            result_artifact_id=result_artifact_id,
+            vision_profile_id=vision_profile.id,
+            strength_parameter=(
+                value if isinstance((value := strength_values.get("parameter")), str) else None
+            ),
+            current_strength=(
+                float(value)
+                if isinstance((value := strength_values.get("value")), int | float)
+                and not isinstance(value, bool)
+                else None
+            ),
+            minimum=(
+                float(value)
+                if isinstance((value := bound_values.get("minimum")), int | float)
+                and not isinstance(value, bool)
+                else None
+            ),
+            maximum=(
+                float(value)
+                if isinstance((value := bound_values.get("maximum")), int | float)
+                and not isinstance(value, bool)
+                else None
+            ),
+        )
+        step: WorkStep | None = None
+        if run.work_plan_id and run.work_step_id:
+            step_id = f"step_edit_verify_{hashlib.sha256(run.id.encode()).hexdigest()[:22]}"
+            step = session.get(WorkStep, step_id)
+            if not step:
+                ordinal = (
+                    session.scalar(
+                        select(func.max(WorkStep.ordinal)).where(
+                            WorkStep.plan_id == run.work_plan_id
+                        )
+                    )
+                    or 0
+                ) + 1
+                step = WorkStep(
+                    id=step_id,
+                    plan_id=run.work_plan_id,
+                    ordinal=ordinal,
+                    display_group="Image edit check",
+                    operation=JobKind.EDIT_VERIFY.value,
+                    status=JobStatus.QUEUED.value,
+                    prompt="",
+                    profile_id=vision_profile.id,
+                    queue_class="interactive_compute",
+                    input_bindings_json=[
+                        {"artifact_id": source_artifact_id, "role": "source"},
+                        {"artifact_id": result_artifact_id, "role": "result"},
+                    ],
+                    output_contract_json=[],
+                )
+                session.add(step)
+                session.flush()
+                session.add(
+                    WorkStepDependency(
+                        step_id=step.id,
+                        depends_on_step_id=run.work_step_id,
+                    )
+                )
+
+        now = utcnow()
+        job = Job(
+            id=job_id,
+            kind=JobKind.EDIT_VERIFY.value,
+            status=JobStatus.QUEUED.value,
+            progress=0.0,
+            progress_json={},
+            work_plan_id=run.work_plan_id if step else None,
+            work_step_id=step.id if step else None,
+            queue_resource="interactive_compute",
+            queue_group="primary",
+            queue_priority=-10,
+            queue_ticket=job_id,
+            enqueued_at=now,
+            payload_json=payload.model_dump(mode="json"),
+            cancellable=True,
+        )
+        update_job_progress(
+            job,
+            stage="Waiting to check image edit",
+            queue_resource=job.queue_resource,
+            indeterminate=True,
+            now=now,
+        )
+        session.add(job)
+        verification.update(
+            {
+                "job_id": job.id,
+                "vision_profile_id": vision_profile.id,
+                "source_artifact_id": source_artifact_id,
+                "result_artifact_id": result_artifact_id,
+            }
+        )
+        run.provenance_json = {
+            **run.provenance_json,
+            "image_edit_verification": verification,
+        }
+        if step and run.work_plan_id:
+            session.flush()
+            refresh_plan_status(session, run.work_plan_id)
+            plan = session.get(WorkPlan, run.work_plan_id)
+            if plan:
+                plan.summary_json = {
+                    **plan.summary_json,
+                    "status_counts": plan_status_summary(session, plan.id),
+                }
+        return job.id
+
+    def _persist_image_edit_verification(
+        self,
+        session: Session,
+        job: Job,
+        result: dict[str, Any],
+        *,
+        job_status: str = JobStatus.COMPLETE.value,
+    ) -> None:
+        now = utcnow()
+        job.status = job_status
+        job.error = None
+        job.completed_at = now
+        job.result_json = result
+        if job_status == JobStatus.COMPLETE.value:
+            completed_progress(job, now=now)
+        else:
+            update_job_progress(job, stage=job_status, indeterminate=True, now=now)
+        if job.work_step_id:
+            step = session.get(WorkStep, job.work_step_id)
+            if step:
+                step.status = (
+                    JobStatus.COMPLETE.value
+                    if job_status == JobStatus.COMPLETE.value
+                    else job_status
+                )
+                step.error = job.error
+                refresh_plan_status(session, step.plan_id)
+                plan = session.get(WorkPlan, step.plan_id)
+                if plan:
+                    session.flush()
+                    plan.summary_json = {
+                        **plan.summary_json,
+                        "status_counts": plan_status_summary(session, plan.id),
+                    }
+        try:
+            payload = ImageEditVerificationJobPayload.model_validate(job.payload_json)
+        except ValueError:
+            return
+        run = session.get(Run, payload.source_run_id)
+        if not run:
+            return
+        run.provenance_json = {
+            **run.provenance_json,
+            "image_edit_verification": result,
+        }
+        revision = session.scalar(select(ResponseRevision).where(ResponseRevision.run_id == run.id))
+        if revision:
+            for revision_part in revision.parts:
+                if revision_part.type == PartType.GENERATION_METADATA.value:
+                    revision_part.metadata_json = {
+                        **revision_part.metadata_json,
+                        "run_id": run.id,
+                        "provenance": run.provenance_json,
+                    }
+        message = session.get(Message, run.assistant_message_id)
+        if message and revision and message.active_response_revision_id == revision.id:
+            for message_part in message.parts:
+                if message_part.type == PartType.GENERATION_METADATA.value:
+                    message_part.metadata_json = {
+                        **message_part.metadata_json,
+                        "run_id": run.id,
+                        "provenance": run.provenance_json,
+                    }
+
+    def _finish_image_edit_verification(
+        self,
+        session: Session,
+        job: Job,
+        reason: VerificationReason,
+        *,
+        job_status: str = JobStatus.COMPLETE.value,
+    ) -> None:
+        self._persist_image_edit_verification(
+            session,
+            job,
+            {
+                "version": VERIFICATION_VERSION,
+                "status": "skipped",
+                "reason": reason.value,
+                "automatic_retry_executed": False,
+            },
+            job_status=job_status,
+        )
+
+    async def _execute_image_edit_verification(self, job_id: str) -> None:
+        media_stopped_for_verification = False
+        previous_profile_id = next(
+            (
+                status.profile_id
+                for status in self.processes.statuses()
+                if status.name == "chat" and status.running
+            ),
+            None,
+        )
+        restore_profile: ModelProfile | None = None
+        restore_install: ModelInstall | None = None
+        try:
+            with self.session_factory() as session:
+                job = session.get(Job, job_id)
+                if not job or job.status == JobStatus.CANCELLED.value:
+                    return
+                try:
+                    payload = ImageEditVerificationJobPayload.model_validate(job.payload_json)
+                except ValueError:
+                    self._finish_image_edit_verification(
+                        session, job, VerificationReason.ASSESSMENT_UNAVAILABLE
+                    )
+                    session.commit()
+                    return
+                run = session.get(Run, payload.source_run_id)
+                chat = session.get(Chat, payload.chat_id)
+                source = session.get(Artifact, payload.source_artifact_id)
+                result = session.get(Artifact, payload.result_artifact_id)
+                profile = session.get(ModelProfile, payload.vision_profile_id)
+                install = (
+                    session.get(ModelInstall, profile.model_install_id)
+                    if profile and profile.model_install_id
+                    else None
+                )
+                if not run or run.status != RunStatus.COMPLETE.value or not chat:
+                    self._finish_image_edit_verification(
+                        session, job, VerificationReason.SOURCE_UNAVAILABLE
+                    )
+                    session.commit()
+                    return
+                if chat.vision_settings_json.get("verify_image_edits") is not True:
+                    self._finish_image_edit_verification(session, job, VerificationReason.DISABLED)
+                    session.commit()
+                    return
+                if not source or not result:
+                    self._finish_image_edit_verification(
+                        session, job, VerificationReason.ARTIFACT_UNAVAILABLE
+                    )
+                    session.commit()
+                    return
+                if (
+                    not profile
+                    or not install
+                    or not install.active
+                    or not self._profile_has_verified_vision(session, profile)
+                ):
+                    self._finish_image_edit_verification(
+                        session, job, VerificationReason.VISION_PROFILE_UNAVAILABLE
+                    )
+                    session.commit()
+                    return
+                if previous_profile_id and previous_profile_id != profile.id:
+                    restore_profile = session.get(ModelProfile, previous_profile_id)
+                    restore_install = (
+                        session.get(ModelInstall, restore_profile.model_install_id)
+                        if restore_profile and restore_profile.model_install_id
+                        else None
+                    )
+                    if restore_profile:
+                        session.expunge(restore_profile)
+                    if restore_install:
+                        session.expunge(restore_install)
+                vision_settings = (
+                    chat.vision_settings_json if isinstance(chat.vision_settings_json, dict) else {}
+                )
+                settings = {**vision_settings, "max_images": 2}
+                session.expunge(source)
+                session.expunge(result)
+                session.expunge(profile)
+                session.expunge(install)
+                if job.work_step_id:
+                    step = session.get(WorkStep, job.work_step_id)
+                    if step:
+                        step.status = JobStatus.RUNNING.value
+                        refresh_plan_status(session, step.plan_id)
+                update_job_progress(
+                    job,
+                    stage="Loading vision model",
+                    queue_resource=job.queue_resource,
+                    indeterminate=True,
+                )
+                session.commit()
+
+            try:
+                visual = await self.vision.prepare(
+                    [source, result],
+                    strict_artifact_ids={source.id, result.id},
+                    vision_settings=settings,
+                )
+            except VisionInputError:
+                with self.session_factory() as session:
+                    job = session.get(Job, job_id)
+                    if job:
+                        self._finish_image_edit_verification(
+                            session, job, VerificationReason.VISION_INPUT_UNAVAILABLE
+                        )
+                        session.commit()
+                return
+            if visual.inspected_artifact_ids != [source.id, result.id]:
+                with self.session_factory() as session:
+                    job = session.get(Job, job_id)
+                    if job:
+                        self._finish_image_edit_verification(
+                            session, job, VerificationReason.VISION_INPUT_UNAVAILABLE
+                        )
+                        session.commit()
+                return
+
+            chat_status = next(
+                status for status in self.processes.statuses() if status.name == "chat"
+            )
+            if self.engines.settings.chat_engine in {"llama.cpp", "vllm"} and (
+                not chat_status.running
+                or chat_status.state != "ready"
+                or chat_status.profile_id != profile.id
+            ):
+                media_status = next(
+                    status for status in self.processes.statuses() if status.name == "media"
+                )
+                if (
+                    self.engines.settings.media_engine == "comfyui"
+                    and media_status.managed
+                    and media_status.running
+                ):
+                    await self.processes.stop("media")
+                    media_stopped_for_verification = True
+                await self.processes.load_chat(profile, install)
+            capabilities = await self.engines.chat_capabilities()
+            if "image" not in capabilities.input_modalities:
+                with self.session_factory() as session:
+                    job = session.get(Job, job_id)
+                    if job:
+                        self._finish_image_edit_verification(
+                            session, job, VerificationReason.VISION_PROFILE_UNAVAILABLE
+                        )
+                        session.commit()
+                return
+
+            with self.session_factory() as session:
+                job = session.get(Job, job_id)
+                if not job or job.status == JobStatus.CANCELLED.value:
+                    return
+                run = session.get(Run, payload.source_run_id)
+                if not run:
+                    self._finish_image_edit_verification(
+                        session, job, VerificationReason.SOURCE_UNAVAILABLE
+                    )
+                    session.commit()
+                    return
+                prompt = build_image_edit_verification_prompt(run.standalone_prompt)
+                update_job_progress(
+                    job,
+                    stage="Checking image edit",
+                    queue_resource=job.queue_resource,
+                    indeterminate=True,
+                )
+                session.commit()
+            messages = self.vision.attach_to_latest_user(
+                [{"role": MessageRole.USER.value, "content": prompt}],
+                visual,
+            )
+            raw = ""
+            complete = False
+            async with asyncio.timeout(180):
+                async for event in self.engines.chat.stream(
+                    ChatRequest(
+                        run_id=job_id,
+                        messages=messages,
+                        settings={
+                            "temperature": 0,
+                            "max_tokens": min(
+                                256,
+                                self.engines.settings.vision_bridge_max_tokens,
+                            ),
+                        },
+                        persistence_scope=self.persistence_scope,
+                        scope_id=self.scope_id,
+                    )
+                ):
+                    if event.type == "delta":
+                        raw += event.text
+                        if len(raw) > MAX_ASSESSMENT_CHARACTERS:
+                            raise ValueError("vision assessment exceeded its safety limit")
+                    elif event.type == "error":
+                        raise RuntimeError(
+                            str(event.data.get("error") or "vision assessment failed")
+                        )
+                    elif event.type == "cancelled":
+                        raise asyncio.CancelledError
+                    elif event.type == "complete":
+                        complete = True
+            if not complete:
+                raise RuntimeError("vision assessment did not complete")
+            try:
+                assessment = parse_image_edit_verification_assessment(raw)
+            except ValueError:
+                with self.session_factory() as session:
+                    job = session.get(Job, job_id)
+                    if job:
+                        self._finish_image_edit_verification(
+                            session, job, VerificationReason.INVALID_ASSESSMENT
+                        )
+                        session.commit()
+                return
+            decision = decide_image_edit_retry(
+                assessment,
+                attempt=payload.attempt,
+                parameter=payload.strength_parameter,
+                current_strength=payload.current_strength,
+                minimum=payload.minimum,
+                maximum=payload.maximum,
+            )
+            persisted = {
+                **decision.provenance(assessment),
+                "status": "complete",
+                "worker_profile_id": payload.vision_profile_id,
+                "source_artifact_id": payload.source_artifact_id,
+                "result_artifact_id": payload.result_artifact_id,
+                "automatic_retry_executed": False,
+            }
+            with self.session_factory() as session:
+                job = session.get(Job, job_id)
+                if job and job.status != JobStatus.CANCELLED.value:
+                    self._persist_image_edit_verification(session, job, persisted)
+                    session.commit()
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            logger.warning("Image edit verification was unavailable", exc_info=True)
+            with self.session_factory() as session:
+                job = session.get(Job, job_id)
+                if job and job.status != JobStatus.CANCELLED.value:
+                    self._finish_image_edit_verification(
+                        session, job, VerificationReason.ASSESSMENT_UNAVAILABLE
+                    )
+                    session.commit()
+        finally:
+            if restore_profile and restore_install:
+                try:
+                    await self.processes.load_chat(restore_profile, restore_install)
+                except Exception:
+                    logger.warning(
+                        "Could not restore the previous chat profile after image edit verification",
+                        exc_info=True,
+                    )
+            if media_stopped_for_verification:
+                self._schedule_media_restart()
+            else:
+                self._release_deferred_media_restart()
+        await self.scheduler.publish_job(job_id)
 
     async def _fail(self, job_id: str, run_id: str, error: str) -> None:
         with self.session_factory() as session:
@@ -3752,6 +4370,20 @@ class ConversationOrchestrator:
         now = utcnow()
         job.status = JobStatus.CANCELLED.value
         job.completed_at = now
+        update_job_progress(job, stage="cancelled", indeterminate=True, now=now)
+        if job.kind == JobKind.EDIT_VERIFY.value:
+            self._persist_image_edit_verification(
+                session,
+                job,
+                {
+                    "version": VERIFICATION_VERSION,
+                    "status": "skipped",
+                    "reason": VerificationReason.CANCELLED.value,
+                    "automatic_retry_executed": False,
+                },
+                job_status=JobStatus.CANCELLED.value,
+            )
+            return
         if not job.run_id:
             return
         run = session.get(Run, job.run_id)
@@ -3760,7 +4392,6 @@ class ConversationOrchestrator:
         run.status = RunStatus.CANCELLED.value
         run.completed_at = now
         self._set_work_status(session, run, JobStatus.CANCELLED.value)
-        update_job_progress(job, stage="cancelled", indeterminate=True, now=now)
         message = session.get(Message, run.assistant_message_id)
         if message:
             preview_ids = self._temporary_preview_ids(message)

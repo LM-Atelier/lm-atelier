@@ -1614,6 +1614,7 @@ class ProjectExporter:
             "max_images",
             "max_video_frames",
             "include_prior_visual",
+            "verify_image_edits",
         }:
             raise ValueError("project manifest has invalid vision settings")
         try:

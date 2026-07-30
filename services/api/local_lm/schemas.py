@@ -26,6 +26,7 @@ class VisionSettings(ApiModel):
     max_images: int = Field(default=4, ge=1, le=16)
     max_video_frames: int = Field(default=6, ge=3, le=16)
     include_prior_visual: bool = True
+    verify_image_edits: bool = False
 
 
 class ProjectCreate(ApiModel):

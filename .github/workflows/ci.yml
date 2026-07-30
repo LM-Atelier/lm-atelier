@@ -45,12 +45,12 @@ jobs:
           HEAD_SHA: ${{ github.event.pull_request.head.sha }}
         run: |
           python3 scripts/ci-plan.py \
-            --event $EVENT_NAME \
-            --base-ref $BASE_REF \
-            --head-ref $HEAD_REF \
-            --base-sha $BASE_SHA \
-            --head-sha $HEAD_SHA \
-            --github-output $GITHUB_OUTPUT
+            --event "$EVENT_NAME" \
+            --base-ref "$BASE_REF" \
+            --head-ref "$HEAD_REF" \
+            --base-sha "$BASE_SHA" \
+            --head-sha "$HEAD_SHA" \
+            --github-output "$GITHUB_OUTPUT"
       - name: Scan reachable source history for secrets
         if: steps.plan.outputs.mode == 'full'
         shell: bash

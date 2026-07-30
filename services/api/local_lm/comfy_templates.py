@@ -525,40 +525,47 @@ class ComfyTemplateRegistry:
         return template
 
     def _template_files(self) -> list[Path]:
-        directory = self.settings.comfy_directory
-        if not directory:
-            return []
-        root = directory.expanduser().resolve()
-        candidates = [
-            root
-            / ".venv"
-            / "Lib"
-            / "site-packages"
-            / "comfyui_workflow_templates_json"
-            / "templates",
-            root
-            / "venv"
-            / "Lib"
-            / "site-packages"
-            / "comfyui_workflow_templates_json"
-            / "templates",
-            root
-            / ".venv"
-            / "lib"
-            / "python3"
-            / "site-packages"
-            / "comfyui_workflow_templates_json"
-            / "templates",
-        ]
-        for candidate in candidates:
+        for candidate in self._template_directories():
             if candidate.is_dir():
                 return sorted(candidate.glob("*.json"))
-        unix_matches = sorted(
-            root.glob(
-                ".venv/lib/python*/site-packages/comfyui_workflow_templates_json/templates/*.json"
-            )
-        )
-        return unix_matches
+        return []
+
+    def _template_directories(self) -> list[Path]:
+        """Template directories to try, most authoritative first."""
+        ordered: list[Path] = []
+        seen: set[Path] = set()
+        for site_packages in self._site_packages_roots():
+            candidate = site_packages / "comfyui_workflow_templates_json" / "templates"
+            if candidate not in seen:
+                seen.add(candidate)
+                ordered.append(candidate)
+        return ordered
+
+    def _site_packages_roots(self) -> list[Path]:
+        """Interpreter site-packages directories that may ship the templates.
+
+        The templates install alongside the interpreter that runs ComfyUI, which
+        is not necessarily inside the ComfyUI directory. The official Windows
+        portable release keeps ``python_embeded`` beside ``ComfyUI``, while a
+        checkout built by hand usually keeps its virtual environment within.
+        Prefer the configured executable, because that is the interpreter that
+        actually executes the graph.
+        """
+        roots: list[Path] = []
+        executable = self.settings.comfy_executable
+        if executable:
+            binary = executable.expanduser().resolve().parent
+            roots.append(binary / "Lib" / "site-packages")
+            roots.append(binary.parent / "Lib" / "site-packages")
+            roots.extend(sorted(binary.parent.glob("lib/python*/site-packages")))
+        directory = self.settings.comfy_directory
+        if directory:
+            root = directory.expanduser().resolve()
+            for name in (".venv", "venv"):
+                roots.append(root / name / "Lib" / "site-packages")
+                roots.extend(sorted((root / name).glob("lib/python*/site-packages")))
+            roots.append(root.parent / "python_embeded" / "Lib" / "site-packages")
+        return roots
 
 
 def _tokens(value: str) -> set[str]:

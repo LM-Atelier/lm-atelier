@@ -24,10 +24,34 @@ from local_lm.config import Settings
 from local_lm.schemas import CatalogFileSource
 
 
+def _installed_templates(registry: ComfyTemplateRegistry) -> Path:
+    """The directory the registry actually reads, so fixtures cannot drift from it."""
+    executable = registry.settings.comfy_executable
+    assert executable is not None
+    return (
+        executable.parent
+        / "Lib"
+        / "site-packages"
+        / "comfyui_workflow_templates_json"
+        / "templates"
+    )
+
+
 def _registry(tmp_path: Path) -> ComfyTemplateRegistry:
-    comfy = tmp_path / "comfy"
+    # Mirror the official Windows portable release that LM Atelier provisions:
+    # the interpreter lives beside the ComfyUI directory, not inside it.
+    portable = tmp_path / "ComfyUI_windows_portable"
+    comfy = portable / "ComfyUI"
+    comfy.mkdir(parents=True)
+    executable = portable / "python_embeded" / "python.exe"
+    executable.parent.mkdir(parents=True)
+    executable.touch()
     templates = (
-        comfy / ".venv" / "Lib" / "site-packages" / "comfyui_workflow_templates_json" / "templates"
+        executable.parent
+        / "Lib"
+        / "site-packages"
+        / "comfyui_workflow_templates_json"
+        / "templates"
     )
     templates.mkdir(parents=True)
     template = {
@@ -183,9 +207,101 @@ def _registry(tmp_path: Path) -> ComfyTemplateRegistry:
         encoding="utf-8",
     )
     (templates / "index.en.json").write_text("[]", encoding="utf-8")
-    settings = Settings(data_dir=tmp_path / "data", comfy_directory=comfy)
+    settings = Settings(
+        data_dir=tmp_path / "data",
+        comfy_directory=comfy,
+        comfy_executable=executable,
+    )
     settings.prepare()
     return ComfyTemplateRegistry(settings)
+
+
+def _discovery_settings(tmp_path: Path, layout: str) -> Settings:
+    """Build one of the ComfyUI layouts LM Atelier has to read templates from."""
+    comfy = tmp_path / "comfy"
+    executable: Path | None = None
+    if layout == "portable":
+        portable = tmp_path / "ComfyUI_windows_portable"
+        comfy = portable / "ComfyUI"
+        executable = portable / "python_embeded" / "python.exe"
+        site_packages = executable.parent / "Lib" / "site-packages"
+    elif layout == "portable_directory_only":
+        portable = tmp_path / "ComfyUI_windows_portable"
+        comfy = portable / "ComfyUI"
+        site_packages = portable / "python_embeded" / "Lib" / "site-packages"
+    elif layout == "windows_venv":
+        executable = comfy / ".venv" / "Scripts" / "python.exe"
+        site_packages = comfy / ".venv" / "Lib" / "site-packages"
+    elif layout == "posix_venv":
+        executable = comfy / ".venv" / "bin" / "python"
+        site_packages = comfy / ".venv" / "lib" / "python3.13" / "site-packages"
+    elif layout == "venv_directory_only":
+        site_packages = comfy / ".venv" / "Lib" / "site-packages"
+    else:  # pragma: no cover - guards a typo in the parametrisation
+        raise AssertionError(f"unknown layout {layout}")
+    templates = site_packages / "comfyui_workflow_templates_json" / "templates"
+    templates.mkdir(parents=True)
+    comfy.mkdir(parents=True, exist_ok=True)
+    (templates / "example.json").write_text(
+        json.dumps({"nodes": [], "links": []}), encoding="utf-8"
+    )
+    if executable is not None:
+        executable.parent.mkdir(parents=True, exist_ok=True)
+        executable.touch()
+    settings = Settings(
+        data_dir=tmp_path / "data",
+        comfy_directory=comfy,
+        comfy_executable=executable,
+    )
+    settings.prepare()
+    return settings
+
+
+@pytest.mark.parametrize(
+    "layout",
+    ["portable", "portable_directory_only", "windows_venv", "posix_venv", "venv_directory_only"],
+)
+def test_template_discovery_supports_every_runtime_layout(tmp_path: Path, layout: str) -> None:
+    registry = ComfyTemplateRegistry(_discovery_settings(tmp_path, layout))
+
+    discovered = registry._template_files()
+
+    assert [path.name for path in discovered] == ["example.json"]
+
+
+def test_template_discovery_returns_nothing_when_no_runtime_is_configured(tmp_path: Path) -> None:
+    settings = Settings(data_dir=tmp_path / "data")
+    settings.prepare()
+
+    assert ComfyTemplateRegistry(settings)._template_files() == []
+
+
+def test_template_discovery_prefers_the_configured_interpreter(tmp_path: Path) -> None:
+    """The executable runs the graph, so its templates win over a stale sibling."""
+    portable = tmp_path / "ComfyUI_windows_portable"
+    comfy = portable / "ComfyUI"
+    comfy.mkdir(parents=True)
+    executable = portable / "python_embeded" / "python.exe"
+    executable.parent.mkdir(parents=True)
+    executable.touch()
+    graph = json.dumps({"nodes": [], "links": []})
+    for site_packages, name in (
+        (executable.parent / "Lib" / "site-packages", "from_interpreter.json"),
+        (comfy / ".venv" / "Lib" / "site-packages", "from_directory.json"),
+    ):
+        templates = site_packages / "comfyui_workflow_templates_json" / "templates"
+        templates.mkdir(parents=True)
+        (templates / name).write_text(graph, encoding="utf-8")
+    settings = Settings(
+        data_dir=tmp_path / "data",
+        comfy_directory=comfy,
+        comfy_executable=executable,
+    )
+    settings.prepare()
+
+    discovered = ComfyTemplateRegistry(settings)._template_files()
+
+    assert [path.name for path in discovered] == ["from_interpreter.json"]
 
 
 def test_registry_requires_the_exact_backend_declared_repository(tmp_path: Path) -> None:
@@ -218,14 +334,7 @@ def test_registry_accepts_and_revalidates_a_pinned_multirepository_bundle(
     tmp_path: Path,
 ) -> None:
     registry = _registry(tmp_path)
-    templates = (
-        registry.settings.comfy_directory
-        / ".venv"
-        / "Lib"
-        / "site-packages"
-        / "comfyui_workflow_templates_json"
-        / "templates"
-    )
+    templates = _installed_templates(registry)
     dependencies = [
         (
             "diffusion_models",
@@ -537,14 +646,7 @@ def test_native_edit_loaders_bind_ordered_runtime_images(
     tmp_path: Path,
 ) -> None:
     registry = _registry(tmp_path)
-    templates = (
-        registry.settings.comfy_directory
-        / ".venv"
-        / "Lib"
-        / "site-packages"
-        / "comfyui_workflow_templates_json"
-        / "templates"
-    )
+    templates = _installed_templates(registry)
     revision = "a" * 40
     template = {
         "nodes": [
@@ -1003,16 +1105,7 @@ def test_registry_compiles_modern_combo_widgets(tmp_path: Path) -> None:
 
 def test_registry_binds_modern_random_noise_seed(tmp_path: Path) -> None:
     registry = _registry(tmp_path)
-    assert registry.settings.comfy_directory is not None
-    template_path = (
-        registry.settings.comfy_directory
-        / ".venv"
-        / "Lib"
-        / "site-packages"
-        / "comfyui_workflow_templates_json"
-        / "templates"
-        / "sdxlturbo_example.json"
-    )
+    template_path = _installed_templates(registry) / "sdxlturbo_example.json"
     template = json.loads(template_path.read_text(encoding="utf-8"))
     template["nodes"].append(
         {
@@ -1076,14 +1169,7 @@ def test_registry_normalizes_advanced_image_output_to_the_core_contract(
 ) -> None:
     registry = _registry(tmp_path)
     assert registry.settings.comfy_directory is not None
-    templates = (
-        registry.settings.comfy_directory
-        / ".venv"
-        / "Lib"
-        / "site-packages"
-        / "comfyui_workflow_templates_json"
-        / "templates"
-    )
+    templates = _installed_templates(registry)
     template = {
         "nodes": [
             {

@@ -369,6 +369,34 @@ describe("App", () => {
     expect(screen.queryByRole("dialog", { name: "Set up LM Atelier" })).not.toBeInTheDocument();
   });
 
+  it("offers no action for a role this machine cannot run", async () => {
+    vi.mocked(api.setupReadiness).mockResolvedValue(setupReport(
+      setupRole("chat"),
+      setupRole("image", "action_required", null, {
+        checks: [{
+          code: "runtime_unsupported",
+          status: "fail",
+          message: "Automatic setup for the required runtime is unavailable on this machine.",
+          action: null,
+        }],
+      }),
+      setupRole("video"),
+    ));
+    const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+    render(
+      <QueryClientProvider client={client}>
+        <App />
+      </QueryClientProvider>,
+    );
+
+    expect(await screen.findByRole("dialog", { name: "Set up LM Atelier" })).toBeInTheDocument();
+    expect(
+      screen.getByText("Automatic setup for the required runtime is unavailable on this machine."),
+    ).toBeInTheDocument();
+    // Sending an unsupported machine to the model library is the loop this prevents.
+    expect(screen.queryByRole("button", { name: "Choose image model" })).not.toBeInTheDocument();
+  });
+
   it("runs the bounded local generation test from a configured role", async () => {
     vi.mocked(api.setupReadiness).mockResolvedValue(setupReport(
       setupRole("chat"),
@@ -639,7 +667,7 @@ describe("App", () => {
   it("searches and manages chats from the workspace sidebar", async () => {
     const stamp = "2026-07-22T00:00:00Z";
     vi.mocked(api.projects).mockResolvedValue([{ id: "project-1", name: "Research", description: "", instructions: "", archived: false, image_workflow_revision_id: null, video_workflow_revision_id: null, created_at: stamp, updated_at: stamp }]);
-    const chat = { id: "chat-1", project_id: "project-1", title: "Model notes", archived: false, routing_mode: "auto" as const, confirm_uncertain_media: false, active_chat_profile_id: null, active_image_profile_id: null, active_video_profile_id: null, active_head_message_id: null, created_at: stamp, updated_at: stamp };
+    const chat = { id: "chat-1", project_id: "project-1", title: "Model notes", archived: false, routing_mode: "auto" as const, confirm_uncertain_media: false, active_chat_profile_id: null, active_image_profile_id: null, active_video_profile_id: null, active_head_message_id: null, vision_settings_json: { max_images: 4 }, created_at: stamp, updated_at: stamp };
     vi.mocked(api.chats).mockResolvedValue([chat]);
     vi.mocked(api.chat).mockResolvedValue({ ...chat, messages: [] });
     vi.mocked(api.updateChat).mockResolvedValue({ id: "chat-1", project_id: null, title: "Renamed notes", archived: true, routing_mode: "auto", confirm_uncertain_media: false, active_chat_profile_id: null, active_image_profile_id: null, active_video_profile_id: null, active_head_message_id: null, created_at: stamp, updated_at: stamp });
@@ -655,9 +683,15 @@ describe("App", () => {
     fireEvent.change(screen.getByDisplayValue("Model notes"), { target: { value: "Renamed notes" } });
     fireEvent.change(screen.getByLabelText("Project"), { target: { value: "" } });
     fireEvent.click(screen.getByRole("checkbox", { name: /Archived/ }));
+    fireEvent.click(screen.getByRole("checkbox", { name: /Review image edits/ }));
     fireEvent.click(screen.getByText("Save chat"));
     await waitFor(() => expect(vi.mocked(api.updateChat).mock.calls[0]?.[0]).toBe("chat-1"));
-    expect(vi.mocked(api.updateChat).mock.calls[0]?.[1]).toMatchObject({ title: "Renamed notes", project_id: null, archived: true });
+    expect(vi.mocked(api.updateChat).mock.calls[0]?.[1]).toMatchObject({
+      title: "Renamed notes",
+      project_id: null,
+      archived: true,
+      vision_settings_json: { max_images: 4, verify_image_edits: true },
+    });
   });
 
   it("offers only runtime-verified vision profiles in the per-chat vision selector", async () => {

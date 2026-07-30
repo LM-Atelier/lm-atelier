@@ -442,6 +442,7 @@ class RuntimeProvisioner:
         final = parent / release
         staging = parent / f".{release}.partial-{uuid4().hex}"
         parent.mkdir(parents=True, exist_ok=True)
+        self._prune_stale_staging(parent, engine)
         staging.mkdir()
         try:
             archive_type = str(asset["archive_type"])
@@ -490,8 +491,35 @@ class RuntimeProvisioner:
             os.replace(staging, final)
             return self._resolve_installed_paths(final, asset)
         finally:
-            if staging.exists():
-                shutil.rmtree(staging, ignore_errors=True)
+            self._discard_staging(staging, engine)
+
+    def _prune_stale_staging(self, parent: Path, engine: RuntimeName) -> None:
+        """Reclaim staging trees abandoned by an interrupted or failed attempt.
+
+        A partial extraction can be several gigabytes across tens of thousands of
+        files, and Windows regularly refuses to delete it while a scanner still
+        holds a handle. Nothing else reclaims these, so sweep them before staging
+        a new attempt rather than accumulating one tree per failure.
+        """
+        for candidate in sorted(parent.glob(".*.partial-*")):
+            if candidate.is_dir():
+                self._discard_staging(candidate, engine, stale=True)
+
+    @staticmethod
+    def _discard_staging(staging: Path, engine: RuntimeName, *, stale: bool = False) -> None:
+        if not staging.exists():
+            return
+        shutil.rmtree(staging, ignore_errors=True)
+        if staging.exists():
+            logger.warning(
+                "Could not remove %s %s runtime staging directory at %s; "
+                "it will be retried on the next installation.",
+                "stale" if stale else "incomplete",
+                engine,
+                staging,
+            )
+        elif stale:
+            logger.info("Reclaimed stale %s runtime staging directory at %s", engine, staging)
 
     @staticmethod
     def _extract_zip(archive_path: Path, destination: Path) -> None:

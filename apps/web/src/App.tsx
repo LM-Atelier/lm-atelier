@@ -3556,6 +3556,9 @@ function ChatManager({
   const [projectId, setProjectId] = useState(chat.project_id ?? "");
   const [archived, setArchived] = useState(chat.archived);
   const [confirmUncertainMedia, setConfirmUncertainMedia] = useState(chat.confirm_uncertain_media);
+  const [verifyImageEdits, setVerifyImageEdits] = useState(
+    chat.vision_settings_json?.verify_image_edits === true,
+  );
   const [deleteGeneratedMedia, setDeleteGeneratedMedia] = useState(false);
   const deletePrompt = deleteGeneratedMedia
     ? `Delete ${chat.title}, its history, and generated media used only by this chat?`
@@ -3571,9 +3574,10 @@ function ChatManager({
       <label>Title<input value={title} onChange={(event) => setTitle(event.target.value)} /></label>
       <label>Project<select value={projectId} onChange={(event) => setProjectId(event.target.value)}><option value="">Unfiled</option>{projects.filter((project) => !project.archived).map((project) => <option key={project.id} value={project.id}>{project.name}</option>)}</select></label>
       <label className="toggle-row"><span className="toggle-copy"><strong>Confirm uncertain media</strong><small>Ask before Auto mode starts an image or video when the planner is unsure.</small></span><input type="checkbox" checked={confirmUncertainMedia} onChange={(event) => setConfirmUncertainMedia(event.target.checked)} /></label>
+      <label className="toggle-row"><span className="toggle-copy"><strong>Review image edits</strong><small>Use local vision to check whether the requested change appears.</small></span><input type="checkbox" checked={verifyImageEdits} onChange={(event) => setVerifyImageEdits(event.target.checked)} /></label>
       <label className="toggle-row"><span className="toggle-copy"><strong>Archived</strong><small>Hide this chat from the active workspace without deleting its history.</small></span><input type="checkbox" checked={archived} onChange={(event) => setArchived(event.target.checked)} /></label>
       <label className="toggle-row delete-media-option"><span className="toggle-copy"><strong>Delete generated media with chat</strong><small>Permanently delete image and video outputs used only by this chat. Shared media is kept.</small></span><input type="checkbox" checked={deleteGeneratedMedia} onChange={(event) => setDeleteGeneratedMedia(event.target.checked)} /></label>
-      <footer className="editor-actions"><button className="secondary danger" onClick={() => { if (window.confirm(deletePrompt)) onDelete(deleteGeneratedMedia); }}>Delete chat</button><button className="secondary" onClick={onClose}>Cancel</button><button className="primary" disabled={!title.trim()} onClick={() => onSave({ title: title.trim(), project_id: projectId || null, archived, confirm_uncertain_media: confirmUncertainMedia })}>Save chat</button></footer>
+      <footer className="editor-actions"><button className="secondary danger" onClick={() => { if (window.confirm(deletePrompt)) onDelete(deleteGeneratedMedia); }}>Delete chat</button><button className="secondary" onClick={onClose}>Cancel</button><button className="primary" disabled={!title.trim()} onClick={() => onSave({ title: title.trim(), project_id: projectId || null, archived, confirm_uncertain_media: confirmUncertainMedia, vision_settings_json: { ...(chat.vision_settings_json ?? {}), verify_image_edits: verifyImageEdits } })}>Save chat</button></footer>
     </AccessibleDialog>
   );
 }
@@ -3876,6 +3880,10 @@ function progressSampleIsFresh(progress: ProgressV2): boolean {
   return Number.isFinite(updatedAt) && Math.abs(Date.now() - updatedAt) <= 5_000;
 }
 
+function jobDisplayName(kind: string): string {
+  return kind === "edit_verify" ? "Image edit check" : kind;
+}
+
 function jobProgressText(job: Job): string {
   const progress = job.progress_json;
   const pieces = [progress?.stage || job.phase];
@@ -4092,13 +4100,15 @@ function SetupWizard({
                         : `Install ${recipe.name}`}
                     </button>
                   )}
-                  <button
-                    className={recipe ? "secondary compact-button" : "primary compact-button"}
-                    disabled={actionPending}
-                    onClick={() => performAction(role)}
-                  >
-                    {actionPending ? "Working…" : actionLabel(role)}
-                  </button>
+                  {role.next_action && (
+                    <button
+                      className={recipe ? "secondary compact-button" : "primary compact-button"}
+                      disabled={actionPending}
+                      onClick={() => performAction(role)}
+                    >
+                      {actionPending ? "Working…" : actionLabel(role)}
+                    </button>
+                  )}
                   {recipe && <small>Reference candidate · {formatBytes(recipe.total_size_bytes)}</small>}
                 </div>
               )}
@@ -4132,6 +4142,7 @@ function JobsPanel() {
   const active = jobs.data?.filter((job) => ["queued", "running", "paused"].includes(job.status)) ?? [];
   const recentUnsuccessful = (jobs.data ?? [])
     .filter((job) => ["failed", "cancelled", "interrupted"].includes(job.status))
+    .filter((job) => job.kind !== "edit_verify" || job.status === "failed")
     .filter((job) => Date.parse(job.updated_at) > dismissedBefore)
     .sort((left, right) => Date.parse(right.updated_at) - Date.parse(left.updated_at))
     .slice(0, RECENT_UNSUCCESSFUL_JOB_LIMIT);
@@ -4169,12 +4180,12 @@ function JobsPanel() {
       {active.map((job) => (
         <div className="job-row" key={job.id}>
           <div>
-            <strong>{job.kind}</strong>
+            <strong>{jobDisplayName(job.kind)}</strong>
             <small>{jobProgressText(job)}</small>
             <div
               className="progress-track"
               role="progressbar"
-              aria-label={`${job.kind} progress`}
+              aria-label={`${jobDisplayName(job.kind)} progress`}
               aria-valuemin={0}
               aria-valuemax={100}
               aria-valuenow={jobProgressFraction(job) === null
@@ -4228,7 +4239,7 @@ function JobsPanel() {
       {recentUnsuccessful.map((job) => (
         <div className="job-row unsuccessful" key={job.id}>
           <div>
-            <strong>{job.kind} · {job.status}</strong>
+            <strong>{jobDisplayName(job.kind)} · {job.status}</strong>
             <small>{job.phase || "Stopped"}</small>
             {job.error && <small className="job-error" title={job.error}>{job.error}</small>}
           </div>
