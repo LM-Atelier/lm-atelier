@@ -110,7 +110,7 @@ from .prompt_helpers import (
     STANDARD_CHAT_SCOPE,
     prompt_preview_settings,
 )
-from .recipes import get_reference_recipe, list_reference_recipes, recipe_download_request
+from .recipes import get_reference_recipe, list_reference_recipes
 from .routing import RouteConfirmationRequired
 from .schemas import (
     ApplicationInfo,
@@ -140,6 +140,7 @@ from .schemas import (
     DownloadRequest,
     EngineCapabilities,
     HealthOut,
+    InstallPlanOut,
     JobOut,
     MessageOut,
     ModelAssetOut,
@@ -2673,62 +2674,70 @@ async def catalog_preflight(
     )
 
 
+def _planned_download_fields(plan: InstallPlan | None) -> dict[str, Any]:
+    """The download fields an immutable plan authorises, and nothing else.
+
+    This is both the comparison used to reject a tampered request and the source
+    a recipe install builds its request from, so the two can never disagree.
+    """
+
+    if not plan:
+        raise ValueError("install plan not found; run the install check again")
+    if plan.status != "planned":
+        raise ValueError("install plan is no longer active; run the install check again")
+    if plan.compatibility != "supported":
+        raise ValueError(plan.failure_reason or "this model layout is unsupported")
+    if plan.resolver_version != INSTALL_RESOLVER_VERSION:
+        raise ValueError("install contract changed; run the install check again")
+    runtime = plan.runtime_contract_json
+    if (
+        runtime.get("workflow_template_id")
+        and runtime.get("workflow_compiler_version") != COMFY_TEMPLATE_COMPILER_VERSION
+    ):
+        raise ValueError("workflow contract changed; run the install check again")
+    return {
+        "remote_id": plan.remote_id,
+        "revision": plan.revision,
+        "role": plan.role,
+        "engine": plan.engine,
+        "allow_patterns": [
+            str(item.get("path") or "")
+            for item in plan.artifacts_json
+            if item.get("required", True)
+        ],
+        "expected_sha256": {
+            str(item["path"]): str(item["sha256"])
+            for item in plan.artifacts_json
+            if item.get("sha256")
+        },
+        "file_sources": {
+            str(item["path"]): {
+                "remote_id": str(item["source_remote_id"]),
+                "revision": str(item["source_revision"]),
+                "filename": str(item["source_path"]),
+                "size_bytes": item.get("size_bytes"),
+                "sha256": item.get("sha256"),
+            }
+            for item in plan.artifacts_json
+            if item.get("source_remote_id")
+            and item.get("source_revision")
+            and item.get("source_path")
+        },
+        "source_remote_id": runtime.get("source_remote_id"),
+        "comfy_paths": runtime.get("comfy_paths") or {},
+        "workflow_template_id": runtime.get("workflow_template_id"),
+        "workflow_template_sha256": runtime.get("workflow_template_sha256"),
+        "auxiliary_kind": runtime.get("auxiliary_kind"),
+    }
+
+
 @router.post("/downloads", response_model=JobOut, status_code=202)
 async def create_download(payload: DownloadRequest, request: Request, session: SessionDep) -> Job:
     manager: DownloadManager = _services(request).downloads
     try:
         if payload.install_plan_id:
             plan = session.get(InstallPlan, payload.install_plan_id)
-            if not plan:
-                raise ValueError("install plan not found; run the install check again")
-            if plan.status != "planned":
-                raise ValueError("install plan is no longer active; run the install check again")
-            if plan.compatibility != "supported":
-                raise ValueError(plan.failure_reason or "this model layout is unsupported")
-            if plan.resolver_version != INSTALL_RESOLVER_VERSION:
-                raise ValueError("install contract changed; run the install check again")
-            planned_files = [
-                str(item.get("path") or "")
-                for item in plan.artifacts_json
-                if item.get("required", True)
-            ]
-            planned_hashes = {
-                str(item["path"]): str(item["sha256"])
-                for item in plan.artifacts_json
-                if item.get("sha256")
-            }
-            runtime = plan.runtime_contract_json
-            if (
-                runtime.get("workflow_template_id")
-                and runtime.get("workflow_compiler_version") != COMFY_TEMPLATE_COMPILER_VERSION
-            ):
-                raise ValueError("workflow contract changed; run the install check again")
-            expected = {
-                "remote_id": plan.remote_id,
-                "revision": plan.revision,
-                "role": plan.role,
-                "engine": plan.engine,
-                "allow_patterns": planned_files,
-                "expected_sha256": planned_hashes,
-                "file_sources": {
-                    str(item["path"]): {
-                        "remote_id": str(item["source_remote_id"]),
-                        "revision": str(item["source_revision"]),
-                        "filename": str(item["source_path"]),
-                        "size_bytes": item.get("size_bytes"),
-                        "sha256": item.get("sha256"),
-                    }
-                    for item in plan.artifacts_json
-                    if item.get("source_remote_id")
-                    and item.get("source_revision")
-                    and item.get("source_path")
-                },
-                "source_remote_id": runtime.get("source_remote_id"),
-                "comfy_paths": runtime.get("comfy_paths") or {},
-                "workflow_template_id": runtime.get("workflow_template_id"),
-                "workflow_template_sha256": runtime.get("workflow_template_sha256"),
-                "auxiliary_kind": runtime.get("auxiliary_kind"),
-            }
+            expected = _planned_download_fields(plan)
             supplied = payload.model_dump()
             mismatched = [key for key, value in expected.items() if supplied.get(key) != value]
             if mismatched:
@@ -2784,14 +2793,82 @@ async def get_recipe(recipe_id: str) -> ReferenceRecipe:
 
 @router.post("/recipes/{recipe_id}/install", response_model=JobOut, status_code=202)
 async def install_recipe(recipe_id: str, request: Request, session: SessionDep) -> Job:
+    """Install a shipped recipe through the same verified path as the catalog.
+
+    A recipe used to be downloaded directly, which skipped the install plan and
+    with it staged inspection, component manifests, workflow compilation, the
+    activation probe and the evidence write - so it produced a model that could
+    never report ready. It now runs the ordinary preflight, and the resulting plan
+    must match what the recipe pins before anything is transferred.
+    """
+
     recipe = get_reference_recipe(recipe_id)
     if not recipe:
         raise HTTPException(404, "reference recipe not found")
-    manager: DownloadManager = _services(request).downloads
+    owner, _, name = recipe.remote_id.partition("/")
+    if not owner or not name:
+        raise HTTPException(422, "this recipe does not name a valid repository")
+    preflight = await catalog_preflight(
+        owner,
+        name,
+        CatalogPreflightRequest(
+            revision=recipe.revision,
+            role=recipe.role,
+            engine=recipe.engine,
+            selected_files=[file.path for file in recipe.files],
+        ),
+        request,
+        session,
+    )
+    plan = preflight.install_plan
     try:
-        return manager.create(session, recipe_download_request(recipe))
+        _assert_recipe_pins_hold(recipe, plan)
+        fields = _planned_download_fields(session.get(InstallPlan, plan.id) if plan else None)
+        return _services(request).downloads.create(
+            session,
+            DownloadRequest(
+                install_plan_id=plan.id if plan else None,
+                recipe_id=recipe.id,
+                recipe_version=recipe.version,
+                default_settings=recipe.default_settings,
+                **fields,
+            ),
+        )
     except ValueError as exc:
         raise HTTPException(422, str(exc)) from exc
+
+
+def _assert_recipe_pins_hold(recipe: ReferenceRecipe, plan: InstallPlanOut | None) -> None:
+    """Refuse to install anything other than exactly what the recipe pins.
+
+    Preflight resolves a repository, and for media it may select a bundle a
+    workflow template declares. That is right for a catalog install the user is
+    steering, but a recipe exists to promise specific bytes, so a resolution that
+    drifts from its pins has to fail rather than quietly install something else.
+    """
+
+    if not plan:
+        raise ValueError("the install check did not produce a plan for this recipe")
+    if plan.compatibility != "supported":
+        raise ValueError(
+            plan.failure_reason or "this recipe cannot be installed automatically on this machine"
+        )
+    if plan.remote_id != recipe.remote_id or plan.revision != recipe.revision:
+        raise ValueError("this recipe resolved to a different repository or revision")
+    pinned = {file.path: file.sha256 for file in recipe.files}
+    resolved = {
+        str(item.get("path") or ""): (str(item["sha256"]) if item.get("sha256") else None)
+        for item in plan.artifacts_json
+        if item.get("required", True)
+    }
+    if set(resolved) != set(pinned):
+        raise ValueError("this recipe resolved to a different set of files")
+    drifted = [path for path, digest in pinned.items() if digest and resolved[path] != digest]
+    if drifted:
+        raise ValueError("this recipe resolved to different file contents")
+    unverified = [path for path, digest in resolved.items() if not digest]
+    if unverified:
+        raise ValueError("this recipe resolved files without a verifiable checksum")
 
 
 @router.get("/models", response_model=list[ModelInstallOut])
