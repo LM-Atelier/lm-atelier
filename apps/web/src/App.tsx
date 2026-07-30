@@ -3,7 +3,6 @@ import {
   isValidElement,
   useCallback,
   useEffect,
-  useId,
   useMemo,
   useRef,
   useState,
@@ -49,6 +48,8 @@ import {
   Workflow as WorkflowIcon,
   X,
 } from "lucide-react";
+import { AccessibleDialog } from "./AccessibleDialog";
+import { InstallConfirmDialog } from "./InstallConfirmDialog";
 import { api, connectEvents } from "./api";
 import {
   downloadJson,
@@ -80,6 +81,7 @@ import type {
   ArtifactLibraryItem,
   BackupInfo,
   CatalogModel,
+  CatalogPreflight,
   Chat,
   ChatDetail,
   EngineCapabilities,
@@ -175,122 +177,8 @@ function aggregateWorkPlanStatus(steps: WorkPlan["steps"]): string {
   if (statuses.every((status) => status === "complete")) return "complete";
   return new Set(statuses).size === 1 ? statuses[0] ?? "queued" : "partial";
 }
-const DIALOG_FOCUSABLE = [
-  "a[href]",
-  "button:not([disabled])",
-  "input:not([disabled]):not([type='hidden'])",
-  "select:not([disabled])",
-  "textarea:not([disabled])",
-  "[tabindex]:not([tabindex='-1'])",
-].join(",");
-
 function focusMainContent() {
   window.setTimeout(() => document.getElementById("main-content")?.focus(), 0);
-}
-
-function dialogFocusableElements(dialog: HTMLElement): HTMLElement[] {
-  return Array.from(dialog.querySelectorAll<HTMLElement>(DIALOG_FOCUSABLE)).filter(
-    (element) => element.getAttribute("aria-hidden") !== "true",
-  );
-}
-
-function AccessibleDialog({
-  title,
-  eyebrow,
-  closeLabel,
-  onClose,
-  className = "",
-  backdropClassName = "",
-  children,
-}: {
-  title: string;
-  eyebrow: string;
-  closeLabel: string;
-  onClose: () => void;
-  className?: string;
-  backdropClassName?: string;
-  children: ReactNode;
-}) {
-  const headingId = useId();
-  const dialog = useRef<HTMLDivElement>(null);
-  const returnFocus = useRef<HTMLElement | null>(null);
-  const close = useRef(onClose);
-
-  useEffect(() => {
-    close.current = onClose;
-  }, [onClose]);
-
-  useEffect(() => {
-    returnFocus.current = document.activeElement instanceof HTMLElement
-      ? document.activeElement
-      : null;
-    const previousOverflow = document.body.style.overflow;
-    document.body.style.overflow = "hidden";
-    const surface = dialog.current;
-    const initialFocus = surface?.querySelector<HTMLElement>("[data-dialog-initial-focus]")
-      ?? (surface ? dialogFocusableElements(surface)[0] : null)
-      ?? surface;
-    initialFocus?.focus();
-    return () => {
-      document.body.style.overflow = previousOverflow;
-      if (returnFocus.current?.isConnected) returnFocus.current.focus();
-    };
-  }, []);
-
-  const onKeyDown = (event: React.KeyboardEvent<HTMLDivElement>) => {
-    if (event.key === "Escape") {
-      event.preventDefault();
-      event.stopPropagation();
-      close.current();
-      return;
-    }
-    if (event.key !== "Tab" || !dialog.current) return;
-    const focusable = dialogFocusableElements(dialog.current);
-    if (!focusable.length) {
-      event.preventDefault();
-      dialog.current.focus();
-      return;
-    }
-    const first = focusable[0];
-    const last = focusable.at(-1)!;
-    if (event.shiftKey && (document.activeElement === first || !dialog.current.contains(document.activeElement))) {
-      event.preventDefault();
-      last.focus();
-    } else if (!event.shiftKey && (document.activeElement === last || !dialog.current.contains(document.activeElement))) {
-      event.preventDefault();
-      first.focus();
-    }
-  };
-
-  return (
-    <div className={`modal-backdrop ${backdropClassName}`.trim()}>
-      {/* A modal owns Escape, and this is the element that holds focus while it
-          is open, so the listener belongs here rather than on a control inside. */}
-      {/* eslint-disable-next-line jsx-a11y-x/no-noninteractive-element-interactions */}
-      <div
-        ref={dialog}
-        className={`modal ${className}`.trim()}
-        role="dialog"
-        aria-modal="true"
-        aria-labelledby={headingId}
-        tabIndex={-1}
-        onKeyDown={onKeyDown}
-      >
-        <header>
-          <div><small>{eyebrow}</small><h2 id={headingId}>{title}</h2></div>
-          <button
-            className="icon-button"
-            aria-label={closeLabel}
-            onClick={onClose}
-            data-dialog-initial-focus
-          >
-            <X />
-          </button>
-        </header>
-        {children}
-      </div>
-    </div>
-  );
 }
 
 function roleForMode(mode: RoutingMode): EngineRole {
@@ -2526,6 +2414,14 @@ function InstalledAssetRow({
   );
 }
 
+interface PendingInstall {
+  model: CatalogModel;
+  preflight: CatalogPreflight;
+  installRole: string;
+  engine: string;
+  auxiliaryKind: "lora" | null;
+}
+
 function ModelsView({ initialRole }: { initialRole: EngineRole }) {
   const client = useQueryClient();
   const [query, setQuery] = useState("");
@@ -2596,9 +2492,13 @@ function ModelsView({ initialRole }: { initialRole: EngineRole }) {
   const storage = useQuery({ queryKey: ["model-storage"], queryFn: api.modelStorage });
   const profiles = useQuery({ queryKey: ["profiles"], queryFn: api.profiles });
   const runtimes = useQuery({ queryKey: ["runtimes"], queryFn: api.runtimes });
+  const machine = useQuery({ queryKey: ["system"], queryFn: api.system });
   const runtimeFor = (model: CatalogModel) => runtimes.data?.find(
     (runtime) => runtime.engine === model.required_runtime,
   );
+  // Preflight and transfer are separate steps so the user sees what a download
+  // will cost before it starts; the numbers were previously computed and dropped.
+  const [pendingInstall, setPendingInstall] = useState<PendingInstall | null>(null);
   const download = useMutation({
     mutationFn: async ({ model, selectedRole }: { model: CatalogModel; selectedRole: string }) => {
       const auxiliaryKind = selectedRole === "lora" ? "lora" : null;
@@ -2632,6 +2532,12 @@ function ModelsView({ initialRole }: { initialRole: EngineRole }) {
           || "LM Atelier cannot safely activate this model with the current runtime.",
         );
       }
+      return { model, preflight, installRole, engine, auxiliaryKind } satisfies PendingInstall;
+    },
+    onSuccess: (ready) => setPendingInstall(ready),
+  });
+  const confirmInstall = useMutation({
+    mutationFn: ({ preflight, installRole, engine, auxiliaryKind }: PendingInstall) => {
       const downloadArguments = [
         preflight.remote_id,
         preflight.source_remote_id,
@@ -2650,7 +2556,10 @@ function ModelsView({ initialRole }: { initialRole: EngineRole }) {
         ? api.download(...downloadArguments, auxiliaryKind)
         : api.download(...downloadArguments);
     },
-    onSuccess: () => void client.invalidateQueries({ queryKey: ["jobs"] }),
+    onSuccess: () => {
+      setPendingInstall(null);
+      void client.invalidateQueries({ queryKey: ["jobs"] });
+    },
   });
   const installRecipe = useMutation({
     mutationFn: (recipeId: string) => api.installRecipe(recipeId),
@@ -2851,7 +2760,17 @@ function ModelsView({ initialRole }: { initialRole: EngineRole }) {
           ))}
         </div>
       </section>}
-      {(download.error || deleteModel.error || cleanupDownloads.error || updateUseCase.error || setDefaultModel.error || updateModelAsset.error || deleteModelAsset.error) && <ErrorCallout message={download.error?.message || deleteModel.error?.message || cleanupDownloads.error?.message || updateUseCase.error?.message || setDefaultModel.error?.message || updateModelAsset.error?.message || deleteModelAsset.error?.message} />}
+      {pendingInstall && (
+        <InstallConfirmDialog
+          name={pendingInstall.model.name || pendingInstall.model.remote_id}
+          preflight={pendingInstall.preflight}
+          system={machine.data}
+          pending={confirmInstall.isPending}
+          onConfirm={() => confirmInstall.mutate(pendingInstall)}
+          onCancel={() => setPendingInstall(null)}
+        />
+      )}
+      {(download.error || confirmInstall.error || deleteModel.error || cleanupDownloads.error || updateUseCase.error || setDefaultModel.error || updateModelAsset.error || deleteModelAsset.error) && <ErrorCallout message={download.error?.message || confirmInstall.error?.message || deleteModel.error?.message || cleanupDownloads.error?.message || updateUseCase.error?.message || setDefaultModel.error?.message || updateModelAsset.error?.message || deleteModelAsset.error?.message} />}
       {catalog.isLoading && <div className="loading-line" />}
       <ErrorCallout message={catalog.error?.message} action={<button className="secondary compact-button" disabled={catalog.isFetching} onClick={() => void catalog.refetch()}>Retry</button>} />
       {catalogIsStale && !catalog.error && <div className="callout warning action-callout" role="status"><span>Showing saved results while Hugging Face is unavailable.</span><button className="secondary compact-button" disabled={catalog.isFetching} onClick={() => void catalog.refetch()}>Refresh</button></div>}
