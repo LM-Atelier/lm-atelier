@@ -849,6 +849,80 @@ def test_workflow_policy_rejects_runner_context_in_job_environment() -> None:
     ]
 
 
+def test_ci_plan_is_fail_closed_and_audits_dependency_changes() -> None:
+    namespace = runpy.run_path(str(ROOT / "scripts/ci-plan.py"))
+    classify = namespace["classify_develop_changes"]
+
+    assert classify(["docs/ARCHITECTURE.md", "CONTRIBUTING.md"]) == (
+        "documentation",
+        False,
+    )
+    assert classify(["README.md"]) == ("full", False)
+    assert classify(["docs/TROUBLESHOOTING.md"]) == ("full", False)
+    assert classify(["services/api/local_lm/api.py"]) == ("full", False)
+    assert classify(["package-lock.json"]) == ("full", True)
+    assert classify([]) == ("full", False)
+
+
+def test_ci_plan_rejects_malformed_event_shas() -> None:
+    namespace = runpy.run_path(str(ROOT / "scripts/ci-plan.py"))
+    require_sha = namespace["require_sha"]
+
+    with pytest.raises(ValueError, match="full commit SHA"):
+        require_sha("base SHA", "--output=unexpected")
+
+
+def test_ci_plan_requires_exact_protected_develop_promotion(monkeypatch) -> None:
+    namespace = runpy.run_path(str(ROOT / "scripts/ci-plan.py"))
+    validate = namespace["validate_develop_promotion"]
+    base = "a" * 40
+    head = "b" * 40
+    common = "c" * 40
+
+    def exact_git(*arguments: str) -> str:
+        queries = {
+            ("rev-parse", "--verify", f"{base}^{{commit}}"): base,
+            ("rev-parse", "--verify", f"{head}^{{commit}}"): head,
+            ("rev-parse", "origin/main"): base,
+            ("rev-parse", "origin/develop"): head,
+            ("merge-base", base, head): common,
+            ("rev-parse", f"{base}^{{tree}}"): "tree",
+            ("rev-parse", f"{common}^{{tree}}"): "tree",
+        }
+        return queries[arguments]
+
+    monkeypatch.setitem(validate.__globals__, "git", exact_git)
+    validate(base_ref="main", head_ref="develop", base_sha=base, head_sha=head)
+
+    with pytest.raises(ValueError, match="develop branch"):
+        validate(base_ref="main", head_ref="other", base_sha=base, head_sha=head)
+
+    def divergent_git(*arguments: str) -> str:
+        if arguments == ("rev-parse", f"{common}^{{tree}}"):
+            return "different-tree"
+        return exact_git(*arguments)
+
+    monkeypatch.setitem(validate.__globals__, "git", divergent_git)
+    with pytest.raises(ValueError, match="not present in the develop lineage"):
+        validate(base_ref="main", head_ref="develop", base_sha=base, head_sha=head)
+
+
+def test_ci_workflow_retains_required_check_for_every_pr_scope() -> None:
+    workflow = (ROOT / ".github/workflows/ci.yml").read_text()
+    compatibility = workflow.split("  compatibility:", 1)[1].split("  scheduled-audit:", 1)[0]
+
+    assert "name: Ubuntu compatibility" in compatibility
+    assert "scripts/ci-plan.py" in compatibility
+    assert compatibility.count("steps.plan.outputs.mode") >= 10
+    assert "documentation" in compatibility
+    assert "promotion" in compatibility
+    assert "steps.plan.outputs.dependency_audit" in compatibility
+    assert "23 9 * * 2" in workflow
+    assert "name: Scheduled dependency audit" in workflow
+    assert "npm audit --audit-level=high" in workflow
+    assert ".venv/bin/python -m pip_audit" in workflow
+
+
 def test_public_repository_configuration_verifies_every_applied_control() -> None:
     script = (ROOT / "scripts/configure-public-repository.ps1").read_text()
 
