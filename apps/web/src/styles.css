@@ -588,3 +588,9 @@ h1, h2, h3 { margin: 0; }
 .render-error p { color: #9aa3b1; line-height: 1.6; margin-bottom: 20px; }
 .render-error details { margin-top: 22px; text-align: left; color: #818a98; font-size: 12px; }
 .render-error pre { white-space: pre-wrap; word-break: break-word; margin-top: 8px; }
+.install-confirm .install-facts { display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: 14px; margin: 4px 0 18px; }
+.install-confirm .install-facts dt { color: #818a98; font-size: 12px; margin-bottom: 3px; }
+.install-confirm .install-facts dd { margin: 0; font-size: 16px; font-variant-numeric: tabular-nums; }
+.install-confirm .install-facts dd small { color: #818a98; font-size: 12px; }
+.install-confirm .install-warning { color: #e7c86b; line-height: 1.5; margin: 0 0 12px; }
+.install-confirm footer { display: flex; justify-content: flex-end; gap: 10px; margin-top: 20px; }
