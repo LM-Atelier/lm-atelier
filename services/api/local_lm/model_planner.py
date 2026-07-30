@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+from collections.abc import Mapping
 from dataclasses import dataclass
 from pathlib import PurePosixPath
 from typing import Any, Literal
@@ -39,9 +40,64 @@ InstallCompatibility = Literal[
 ]
 
 
+WORKFLOW_ARTIFACT_CONTRACT_VERSION = 1
+
+# Declared dependencies that can change how a workflow executes. Local install
+# identifiers are excluded because they differ per machine, and the compiler
+# version is excluded because keying on it is what this replaces.
+_EXECUTION_DEPENDENCY_KEYS = (
+    "template_id",
+    "template_sha256",
+    "model_files",
+    "custom_nodes",
+    "extensions",
+)
+
+
 def media_workflow_contract_version(template_sha256: str) -> str:
+    """The legacy contract key, derived from the compiler version.
+
+    Retained so evidence recorded before the artifact contract can still be
+    recognised. New evidence uses `workflow_artifact_contract`.
+    """
+
     payload = f"{COMFY_TEMPLATE_COMPILER_VERSION}:{template_sha256}".encode()
     return hashlib.sha256(payload).hexdigest()
+
+
+def workflow_artifact_contract(
+    *,
+    operation: str,
+    engine: str,
+    api_graph: Mapping[str, Any],
+    input_schema: Mapping[str, Any],
+    dependencies: Mapping[str, Any],
+) -> str:
+    """Identify what a compiled workflow actually executes.
+
+    Capability evidence used to be keyed on the compiler version, so improving
+    the compiler invalidated every media model's evidence even when a given
+    workflow compiled to exactly the same thing. Keying on the compiled output
+    means only workflows whose execution really changed need re-proving.
+
+    The payload is canonical: sorted keys, compact separators, no NaN. List order
+    is preserved because it can be semantic. Anything incidental - the UI graph,
+    timestamps, revision and install identifiers, display metadata - is excluded,
+    so the same input always produces the same hash.
+    """
+
+    payload = {
+        "version": WORKFLOW_ARTIFACT_CONTRACT_VERSION,
+        "operation": operation,
+        "engine": engine,
+        "api_graph": api_graph,
+        "input_schema": input_schema,
+        "dependencies": {
+            key: dependencies[key] for key in _EXECUTION_DEPENDENCY_KEYS if key in dependencies
+        },
+    }
+    encoded = json.dumps(payload, sort_keys=True, separators=(",", ":"), allow_nan=False)
+    return hashlib.sha256(encoded.encode()).hexdigest()
 
 
 @dataclass(frozen=True)

@@ -610,6 +610,9 @@ class WorkflowRevision(TimestampMixin, Base):
     api_graph_json: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
     input_schema_json: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
     dependencies_json: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
+    # Identifies what this revision executes, so capability evidence survives a
+    # compiler change that does not alter the compiled output.
+    artifact_sha256: Mapped[str | None] = mapped_column(String(64), nullable=True, index=True)
     trusted: Mapped[bool] = mapped_column(Boolean, default=False)
 
     definition: Mapped[WorkflowDefinition] = relationship(

@@ -51,7 +51,7 @@ from .model_manifests import (
     ModelManifestInspection,
     inspect_repository_metadata,
 )
-from .model_planner import media_workflow_contract_version
+from .model_planner import media_workflow_contract_version, workflow_artifact_contract
 from .models import (
     Chat,
     InstallPlan,
@@ -2375,6 +2375,13 @@ class DownloadManager:
             api_graph_json=compiled.api_graph,
             input_schema_json=input_schema,
             dependencies_json=dependencies,
+            artifact_sha256=workflow_artifact_contract(
+                operation=compiled.template.operation,
+                engine="comfyui",
+                api_graph=compiled.api_graph,
+                input_schema=input_schema,
+                dependencies=dependencies,
+            ),
             trusted=True,
         )
         session.add(revision)
