@@ -87,6 +87,9 @@ class EngineRegistry:
     async def chat_capabilities(self) -> EngineCapabilities:
         return await self._adapter_capabilities(self.chat, "chat")
 
+    async def media_capabilities(self) -> EngineCapabilities:
+        return await self._adapter_capabilities(self.media, "media")
+
     async def settings_for_role(
         self,
         role: str,
