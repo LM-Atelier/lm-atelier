@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
+from typing import Any
 
 import pytest
 
@@ -11,6 +12,7 @@ from local_lm.comfy_templates import (
     ComfyTemplateRegistry,
     CompiledComfyTemplate,
     _compile_ui_graph,
+    _enable_declared_four_step_edit_acceleration,
     derive_image_to_image,
 )
 from local_lm.config import Settings
@@ -1458,3 +1460,122 @@ def test_runtime_parameter_names_do_not_replace_graph_links() -> None:
     assert graph["2"]["inputs"]["steps"] == ["1", 0]
     assert schema["properties"]["steps"] == {"readOnly": True}
     assert schema["properties"]["cfg"] == {"readOnly": True}
+
+
+def _four_step_edit_graph() -> dict[str, Any]:
+    return {
+        "inputs": [
+            {
+                "name": "value",
+                "label": "enable_turbo_mode",
+                "type": "BOOLEAN",
+            }
+        ],
+        "nodes": [
+            {
+                "id": 1,
+                "type": "PrimitiveBoolean",
+                "inputs": [{"name": "value", "type": "BOOLEAN"}],
+                "widgets_values": [False],
+            },
+            {"id": 2, "type": "PrimitiveInt", "widgets_values": [40]},
+            {"id": 3, "type": "PrimitiveInt", "widgets_values": [4]},
+            {"id": 4, "type": "BaseModel"},
+            {
+                "id": 5,
+                "type": "LoraLoaderModelOnly",
+                "properties": {
+                    "models": [
+                        {
+                            "name": "edit-lightning.safetensors",
+                            "url": (
+                                "https://huggingface.co/example/edit-lightning/resolve/"
+                                "main/edit-lightning.safetensors"
+                            ),
+                            "directory": "loras",
+                        }
+                    ]
+                },
+                "widgets_values": ["edit-lightning.safetensors", 1.0],
+            },
+            {
+                "id": 6,
+                "type": "ComfySwitchNode",
+                "title": "Switch (Steps)",
+                "inputs": [
+                    {"name": "on_false", "type": "INT"},
+                    {"name": "on_true", "type": "INT"},
+                    {"name": "switch", "type": "BOOLEAN"},
+                ],
+            },
+            {
+                "id": 7,
+                "type": "ComfySwitchNode",
+                "title": "Switch (Model)",
+                "inputs": [
+                    {"name": "on_false", "type": "MODEL"},
+                    {"name": "on_true", "type": "MODEL"},
+                    {"name": "switch", "type": "BOOLEAN"},
+                ],
+            },
+            {
+                "id": 8,
+                "type": "Sampler",
+                "inputs": [
+                    {"name": "steps", "type": "INT"},
+                    {"name": "model", "type": "MODEL"},
+                ],
+            },
+        ],
+        "links": [
+            [-1, -10, 0, 1, 0, "BOOLEAN"],
+            [1, 1, 0, 6, 2, "BOOLEAN"],
+            [2, 1, 0, 7, 2, "BOOLEAN"],
+            [3, 2, 0, 6, 0, "INT"],
+            [4, 3, 0, 6, 1, "INT"],
+            [5, 4, 0, 7, 0, "MODEL"],
+            [6, 5, 0, 7, 1, "MODEL"],
+            [7, 6, 0, 8, 0, "INT"],
+            [8, 7, 0, 8, 1, "MODEL"],
+        ],
+    }
+
+
+def test_declared_four_step_edit_acceleration_enables_complete_bundled_branch() -> None:
+    subgraph = _four_step_edit_graph()
+    ui_graph = {"nodes": [], "definitions": {"subgraphs": [subgraph]}}
+
+    accelerated = _enable_declared_four_step_edit_acceleration(
+        ui_graph,
+        operation="image_to_image",
+    )
+
+    assert accelerated is True
+    assert subgraph["nodes"][0]["widgets_values"] == [True]
+
+
+def test_declared_four_step_edit_acceleration_is_edit_only() -> None:
+    subgraph = _four_step_edit_graph()
+    ui_graph = {"nodes": [], "definitions": {"subgraphs": [subgraph]}}
+
+    accelerated = _enable_declared_four_step_edit_acceleration(
+        ui_graph,
+        operation="text_to_image",
+    )
+
+    assert accelerated is False
+    assert subgraph["nodes"][0]["widgets_values"] == [False]
+
+
+def test_declared_four_step_edit_acceleration_requires_bundled_lora_metadata() -> None:
+    subgraph = _four_step_edit_graph()
+    subgraph["nodes"][4]["properties"] = {}
+    ui_graph = {"nodes": [], "definitions": {"subgraphs": [subgraph]}}
+
+    accelerated = _enable_declared_four_step_edit_acceleration(
+        ui_graph,
+        operation="image_to_image",
+    )
+
+    assert accelerated is False
+    assert subgraph["nodes"][0]["widgets_values"] == [False]
