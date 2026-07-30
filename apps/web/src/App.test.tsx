@@ -127,6 +127,7 @@ vi.mock("./api", () => ({
     retryJob: vi.fn(),
     pauseDownload: vi.fn(),
     resumeDownload: vi.fn(),
+    activateModel: vi.fn(),
     engines: vi.fn().mockResolvedValue([
       {
         engine: "mock",
@@ -394,6 +395,36 @@ describe("App", () => {
       screen.getByText("Automatic setup for the required runtime is unavailable on this machine."),
     ).toBeInTheDocument();
     // Sending an unsupported machine to the model library is the loop this prevents.
+    expect(screen.queryByRole("button", { name: "Choose image model" })).not.toBeInTheDocument();
+  });
+
+  it("re-checks a model whose activation went stale", async () => {
+    vi.mocked(api.setupReadiness).mockResolvedValue(setupReport(
+      setupRole("chat"),
+      setupRole("image", "action_required", "activate_model", {
+        install_id: "install-image",
+        checks: [{
+          code: "activation_stale",
+          status: "fail",
+          message: "The model must be rechecked for the current runtime and hardware.",
+          action: "activate_model",
+        }],
+      }),
+      setupRole("video"),
+    ));
+    vi.mocked(api.activateModel).mockResolvedValue({ id: "job-activate" } as never);
+    const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+    render(
+      <QueryClientProvider client={client}>
+        <App />
+      </QueryClientProvider>,
+    );
+
+    expect(await screen.findByRole("dialog", { name: "Set up LM Atelier" })).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "Re-check model" }));
+
+    await waitFor(() => expect(api.activateModel).toHaveBeenCalledWith("install-image"));
+    // Sending the user back to the catalog is the dead end this replaces.
     expect(screen.queryByRole("button", { name: "Choose image model" })).not.toBeInTheDocument();
   });
 

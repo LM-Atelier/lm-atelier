@@ -3964,6 +3964,10 @@ function SetupWizard({
     mutationFn: (jobId: string) => api.resumeDownload(jobId),
     onSuccess: refresh,
   });
+  const activateModel = useMutation({
+    mutationFn: (installId: string) => api.activateModel(installId),
+    onSuccess: refresh,
+  });
   const installRuntime = useMutation({
     mutationFn: (engine: RuntimeStatus["engine"]) => api.installRuntime(engine),
     onSuccess: refresh,
@@ -3999,6 +4003,10 @@ function SetupWizard({
       retryInstall.mutate(role.job_id);
       return;
     }
+    if (role.next_action === "activate_model" && role.install_id) {
+      activateModel.mutate(role.install_id);
+      return;
+    }
     if (
       ["install_runtime", "retry_runtime"].includes(role.next_action ?? "")
       && ["llama.cpp", "vllm", "comfyui"].includes(role.engine ?? "")
@@ -4019,6 +4027,7 @@ function SetupWizard({
   const actionLabel = (role: SetupRoleReadiness): string => {
     if (role.next_action === "verify_generation") return "Run quick test";
     if (role.next_action === "retry_install") return "Retry install";
+    if (role.next_action === "activate_model") return "Re-check model";
     if (role.next_action === "install_runtime") return "Install runtime";
     if (role.next_action === "retry_runtime") return "Retry runtime";
     if (role.next_action === "restart_worker") return "Restart worker";
@@ -4028,7 +4037,7 @@ function SetupWizard({
     return `Choose ${role.role} model`;
   };
   const pendingRole = restartWorker.variables?.role;
-  const error = installRecipe.error || retryInstall.error || installRuntime.error || restartWorker.error || verifyRole.error;
+  const error = installRecipe.error || retryInstall.error || installRuntime.error || restartWorker.error || verifyRole.error || activateModel.error;
 
   return (
     <AccessibleDialog
@@ -4051,6 +4060,7 @@ function SetupWizard({
             : undefined;
           const actionPending = (
             (retryInstall.isPending && retryInstall.variables === role.job_id)
+            || (activateModel.isPending && activateModel.variables === role.install_id)
             || (installRuntime.isPending && installRuntime.variables === role.engine)
             || (restartWorker.isPending && pendingRole === role.role)
             || (verifyRole.isPending && verifyRole.variables === role.role)

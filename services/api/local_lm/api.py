@@ -3116,6 +3116,25 @@ async def import_model(payload: ModelImport, session: SessionDep) -> ModelInstal
     return install
 
 
+@router.post("/models/{model_id}/activate", response_model=JobOut, status_code=202)
+async def activate_model(model_id: str, request: Request, session: SessionDep) -> Job:
+    """Re-prove an installed model against the current runtime and hardware.
+
+    Activation evidence is bound to the runtime, workflow contract and hardware it
+    was gathered on, so an upgrade can leave a working install reporting that it
+    must be rechecked. Without this the only remedy was to delete the model and
+    download it again.
+    """
+
+    install = session.get(ModelInstall, model_id)
+    if not install:
+        raise HTTPException(404, "model not found")
+    try:
+        return _services(request).downloads.reactivate(session, install)
+    except ValueError as exc:
+        raise HTTPException(422, str(exc)) from exc
+
+
 @router.delete("/models/{model_id}", status_code=204)
 async def delete_model(
     model_id: str,
