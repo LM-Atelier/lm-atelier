@@ -563,8 +563,8 @@ async def test_worker_health_probe_ignores_proxy_environment(
         async def __aexit__(self, *_args: object) -> None:
             return None
 
-        async def get(self, _url: str, *, timeout: int) -> SimpleNamespace:
-            assert timeout == 1
+        async def get(self, _url: str, *, timeout: float) -> SimpleNamespace:
+            assert timeout == 5.0
             return SimpleNamespace(is_success=True)
 
     monkeypatch.setattr("local_lm.processes.httpx.AsyncClient", FakeClient)
@@ -578,6 +578,47 @@ async def test_worker_health_probe_ignores_proxy_environment(
 
     assert captured == {"trust_env": False}
     await supervisor.close()
+
+
+async def test_worker_health_probe_backs_off_between_loading_responses(
+    settings,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:  # type: ignore[no-untyped-def]
+    settings.prepare()
+    supervisor = ProcessSupervisor(settings)
+    delays: list[float] = []
+    record = SimpleNamespace(
+        name="chat",
+        process=SimpleNamespace(pid=456_789_123, returncode=None),
+    )
+
+    class FakeClient:
+        def __init__(self, **_kwargs: object) -> None:
+            pass
+
+        async def __aenter__(self) -> FakeClient:
+            return self
+
+        async def __aexit__(self, *_args: object) -> None:
+            return None
+
+        async def get(self, _url: str, *, timeout: float) -> SimpleNamespace:
+            assert timeout == 5.0
+            return SimpleNamespace(is_success=False, status_code=503)
+
+    async def sleep(delay: float) -> None:
+        delays.append(delay)
+        if len(delays) == 4:
+            record.process.returncode = 1
+
+    monkeypatch.setattr("local_lm.processes.httpx.AsyncClient", FakeClient)
+    monkeypatch.setattr("local_lm.processes.asyncio.sleep", sleep)
+    monkeypatch.setattr(supervisor, "_record_worker_process_tree", lambda *_args: None)
+
+    with pytest.raises(RuntimeError, match="exited with code 1"):
+        await supervisor._wait_healthy(record, "http://127.0.0.1:12341/health")
+
+    assert delays == [0.25, 0.5, 1.0, 2.0]
 
 
 async def test_worker_health_rejects_listener_owned_by_another_process(
@@ -597,8 +638,8 @@ async def test_worker_health_rejects_listener_owned_by_another_process(
         async def __aexit__(self, *_args: object) -> None:
             return None
 
-        async def get(self, _url: str, *, timeout: int) -> SimpleNamespace:
-            assert timeout == 1
+        async def get(self, _url: str, *, timeout: float) -> SimpleNamespace:
+            assert timeout == 5.0
             return SimpleNamespace(is_success=True)
 
     monkeypatch.setattr("local_lm.processes.httpx.AsyncClient", FakeClient)
@@ -648,6 +689,33 @@ async def test_runtime_exit_captures_only_a_bounded_stderr_tail(
     assert len(status.stderr_tail) <= WORKER_STDERR_DISPLAY_CHARS + 1
     assert len(record.stderr_tail) <= WORKER_STDERR_TAIL_BYTES
     await supervisor.close()
+
+
+async def test_loading_health_503_lines_do_not_displace_stderr_tail(
+    settings,
+) -> None:  # type: ignore[no-untyped-def]
+    settings.prepare()
+    supervisor = ProcessSupervisor(settings)
+    stdout = asyncio.StreamReader()
+    stderr = asyncio.StreamReader()
+    stdout.feed_eof()
+    stderr.feed_data(b"CUDA allocation failed before loading\nINFO GET /hea")
+    stderr.feed_data(b"lth HTTP/1.1 503 Loading model\nfatal model error after loading\n")
+    stderr.feed_eof()
+    log_path = settings.log_dir / "loading-worker.log"
+    record = WorkerRecord(
+        name="chat",
+        process=SimpleNamespace(stdout=stdout, stderr=stderr),  # type: ignore[arg-type]
+        command=[],
+        log=_RotatingWorkerLog(log_path),
+    )
+
+    await supervisor._capture_process_output(record)
+
+    assert b"CUDA allocation failed" in record.stderr_tail
+    assert b"fatal model error" in record.stderr_tail
+    assert b"/health" not in record.stderr_tail
+    assert b"GET /health HTTP/1.1 503" in log_path.read_bytes()
 
 
 async def test_chat_first_use_provisions_missing_runtime(
@@ -751,7 +819,7 @@ async def test_media_first_use_provisions_missing_runtime(
     runtimes.ensure.assert_awaited_once_with("comfyui")
     assert captured["command"][0] == str(executable.resolve())
     assert captured["command"][1] == str((runtime / "main.py").resolve())
-    assert captured["health_url"] == settings.comfy_url + "/object_info"
+    assert captured["health_url"] == settings.comfy_url + "/system_stats"
 
 
 async def test_vllm_chat_launches_complete_modelopt_snapshot(

@@ -35,6 +35,9 @@ WORKER_LOG_BACKUP_COUNT = 3
 WORKER_STDERR_TAIL_BYTES = 16 * 1024
 WORKER_STDERR_DISPLAY_CHARS = 2_000
 WORKER_STDERR_DISPLAY_LINES = 12
+WORKER_HEALTH_REQUEST_TIMEOUT_SECONDS = 5.0
+WORKER_HEALTH_INITIAL_DELAY_SECONDS = 0.25
+WORKER_HEALTH_MAX_DELAY_SECONDS = 2.0
 WINDOWS_CREATE_NO_WINDOW = 0x08000000
 WINDOWS_SO_EXCLUSIVEADDRUSE = int(getattr(socket, "SO_EXCLUSIVEADDRUSE", -5))
 
@@ -151,6 +154,7 @@ class WorkerRecord:
     startup_duration_ms: int | None = None
     peak_memory_bytes: int = 0
     stderr_tail: bytearray = field(default_factory=bytearray)
+    stderr_pending: bytearray = field(default_factory=bytearray)
     output_task: asyncio.Task[None] | None = None
     failure_detail: str | None = None
 
@@ -182,12 +186,14 @@ class ProcessSupervisor:
         self._private_output_suppression_depth += 1
         for record in self._workers.values():
             record.stderr_tail.clear()
+            record.stderr_pending.clear()
 
     def end_private_session(self) -> None:
         if self._private_output_suppression_depth > 0:
             self._private_output_suppression_depth -= 1
         for record in self._workers.values():
             record.stderr_tail.clear()
+            record.stderr_pending.clear()
 
     def statuses(self) -> list[WorkerStatus]:
         result: list[WorkerStatus] = []
@@ -403,7 +409,7 @@ class ProcessSupervisor:
         ]
         if trusted_custom_nodes:
             command.extend(["--whitelist-custom-nodes", *trusted_custom_nodes])
-        await self._replace("media", command, self.settings.comfy_url + "/object_info")
+        await self._replace("media", command, self.settings.comfy_url + "/system_stats")
         return self.statuses()[1]
 
     async def _trusted_comfy_node_folders(self) -> list[str]:
@@ -625,16 +631,24 @@ class ProcessSupervisor:
                 raise RuntimeError(message) from exc
 
     async def _wait_healthy(self, record: WorkerRecord, url: str) -> None:
-        deadline = asyncio.get_running_loop().time() + self.settings.worker_startup_seconds
+        loop = asyncio.get_running_loop()
+        deadline = loop.time() + self.settings.worker_startup_seconds
+        delay = WORKER_HEALTH_INITIAL_DELAY_SECONDS
         async with httpx.AsyncClient(trust_env=False) as client:
-            while asyncio.get_running_loop().time() < deadline:
+            while loop.time() < deadline:
                 if record.process.returncode is not None:
                     raise RuntimeError(
                         f"{record.name} worker exited with code {record.process.returncode}"
                     )
                 self._record_worker_process_tree(record.name, record.process.pid)
+                remaining = deadline - loop.time()
+                if remaining <= 0:
+                    break
                 try:
-                    response = await client.get(url, timeout=1)
+                    response = await client.get(
+                        url,
+                        timeout=min(WORKER_HEALTH_REQUEST_TIMEOUT_SECONDS, remaining),
+                    )
                     if response.is_success:
                         if self._listener_owned_by_worker(record.process.pid, url):
                             return
@@ -643,7 +657,11 @@ class ProcessSupervisor:
                         )
                 except httpx.HTTPError:
                     pass
-                await asyncio.sleep(0.2)
+                remaining = deadline - loop.time()
+                if remaining <= 0:
+                    break
+                await asyncio.sleep(min(delay, remaining))
+                delay = min(delay * 2, WORKER_HEALTH_MAX_DELAY_SECONDS)
         raise TimeoutError(f"{record.name} worker did not become healthy before timeout")
 
     async def _ensure_port_available(self, name: str, url: str) -> None:
@@ -923,10 +941,7 @@ class ProcessSupervisor:
                     if self.private_output_suppressed:
                         continue
                     if stderr:
-                        record.stderr_tail.extend(chunk)
-                        overflow = len(record.stderr_tail) - WORKER_STDERR_TAIL_BYTES
-                        if overflow > 0:
-                            del record.stderr_tail[:overflow]
+                        self._append_stderr_tail(record, chunk)
                     if not log_failed:
                         try:
                             record.log.write(chunk)
@@ -935,6 +950,9 @@ class ProcessSupervisor:
                             logger.exception("Could not write the %s worker log", record.name)
             except (OSError, ValueError):
                 logger.exception("Could not read %s worker output", record.name)
+            finally:
+                if stderr:
+                    self._append_stderr_tail(record, b"", final=True)
 
         try:
             await asyncio.gather(
@@ -943,6 +961,34 @@ class ProcessSupervisor:
             )
         finally:
             record.log.close()
+
+    @staticmethod
+    def _is_loading_health_line(line: bytes) -> bool:
+        lowered = line.lower()
+        return b"/health" in lowered and b"503" in lowered and b"get " in lowered
+
+    @classmethod
+    def _append_stderr_tail(
+        cls,
+        record: WorkerRecord,
+        chunk: bytes,
+        *,
+        final: bool = False,
+    ) -> None:
+        payload = bytes(record.stderr_pending) + chunk
+        record.stderr_pending.clear()
+        lines = payload.splitlines(keepends=True)
+        if not final and lines and not payload.endswith((b"\n", b"\r")):
+            record.stderr_pending.extend(lines.pop())
+        for line in lines:
+            if cls._is_loading_health_line(line):
+                continue
+            record.stderr_tail.extend(line)
+            overflow = len(record.stderr_tail) - WORKER_STDERR_TAIL_BYTES
+            if overflow > 0:
+                del record.stderr_tail[:overflow]
+        if len(record.stderr_pending) > WORKER_STDERR_TAIL_BYTES:
+            del record.stderr_pending[:-WORKER_STDERR_TAIL_BYTES]
 
     def _stderr_tail(self, record: WorkerRecord) -> str | None:
         if not record.stderr_tail:
