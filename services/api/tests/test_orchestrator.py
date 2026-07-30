@@ -8,6 +8,7 @@ from unittest.mock import AsyncMock, Mock
 import pytest
 
 from local_lm.adapters.base import ChatEvent, MediaEvent, estimate_chat_tokens
+from local_lm.comfy_templates import COMFY_TEMPLATE_COMPILER_VERSION
 from local_lm.models import (
     Job,
     Message,
@@ -15,10 +16,128 @@ from local_lm.models import (
     ModelInstall,
     ModelProfile,
     Run,
+    WorkflowRevision,
     WorkStep,
 )
 from local_lm.orchestrator import ConversationOrchestrator
-from local_lm.schemas import WorkerStatus
+from local_lm.schemas import EngineCapabilities, WorkerStatus
+
+
+def test_successful_media_evidence_requires_an_exact_official_contract(monkeypatch) -> None:
+    template_sha256 = "b" * 64
+    profile = SimpleNamespace(
+        id="profile-image",
+        model_install_id="install-image",
+        role="image",
+        engine="comfyui",
+    )
+    install = SimpleNamespace(
+        id="install-image",
+        active=True,
+        role="image",
+        engine="comfyui",
+        manifest_json={
+            "expected_sha256": {"model.safetensors": "a" * 64},
+            "workflow_template_id": "image_edit",
+            "workflow_template_sha256": template_sha256,
+        },
+    )
+    performance = {"version": 1, "signals": [{"kind": "model-cache"}]}
+    revision = SimpleNamespace(
+        id="revision-image",
+        trusted=True,
+        engine="comfyui",
+        input_schema_json={"x-lm-atelier-workflow-performance": performance},
+        dependencies_json={
+            "model_install_ids": [install.id],
+            "compiler_version": COMFY_TEMPLATE_COMPILER_VERSION,
+            "template_id": "image_edit",
+            "template_sha256": template_sha256,
+        },
+    )
+    run = SimpleNamespace(
+        operation="image_to_image",
+        profile_id=profile.id,
+        workflow_revision_id=revision.id,
+    )
+
+    class FakeSession:
+        def get(self, model, identity):  # type: ignore[no-untyped-def]
+            return {
+                (ModelProfile, profile.id): profile,
+                (ModelInstall, install.id): install,
+                (WorkflowRevision, revision.id): revision,
+            }.get((model, identity))
+
+    recorder = Mock(return_value=SimpleNamespace(evidence_key="evidence-key"))
+    monkeypatch.setattr("local_lm.orchestrator.record_capability_evidence", recorder)
+    orchestrator = ConversationOrchestrator(
+        engines=SimpleNamespace(settings=SimpleNamespace()),
+        artifacts=Mock(),
+        events=Mock(),
+        scheduler=Mock(),
+        processes=SimpleNamespace(runtimes=None),
+    )
+    capabilities = EngineCapabilities(
+        engine="comfyui",
+        version="comfy-test",
+        roles=["image"],
+        operations=["image_to_image"],
+        formats=["png"],
+        devices=["gpu:0"],
+        streaming=True,
+        tool_calling=False,
+        settings=[],
+        healthy=True,
+    )
+
+    assert (
+        orchestrator._record_successful_media_evidence(
+            FakeSession(),
+            run,
+            capabilities,
+            output_count=1,
+        )
+        == "evidence-key"
+    )
+    assert recorder.call_args.kwargs["component_hashes"] == {"model.safetensors": "a" * 64}
+    assert recorder.call_args.kwargs["details"] == {
+        "probe": "successful_media_output",
+        "operation": "image_to_image",
+        "workflow_revision_id": revision.id,
+        "workflow_template_id": "image_edit",
+        "workflow_performance": performance,
+        "output_count": 1,
+    }
+
+    assert (
+        orchestrator._record_successful_media_evidence(
+            FakeSession(),
+            run,
+            capabilities.model_copy(update={"engine": "mock"}),
+            output_count=1,
+        )
+        is None
+    )
+    assert (
+        orchestrator._record_successful_media_evidence(
+            FakeSession(),
+            run,
+            capabilities.model_copy(update={"healthy": False}),
+            output_count=1,
+        )
+        is None
+    )
+    assert (
+        orchestrator._record_successful_media_evidence(
+            FakeSession(),
+            run,
+            capabilities,
+            output_count=0,
+        )
+        is None
+    )
+    assert recorder.call_count == 1
 
 
 async def test_context_folding_preserves_system_and_current_messages() -> None:

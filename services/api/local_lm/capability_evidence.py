@@ -1,6 +1,8 @@
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, Literal, cast
+import hashlib
+import json
+from typing import TYPE_CHECKING, Any, Literal, cast
 
 from sqlalchemy import select
 from sqlalchemy.orm import Session
@@ -72,6 +74,75 @@ def current_capability_evidence(
             continue
         return evidence
     return None
+
+
+def record_capability_evidence(
+    session: Session,
+    install: ModelInstall,
+    settings: Settings,
+    runtimes: RuntimeProvisioner | None,
+    *,
+    component_hashes: dict[str, str],
+    runtime_build: str,
+    workflow_contract_version: str | None,
+    details: dict[str, Any],
+) -> ModelCapabilityEvidence:
+    """Persist idempotent capability evidence for one exact runtime contract."""
+
+    hardware_class = hardware_capability_class(settings)
+    runtime_release: str | None = None
+    runtime_managed: bool | None = None
+    if runtimes and install.engine in {"llama.cpp", "vllm", "comfyui"}:
+        runtime_status = runtimes.status(
+            cast(Literal["llama.cpp", "vllm", "comfyui"], install.engine)
+        )
+        runtime_release = runtime_status.release
+        runtime_managed = runtime_status.managed
+    evidence_payload = {
+        "component_hashes": dict(sorted(component_hashes.items())),
+        "runtime_build": runtime_build,
+        "adapter_contract_version": ADAPTER_CONTRACT_VERSION,
+        "launch_contract_version": LAUNCH_CONTRACT_VERSION,
+        "workflow_contract_version": workflow_contract_version,
+        "hardware_class": hardware_class,
+        "probe_version": ACTIVATION_PROBE_VERSION,
+        "runtime_release": runtime_release,
+    }
+    evidence_key = hashlib.sha256(
+        json.dumps(
+            evidence_payload,
+            sort_keys=True,
+            separators=(",", ":"),
+            allow_nan=False,
+        ).encode()
+    ).hexdigest()
+    existing = session.scalar(
+        select(ModelCapabilityEvidence).where(
+            ModelCapabilityEvidence.model_install_id == install.id,
+            ModelCapabilityEvidence.evidence_key == evidence_key,
+        )
+    )
+    if existing:
+        return existing
+    evidence = ModelCapabilityEvidence(
+        model_install_id=install.id,
+        evidence_key=evidence_key,
+        result="ready",
+        component_hashes_json=component_hashes,
+        runtime_build=runtime_build[:200],
+        adapter_contract_version=ADAPTER_CONTRACT_VERSION,
+        launch_contract_version=LAUNCH_CONTRACT_VERSION,
+        workflow_contract_version=workflow_contract_version,
+        hardware_class=hardware_class[:200],
+        probe_version=ACTIVATION_PROBE_VERSION,
+        details_json={
+            **details,
+            "runtime_release": runtime_release,
+            "runtime_managed": runtime_managed,
+        },
+    )
+    session.add(evidence)
+    return evidence
 
 
 def evidence_input_modalities(evidence: ModelCapabilityEvidence | None) -> list[str]:
