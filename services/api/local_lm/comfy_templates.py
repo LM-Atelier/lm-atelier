@@ -32,7 +32,7 @@ _RUNTIME_PARAMETERS = {
 }
 _PRIMITIVE_WIDGET_TYPES = {"BOOLEAN", "COMBO", "FLOAT", "INT", "STRING"}
 _CONTROL_AFTER_GENERATE = {"decrement", "fixed", "increment", "randomize"}
-COMFY_TEMPLATE_COMPILER_VERSION = 14
+COMFY_TEMPLATE_COMPILER_VERSION = 15
 DEFAULT_IMAGE_EDIT_DENOISE = 0.9
 _ADAPTIVE_CHECKPOINT_PREFIX = "lma_image_checkpoint_v1_"
 _ADAPTIVE_CHECKPOINT_PLACEHOLDER = "__LM_ATELIER_CHECKPOINT__"
@@ -418,12 +418,22 @@ class ComfyTemplateRegistry:
             ui_graph["nodes"][0]["widgets_values"] = [template.dependencies[0].name]
         else:
             ui_graph = _read_json(template.path)
+        accelerated = _enable_declared_four_step_edit_acceleration(
+            ui_graph,
+            operation=template.operation,
+        )
         api_graph, input_schema = _compile_ui_graph(
             ui_graph,
             object_info,
             operation=template.operation,
             validate_model_choices=validate_model_choices,
         )
+        if accelerated:
+            input_schema["x-lm-atelier-workflow-acceleration"] = {
+                "version": 1,
+                "mode": "bundled-four-step",
+                "steps": 4,
+            }
         output_nodes = [
             node_id
             for node_id, node in api_graph.items()
@@ -862,6 +872,189 @@ def _available_node_id(graph: dict[str, Any], preferred: str) -> str:
     while f"{preferred}-{suffix}" in graph:
         suffix += 1
     return f"{preferred}-{suffix}"
+
+
+def _enable_declared_four_step_edit_acceleration(
+    ui_graph: dict[str, Any],
+    *,
+    operation: str,
+) -> bool:
+    """Enable an official edit template's complete bundled four-step branch."""
+
+    if operation != "image_to_image":
+        return False
+    accelerated = False
+    candidates = [ui_graph]
+    definitions = ui_graph.get("definitions")
+    if isinstance(definitions, dict):
+        candidates.extend(
+            item for item in definitions.get("subgraphs", []) if isinstance(item, dict)
+        )
+    for graph in candidates:
+        nodes = {
+            str(node["id"]): node
+            for node in graph.get("nodes", [])
+            if isinstance(node, dict) and node.get("id") is not None
+        }
+        links = [
+            normalized
+            for item in graph.get("links", [])
+            if (normalized := _normalize_link(item)) is not None
+        ]
+        graph_inputs = [item for item in graph.get("inputs", []) if isinstance(item, dict)]
+        declared_controls: set[str] = set()
+        for origin, origin_slot, target, target_slot in links:
+            if origin != "-10" or origin_slot >= len(graph_inputs):
+                continue
+            definition = graph_inputs[origin_slot]
+            identity = re.sub(
+                r"[^a-z0-9]+",
+                "_",
+                str(definition.get("label") or definition.get("name") or "").casefold(),
+            ).strip("_")
+            target_node = nodes.get(target)
+            target_inputs = target_node.get("inputs", []) if target_node else []
+            if (
+                identity == "enable_turbo_mode"
+                and str(definition.get("type") or "") == "BOOLEAN"
+                and str((target_node or {}).get("type") or "") == "PrimitiveBoolean"
+                and target_slot < len(target_inputs)
+                and str(target_inputs[target_slot].get("type") or "") == "BOOLEAN"
+            ):
+                declared_controls.add(target)
+        for control_id in declared_controls:
+            control = nodes[control_id]
+            switches = []
+            for origin, _, target, target_slot in links:
+                target_node = nodes.get(target)
+                target_inputs = target_node.get("inputs", []) if target_node else []
+                if (
+                    origin == control_id
+                    and target_node
+                    and str(target_node.get("type") or "") == "ComfySwitchNode"
+                    and target_slot < len(target_inputs)
+                    and str(target_inputs[target_slot].get("name") or "") == "switch"
+                ):
+                    switches.append(target_node)
+            if not any(
+                _switch_selects_four_steps(node, nodes, links) for node in switches
+            ) or not any(_switch_selects_bundled_lora(node, nodes, links) for node in switches):
+                continue
+            raw_values = control.get("widgets_values")
+            values = list(raw_values) if isinstance(raw_values, list) else []
+            if values:
+                values[0] = True
+            else:
+                values = [True]
+            control["widgets_values"] = values
+            accelerated = True
+    return accelerated
+
+
+def _switch_input_origin(
+    switch: dict[str, Any],
+    input_name: str,
+    links: list[tuple[str, int, str, int]],
+) -> str | None:
+    switch_id = str(switch.get("id"))
+    slot = next(
+        (
+            index
+            for index, item in enumerate(switch.get("inputs", []))
+            if isinstance(item, dict) and str(item.get("name") or "") == input_name
+        ),
+        None,
+    )
+    if slot is None:
+        return None
+    return next(
+        (
+            origin
+            for origin, _, target, target_slot in links
+            if target == switch_id and target_slot == slot
+        ),
+        None,
+    )
+
+
+def _primitive_number(node: dict[str, Any] | None) -> float | None:
+    if not node or str(node.get("type") or "") not in {"PrimitiveInt", "PrimitiveFloat"}:
+        return None
+    values = node.get("widgets_values")
+    if (
+        not isinstance(values, list)
+        or not values
+        or isinstance(values[0], bool)
+        or not isinstance(values[0], int | float)
+    ):
+        return None
+    return float(values[0])
+
+
+def _switch_output_feeds_input(
+    switch: dict[str, Any],
+    input_name: str,
+    nodes: dict[str, dict[str, Any]],
+    links: list[tuple[str, int, str, int]],
+) -> bool:
+    switch_id = str(switch.get("id"))
+    for origin, _, target, target_slot in links:
+        target_node = nodes.get(target)
+        target_inputs = target_node.get("inputs", []) if target_node else []
+        if (
+            origin == switch_id
+            and target_slot < len(target_inputs)
+            and str(target_inputs[target_slot].get("name") or "") == input_name
+        ):
+            return True
+    return False
+
+
+def _switch_selects_four_steps(
+    switch: dict[str, Any],
+    nodes: dict[str, dict[str, Any]],
+    links: list[tuple[str, int, str, int]],
+) -> bool:
+    false_value = _primitive_number(
+        nodes.get(_switch_input_origin(switch, "on_false", links) or "")
+    )
+    true_value = _primitive_number(nodes.get(_switch_input_origin(switch, "on_true", links) or ""))
+    return (
+        true_value == 4
+        and false_value is not None
+        and false_value > true_value
+        and _switch_output_feeds_input(switch, "steps", nodes, links)
+    )
+
+
+def _switch_selects_bundled_lora(
+    switch: dict[str, Any],
+    nodes: dict[str, dict[str, Any]],
+    links: list[tuple[str, int, str, int]],
+) -> bool:
+    true_node = nodes.get(_switch_input_origin(switch, "on_true", links) or "")
+    if (
+        not true_node
+        or not str(true_node.get("type") or "").startswith("LoraLoader")
+        or not _switch_output_feeds_input(switch, "model", nodes, links)
+    ):
+        return False
+    properties = true_node.get("properties")
+    models = properties.get("models") if isinstance(properties, dict) else None
+    if isinstance(models, dict):
+        model_items = [models]
+    elif isinstance(models, list):
+        model_items = [item for item in models if isinstance(item, dict)]
+    else:
+        model_items = []
+    values = true_node.get("widgets_values")
+    selected = str(values[0]) if isinstance(values, list) and values else ""
+    return any(
+        str(item.get("directory") or "") == "loras"
+        and str(item.get("name") or "") == selected
+        and _parse_huggingface_url(str(item.get("url") or "")) is not None
+        for item in model_items
+    )
 
 
 def _compile_ui_graph(
