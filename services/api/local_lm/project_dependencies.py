@@ -20,6 +20,7 @@ from .models import (
 )
 from .profile_service import AUTO_PROFILE_ID
 from .project_portability import redact_local_paths
+from .settings_registry import ROLE_SETTINGS
 from .workflow_edit_calibration import validate_workflow_edit_calibration
 
 ModelRoleName = Literal["chat", "image", "video"]
@@ -343,6 +344,24 @@ def dependency_source_index(dependencies: PortableDependencies) -> DependencySou
     )
 
 
+def _without_load_scope_settings(values: dict[str, Any], role: str) -> dict[str, Any]:
+    """Strip settings only a load-scope layer may carry.
+
+    The REST API refuses load-scope keys on request-scope layers, because a value
+    stored there is validated against every field and would then outrank layers
+    that cannot express it. Archive import wrote its settings verbatim, so an old
+    or crafted archive could place them where the API will not.
+
+    Only keys the registry positively identifies as load-scope are removed.
+    Anything else is left alone: a workflow can extend the field set beyond what
+    the registry knows, and dropping unrecognised keys here would silently
+    discard legitimate settings.
+    """
+
+    load_scope = {field.key for field in ROLE_SETTINGS.get(role, []) if field.scope == "load"}
+    return {key: value for key, value in values.items() if key not in load_scope}
+
+
 def install_dependency_manifest(
     session: Session, dependencies: PortableDependencies
 ) -> ImportedDependencies:
@@ -358,7 +377,9 @@ def install_dependency_manifest(
                 engine=profile_source.engine,
                 model_install_id=None,
                 load_settings_json=profile_source.load_settings,
-                request_settings_json=profile_source.request_settings,
+                request_settings_json=_without_load_scope_settings(
+                    profile_source.request_settings, profile_source.role
+                ),
                 is_default=False,
             )
             session.add(profile)
@@ -376,7 +397,9 @@ def install_dependency_manifest(
             imported = GenerationPreset(
                 name=_available_preset_name(session, preset_source.role, preset_source.name),
                 role=preset_source.role,
-                settings_json=preset_source.settings,
+                settings_json=_without_load_scope_settings(
+                    preset_source.settings, preset_source.role
+                ),
                 is_default=False,
             )
             session.add(imported)

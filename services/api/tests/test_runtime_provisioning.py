@@ -401,6 +401,76 @@ async def test_external_comfy_archive_is_provisioned_without_bundling_it(
     assert (settings.comfy_directory / "main.py").is_file()
 
 
+def _provisioner(settings, tmp_path: Path):  # type: ignore[no-untyped-def]
+    manifest = tmp_path / "engines.json"
+    _write_manifest(manifest, llama_content=_zip_bytes({"llama-server.exe": b"llama"}))
+    settings.prepare()
+    return RuntimeProvisioner(
+        settings,
+        manifest_path=manifest,
+        environment={},
+        platform_key="test-platform",
+        allowed_download_hosts={"runtime.test"},
+    )
+
+
+def test_integrity_walk_refuses_a_link_that_escapes_the_runtime(
+    settings,
+    tmp_path: Path,
+) -> None:  # type: ignore[no-untyped-def]
+    """Only a reparse point can point elsewhere, so only it is containment-checked."""
+    provisioner = _provisioner(settings, tmp_path)
+    root = tmp_path / "runtime-root"
+    (root / "inner").mkdir(parents=True)
+    (root / "inner" / "real.bin").write_bytes(b"payload")
+    outside = tmp_path / "outside.bin"
+    outside.write_bytes(b"elsewhere")
+    try:
+        (root / "inner" / "escape.bin").symlink_to(outside)
+    except OSError:
+        pytest.skip("filesystem links are unavailable in this test environment")
+
+    with pytest.raises(RuntimeProvisioningError, match="escape its install directory"):
+        provisioner._integrity_file_map(root)
+
+
+def test_integrity_walk_refuses_a_linked_directory(
+    settings,
+    tmp_path: Path,
+) -> None:  # type: ignore[no-untyped-def]
+    provisioner = _provisioner(settings, tmp_path)
+    root = tmp_path / "runtime-root"
+    (root / "inner").mkdir(parents=True)
+    target = root / "inner" / "target"
+    target.mkdir()
+    try:
+        (root / "inner" / "linked").symlink_to(target, target_is_directory=True)
+    except OSError:
+        pytest.skip("filesystem links are unavailable in this test environment")
+
+    with pytest.raises(RuntimeProvisioningError, match="unsupported dependency directory link"):
+        provisioner._integrity_file_map(root)
+
+
+def test_integrity_walk_lists_every_ordinary_file(
+    settings,
+    tmp_path: Path,
+) -> None:  # type: ignore[no-untyped-def]
+    provisioner = _provisioner(settings, tmp_path)
+    root = tmp_path / "runtime-root"
+    (root / "a" / "b").mkdir(parents=True)
+    (root / "a" / "one.bin").write_bytes(b"1")
+    (root / "a" / "b" / "two.bin").write_bytes(b"22")
+    # Mutable areas and the marker stay excluded, as before.
+    (root / "temp").mkdir()
+    (root / "temp" / "scratch.bin").write_bytes(b"ignored")
+    (root / ".lm-atelier-runtime.json").write_text("{}", encoding="utf-8")
+
+    found = provisioner._integrity_file_map(root)
+
+    assert set(found) == {"a/one.bin", "a/b/two.bin"}
+
+
 async def test_installation_reclaims_staging_left_by_a_failed_attempt(
     settings,
     tmp_path: Path,

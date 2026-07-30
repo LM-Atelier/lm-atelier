@@ -8,7 +8,7 @@ import math
 import os
 import shutil
 import stat
-from collections.abc import AsyncGenerator, AsyncIterator
+from collections.abc import AsyncGenerator, AsyncIterator, Callable
 from contextlib import suppress
 from pathlib import Path, PurePosixPath
 from typing import TYPE_CHECKING, Annotated, Any, Literal, cast
@@ -67,6 +67,7 @@ from .model_manifests import (
 )
 from .model_planner import (
     INSTALL_RESOLVER_VERSION,
+    ResolvedInstallPlan,
     persist_install_plan,
     resolve_install_plan,
 )
@@ -140,7 +141,6 @@ from .schemas import (
     DownloadRequest,
     EngineCapabilities,
     HealthOut,
-    InstallPlanOut,
     JobOut,
     MessageOut,
     ModelAssetOut,
@@ -450,15 +450,20 @@ async def worker_status(request: Request, session: SessionDep) -> list[WorkerSta
 
 
 @router.get("/runtimes", response_model=list[RuntimeStatus])
-async def runtime_status(request: Request) -> list[RuntimeStatus]:
+def runtime_status(request: Request) -> list[RuntimeStatus]:
+    # Deliberately synchronous: reading runtime status touches the filesystem, so
+    # the framework runs this in a worker thread rather than on the event loop.
     return _services(request).runtimes.statuses()
 
 
 @router.get("/setup/readiness", response_model=SetupReadinessReport)
-async def get_setup_readiness(
+def get_setup_readiness(
     request: Request,
     session: SessionDep,
 ) -> SetupReadinessReport:
+    # Deliberately synchronous, and polled every few seconds while setup is
+    # incomplete: this reads runtime status from disk and queries the database,
+    # so it belongs in a worker thread rather than blocking every other request.
     services = _services(request)
     return setup_readiness_report(
         session,
@@ -2194,6 +2199,10 @@ async def catalog_detail(
         ) from exc
 
 
+class CatalogUnavailableError(RuntimeError):
+    """The catalog could not be reached or did not answer usefully."""
+
+
 @router.post("/catalog/{owner}/{name}/preflight", response_model=CatalogPreflight)
 async def catalog_preflight(
     owner: str,
@@ -2202,11 +2211,41 @@ async def catalog_preflight(
     request: Request,
     session: SessionDep,
 ) -> CatalogPreflight:
-    services = _services(request)
     try:
-        raw_detail = await services.catalog.inspect(
-            f"{owner}/{name}", payload.revision, payload.role
+        return await resolve_catalog_preflight(
+            _services(request),
+            session,
+            f"{owner}/{name}",
+            payload,
         )
+    except CatalogUnavailableError as exc:
+        raise HTTPException(503, str(exc)) from exc
+
+
+async def resolve_catalog_preflight(
+    services: Services,
+    session: Session,
+    remote_id: str,
+    payload: CatalogPreflightRequest,
+    *,
+    validate_resolved: Callable[[ResolvedInstallPlan], None] | None = None,
+) -> CatalogPreflight:
+    """Plan an install without deciding how a caller should report failure.
+
+    Both the catalog route and a reference-recipe install need the whole
+    operation - inspection, template matching, adaptive-checkpoint selection,
+    dependency resolution and plan persistence - so it lives here rather than in
+    a request handler, and raises a domain error the route maps to a status code.
+
+    `validate_resolved` runs immediately before the plan is persisted. A caller
+    with its own requirements, such as a recipe that pins exact checksums, must
+    reject there rather than afterwards: a committed plan is installable on its
+    own through the download endpoint, so a plan persisted and then refused would
+    leave behind exactly what the refusal was meant to prevent.
+    """
+
+    try:
+        raw_detail = await services.catalog.inspect(remote_id, payload.revision, payload.role)
         detail = CatalogDetail.model_validate(raw_detail)
         if payload.role == "chat" and payload.engine == "llama.cpp":
             try:
@@ -2228,9 +2267,8 @@ async def catalog_preflight(
             except (GGUFSelectionError, httpx.HTTPError, ValueError):
                 pass
     except Exception as exc:
-        raise HTTPException(
-            503,
-            "Hugging Face is temporarily unavailable. Check your connection and retry.",
+        raise CatalogUnavailableError(
+            "Hugging Face is temporarily unavailable. Check your connection and retry."
         ) from exc
     system = collect_system_info(services.settings)
 
@@ -2386,6 +2424,8 @@ async def catalog_preflight(
                     "The install check did not pass.",
                 ),
             )
+        if validate_resolved:
+            validate_resolved(resolved)
         plan = persist_install_plan(session, resolved)
         session.commit()
         return result.model_copy(update={"install_plan": plan})
@@ -2805,24 +2845,29 @@ async def install_recipe(recipe_id: str, request: Request, session: SessionDep) 
     recipe = get_reference_recipe(recipe_id)
     if not recipe:
         raise HTTPException(404, "reference recipe not found")
-    owner, _, name = recipe.remote_id.partition("/")
-    if not owner or not name:
+    if not all(recipe.remote_id.partition("/")[::2]):
         raise HTTPException(422, "this recipe does not name a valid repository")
-    preflight = await catalog_preflight(
-        owner,
-        name,
-        CatalogPreflightRequest(
-            revision=recipe.revision,
-            role=recipe.role,
-            engine=recipe.engine,
-            selected_files=[file.path for file in recipe.files],
-        ),
-        request,
-        session,
-    )
+    try:
+        preflight = await resolve_catalog_preflight(
+            _services(request),
+            session,
+            recipe.remote_id,
+            CatalogPreflightRequest(
+                revision=recipe.revision,
+                role=recipe.role,
+                engine=recipe.engine,
+                selected_files=[file.path for file in recipe.files],
+            ),
+            validate_resolved=lambda resolved: _assert_recipe_pins_hold(recipe, resolved),
+        )
+    except CatalogUnavailableError as exc:
+        raise HTTPException(503, str(exc)) from exc
+    except ValueError as exc:
+        # Refused before persistence, so no installable plan is left behind.
+        session.rollback()
+        raise HTTPException(422, str(exc)) from exc
     plan = preflight.install_plan
     try:
-        _assert_recipe_pins_hold(recipe, plan)
         fields = _planned_download_fields(session.get(InstallPlan, plan.id) if plan else None)
         return _services(request).downloads.create(
             session,
@@ -2838,13 +2883,17 @@ async def install_recipe(recipe_id: str, request: Request, session: SessionDep) 
         raise HTTPException(422, str(exc)) from exc
 
 
-def _assert_recipe_pins_hold(recipe: ReferenceRecipe, plan: InstallPlanOut | None) -> None:
+def _assert_recipe_pins_hold(recipe: ReferenceRecipe, plan: ResolvedInstallPlan | None) -> None:
     """Refuse to install anything other than exactly what the recipe pins.
 
     Preflight resolves a repository, and for media it may select a bundle a
     workflow template declares. That is right for a catalog install the user is
     steering, but a recipe exists to promise specific bytes, so a resolution that
     drifts from its pins has to fail rather than quietly install something else.
+
+    This runs on the resolved plan, before persistence. A committed plan is
+    installable on its own through the download endpoint, so refusing after
+    persisting would leave behind the very thing the refusal prevents.
     """
 
     if not plan:
@@ -2856,11 +2905,7 @@ def _assert_recipe_pins_hold(recipe: ReferenceRecipe, plan: InstallPlanOut | Non
     if plan.remote_id != recipe.remote_id or plan.revision != recipe.revision:
         raise ValueError("this recipe resolved to a different repository or revision")
     pinned = {file.path: file.sha256 for file in recipe.files}
-    resolved = {
-        str(item.get("path") or ""): (str(item["sha256"]) if item.get("sha256") else None)
-        for item in plan.artifacts_json
-        if item.get("required", True)
-    }
+    resolved = {artifact.path: artifact.sha256 for artifact in plan.artifacts if artifact.required}
     if set(resolved) != set(pinned):
         raise ValueError("this recipe resolved to a different set of files")
     drifted = [path for path, digest in pinned.items() if digest and resolved[path] != digest]

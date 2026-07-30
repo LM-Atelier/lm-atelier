@@ -19,7 +19,8 @@ default and can select an appropriate configured model for each request.
   together in a single local conversation
 - Vision context for images and representative video frames
 - Auto Mode for routing requests to configured models
-- One-click installation for models with supported, runtime-verified formats
+- Guided model installation that pins checksums, shows what a download costs,
+  and proves the model produces output before calling it ready
 - Contextual image creation and editing within conversations
 - Durable queues, regeneration history, per-chat settings, and reusable presets
 - Local model, media, conversation, and storage management
