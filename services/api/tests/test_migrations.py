@@ -380,3 +380,58 @@ def test_idempotency_migration_downgrade_preserves_cross_chat_runs(tmp_path) -> 
             """
         ).fetchone() == (2,)
         assert connection.execute("PRAGMA integrity_check").fetchone() == ("ok",)
+
+
+def test_artifact_hash_backfills_existing_revisions(tmp_path) -> None:  # type: ignore[no-untyped-def]
+    """An existing installation keeps its evidence rather than re-proving models.
+
+    The backfill reads stored JSON only, so it needs no live runtime, and it must
+    agree with what the application computes for the same revision afterwards.
+    """
+    from alembic import command
+
+    from local_lm.model_planner import workflow_artifact_contract
+
+    settings = Settings(data_dir=tmp_path / "backfill")
+    settings.prepare()
+    config = alembic_config(settings)
+    command.upgrade(config, "c6e9b2f41d30")
+
+    api_graph = {"3": {"class_type": "KSampler"}}
+    input_schema = {"type": "object"}
+    dependencies = {"template_id": "example", "model_install_ids": ["local_only"]}
+    database = settings.state_dir / "local-lm.sqlite3"
+    with sqlite3.connect(database) as connection:
+        connection.execute(
+            "insert into workflow_definitions (id, name, description, operation, created_at,"
+            " updated_at) values ('wf_1', 'Example', '', 'text_to_image', '2026-01-01',"
+            " '2026-01-01')"
+        )
+        connection.execute(
+            "insert into workflow_revisions (id, workflow_id, version, engine, ui_graph_json,"
+            " api_graph_json, input_schema_json, dependencies_json, trusted, created_at,"
+            " updated_at) values ('rev_1', 'wf_1', 1, 'comfyui', ?, ?, ?, ?, 1, '2026-01-01',"
+            " '2026-01-01')",
+            (
+                json.dumps({"nodes": []}),
+                json.dumps(api_graph),
+                json.dumps(input_schema),
+                json.dumps(dependencies),
+            ),
+        )
+        connection.commit()
+
+    command.upgrade(config, "head")
+
+    with sqlite3.connect(database) as connection:
+        digest = connection.execute(
+            "select artifact_sha256 from workflow_revisions where id = 'rev_1'"
+        ).fetchone()[0]
+
+    assert digest == workflow_artifact_contract(
+        operation="text_to_image",
+        engine="comfyui",
+        api_graph=api_graph,
+        input_schema=input_schema,
+        dependencies=dependencies,
+    )
