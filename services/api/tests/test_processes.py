@@ -1,12 +1,16 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
+import json
 import os
+import subprocess
 import sys
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
+import psutil
 import pytest
 from sqlalchemy.orm import object_session
 
@@ -161,12 +165,14 @@ async def test_private_session_suppresses_worker_logs_and_diagnostic_tail(
 
 async def test_startup_exit_retains_redacted_stderr_and_actionable_status(
     settings,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:  # type: ignore[no-untyped-def]
     settings.prepare()
     settings.hf_token = "hf_private_worker_token"
     private_model_path = settings.model_dir / "private-model.gguf"
     stderr = f"Authorization: Bearer hf_private_worker_token\nfailed to open {private_model_path}\n"
     supervisor = ProcessSupervisor(settings)
+    monkeypatch.setattr(supervisor, "_ensure_port_available", AsyncMock())
 
     with pytest.raises(RuntimeError) as raised:
         await supervisor._replace(
@@ -197,9 +203,11 @@ async def test_startup_exit_retains_redacted_stderr_and_actionable_status(
 
 async def test_startup_exit_with_empty_stderr_has_no_synthetic_tail(
     settings,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:  # type: ignore[no-untyped-def]
     settings.prepare()
     supervisor = ProcessSupervisor(settings)
+    monkeypatch.setattr(supervisor, "_ensure_port_available", AsyncMock())
 
     with pytest.raises(RuntimeError, match=r"chat worker exited with code 4\.$"):
         await supervisor._replace(
@@ -236,14 +244,18 @@ async def test_worker_subprocess_does_not_inherit_application_or_cloud_secrets(
     async def healthy(_record: object, _url: str) -> None:
         return None
 
+    async def port_available(_name: str, _url: str) -> None:
+        return None
+
     monkeypatch.setenv("LOCAL_LM_HF_TOKEN", "hf_private")
     monkeypatch.setenv("GITHUB_TOKEN", "github_private")
     monkeypatch.setenv("AWS_SECRET_ACCESS_KEY", "aws_private")
     monkeypatch.setattr(asyncio, "create_subprocess_exec", create_process)
     monkeypatch.setattr(supervisor, "_capture_process_output", capture_output)
     monkeypatch.setattr(supervisor, "_wait_healthy", healthy)
+    monkeypatch.setattr(supervisor, "_ensure_port_available", port_available)
 
-    await supervisor._replace("chat", ["worker"], "http://127.0.0.1/health")
+    await supervisor._replace("chat", ["worker"], "http://127.0.0.1:12341/health")
 
     environment = captured["env"]
     assert isinstance(environment, dict)
@@ -251,7 +263,216 @@ async def test_worker_subprocess_does_not_inherit_application_or_cloud_secrets(
     assert "LOCAL_LM_HF_TOKEN" not in environment
     assert "GITHUB_TOKEN" not in environment
     assert "AWS_SECRET_ACCESS_KEY" not in environment
+    if os.name == "nt":
+        assert captured["creationflags"] == subprocess.CREATE_NO_WINDOW
+    else:
+        assert "creationflags" not in captured
     await supervisor.close()
+
+
+async def test_worker_port_is_preflighted_before_spawn(
+    settings,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:  # type: ignore[no-untyped-def]
+    settings.prepare()
+    supervisor = ProcessSupervisor(settings)
+    create_process = AsyncMock()
+    preflight = AsyncMock(side_effect=OSError("worker port is already in use"))
+    monkeypatch.setattr(asyncio, "create_subprocess_exec", create_process)
+    monkeypatch.setattr(supervisor, "_ensure_port_available", preflight)
+
+    with pytest.raises(OSError, match="already in use"):
+        await supervisor._replace("chat", ["worker"], "http://127.0.0.1:12341/health")
+
+    preflight.assert_awaited_once_with("chat", "http://127.0.0.1:12341/health")
+    create_process.assert_not_awaited()
+    assert "chat" not in supervisor._workers
+
+
+async def test_cancelled_worker_start_terminates_and_forgets_starting_process(
+    settings,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:  # type: ignore[no-untyped-def]
+    settings.prepare()
+    supervisor = ProcessSupervisor(settings)
+    waiting = asyncio.Event()
+
+    class FakeProcess:
+        pid = 987_654_321
+        returncode: int | None = None
+        stdout = None
+        stderr = None
+        terminated = False
+
+        def terminate(self) -> None:
+            self.terminated = True
+            self.returncode = 0
+
+        def kill(self) -> None:
+            self.returncode = -9
+
+        async def wait(self) -> int:
+            return self.returncode or 0
+
+    process = FakeProcess()
+
+    async def create_process(*_command: str, **_kwargs: object) -> FakeProcess:
+        return process
+
+    async def wait_healthy(_record: object, _url: str) -> None:
+        await waiting.wait()
+
+    async def port_available(_name: str, _url: str) -> None:
+        return None
+
+    monkeypatch.setattr(asyncio, "create_subprocess_exec", create_process)
+    monkeypatch.setattr(supervisor, "_wait_healthy", wait_healthy)
+    monkeypatch.setattr(supervisor, "_ensure_port_available", port_available)
+
+    start = asyncio.create_task(
+        supervisor._replace("chat", ["worker"], "http://127.0.0.1:12341/health")
+    )
+    while "chat" not in supervisor._workers:
+        await asyncio.sleep(0)
+    start.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await start
+
+    assert process.terminated is True
+    assert "chat" not in supervisor._workers
+
+
+async def test_stopping_worker_terminates_descendant_process_tree(
+    settings,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:  # type: ignore[no-untyped-def]
+    settings.prepare()
+    supervisor = ProcessSupervisor(settings)
+    child_pid_file = tmp_path / "child.pid"
+    script = (
+        "import pathlib, subprocess, sys, time; "
+        "child = subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(60)']); "
+        f"pathlib.Path({str(child_pid_file)!r}).write_text(str(child.pid)); "
+        "time.sleep(60)"
+    )
+
+    async def healthy(_record: object, _url: str) -> None:
+        return None
+
+    async def port_available(_name: str, _url: str) -> None:
+        return None
+
+    monkeypatch.setattr(supervisor, "_wait_healthy", healthy)
+    monkeypatch.setattr(supervisor, "_ensure_port_available", port_available)
+    child_pid: int | None = None
+    try:
+        await supervisor._replace(
+            "chat",
+            [sys.executable, "-c", script],
+            "http://127.0.0.1:12341/health",
+        )
+        for _attempt in range(100):
+            if child_pid_file.is_file():
+                child_pid = int(child_pid_file.read_text())
+                break
+            await asyncio.sleep(0.02)
+        assert child_pid is not None
+        assert psutil.pid_exists(child_pid)
+
+        await supervisor.stop("chat")
+
+        assert not psutil.pid_exists(child_pid)
+    finally:
+        if child_pid and psutil.pid_exists(child_pid):
+            with contextlib.suppress(psutil.Error):
+                psutil.Process(child_pid).kill()
+
+
+def test_persisted_worker_identity_reaps_only_matching_process(
+    settings,
+) -> None:  # type: ignore[no-untyped-def]
+    settings.prepare()
+    creationflags = subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0
+    child = subprocess.Popen(
+        [sys.executable, "-c", "import time; time.sleep(60)"],
+        creationflags=creationflags,
+    )
+    try:
+        identity_path = settings.state_dir / "worker-processes.json"
+        identity_path.write_text(
+            json.dumps(
+                {
+                    "version": 1,
+                    "workers": {
+                        "chat": [
+                            {
+                                "pid": child.pid,
+                                "create_time": psutil.Process(child.pid).create_time(),
+                            }
+                        ]
+                    },
+                }
+            ),
+            encoding="utf-8",
+        )
+
+        ProcessSupervisor(settings)
+
+        child.wait(timeout=5)
+        assert not identity_path.exists()
+    finally:
+        if child.poll() is None:
+            child.kill()
+            child.wait(timeout=5)
+
+
+def test_persisted_worker_identity_does_not_kill_reused_pid(
+    settings,
+) -> None:  # type: ignore[no-untyped-def]
+    settings.prepare()
+    creationflags = subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0
+    child = subprocess.Popen(
+        [sys.executable, "-c", "import time; time.sleep(60)"],
+        creationflags=creationflags,
+    )
+    try:
+        identity_path = settings.state_dir / "worker-processes.json"
+        identity_path.write_text(
+            json.dumps(
+                {
+                    "version": 1,
+                    "workers": {
+                        "chat": [
+                            {
+                                "pid": child.pid,
+                                "create_time": psutil.Process(child.pid).create_time() + 1,
+                            }
+                        ]
+                    },
+                }
+            ),
+            encoding="utf-8",
+        )
+
+        ProcessSupervisor(settings)
+
+        assert child.poll() is None
+        assert not identity_path.exists()
+    finally:
+        if child.poll() is None:
+            child.kill()
+            child.wait(timeout=5)
+
+
+def test_malformed_worker_identity_record_fails_safe(settings) -> None:  # type: ignore[no-untyped-def]
+    settings.prepare()
+    identity_path = settings.state_dir / "worker-processes.json"
+    identity_path.write_text("not-json", encoding="utf-8")
+
+    ProcessSupervisor(settings)
+
+    assert not identity_path.exists()
 
 
 async def test_worker_status_records_spawn_to_health_duration(
@@ -281,12 +502,16 @@ async def test_worker_status_records_spawn_to_health_duration(
     async def healthy(_record: object, _url: str) -> None:
         return None
 
+    async def port_available(_name: str, _url: str) -> None:
+        return None
+
     monkeypatch.setattr("local_lm.processes.time.perf_counter", lambda: next(ticks))
     monkeypatch.setattr(asyncio, "create_subprocess_exec", create_process)
     monkeypatch.setattr(supervisor, "_capture_process_output", capture_output)
     monkeypatch.setattr(supervisor, "_wait_healthy", healthy)
+    monkeypatch.setattr(supervisor, "_ensure_port_available", port_available)
 
-    await supervisor._replace("chat", ["worker"], "http://127.0.0.1/health")
+    await supervisor._replace("chat", ["worker"], "http://127.0.0.1:12341/health")
 
     status = supervisor.statuses()[0]
     assert status.state == "ready"
@@ -317,12 +542,48 @@ async def test_worker_health_probe_ignores_proxy_environment(
             return SimpleNamespace(is_success=True)
 
     monkeypatch.setattr("local_lm.processes.httpx.AsyncClient", FakeClient)
-    record = SimpleNamespace(name="chat", process=SimpleNamespace(returncode=None))
+    monkeypatch.setattr(supervisor, "_listener_owned_by_worker", lambda *_args: True)
+    record = SimpleNamespace(
+        name="chat",
+        process=SimpleNamespace(pid=os.getpid(), returncode=None),
+    )
 
     await supervisor._wait_healthy(record, "http://127.0.0.1:12341/health")
 
     assert captured == {"trust_env": False}
     await supervisor.close()
+
+
+async def test_worker_health_rejects_listener_owned_by_another_process(
+    settings,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:  # type: ignore[no-untyped-def]
+    settings.prepare()
+    supervisor = ProcessSupervisor(settings)
+
+    class FakeClient:
+        def __init__(self, **_kwargs: object) -> None:
+            pass
+
+        async def __aenter__(self) -> FakeClient:
+            return self
+
+        async def __aexit__(self, *_args: object) -> None:
+            return None
+
+        async def get(self, _url: str, *, timeout: int) -> SimpleNamespace:
+            assert timeout == 1
+            return SimpleNamespace(is_success=True)
+
+    monkeypatch.setattr("local_lm.processes.httpx.AsyncClient", FakeClient)
+    monkeypatch.setattr(supervisor, "_listener_owned_by_worker", lambda *_args: False)
+    record = SimpleNamespace(
+        name="chat",
+        process=SimpleNamespace(pid=456_789_123, returncode=None),
+    )
+
+    with pytest.raises(RuntimeError, match="another process"):
+        await supervisor._wait_healthy(record, "http://127.0.0.1:12341/health")
 
 
 async def test_runtime_exit_captures_only_a_bounded_stderr_tail(
@@ -336,6 +597,7 @@ async def test_runtime_exit_captures_only_a_bounded_stderr_tail(
         return None
 
     monkeypatch.setattr(supervisor, "_wait_healthy", healthy_immediately)
+    monkeypatch.setattr(supervisor, "_ensure_port_available", AsyncMock())
     await supervisor._replace(
         "chat",
         [
