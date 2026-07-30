@@ -95,6 +95,38 @@ def test_false_or_unsafe_sequences_do_not_compile(text: str) -> None:
     assert OrderedPlanCompiler.deterministic(text, RoutingMode.AUTO) is None
 
 
+@pytest.mark.parametrize(
+    "text",
+    [
+        "Explain how to make a picture look better, then describe the steps",
+        "Explain how to make a video look cinematic, then outline the steps",
+        "Compare how to render a poster in two styles, then summarize",
+        "Describe how to animate a logo, then list the tools",
+    ],
+)
+def test_questions_about_a_medium_do_not_compile_a_media_plan(text: str) -> None:
+    """These name a medium, so the media patterns match without a question guard.
+
+    The compiler runs before the router, and its plans carry enough confidence to
+    skip the confirmation gate, so a how-to question would silently generate.
+    """
+    assert OrderedPlanCompiler.deterministic(text, RoutingMode.AUTO) is None
+
+
+def test_a_long_list_is_not_mistaken_for_an_oversized_plan() -> None:
+    """Counting clauses before classifying rejected any message with separators."""
+    listing = "; ".join(f"buy item {index}" for index in range(1, 10))
+
+    assert OrderedPlanCompiler.deterministic(listing, RoutingMode.AUTO) is None
+
+
+def test_an_oversized_media_plan_is_still_rejected() -> None:
+    request = "; ".join(f"generate an image of item {index}" for index in range(1, 10))
+
+    with pytest.raises(ValueError, match="at most"):
+        OrderedPlanCompiler.deterministic(request, RoutingMode.AUTO)
+
+
 def test_rejects_forward_dependency_cycle() -> None:
     with pytest.raises(ValueError, match="earlier step"):
         OrderedPlanCompiler.validate(

@@ -7,6 +7,7 @@ from typing import Any, Literal
 
 from .adapters.base import ChatAdapter, ChatRequest
 from .domain import RoutingMode, new_id
+from .routing import DISCUSSION_OPENING
 from .schemas import OrderedStepInput, OrderedStepIntent, OrderedWorkIntent
 
 MAX_ORDERED_PLAN_STEPS = 8
@@ -158,8 +159,6 @@ class OrderedPlanCompiler:
         ]
         if len(clauses) < 2:
             return None
-        if len(clauses) > MAX_ORDERED_PLAN_STEPS:
-            raise ValueError(f"Ordered plans can contain at most {MAX_ORDERED_PLAN_STEPS} steps.")
         modes = [cls._clause_mode(clause) for clause in clauses]
         if any(candidate is None for candidate in modes):
             return None
@@ -168,6 +167,11 @@ class OrderedPlanCompiler:
             candidate in {"image", "video"} for candidate in normalized_modes
         ):
             return None
+        # Only reject an over-long plan once this is known to be one. Counting
+        # first rejected any message that merely happened to contain enough
+        # separators, such as a semicolon-separated list.
+        if len(clauses) > MAX_ORDERED_PLAN_STEPS:
+            raise ValueError(f"Ordered plans can contain at most {MAX_ORDERED_PLAN_STEPS} steps.")
 
         steps: list[OrderedStepIntent] = []
         for index, (clause, step_mode) in enumerate(
@@ -336,6 +340,11 @@ class OrderedPlanCompiler:
 
     @staticmethod
     def _clause_mode(clause: str) -> StepMode | None:
+        # A question about how to do something names the medium it asks about,
+        # so it matches the media patterns below. The router guards against that
+        # already; this compiler runs before the router, so it has to as well.
+        if DISCUSSION_OPENING.search(clause):
+            return "text"
         if _IMAGE_PROMPT_TEXT.search(clause):
             return "text"
         if _VIDEO_ACTION.search(clause):
