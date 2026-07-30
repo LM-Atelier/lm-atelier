@@ -167,6 +167,7 @@ async def test_project_vision_context_round_trip_and_legacy_defaults(
             "max_images": 2,
             "max_video_frames": 5,
             "include_prior_visual": False,
+            "verify_image_edits": True,
         }
         stored_run.vision_profile_id = profile["id"]
         stored_run.provenance_json = {
@@ -195,6 +196,7 @@ async def test_project_vision_context_round_trip_and_legacy_defaults(
         "max_images": 2,
         "max_video_frames": 5,
         "include_prior_visual": False,
+        "verify_image_edits": True,
     }
     assert manifest["runs"][0]["vision_profile_id"] == profile["id"]
     portable_vision = manifest["runs"][0]["provenance_json"]["context"]["vision"]
@@ -257,6 +259,7 @@ async def test_project_vision_context_round_trip_and_legacy_defaults(
                 "max_images": 2,
                 "max_video_frames": 5,
                 "include_prior_visual": False,
+                "verify_image_edits": True,
             }
             assert imported_run.vision_profile_id == imported_chat.active_vision_profile_id
             imported_vision = imported_run.provenance_json["context"]["vision"]
@@ -286,6 +289,7 @@ async def test_project_vision_context_round_trip_and_legacy_defaults(
                 "max_images": 4,
                 "max_video_frames": 6,
                 "include_prior_visual": True,
+                "verify_image_edits": False,
             }
             assert legacy_run.vision_profile_id is None
 

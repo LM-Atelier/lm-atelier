@@ -424,7 +424,7 @@ async def worker_status(request: Request, session: SessionDep) -> list[WorkerSta
     statuses = _services(request).processes.statuses()
     for index, status in enumerate(statuses):
         kinds = (
-            [JobKind.CHAT.value]
+            [JobKind.CHAT.value, JobKind.EDIT_VERIFY.value]
             if status.name == "chat"
             else [JobKind.IMAGE.value, JobKind.VIDEO.value]
         )
@@ -644,7 +644,11 @@ async def install_runtime(engine: str, request: Request) -> RuntimeStatus:
 
 
 def _ensure_worker_idle(session: Session, name: str) -> None:
-    kinds = [JobKind.CHAT.value] if name == "chat" else [JobKind.IMAGE.value, JobKind.VIDEO.value]
+    kinds = (
+        [JobKind.CHAT.value, JobKind.EDIT_VERIFY.value]
+        if name == "chat"
+        else [JobKind.IMAGE.value, JobKind.VIDEO.value]
+    )
     busy_jobs = (
         session.scalar(
             select(func.count(Job.id)).where(

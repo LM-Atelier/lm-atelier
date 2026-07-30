@@ -260,3 +260,53 @@ async def test_waiting_for_local_capacity_does_not_keep_a_database_session_open(
     finally:
         task.cancel()
         await asyncio.gather(task, return_exceptions=True)
+
+
+def test_expired_runless_claim_interrupts_its_work_step(settings: Settings) -> None:
+    settings.prepare()
+    configure_database(settings)
+    init_db()
+    scheduler = ResourceScheduler()
+    now = utcnow()
+    with SessionLocal() as session:
+        chat = Chat(id="chat_runless", title="Runless")
+        plan = WorkPlan(
+            id="plan_runless",
+            chat_id=chat.id,
+            transcript_sequence=1,
+            summary_json={},
+        )
+        step = WorkStep(
+            id="step_runless",
+            plan=plan,
+            ordinal=1,
+            operation="edit_verify",
+            status=JobStatus.RUNNING.value,
+        )
+        job = Job(
+            id="job_runless",
+            kind="edit_verify",
+            status=JobStatus.RUNNING.value,
+            work_plan_id=plan.id,
+            work_step_id=step.id,
+            queue_group="primary",
+            claim_owner="other-dispatcher_token",
+            claim_expires_at=now - timedelta(seconds=1),
+        )
+        session.add_all([chat, plan])
+        session.flush()
+        session.add_all([step, job])
+        session.commit()
+        job_id = job.id
+        step_id = step.id
+        plan_id = plan.id
+
+    assert scheduler._expire_foreign_claims("primary") == [job_id]
+    with SessionLocal() as session:
+        stored_job = session.get(Job, job_id)
+        stored_step = session.get(WorkStep, step_id)
+        stored_plan = session.get(WorkPlan, plan_id)
+        assert stored_job and stored_step and stored_plan
+        assert stored_job.status == JobStatus.INTERRUPTED.value
+        assert stored_step.status == JobStatus.INTERRUPTED.value
+        assert stored_plan.summary_json["status_counts"] == {"interrupted": 1}
