@@ -530,6 +530,41 @@ async def test_clear_auto_route_does_not_invoke_model_planner() -> None:
 
 
 @pytest.mark.parametrize(
+    "text",
+    [
+        "Make me a summary of the video call",
+        "Make notes about the animation industry",
+        "Create bullet points describing a movie plot",
+        "Summarize the article and design a logo brief",
+        "Proofread my caption and make it fit a poster",
+        "Make a list of image prompts",
+        "Write an outline for a documentary film",
+    ],
+)
+def test_writing_about_a_medium_is_not_a_generation_request(text: str) -> None:
+    """Each of these matched a media pattern and generated instead of writing."""
+    plan = ModalityRouter().plan(text=text, mode=RoutingMode.AUTO, input_artifact_ids=[])
+
+    assert plan.operation == Operation.TEXT
+
+
+@pytest.mark.parametrize(
+    ("text", "expected"),
+    [
+        ("Make an image based on the previous story", Operation.TEXT_TO_IMAGE),
+        ("Create a poster from the outline above", Operation.TEXT_TO_IMAGE),
+        ("Generate a clip art logo of a cat", Operation.TEXT_TO_IMAGE),
+        ("Make a short clip of rain on a window", Operation.TEXT_TO_VIDEO),
+    ],
+)
+def test_the_first_thing_named_is_what_is_being_asked_for(text: str, expected: Operation) -> None:
+    """A textual noun after the medium is source material, not the deliverable."""
+    plan = ModalityRouter().plan(text=text, mode=RoutingMode.AUTO, input_artifact_ids=[])
+
+    assert plan.operation == expected
+
+
+@pytest.mark.parametrize(
     ("text", "reason"),
     [
         ("Reply with exactly: Auto ready", "clear text task"),
