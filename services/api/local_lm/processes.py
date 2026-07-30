@@ -7,6 +7,7 @@ import json
 import logging
 import os
 import re
+import socket
 import sys
 import threading
 import time
@@ -35,6 +36,7 @@ WORKER_STDERR_TAIL_BYTES = 16 * 1024
 WORKER_STDERR_DISPLAY_CHARS = 2_000
 WORKER_STDERR_DISPLAY_LINES = 12
 WINDOWS_CREATE_NO_WINDOW = 0x08000000
+WINDOWS_SO_EXCLUSIVEADDRUSE = int(getattr(socket, "SO_EXCLUSIVEADDRUSE", -5))
 
 _ANSI_ESCAPE = re.compile(r"\x1b(?:[@-_][0-?]*[ -/]*[@-~]|\][^\x07]*(?:\x07|\x1b\\))")
 _BEARER_SECRET = re.compile(r"(?i)\b(bearer)\s+\S+")
@@ -650,19 +652,20 @@ class ProcessSupervisor:
         port = parsed.port
         if not host or not port:
             raise ValueError(f"{name} worker health URL has no host and port")
+        family = socket.AF_INET6 if ":" in host else socket.AF_INET
+        address: tuple[str, int] | tuple[str, int, int, int]
+        address = (host, port, 0, 0) if family == socket.AF_INET6 else (host, port)
         try:
-            _reader, writer = await asyncio.wait_for(
-                asyncio.open_connection(host, port),
-                timeout=0.25,
-            )
-        except ConnectionRefusedError:
-            return
-        except (OSError, TimeoutError) as exc:
-            raise OSError(f"{name} worker port {host}:{port} could not be checked") from exc
-        writer.close()
-        with contextlib.suppress(OSError):
-            await writer.wait_closed()
-        raise OSError(f"{name} worker cannot start because {host}:{port} is already in use")
+            with socket.socket(family, socket.SOCK_STREAM) as probe:
+                if os.name == "nt":
+                    probe.setsockopt(socket.SOL_SOCKET, WINDOWS_SO_EXCLUSIVEADDRUSE, 1)
+                else:
+                    probe.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+                probe.bind(address)
+        except OSError as exc:
+            raise OSError(
+                f"{name} worker cannot start because {host}:{port} is already in use"
+            ) from exc
 
     @staticmethod
     def _listener_owned_by_worker(pid: int, url: str) -> bool:
