@@ -401,6 +401,39 @@ async def test_external_comfy_archive_is_provisioned_without_bundling_it(
     assert (settings.comfy_directory / "main.py").is_file()
 
 
+async def test_installation_reclaims_staging_left_by_a_failed_attempt(
+    settings,
+    tmp_path: Path,
+) -> None:  # type: ignore[no-untyped-def]
+    """A failed extraction can strand gigabytes; the next attempt must reclaim it."""
+    content = _zip_bytes({"llama-server.exe": b"llama"})
+    manifest = tmp_path / "engines.json"
+    _write_manifest(manifest, llama_content=content)
+    settings.prepare()
+    stranded = settings.data_dir / "runtimes" / "llama.cpp" / ".b0000.partial-deadbeef"
+    stranded.mkdir(parents=True)
+    (stranded / "half-extracted.bin").write_bytes(b"partial")
+
+    def handler(_request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, content=content)
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        provisioner = RuntimeProvisioner(
+            settings,
+            manifest_path=manifest,
+            client=client,
+            environment={},
+            platform_key="test-platform",
+            allowed_download_hosts={"runtime.test"},
+        )
+        status = await provisioner.ensure("llama.cpp")
+        await provisioner.close()
+
+    assert status.state == "ready"
+    assert not stranded.exists()
+    assert list((settings.data_dir / "runtimes" / "llama.cpp").glob(".*.partial-*")) == []
+
+
 async def test_managed_runtime_integrity_change_is_not_reported_ready(
     settings,
     tmp_path: Path,
