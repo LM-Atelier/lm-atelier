@@ -6344,7 +6344,7 @@ async def test_comfy_catalog_preflight_pins_a_multirepository_official_bundle(
         (
             "diffusion_models",
             "model.safetensors",
-            "https://huggingface.co/owner/primary/resolve/main/weights/model.safetensors",
+            "https://huggingface.co/owner/primary/resolve/main/model.safetensors",
         ),
         (
             "text_encoders",
@@ -6395,7 +6395,7 @@ async def test_comfy_catalog_preflight_pins_a_multirepository_official_bundle(
         "owner/vae": "c" * 40,
     }
     source_files = {
-        "owner/primary": ("weights/model.safetensors", 2_048, "d" * 64),
+        "owner/primary": ("model.safetensors", 2_048, "d" * 64),
         "owner/text": ("encoders/encoder.safetensors", 1_024, "e" * 64),
         "owner/vae": ("vae.safetensors", 512, "f" * 64),
     }
@@ -6444,12 +6444,17 @@ async def test_comfy_catalog_preflight_pins_a_multirepository_official_bundle(
     assert payload["can_install"] is True
     assert payload["revision"] == revisions["owner/primary"]
     assert payload["selected_files"] == [
-        "weights/model.safetensors",
+        "model.safetensors",
         "encoders/encoder.safetensors",
         "vae.safetensors",
     ]
     assert payload["download_bytes"] == 3_584
     assert payload["workflow_template_id"] == "image_multi_repo_edit"
+    assert payload["comfy_paths"] == {
+        "diffusion_models": ".",
+        "text_encoders": "encoders",
+        "vae": ".",
+    }
     assert payload["file_sources"] == {
         "encoders/encoder.safetensors": {
             "remote_id": "owner/text",
@@ -6467,9 +6472,17 @@ async def test_comfy_catalog_preflight_pins_a_multirepository_official_bundle(
         },
     }
     assert payload["install_plan"]["compatibility"] == "supported"
+    assert payload["install_plan"]["runtime_contract_json"]["workflow_component_folders"] == {
+        "model.safetensors": "diffusion_models",
+        "encoders/encoder.safetensors": "text_encoders",
+        "vae.safetensors": "vae",
+    }
     artifacts = {item["path"]: item for item in payload["install_plan"]["artifacts_json"]}
+    assert artifacts["model.safetensors"]["target_folder"] == "diffusion_models"
     assert artifacts["encoders/encoder.safetensors"]["source_remote_id"] == "owner/text"
+    assert artifacts["encoders/encoder.safetensors"]["target_folder"] == "text_encoders"
     assert artifacts["vae.safetensors"]["source_revision"] == revisions["owner/vae"]
+    assert artifacts["vae.safetensors"]["target_folder"] == "vae"
 
 
 async def test_comfy_catalog_preflight_blocks_an_unreviewed_managed_runtime(

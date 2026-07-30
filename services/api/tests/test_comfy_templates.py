@@ -11,9 +11,13 @@ from local_lm.comfy_templates import (
     ComfyTemplate,
     ComfyTemplateRegistry,
     CompiledComfyTemplate,
+    WorkflowAccelerationRecipe,
+    _apply_workflow_performance_bounds,
     _compile_ui_graph,
     _resolve_declared_workflow_acceleration,
+    _template_performance_hints,
     _workflow_acceleration_provenance,
+    _workflow_performance_provenance,
     derive_image_to_image,
 )
 from local_lm.config import Settings
@@ -315,7 +319,12 @@ def test_registry_accepts_and_revalidates_a_pinned_multirepository_bundle(
 
     matches = registry.matches("owner/primary", "image")
 
-    assert "image_ambiguous_component_paths" not in {item.id for item in matches}
+    assert "image_ambiguous_component_paths" in {item.id for item in matches}
+    shared_parent = next(item for item in matches if item.id == "image_ambiguous_component_paths")
+    assert shared_parent.comfy_paths == {
+        "diffusion_models": "weights",
+        "vae": "weights",
+    }
     assert matches[0].id == "image_multi_repo_edit"
     assert matches[0].published_date == "2026-07-10"
     assert matches[0].selected_files == [
@@ -364,6 +373,164 @@ def test_registry_accepts_and_revalidates_a_pinned_multirepository_bundle(
             revision="a" * 40,
             file_sources=sources,
         )
+
+
+def test_performance_contract_uses_metadata_graph_and_runtime_evidence() -> None:
+    dependency = ComfyModelDependency(
+        remote_id="owner/model",
+        revision="a" * 40,
+        path="model.safetensors",
+        directory="checkpoints",
+        name="model.safetensors",
+        url="https://huggingface.co/owner/model/resolve/main/model.safetensors",
+    )
+    hints = _template_performance_hints(
+        {
+            "title": "Distilled editor with KV cache",
+            "description": "An authored low-step workflow with cached key values.",
+        }
+    )
+    template = ComfyTemplate(
+        id="image_native_performance_edit",
+        path=Path("unused.json"),
+        role="image",
+        operation="image_to_image",
+        score=0,
+        sha256="a" * 64,
+        dependencies=(dependency,),
+        published_date="2026-07-20",
+        performance_hints=hints,
+    )
+    ordinary = ComfyTemplate(
+        id="image_turbo_name_only_edit",
+        path=Path("unused.json"),
+        role="image",
+        operation="image_to_image",
+        score=0,
+        sha256="b" * 64,
+        dependencies=(dependency,),
+        published_date="2026-07-21",
+    )
+    ui_graph = {
+        "nodes": [
+            {"id": 1, "type": "Sampler", "widgets_values": [4]},
+        ]
+    }
+    api_graph = {
+        "cache": {
+            "class_type": "ModelKVCache",
+            "inputs": {"model": ["loader", 0]},
+        },
+        "sampler": {
+            "class_type": "Sampler",
+            "inputs": {"model": ["cache", 0], "steps": "${steps}"},
+        },
+        "save": {
+            "class_type": "SaveImage",
+            "inputs": {"images": ["sampler", 0]},
+        },
+    }
+    object_info = {
+        "Sampler": {
+            "input": {"required": {"steps": ["INT", {"default": 20}]}},
+            "input_order": {"required": ["steps"]},
+        },
+        "ModelKVCache": {
+            "display_name": "Model KV Cache",
+            "description": "Caches model key value tensors for reuse.",
+            "input": {"required": {"model": ["MODEL"]}},
+            "output": ["MODEL"],
+        },
+        "SaveImage": {"output_node": True},
+    }
+    input_schema = {
+        "type": "object",
+        "properties": {"steps": {"type": "integer", "default": 4}},
+    }
+
+    performance = _workflow_performance_provenance(
+        template,
+        ui_graph,
+        api_graph,
+        input_schema,
+        object_info,
+        (),
+    )
+
+    assert hints == ("distilled", "low-step", "kv-cache")
+    assert template.preference_score > ordinary.preference_score
+    assert performance and [item["kind"] for item in performance["signals"]] == [
+        "native-low-step",
+        "model-cache",
+    ]
+    assert performance["signals"][0]["steps"] == 4
+    assert performance["signals"][1]["node_types"] == ["ModelKVCache"]
+    assert performance["signals"][1]["steps"] == 4
+    bounds = _apply_workflow_performance_bounds(input_schema, performance)
+    assert bounds == {"steps": {"default": 4, "maximum": 8}}
+    assert input_schema["properties"]["steps"]["maximum"] == 8
+
+    name_only = _workflow_performance_provenance(
+        ordinary,
+        ui_graph,
+        {"save": api_graph["save"]},
+        {"type": "object", "properties": {"steps": {"default": 4}}},
+        object_info,
+        (),
+    )
+    assert ordinary.performance_hints == ()
+    assert name_only is None
+
+
+def test_declared_acceleration_receives_the_same_safe_schedule_bound() -> None:
+    template = ComfyTemplate(
+        id="image_generic_edit",
+        path=Path("unused.json"),
+        role="image",
+        operation="image_to_image",
+        score=0,
+        sha256="a" * 64,
+        dependencies=(
+            ComfyModelDependency(
+                remote_id="owner/model",
+                revision="a" * 40,
+                path="model.safetensors",
+                directory="checkpoints",
+                name="model.safetensors",
+                url="",
+            ),
+        ),
+    )
+    recipe = WorkflowAccelerationRecipe(
+        kind="lightning",
+        mode="declared-low-step",
+        step_schedules=((4, 40),),
+        switched_inputs=("steps",),
+        asset_kinds=(),
+    )
+    schema = {"type": "object", "properties": {"steps": {"default": 4}}}
+
+    performance = _workflow_performance_provenance(
+        template,
+        {"nodes": []},
+        {},
+        schema,
+        {},
+        (recipe,),
+    )
+
+    assert performance and performance["signals"] == [
+        {
+            "kind": "declared-acceleration",
+            "mode": "declared-low-step",
+            "recipe_count": 1,
+            "source": "author-declared-graph-branch",
+            "steps": 4,
+        }
+    ]
+    assert _apply_workflow_performance_bounds(schema, performance) == {
+        "steps": {"default": 4, "maximum": 8}
+    }
 
 
 def test_native_edit_loaders_bind_ordered_runtime_images(
