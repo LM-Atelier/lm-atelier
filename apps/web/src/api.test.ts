@@ -62,6 +62,41 @@ it("starts setup verification with the local CSRF contract", async () => {
   expect(fetchMock.mock.calls[1][1]?.method).toBe("POST");
   expect(new Headers(fetchMock.mock.calls[1][1]?.headers).get("x-local-lm-csrf")).toBe("csrf");
 });
+it("returns the complete uploaded artifact for composer previews", async () => {
+  const artifact = {
+    id: "artifact-uploaded",
+    sha256: "uploaded",
+    kind: "input",
+    media_type: "image/png",
+    size_bytes: 6,
+    original_name: "source.png",
+    metadata_json: { uploaded: true },
+    created_at: "2026-07-30T00:00:00Z",
+    url: "/api/artifacts/artifact-uploaded/content",
+  };
+  const fetchMock = vi.fn()
+    .mockResolvedValueOnce(
+      new Response(JSON.stringify({ csrf_token: "csrf" }), {
+        status: 200,
+        headers: { "content-type": "application/json" },
+      }),
+    )
+    .mockResolvedValueOnce(
+      new Response(JSON.stringify(artifact), {
+        status: 201,
+        headers: { "content-type": "application/json" },
+      }),
+    );
+  vi.stubGlobal("fetch", fetchMock);
+
+  const { api } = await import("./api");
+  const file = new File(["pixels"], "source.png", { type: "image/png" });
+  await expect(api.upload(file)).resolves.toEqual(artifact);
+  expect(fetchMock.mock.calls[1][0]).toBe("/api/artifacts");
+  expect(fetchMock.mock.calls[1][1]?.method).toBe("POST");
+  expect(fetchMock.mock.calls[1][1]?.body).toBeInstanceOf(FormData);
+  expect(new Headers(fetchMock.mock.calls[1][1]?.headers).get("x-local-lm-csrf")).toBe("csrf");
+});
 it("confirms a bounded ordered plan without changing Auto mode", async () => {
   const confirm = vi.fn(() => true);
   vi.stubGlobal("confirm", confirm);

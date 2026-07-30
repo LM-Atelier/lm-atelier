@@ -4115,6 +4115,98 @@ describe("App", () => {
     expect(screen.getByText(/Fixed by this workflow at 81/)).toBeInTheDocument();
   });
 
+  it("distinguishes uploaded and edited images from durable artifact origin", async () => {
+    const stamp = "2026-07-30T00:00:00Z";
+    const chat: Chat = {
+      id: "chat-media-origins",
+      project_id: null,
+      title: "Media origins",
+      archived: false,
+      routing_mode: "image",
+      confirm_uncertain_media: false,
+      active_chat_profile_id: null,
+      active_image_profile_id: null,
+      active_video_profile_id: null,
+      active_head_message_id: "assistant-media-origins",
+      created_at: stamp,
+      updated_at: stamp,
+    };
+    const artifact = (id: string, name: string, origin: "uploaded" | "edited") => ({
+      id,
+      sha256: id,
+      kind: origin === "uploaded" ? "input" : "image",
+      media_type: "image/png",
+      size_bytes: 10,
+      original_name: name,
+      metadata_json: { uploaded: true },
+      created_at: stamp,
+      url: `/api/artifacts/${id}/content`,
+    });
+    vi.mocked(api.chats).mockResolvedValue([chat]);
+    vi.mocked(api.chat).mockResolvedValue({
+      ...chat,
+      messages: [{
+        id: "user-media-origins",
+        chat_id: chat.id,
+        parent_id: null,
+        role: "user",
+        status: "complete",
+        parts: [{
+          id: "user-media-prompt",
+          position: 0,
+          type: "text",
+          text: "Use this synthetic source",
+          artifact_id: null,
+          metadata_json: {},
+        }, {
+          id: "uploaded-media-part",
+          position: 1,
+          type: "image",
+          text: null,
+          artifact_id: "uploaded-media",
+          metadata_json: { input_reference: true },
+          artifact: artifact("uploaded-media", "source.png", "uploaded"),
+        }],
+        created_at: stamp,
+        updated_at: stamp,
+      }, {
+        id: "assistant-media-origins",
+        chat_id: chat.id,
+        parent_id: "user-media-origins",
+        role: "assistant",
+        status: "complete",
+        parts: [{
+          id: "edited-media-part",
+          position: 0,
+          type: "image",
+          text: null,
+          artifact_id: "edited-media",
+          metadata_json: {},
+          artifact: artifact("edited-media", "edited.png", "edited"),
+        }, {
+          id: "edited-media-metadata",
+          position: 1,
+          type: "generation_metadata",
+          text: null,
+          artifact_id: null,
+          metadata_json: { provenance: { routing: { operation: "image_to_image" } } },
+        }],
+        created_at: stamp,
+        updated_at: stamp,
+      }],
+    });
+    localStorage.setItem("local-lm-chat", chat.id);
+    const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+    render(
+      <QueryClientProvider client={client}>
+        <App />
+      </QueryClientProvider>,
+    );
+
+    expect(await screen.findByRole("img", { name: "Uploaded image" })).toBeVisible();
+    expect(screen.getByRole("img", { name: "Edited image" })).toBeVisible();
+    expect(screen.queryByText("Attached image")).not.toBeInTheDocument();
+  });
   it("selects prior-image workflow controls only for an explicit visual follow-up", async () => {
     const stamp = "2026-07-22T00:00:00Z";
     const chat = {
@@ -4353,17 +4445,17 @@ describe("App", () => {
     const firstComposer = await screen.findByRole("textbox", { name: "Message" });
     fireEvent.change(firstComposer, { target: { value: "Unsent first-chat draft" } });
     fireEvent.click(screen.getByRole("button", { name: "Edit" }));
-    expect(await screen.findByRole("button", { name: /Remove attachment sha256:synthetic/ })).toBeVisible();
+    expect(await screen.findByRole("button", { name: /Remove Generated image: sha256:synthetic/ })).toBeVisible();
 
     fireEvent.click(screen.getByText(second.title));
     expect(await screen.findByRole("heading", { name: second.title })).toBeInTheDocument();
     expect(screen.getByRole("textbox", { name: "Message" })).toHaveValue("");
-    expect(screen.queryByRole("button", { name: /Remove attachment sha256:synthetic/ })).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: /Remove Generated image: sha256:synthetic/ })).not.toBeInTheDocument();
 
     fireEvent.click(screen.getByText(first.title));
     expect(await screen.findByRole("heading", { name: first.title })).toBeInTheDocument();
     expect(screen.getByRole("textbox", { name: "Message" })).toHaveValue("");
-    expect(screen.queryByRole("button", { name: /Remove attachment sha256:synthetic/ })).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: /Remove Generated image: sha256:synthetic/ })).not.toBeInTheDocument();
   });
 
   it("animates a completed image through the image-to-video workflow path", async () => {
@@ -4453,7 +4545,8 @@ describe("App", () => {
     const composer = screen.getByRole("textbox", { name: "Message" });
     expect(composer).toHaveValue("Animate this image");
     expect(composer).toHaveFocus();
-    expect(screen.getByText("sha256:animate-sou")).toBeInTheDocument();
+    expect(screen.getByRole("link", { name: "Preview sha256:animate-source" })).toBeVisible();
+    expect(screen.getAllByText("Generated image")).toHaveLength(2);
     expect(screen.getByRole("combobox", { name: "Generation mode" })).toHaveValue("video");
 
     fireEvent.click(screen.getByRole("button", { name: "Turn settings" }));
@@ -4498,7 +4591,17 @@ describe("App", () => {
         video: [videoSetting],
       },
     }]);
-    vi.mocked(api.upload).mockResolvedValue("sha256:uploaded-image");
+    vi.mocked(api.upload).mockResolvedValue({
+      id: "sha256:uploaded-image",
+      sha256: "uploaded-image",
+      kind: "input",
+      media_type: "image/png",
+      size_bytes: 5,
+      original_name: "source.png",
+      metadata_json: { origin: "uploaded", uploaded: true },
+      created_at: stamp,
+      url: "/api/artifacts/sha256%3Auploaded-image/content",
+    });
     vi.mocked(api.updateChat).mockResolvedValue({ ...chat, routing_mode: "image" });
     const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
     render(
@@ -4525,7 +4628,10 @@ describe("App", () => {
       routing_mode: "image",
     }));
     expect(composer).toHaveFocus();
-    expect(screen.getByText("sha256:uploaded-im")).toBeInTheDocument();
+    const sourcePreview = screen.getByRole("link", { name: "Preview source.png" });
+    expect(sourcePreview).toHaveAttribute("href", "/api/artifacts/sha256%3Auploaded-image/content");
+    expect(sourcePreview.querySelector("img")).toHaveAttribute("src", "/api/artifacts/sha256%3Auploaded-image/content");
+    expect(screen.getByText("Uploaded image")).toBeVisible();
     fireEvent.change(composer, { target: { value: "Replace the jacket" } });
     fireEvent.click(screen.getByRole("button", { name: "Turn settings" }));
     expect(screen.getByRole("group", { name: "Image edit change strength mode" })).toBeInTheDocument();
@@ -4981,7 +5087,17 @@ describe("App", () => {
       updated_at: stamp,
       messages: [],
     });
-    vi.mocked(api.upload).mockResolvedValue("art_dropped123456789");
+    vi.mocked(api.upload).mockResolvedValue({
+      id: "art_dropped123456789",
+      sha256: "dropped123456789",
+      kind: "input",
+      media_type: "image/png",
+      size_bytes: 6,
+      original_name: "photo.png",
+      metadata_json: { origin: "uploaded", uploaded: true },
+      created_at: stamp,
+      url: "/api/artifacts/art_dropped123456789/content",
+    });
     const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
     render(
       <QueryClientProvider client={client}>
@@ -4993,7 +5109,9 @@ describe("App", () => {
     const image = new File(["pixels"], "photo.png", { type: "image/png" });
     const ignored = new File(["text"], "notes.txt", { type: "text/plain" });
     fireEvent.drop(wrap, { dataTransfer: { files: [image, ignored], types: ["Files"] } });
-    expect(await screen.findByText("art_dropped1234567")).toBeInTheDocument();
+    const droppedPreview = await screen.findByRole("link", { name: "Preview photo.png" });
+    expect(droppedPreview.querySelector("img")).toHaveAttribute("src", "/api/artifacts/art_dropped123456789/content");
+    expect(screen.getByText("Uploaded image")).toBeVisible();
     expect(vi.mocked(api.upload)).toHaveBeenCalledTimes(1);
     expect(vi.mocked(api.upload)).toHaveBeenCalledWith(image);
     fireEvent.click(screen.getByRole("button", { name: "Animate attached image" }));

@@ -248,7 +248,6 @@
         }
       ]
     },
-
     {
       "id": "video-01",
       "text": "Generate a short video of a sunrise",
@@ -897,6 +896,78 @@
         "sha256:synthetic-image"
       ],
       "expected": "text"
+    },
+    {
+      "id": "textmedia-01",
+      "text": "Make me a summary of the video call",
+      "mode": "auto",
+      "expected": "text"
+    },
+    {
+      "id": "textmedia-02",
+      "text": "Make notes about the animation industry",
+      "mode": "auto",
+      "expected": "text"
+    },
+    {
+      "id": "textmedia-03",
+      "text": "Create bullet points describing a movie plot",
+      "mode": "auto",
+      "expected": "text"
+    },
+    {
+      "id": "textmedia-04",
+      "text": "Summarize the article and design a logo brief",
+      "mode": "auto",
+      "expected": "text"
+    },
+    {
+      "id": "textmedia-05",
+      "text": "Proofread my caption and make it fit a poster",
+      "mode": "auto",
+      "expected": "text"
+    },
+    {
+      "id": "textmedia-06",
+      "text": "Make a list of image prompts",
+      "mode": "auto",
+      "expected": "text"
+    },
+    {
+      "id": "textmedia-07",
+      "text": "Write an outline for a documentary film",
+      "mode": "auto",
+      "expected": "text"
+    },
+    {
+      "id": "textmedia-08",
+      "text": "Draft a script synopsis for the animation",
+      "mode": "auto",
+      "expected": "text"
+    },
+    {
+      "id": "textmedia-09",
+      "text": "Make an image based on the previous story",
+      "mode": "auto",
+      "expected": "text_to_image"
+    },
+    {
+      "id": "textmedia-10",
+      "text": "Generate a clip art logo of a cat",
+      "mode": "auto",
+      "expected": "text_to_image"
+    },
+    {
+      "id": "textmedia-11",
+      "text": "Create a poster from the outline above",
+      "mode": "auto",
+      "expected": "text_to_image"
+    },
+    {
+      "id": "textmedia-12",
+      "text": "Make a short clip of rain on a window",
+      "mode": "auto",
+      "expected": "text_to_video"
     }
   ]
 }

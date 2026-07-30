@@ -68,6 +68,7 @@ import {
 import type {
   ApplicationInfo,
   AppEvent,
+  Artifact,
   ArtifactLibraryItem,
   BackupInfo,
   CatalogModel,
@@ -103,6 +104,18 @@ import type {
 type View = "chat" | "media" | "models" | "workflows" | "settings";
 type Visibility = "basic" | "advanced" | "expert";
 type PendingTurn = { id: string; text: string; mode: RoutingMode };
+type MediaOrigin = "uploaded" | "generated" | "edited";
+type ComposerAttachment = {
+  id: string;
+  kind: "image" | "video";
+  artifact?: Artifact | null;
+  origin: MediaOrigin;
+};
+type VisualTarget = {
+  attachment: ComposerAttachment;
+  mode: "image" | "video";
+  requestId: number;
+};
 type SendTurnVariables = PendingTurn & {
   chatId: string;
   artifacts: string[];
@@ -371,25 +384,48 @@ function StatusDot({ healthy, label }: { healthy: boolean; label?: string }) {
   );
 }
 
-function useArtifactSource(artifactId: string | null): string | null {
+function artifactSource(artifactId: string | null): string | null {
   return artifactId ? `/api/artifacts/${encodeURIComponent(artifactId)}/content` : null;
+}
+
+function artifactOrigin(artifact?: Artifact | null): MediaOrigin | null {
+  return artifact?.metadata_json.uploaded === true ? "uploaded" : null;
+}
+
+function mediaOriginForPart(
+  part: MessagePart,
+  operation?: string,
+  fallback?: MediaOrigin | null,
+): MediaOrigin | null {
+  if (!part.metadata_json.input_reference) {
+    if (operation === "image_to_image") return "edited";
+    if (fallback) return fallback;
+  }
+  return artifactOrigin(part.artifact) ?? fallback ?? null;
+}
+
+function mediaOriginLabel(origin: MediaOrigin | null, kind: "image" | "video"): string {
+  if (!origin) return `Attached ${kind}`;
+  return `${origin[0].toUpperCase()}${origin.slice(1)} ${kind}`;
 }
 
 function ArtifactPart({
   part,
+  origin,
   onEditImage,
   onAnimateImage,
 }: {
   part: MessagePart;
-  onEditImage?: (artifactId: string) => void;
-  onAnimateImage?: (artifactId: string) => void;
+  origin: MediaOrigin | null;
+  onEditImage?: (part: MessagePart, origin: MediaOrigin) => void;
+  onAnimateImage?: (part: MessagePart, origin: MediaOrigin) => void;
 }) {
   const proxyId = typeof part.metadata_json.browser_proxy_artifact_id === "string" ? part.metadata_json.browser_proxy_artifact_id : null;
   const posterId = typeof part.metadata_json.poster_artifact_id === "string"
     ? part.metadata_json.poster_artifact_id
     : null;
-  const source = useArtifactSource(proxyId ?? part.artifact_id);
-  const poster = useArtifactSource(posterId) ?? undefined;
+  const source = artifactSource(proxyId ?? part.artifact_id);
+  const poster = artifactSource(posterId) ?? undefined;
   if (!part.artifact_id) return null;
   const preview = Boolean(part.metadata_json.preview);
   const inputReference = part.metadata_json.input_reference === true;
@@ -400,14 +436,20 @@ function ArtifactPart({
     const name = part.artifact?.original_name || "Attachment";
     return <a className="message-attachment" href={source} download><Paperclip size={14} />{name}</a>;
   }
+  const kind = part.type === "video" ? "video" : "image";
+  const label = preview ? "Generation preview" : mediaOriginLabel(
+    origin,
+    kind,
+  );
+  const callbackOrigin = origin ?? (inputReference ? "uploaded" : "generated");
   if (part.type === "image") {
     return (
       <figure className={`media-card ${preview ? "preview" : ""}`}>
-        <img src={source} alt={preview ? "Generation preview" : inputReference ? "Attached image" : "Generated result"} loading="lazy" />
+        <img src={source} alt={label} loading="lazy" />
         <figcaption>
-          <ImageIcon size={14} /> {preview ? "Generation preview" : inputReference ? "Attached image" : "Generated image"}
-          {!preview && onEditImage && <button type="button" onClick={() => onEditImage(part.artifact_id!)}>Edit</button>}
-          {!preview && onAnimateImage && <button type="button" onClick={() => onAnimateImage(part.artifact_id!)}>Animate</button>}
+          <ImageIcon size={14} /> {label}
+          {!preview && onEditImage && <button type="button" onClick={() => onEditImage(part, callbackOrigin)}>Edit</button>}
+          {!preview && onAnimateImage && <button type="button" onClick={() => onAnimateImage(part, callbackOrigin)}>Animate</button>}
           {!preview && <a href={source} download>Download</a>}
         </figcaption>
       </figure>
@@ -415,9 +457,9 @@ function ArtifactPart({
   }
   return (
     <figure className="media-card">
-      <video src={source} poster={poster} controls preload="metadata" />
+      <video src={source} poster={poster} controls preload="metadata" aria-label={label} />
       <figcaption>
-        <Film size={14} /> {inputReference ? "Attached video" : "Generated video"}
+        <Film size={14} /> {label}
         <a href={source} download>Download</a>
       </figcaption>
     </figure>
@@ -660,21 +702,23 @@ function PartView({
   part,
   liveText,
   markdown = false,
+  origin,
   onEditImage,
   onAnimateImage,
 }: {
   part: MessagePart;
   liveText?: string;
   markdown?: boolean;
-  onEditImage?: (artifactId: string) => void;
-  onAnimateImage?: (artifactId: string) => void;
+  origin: MediaOrigin | null;
+  onEditImage?: (part: MessagePart, origin: MediaOrigin) => void;
+  onAnimateImage?: (part: MessagePart, origin: MediaOrigin) => void;
 }) {
   if (part.type === "text") {
     const text = liveText || part.text || "";
     return markdown ? <MarkdownText text={text} /> : <div className="message-text">{text}</div>;
   }
   if (part.type === "image" || part.type === "video" || part.type === "attachment") {
-    return <ArtifactPart part={part} onEditImage={onEditImage} onAnimateImage={onAnimateImage} />;
+    return <ArtifactPart part={part} origin={origin} onEditImage={onEditImage} onAnimateImage={onAnimateImage} />;
   }
   if (part.type === "progress") {
     const progress = Number(part.metadata_json.progress ?? 0);
@@ -715,8 +759,8 @@ function MessageBubble({
   onEdit?: (messageId: string, text: string) => void;
   onSelectRevision?: (messageId: string, revisionId: string) => void;
   onCancelQueued?: () => void;
-  onEditImage?: (artifactId: string) => void;
-  onAnimateImage?: (artifactId: string) => void;
+  onEditImage?: (part: MessagePart, origin: MediaOrigin) => void;
+  onAnimateImage?: (part: MessagePart, origin: MediaOrigin) => void;
   onQuote?: (text: string) => void;
 }) {
   const visibleParts = message.parts.filter((part) => part.type !== "generation_metadata");
@@ -741,6 +785,8 @@ function MessageBubble({
   const metadata = message.parts.find((part) => part.type === "generation_metadata")?.metadata_json;
   const context = metadata?.context as Record<string, unknown> | undefined;
   const provenance = metadata?.provenance as Record<string, unknown> | undefined;
+  const routing = provenance?.routing as Record<string, unknown> | undefined;
+  const operation = typeof routing?.operation === "string" ? routing.operation : undefined;
   const modelSelection = provenance?.model_selection as Record<string, unknown> | undefined;
   const autoProfileName = modelSelection?.mode === "auto"
     ? String(modelSelection.profile_name ?? "")
@@ -792,7 +838,7 @@ function MessageBubble({
     <article className={`message ${message.role}`}>
       <div className="avatar">{message.role === "user" ? "You" : <Bot size={19} />}</div>
       <div className="message-content">
-        {editing ? <div className="message-edit"><textarea aria-label="Edit message" rows={4} value={draft} onChange={(event) => setDraft(event.target.value)} /><div><button onClick={() => { setDraft(userText); setEditing(false); }}>Cancel</button><button className="primary" disabled={!draft.trim()} onClick={() => { onEdit?.(message.id, draft.trim()); setEditing(false); }}>Send edited message</button></div></div> : renderedParts.map((part) => <PartView key={part.id} part={part} liveText={liveText} markdown={message.role === "assistant"} onEditImage={onEditImage} onAnimateImage={onAnimateImage} />)}
+        {editing ? <div className="message-edit"><textarea aria-label="Edit message" rows={4} value={draft} onChange={(event) => setDraft(event.target.value)} /><div><button onClick={() => { setDraft(userText); setEditing(false); }}>Cancel</button><button className="primary" disabled={!draft.trim()} onClick={() => { onEdit?.(message.id, draft.trim()); setEditing(false); }}>Send edited message</button></div></div> : renderedParts.map((part) => <PartView key={part.id} part={part} liveText={liveText} markdown={message.role === "assistant"} origin={mediaOriginForPart(part, operation, message.role === "assistant" ? "generated" : null)} onEditImage={onEditImage} onAnimateImage={onAnimateImage} />)}
         {liveText && !visibleParts.some((part) => part.type === "text") && (
           <MarkdownText text={liveText} />
         )}
@@ -1615,16 +1661,14 @@ function Composer({
   ) => void;
   workflows: Workflow[];
   project?: Project;
-  visualTarget?: { artifactId: string; mode: "image" | "video"; requestId: number } | null;
+  visualTarget?: VisualTarget | null;
   quoteTarget?: { text: string; requestId: number } | null;
 }) {
   const [text, setText] = useState("");
   const mode = chat.routing_mode;
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [promptHelperDraft, setPromptHelperDraft] = useState<string | null>(null);
-  const [attachments, setAttachments] = useState<
-    { id: string; kind: "image" | "video" }[]
-  >([]);
+  const [attachments, setAttachments] = useState<ComposerAttachment[]>([]);
   const [uploading, setUploading] = useState(false);
   const [dropActive, setDropActive] = useState(false);
   const fileInput = useRef<HTMLInputElement>(null);
@@ -1634,9 +1678,9 @@ function Composer({
     if (!visualTarget || consumedVisualRequest.current === visualTarget.requestId) return;
     consumedVisualRequest.current = visualTarget.requestId;
     setAttachments((current) => (
-      current.some((item) => item.id === visualTarget.artifactId)
+      current.some((item) => item.id === visualTarget.attachment.id)
         ? current
-        : [...current, { id: visualTarget.artifactId, kind: "image" }]
+        : [...current, visualTarget.attachment]
     ));
     onMode(visualTarget.mode);
     if (visualTarget.mode === "video") {
@@ -1720,10 +1764,15 @@ function Composer({
     if (!file) return;
     setUploading(true);
     try {
-      const id = await api.upload(file);
+      const artifact = await api.upload(file);
       setAttachments((current) => [
         ...current,
-        { id, kind: file.type.startsWith("video/") ? "video" : "image" },
+        {
+          id: artifact.id,
+          kind: file.type.startsWith("video/") ? "video" : "image",
+          artifact,
+          origin: artifactOrigin(artifact) ?? "uploaded",
+        },
       ]);
     } finally {
       setUploading(false);
@@ -1755,45 +1804,65 @@ function Composer({
         {dropActive && <div className="drop-hint">Drop images or videos to attach</div>}
         {attachments.length > 0 && (
           <div className="attachment-strip">
-            {attachments.map((attachment) => (
-              <span key={attachment.id}>
-                <Paperclip size={13} />
-                {attachment.id.slice(0, 18)}
-                {attachment.kind === "image" && (
-                  <>
+            {attachments.map((attachment) => {
+              const source = attachment.artifact?.url || artifactSource(attachment.id)!;
+              const name = attachment.artifact?.original_name || attachment.id;
+              const label = mediaOriginLabel(attachment.origin, attachment.kind);
+              return (
+                <article className="attachment-card" key={attachment.id}>
+                  <a
+                    className="attachment-preview"
+                    href={source}
+                    target="_blank"
+                    rel="noreferrer"
+                    aria-label={`Preview ${name}`}
+                  >
+                    {attachment.kind === "image"
+                      ? <img src={source} alt="" />
+                      : <video src={source} muted preload="metadata" />}
+                  </a>
+                  <span className="attachment-summary">
+                    <strong>{label}</strong>
+                    <small title={name}>{name}</small>
+                  </span>
+                  <span className="attachment-actions">
+                    {attachment.kind === "image" && (
+                      <>
+                        <button
+                          className="attachment-edit"
+                          aria-label="Edit attached image"
+                          onClick={() => {
+                            onMode("image");
+                            textInput.current?.focus();
+                          }}
+                        >
+                          Edit
+                        </button>
+                        <button
+                          className="attachment-edit"
+                          aria-label="Animate attached image"
+                          onClick={() => {
+                            onMode("video");
+                            setText((current) => current.trim() ? current : "Animate this image");
+                            textInput.current?.focus();
+                          }}
+                        >
+                          Animate
+                        </button>
+                      </>
+                    )}
                     <button
-                      className="attachment-edit"
-                      aria-label="Edit attached image"
-                      onClick={() => {
-                        onMode("image");
-                        textInput.current?.focus();
-                      }}
+                      aria-label={`Remove ${label}: ${name}`}
+                      onClick={() => setAttachments((items) => (
+                        items.filter((item) => item.id !== attachment.id)
+                      ))}
                     >
-                      Edit
+                      <X size={12} />
                     </button>
-                    <button
-                      className="attachment-edit"
-                      aria-label="Animate attached image"
-                      onClick={() => {
-                        onMode("video");
-                        setText((current) => current.trim() ? current : "Animate this image");
-                        textInput.current?.focus();
-                      }}
-                    >
-                      Animate
-                    </button>
-                  </>
-                )}
-                <button
-                  aria-label={`Remove attachment ${attachment.id.slice(0, 18)}`}
-                  onClick={() => setAttachments((items) => (
-                    items.filter((item) => item.id !== attachment.id)
-                  ))}
-                >
-                  <X size={12} />
-                </button>
-              </span>
-            ))}
+                  </span>
+                </article>
+              );
+            })}
           </div>
         )}
         <div className="composer">
@@ -2077,7 +2146,7 @@ function ChatView({
   const messagesRef = useRef<HTMLDivElement>(null);
   const followMessages = useRef(true);
   const previousChatId = useRef<string | undefined>(undefined);
-  const [visualTarget, setVisualTarget] = useState<{ artifactId: string; mode: "image" | "video"; requestId: number } | null>(null);
+  const [visualTarget, setVisualTarget] = useState<VisualTarget | null>(null);
   const [quoteTarget, setQuoteTarget] = useState<{ text: string; requestId: number } | null>(null);
   useEffect(() => {
     if (previousChatId.current !== chat?.id) {
@@ -2175,13 +2244,23 @@ function ChatView({
                     ? () => onCancelPlan(messagePlan.id)
                     : undefined
                 }
-                onEditImage={busy ? undefined : (artifactId) => setVisualTarget({
-                  artifactId,
+                onEditImage={busy ? undefined : (part, origin) => setVisualTarget({
+                  attachment: {
+                    id: part.artifact_id!,
+                    kind: "image",
+                    artifact: part.artifact,
+                    origin,
+                  },
                   mode: "image",
                   requestId: Date.now(),
                 })}
-                onAnimateImage={busy ? undefined : (artifactId) => setVisualTarget({
-                  artifactId,
+                onAnimateImage={busy ? undefined : (part, origin) => setVisualTarget({
+                  attachment: {
+                    id: part.artifact_id!,
+                    kind: "image",
+                    artifact: part.artifact,
+                    origin,
+                  },
                   mode: "video",
                   requestId: Date.now(),
                 })}
