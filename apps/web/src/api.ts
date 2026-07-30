@@ -307,6 +307,8 @@ export const api = {
     request<Job>(`/api/downloads/${id}/pause`, { method: "POST" }),
   resumeDownload: (id: string) =>
     request<Job>(`/api/downloads/${id}/resume`, { method: "POST" }),
+  activateModel: (id: string) =>
+    request<Job>(`/api/models/${id}/activate`, { method: "POST" }),
   engines: () => request<EngineCapabilities[]>("/api/engines"),
   probeChatTools: () =>
     request<ToolCapabilityProbe>("/api/engines/chat/tool-probe", { method: "POST" }),
