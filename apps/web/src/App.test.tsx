@@ -369,6 +369,34 @@ describe("App", () => {
     expect(screen.queryByRole("dialog", { name: "Set up LM Atelier" })).not.toBeInTheDocument();
   });
 
+  it("offers no action for a role this machine cannot run", async () => {
+    vi.mocked(api.setupReadiness).mockResolvedValue(setupReport(
+      setupRole("chat"),
+      setupRole("image", "action_required", null, {
+        checks: [{
+          code: "runtime_unsupported",
+          status: "fail",
+          message: "Automatic setup for the required runtime is unavailable on this machine.",
+          action: null,
+        }],
+      }),
+      setupRole("video"),
+    ));
+    const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+    render(
+      <QueryClientProvider client={client}>
+        <App />
+      </QueryClientProvider>,
+    );
+
+    expect(await screen.findByRole("dialog", { name: "Set up LM Atelier" })).toBeInTheDocument();
+    expect(
+      screen.getByText("Automatic setup for the required runtime is unavailable on this machine."),
+    ).toBeInTheDocument();
+    // Sending an unsupported machine to the model library is the loop this prevents.
+    expect(screen.queryByRole("button", { name: "Choose image model" })).not.toBeInTheDocument();
+  });
+
   it("runs the bounded local generation test from a configured role", async () => {
     vi.mocked(api.setupReadiness).mockResolvedValue(setupReport(
       setupRole("chat"),
