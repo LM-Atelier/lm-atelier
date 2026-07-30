@@ -1,16 +1,17 @@
 from __future__ import annotations
 
+import hashlib
 import json
 import math
 from dataclasses import dataclass
 from enum import StrEnum
-from typing import Any
+from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, StrictBool, field_validator
 
 from .domain import Operation
 
-VERIFICATION_VERSION = "image-edit-verification-v1"
+VERIFICATION_VERSION: Literal["image-edit-verification-v1"] = "image-edit-verification-v1"
 MAX_ASSESSMENT_CHARACTERS = 8_192
 MAX_REQUEST_CHARACTERS = 20_000
 DEFAULT_CONFIDENCE_THRESHOLD = 0.7
@@ -41,6 +42,41 @@ class VerificationReason(StrEnum):
     STRENGTH_UNAVAILABLE = "strength_unavailable"
     STRENGTH_AT_BOUND = "strength_at_bound"
     RETRY_LIMIT_REACHED = "retry_limit_reached"
+    ARTIFACT_UNAVAILABLE = "artifact_unavailable"
+    VISION_INPUT_UNAVAILABLE = "vision_input_unavailable"
+    ASSESSMENT_UNAVAILABLE = "assessment_unavailable"
+    INVALID_ASSESSMENT = "invalid_assessment"
+    ASSESSMENT_INTERRUPTED = "assessment_interrupted"
+    CANCELLED = "cancelled"
+
+
+class ImageEditVerificationJobPayload(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    version: Literal["image-edit-verification-v1"] = VERIFICATION_VERSION
+    chat_id: str = Field(min_length=1, max_length=40)
+    source_run_id: str = Field(min_length=1, max_length=40)
+    source_job_id: str = Field(min_length=1, max_length=40)
+    source_artifact_id: str = Field(min_length=1, max_length=100)
+    result_artifact_id: str = Field(min_length=1, max_length=100)
+    vision_profile_id: str = Field(min_length=1, max_length=40)
+    attempt: int = Field(default=0, ge=0, le=MAX_RETRY_ATTEMPTS)
+    strength_parameter: str | None = Field(default=None, min_length=1, max_length=80)
+    current_strength: float | None = None
+    minimum: float | None = None
+    maximum: float | None = None
+
+    @field_validator("current_strength", "minimum", "maximum")
+    @classmethod
+    def finite_optional_number(cls, value: float | None) -> float | None:
+        if value is not None and not math.isfinite(value):
+            raise ValueError("verification strength values must be finite")
+        return value
+
+
+def image_edit_verification_job_id(source_run_id: str) -> str:
+    digest = hashlib.sha256(source_run_id.encode("utf-8")).hexdigest()[:24]
+    return f"job_edit_verify_{digest}"
 
 
 class ImageEditVerificationAssessment(BaseModel):

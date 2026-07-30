@@ -79,6 +79,7 @@ class JobKind(StrEnum):
     CHAT = "chat"
     IMAGE = "image"
     VIDEO = "video"
+    EDIT_VERIFY = "edit_verify"
     DOWNLOAD = "download"
     EXPORT = "export"
 
