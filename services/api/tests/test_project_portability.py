@@ -732,3 +732,26 @@ async def test_commit_failure_rolls_back_new_content_addressed_files(
         assert not target_path.exists()
         with SessionLocal() as session:
             assert not session.scalar(select(Artifact).where(Artifact.sha256 == digest))
+
+
+def test_import_strips_load_scope_settings_from_request_layers() -> None:
+    """The API refuses load-scope keys on request layers; an archive could not."""
+    from local_lm.project_dependencies import _without_load_scope_settings
+
+    stripped = _without_load_scope_settings({"gpu_layers": 40, "temperature": 0.7}, "chat")
+
+    assert "gpu_layers" not in stripped
+    assert stripped["temperature"] == 0.7
+
+
+def test_import_keeps_settings_the_registry_does_not_define() -> None:
+    """A workflow can extend the field set, so unknown keys are not dropped here.
+
+    Dropping them would silently discard legitimate workflow settings, which is
+    the same class of failure this is meant to prevent.
+    """
+    from local_lm.project_dependencies import _without_load_scope_settings
+
+    kept = _without_load_scope_settings({"a_workflow_parameter": 3}, "image")
+
+    assert kept == {"a_workflow_parameter": 3}
