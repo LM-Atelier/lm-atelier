@@ -94,7 +94,7 @@ async def test_non_dev_api_requires_cookie_and_csrf(tmp_path) -> None:  # type: 
     app = create_app(settings)
     async with app.router.lifespan_context(app):
         transport = ASGITransport(app=app)
-        async with AsyncClient(transport=transport, base_url="http://testserver") as client:
+        async with AsyncClient(transport=transport, base_url="http://127.0.0.1") as client:
             assert (await client.get("/api/projects")).status_code == 401
             session = await client.post("/api/session")
             assert session.status_code == 200
@@ -122,7 +122,7 @@ async def test_browser_origins_are_limited_to_the_local_application(
     app = create_app(settings)
     async with app.router.lifespan_context(app):
         transport = ASGITransport(app=app)
-        async with AsyncClient(transport=transport, base_url="http://testserver") as client:
+        async with AsyncClient(transport=transport, base_url="http://127.0.0.1") as client:
             rejected = await client.post(
                 "/api/session",
                 headers={"origin": "https://malicious.example"},
@@ -137,6 +137,48 @@ async def test_browser_origins_are_limited_to_the_local_application(
                 headers={"origin": "http://127.0.0.1:12340"},
             )
             assert allowed.status_code == 200
+
+
+async def test_release_mode_excludes_developer_hosts_and_openapi(tmp_path: Path) -> None:
+    settings = Settings(data_dir=tmp_path / "release-surface", dev=False)
+    app = create_app(settings)
+    assert app.openapi_url is None
+
+    accepted_statuses: list[int] = []
+    rejected_responses: list[tuple[int, str]] = []
+    async with app.router.lifespan_context(app):
+        transport = ASGITransport(app=app)
+        for host in ("127.0.0.1", "localhost", "[::1]"):
+            async with AsyncClient(transport=transport, base_url=f"http://{host}:12340") as client:
+                accepted_statuses.append((await client.get("/api/ready")).status_code)
+        for host in ("testserver", "testclient", "malicious.example"):
+            async with AsyncClient(transport=transport, base_url=f"http://{host}:12340") as client:
+                rejected = await client.get("/api/ready")
+                rejected_responses.append((rejected.status_code, rejected.text))
+
+    assert accepted_statuses == [200, 200, 200]
+    assert rejected_responses == [(400, "Invalid host header")] * 3
+
+
+async def test_developer_mode_retains_test_hosts_and_openapi(tmp_path: Path) -> None:
+    settings = Settings(
+        data_dir=tmp_path / "developer-surface",
+        dev=True,
+        chat_engine="mock",
+        media_engine="mock",
+    )
+    app = create_app(settings)
+    assert app.openapi_url == "/openapi.json"
+
+    responses: list[tuple[int, str]] = []
+    async with app.router.lifespan_context(app):
+        transport = ASGITransport(app=app)
+        for host in ("testserver", "testclient"):
+            async with AsyncClient(transport=transport, base_url=f"http://{host}:12340") as client:
+                response = await client.get("/openapi.json")
+                responses.append((response.status_code, response.json()["info"]["title"]))
+
+    assert responses == [(200, "LM Atelier API")] * 2
 
 
 def test_websocket_origin_policy_allows_non_browser_clients_and_local_ui(
