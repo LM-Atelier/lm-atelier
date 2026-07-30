@@ -204,6 +204,73 @@ async def test_fresh_setup_reports_one_stable_model_action_per_role(
         assert role["verification_level"] == "generation_probe"
 
 
+async def test_unsupported_runtime_is_reported_before_any_model_download(
+    client: AsyncClient,
+    app: FastAPI,
+    settings: Settings,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A machine that cannot run the engine must be told so, not sent shopping."""
+    unsupported = _runtime("comfyui", state="unsupported")
+    unsupported.message = "This machine has no supported accelerator."
+    monkeypatch.setattr(settings, "media_engine", "comfyui")
+    _set_runtime_and_worker_state(
+        app,
+        monkeypatch,
+        workers=_workers(),
+        runtime_overrides={"comfyui": unsupported},
+    )
+
+    payload = (await client.get("/api/setup/readiness")).json()
+    by_role = {role["role"]: role for role in payload["roles"]}
+
+    for role in ("image", "video"):
+        assert [check["code"] for check in by_role[role]["checks"]] == ["runtime_unsupported"]
+        assert "no supported accelerator" in by_role[role]["checks"][0]["message"]
+        # Terminal: offering an action here is what produced the endless
+        # "choose a model" loop on machines that can never run the engine.
+        assert by_role[role]["next_action"] is None
+    assert by_role["chat"]["checks"][0]["code"] == "model_missing"
+
+
+async def test_missing_runtime_is_reported_before_any_model_download(
+    client: AsyncClient,
+    app: FastAPI,
+    settings: Settings,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(settings, "media_engine", "comfyui")
+    _set_runtime_and_worker_state(
+        app,
+        monkeypatch,
+        workers=_workers(),
+        runtime_overrides={"comfyui": _runtime("comfyui", state="missing")},
+    )
+
+    payload = (await client.get("/api/setup/readiness")).json()
+    by_role = {role["role"]: role for role in payload["roles"]}
+
+    assert [check["code"] for check in by_role["image"]["checks"]] == ["runtime_missing"]
+    assert by_role["image"]["next_action"] == "install_runtime"
+    assert by_role["image"]["engine"] == "comfyui"
+
+
+async def test_ready_runtime_without_a_model_still_asks_for_a_model(
+    client: AsyncClient,
+    app: FastAPI,
+    settings: Settings,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(settings, "media_engine", "comfyui")
+    _set_runtime_and_worker_state(app, monkeypatch, workers=_workers())
+
+    payload = (await client.get("/api/setup/readiness")).json()
+    by_role = {role["role"]: role for role in payload["roles"]}
+
+    assert [check["code"] for check in by_role["image"]["checks"]] == ["model_missing"]
+    assert by_role["image"]["next_action"] == "select_model"
+
+
 async def test_partial_setup_reports_role_specific_install_progress(
     client: AsyncClient,
 ) -> None:

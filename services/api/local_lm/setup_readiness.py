@@ -117,6 +117,15 @@ def _role_readiness(
     install = _select_install(installs, profiles, current_evidence, worker)
 
     if not install:
+        # A model cannot help when its runtime can never run here, and a model is
+        # tens of gigabytes. Report the runtime first so the machine is ruled in
+        # or out before anything is downloaded.
+        expected_runtime = runtime_by_engine.get(_expected_engine(settings, role))
+        if expected_runtime:
+            runtime_check = _runtime_check(expected_runtime)
+            if runtime_check.status != "pass":
+                checks.append(runtime_check)
+                return _role_result(role, checks, engine=expected_runtime.engine)
         download = _latest_download_for_role(session, role)
         if download and download.status in _ACTIVE_DOWNLOAD_STATES:
             checks.append(
@@ -375,6 +384,12 @@ def _latest_download_for_role(session: Session, role: Role) -> Job | None:
     )
 
 
+def _expected_engine(settings: Settings, role: Role) -> str:
+    """The engine a role will use once a model is installed."""
+
+    return settings.chat_engine if role == "chat" else settings.media_engine
+
+
 def _runtime_check(runtime: RuntimeStatus) -> SetupReadinessCheck:
     if runtime.state == "ready":
         return _check("runtime_ready", "pass", "The required runtime is ready.")
@@ -393,12 +408,13 @@ def _runtime_check(runtime: RuntimeStatus) -> SetupReadinessCheck:
             "retry_runtime",
         )
     if runtime.state == "unsupported":
-        return _check(
-            "runtime_unsupported",
-            "fail",
-            "Automatic setup for the required runtime is unavailable on this machine.",
-            "select_model",
-        )
+        # Terminal: no action can make an unsupported machine supported, so offer
+        # none rather than sending the user back to a catalog that cannot help.
+        detail = runtime.message.strip() or runtime.security_message.strip()
+        message = "Automatic setup for the required runtime is unavailable on this machine."
+        if detail:
+            message = f"{message} {detail}"
+        return _check("runtime_unsupported", "fail", message[:240])
     return _check(
         "runtime_missing",
         "fail",
