@@ -2394,6 +2394,66 @@ async def test_chat_pending_admission_limit_is_bounded(
     await wait_for_run(client, accepted["run"]["id"])
 
 
+async def test_activation_can_be_requeued_for_an_installed_model(
+    client: AsyncClient,
+) -> None:
+    """Stale evidence was a dead end: evidence is otherwise only written on download."""
+    with SessionLocal() as session:
+        session.add(
+            ModelInstall(
+                id="model_reactivate",
+                name="Reactivate me",
+                role="chat",
+                engine="llama.cpp",
+                local_path="C:/models/reactivate",
+                manifest_json={
+                    "remote_id": "synthetic/chat",
+                    "revision": "c" * 40,
+                    "files": ["chat.gguf"],
+                    "expected_sha256": {"chat.gguf": "d" * 64},
+                },
+                active=True,
+            )
+        )
+        session.commit()
+
+    accepted = await client.post("/api/models/model_reactivate/activate")
+
+    assert accepted.status_code == 202
+    assert accepted.json()["kind"] == "activate"
+    # Asking twice must not queue the probe twice; it takes the compute lease.
+    again = await client.post("/api/models/model_reactivate/activate")
+    assert again.status_code == 202
+    assert again.json()["id"] == accepted.json()["id"]
+
+
+async def test_activation_is_refused_for_a_model_without_a_manifest(
+    client: AsyncClient,
+) -> None:
+    with SessionLocal() as session:
+        session.add(
+            ModelInstall(
+                id="model_imported",
+                name="Imported by hand",
+                role="chat",
+                engine="llama.cpp",
+                local_path="C:/models/imported",
+                manifest_json={"imported": True},
+                active=True,
+            )
+        )
+        session.commit()
+
+    refused = await client.post("/api/models/model_imported/activate")
+
+    assert refused.status_code == 422
+    assert "manifest" in refused.json()["detail"]
+
+
+async def test_activation_of_an_unknown_model_is_not_found(client: AsyncClient) -> None:
+    assert (await client.post("/api/models/model_missing/activate")).status_code == 404
+
+
 async def test_stopping_a_multi_output_turn_cancels_every_output(
     app: FastAPI,
     client: AsyncClient,

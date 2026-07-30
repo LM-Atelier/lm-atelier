@@ -80,6 +80,7 @@ class JobKind(StrEnum):
     IMAGE = "image"
     VIDEO = "video"
     EDIT_VERIFY = "edit_verify"
+    ACTIVATE = "activate"
     DOWNLOAD = "download"
     EXPORT = "export"
 
