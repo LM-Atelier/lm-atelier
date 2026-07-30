@@ -42,12 +42,16 @@ InstallCompatibility = Literal[
 
 WORKFLOW_ARTIFACT_CONTRACT_VERSION = 1
 
-# Declared dependencies that can change how a workflow executes. Local install
-# identifiers are excluded because they differ per machine, and the compiler
-# version is excluded because keying on it is what this replaces.
+# Declared dependencies that can change how a workflow executes.
+#
+# Template identity is deliberately absent. It is provenance, not execution: if
+# the graph, schema and execution dependencies are identical, a template revision
+# does not change what runs, and including it would recreate the compiler-version
+# problem at template granularity. If a template change can alter execution
+# without changing any of those, the missing execution dependency belongs in this
+# payload rather than provenance standing in for it. Local install identifiers
+# and the compiler version are excluded for the same reason.
 _EXECUTION_DEPENDENCY_KEYS = (
-    "template_id",
-    "template_sha256",
     "model_files",
     "custom_nodes",
     "extensions",

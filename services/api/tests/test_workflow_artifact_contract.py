@@ -86,3 +86,21 @@ def test_list_order_is_significant() -> None:
     }
 
     assert workflow_artifact_contract(**reordered) != workflow_artifact_contract(**_BASE)
+
+
+def test_template_provenance_does_not_change_the_contract() -> None:
+    """Template identity is provenance, not execution.
+
+    If the graph, schema and execution dependencies are identical, a template
+    revision does not change what runs. Including it would recreate the
+    compiler-version problem at template granularity - a bump invalidating
+    evidence for workflows that execute exactly as before.
+    """
+    reissued = dict(_BASE)
+    reissued["dependencies"] = {
+        **_BASE["dependencies"],
+        "template_id": "a_different_template",
+        "template_sha256": "b" * 64,
+    }
+
+    assert workflow_artifact_contract(**reissued) == workflow_artifact_contract(**_BASE)

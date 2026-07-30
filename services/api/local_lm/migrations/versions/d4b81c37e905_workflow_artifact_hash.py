@@ -22,8 +22,6 @@ depends_on = None
 # application's definition moves on.
 _CONTRACT_VERSION = 1
 _EXECUTION_DEPENDENCY_KEYS = (
-    "template_id",
-    "template_sha256",
     "model_files",
     "custom_nodes",
     "extensions",
