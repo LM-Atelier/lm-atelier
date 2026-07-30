@@ -50,7 +50,14 @@ import {
   X,
 } from "lucide-react";
 import { api, connectEvents } from "./api";
-import { formatEta, formatStageElapsed, formatTransferRate } from "./format";
+import {
+  downloadJson,
+  formatBytes,
+  formatDate,
+  formatEta,
+  formatStageElapsed,
+  formatTransferRate,
+} from "./format";
 import {
   calibratedImageEditStrength,
   estimateImageEditStrength,
@@ -257,6 +264,9 @@ function AccessibleDialog({
 
   return (
     <div className={`modal-backdrop ${backdropClassName}`.trim()}>
+      {/* A modal owns Escape, and this is the element that holds focus while it
+          is open, so the listener belongs here rather than on a control inside. */}
+      {/* eslint-disable-next-line jsx-a11y-x/no-noninteractive-element-interactions */}
       <div
         ref={dialog}
         className={`modal ${className}`.trim()}
@@ -287,27 +297,6 @@ function roleForMode(mode: RoutingMode): EngineRole {
   if (mode === "video") return "video";
   if (mode === "image") return "image";
   return "chat";
-}
-
-function formatBytes(value?: number | null): string {
-  if (value == null) return "Unknown";
-  const units = ["B", "KB", "MB", "GB", "TB"];
-  let size = value;
-  let index = 0;
-  while (size >= 1024 && index < units.length - 1) {
-    size /= 1024;
-    index += 1;
-  }
-  return `${size >= 10 || index === 0 ? size.toFixed(0) : size.toFixed(1)} ${units[index]}`;
-}
-
-function formatDate(value?: string | null): string {
-  if (!value) return "Update unknown";
-  return `Updated ${new Intl.DateTimeFormat(undefined, {
-    year: "numeric",
-    month: "short",
-    day: "numeric",
-  }).format(new Date(value))}`;
 }
 
 function formatTechnicalDetails(
@@ -344,15 +333,6 @@ function formatTechnicalDetails(
     ...devices,
     ...runtimes,
   ].join("\n");
-}
-
-function downloadJson(value: unknown, filename: string): void {
-  const url = URL.createObjectURL(new Blob([JSON.stringify(value, null, 2)], { type: "application/json" }));
-  const anchor = document.createElement("a");
-  anchor.href = url;
-  anchor.download = filename;
-  anchor.click();
-  URL.revokeObjectURL(url);
 }
 
 function EmptyState({ icon, title, body }: { icon: React.ReactNode; title: string; body: string }) {
@@ -458,6 +438,8 @@ function ArtifactPart({
   }
   return (
     <figure className="media-card">
+      {/* Generated media has no caption track to point at, and an empty one would claim an affordance that is not there. */}
+      {/* eslint-disable-next-line jsx-a11y-x/media-has-caption */}
       <video src={source} poster={poster} controls preload="metadata" aria-label={label} />
       <figcaption>
         <Film size={14} /> {label}
@@ -531,6 +513,8 @@ function MediaLibraryView() {
         const playbackSource = proxyId ? `/api/artifacts/${encodeURIComponent(proxyId)}/content` : source;
         const posterId = typeof artifact.metadata_json.poster_artifact_id === "string" ? artifact.metadata_json.poster_artifact_id : null;
         return <article className="gallery-card" key={artifact.id}>
+          {/* Generated media has no caption track to point at, and an empty one would claim an affordance that is not there. */}
+          {/* eslint-disable-next-line jsx-a11y-x/media-has-caption */}
           {artifact.kind === "image" ? <img src={source} alt={artifact.original_name ?? "Generated image"} loading="lazy" /> : <video src={playbackSource} poster={posterId ? `/api/artifacts/${encodeURIComponent(posterId)}/content` : undefined} controls preload="metadata" />}
           <div><strong>{artifact.original_name ?? artifact.kind}</strong><small>{formatBytes(artifact.size_bytes)} · {artifact.reference_count} reference{artifact.reference_count === 1 ? "" : "s"}</small><span><a href={source} download>Download</a><code>{artifact.sha256.slice(0, 12)}</code><button className="icon-button danger" aria-label={`Delete ${artifact.original_name ?? artifact.kind}`} disabled={deleteArtifact.isPending && deleteArtifact.variables === artifact.id} onClick={() => { const references = artifact.reference_count ? ` and remove ${artifact.reference_count} appearance${artifact.reference_count === 1 ? "" : "s"} from chats` : ""; if (window.confirm(`Permanently delete ${artifact.original_name ?? artifact.kind}${references}?`)) deleteArtifact.mutate(artifact.id); }}><Trash2 size={14} /></button></span></div>
         </article>;

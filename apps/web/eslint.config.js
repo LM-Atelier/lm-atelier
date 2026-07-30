@@ -26,17 +26,9 @@ export default tseslint.config(
       ...reactHooks.configs.recommended.rules,
       "jsx-a11y-x/label-has-associated-control": ["error", { assert: "either", depth: 3 }],
       "max-len": ["error", { code: 2607 }],
-      "max-lines": ["error", { max: 4859 }],
+      "max-lines": ["error", { max: 4843 }],
       "max-lines-per-function": ["error", { max: 531 }],
       "react-refresh/only-export-components": ["warn", { allowConstantExport: true }],
-    },
-  },
-  {
-    // Existing App findings are tracked separately; all other source is gated.
-    files: ["src/App.tsx"],
-    rules: {
-      "jsx-a11y-x/media-has-caption": "off",
-      "jsx-a11y-x/no-noninteractive-element-interactions": "off",
     },
   },
   {
