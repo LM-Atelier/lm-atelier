@@ -34,7 +34,7 @@ _PRIOR_IMAGE_EDIT = re.compile(
     r"girl|boy))\b|"
     r"(?:make|change|edit|modify|adjust|recolor)\s+(?:only\s+)?(?:the\s+)?"
     r"(?:leftmost|rightmost|middle|center|first|second|third)\s+"
-    r"(?:person|woman|man|girl|boy)(?:['’]s\b.{0,64}\b"
+    r"(?:person|woman|man|girl|boy)(?:['\u2019]s\b.{0,64}\b"
     r"(?:top|shirt|blouse|hoodie|sweater|sweatshirt|jacket|coat|dress|"
     r"outfit|pants|trousers|skirt|shoes|hair)\b|\s+(?:into|to|as)\b)|"
     r"(?:correct|fix|neutralize|balance)\b.{0,96}\b"
@@ -57,7 +57,7 @@ _PRIOR_IMAGE_SOURCE = re.compile(
     r"(?:image|picture|photo|illustration|artwork|logo|icon))\b",
     re.IGNORECASE,
 )
-_DISCUSSION = re.compile(
+DISCUSSION_OPENING = re.compile(
     r"^\s*(?:explain|describe|compare|what|why|how|when|where|who|tell me about|write about)\b",
     re.IGNORECASE,
 )
@@ -331,7 +331,7 @@ _ORDINAL_WORDS = {
     "ninth": 9,
     "tenth": 10,
 }
-_LIST_ITEM = re.compile(r"^\s*(?:\d{1,2}[.)]\s+|[-*Ã¢â‚¬Â¢]\s+)(?P<item>\S.*?)\s*$")
+_LIST_ITEM = re.compile(r"^\s*(?:\d{1,2}[.)]\s+|[-*\u2022\u2023\u25e6]\s+)(?P<item>\S.*?)\s*$")
 _OUTPUT_COUNT = re.compile(
     r"\b(?P<count>\d{1,2}|one|two|three|four|five|six|seven|eight|nine|ten|"
     r"eleven|twelve|thirteen|fourteen|fifteen|sixteen)\s+"
@@ -605,7 +605,7 @@ class ModalityRouter:
                     0.95,
                 )
 
-        if _DISCUSSION.search(normalized) and not re.search(
+        if DISCUSSION_OPENING.search(normalized) and not re.search(
             r"\b(?:for me|now|instead)\b", normalized, re.IGNORECASE
         ):
             return self._text(normalized, "question or discussion phrasing", 0.94)

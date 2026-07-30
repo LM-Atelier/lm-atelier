@@ -4277,6 +4277,95 @@ describe("App", () => {
     expect(composer).toHaveFocus();
   });
 
+  it("clears unsent text and visual edit targets when switching chats", async () => {
+    const stamp = "2026-07-30T00:00:00Z";
+    const first: Chat = {
+      id: "chat-draft-first",
+      project_id: null,
+      title: "Draft first",
+      archived: false,
+      routing_mode: "image",
+      confirm_uncertain_media: false,
+      active_chat_profile_id: null,
+      active_image_profile_id: null,
+      active_video_profile_id: null,
+      active_head_message_id: "assistant-draft-first",
+      created_at: stamp,
+      updated_at: stamp,
+    };
+    const second: Chat = {
+      ...first,
+      id: "chat-draft-second",
+      title: "Draft second",
+      routing_mode: "auto",
+      active_head_message_id: null,
+    };
+    const firstDetail: ChatDetail = {
+      ...first,
+      messages: [{
+        id: "user-draft-first",
+        chat_id: first.id,
+        parent_id: null,
+        role: "user",
+        status: "complete",
+        parts: [{
+          id: "prompt-draft-first",
+          position: 0,
+          type: "text",
+          text: "Create a synthetic test image",
+          artifact_id: null,
+          metadata_json: {},
+        }],
+        created_at: stamp,
+        updated_at: stamp,
+      }, {
+        id: "assistant-draft-first",
+        chat_id: first.id,
+        parent_id: "user-draft-first",
+        role: "assistant",
+        status: "complete",
+        parts: [{
+          id: "image-draft-first",
+          position: 0,
+          type: "image",
+          text: null,
+          artifact_id: "sha256:synthetic-draft-image",
+          metadata_json: {},
+        }],
+        created_at: stamp,
+        updated_at: stamp,
+      }],
+    };
+    const details = new Map<string, ChatDetail>([
+      [first.id, firstDetail],
+      [second.id, { ...second, messages: [] }],
+    ]);
+    localStorage.setItem("local-lm-chat", first.id);
+    vi.mocked(api.chats).mockResolvedValue([first, second]);
+    vi.mocked(api.chat).mockImplementation(async (id) => details.get(id)!);
+    const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+    render(
+      <QueryClientProvider client={client}>
+        <App />
+      </QueryClientProvider>,
+    );
+
+    const firstComposer = await screen.findByRole("textbox", { name: "Message" });
+    fireEvent.change(firstComposer, { target: { value: "Unsent first-chat draft" } });
+    fireEvent.click(screen.getByRole("button", { name: "Edit" }));
+    expect(await screen.findByRole("button", { name: /Remove attachment sha256:synthetic/ })).toBeVisible();
+
+    fireEvent.click(screen.getByText(second.title));
+    expect(await screen.findByRole("heading", { name: second.title })).toBeInTheDocument();
+    expect(screen.getByRole("textbox", { name: "Message" })).toHaveValue("");
+    expect(screen.queryByRole("button", { name: /Remove attachment sha256:synthetic/ })).not.toBeInTheDocument();
+
+    fireEvent.click(screen.getByText(first.title));
+    expect(await screen.findByRole("heading", { name: first.title })).toBeInTheDocument();
+    expect(screen.getByRole("textbox", { name: "Message" })).toHaveValue("");
+    expect(screen.queryByRole("button", { name: /Remove attachment sha256:synthetic/ })).not.toBeInTheDocument();
+  });
+
   it("animates a completed image through the image-to-video workflow path", async () => {
     const stamp = "2026-07-28T00:00:00Z";
     const chat: Chat = {

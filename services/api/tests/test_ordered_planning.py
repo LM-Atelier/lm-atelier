@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import time
 from collections.abc import AsyncIterator
 
 import pytest
@@ -93,6 +94,70 @@ def test_explicit_modes_never_compile_an_ordered_plan(mode: RoutingMode) -> None
 )
 def test_false_or_unsafe_sequences_do_not_compile(text: str) -> None:
     assert OrderedPlanCompiler.deterministic(text, RoutingMode.AUTO) is None
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "Explain how to make a picture look better, then describe the steps",
+        "Explain how to make a video look cinematic, then outline the steps",
+        "Compare how to render a poster in two styles, then summarize",
+        "Describe how to animate a logo, then list the tools",
+    ],
+)
+def test_questions_about_a_medium_do_not_compile_a_media_plan(text: str) -> None:
+    """These name a medium, so the media patterns match without a question guard.
+
+    The compiler runs before the router, and its plans carry enough confidence to
+    skip the confirmation gate, so a how-to question would silently generate.
+    """
+    assert OrderedPlanCompiler.deterministic(text, RoutingMode.AUTO) is None
+
+
+@pytest.mark.parametrize(
+    ("text", "expected"),
+    [
+        ("Generate an image of a fox, then write a caption", ["image", "text"]),
+        ("Generate an image of a fox;write a caption", ["image", "text"]),
+        ("Generate an image of a fox   ;   write a caption", ["image", "text"]),
+        ("Generate an image of a fox -> write a caption", ["image", "text"]),
+        ("Generate an image of a fox->write a caption", ["image", "text"]),
+        ("Generate an image of a fox, after that write a caption", ["image", "text"]),
+    ],
+)
+def test_separators_split_the_same_regardless_of_surrounding_space(
+    text: str, expected: list[str]
+) -> None:
+    intent = OrderedPlanCompiler.deterministic(text, RoutingMode.AUTO)
+
+    assert intent is not None
+    assert [step.mode for step in intent.steps] == expected
+
+
+def test_separator_matching_stays_linear_on_repeated_whitespace() -> None:
+    """The separator carried a whitespace quantifier on either side, which a long
+    run of spaces could be divided between in many ways."""
+    adversarial = "generate an image" + (" " * 100_000) + "x"
+
+    started = time.monotonic()
+    OrderedPlanCompiler.deterministic(adversarial, RoutingMode.AUTO)
+    elapsed = time.monotonic() - started
+
+    assert elapsed < 5
+
+
+def test_a_long_list_is_not_mistaken_for_an_oversized_plan() -> None:
+    """Counting clauses before classifying rejected any message with separators."""
+    listing = "; ".join(f"buy item {index}" for index in range(1, 10))
+
+    assert OrderedPlanCompiler.deterministic(listing, RoutingMode.AUTO) is None
+
+
+def test_an_oversized_media_plan_is_still_rejected() -> None:
+    request = "; ".join(f"generate an image of item {index}" for index in range(1, 10))
+
+    with pytest.raises(ValueError, match="at most"):
+        OrderedPlanCompiler.deterministic(request, RoutingMode.AUTO)
 
 
 def test_rejects_forward_dependency_cycle() -> None:
