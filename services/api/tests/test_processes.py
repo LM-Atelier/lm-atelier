@@ -4,6 +4,7 @@ import asyncio
 import contextlib
 import json
 import os
+import socket
 import subprocess
 import sys
 from pathlib import Path
@@ -287,6 +288,31 @@ async def test_worker_port_is_preflighted_before_spawn(
     preflight.assert_awaited_once_with("chat", "http://127.0.0.1:12341/health")
     create_process.assert_not_awaited()
     assert "chat" not in supervisor._workers
+
+
+async def test_worker_port_preflight_distinguishes_free_and_bound_ports(
+    settings,
+) -> None:  # type: ignore[no-untyped-def]
+    settings.prepare()
+    supervisor = ProcessSupervisor(settings)
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as temporary:
+        temporary.bind(("127.0.0.1", 0))
+        free_port = temporary.getsockname()[1]
+
+    await supervisor._ensure_port_available(
+        "chat",
+        f"http://127.0.0.1:{free_port}/health",
+    )
+
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as listener:
+        listener.bind(("127.0.0.1", 0))
+        listener.listen()
+        occupied_port = listener.getsockname()[1]
+        with pytest.raises(OSError, match="already in use"):
+            await supervisor._ensure_port_available(
+                "chat",
+                f"http://127.0.0.1:{occupied_port}/health",
+            )
 
 
 async def test_cancelled_worker_start_terminates_and_forgets_starting_process(
