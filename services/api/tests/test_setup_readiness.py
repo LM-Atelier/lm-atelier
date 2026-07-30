@@ -440,3 +440,18 @@ async def test_ready_roles_surface_worker_failure_without_requiring_residency(
 
 def response_text(payload: object) -> str:
     return repr(payload)
+
+
+async def test_polled_endpoints_do_not_block_the_event_loop() -> None:
+    """Both read the filesystem, and readiness is polled every few seconds.
+
+    Declaring them synchronously is what makes the framework run them in a worker
+    thread; declaring them `async` would put that work on the event loop and stall
+    every other request for its duration.
+    """
+    import inspect
+
+    from local_lm import api as api_module
+
+    assert not inspect.iscoroutinefunction(api_module.get_setup_readiness)
+    assert not inspect.iscoroutinefunction(api_module.runtime_status)

@@ -17,6 +17,7 @@ from local_lm.generation_offers import (
     routing_plan_for_offer,
     validate_generation_offer,
 )
+from local_lm.schemas import RoutingReasonCode
 
 
 def tool_delta(*, name: str = "offer_generation", arguments: object) -> dict[str, object]:
@@ -96,6 +97,8 @@ def test_collector_reassembles_fragmented_offer_and_builds_single_plan() -> None
     assert plan.operation.value == "text_to_image"
     assert plan.standalone_prompt == "A blue cup."
     assert plan.confidence == 1
+    assert plan.reason_code == RoutingReasonCode.GENERATION_OFFER_ACCEPTED
+    assert plan.model_dump(mode="json")["reason_code"] == "generation_offer_accepted"
 
 
 def test_multiple_offer_items_become_ordered_independent_media_steps() -> None:
