@@ -16,8 +16,8 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
-  compatibility:
-    name: Ubuntu compatibility
+  verification-plan:
+    name: Select verification plan
     if: >-
       github.event_name == 'workflow_dispatch' ||
       (
@@ -26,17 +26,17 @@ jobs:
         github.event.pull_request.draft == false
       )
     runs-on: ubuntu-24.04
-    timeout-minutes: 30
-    env:
-      LOCAL_LM_DATA_DIR: ${{ github.workspace }}/temp/local-lm-tests
-      UV_PROJECT_ENVIRONMENT: ${{ github.workspace }}/.venv
+    timeout-minutes: 5
+    outputs:
+      mode: ${{ steps.plan.outputs.mode }}
+      dependency_audit: ${{ steps.plan.outputs.dependency_audit }}
+      windows: ${{ steps.plan.outputs.windows }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           fetch-depth: 0
           persist-credentials: false
       - id: plan
-        name: Select verification plan
         env:
           BASE_REF: ${{ github.base_ref }}
           BASE_SHA: ${{ github.event.pull_request.base.sha }}
@@ -51,8 +51,35 @@ jobs:
             --base-sha "$BASE_SHA" \
             --head-sha "$HEAD_SHA" \
             --github-output "$GITHUB_OUTPUT"
+
+  compatibility:
+    name: Ubuntu compatibility
+    needs: verification-plan
+    if: >-
+      always() &&
+      (
+        github.event_name == 'workflow_dispatch' ||
+        (
+          github.event_name == 'pull_request' &&
+          github.event.repository.private == false &&
+          github.event.pull_request.draft == false
+        )
+      )
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    env:
+      LOCAL_LM_DATA_DIR: ${{ github.workspace }}/temp/local-lm-tests
+      UV_PROJECT_ENVIRONMENT: ${{ github.workspace }}/.venv
+    steps:
+      - name: Require a valid verification plan
+        if: needs.verification-plan.result != 'success'
+        run: exit 1
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
       - name: Scan reachable source history for secrets
-        if: steps.plan.outputs.mode == 'full'
+        if: needs.verification-plan.outputs.mode == 'full'
         shell: bash
         run: |
           set -euo pipefail
@@ -67,29 +94,29 @@ jobs:
           tar -xzf "$archive" -C "$RUNNER_TEMP" gitleaks
           "$RUNNER_TEMP/gitleaks" git . --redact
       - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
-        if: steps.plan.outputs.mode == 'full'
+        if: needs.verification-plan.outputs.mode == 'full'
         with:
           node-version: 22
           cache: npm
       - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
-        if: steps.plan.outputs.mode == 'full'
+        if: needs.verification-plan.outputs.mode == 'full'
         with:
           python-version: "3.12"
       - uses: astral-sh/setup-uv@c771a70e6277c0a99b617c7a806ffedaca235ff9 # v9.0.0
-        if: steps.plan.outputs.mode == 'full'
+        if: needs.verification-plan.outputs.mode == 'full'
         with:
           version: "0.11.18"
           enable-cache: true
           cache-dependency-glob: services/api/uv.lock
       - name: Install verification dependencies
-        if: steps.plan.outputs.mode == 'full'
+        if: needs.verification-plan.outputs.mode == 'full'
         run: |
           uv sync --project services/api --locked --python 3.12 \
             --extra dev \
             --extra package
           npm ci
       - name: Audit locked dependencies
-        if: steps.plan.outputs.dependency_audit == 'true'
+        if: needs.verification-plan.outputs.dependency_audit == 'true'
         run: |
           npm audit --audit-level=high
           mkdir -p temp/pip-audit-cache
@@ -98,21 +125,21 @@ jobs:
             --progress-spinner off \
             --cache-dir temp/pip-audit-cache
       - name: Install ffmpeg for media pipeline tests
-        if: steps.plan.outputs.mode == 'full'
+        if: needs.verification-plan.outputs.mode == 'full'
         run: |
           sudo apt-get update
           sudo apt-get install --yes --no-install-recommends ffmpeg
       - name: Run repository verification
-        if: steps.plan.outputs.mode == 'full'
+        if: needs.verification-plan.outputs.mode == 'full'
         run: ./scripts/verify.sh
       - name: Install golden-path browser
-        if: steps.plan.outputs.mode == 'full'
+        if: needs.verification-plan.outputs.mode == 'full'
         run: npx playwright install --with-deps chromium
       - name: Run browser golden path
-        if: steps.plan.outputs.mode == 'full'
+        if: needs.verification-plan.outputs.mode == 'full'
         run: npm run e2e:run
       - name: Validate documentation-only change
-        if: steps.plan.outputs.mode == 'documentation'
+        if: needs.verification-plan.outputs.mode == 'documentation'
         env:
           BASE_SHA: ${{ github.event.pull_request.base.sha }}
           HEAD_SHA: ${{ github.event.pull_request.head.sha }}
@@ -120,8 +147,43 @@ jobs:
           python3 scripts/check-repository-hygiene.py
           git diff --check $BASE_SHA...$HEAD_SHA --
       - name: Confirm exact develop promotion
-        if: steps.plan.outputs.mode == 'promotion'
+        if: needs.verification-plan.outputs.mode == 'promotion'
         run: echo Protected develop is ready for exact-tree promotion to main.
+
+  windows-compatibility:
+    name: Windows compatibility
+    needs: verification-plan
+    if: needs.verification-plan.outputs.windows == 'true'
+    runs-on: windows-2025
+    timeout-minutes: 30
+    env:
+      LOCAL_LM_DATA_DIR: ${{ github.workspace }}/temp/local-lm-tests
+      UV_PROJECT_ENVIRONMENT: ${{ github.workspace }}/.venv
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: 22
+          cache: npm
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: "3.12"
+      - uses: astral-sh/setup-uv@c771a70e6277c0a99b617c7a806ffedaca235ff9 # v9.0.0
+        with:
+          version: "0.11.18"
+          enable-cache: true
+          cache-dependency-glob: services/api/uv.lock
+      - name: Install verification dependencies
+        run: |
+          uv sync --project services/api --locked --python 3.12 --extra dev --extra package
+          npm.cmd ci
+      - name: Install ffmpeg for media pipeline tests
+        run: choco install ffmpeg --version 8.1.2 --yes --no-progress
+      - name: Run repository verification
+        run: .\scripts\verify.ps1
 
   scheduled-audit:
     name: Scheduled dependency audit
