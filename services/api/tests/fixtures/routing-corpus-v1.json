@@ -968,6 +968,56 @@
       "text": "Make a short clip of rain on a window",
       "mode": "auto",
       "expected": "text_to_video"
+    },
+    {
+      "id": "ordered-01",
+      "text": "Write a short story about a paper boat, then create an image based on it, then animate the image into a video, then summarize the result",
+      "mode": "auto",
+      "expected_ordered_modes": [
+        "text",
+        "image",
+        "video",
+        "text"
+      ]
+    },
+    {
+      "id": "ordered-02",
+      "text": "Generate an image of a fox, then write a caption",
+      "mode": "auto",
+      "expected_ordered_modes": [
+        "image",
+        "text"
+      ]
+    },
+    {
+      "id": "ordered-03",
+      "text": "Create an image of a clockwork bird, then turn it into a short video",
+      "mode": "auto",
+      "expected_ordered_modes": [
+        "image",
+        "video"
+      ]
+    },
+    {
+      "id": "ordered-04",
+      "text": "Analyze the attached image, then write a concise critique",
+      "mode": "auto",
+      "input_artifact_ids": [
+        "sha256:synthetic-image"
+      ],
+      "expected_ordered_modes": [
+        "text",
+        "text"
+      ]
+    },
+    {
+      "id": "ordered-05",
+      "text": "Write a product description, then create an image from it",
+      "mode": "auto",
+      "expected_ordered_modes": [
+        "text",
+        "image"
+      ]
     }
   ]
 }
