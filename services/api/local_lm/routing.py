@@ -58,7 +58,7 @@ _PRIOR_IMAGE_SOURCE = re.compile(
     r"(?:image|picture|photo|illustration|artwork|logo|icon))\b",
     re.IGNORECASE,
 )
-_DISCUSSION = re.compile(
+DISCUSSION_OPENING = re.compile(
     r"^\s*(?:explain|describe|compare|what|why|how|when|where|who|tell me about|write about)\b",
     re.IGNORECASE,
 )
@@ -710,7 +710,7 @@ class ModalityRouter:
                     0.95,
                 )
 
-        if _DISCUSSION.search(normalized) and not re.search(
+        if DISCUSSION_OPENING.search(normalized) and not re.search(
             r"\b(?:for me|now|instead)\b", normalized, re.IGNORECASE
         ):
             return self._text(normalized, "question or discussion phrasing", 0.94)
