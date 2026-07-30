@@ -4,6 +4,8 @@ on:
   pull_request:
     branches: [develop, main]
     types: [opened, synchronize, reopened, ready_for_review]
+  schedule:
+    - cron: '23 9 * * 2'
   workflow_dispatch:
 
 permissions:
@@ -19,6 +21,7 @@ jobs:
     if: >-
       github.event_name == 'workflow_dispatch' ||
       (
+        github.event_name == 'pull_request' &&
         github.event.repository.private == false &&
         github.event.pull_request.draft == false
       )
@@ -32,7 +35,24 @@ jobs:
         with:
           fetch-depth: 0
           persist-credentials: false
+      - id: plan
+        name: Select verification plan
+        env:
+          BASE_REF: ${{ github.base_ref }}
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          EVENT_NAME: ${{ github.event_name }}
+          HEAD_REF: ${{ github.head_ref }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        run: |
+          python3 scripts/ci-plan.py \
+            --event $EVENT_NAME \
+            --base-ref $BASE_REF \
+            --head-ref $HEAD_REF \
+            --base-sha $BASE_SHA \
+            --head-sha $HEAD_SHA \
+            --github-output $GITHUB_OUTPUT
       - name: Scan reachable source history for secrets
+        if: steps.plan.outputs.mode == 'full'
         shell: bash
         run: |
           set -euo pipefail
@@ -47,18 +67,86 @@ jobs:
           tar -xzf "$archive" -C "$RUNNER_TEMP" gitleaks
           "$RUNNER_TEMP/gitleaks" git . --redact
       - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        if: steps.plan.outputs.mode == 'full'
         with:
           node-version: 22
           cache: npm
       - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        if: steps.plan.outputs.mode == 'full'
         with:
           python-version: "3.12"
       - uses: astral-sh/setup-uv@c771a70e6277c0a99b617c7a806ffedaca235ff9 # v9.0.0
+        if: steps.plan.outputs.mode == 'full'
         with:
           version: "0.11.18"
           enable-cache: true
           cache-dependency-glob: services/api/uv.lock
       - name: Install verification dependencies
+        if: steps.plan.outputs.mode == 'full'
+        run: |
+          uv sync --project services/api --locked --python 3.12 \
+            --extra dev \
+            --extra package
+          npm ci
+      - name: Audit locked dependencies
+        if: steps.plan.outputs.dependency_audit == 'true'
+        run: |
+          npm audit --audit-level=high
+          mkdir -p temp/pip-audit-cache
+          .venv/bin/python -m pip_audit \
+            --skip-editable \
+            --progress-spinner off \
+            --cache-dir temp/pip-audit-cache
+      - name: Install ffmpeg for media pipeline tests
+        if: steps.plan.outputs.mode == 'full'
+        run: |
+          sudo apt-get update
+          sudo apt-get install --yes --no-install-recommends ffmpeg
+      - name: Run repository verification
+        if: steps.plan.outputs.mode == 'full'
+        run: ./scripts/verify.sh
+      - name: Install golden-path browser
+        if: steps.plan.outputs.mode == 'full'
+        run: npx playwright install --with-deps chromium
+      - name: Run browser golden path
+        if: steps.plan.outputs.mode == 'full'
+        run: npm run e2e:run
+      - name: Validate documentation-only change
+        if: steps.plan.outputs.mode == 'documentation'
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        run: |
+          python3 scripts/check-repository-hygiene.py
+          git diff --check $BASE_SHA...$HEAD_SHA --
+      - name: Confirm exact develop promotion
+        if: steps.plan.outputs.mode == 'promotion'
+        run: echo Protected develop is ready for exact-tree promotion to main.
+
+  scheduled-audit:
+    name: Scheduled dependency audit
+    if: github.event_name == 'schedule'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    env:
+      UV_PROJECT_ENVIRONMENT: ${{ github.workspace }}/.venv
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: 22
+          cache: npm
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: '3.12'
+      - uses: astral-sh/setup-uv@c771a70e6277c0a99b617c7a806ffedaca235ff9 # v9.0.0
+        with:
+          version: '0.11.18'
+          enable-cache: true
+          cache-dependency-glob: services/api/uv.lock
+      - name: Install audit dependencies
         run: |
           uv sync --project services/api --locked --python 3.12 \
             --extra dev \
@@ -72,13 +160,3 @@ jobs:
             --skip-editable \
             --progress-spinner off \
             --cache-dir temp/pip-audit-cache
-      - name: Install ffmpeg for media pipeline tests
-        run: |
-          sudo apt-get update
-          sudo apt-get install --yes --no-install-recommends ffmpeg
-      - name: Run repository verification
-        run: ./scripts/verify.sh
-      - name: Install golden-path browser
-        run: npx playwright install --with-deps chromium
-      - name: Run browser golden path
-        run: npm run e2e:run
