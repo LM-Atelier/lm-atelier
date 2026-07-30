@@ -24,12 +24,12 @@ from sqlalchemy import select, update
 from sqlalchemy.orm import Session
 
 from .adapters.base import ChatAdapter, ChatRequest, MediaRequest
-from .adapters.contracts import ADAPTER_CONTRACT_VERSION
 from .auxiliary_assets import (
     COMFY_AUXILIARY_FOLDERS,
     checkpoint_lora_extension,
     validate_lora_workflow_contract,
 )
+from .capability_evidence import record_capability_evidence
 from .comfy_templates import (
     COMFY_TEMPLATE_COMPILER_VERSION,
     ComfyTemplateRegistry,
@@ -45,18 +45,13 @@ from .gguf import (
     automatic_mmproj_selection,
     validate_gguf_selection,
 )
-from .hardware import hardware_capability_class
 from .model_manifests import (
     MAX_METADATA_BYTES,
     MAX_WEIGHT_HEADER_BYTES,
     ModelManifestInspection,
     inspect_repository_metadata,
 )
-from .model_planner import (
-    ACTIVATION_PROBE_VERSION,
-    LAUNCH_CONTRACT_VERSION,
-    media_workflow_contract_version,
-)
+from .model_planner import media_workflow_contract_version
 from .models import (
     Chat,
     InstallPlan,
@@ -511,59 +506,17 @@ class DownloadManager:
         workflow_contract_version: str | None,
         details: dict[str, Any],
     ) -> ModelCapabilityEvidence:
-        hardware_class = hardware_capability_class(self.settings)
-        runtime_release: str | None = None
-        runtime_managed: bool | None = None
         runtimes = getattr(self.processes, "runtimes", None) if self.processes else None
-        if runtimes and install.engine in {"llama.cpp", "vllm", "comfyui"}:
-            runtime_status = runtimes.status(install.engine)
-            runtime_release = runtime_status.release
-            runtime_managed = runtime_status.managed
-        evidence_payload = {
-            "component_hashes": dict(sorted(component_hashes.items())),
-            "runtime_build": runtime_build,
-            "adapter_contract_version": ADAPTER_CONTRACT_VERSION,
-            "launch_contract_version": LAUNCH_CONTRACT_VERSION,
-            "workflow_contract_version": workflow_contract_version,
-            "hardware_class": hardware_class,
-            "probe_version": ACTIVATION_PROBE_VERSION,
-            "runtime_release": runtime_release,
-        }
-        evidence_key = hashlib.sha256(
-            json.dumps(
-                evidence_payload,
-                sort_keys=True,
-                separators=(",", ":"),
-                allow_nan=False,
-            ).encode()
-        ).hexdigest()
-        existing = session.scalar(
-            select(ModelCapabilityEvidence).where(
-                ModelCapabilityEvidence.model_install_id == install.id,
-                ModelCapabilityEvidence.evidence_key == evidence_key,
-            )
-        )
-        if existing:
-            return existing
-        evidence = ModelCapabilityEvidence(
-            model_install_id=install.id,
-            evidence_key=evidence_key,
-            result="ready",
-            component_hashes_json=component_hashes,
-            runtime_build=runtime_build[:200],
-            adapter_contract_version=ADAPTER_CONTRACT_VERSION,
-            launch_contract_version=LAUNCH_CONTRACT_VERSION,
+        return record_capability_evidence(
+            session,
+            install,
+            self.settings,
+            runtimes,
+            component_hashes=component_hashes,
+            runtime_build=runtime_build,
             workflow_contract_version=workflow_contract_version,
-            hardware_class=hardware_class[:200],
-            probe_version=ACTIVATION_PROBE_VERSION,
-            details_json={
-                **details,
-                "runtime_release": runtime_release,
-                "runtime_managed": runtime_managed,
-            },
+            details=details,
         )
-        session.add(evidence)
-        return evidence
 
     def start(self, job_id: str) -> None:
         if job_id in self._tasks and not self._tasks[job_id].done():

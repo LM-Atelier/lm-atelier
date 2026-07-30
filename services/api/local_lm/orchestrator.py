@@ -26,7 +26,12 @@ from .auxiliary_assets import (
     transform_lora_graph,
     workflow_lora_extension,
 )
-from .capability_evidence import current_capability_evidence, evidence_input_modalities
+from .capability_evidence import (
+    current_capability_evidence,
+    evidence_input_modalities,
+    record_capability_evidence,
+)
+from .comfy_templates import COMFY_TEMPLATE_COMPILER_VERSION
 from .context_compaction import (
     CONTEXT_COMPACTION_VERSION,
     MAX_COMPACTION_CHARACTERS,
@@ -64,6 +69,7 @@ from .image_edit_strength import (
     ImageEditStrengthResolution,
     resolve_image_edit_strength,
 )
+from .model_planner import media_workflow_contract_version
 from .models import (
     Artifact,
     Chat,
@@ -93,6 +99,7 @@ from .prompt_helpers import PROMPT_HELPER_SCOPE, prompt_helper_system_message
 from .routing import ModalityRouter, RouteConfirmationRequired
 from .scheduler import ResourceScheduler
 from .schemas import (
+    EngineCapabilities,
     GenerationOffer,
     MessageOut,
     OrderedWorkIntent,
@@ -3220,6 +3227,106 @@ class ConversationOrchestrator:
         if not status.running or status.state != "ready":
             await self.processes.start_media()
 
+    async def _successful_media_capabilities(self) -> EngineCapabilities | None:
+        try:
+            capabilities = await self.engines.media_capabilities()
+        except Exception:
+            logger.exception("Could not inspect the successful media runtime")
+            return None
+        return capabilities if capabilities.healthy else None
+
+    def _record_successful_media_evidence(
+        self,
+        session: Session,
+        run: Run,
+        capabilities: EngineCapabilities | None,
+        *,
+        output_count: int,
+    ) -> str | None:
+        if (
+            output_count <= 0
+            or not capabilities
+            or not capabilities.healthy
+            or not run.profile_id
+            or not run.workflow_revision_id
+        ):
+            return None
+        profile = session.get(ModelProfile, run.profile_id)
+        install = (
+            session.get(ModelInstall, profile.model_install_id)
+            if profile and profile.model_install_id
+            else None
+        )
+        revision = session.get(WorkflowRevision, run.workflow_revision_id)
+        if (
+            not profile
+            or not install
+            or not install.active
+            or not revision
+            or not revision.trusted
+            or profile.engine != install.engine
+            or revision.engine != install.engine
+            or capabilities.engine != install.engine
+        ):
+            return None
+        expected_role = (
+            "image"
+            if run.operation in {Operation.TEXT_TO_IMAGE.value, Operation.IMAGE_TO_IMAGE.value}
+            else "video"
+            if run.operation in {Operation.TEXT_TO_VIDEO.value, Operation.IMAGE_TO_VIDEO.value}
+            else None
+        )
+        if profile.role != expected_role or install.role != expected_role:
+            return None
+        dependencies = revision.dependencies_json
+        declared_installs = dependencies.get("model_install_ids")
+        if not isinstance(declared_installs, list) or install.id not in declared_installs:
+            return None
+        template_sha256 = dependencies.get("template_sha256")
+        if (
+            not isinstance(template_sha256, str)
+            or len(template_sha256) != 64
+            or any(character not in "0123456789abcdef" for character in template_sha256.lower())
+            or dependencies.get("compiler_version") != COMFY_TEMPLATE_COMPILER_VERSION
+            or install.manifest_json.get("workflow_template_sha256") != template_sha256
+            or install.manifest_json.get("workflow_template_id") != dependencies.get("template_id")
+        ):
+            return None
+        raw_hashes = install.manifest_json.get("expected_sha256")
+        if not isinstance(raw_hashes, dict) or not raw_hashes:
+            return None
+        component_hashes = {
+            path: digest
+            for path, digest in raw_hashes.items()
+            if isinstance(path, str)
+            and path
+            and isinstance(digest, str)
+            and len(digest) == 64
+            and all(character in "0123456789abcdef" for character in digest.lower())
+        }
+        if len(component_hashes) != len(raw_hashes):
+            return None
+        evidence = record_capability_evidence(
+            session,
+            install,
+            self.engines.settings,
+            getattr(self.processes, "runtimes", None),
+            component_hashes=component_hashes,
+            runtime_build=capabilities.version,
+            workflow_contract_version=media_workflow_contract_version(template_sha256),
+            details={
+                "probe": "successful_media_output",
+                "operation": run.operation,
+                "workflow_revision_id": revision.id,
+                "workflow_template_id": dependencies.get("template_id"),
+                "workflow_performance": revision.input_schema_json.get(
+                    "x-lm-atelier-workflow-performance"
+                ),
+                "output_count": output_count,
+            },
+        )
+        return evidence.evidence_key
+
     async def _execute_media(self, job_id: str, run_id: str) -> None:
         if self.engines.settings.media_engine == "comfyui":
             status = next(item for item in self.processes.statuses() if item.name == "media")
@@ -3409,6 +3516,9 @@ class ConversationOrchestrator:
             elif event.type == "complete":
                 completed_assets.extend(event.assets)
 
+        media_capabilities = (
+            await self._successful_media_capabilities() if completed_assets else None
+        )
         completed_assistant_id = assistant_id
         with self.session_factory() as session:
             message = session.get(Message, assistant_id)
@@ -3513,6 +3623,21 @@ class ConversationOrchestrator:
                         },
                     )
                 )
+            try:
+                evidence_key = self._record_successful_media_evidence(
+                    session,
+                    run,
+                    media_capabilities,
+                    output_count=len(artifact_ids),
+                )
+            except Exception:
+                logger.exception("Could not record successful media capability evidence")
+                evidence_key = None
+            if evidence_key:
+                run.provenance_json = {
+                    **run.provenance_json,
+                    "capability_evidence_key": evidence_key,
+                }
             self._complete(session, run, job, {"artifact_ids": artifact_ids})
             run.provenance_json = {
                 **run.provenance_json,
