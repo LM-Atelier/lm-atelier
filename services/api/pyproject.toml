@@ -68,7 +68,14 @@ line-length = 100
 target-version = "py312"
 
 [tool.ruff.lint]
-select = ["E", "F", "I", "UP", "B", "SIM"]
+select = ["E", "F", "I", "UP", "B", "SIM", "C901", "PLR0912", "PLR0915"]
+
+[tool.ruff.lint.mccabe]
+max-complexity = 75
+
+[tool.ruff.lint.pylint]
+max-branches = 76
+max-statements = 326
 
 [tool.mypy]
 python_version = "3.12"
