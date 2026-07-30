@@ -4,8 +4,14 @@ from pathlib import Path
 
 from alembic import command
 from alembic.config import Config
+from alembic.script.revision import ResolutionError
+from alembic.util.exc import CommandError
 
 from .config import Settings
+
+
+class DatabaseVersionError(RuntimeError):
+    """The database revision is not supported by this application build."""
 
 
 def alembic_config(settings: Settings) -> Config:
@@ -18,4 +24,13 @@ def alembic_config(settings: Settings) -> Config:
 
 
 def upgrade_database(settings: Settings) -> None:
-    command.upgrade(alembic_config(settings), "head")
+    try:
+        command.upgrade(alembic_config(settings), "head")
+    except CommandError as error:
+        if not isinstance(error.__cause__, ResolutionError):
+            raise
+        raise DatabaseVersionError(
+            "This LM Atelier data uses a database schema revision that this "
+            "build does not recognize. Install the latest LM Atelier version "
+            "and keep the existing data folder."
+        ) from error
