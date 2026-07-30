@@ -4092,13 +4092,15 @@ function SetupWizard({
                         : `Install ${recipe.name}`}
                     </button>
                   )}
-                  <button
-                    className={recipe ? "secondary compact-button" : "primary compact-button"}
-                    disabled={actionPending}
-                    onClick={() => performAction(role)}
-                  >
-                    {actionPending ? "Working…" : actionLabel(role)}
-                  </button>
+                  {role.next_action && (
+                    <button
+                      className={recipe ? "secondary compact-button" : "primary compact-button"}
+                      disabled={actionPending}
+                      onClick={() => performAction(role)}
+                    >
+                      {actionPending ? "Working…" : actionLabel(role)}
+                    </button>
+                  )}
                   {recipe && <small>Reference candidate · {formatBytes(recipe.total_size_bytes)}</small>}
                 </div>
               )}
