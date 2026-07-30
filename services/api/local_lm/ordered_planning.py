@@ -14,7 +14,7 @@ MAX_ORDERED_PLAN_STEPS = 8
 MAX_ORDERED_PLAN_PROMPT_CHARS = 50_000
 
 _SEQUENCE_SEPARATOR = re.compile(
-    r"\s*(?:->|→|;|\bthen\b|\bnext\b|\bafter\s+that\b|\bfinally\b)\s*",
+    r"\s*(?:->|\u2192|;|\bthen\b|\bnext\b|\bafter\s+that\b|\bfinally\b)\s*",
     re.IGNORECASE,
 )
 _IMAGE_ACTION = re.compile(

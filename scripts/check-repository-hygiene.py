@@ -137,6 +137,14 @@ SECRET_PATTERNS = (
     re.compile(r"BEGIN (?:RSA |EC |OPENSSH )?PRIVATE KEY"),
 )
 MARKDOWN_LINK = re.compile(r"!?\[[^\]]*]\((?P<target>[^)]+)\)")
+# A UTF-8 sequence re-read as cp1252 or latin-1 always begins with one of
+# these pairs. They are written as escapes so this file stays ASCII and
+# cannot itself be mangled, which is the discipline the check asks for.
+MOJIBAKE_MARKERS = (
+    "\u00e2\u20ac",  # a-circumflex + euro: smart punctuation as cp1252
+    "\u00c3\u00a2",  # A-tilde + a-circumflex: the same text mangled twice
+    "\u00c2\u00a0",  # A-circumflex + no-break space
+)
 
 
 def candidate_paths() -> list[str]:
@@ -192,6 +200,34 @@ def has_trailing_whitespace(path: str) -> bool:
     return any(line.endswith((" ", "\t")) for line in text.splitlines())
 
 
+def mojibake_lines(path: str) -> list[str]:
+    """Return lines showing a UTF-8 text decoded as a single-byte codepage.
+
+    Writing a UTF-8 file with a cp1252 tool turns each multi-byte character into
+    a run of Latin-1 characters, and the result still decodes as valid UTF-8, so
+    nothing else notices. It reached a live regex once already: a bullet in a
+    routing pattern became six Latin-1 characters, and the class silently stopped
+    matching bulleted lists. These sequences do not occur in correct text.
+    """
+
+    payload = Path(path).read_bytes()
+    if b"\0" in payload:
+        return []
+    try:
+        text = payload.decode("utf-8")
+    except UnicodeDecodeError:
+        return []
+    found: list[str] = []
+    for number, line in enumerate(text.splitlines(), 1):
+        if any(marker in line for marker in MOJIBAKE_MARKERS):
+            readable = "".join(
+                character if character.isascii() else f"<U+{ord(character):04X}>"
+                for character in line.strip()
+            )
+            found.append(f"{path}:{number}: {readable[:120]}")
+    return found
+
+
 def broken_local_links(paths: list[str]) -> list[str]:
     """Return local Markdown links that do not resolve inside the repository."""
 
@@ -242,6 +278,15 @@ def main() -> int:
         raise SystemExit(
             "Trailing whitespace is present in candidate files:\n- "
             + "\n- ".join(whitespace_paths)
+        )
+
+    mangled = [line for path in paths for line in mojibake_lines(path)]
+    if mangled:
+        raise SystemExit(
+            "Text mangled by a codepage round trip is present. Rewrite the line "
+            "as UTF-8, and prefer an explicit escape such as \\u2022 over a "
+            "literal non-ASCII character inside a regular expression:\n- "
+            + "\n- ".join(mangled)
         )
 
     broken_links = broken_local_links(paths)
