@@ -10,6 +10,7 @@ import pytest
 from local_lm.adapters.base import ChatEvent, ChatRequest
 from local_lm.adapters.mock import MockChatAdapter
 from local_lm.domain import Operation, RoutingMode
+from local_lm.ordered_planning import OrderedPlanCompiler
 from local_lm.routing import ModalityRouter
 
 CORPUS = Path(__file__).parent / "fixtures" / "routing-corpus-v1.json"
@@ -27,7 +28,12 @@ class CapturingMockChatAdapter(MockChatAdapter):
 
 
 class UnavailableChatAdapter(MockChatAdapter):
+    def __init__(self) -> None:
+        super().__init__()
+        self.called = False
+
     async def stream(self, request: ChatRequest) -> AsyncIterator[ChatEvent]:
+        self.called = True
         yield ChatEvent(type="error", data={"error": "chat worker unavailable"})
 
 
@@ -44,16 +50,40 @@ class HangingChatAdapter(MockChatAdapter):
         yield ChatEvent(type="complete")
 
 
-def test_versioned_routing_corpus_meets_precision_and_recall_gate() -> None:
+async def test_versioned_routing_corpus_matches_production_pipeline() -> None:
     document = json.loads(CORPUS.read_text(encoding="utf-8"))
     assert document["schema_version"] == 1
     cases = document["cases"]
+    assert len({case["id"] for case in cases}) == len(cases)
     operations = [operation.value for operation in Operation]
     confusion = {expected: {actual: 0 for actual in operations} for expected in operations}
     failures: list[str] = []
+    adapter = UnavailableChatAdapter()
+    router = ModalityRouter()
 
     for case in cases:
-        plan = ModalityRouter().plan(
+        ordered = OrderedPlanCompiler.deterministic(
+            case["text"],
+            RoutingMode(case["mode"]),
+            has_media_input=bool(case.get("input_artifact_ids", [])),
+        )
+        expected_ordered = case.get("expected_ordered_modes")
+        if expected_ordered is not None:
+            actual_ordered = [step.mode for step in ordered.steps] if ordered else None
+            if actual_ordered != expected_ordered:
+                failures.append(
+                    f"{case['id']}: expected ordered {expected_ordered}, got {actual_ordered}"
+                )
+            continue
+        if ordered is not None:
+            failures.append(
+                f"{case['id']}: expected a single route, got ordered "
+                f"{[step.mode for step in ordered.steps]}"
+            )
+            continue
+
+        plan = await router.plan_with_model(
+            adapter=adapter,
             text=case["text"],
             mode=RoutingMode(case["mode"]),
             input_artifact_ids=case.get("input_artifact_ids", []),
@@ -65,6 +95,9 @@ def test_versioned_routing_corpus_meets_precision_and_recall_gate() -> None:
         confusion[expected][actual] += 1
         if actual != expected:
             failures.append(f"{case['id']}: expected {expected}, got {actual}")
+
+    assert not failures, "\n".join(failures)
+    assert adapter.called, "corpus must exercise a route that reaches the model planner"
 
     for operation in {
         Operation.TEXT.value,
@@ -80,7 +113,6 @@ def test_versioned_routing_corpus_meets_precision_and_recall_gate() -> None:
         recall = true_positive / actual if actual else 0
         assert precision >= 0.9, f"{operation} precision was {precision:.3f}"
         assert recall >= 0.9, f"{operation} recall was {recall:.3f}"
-    assert not failures, "\n".join(failures)
 
 
 @pytest.mark.parametrize(
