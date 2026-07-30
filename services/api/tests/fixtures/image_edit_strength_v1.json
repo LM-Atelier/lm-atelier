@@ -117,6 +117,15 @@
     "reasons": ["subject_replacement", "preservation_requested"]
   },
   {
+    "name": "detailed garment replacement",
+    "prompt": "Replace the mannequin's red sweatshirt with a royal-blue blazer. Keep the mannequin's head, pose, hands, pants, framing, lighting, and background unchanged.",
+    "scope": "replacement",
+    "confidence": "high",
+    "minimum": 0.58,
+    "maximum": 0.74,
+    "reasons": ["subject_replacement", "preservation_requested"]
+  },
+  {
     "name": "natural language top recolor",
     "prompt": "Make her top red.",
     "scope": "localized",

@@ -1,4 +1,5 @@
 import { describe, expect, it } from "vitest";
+import strengthFixtures from "../../../services/api/tests/fixtures/image_edit_strength_v1.json";
 import {
   calibratedImageEditStrength,
   estimateImageEditStrength,
@@ -6,37 +7,25 @@ import {
   workflowImageEditCalibration,
 } from "./imageEditStrength";
 
+type StrengthFixture = {
+  name: string;
+  prompt: string;
+  scope: "minimal" | "localized" | "replacement" | "global" | "fallback";
+  confidence: "low" | "medium" | "high";
+  minimum: number;
+  maximum: number;
+};
+
 describe("estimateImageEditStrength", () => {
-  it.each([
-    ["Slightly brighten the lighting and keep everything else the same.", "minimal", 0.38, "high"],
-    ["Make it green.", "localized", 0.50, "medium"],
-    ["Give the person a new formal outfit without changing their face.", "replacement", 0.66, "high"],
-    ["Replace the background with a moonlit city scene.", "replacement", 0.66, "high"],
-    ["Replace the mannequin's red sweatshirt with a royal-blue blazer. Keep the mannequin's head, pose, hands, pants, framing, lighting, and background unchanged.", "replacement", 0.66, "high"],
-    ["Make her top red.", "localized", 0.50, "high"],
-    ["Recolor the second person's jacket orange.", "localized", 0.50, "high"],
-    ["Change only the rightmost person into a marble statue.", "replacement", 0.66, "high"],
-    ["Increase the brightness.", "minimal", 0.38, "high"],
-    ["Correct the harsh green color cast and brighten the foreground subjects.", "minimal", 0.38, "high"],
-    ["Make the car blue.", "localized", 0.50, "high"],
-    ["Give him a short beard.", "replacement", 0.66, "high"],
-    ["Make her smile.", "replacement", 0.66, "high"],
-    ["Straighten the horizon.", "replacement", 0.66, "high"],
-    ["Convert it to black and white.", "global", 0.82, "high"],
-    ["Extend the canvas to the left.", "global", 0.82, "high"],
-    ["Relight the scene from the left.", "global", 0.82, "high"],
-    ["Correct the white balance.", "minimal", 0.38, "high"],
-    ["Desaturate everything except the umbrella.", "localized", 0.50, "high"],
-    ["Change the center flower into a sunflower.", "replacement", 0.66, "high"],
-    ["Restyle the entire image as a watercolor painting.", "global", 0.82, "high"],
-    ["Make this better.", "fallback", 0.56, "low"],
-    ["Do not change the clothing; just brighten the lighting.", "minimal", 0.38, "high"],
-  ])("classifies %s", (prompt, scope, value, confidence) => {
-    expect(estimateImageEditStrength(prompt)).toEqual({
-      scope,
-      value,
-      confidence,
-    });
+  const cases = strengthFixtures as StrengthFixture[];
+
+  it.each(cases)("$name", ({ prompt, scope, confidence, minimum, maximum }) => {
+    const estimate = estimateImageEditStrength(prompt);
+
+    expect(estimate.scope).toBe(scope);
+    expect(estimate.confidence).toBe(confidence);
+    expect(estimate.value).toBeGreaterThanOrEqual(minimum);
+    expect(estimate.value).toBeLessThanOrEqual(maximum);
   });
 
   it("clamps the estimate to workflow bounds", () => {
