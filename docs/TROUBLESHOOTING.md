@@ -1,5 +1,44 @@
 # Troubleshooting
 
+New install? Start with [Getting started](GETTING-STARTED.md), which explains
+the order setup works in and what "Ready" means.
+
+## Setup will not finish
+
+The setup panel shows the first unsatisfied check for a role. What each state
+means:
+
+- **No active model is installed for this role.** Nothing is installed yet.
+  Choose a model, or use the recommended one if the panel offers it.
+- **The required runtime is not installed.** The engine downloads automatically
+  the first time it is needed; **Install runtime** starts it now. Confirm free
+  disk space first: ComfyUI needs about 2 GB to download and 8 GB free to
+  install.
+- **The required runtime did not start or install.** The download or extraction
+  failed. Retry it. If it keeps failing, check free disk space and confirm that
+  security software is not quarantining the extracted files.
+- **Automatic setup for the required runtime is unavailable on this machine.**
+  This role cannot run here, and the message says why. Image and video need
+  Windows with a compatible NVIDIA GPU. No action is offered because none would
+  help; see the platform table in [Getting started](GETTING-STARTED.md).
+- **The model has not passed an activation probe**, or **must be rechecked for
+  the current runtime and hardware.** The files are present, but the model has
+  not produced output under the current setup, so it is not usable yet. This
+  also appears after an update that changes the runtime or workflow contract.
+- **The model did not pass its activation probe.** It loaded but failed to
+  generate. Usually the model does not fit in available memory, or its format is
+  not supported by the installed runtime. Try a smaller model or a smaller
+  quantization.
+- **No compatible workflow is installed for this model.** The media runtime has
+  no workflow that can drive this model. Confirm the ComfyUI runtime finished
+  installing; a partial install exposes no workflows.
+- **The managed worker exited unexpectedly.** The engine process stopped.
+  Restart the worker from the panel; if it exits again, read the worker error
+  shown on its card in Settings.
+
+A role is only **Ready** after a real local generation completes. **Not runtime
+verified** in the model library means the same thing: installed, not yet proven.
+
 ## The application does not open
 
 - Keep the LM Atelier terminal open; it runs the local service.
