@@ -191,3 +191,25 @@ async def test_reference_recipe_api_lists_pinned_metadata(client: AsyncClient) -
 
     missing = await client.get("/api/recipes/not-a-recipe")
     assert missing.status_code == 404
+
+
+async def test_recipe_install_reports_an_unreachable_catalog_as_unavailable(
+    client: AsyncClient,
+    monkeypatch,
+) -> None:  # type: ignore[no-untyped-def]
+    """The shared operation raises a domain error; each route maps it itself."""
+
+    async def unreachable(
+        _catalog: HuggingFaceCatalog,
+        _remote_id: str,
+        _revision: str = "main",
+        _requested_role: str | None = None,
+    ) -> dict:  # type: ignore[type-arg]
+        raise OSError("network is down")
+
+    monkeypatch.setattr(HuggingFaceCatalog, "inspect", unreachable)
+
+    response = await client.post("/api/recipes/qwen3-8b-q4-k-m/install")
+
+    assert response.status_code == 503
+    assert "temporarily unavailable" in response.json()["detail"]
