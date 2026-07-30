@@ -14,6 +14,7 @@ from .schemas import (
     OrderedStepIntent,
     OrderedWorkIntent,
     RoutingPlan,
+    RoutingReasonCode,
 )
 
 GENERATION_OFFER_VERSION = "generation-offer-v1"
@@ -194,6 +195,7 @@ def routing_plan_for_offer(offer: GenerationOffer) -> RoutingPlan:
         operation=(Operation.TEXT_TO_IMAGE if item.mode == "image" else Operation.TEXT_TO_VIDEO),
         standalone_prompt=item.prompt,
         confidence=1,
+        reason_code=RoutingReasonCode.GENERATION_OFFER_ACCEPTED,
         reason="explicit assent to the latest model generation offer",
     )
 

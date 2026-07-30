@@ -12,6 +12,7 @@ from local_lm.adapters.mock import MockChatAdapter
 from local_lm.domain import Operation, RoutingMode
 from local_lm.ordered_planning import OrderedPlanCompiler
 from local_lm.routing import ModalityRouter
+from local_lm.schemas import RoutingReasonCode
 
 CORPUS = Path(__file__).parent / "fixtures" / "routing-corpus-v1.json"
 
@@ -145,6 +146,7 @@ def test_explicit_mode_always_wins() -> None:
     )
     assert plan.operation == Operation.TEXT_TO_IMAGE
     assert plan.confidence == 1
+    assert plan.reason_code == RoutingReasonCode.EXPLICIT_IMAGE_MODE
 
 
 @pytest.mark.parametrize(
@@ -219,6 +221,7 @@ def test_numeric_text_request_does_not_create_multiple_outputs() -> None:
     )
     assert plan.operation == Operation.TEXT
     assert plan.output_count == 1
+    assert plan.reason_code == RoutingReasonCode.EXPLICIT_TEXT_MODE
 
 
 @pytest.mark.parametrize(
@@ -261,6 +264,12 @@ def test_explicit_media_mode_uses_prior_image_only_for_clear_follow_ups(
     )
 
     assert plan.operation == expected
+    expected_code = (
+        RoutingReasonCode.EXPLICIT_IMAGE_MODE
+        if mode == RoutingMode.IMAGE
+        else RoutingReasonCode.EXPLICIT_VIDEO_MODE
+    )
+    assert plan.reason_code == expected_code
 
 
 def test_explicit_media_mode_prefers_referenced_chat_text_over_prior_image() -> None:
@@ -302,6 +311,7 @@ async def test_prior_image_edit_routes_without_a_model_planner() -> None:
 
     assert plan.operation == Operation.IMAGE_TO_IMAGE
     assert plan.confidence == 0.97
+    assert plan.reason_code == RoutingReasonCode.PRIOR_IMAGE_EDIT
     assert plan.reason == "clear prior-image edit request"
 
 
@@ -342,7 +352,7 @@ async def test_natural_language_prior_image_edits_route_without_a_model_planner(
     )
 
     assert plan.operation == Operation.IMAGE_TO_IMAGE
-    assert plan.reason == "clear prior-image edit request"
+    assert plan.reason_code == RoutingReasonCode.PRIOR_IMAGE_EDIT
 
 
 @pytest.mark.parametrize(
@@ -417,7 +427,7 @@ async def test_structured_planner_preserves_text_discussion() -> None:
         input_artifact_ids=[],
     )
     assert plan.operation == Operation.TEXT
-    assert plan.reason == "question or discussion phrasing"
+    assert plan.reason_code == RoutingReasonCode.DISCUSSION
 
 
 @pytest.mark.asyncio
@@ -558,7 +568,7 @@ async def test_clear_auto_route_does_not_invoke_model_planner() -> None:
     )
 
     assert plan.operation == Operation.TEXT_TO_IMAGE
-    assert plan.reason == "clear image creation request"
+    assert plan.reason_code == RoutingReasonCode.IMAGE_CREATION
 
 
 @pytest.mark.parametrize(
@@ -597,13 +607,16 @@ def test_the_first_thing_named_is_what_is_being_asked_for(text: str, expected: O
 
 
 @pytest.mark.parametrize(
-    ("text", "reason"),
+    ("text", "reason_code"),
     [
-        ("Reply with exactly: Auto ready", "clear text task"),
-        ("Generate code that blurs an image", "clear text task about media"),
+        ("Reply with exactly: Auto ready", RoutingReasonCode.TEXT_TASK),
+        ("Generate code that blurs an image", RoutingReasonCode.TEXT_MEDIA_TASK),
     ],
 )
-async def test_clear_text_task_does_not_invoke_model_planner(text: str, reason: str) -> None:
+async def test_clear_text_task_does_not_invoke_model_planner(
+    text: str,
+    reason_code: RoutingReasonCode,
+) -> None:
     plan = await ModalityRouter().plan_with_model(
         adapter=UnexpectedChatAdapter(),
         text=text,
@@ -612,7 +625,7 @@ async def test_clear_text_task_does_not_invoke_model_planner(text: str, reason: 
     )
 
     assert plan.operation == Operation.TEXT
-    assert plan.reason == reason
+    assert plan.reason_code == reason_code
 
 
 @pytest.mark.asyncio
@@ -626,7 +639,7 @@ async def test_hedged_media_request_still_uses_model_planner() -> None:
 
     assert plan.operation == Operation.TEXT_TO_IMAGE
     assert plan.confidence == 0.6
-    assert plan.reason == "model planner: deterministic mock planner"
+    assert plan.reason_code == RoutingReasonCode.MODEL_PLANNER
 
 
 @pytest.mark.asyncio
@@ -643,7 +656,7 @@ async def test_ambiguous_auto_route_has_a_bounded_model_planner(
     )
 
     assert plan.operation == Operation.TEXT
-    assert plan.reason == "no clear media creation intent"
+    assert plan.reason_code == RoutingReasonCode.DEFAULT_TEXT
 
 
 _IMAGE_SUMMARY = (
@@ -700,6 +713,7 @@ def test_repeat_command_reuses_the_last_generation_prompt(
 
     assert plan.operation == expected_operation
     assert plan.standalone_prompt == expected_prompt
+    assert plan.reason_code == RoutingReasonCode.REPEAT_LAST_GENERATION
 
 
 def test_repeat_command_without_a_generation_stays_text() -> None:
@@ -747,6 +761,7 @@ def test_ordinal_selection_resolves_the_listed_suggestion(
 
     assert plan.operation == expected_operation
     assert plan.standalone_prompt == expected_prompt
+    assert plan.reason_code == RoutingReasonCode.ASSISTANT_SUGGESTION_SELECTED
 
 
 def test_ordinal_selection_beyond_the_list_stays_text() -> None:
