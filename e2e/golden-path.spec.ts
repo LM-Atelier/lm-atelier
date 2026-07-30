@@ -79,7 +79,7 @@ async function expectPersistedConversation(page: Page) {
   const history = await messages.evaluateAll((elements) => elements.map((element) => ({
     role: element.classList.contains("user") ? "user" : "assistant",
     text: element.textContent ?? "",
-    hasImage: Boolean(element.querySelector('img[alt="Generated result"]')),
+    hasImage: Boolean(element.querySelector('img[alt="Generated image"]')),
   })));
   expect(history.map((entry) => entry.role)).toEqual([
     "user",
@@ -168,7 +168,7 @@ test("persists a streamed text and contextual image golden path", async ({
   await expect(mode).toHaveValue("image");
   await composer.fill(IMAGE_PROMPT);
   await composer.press("Enter");
-  const generatedImage = page.getByRole("img", { name: "Generated result" });
+  const generatedImage = page.getByRole("img", { name: "Generated image" });
   await expect(generatedImage).toBeVisible();
   await expect.poll(
     () => generatedImage.evaluate((image) => (image as HTMLImageElement).naturalWidth),
