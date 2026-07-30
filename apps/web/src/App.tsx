@@ -50,6 +50,7 @@ import {
   X,
 } from "lucide-react";
 import { api, connectEvents } from "./api";
+import { formatEta, formatStageElapsed, formatTransferRate } from "./format";
 import {
   calibratedImageEditStrength,
   estimateImageEditStrength,
@@ -3928,30 +3929,6 @@ function jobProgressFraction(job: Job): number | null {
   }
   if (job.status === "queued") return null;
   return Number.isFinite(job.progress) ? Math.min(1, Math.max(0, job.progress)) : null;
-}
-
-function formatTransferRate(bytesPerSecond: number): string {
-  const units = ["B/s", "KB/s", "MB/s", "GB/s"];
-  let value = bytesPerSecond;
-  let unit = 0;
-  while (value >= 1024 && unit < units.length - 1) {
-    value /= 1024;
-    unit += 1;
-  }
-  return `${value >= 10 || unit === 0 ? value.toFixed(0) : value.toFixed(1)} ${units[unit]}`;
-}
-
-function formatEta(seconds: number): string {
-  if (seconds < 60) return `about ${Math.max(0, Math.round(seconds))} sec`;
-  return `about ${Math.round(seconds / 60)} min`;
-}
-
-function formatStageElapsed(milliseconds: number): string {
-  const seconds = Math.max(0, Math.round(milliseconds / 1_000));
-  if (seconds < 60) return `${seconds}s`;
-  const minutes = Math.floor(seconds / 60);
-  const remainder = seconds % 60;
-  return remainder ? `${minutes}m ${remainder}s` : `${minutes}m`;
 }
 
 function progressSampleIsFresh(progress: ProgressV2): boolean {
