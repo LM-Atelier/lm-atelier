@@ -52,6 +52,7 @@ import { AccessibleDialog } from "./AccessibleDialog";
 import { InstallConfirmDialog } from "./InstallConfirmDialog";
 import { api, connectEvents } from "./api";
 import {
+  supportLinks,
   downloadJson,
   formatBytes,
   formatDate,
@@ -3507,10 +3508,9 @@ function SettingsView({ engines }: { engines: EngineCapabilities[] }) {
           <div className="about-actions">
             {technicalDetails && <CopyTextButton text={technicalDetails} label="Copy technical details" buttonText="Copy technical details" className="secondary" />}
             <nav aria-label="Support resources">
-              <a href="https://github.com/ajccarlson/lm-atelier/issues" target="_blank" rel="noreferrer">Issues</a>
-              <a href="https://github.com/ajccarlson/lm-atelier/blob/main/SECURITY.md" target="_blank" rel="noreferrer">Security</a>
-              <a href="https://github.com/ajccarlson/lm-atelier/blob/main/SUPPORT.md" target="_blank" rel="noreferrer">Support</a>
-              <a href="https://github.com/ajccarlson/lm-atelier/blob/main/docs/PRIVACY.md" target="_blank" rel="noreferrer">Privacy</a>
+              {supportLinks(about.data.version).map(([label, href]) => (
+                <a key={label} href={href} target="_blank" rel="noreferrer">{label}</a>
+              ))}
             </nav>
           </div>
         </div>}

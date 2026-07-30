@@ -25,6 +25,8 @@ means:
   the current runtime and hardware.** The files are present, but the model has
   not produced output under the current setup, so it is not usable yet. This
   also appears after an update that changes the runtime or workflow contract.
+  Use **Re-check model**: it loads the model again and asks it for one small
+  output, without re-downloading anything. You do not need to reinstall.
 - **The model did not pass its activation probe.** It loaded but failed to
   generate. Usually the model does not fit in available memory, or its format is
   not supported by the installed runtime. Try a smaller model or a smaller
@@ -38,6 +40,22 @@ means:
 
 A role is only **Ready** after a real local generation completes. **Not runtime
 verified** in the model library means the same thing: installed, not yet proven.
+
+## Installing a model
+
+- **You are asked to confirm before a download starts.** The confirmation shows
+  the download size, your free space, and the memory the model needs to load. If
+  it says the model needs more accelerator memory than your machine reports, it
+  will either run slowly on the processor or fail to load; a smaller model or a
+  smaller quantization is usually the better choice.
+- **A recommended model refuses to install.** Recommended models pin exact file
+  checksums, and the install refuses if the repository no longer matches them -
+  for example if files were replaced upstream. This is deliberate: it will not
+  install something other than what was verified. Choose another model, or
+  install from the catalog where you can see what is being resolved.
+- **The install check cannot reach Hugging Face.** Installing needs the network
+  even for a recommended model, because the check confirms the pinned revision
+  still exists and its files still match before anything is transferred.
 
 ## The application does not open
 
