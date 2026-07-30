@@ -9,6 +9,7 @@ import subprocess
 import sys
 from pathlib import Path
 from types import SimpleNamespace
+from typing import Any
 from unittest.mock import AsyncMock
 
 import httpx
@@ -133,17 +134,45 @@ def test_multimodal_projector_resolution_matches_selected_model(tmp_path: Path) 
 
 
 @pytest.mark.skipif(os.name != "nt", reason="Windows short-path behavior")
-def test_long_llama_model_path_uses_existing_short_name(tmp_path: Path) -> None:
+def test_long_llama_model_path_handles_shortening_result(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     model_dir = tmp_path / ("descriptive-model-" * 8)
     model_dir.mkdir()
     model_path = model_dir / (("quantized-model-" * 5) + ".gguf")
     model_path.touch()
+    short_alias = tmp_path / "MODEL~1.GGF"
+    os.link(model_path, short_alias)
     assert len(str(model_path)) >= 240
+
+    class FakeShortPath:
+        argtypes: object = None
+        restype: object = None
+
+        def __init__(self, result: Path) -> None:
+            self.result = result
+
+        def __call__(self, _path: str, buffer: Any, _length: int) -> int:
+            buffer.value = str(self.result)
+            return len(str(self.result))
+
+    get_short_path = FakeShortPath(short_alias)
+    monkeypatch.setattr(
+        "local_lm.processes.ctypes.WinDLL",
+        lambda _name, **_kwargs: SimpleNamespace(
+            GetShortPathNameW=get_short_path,
+        ),
+    )
 
     launch_path = ProcessSupervisor._llama_model_path(model_path)
 
     assert len(str(launch_path)) < 260
     assert os.path.samefile(launch_path, model_path)
+
+    get_short_path.result = model_path
+    with pytest.raises(OSError, match="remains too long"):
+        ProcessSupervisor._llama_model_path(model_path)
 
 
 def test_chat_memory_estimate_includes_model_and_context_overhead() -> None:
