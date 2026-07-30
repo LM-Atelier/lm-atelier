@@ -16,7 +16,7 @@ from collections.abc import Callable
 from contextlib import suppress
 from pathlib import Path, PurePosixPath
 from types import SimpleNamespace
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, Literal
 
 import psutil
 from huggingface_hub import HfApi
@@ -689,6 +689,9 @@ class DownloadManager:
 
         if not self.media_adapter:
             raise RuntimeError("automatic ComfyUI activation is unavailable")
+        if role not in {"image", "video"}:
+            raise ValueError("only image and video models are driven by a workflow")
+        media_role: Literal["image", "video"] = "image" if role == "image" else "video"
         template_id = str(manifest.get("workflow_template_id") or "")
         template_sha256 = str(manifest.get("workflow_template_sha256") or "")
         remote_id = str(manifest.get("remote_id") or "")
@@ -704,7 +707,7 @@ class DownloadManager:
         object_info = await self.media_adapter.object_info()
         compiled = self.comfy_templates.compile(
             template_id,
-            role,
+            media_role,
             object_info,
             remote_id=remote_id,
             revision=revision,
@@ -722,7 +725,7 @@ class DownloadManager:
         request = DownloadRequest(
             remote_id=remote_id,
             revision=revision,
-            role=role,
+            role=media_role,
             engine="comfyui",
             allow_patterns=selected_files,
             expected_sha256=component_hashes,
