@@ -13,8 +13,11 @@ from .schemas import OrderedStepInput, OrderedStepIntent, OrderedWorkIntent
 MAX_ORDERED_PLAN_STEPS = 8
 MAX_ORDERED_PLAN_PROMPT_CHARS = 50_000
 
+# No surrounding whitespace: a run of spaces either side could be divided
+# between two quantifiers in many ways, which backtracks polynomially. The
+# split path strips each clause and the model path only counts matches.
 _SEQUENCE_SEPARATOR = re.compile(
-    r"\s*(?:->|\u2192|;|\bthen\b|\bnext\b|\bafter\s+that\b|\bfinally\b)\s*",
+    r"(?:->|\u2192|;|\bthen\b|\bnext\b|\bafter\s+that\b|\bfinally\b)",
     re.IGNORECASE,
 )
 _IMAGE_ACTION = re.compile(

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import time
 from collections.abc import AsyncIterator
 
 import pytest
@@ -111,6 +112,38 @@ def test_questions_about_a_medium_do_not_compile_a_media_plan(text: str) -> None
     skip the confirmation gate, so a how-to question would silently generate.
     """
     assert OrderedPlanCompiler.deterministic(text, RoutingMode.AUTO) is None
+
+
+@pytest.mark.parametrize(
+    ("text", "expected"),
+    [
+        ("Generate an image of a fox, then write a caption", ["image", "text"]),
+        ("Generate an image of a fox;write a caption", ["image", "text"]),
+        ("Generate an image of a fox   ;   write a caption", ["image", "text"]),
+        ("Generate an image of a fox -> write a caption", ["image", "text"]),
+        ("Generate an image of a fox->write a caption", ["image", "text"]),
+        ("Generate an image of a fox, after that write a caption", ["image", "text"]),
+    ],
+)
+def test_separators_split_the_same_regardless_of_surrounding_space(
+    text: str, expected: list[str]
+) -> None:
+    intent = OrderedPlanCompiler.deterministic(text, RoutingMode.AUTO)
+
+    assert intent is not None
+    assert [step.mode for step in intent.steps] == expected
+
+
+def test_separator_matching_stays_linear_on_repeated_whitespace() -> None:
+    """The separator carried a whitespace quantifier on either side, which a long
+    run of spaces could be divided between in many ways."""
+    adversarial = "generate an image" + (" " * 100_000) + "x"
+
+    started = time.monotonic()
+    OrderedPlanCompiler.deterministic(adversarial, RoutingMode.AUTO)
+    elapsed = time.monotonic() - started
+
+    assert elapsed < 5
 
 
 def test_a_long_list_is_not_mistaken_for_an_oversized_plan() -> None:
