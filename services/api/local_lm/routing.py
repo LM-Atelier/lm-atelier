@@ -7,7 +7,7 @@ from typing import Any
 
 from .adapters.base import ChatAdapter, ChatRequest
 from .domain import Operation, RoutingMode, new_id
-from .schemas import RoutingPlan
+from .schemas import RoutingPlan, RoutingReasonCode
 
 _IMAGE_CREATE = re.compile(
     r"\b(?:create|draw|generate|make|paint|render|design|illustrate|visuali[sz]e)\b.*"
@@ -639,7 +639,12 @@ class ModalityRouter:
             return self._with_text_context(plan, referenced_text)
 
         if mode == RoutingMode.TEXT:
-            return self._text(normalized, "explicit text mode", 1)
+            return self._text(
+                normalized,
+                RoutingReasonCode.EXPLICIT_TEXT_MODE,
+                "explicit text mode",
+                1,
+            )
         if mode == RoutingMode.IMAGE:
             use_prior_image = bool(
                 has_prior_image
@@ -652,7 +657,14 @@ class ModalityRouter:
                 else Operation.TEXT_TO_IMAGE
             )
             return grounded(
-                self._media(operation, normalized, input_artifact_ids, "explicit image mode", 1)
+                self._media(
+                    operation,
+                    normalized,
+                    input_artifact_ids,
+                    RoutingReasonCode.EXPLICIT_IMAGE_MODE,
+                    "explicit image mode",
+                    1,
+                )
             )
         if mode == RoutingMode.VIDEO:
             use_prior_image = bool(
@@ -670,7 +682,14 @@ class ModalityRouter:
                 else Operation.TEXT_TO_VIDEO
             )
             return grounded(
-                self._media(operation, normalized, input_artifact_ids, "explicit video mode", 1)
+                self._media(
+                    operation,
+                    normalized,
+                    input_artifact_ids,
+                    RoutingReasonCode.EXPLICIT_VIDEO_MODE,
+                    "explicit video mode",
+                    1,
+                )
             )
 
         if not input_artifact_ids and _ANOTHER_GENERATION.match(normalized):
@@ -684,6 +703,7 @@ class ModalityRouter:
                     operation,
                     prompt,
                     [],
+                    RoutingReasonCode.REPEAT_LAST_GENERATION,
                     "repeat of the last generation's prompt",
                     0.96,
                 )
@@ -706,6 +726,7 @@ class ModalityRouter:
                     operation,
                     items[index],
                     [],
+                    RoutingReasonCode.ASSISTANT_SUGGESTION_SELECTED,
                     f"selected suggestion {index + 1} from the last assistant list",
                     0.95,
                 )
@@ -713,13 +734,25 @@ class ModalityRouter:
         if DISCUSSION_OPENING.search(normalized) and not re.search(
             r"\b(?:for me|now|instead)\b", normalized, re.IGNORECASE
         ):
-            return self._text(normalized, "question or discussion phrasing", 0.94)
+            return self._text(
+                normalized,
+                RoutingReasonCode.DISCUSSION,
+                "question or discussion phrasing",
+                0.94,
+            )
 
         if _TEXT_EDIT.search(normalized):
-            return self._text(normalized, "clear text editing request", 0.96)
+            return self._text(
+                normalized, RoutingReasonCode.TEXT_EDIT, "clear text editing request", 0.96
+            )
 
         if _clear_text_media_task(normalized):
-            return self._text(normalized, "clear text task about media", 0.96)
+            return self._text(
+                normalized,
+                RoutingReasonCode.TEXT_MEDIA_TASK,
+                "clear text task about media",
+                0.96,
+            )
 
         if (
             _VIDEO_CREATE.search(normalized)
@@ -736,6 +769,7 @@ class ModalityRouter:
                     operation,
                     normalized,
                     input_artifact_ids,
+                    RoutingReasonCode.VIDEO_CREATION,
                     "clear video creation request",
                     0.9 if _UNCERTAIN.search(normalized) else 0.96,
                 )
@@ -751,6 +785,7 @@ class ModalityRouter:
                     Operation.IMAGE_TO_IMAGE,
                     normalized,
                     input_artifact_ids,
+                    RoutingReasonCode.PRIOR_IMAGE_EDIT,
                     "clear prior-image edit request",
                     0.97,
                 )
@@ -767,15 +802,18 @@ class ModalityRouter:
                     operation,
                     normalized,
                     input_artifact_ids,
+                    RoutingReasonCode.IMAGE_CREATION,
                     "clear image creation request",
                     0.9 if _UNCERTAIN.search(normalized) else 0.96,
                 )
             )
 
         if _TEXT_TASK.search(normalized):
-            return self._text(normalized, "clear text task", 0.95)
+            return self._text(normalized, RoutingReasonCode.TEXT_TASK, "clear text task", 0.95)
 
-        return self._text(normalized, "no clear media creation intent", 0.9)
+        return self._text(
+            normalized, RoutingReasonCode.DEFAULT_TEXT, "no clear media creation intent", 0.9
+        )
 
     @staticmethod
     def _referenced_text_context(text: str, conversation: list[dict[str, Any]]) -> str | None:
@@ -857,7 +895,12 @@ class ModalityRouter:
         ):
             raise ValueError("route arguments do not satisfy the schema")
         if mode == "text":
-            return self._text(text.strip(), f"model planner: {reason.strip()}", float(confidence))
+            return self._text(
+                text.strip(),
+                RoutingReasonCode.MODEL_PLANNER,
+                f"model planner: {reason.strip()}",
+                float(confidence),
+            )
         has_image_input = bool(input_artifact_ids) or (has_prior_image and use_prior_image)
         if mode == "image":
             operation = Operation.IMAGE_TO_IMAGE if has_image_input else Operation.TEXT_TO_IMAGE
@@ -867,6 +910,7 @@ class ModalityRouter:
             operation,
             standalone_prompt.strip(),
             input_artifact_ids,
+            RoutingReasonCode.MODEL_PLANNER,
             f"model planner: {reason.strip()}",
             float(confidence),
         )
@@ -914,11 +958,17 @@ class ModalityRouter:
         return []
 
     @staticmethod
-    def _text(prompt: str, reason: str, confidence: float) -> RoutingPlan:
+    def _text(
+        prompt: str,
+        reason_code: RoutingReasonCode,
+        reason: str,
+        confidence: float,
+    ) -> RoutingPlan:
         return RoutingPlan(
             operation=Operation.TEXT,
             standalone_prompt=prompt,
             confidence=confidence,
+            reason_code=reason_code,
             reason=reason,
         )
 
@@ -927,6 +977,7 @@ class ModalityRouter:
         operation: Operation,
         prompt: str,
         input_artifact_ids: list[str],
+        reason_code: RoutingReasonCode,
         reason: str,
         confidence: float,
     ) -> RoutingPlan:
@@ -936,6 +987,7 @@ class ModalityRouter:
             input_artifact_ids=input_artifact_ids,
             output_count=ModalityRouter.requested_output_count(prompt),
             confidence=confidence,
+            reason_code=reason_code,
             reason=reason,
         )
 
