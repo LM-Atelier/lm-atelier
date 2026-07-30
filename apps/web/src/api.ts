@@ -1,6 +1,7 @@
 import type {
   ApplicationInfo,
   AppEvent,
+  Artifact,
   ArtifactCleanupResult,
   ArtifactDeleteResult,
   ArtifactLibraryItem,
@@ -556,16 +557,16 @@ export const api = {
       `/api/workflows/${id}/validate`,
       { method: "POST" },
     ),
-  upload: async (file: File): Promise<string> => {
+  upload: async (file: File): Promise<Artifact> => {
     await ensureSession();
     const form = new FormData();
     form.append("file", file);
-    const artifact = await request<{ id: string }>("/api/artifacts", {
+    const artifact = await request<Artifact>("/api/artifacts", {
       method: "POST",
       headers: { "x-local-lm-csrf": csrfToken },
       body: form,
     });
-    return artifact.id;
+    return artifact;
   },
 };
 

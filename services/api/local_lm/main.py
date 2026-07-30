@@ -2,9 +2,12 @@ from __future__ import annotations
 
 import asyncio
 import logging
-from contextlib import asynccontextmanager, suppress
+from collections.abc import Iterator
+from contextlib import asynccontextmanager, contextmanager, suppress
 from dataclasses import dataclass
+from logging.handlers import RotatingFileHandler
 from pathlib import Path
+from typing import Any
 
 import uvicorn
 from fastapi import FastAPI, Request, WebSocket, WebSocketDisconnect
@@ -43,12 +46,98 @@ from .security import (
 from .seed import seed_defaults
 from .worker_startup import restore_configured_workers
 
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s %(levelname)s %(name)s %(message)s",
-)
 logger = logging.getLogger("local_lm")
 AUTOMATIC_BACKUP_CHECK_INTERVAL_SECONDS = 60 * 60
+API_LOG_MAX_BYTES = 2 * 1024 * 1024
+API_LOG_BACKUP_COUNT = 3
+LOG_FORMAT = "%(asctime)s %(levelname)s %(name)s %(message)s"
+
+
+def _configure_console_logging() -> None:
+    logging.basicConfig(level=logging.INFO, format=LOG_FORMAT)
+
+
+@contextmanager
+def _api_file_logging(settings: Settings) -> Iterator[None]:
+    handler = RotatingFileHandler(
+        settings.log_dir / "api.log",
+        maxBytes=API_LOG_MAX_BYTES,
+        backupCount=API_LOG_BACKUP_COUNT,
+        encoding="utf-8",
+        delay=True,
+    )
+    handler.setLevel(logging.INFO)
+    handler.setFormatter(logging.Formatter(LOG_FORMAT))
+    root_logger = logging.getLogger()
+    root_logger.addHandler(handler)
+    try:
+        yield
+    except Exception:
+        logger.exception("LM Atelier application lifecycle failed")
+        raise
+    finally:
+        root_logger.removeHandler(handler)
+        handler.close()
+
+
+async def _cancel_task(task: asyncio.Task[Any] | None) -> None:
+    if task is None:
+        return
+    if not task.done():
+        task.cancel()
+    with suppress(asyncio.CancelledError):
+        await task
+
+
+async def _wait_for_websocket_disconnect(websocket: WebSocket) -> None:
+    while True:
+        message = await websocket.receive()
+        if message["type"] == "websocket.disconnect":
+            return
+
+
+async def _stream_events(websocket: WebSocket, broker: EventBroker, *, after: int) -> None:
+    disconnect_task = asyncio.create_task(
+        _wait_for_websocket_disconnect(websocket),
+        name="event-websocket-disconnect",
+    )
+    event_task: asyncio.Task[Any] | None = None
+    send_task: asyncio.Task[Any] | None = None
+    try:
+        async with broker.subscribe(after) as queue:
+            while True:
+                event_task = asyncio.create_task(queue.get(), name="event-websocket-next-event")
+                done, _ = await asyncio.wait(
+                    {disconnect_task, event_task},
+                    return_when=asyncio.FIRST_COMPLETED,
+                )
+                if disconnect_task in done:
+                    await _cancel_task(event_task)
+                    event_task = None
+                    await disconnect_task
+                    return
+
+                event = event_task.result()
+                event_task = None
+                send_task = asyncio.create_task(
+                    websocket.send_json(event.model_dump(mode="json")),
+                    name="event-websocket-send",
+                )
+                done, _ = await asyncio.wait(
+                    {disconnect_task, send_task},
+                    return_when=asyncio.FIRST_COMPLETED,
+                )
+                if disconnect_task in done:
+                    await _cancel_task(send_task)
+                    send_task = None
+                    await disconnect_task
+                    return
+                await send_task
+                send_task = None
+    finally:
+        await _cancel_task(event_task)
+        await _cancel_task(send_task)
+        await _cancel_task(disconnect_task)
 
 
 @dataclass
@@ -79,7 +168,7 @@ def build_services(settings: Settings) -> Services:
     runtimes = RuntimeProvisioner(settings)
     engines = EngineRegistry(settings)
     scheduler = ResourceScheduler(events)
-    processes = ProcessSupervisor(settings, runtimes)
+    processes = ProcessSupervisor(settings, runtimes, events)
     orchestrator = ConversationOrchestrator(engines, artifacts, events, scheduler, processes)
     services = Services(
         settings=settings,
@@ -141,6 +230,7 @@ async def maintain_automatic_recovery_backups(
 
 
 def create_app(settings: Settings | None = None) -> FastAPI:
+    _configure_console_logging()
     active_settings = settings or get_settings()
     active_settings.prepare()
     instance_identity = load_or_create_instance_identity(active_settings.data_dir)
@@ -150,52 +240,53 @@ def create_app(settings: Settings | None = None) -> FastAPI:
 
     @asynccontextmanager
     async def lifespan(app: FastAPI):  # type: ignore[no-untyped-def]
-        upgrade_database(active_settings)
-        with SessionLocal() as session:
-            recover_model_delete_quarantines(
-                session,
-                active_settings.model_dir.resolve(),
+        with _api_file_logging(active_settings):
+            upgrade_database(active_settings)
+            with SessionLocal() as session:
+                recover_model_delete_quarantines(
+                    session,
+                    active_settings.model_dir.resolve(),
+                )
+                seed_defaults(session, active_settings)
+                services.artifacts.cleanup_retention(
+                    session,
+                    retention_days=active_settings.artifact_retention_days,
+                    temporary_hours=active_settings.temporary_retention_hours,
+                    dry_run=False,
+                )
+                session.commit()
+            await ensure_automatic_recovery_backup(services.backups)
+            services.orchestrator.recover_interrupted()
+            services.downloads.recover_interrupted()
+            logger.info(
+                "LM Atelier %s started on %s:%s",
+                __version__,
+                active_settings.host,
+                active_settings.port,
             )
-            seed_defaults(session, active_settings)
-            services.artifacts.cleanup_retention(
-                session,
-                retention_days=active_settings.artifact_retention_days,
-                temporary_hours=active_settings.temporary_retention_hours,
-                dry_run=False,
+            worker_restore = asyncio.create_task(
+                restore_configured_workers(services),
+                name="restore-configured-workers",
             )
-            session.commit()
-        await ensure_automatic_recovery_backup(services.backups)
-        services.orchestrator.recover_interrupted()
-        services.downloads.recover_interrupted()
-        logger.info(
-            "LM Atelier %s started on %s:%s",
-            __version__,
-            active_settings.host,
-            active_settings.port,
-        )
-        worker_restore = asyncio.create_task(
-            restore_configured_workers(services),
-            name="restore-configured-workers",
-        )
-        backup_maintenance = asyncio.create_task(
-            maintain_automatic_recovery_backups(services.backups),
-            name="maintain-automatic-recovery-backups",
-        )
-        try:
-            yield
-        finally:
-            for task in (worker_restore, backup_maintenance):
-                if not task.done():
-                    task.cancel()
-            for task in (worker_restore, backup_maintenance):
-                with suppress(asyncio.CancelledError):
-                    await task
-            await services.downloads.close()
-            await services.orchestrator.close()
-            await services.runtimes.close()
-            await services.catalog.close()
-            await services.engines.close()
-            await services.processes.close()
+            backup_maintenance = asyncio.create_task(
+                maintain_automatic_recovery_backups(services.backups),
+                name="maintain-automatic-recovery-backups",
+            )
+            try:
+                yield
+            finally:
+                for task in (worker_restore, backup_maintenance):
+                    if not task.done():
+                        task.cancel()
+                for task in (worker_restore, backup_maintenance):
+                    with suppress(asyncio.CancelledError):
+                        await task
+                await services.downloads.close()
+                await services.orchestrator.close()
+                await services.runtimes.close()
+                await services.catalog.close()
+                await services.engines.close()
+                await services.processes.close()
 
     app = FastAPI(
         title="LM Atelier API",
@@ -257,10 +348,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             return
         await websocket.accept()
         try:
-            async with services.events.subscribe(after) as queue:
-                while True:
-                    event = await queue.get()
-                    await websocket.send_json(event.model_dump(mode="json"))
+            await _stream_events(websocket, services.events, after=after)
         except WebSocketDisconnect:
             return
 

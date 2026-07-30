@@ -21,6 +21,18 @@ DEPENDENCY_FILES = {
     "services/api/pyproject.toml",
     "services/api/uv.lock",
 }
+WINDOWS_PATHS = {
+    ".github/workflows/ci.yml",
+    "packaging/lmatelier.spec",
+    "scripts/build-windows-installer.ps1",
+    "scripts/ci-plan.py",
+    "scripts/smoke-windows-installer.ps1",
+    "scripts/verify.ps1",
+}
+WINDOWS_PATH_PREFIXES = (
+    "packaging/windows/",
+    "services/api/",
+)
 
 
 def normalized_path(value: str) -> str:
@@ -40,6 +52,17 @@ def requires_dependency_audit(paths: Iterable[str]) -> bool:
     """Return whether changed dependency inputs need an online audit."""
 
     return any(normalized_path(path) in DEPENDENCY_FILES for path in paths)
+
+
+def requires_windows_verification(paths: Iterable[str]) -> bool:
+    """Return whether changed paths exercise Windows-specific behavior."""
+
+    normalized = (normalized_path(path) for path in paths)
+    return any(
+        path in WINDOWS_PATHS
+        or any(path.startswith(prefix) for prefix in WINDOWS_PATH_PREFIXES)
+        for path in normalized
+    )
 
 
 def classify_develop_changes(paths: Iterable[str]) -> tuple[str, bool]:
@@ -106,12 +129,19 @@ def validate_develop_promotion(
         )
 
 
-def write_outputs(path: Path, *, mode: str, dependency_audit: bool) -> None:
+def write_outputs(
+    path: Path,
+    *,
+    mode: str,
+    dependency_audit: bool,
+    windows: bool,
+) -> None:
     """Append the selected plan to GitHub's step-output file."""
 
     with path.open("a", encoding="utf-8", newline="\n") as output:
         output.write(f"mode={mode}\n")
         output.write(f"dependency_audit={str(dependency_audit).lower()}\n")
+        output.write(f"windows={str(windows).lower()}\n")
 
 
 def parse_arguments() -> argparse.Namespace:
@@ -128,7 +158,7 @@ def parse_arguments() -> argparse.Namespace:
 def main() -> None:
     arguments = parse_arguments()
     if arguments.event == "workflow_dispatch":
-        mode, dependency_audit = "full", True
+        mode, dependency_audit, windows = "full", True, True
     elif arguments.event == "pull_request" and arguments.base_ref == "main":
         validate_develop_promotion(
             base_ref=arguments.base_ref,
@@ -136,19 +166,25 @@ def main() -> None:
             base_sha=arguments.base_sha,
             head_sha=arguments.head_sha,
         )
-        mode, dependency_audit = "promotion", False
+        mode, dependency_audit, windows = "promotion", False, False
     elif arguments.event == "pull_request" and arguments.base_ref == "develop":
         base = require_sha("base SHA", arguments.base_sha)
         head = require_sha("head SHA", arguments.head_sha)
-        mode, dependency_audit = classify_develop_changes(changed_paths(base, head))
+        paths = changed_paths(base, head)
+        mode, dependency_audit = classify_develop_changes(paths)
+        windows = mode == "full" and requires_windows_verification(paths)
     else:
         raise SystemExit("Unsupported CI event or pull-request target")
     write_outputs(
         arguments.github_output,
         mode=mode,
         dependency_audit=dependency_audit,
+        windows=windows,
     )
-    print(f"Verification plan: {mode}; dependency audit: {dependency_audit}")
+    print(
+        f"Verification plan: {mode}; dependency audit: {dependency_audit}; "
+        f"Windows: {windows}"
+    )
 
 
 if __name__ == "__main__":
