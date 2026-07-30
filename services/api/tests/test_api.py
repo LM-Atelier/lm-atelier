@@ -2394,6 +2394,39 @@ async def test_chat_pending_admission_limit_is_bounded(
     await wait_for_run(client, accepted["run"]["id"])
 
 
+async def test_stopping_a_multi_output_turn_cancels_every_output(
+    app: FastAPI,
+    client: AsyncClient,
+) -> None:
+    """Outputs run one at a time, so cancelling only the running one continued."""
+    chat = (await client.post("/api/chats", json={"title": "Stop them all"})).json()
+    async with app.state.services.scheduler.lease("primary"):
+        accepted = (
+            await client.post(
+                f"/api/chats/{chat['id']}/turns",
+                json={"text": "Make me 4 images of a blue cup", "mode": "image"},
+            )
+        ).json()
+        plan_id = accepted["run"]["work_plan_id"]
+        queued = [
+            job
+            for job in (await client.get("/api/jobs")).json()
+            if job.get("work_plan_id") == plan_id
+        ]
+        assert len(queued) > 1
+
+        cancelled = await client.post(f"/api/chats/{chat['id']}/cancel")
+        assert cancelled.status_code == 200
+
+        remaining = [
+            job
+            for job in (await client.get("/api/jobs")).json()
+            if job.get("work_plan_id") == plan_id
+            and job["status"] in {"queued", "running", "paused"}
+        ]
+        assert remaining == []
+
+
 async def test_active_chat_run_can_be_cancelled_directly(client: AsyncClient) -> None:
     chat = (await client.post("/api/chats", json={"title": "Stop response"})).json()
     turn = await client.post(
