@@ -32,7 +32,7 @@ _RUNTIME_PARAMETERS = {
 }
 _PRIMITIVE_WIDGET_TYPES = {"BOOLEAN", "COMBO", "FLOAT", "INT", "STRING"}
 _CONTROL_AFTER_GENERATE = {"decrement", "fixed", "increment", "randomize"}
-COMFY_TEMPLATE_COMPILER_VERSION = 15
+COMFY_TEMPLATE_COMPILER_VERSION = 16
 DEFAULT_IMAGE_EDIT_DENOISE = 0.9
 _ADAPTIVE_CHECKPOINT_PREFIX = "lma_image_checkpoint_v1_"
 _ADAPTIVE_CHECKPOINT_PLACEHOLDER = "__LM_ATELIER_CHECKPOINT__"
@@ -216,6 +216,15 @@ class CompiledComfyTemplate:
     ui_graph: dict[str, Any]
     api_graph: dict[str, Any]
     input_schema: dict[str, Any]
+
+
+@dataclass(frozen=True)
+class WorkflowAccelerationRecipe:
+    kind: str
+    mode: str
+    step_schedules: tuple[tuple[int, int], ...]
+    switched_inputs: tuple[str, ...]
+    asset_kinds: tuple[str, ...]
 
 
 class ComfyTemplateRegistry:
@@ -418,7 +427,7 @@ class ComfyTemplateRegistry:
             ui_graph["nodes"][0]["widgets_values"] = [template.dependencies[0].name]
         else:
             ui_graph = _read_json(template.path)
-        accelerated = _enable_declared_four_step_edit_acceleration(
+        acceleration_recipes = _resolve_declared_workflow_acceleration(
             ui_graph,
             operation=template.operation,
         )
@@ -428,12 +437,10 @@ class ComfyTemplateRegistry:
             operation=template.operation,
             validate_model_choices=validate_model_choices,
         )
-        if accelerated:
-            input_schema["x-lm-atelier-workflow-acceleration"] = {
-                "version": 1,
-                "mode": "bundled-four-step",
-                "steps": 4,
-            }
+        if acceleration_recipes:
+            input_schema["x-lm-atelier-workflow-acceleration"] = _workflow_acceleration_provenance(
+                acceleration_recipes
+            )
         output_nodes = [
             node_id
             for node_id, node in api_graph.items()
@@ -874,22 +881,100 @@ def _available_node_id(graph: dict[str, Any], preferred: str) -> str:
     return f"{preferred}-{suffix}"
 
 
-def _enable_declared_four_step_edit_acceleration(
+_ACCELERATION_CONTROL_KINDS = {
+    "accelerated": "acceleration",
+    "acceleration": "acceleration",
+    "distilled": "distilled",
+    "fast": "fast",
+    "few_step": "few-step",
+    "hyper": "hyper",
+    "hyper_sd": "hyper",
+    "lcm": "lcm",
+    "lightning": "lightning",
+    "low_step": "low-step",
+    "schnell": "schnell",
+    "tcd": "tcd",
+    "turbo": "turbo",
+}
+_ACCELERATION_CONTROL_AFFIXES = {"enable", "enabled", "mode", "use"}
+_ACCELERATION_RECIPE_INPUTS = {
+    "cfg",
+    "denoise",
+    "end_at_step",
+    "guidance",
+    "guidance_scale",
+    "model",
+    "num_steps",
+    "sampler",
+    "sampler_name",
+    "sampling_steps",
+    "scheduler",
+    "shift",
+    "sigmas",
+    "start_at_step",
+    "steps",
+    "total_steps",
+}
+_ACCELERATION_STEP_INPUTS = {
+    "num_steps",
+    "sampling_steps",
+    "steps",
+    "total_steps",
+}
+_ACCELERATION_MODEL_INPUTS = {"model"}
+_ACCELERATION_ASSET_DIRECTORIES = {
+    "checkpoints",
+    "diffusion_models",
+    "loras",
+    "unet",
+    "unets",
+}
+
+
+_MAX_ACCELERATION_GRAPHS = 256
+
+
+def _candidate_workflow_graphs(
+    value: dict[str, Any],
+) -> tuple[dict[str, Any], ...] | None:
+    candidates: list[dict[str, Any]] = []
+    pending = [value]
+    visited: set[int] = set()
+    while pending:
+        graph = pending.pop()
+        identity = id(graph)
+        if identity in visited:
+            continue
+        visited.add(identity)
+        if len(candidates) >= _MAX_ACCELERATION_GRAPHS:
+            return None
+        candidates.append(graph)
+        definitions = graph.get("definitions")
+        if not isinstance(definitions, dict):
+            continue
+        children = [item for item in definitions.get("subgraphs", []) if isinstance(item, dict)]
+        pending.extend(reversed(children))
+    return tuple(candidates)
+
+
+def _resolve_declared_workflow_acceleration(
     ui_graph: dict[str, Any],
     *,
     operation: str,
-) -> bool:
-    """Enable an official edit template's complete bundled four-step branch."""
+) -> tuple[WorkflowAccelerationRecipe, ...]:
+    """Enable complete author-declared accelerated media-workflow branches."""
 
-    if operation != "image_to_image":
-        return False
-    accelerated = False
-    candidates = [ui_graph]
-    definitions = ui_graph.get("definitions")
-    if isinstance(definitions, dict):
-        candidates.extend(
-            item for item in definitions.get("subgraphs", []) if isinstance(item, dict)
-        )
+    if operation not in {
+        "image_to_image",
+        "image_to_video",
+        "text_to_image",
+        "text_to_video",
+    }:
+        return ()
+    candidates = _candidate_workflow_graphs(ui_graph)
+    if candidates is None:
+        return ()
+    resolved: list[WorkflowAccelerationRecipe] = []
     for graph in candidates:
         nodes = {
             str(node["id"]): node
@@ -902,29 +987,27 @@ def _enable_declared_four_step_edit_acceleration(
             if (normalized := _normalize_link(item)) is not None
         ]
         graph_inputs = [item for item in graph.get("inputs", []) if isinstance(item, dict)]
-        declared_controls: set[str] = set()
+        declared_controls: dict[str, str] = {}
         for origin, origin_slot, target, target_slot in links:
-            if origin != "-10" or origin_slot >= len(graph_inputs):
+            if origin != "-10" or not 0 <= origin_slot < len(graph_inputs):
                 continue
             definition = graph_inputs[origin_slot]
-            identity = re.sub(
-                r"[^a-z0-9]+",
-                "_",
-                str(definition.get("label") or definition.get("name") or "").casefold(),
-            ).strip("_")
+            kind = _acceleration_control_kind(
+                str(definition.get("label") or definition.get("name") or "")
+            )
             target_node = nodes.get(target)
             target_inputs = target_node.get("inputs", []) if target_node else []
             if (
-                identity == "enable_turbo_mode"
-                and str(definition.get("type") or "") == "BOOLEAN"
+                kind is not None
+                and str(definition.get("type") or "").upper() == "BOOLEAN"
                 and str((target_node or {}).get("type") or "") == "PrimitiveBoolean"
-                and target_slot < len(target_inputs)
-                and str(target_inputs[target_slot].get("type") or "") == "BOOLEAN"
+                and 0 <= target_slot < len(target_inputs)
+                and str(target_inputs[target_slot].get("type") or "").upper() == "BOOLEAN"
             ):
-                declared_controls.add(target)
-        for control_id in declared_controls:
-            control = nodes[control_id]
-            switches = []
+                declared_controls[target] = kind
+        graph_recipes: list[tuple[dict[str, Any], WorkflowAccelerationRecipe]] = []
+        for control_id, kind in declared_controls.items():
+            switches: list[dict[str, Any]] = []
             for origin, _, target, target_slot in links:
                 target_node = nodes.get(target)
                 target_inputs = target_node.get("inputs", []) if target_node else []
@@ -932,23 +1015,113 @@ def _enable_declared_four_step_edit_acceleration(
                     origin == control_id
                     and target_node
                     and str(target_node.get("type") or "") == "ComfySwitchNode"
-                    and target_slot < len(target_inputs)
+                    and 0 <= target_slot < len(target_inputs)
                     and str(target_inputs[target_slot].get("name") or "") == "switch"
                 ):
                     switches.append(target_node)
-            if not any(
-                _switch_selects_four_steps(node, nodes, links) for node in switches
-            ) or not any(_switch_selects_bundled_lora(node, nodes, links) for node in switches):
+            recipe = _declared_acceleration_recipe(kind, switches, nodes, links)
+            if recipe is None:
                 continue
-            raw_values = control.get("widgets_values")
-            values = list(raw_values) if isinstance(raw_values, list) else []
-            if values:
-                values[0] = True
-            else:
-                values = [True]
-            control["widgets_values"] = values
-            accelerated = True
-    return accelerated
+            graph_recipes.append((nodes[control_id], recipe))
+        if len(graph_recipes) != 1:
+            continue
+        control, recipe = graph_recipes[0]
+        raw_values = control.get("widgets_values")
+        values = list(raw_values) if isinstance(raw_values, list) else []
+        if values:
+            values[0] = True
+        else:
+            values = [True]
+        control["widgets_values"] = values
+        resolved.append(recipe)
+    return tuple(resolved)
+
+
+def _acceleration_control_kind(label: str) -> str | None:
+    tokens = [
+        token
+        for token in re.sub(r"[^a-z0-9]+", "_", label.casefold()).strip("_").split("_")
+        if token
+    ]
+    semantic = "_".join(token for token in tokens if token not in _ACCELERATION_CONTROL_AFFIXES)
+    return _ACCELERATION_CONTROL_KINDS.get(semantic)
+
+
+def _declared_acceleration_recipe(
+    kind: str,
+    switches: list[dict[str, Any]],
+    nodes: dict[str, dict[str, Any]],
+    links: list[tuple[str, int, str, int]],
+) -> WorkflowAccelerationRecipe | None:
+    step_schedules: list[tuple[int, int]] = []
+    switched_inputs: set[str] = set()
+    asset_kinds: set[str] = set()
+
+    for switch in switches:
+        output_inputs = _switch_output_input_names(switch, nodes, links)
+        if not output_inputs or not output_inputs <= _ACCELERATION_RECIPE_INPUTS:
+            return None
+        recipe_inputs = output_inputs & _ACCELERATION_RECIPE_INPUTS
+        switched_inputs.update(recipe_inputs)
+        if recipe_inputs & _ACCELERATION_STEP_INPUTS:
+            schedule = _switch_step_schedule(switch, nodes, links)
+            if schedule is None:
+                return None
+            step_schedules.append(schedule)
+        if recipe_inputs & _ACCELERATION_MODEL_INPUTS:
+            asset_kind = _switch_bundled_acceleration_asset(switch, nodes, links)
+            if asset_kind is None:
+                return None
+            asset_kinds.add(asset_kind)
+
+    if not step_schedules:
+        return None
+    mode = (
+        "bundled-four-step"
+        if asset_kinds == {"bundled-lora"}
+        and all(fast_steps == 4 for fast_steps, _ in step_schedules)
+        else "declared-low-step"
+    )
+    return WorkflowAccelerationRecipe(
+        kind=kind,
+        mode=mode,
+        step_schedules=tuple(sorted(step_schedules)),
+        switched_inputs=tuple(sorted(switched_inputs)),
+        asset_kinds=tuple(sorted(asset_kinds)),
+    )
+
+
+def _workflow_acceleration_provenance(
+    recipes: tuple[WorkflowAccelerationRecipe, ...],
+) -> dict[str, Any]:
+    resolved: list[dict[str, Any]] = []
+    for recipe in recipes:
+        item: dict[str, Any] = {
+            "kind": recipe.kind,
+            "mode": recipe.mode,
+            "step_schedules": [
+                {"steps": steps, "baseline_steps": baseline_steps}
+                for steps, baseline_steps in recipe.step_schedules
+            ],
+            "switched_inputs": list(recipe.switched_inputs),
+        }
+        if recipe.asset_kinds:
+            item["asset_kinds"] = list(recipe.asset_kinds)
+        resolved.append(item)
+    result: dict[str, Any] = {
+        "version": 1,
+        "mode": (recipes[0].mode if len(recipes) == 1 else "declared-accelerated-branches"),
+        "recipe_count": len(recipes),
+        "recipes": resolved,
+    }
+    all_schedules = [schedule for recipe in recipes for schedule in recipe.step_schedules]
+    fast_steps = {schedule[0] for schedule in all_schedules}
+    baseline_steps = {schedule[1] for schedule in all_schedules}
+    if len(fast_steps) == 1:
+        result["steps"] = fast_steps.pop()
+    if len(baseline_steps) == 1:
+        result["baseline_steps"] = baseline_steps.pop()
+    return result
 
 
 def _switch_input_origin(
@@ -991,54 +1164,61 @@ def _primitive_number(node: dict[str, Any] | None) -> float | None:
     return float(values[0])
 
 
-def _switch_output_feeds_input(
+def _switch_output_input_names(
     switch: dict[str, Any],
-    input_name: str,
     nodes: dict[str, dict[str, Any]],
     links: list[tuple[str, int, str, int]],
-) -> bool:
+) -> set[str]:
     switch_id = str(switch.get("id"))
+    result: set[str] = set()
     for origin, _, target, target_slot in links:
         target_node = nodes.get(target)
         target_inputs = target_node.get("inputs", []) if target_node else []
-        if (
-            origin == switch_id
-            and target_slot < len(target_inputs)
-            and str(target_inputs[target_slot].get("name") or "") == input_name
-        ):
-            return True
-    return False
+        if origin == switch_id and 0 <= target_slot < len(target_inputs):
+            name = re.sub(
+                r"[^a-z0-9]+",
+                "_",
+                str(target_inputs[target_slot].get("name") or "").casefold(),
+            ).strip("_")
+            if name:
+                result.add(name)
+    return result
 
 
-def _switch_selects_four_steps(
+def _switch_step_schedule(
     switch: dict[str, Any],
     nodes: dict[str, dict[str, Any]],
     links: list[tuple[str, int, str, int]],
-) -> bool:
+) -> tuple[int, int] | None:
     false_value = _primitive_number(
         nodes.get(_switch_input_origin(switch, "on_false", links) or "")
     )
     true_value = _primitive_number(nodes.get(_switch_input_origin(switch, "on_true", links) or ""))
-    return (
-        true_value == 4
-        and false_value is not None
-        and false_value > true_value
-        and _switch_output_feeds_input(switch, "steps", nodes, links)
-    )
+    if (
+        true_value is None
+        or false_value is None
+        or not true_value.is_integer()
+        or not false_value.is_integer()
+    ):
+        return None
+    fast_steps = int(true_value)
+    baseline_steps = int(false_value)
+    if fast_steps < 1 or baseline_steps <= fast_steps:
+        return None
+    return fast_steps, baseline_steps
 
 
-def _switch_selects_bundled_lora(
+def _switch_bundled_acceleration_asset(
     switch: dict[str, Any],
     nodes: dict[str, dict[str, Any]],
     links: list[tuple[str, int, str, int]],
-) -> bool:
+) -> str | None:
     true_node = nodes.get(_switch_input_origin(switch, "on_true", links) or "")
-    if (
-        not true_node
-        or not str(true_node.get("type") or "").startswith("LoraLoader")
-        or not _switch_output_feeds_input(switch, "model", nodes, links)
-    ):
-        return False
+    if not true_node:
+        return None
+    node_type = str(true_node.get("type") or "")
+    if "loader" not in node_type.casefold():
+        return None
     properties = true_node.get("properties")
     models = properties.get("models") if isinstance(properties, dict) else None
     if isinstance(models, dict):
@@ -1048,12 +1228,25 @@ def _switch_selects_bundled_lora(
     else:
         model_items = []
     values = true_node.get("widgets_values")
-    selected = str(values[0]) if isinstance(values, list) and values else ""
-    return any(
-        str(item.get("directory") or "") == "loras"
-        and str(item.get("name") or "") == selected
-        and _parse_huggingface_url(str(item.get("url") or "")) is not None
+    selected_values = (
+        {str(value) for value in values if isinstance(value, str)}
+        if isinstance(values, list)
+        else set()
+    )
+    bundled = [
+        item
         for item in model_items
+        if str(item.get("directory") or "").casefold() in _ACCELERATION_ASSET_DIRECTORIES
+        and str(item.get("name") or "") in selected_values
+        and _parse_huggingface_url(str(item.get("url") or "")) is not None
+    ]
+    if not bundled:
+        return None
+    return (
+        "bundled-lora"
+        if node_type.casefold().startswith("loraloader")
+        or all(str(item.get("directory") or "").casefold() == "loras" for item in bundled)
+        else "bundled-model"
     )
 
 

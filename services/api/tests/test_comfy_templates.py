@@ -12,7 +12,8 @@ from local_lm.comfy_templates import (
     ComfyTemplateRegistry,
     CompiledComfyTemplate,
     _compile_ui_graph,
-    _enable_declared_four_step_edit_acceleration,
+    _resolve_declared_workflow_acceleration,
+    _workflow_acceleration_provenance,
     derive_image_to_image,
 )
 from local_lm.config import Settings
@@ -1541,41 +1542,382 @@ def _four_step_edit_graph() -> dict[str, Any]:
     }
 
 
-def test_declared_four_step_edit_acceleration_enables_complete_bundled_branch() -> None:
+def test_declared_acceleration_enables_complete_bundled_branch() -> None:
     subgraph = _four_step_edit_graph()
     ui_graph = {"nodes": [], "definitions": {"subgraphs": [subgraph]}}
 
-    accelerated = _enable_declared_four_step_edit_acceleration(
+    recipes = _resolve_declared_workflow_acceleration(
         ui_graph,
         operation="image_to_image",
     )
 
-    assert accelerated is True
     assert subgraph["nodes"][0]["widgets_values"] == [True]
+    assert len(recipes) == 1
+    assert recipes[0].kind == "turbo"
+    assert recipes[0].mode == "bundled-four-step"
+    assert recipes[0].step_schedules == ((4, 40),)
+    assert recipes[0].switched_inputs == ("model", "steps")
+    assert recipes[0].asset_kinds == ("bundled-lora",)
+    assert _workflow_acceleration_provenance(recipes) == {
+        "version": 1,
+        "mode": "bundled-four-step",
+        "recipe_count": 1,
+        "recipes": [
+            {
+                "kind": "turbo",
+                "mode": "bundled-four-step",
+                "step_schedules": [{"steps": 4, "baseline_steps": 40}],
+                "switched_inputs": ["model", "steps"],
+                "asset_kinds": ["bundled-lora"],
+            }
+        ],
+        "steps": 4,
+        "baseline_steps": 40,
+    }
 
 
-def test_declared_four_step_edit_acceleration_is_edit_only() -> None:
+@pytest.mark.parametrize(
+    "operation",
+    ["text_to_image", "image_to_image", "text_to_video", "image_to_video"],
+)
+def test_declared_acceleration_supports_every_media_operation(operation: str) -> None:
     subgraph = _four_step_edit_graph()
     ui_graph = {"nodes": [], "definitions": {"subgraphs": [subgraph]}}
 
-    accelerated = _enable_declared_four_step_edit_acceleration(
+    recipes = _resolve_declared_workflow_acceleration(ui_graph, operation=operation)
+
+    assert len(recipes) == 1
+    assert subgraph["nodes"][0]["widgets_values"] == [True]
+
+
+def test_declared_acceleration_ignores_non_media_operations() -> None:
+    subgraph = _four_step_edit_graph()
+    ui_graph = {"nodes": [], "definitions": {"subgraphs": [subgraph]}}
+    original = json.loads(json.dumps(ui_graph))
+
+    recipes = _resolve_declared_workflow_acceleration(ui_graph, operation="chat")
+
+    assert recipes == ()
+    assert ui_graph == original
+
+
+def test_declared_acceleration_requires_bundled_asset_metadata() -> None:
+    subgraph = _four_step_edit_graph()
+    subgraph["nodes"][4]["properties"] = {}
+    ui_graph = {"nodes": [], "definitions": {"subgraphs": [subgraph]}}
+    original = json.loads(json.dumps(ui_graph))
+
+    recipes = _resolve_declared_workflow_acceleration(
+        ui_graph,
+        operation="image_to_image",
+    )
+
+    assert recipes == ()
+    assert ui_graph == original
+
+
+def test_declared_acceleration_rejects_unrelated_fast_toggle() -> None:
+    subgraph = _four_step_edit_graph()
+    subgraph["inputs"][0]["label"] = "fast_preview"
+    ui_graph = {"nodes": [], "definitions": {"subgraphs": [subgraph]}}
+    original = json.loads(json.dumps(ui_graph))
+
+    recipes = _resolve_declared_workflow_acceleration(
+        ui_graph,
+        operation="image_to_image",
+    )
+
+    assert recipes == ()
+    assert ui_graph == original
+
+
+def test_declared_acceleration_requires_executed_model_branch() -> None:
+    subgraph = _four_step_edit_graph()
+    subgraph["links"] = [link for link in subgraph["links"] if link[0] != 8]
+    ui_graph = {"nodes": [], "definitions": {"subgraphs": [subgraph]}}
+    original = json.loads(json.dumps(ui_graph))
+
+    recipes = _resolve_declared_workflow_acceleration(
+        ui_graph,
+        operation="image_to_image",
+    )
+
+    assert recipes == ()
+    assert ui_graph == original
+
+
+def test_declared_acceleration_supports_bundled_low_step_model() -> None:
+    subgraph = _four_step_edit_graph()
+    subgraph["inputs"][0]["label"] = "use_lightning_mode"
+    subgraph["nodes"][2]["widgets_values"] = [8]
+    subgraph["nodes"][4] = {
+        "id": 5,
+        "type": "UNETLoader",
+        "properties": {
+            "models": [
+                {
+                    "name": "accelerated-model.safetensors",
+                    "url": (
+                        "https://huggingface.co/example/accelerated/resolve/"
+                        "main/accelerated-model.safetensors"
+                    ),
+                    "directory": "diffusion_models",
+                }
+            ]
+        },
+        "widgets_values": ["accelerated-model.safetensors", "default"],
+    }
+    ui_graph = {"nodes": [], "definitions": {"subgraphs": [subgraph]}}
+
+    recipes = _resolve_declared_workflow_acceleration(
+        ui_graph,
+        operation="text_to_video",
+    )
+
+    assert len(recipes) == 1
+    assert recipes[0].kind == "lightning"
+    assert recipes[0].mode == "declared-low-step"
+    assert recipes[0].step_schedules == ((8, 40),)
+    assert recipes[0].asset_kinds == ("bundled-model",)
+
+
+def test_declared_acceleration_supports_step_only_distilled_workflow() -> None:
+    subgraph = _four_step_edit_graph()
+    subgraph["inputs"][0]["label"] = "enable_lcm_mode"
+    subgraph["nodes"] = [node for node in subgraph["nodes"] if node["id"] not in {5, 7}]
+    subgraph["nodes"][2]["widgets_values"] = [31]
+    subgraph["links"] = [
+        link for link in subgraph["links"] if link[1] not in {5, 7} and link[3] not in {5, 7}
+    ]
+    subgraph["links"].append([9, 4, 0, 8, 1, "MODEL"])
+    ui_graph = {"nodes": [], "definitions": {"subgraphs": [subgraph]}}
+
+    recipes = _resolve_declared_workflow_acceleration(
         ui_graph,
         operation="text_to_image",
     )
 
-    assert accelerated is False
-    assert subgraph["nodes"][0]["widgets_values"] == [False]
+    assert len(recipes) == 1
+    assert recipes[0].kind == "lcm"
+    assert recipes[0].mode == "declared-low-step"
+    assert recipes[0].step_schedules == ((31, 40),)
+    assert recipes[0].switched_inputs == ("steps",)
+    assert recipes[0].asset_kinds == ()
+    assert subgraph["nodes"][0]["widgets_values"] == [True]
 
 
-def test_declared_four_step_edit_acceleration_requires_bundled_lora_metadata() -> None:
+def test_declared_acceleration_discovers_nested_subgraph() -> None:
     subgraph = _four_step_edit_graph()
-    subgraph["nodes"][4]["properties"] = {}
-    ui_graph = {"nodes": [], "definitions": {"subgraphs": [subgraph]}}
+    nested = {"nodes": [], "definitions": {"subgraphs": [subgraph]}}
+    ui_graph = {"nodes": [], "definitions": {"subgraphs": [nested]}}
 
-    accelerated = _enable_declared_four_step_edit_acceleration(
+    recipes = _resolve_declared_workflow_acceleration(
+        ui_graph,
+        operation="image_to_video",
+    )
+
+    assert len(recipes) == 1
+    assert subgraph["nodes"][0]["widgets_values"] == [True]
+
+
+def test_declared_acceleration_preserves_independent_stage_recipes() -> None:
+    first = _four_step_edit_graph()
+    second = _four_step_edit_graph()
+    second["nodes"][2]["widgets_values"] = [6]
+    ui_graph = {"nodes": [], "definitions": {"subgraphs": [first, second]}}
+
+    recipes = _resolve_declared_workflow_acceleration(
+        ui_graph,
+        operation="text_to_video",
+    )
+    provenance = _workflow_acceleration_provenance(recipes)
+
+    assert len(recipes) == 2
+    assert first["nodes"][0]["widgets_values"] == [True]
+    assert second["nodes"][0]["widgets_values"] == [True]
+    assert provenance["mode"] == "declared-accelerated-branches"
+    assert provenance["recipe_count"] == 2
+    assert "steps" not in provenance
+    assert provenance["baseline_steps"] == 40
+
+
+def test_declared_acceleration_rejects_non_reducing_schedule() -> None:
+    subgraph = _four_step_edit_graph()
+    subgraph["nodes"][2]["widgets_values"] = [40]
+    ui_graph = {"nodes": [], "definitions": {"subgraphs": [subgraph]}}
+    original = json.loads(json.dumps(ui_graph))
+
+    recipes = _resolve_declared_workflow_acceleration(
         ui_graph,
         operation="image_to_image",
     )
 
-    assert accelerated is False
+    assert recipes == ()
+    assert ui_graph == original
+
+
+def test_declared_acceleration_leaves_ambiguous_graph_unchanged() -> None:
+    first = _four_step_edit_graph()
+    second = json.loads(json.dumps(first))
+    for node in second["nodes"]:
+        node["id"] += 100
+    for link in second["links"]:
+        link[0] += 100
+        if link[1] != -10:
+            link[1] += 100
+        else:
+            link[2] = 1
+        if link[3] != -20:
+            link[3] += 100
+    combined = {
+        "inputs": [first["inputs"][0], second["inputs"][0]],
+        "nodes": first["nodes"] + second["nodes"],
+        "links": first["links"] + second["links"],
+    }
+    ui_graph = {"nodes": [], "definitions": {"subgraphs": [combined]}}
+    original = json.loads(json.dumps(ui_graph))
+
+    recipes = _resolve_declared_workflow_acceleration(
+        ui_graph,
+        operation="image_to_image",
+    )
+
+    assert recipes == ()
+    assert ui_graph == original
+
+
+def _schedule_only_fast_graph() -> dict[str, Any]:
+    graph = _four_step_edit_graph()
+    graph["inputs"][0]["label"] = "enable_fast_mode"
+    graph["nodes"] = [node for node in graph["nodes"] if node["id"] not in {4, 5, 7}]
+    sampler = next(node for node in graph["nodes"] if node["id"] == 8)
+    sampler["inputs"] = [
+        {"name": "steps", "type": "INT"},
+        {"name": "cfg", "type": "FLOAT"},
+    ]
+    graph["nodes"].extend(
+        [
+            {"id": 9, "type": "PrimitiveFloat", "widgets_values": [5.0]},
+            {"id": 10, "type": "PrimitiveFloat", "widgets_values": [1.0]},
+            {
+                "id": 11,
+                "type": "ComfySwitchNode",
+                "inputs": [
+                    {"name": "on_false", "type": "FLOAT"},
+                    {"name": "on_true", "type": "FLOAT"},
+                    {"name": "switch", "type": "BOOLEAN"},
+                ],
+            },
+        ]
+    )
+    graph["links"] = [
+        link for link in graph["links"] if link[1] not in {4, 5, 7} and link[3] not in {7}
+    ]
+    graph["links"].extend(
+        [
+            [9, 1, 0, 11, 2, "BOOLEAN"],
+            [10, 9, 0, 11, 0, "FLOAT"],
+            [11, 10, 0, 11, 1, "FLOAT"],
+            [12, 11, 0, 8, 1, "FLOAT"],
+        ]
+    )
+    return graph
+
+
+def test_declared_acceleration_supports_atomic_schedule_only_recipe() -> None:
+    subgraph = _schedule_only_fast_graph()
+    ui_graph = {"nodes": [], "definitions": {"subgraphs": [subgraph]}}
+
+    recipes = _resolve_declared_workflow_acceleration(
+        ui_graph,
+        operation="text_to_image",
+    )
+
+    assert len(recipes) == 1
+    assert recipes[0].kind == "fast"
+    assert recipes[0].mode == "declared-low-step"
+    assert recipes[0].step_schedules == ((4, 40),)
+    assert recipes[0].switched_inputs == ("cfg", "steps")
+    assert recipes[0].asset_kinds == ()
+    assert subgraph["nodes"][0]["widgets_values"] == [True]
+
+
+@pytest.mark.parametrize(
+    ("label", "kind"),
+    [
+        ("Enable acceleration mode", "acceleration"),
+        ("Use distilled mode", "distilled"),
+        ("Enable few-step mode", "few-step"),
+        ("Enable Hyper-SD mode", "hyper"),
+        ("Use low step mode", "low-step"),
+        ("Enable Schnell mode", "schnell"),
+        ("Enable TCD mode", "tcd"),
+    ],
+)
+def test_declared_acceleration_recognizes_common_techniques(
+    label: str,
+    kind: str,
+) -> None:
+    subgraph = _four_step_edit_graph()
+    subgraph["inputs"][0]["label"] = label
+    ui_graph = {"nodes": [], "definitions": {"subgraphs": [subgraph]}}
+
+    recipes = _resolve_declared_workflow_acceleration(
+        ui_graph,
+        operation="text_to_image",
+    )
+
+    assert len(recipes) == 1
+    assert recipes[0].kind == kind
+
+
+@pytest.mark.parametrize(("link_index", "slot_index"), [(0, 2), (0, 4)])
+def test_declared_acceleration_rejects_negative_graph_slots(
+    link_index: int,
+    slot_index: int,
+) -> None:
+    subgraph = _four_step_edit_graph()
+    subgraph["links"][link_index][slot_index] = -1
+    ui_graph = {"nodes": [], "definitions": {"subgraphs": [subgraph]}}
+    original = json.loads(json.dumps(ui_graph))
+
+    recipes = _resolve_declared_workflow_acceleration(
+        ui_graph,
+        operation="image_to_image",
+    )
+
+    assert recipes == ()
+    assert ui_graph == original
+
+
+def test_declared_acceleration_bounds_nested_graph_discovery() -> None:
+    subgraph = _four_step_edit_graph()
+    ui_graph: dict[str, Any] = subgraph
+    for _ in range(256):
+        ui_graph = {"nodes": [], "definitions": {"subgraphs": [ui_graph]}}
+
+    recipes = _resolve_declared_workflow_acceleration(
+        ui_graph,
+        operation="image_to_image",
+    )
+
+    assert recipes == ()
     assert subgraph["nodes"][0]["widgets_values"] == [False]
+
+
+@pytest.mark.parametrize("schedule_input", ["start_at_step", "end_at_step"])
+def test_declared_acceleration_preserves_auxiliary_schedule_switches(
+    schedule_input: str,
+) -> None:
+    subgraph = _schedule_only_fast_graph()
+    sampler = next(node for node in subgraph["nodes"] if node["id"] == 8)
+    sampler["inputs"][1]["name"] = schedule_input
+    ui_graph = {"nodes": [], "definitions": {"subgraphs": [subgraph]}}
+
+    recipes = _resolve_declared_workflow_acceleration(
+        ui_graph,
+        operation="text_to_video",
+    )
+
+    assert len(recipes) == 1
+    assert recipes[0].switched_inputs == (schedule_input, "steps")
