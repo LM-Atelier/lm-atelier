@@ -852,6 +852,7 @@ def test_workflow_policy_rejects_runner_context_in_job_environment() -> None:
 def test_ci_plan_is_fail_closed_and_audits_dependency_changes() -> None:
     namespace = runpy.run_path(str(ROOT / "scripts/ci-plan.py"))
     classify = namespace["classify_develop_changes"]
+    requires_windows = namespace["requires_windows_verification"]
 
     assert classify(["docs/ARCHITECTURE.md", "CONTRIBUTING.md"]) == (
         "documentation",
@@ -862,6 +863,14 @@ def test_ci_plan_is_fail_closed_and_audits_dependency_changes() -> None:
     assert classify(["services/api/local_lm/api.py"]) == ("full", False)
     assert classify(["package-lock.json"]) == ("full", True)
     assert classify([]) == ("full", False)
+    assert requires_windows(["services/api/local_lm/api.py"])
+    assert requires_windows(["packaging/windows/LMAtelier.iss"])
+    assert requires_windows(["packaging/LMAtelier.spec"])
+    assert requires_windows(["scripts/verify.ps1"])
+    assert requires_windows([".github/workflows/ci.yml"])
+    assert not requires_windows(["apps/web/src/App.tsx"])
+    assert not requires_windows(["packaging/linux/frozen-uninstall.sh"])
+    assert not requires_windows(["docs/ARCHITECTURE.md"])
 
 
 def test_ci_plan_rejects_malformed_event_shas() -> None:
@@ -909,16 +918,26 @@ def test_ci_plan_requires_exact_protected_develop_promotion(monkeypatch) -> None
 
 def test_ci_workflow_retains_required_check_for_every_pr_scope() -> None:
     workflow = (ROOT / ".github/workflows/ci.yml").read_text()
-    compatibility = workflow.split("  compatibility:", 1)[1].split("  scheduled-audit:", 1)[0]
+    plan = workflow.split("  verification-plan:", 1)[1].split("  compatibility:", 1)[0]
+    compatibility = workflow.split("  compatibility:", 1)[1].split("  windows-compatibility:", 1)[0]
+    windows = workflow.split("  windows-compatibility:", 1)[1].split("  scheduled-audit:", 1)[0]
 
     assert "name: Ubuntu compatibility" in compatibility
-    assert "scripts/ci-plan.py" in compatibility
+    assert "scripts/ci-plan.py" in plan
     for variable in ("EVENT_NAME", "BASE_REF", "HEAD_REF", "BASE_SHA", "HEAD_SHA"):
-        assert f'"${variable}"' in compatibility
-    assert compatibility.count("steps.plan.outputs.mode") >= 10
+        assert f'"${variable}"' in plan
+    for output in ("mode", "dependency_audit", "windows"):
+        assert f"{output}: ${{{{ steps.plan.outputs.{output} }}}}" in plan
+    assert compatibility.count("needs.verification-plan.outputs.mode") >= 10
+    assert "needs.verification-plan.result != 'success'" in compatibility
     assert "documentation" in compatibility
     assert "promotion" in compatibility
-    assert "steps.plan.outputs.dependency_audit" in compatibility
+    assert "needs.verification-plan.outputs.dependency_audit" in compatibility
+    assert "name: Windows compatibility" in windows
+    assert "runs-on: windows-2025" in windows
+    assert "needs.verification-plan.outputs.windows == 'true'" in windows
+    assert "choco install ffmpeg --version 8.1.2" in windows
+    assert r".\scripts\verify.ps1" in windows
     assert "23 9 * * 2" in workflow
     assert "name: Scheduled dependency audit" in workflow
     assert "npm audit --audit-level=high" in workflow
