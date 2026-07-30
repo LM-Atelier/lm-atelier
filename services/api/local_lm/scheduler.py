@@ -467,6 +467,19 @@ class ResourceScheduler:
                                     text=error,
                                 )
                             )
+                elif job.work_step_id:
+                    step = session.get(WorkStep, job.work_step_id)
+                    if step:
+                        step.status = JobStatus.INTERRUPTED.value
+                        step.error = error
+                        session.flush()
+                        refresh_plan_status(session, step.plan_id)
+                        plan = session.get(WorkPlan, step.plan_id)
+                        if plan:
+                            plan.summary_json = {
+                                **plan.summary_json,
+                                "status_counts": plan_status_summary(session, plan.id),
+                            }
                 expired_ids.append(job.id)
             session.commit()
         return expired_ids

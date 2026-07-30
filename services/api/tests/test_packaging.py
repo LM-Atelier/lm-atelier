@@ -913,6 +913,8 @@ def test_ci_workflow_retains_required_check_for_every_pr_scope() -> None:
 
     assert "name: Ubuntu compatibility" in compatibility
     assert "scripts/ci-plan.py" in compatibility
+    for variable in ("EVENT_NAME", "BASE_REF", "HEAD_REF", "BASE_SHA", "HEAD_SHA"):
+        assert f'"${variable}"' in compatibility
     assert compatibility.count("steps.plan.outputs.mode") >= 10
     assert "documentation" in compatibility
     assert "promotion" in compatibility
