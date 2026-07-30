@@ -5,9 +5,10 @@ from pathlib import Path
 
 from httpx2 import AsyncClient
 
+from local_lm.catalog import HuggingFaceCatalog
 from local_lm.downloads import DownloadManager
 from local_lm.processes import ProcessSupervisor
-from local_lm.recipes import list_reference_recipes, recipe_download_request
+from local_lm.recipes import get_reference_recipe, list_reference_recipes
 from local_lm.settings_registry import (
     CHAT_SETTINGS,
     IMAGE_SETTINGS,
@@ -36,14 +37,113 @@ def test_reference_recipes_are_immutable_safe_candidates() -> None:
         assert all(not Path(file.path).is_absolute() for file in recipe.files)
 
 
-def test_recipe_downloads_pin_files_hashes_and_comfy_folders() -> None:
+def test_every_recipe_pins_a_checksum_for_every_file() -> None:
+    """A recipe exists to promise specific bytes; an unpinned file cannot."""
     for recipe in list_reference_recipes():
-        request = recipe_download_request(recipe)
-        assert request.revision == recipe.revision
-        assert request.allow_patterns == [file.path for file in recipe.files]
-        assert set(request.expected_sha256) == {file.path for file in recipe.files if file.sha256}
-        if recipe.engine == "comfyui":
-            assert request.comfy_paths
+        assert recipe.files
+        assert all(file.sha256 for file in recipe.files), recipe.id
+
+
+def _chat_recipe_catalog(recipe, monkeypatch, *, files=None):  # type: ignore[no-untyped-def]
+    """Answer catalog lookups with exactly what the recipe pins, unless overridden."""
+
+    async def inspect(
+        _catalog: HuggingFaceCatalog,
+        remote_id: str,
+        revision: str = "main",
+        requested_role: str | None = None,
+    ) -> dict:  # type: ignore[type-arg]
+        return {
+            "model": {
+                "remote_id": remote_id,
+                "name": recipe.name,
+                "compatibility": "supported",
+                "formats": ["gguf"],
+            },
+            "revision": revision,
+            "files": files
+            if files is not None
+            else [
+                {"filename": file.path, "size": file.size_bytes or 1024, "sha256": file.sha256}
+                for file in recipe.files
+            ],
+        }
+
+    monkeypatch.setattr(HuggingFaceCatalog, "inspect", inspect)
+    # Bounded header reads are an optimisation preflight treats as optional, and
+    # the staged bytes are inspected for real before activation. Removing it keeps
+    # the test off the network entirely.
+    monkeypatch.delattr(HuggingFaceCatalog, "inspect_file_prefix", raising=False)
+
+
+async def test_recipe_install_produces_a_plan_matching_its_pins(
+    client: AsyncClient,
+    monkeypatch,
+) -> None:  # type: ignore[no-untyped-def]
+    """Recipes used to bypass the install plan entirely and could never be ready."""
+    recipe = get_reference_recipe("qwen3-8b-q4-k-m")
+    assert recipe
+    _chat_recipe_catalog(recipe, monkeypatch)
+
+    accepted = await client.post(f"/api/recipes/{recipe.id}/install")
+
+    assert accepted.status_code == 202
+    job = accepted.json()
+    assert job["kind"] == "download"
+    payload = job["payload_json"]
+    # The download must be plan-driven; that is what enables staged inspection,
+    # component manifests, the activation probe and the evidence write.
+    assert payload["install_plan_id"]
+    assert payload["remote_id"] == recipe.remote_id
+    assert payload["revision"] == recipe.revision
+    assert set(payload["allow_patterns"]) == {file.path for file in recipe.files}
+    assert payload["expected_sha256"] == {
+        file.path: file.sha256 for file in recipe.files if file.sha256
+    }
+    assert payload["recipe_id"] == recipe.id
+    await client.post(f"/api/jobs/{job['id']}/cancel")
+
+
+async def test_recipe_install_refuses_a_repository_that_drifted_from_its_pins(
+    client: AsyncClient,
+    monkeypatch,
+) -> None:  # type: ignore[no-untyped-def]
+    """Preflight carries no hashes, so drift has to be caught before installing."""
+    recipe = get_reference_recipe("qwen3-8b-q4-k-m")
+    assert recipe
+    _chat_recipe_catalog(
+        recipe,
+        monkeypatch,
+        files=[
+            {"filename": file.path, "size": file.size_bytes or 1024, "sha256": "f" * 64}
+            for file in recipe.files
+        ],
+    )
+
+    refused = await client.post(f"/api/recipes/{recipe.id}/install")
+
+    assert refused.status_code == 422
+    assert "different file contents" in refused.json()["detail"]
+
+
+async def test_recipe_install_refuses_a_repository_missing_pinned_files(
+    client: AsyncClient,
+    monkeypatch,
+) -> None:  # type: ignore[no-untyped-def]
+    recipe = get_reference_recipe("qwen3-8b-q4-k-m")
+    assert recipe
+    _chat_recipe_catalog(
+        recipe,
+        monkeypatch,
+        files=[{"filename": "something-else.gguf", "size": 1024, "sha256": "a" * 64}],
+    )
+
+    refused = await client.post(f"/api/recipes/{recipe.id}/install")
+
+    # Preflight rejects this one before the pin check does, which is the better
+    # error; what matters is that nothing installs.
+    assert refused.status_code == 422
+    assert "not present in this revision" in refused.json()["detail"]
 
 
 def test_recipe_defaults_match_the_public_setting_registry() -> None:
