@@ -4,10 +4,58 @@ import json
 import sqlite3
 from pathlib import Path
 
+import pytest
 from alembic import command
+from alembic.util.exc import CommandError
 
 from local_lm.config import Settings
-from local_lm.database_migrations import alembic_config, upgrade_database
+from local_lm.database_migrations import (
+    DatabaseVersionError,
+    alembic_config,
+    upgrade_database,
+)
+
+
+def test_unknown_database_revision_has_actionable_error(tmp_path: Path) -> None:
+    settings = Settings(data_dir=tmp_path / "newer-database")
+    settings.prepare()
+    database = settings.state_dir / "local-lm.sqlite3"
+    unknown_revision = "newer_lm_atelier_revision"
+    with sqlite3.connect(database) as connection:
+        connection.execute("CREATE TABLE alembic_version (version_num TEXT PRIMARY KEY)")
+        connection.execute(
+            "INSERT INTO alembic_version VALUES (?)",
+            (unknown_revision,),
+        )
+
+    with pytest.raises(
+        DatabaseVersionError,
+        match="database schema revision that this build does not recognize",
+    ) as captured:
+        upgrade_database(settings)
+
+    assert isinstance(captured.value.__cause__, CommandError)
+    with sqlite3.connect(database) as connection:
+        assert connection.execute("SELECT version_num FROM alembic_version").fetchone() == (
+            unknown_revision,
+        )
+
+
+def test_unrelated_alembic_command_error_is_not_reclassified(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    settings = Settings(data_dir=tmp_path / "migration-failure")
+    expected = CommandError("unrelated migration failure")
+
+    def fail_upgrade(*_args: object, **_kwargs: object) -> None:
+        raise expected
+
+    monkeypatch.setattr(command, "upgrade", fail_upgrade)
+
+    with pytest.raises(CommandError) as captured:
+        upgrade_database(settings)
+
+    assert captured.value is expected
 
 
 def test_migrations_round_trip(tmp_path) -> None:  # type: ignore[no-untyped-def]
