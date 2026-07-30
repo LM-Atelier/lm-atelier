@@ -16,7 +16,7 @@ from collections.abc import Callable
 from contextlib import suppress
 from pathlib import Path, PurePosixPath
 from types import SimpleNamespace
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, Literal
 
 import psutil
 from huggingface_hub import HfApi
@@ -517,6 +517,234 @@ class DownloadManager:
             workflow_contract_version=workflow_contract_version,
             details=details,
         )
+
+    def reactivate(self, session: Session, install: ModelInstall) -> Job:
+        """Queue a bounded re-probe of an already installed model.
+
+        Activation evidence is bound to the exact runtime, workflow contract and
+        hardware it was gathered on, so an upgrade can leave a working install
+        unusable with no way back: evidence is otherwise only written during a
+        download, and setup verification refuses to run without it.
+        """
+
+        if install.engine not in {"llama.cpp", "comfyui"}:
+            raise ValueError("this model's engine cannot be re-activated automatically")
+        if not str(install.manifest_json.get("remote_id") or ""):
+            raise ValueError("this model was imported without an installation manifest")
+        if install.engine == "comfyui" and not str(
+            install.manifest_json.get("workflow_template_id") or ""
+        ):
+            raise ValueError("this model has no declared workflow to re-activate")
+        for existing in session.scalars(
+            select(Job)
+            .where(
+                Job.kind == JobKind.ACTIVATE.value,
+                Job.status.in_([JobStatus.QUEUED.value, JobStatus.RUNNING.value]),
+            )
+            .order_by(Job.created_at)
+        ).all():
+            if str(existing.payload_json.get("install_id") or "") == install.id:
+                return existing
+        job = Job(
+            kind=JobKind.ACTIVATE.value,
+            status=JobStatus.QUEUED.value,
+            queue_resource="primary_compute",
+            queue_group="primary",
+            queue_ticket=new_id("ticket"),
+            enqueued_at=utcnow(),
+            payload_json={"install_id": install.id, "role": install.role},
+        )
+        update_job_progress(
+            job,
+            stage="queued",
+            queue_resource="primary_compute",
+            indeterminate=True,
+        )
+        session.add(job)
+        session.commit()
+        session.refresh(job)
+        self.start_activation(job.id)
+        return job
+
+    def start_activation(self, job_id: str) -> None:
+        if job_id in self._tasks and not self._tasks[job_id].done():
+            return
+        task = asyncio.create_task(self._reactivate(job_id), name=f"activate-{job_id}")
+        self._tasks[job_id] = task
+
+        def discard(completed: asyncio.Task[None]) -> None:
+            if self._tasks.get(job_id) is completed:
+                self._tasks.pop(job_id, None)
+
+        task.add_done_callback(discard)
+
+    async def _reactivate(self, job_id: str) -> None:
+        """Re-run the bounded activation probe against the current runtime."""
+
+        from .db import SessionLocal
+
+        install_id = ""
+        try:
+            with SessionLocal() as session:
+                job = session.get(Job, job_id)
+                if not job:
+                    return
+                install_id = str(job.payload_json.get("install_id") or "")
+                install = session.get(ModelInstall, install_id) if install_id else None
+                if not install:
+                    raise ValueError("the model is no longer installed")
+                manifest = dict(install.manifest_json)
+                engine = install.engine
+                role = install.role
+                destination = Path(install.local_path)
+                job.status = JobStatus.RUNNING.value
+                job.started_at = utcnow()
+                update_job_progress(
+                    job,
+                    stage="preparing activation",
+                    queue_resource="primary_compute",
+                    indeterminate=True,
+                )
+                session.commit()
+            await self.scheduler.publish_job(job_id)
+
+            component_hashes = {
+                str(key): str(value)
+                for key, value in (manifest.get("expected_sha256") or {}).items()
+                if isinstance(key, str) and isinstance(value, str)
+            }
+            default_settings = {
+                str(key): value
+                for key, value in (manifest.get("default_settings") or {}).items()
+                if isinstance(key, str)
+            }
+            if engine == "llama.cpp":
+                proven = await self._activate_chat_install(
+                    job_id=job_id,
+                    install_id=install_id,
+                    default_settings=default_settings,
+                    component_hashes=component_hashes,
+                )
+                if proven is None:
+                    raise RuntimeError("the chat activation probe did not complete")
+            else:
+                await self._reactivate_media(
+                    job_id=job_id,
+                    install_id=install_id,
+                    role=role,
+                    destination=destination,
+                    manifest=manifest,
+                    component_hashes=component_hashes,
+                    default_settings=default_settings,
+                )
+
+            with SessionLocal() as session:
+                job = session.get(Job, job_id)
+                if job:
+                    job.status = JobStatus.COMPLETE.value
+                    job.completed_at = utcnow()
+                    update_job_progress(
+                        job,
+                        stage="activated",
+                        queue_resource="primary_compute",
+                        overall_progress=1,
+                    )
+                    session.commit()
+            await self.scheduler.publish_job(job_id)
+            await self.events.publish("model.activated", job_id, {"install_id": install_id})
+        except Exception as exc:  # noqa: BLE001 - surfaced on the job for the user
+            logger.exception("Model re-activation failed for %s", install_id or job_id)
+            with SessionLocal() as session:
+                job = session.get(Job, job_id)
+                if job:
+                    job.status = JobStatus.FAILED.value
+                    job.error = str(exc)
+                    job.completed_at = utcnow()
+                    job.result_json = {
+                        "failure_code": self._stable_failure_code(exc),
+                        "failure_reason": str(exc)[:1_000],
+                    }
+                    update_job_progress(
+                        job,
+                        stage="failed",
+                        queue_resource="primary_compute",
+                        indeterminate=True,
+                    )
+                    session.commit()
+            await self.scheduler.publish_job(job_id)
+            await self.events.publish("model.activation_failed", job_id, {"error": str(exc)})
+
+    async def _reactivate_media(
+        self,
+        *,
+        job_id: str,
+        install_id: str,
+        role: str,
+        destination: Path,
+        manifest: dict[str, Any],
+        component_hashes: dict[str, str],
+        default_settings: dict[str, Any],
+    ) -> None:
+        """Recompile the declared workflow and prove it still produces output."""
+
+        if not self.media_adapter:
+            raise RuntimeError("automatic ComfyUI activation is unavailable")
+        if role not in {"image", "video"}:
+            raise ValueError("only image and video models are driven by a workflow")
+        media_role: Literal["image", "video"] = "image" if role == "image" else "video"
+        template_id = str(manifest.get("workflow_template_id") or "")
+        template_sha256 = str(manifest.get("workflow_template_sha256") or "")
+        remote_id = str(manifest.get("remote_id") or "")
+        revision = str(manifest.get("revision") or "")
+        selected_files = [
+            str(item) for item in (manifest.get("files") or []) if isinstance(item, str)
+        ]
+        comfy_paths = {
+            str(key): str(value)
+            for key, value in (manifest.get("comfy_paths") or {}).items()
+            if isinstance(key, str) and isinstance(value, str)
+        }
+        object_info = await self.media_adapter.object_info()
+        compiled = self.comfy_templates.compile(
+            template_id,
+            media_role,
+            object_info,
+            remote_id=remote_id,
+            revision=revision,
+            selected_files=selected_files,
+            comfy_paths=comfy_paths,
+        )
+        if template_sha256 and compiled.template.sha256 != template_sha256:
+            raise ValueError(
+                "the installed workflow template no longer matches the one this "
+                "model was installed with"
+            )
+        # A reconstructed request describes what is already on disk, so it carries
+        # no install plan. `prove_capability` is what makes the probe, the health
+        # check and the evidence write run.
+        request = DownloadRequest(
+            remote_id=remote_id,
+            revision=revision,
+            role=media_role,
+            engine="comfyui",
+            allow_patterns=selected_files,
+            expected_sha256=component_hashes,
+            comfy_paths=comfy_paths,
+            workflow_template_id=template_id,
+            workflow_template_sha256=template_sha256 or None,
+            default_settings=default_settings,
+        )
+        activated = await self._activate_comfy_install(
+            job_id=job_id,
+            install_id=install_id,
+            destination=destination,
+            request=request,
+            compiled=compiled,
+            default_settings=default_settings,
+            prove_capability=True,
+        )
+        if activated is None:
+            raise RuntimeError("the media activation probe did not complete")
 
     def start(self, job_id: str) -> None:
         if job_id in self._tasks and not self._tasks[job_id].done():
@@ -1756,8 +1984,16 @@ class DownloadManager:
         request: DownloadRequest,
         compiled: CompiledComfyTemplate,
         default_settings: dict[str, Any],
+        prove_capability: bool = False,
     ) -> tuple[CompiledComfyTemplate, str, str, list[str]] | None:
-        """Restart, probe, and commit one media install under the compute lease."""
+        """Restart, probe, and commit one media install under the compute lease.
+
+        The probe, the health check, and the evidence write are normally gated on
+        an install plan, because a plain download has nothing to prove.
+        Re-activation has no live plan and exists precisely to renew evidence, so
+        it passes ``prove_capability`` to require all three. Without it a
+        reconstructed request would report success and renew nothing.
+        """
 
         if not self.processes or not self.media_adapter:
             raise RuntimeError("automatic ComfyUI activation is unavailable")
@@ -1783,7 +2019,7 @@ class DownloadManager:
             validation_errors = await self.media_adapter.validate_workflow(compiled.api_graph)
             if validation_errors:
                 raise ValueError("; ".join(validation_errors))
-            if compiled.template.runtime_adaptive or request.install_plan_id:
+            if compiled.template.runtime_adaptive or request.install_plan_id or prove_capability:
                 with SessionLocal() as session:
                     job = session.get(Job, job_id)
                     if job:
@@ -1797,7 +2033,9 @@ class DownloadManager:
                 await self.scheduler.publish_job(job_id)
                 await self._probe_adaptive_checkpoint(compiled)
             capabilities = (
-                await self.media_adapter.capabilities() if request.install_plan_id else None
+                await self.media_adapter.capabilities()
+                if (request.install_plan_id or prove_capability)
+                else None
             )
             if capabilities and not capabilities.healthy:
                 raise RuntimeError("ComfyUI did not pass its health check after the probe")
@@ -1829,7 +2067,7 @@ class DownloadManager:
                         image_edit,
                         activated_install,
                     )
-                if request.install_plan_id and capabilities:
+                if (request.install_plan_id or prove_capability) and capabilities:
                     self._record_capability_evidence(
                         session,
                         activated_install,
