@@ -140,7 +140,7 @@ def build_services(settings: Settings) -> Services:
     runtimes = RuntimeProvisioner(settings)
     engines = EngineRegistry(settings)
     scheduler = ResourceScheduler(events)
-    processes = ProcessSupervisor(settings, runtimes)
+    processes = ProcessSupervisor(settings, runtimes, events)
     orchestrator = ConversationOrchestrator(engines, artifacts, events, scheduler, processes)
     services = Services(
         settings=settings,
