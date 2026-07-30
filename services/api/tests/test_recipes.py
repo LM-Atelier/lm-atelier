@@ -101,6 +101,28 @@ async def test_recipe_install_produces_a_plan_matching_its_pins(
         file.path: file.sha256 for file in recipe.files if file.sha256
     }
     assert payload["recipe_id"] == recipe.id
+
+    # The persisted plan, not only the request, must equal what the recipe pins,
+    # because the plan is what authorises the transfer and the activation probe.
+    from local_lm.db import SessionLocal
+    from local_lm.models import InstallPlan
+
+    with SessionLocal() as session:
+        plan = session.get(InstallPlan, payload["install_plan_id"])
+        assert plan
+        assert plan.remote_id == recipe.remote_id
+        assert plan.revision == recipe.revision
+        assert plan.compatibility == "supported"
+        assert {
+            artifact["path"]: artifact["sha256"]
+            for artifact in plan.artifacts_json
+            if artifact.get("required", True)
+        } == {file.path: file.sha256 for file in recipe.files}
+        # A recipe install cannot be considered ready without being proved; the
+        # generic download-to-evidence path is covered by
+        # test_planned_chat_activation_requires_completion_and_records_evidence.
+        assert plan.activation_probe_json.get("required") is True
+
     await client.post(f"/api/jobs/{job['id']}/cancel")
 
 
@@ -213,3 +235,35 @@ async def test_recipe_install_reports_an_unreachable_catalog_as_unavailable(
 
     assert response.status_code == 503
     assert "temporarily unavailable" in response.json()["detail"]
+
+
+async def test_drift_refusal_leaves_no_installable_plan(
+    client: AsyncClient,
+    monkeypatch,
+) -> None:  # type: ignore[no-untyped-def]
+    """A refused recipe must not leave a usable plan behind.
+
+    A persisted plan is installable on its own through the download endpoint, so
+    committing one that does not match the recipe would defeat the pin check that
+    refused the request.
+    """
+    from local_lm.db import SessionLocal
+    from local_lm.models import InstallPlan, Job
+
+    recipe = get_reference_recipe("qwen3-8b-q4-k-m")
+    assert recipe
+    _chat_recipe_catalog(
+        recipe,
+        monkeypatch,
+        files=[
+            {"filename": file.path, "size": file.size_bytes or 1024, "sha256": "f" * 64}
+            for file in recipe.files
+        ],
+    )
+
+    refused = await client.post(f"/api/recipes/{recipe.id}/install")
+    assert refused.status_code == 422
+
+    with SessionLocal() as session:
+        assert session.query(InstallPlan).count() == 0
+        assert session.query(Job).count() == 0
