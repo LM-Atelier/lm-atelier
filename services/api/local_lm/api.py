@@ -1674,16 +1674,11 @@ async def cancel_active_chat_run(
 ) -> Job:
     if not session.get(Chat, chat_id):
         raise HTTPException(404, "chat not found")
-    job = _current_chat_job(session, chat_id)
-    if not job:
+    if not _current_chat_job(session, chat_id):
         raise HTTPException(409, "chat has no cancellable run")
-    changed = await _services(request).orchestrator.cancel(job.id)
-    if not changed:
-        raise HTTPException(409, "chat run is already terminal or cannot be cancelled")
-    session.expire_all()
-    refreshed = session.get(Job, job.id)
+    refreshed = await _cancel_current_chat_work(request, session, chat_id)
     if not refreshed:
-        raise HTTPException(404, "job not found")
+        raise HTTPException(409, "chat run is already terminal or cannot be cancelled")
     return refreshed
 
 
@@ -1700,10 +1695,7 @@ async def stop_and_send_turn(
 ) -> TurnAccepted:
     if not session.get(Chat, chat_id):
         raise HTTPException(404, "chat not found")
-    job = _current_chat_job(session, chat_id)
-    if job:
-        await _services(request).orchestrator.cancel(job.id)
-        session.expire_all()
+    await _cancel_current_chat_work(request, session, chat_id)
     return await _accept_turn(
         _services(request).orchestrator,
         session,
@@ -1711,6 +1703,46 @@ async def stop_and_send_turn(
         payload,
         source_action="stop_and_send",
     )
+
+
+async def _cancel_current_chat_work(
+    request: Request,
+    session: Session,
+    chat_id: str,
+) -> Job | None:
+    """Cancel the chat's active work, including every sibling output.
+
+    One turn can produce several outputs and they run one at a time, so
+    cancelling only the running job lets the next one start immediately.
+    Stopping has to stop the whole turn.
+    """
+
+    job = _current_chat_job(session, chat_id)
+    if not job:
+        return None
+    targets = [job]
+    if job.work_plan_id:
+        siblings = list(
+            session.scalars(
+                select(Job)
+                .where(
+                    Job.work_plan_id == job.work_plan_id,
+                    Job.status.in_(["queued", "running", "paused"]),
+                    Job.cancellable.is_(True),
+                )
+                .order_by(Job.created_at, Job.id)
+            ).all()
+        )
+        targets = siblings or [job]
+    orchestrator = _services(request).orchestrator
+    cancelled = False
+    for target in targets:
+        if await orchestrator.cancel(target.id):
+            cancelled = True
+    if not cancelled:
+        return None
+    session.expire_all()
+    return session.get(Job, job.id)
 
 
 def _current_chat_job(session: Session, chat_id: str) -> Job | None:
