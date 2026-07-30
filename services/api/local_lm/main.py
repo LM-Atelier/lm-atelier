@@ -8,13 +8,15 @@ from dataclasses import dataclass
 from logging.handlers import RotatingFileHandler
 from pathlib import Path
 from typing import Any
+from urllib.parse import urlsplit
 
 import uvicorn
 from fastapi import FastAPI, Request, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, PlainTextResponse
 from fastapi.staticfiles import StaticFiles
-from starlette.middleware.trustedhost import TrustedHostMiddleware
+from starlette.datastructures import Headers
+from starlette.types import ASGIApp, Receive, Scope, Send
 
 from . import __version__
 from .adapters.comfyui import ComfyUIAdapter
@@ -51,6 +53,45 @@ AUTOMATIC_BACKUP_CHECK_INTERVAL_SECONDS = 60 * 60
 API_LOG_MAX_BYTES = 2 * 1024 * 1024
 API_LOG_BACKUP_COUNT = 3
 LOG_FORMAT = "%(asctime)s %(levelname)s %(name)s %(message)s"
+
+
+def _request_hostname(authority: str) -> str | None:
+    if not authority or authority != authority.strip() or authority.endswith(":"):
+        return None
+    try:
+        parsed = urlsplit(f"//{authority}")
+        _ = parsed.port
+    except ValueError:
+        return None
+    if (
+        not parsed.hostname
+        or parsed.username is not None
+        or parsed.password is not None
+        or parsed.path
+        or parsed.query
+        or parsed.fragment
+    ):
+        return None
+    return parsed.hostname.casefold()
+
+
+class LocalHostMiddleware:
+    def __init__(self, app: ASGIApp, *, allow_test_hosts: bool = False) -> None:
+        self.app = app
+        self.allowed_hosts = {"127.0.0.1", "localhost", "::1"}
+        if allow_test_hosts:
+            self.allowed_hosts.update({"testserver", "testclient"})
+
+    async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
+        if scope["type"] not in {"http", "websocket"}:
+            await self.app(scope, receive, send)
+            return
+        authority = Headers(scope=scope).get("host", "")
+        if _request_hostname(authority) not in self.allowed_hosts:
+            response = PlainTextResponse("Invalid host header", status_code=400)
+            await response(scope, receive, send)
+            return
+        await self.app(scope, receive, send)
 
 
 def _configure_console_logging() -> None:
@@ -293,6 +334,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         version=__version__,
         docs_url="/api/docs" if active_settings.dev else None,
         redoc_url=None,
+        openapi_url="/openapi.json" if active_settings.dev else None,
         lifespan=lifespan,
     )
     app.state.services = services
@@ -302,10 +344,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         artifact_max_bytes=active_settings.max_upload_bytes,
         project_max_bytes=active_settings.max_project_import_bytes,
     )
-    app.add_middleware(
-        TrustedHostMiddleware,
-        allowed_hosts=["127.0.0.1", "localhost", "[::1]", "testserver", "testclient"],
-    )
+    app.add_middleware(LocalHostMiddleware, allow_test_hosts=active_settings.dev)
     if active_settings.dev:
         app.add_middleware(
             CORSMiddleware,
