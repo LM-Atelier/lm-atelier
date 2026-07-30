@@ -32,7 +32,7 @@ _RUNTIME_PARAMETERS = {
 }
 _PRIMITIVE_WIDGET_TYPES = {"BOOLEAN", "COMBO", "FLOAT", "INT", "STRING"}
 _CONTROL_AFTER_GENERATE = {"decrement", "fixed", "increment", "randomize"}
-COMFY_TEMPLATE_COMPILER_VERSION = 16
+COMFY_TEMPLATE_COMPILER_VERSION = 17
 DEFAULT_IMAGE_EDIT_DENOISE = 0.9
 _ADAPTIVE_CHECKPOINT_PREFIX = "lma_image_checkpoint_v1_"
 _ADAPTIVE_CHECKPOINT_PLACEHOLDER = "__LM_ATELIER_CHECKPOINT__"
@@ -181,6 +181,7 @@ class ComfyTemplate:
     runtime_adaptive: bool = False
     published_date: str | None = None
     general_purpose: bool = True
+    performance_hints: tuple[str, ...] = ()
 
     @property
     def remote_id(self) -> str:
@@ -195,11 +196,18 @@ class ComfyTemplate:
         date_score = 0
         if self.published_date and re.fullmatch(r"\d{4}-\d{2}-\d{2}", self.published_date):
             date_score = int(self.published_date.replace("-", ""))
-        return (100_000_000 if self.general_purpose else 0) + date_score
+        performance_score = (
+            1_000_000 if _NATIVE_FAST_HINTS & set(self.performance_hints) else 0
+        ) + (2_000_000 if "kv-cache" in self.performance_hints else 0)
+        return (100_000_000 if self.general_purpose else 0) + performance_score + date_score
 
     @property
     def selected_files(self) -> list[str]:
         return [item.path for item in self.dependencies]
+
+    @property
+    def component_folders(self) -> dict[str, str]:
+        return {item.path: item.directory for item in self.dependencies}
 
     @property
     def comfy_paths(self) -> dict[str, str]:
@@ -275,6 +283,7 @@ class ComfyTemplateRegistry:
                         template_metadata,
                         dependencies,
                     ),
+                    performance_hints=_template_performance_hints(template_metadata),
                 )
             )
         return sorted(matches, key=lambda item: item.id)
@@ -399,6 +408,7 @@ class ComfyTemplateRegistry:
                     template_metadata,
                     dependencies,
                 ),
+                performance_hints=_template_performance_hints(template_metadata),
             )
         raise ValueError(f"ComfyUI template is unavailable: {template_id}")
 
@@ -441,6 +451,19 @@ class ComfyTemplateRegistry:
             input_schema["x-lm-atelier-workflow-acceleration"] = _workflow_acceleration_provenance(
                 acceleration_recipes
             )
+        performance = _workflow_performance_provenance(
+            template,
+            ui_graph,
+            api_graph,
+            input_schema,
+            object_info,
+            acceleration_recipes,
+        )
+        if performance:
+            bounds = _apply_workflow_performance_bounds(input_schema, performance)
+            if bounds:
+                performance["setting_bounds"] = bounds
+            input_schema["x-lm-atelier-workflow-performance"] = performance
         output_nodes = [
             node_id
             for node_id, node in api_graph.items()
@@ -576,6 +599,37 @@ def _metadata_string(metadata: dict[str, Any], key: str) -> str | None:
     return value if isinstance(value, str) and value else None
 
 
+def _template_performance_hints(metadata: dict[str, Any]) -> tuple[str, ...]:
+    """Return conservative performance semantics declared by the template author."""
+
+    values = [metadata.get("title"), metadata.get("description")]
+    tags = metadata.get("tags")
+    if isinstance(tags, list):
+        values.extend(tags)
+    tokens = set().union(*(_tokens(value) for value in values if isinstance(value, str)))
+    hints: list[str] = [
+        hint
+        for hint in (
+            "distilled",
+            "hyper",
+            "lcm",
+            "lightning",
+            "schnell",
+            "tcd",
+            "turbo",
+        )
+        if hint in tokens
+    ]
+    if {"few", "step"} <= tokens:
+        hints.append("few-step")
+    if {"low", "step"} <= tokens:
+        hints.append("low-step")
+    cache_terms = {"cache", "cached", "caching"}
+    if tokens & cache_terms and ("kv" in tokens or {"key", "value"} <= tokens):
+        hints.append("kv-cache")
+    return tuple(hints)
+
+
 def _metadata_marks_specialized_lora(metadata: dict[str, Any]) -> bool:
     values = [metadata.get("title"), metadata.get("description")]
     tags = metadata.get("tags")
@@ -598,7 +652,6 @@ def _supports_dependency_bundle(
     paths: set[str] = set()
     repository_revisions: dict[str, set[str]] = {}
     folder_parents: dict[str, str] = {}
-    parent_folders: dict[str, str] = {}
     for dependency in dependencies:
         path = PurePosixPath(dependency.path)
         if (
@@ -618,9 +671,6 @@ def _supports_dependency_bundle(
         parent = "." if parent == "." else parent
         existing = folder_parents.setdefault(dependency.directory, parent)
         if existing != parent:
-            return False
-        existing_folder = parent_folders.setdefault(parent, dependency.directory)
-        if existing_folder != dependency.directory:
             return False
     return all(len(revisions) == 1 for revisions in repository_revisions.values())
 
@@ -1122,6 +1172,233 @@ def _workflow_acceleration_provenance(
     if len(baseline_steps) == 1:
         result["baseline_steps"] = baseline_steps.pop()
     return result
+
+
+_NATIVE_FAST_HINTS = {
+    "distilled",
+    "few-step",
+    "hyper",
+    "low-step",
+    "lcm",
+    "lightning",
+    "schnell",
+    "tcd",
+    "turbo",
+}
+_MAX_NATIVE_FAST_STEPS = 12
+
+
+def _workflow_performance_provenance(
+    template: ComfyTemplate,
+    ui_graph: dict[str, Any],
+    api_graph: dict[str, Any],
+    input_schema: dict[str, Any],
+    object_info: dict[str, Any],
+    acceleration_recipes: tuple[WorkflowAccelerationRecipe, ...],
+) -> dict[str, Any] | None:
+    """Describe verified authored fast paths without changing workflow semantics."""
+
+    if template.operation not in {
+        "image_to_image",
+        "image_to_video",
+        "text_to_image",
+        "text_to_video",
+    }:
+        return None
+    signals: list[dict[str, Any]] = []
+    hints = set(template.performance_hints)
+    techniques = sorted(hints & _NATIVE_FAST_HINTS)
+    step_defaults = _authored_step_defaults(ui_graph, object_info)
+    properties = input_schema.get("properties")
+    step_schema = properties.get("steps") if isinstance(properties, dict) else None
+    schema_default = step_schema.get("default") if isinstance(step_schema, dict) else None
+    authored_fast_steps = (
+        schema_default
+        if len(step_defaults) == 1
+        and isinstance(schema_default, int)
+        and not isinstance(schema_default, bool)
+        and schema_default in step_defaults
+        and 1 <= schema_default <= _MAX_NATIVE_FAST_STEPS
+        else None
+    )
+    if techniques and authored_fast_steps is not None:
+        signals.append(
+            {
+                "kind": "native-low-step",
+                "techniques": techniques,
+                "steps": authored_fast_steps,
+                "source": "template-metadata-and-authored-graph",
+            }
+        )
+
+    executed_nodes = _executed_workflow_nodes(api_graph, object_info)
+    cache_nodes = sorted(
+        {
+            str(node.get("class_type"))
+            for node_id, node in api_graph.items()
+            if node_id in executed_nodes
+            and _is_model_cache_node(str(node.get("class_type") or ""), object_info)
+        }
+    )
+    if cache_nodes:
+        cache_signal: dict[str, Any] = {
+            "kind": "model-cache",
+            "technique": "kv-cache",
+            "node_types": cache_nodes,
+            "source": "executed-runtime-node-contract",
+        }
+        if authored_fast_steps is not None:
+            cache_signal["steps"] = authored_fast_steps
+        signals.append(cache_signal)
+
+    if acceleration_recipes:
+        acceleration = _workflow_acceleration_provenance(acceleration_recipes)
+        signal: dict[str, Any] = {
+            "kind": "declared-acceleration",
+            "mode": acceleration["mode"],
+            "recipe_count": acceleration["recipe_count"],
+            "source": "author-declared-graph-branch",
+        }
+        if "steps" in acceleration:
+            signal["steps"] = acceleration["steps"]
+        signals.append(signal)
+    if not signals:
+        return None
+    return {
+        "version": 1,
+        "signals": signals,
+        "native_optimized": any(
+            signal["kind"] in {"native-low-step", "model-cache"} for signal in signals
+        ),
+    }
+
+
+def _apply_workflow_performance_bounds(
+    input_schema: dict[str, Any],
+    performance: dict[str, Any],
+) -> dict[str, Any]:
+    properties = input_schema.get("properties")
+    step_schema = properties.get("steps") if isinstance(properties, dict) else None
+    signals = performance.get("signals")
+    if not isinstance(step_schema, dict) or not isinstance(signals, list):
+        return {}
+    steps = {
+        value
+        for signal in signals
+        if isinstance(signal, dict)
+        and isinstance((value := signal.get("steps")), int)
+        and not isinstance(value, bool)
+        and value > 0
+    }
+    if len(steps) != 1:
+        return {}
+    authored_steps = steps.pop()
+    if step_schema.get("default") != authored_steps:
+        return {}
+    recommended_maximum = min(
+        _MAX_NATIVE_FAST_STEPS,
+        max(authored_steps, authored_steps * 2),
+    )
+    existing_maximum = step_schema.get("maximum")
+    if isinstance(existing_maximum, int | float) and not isinstance(existing_maximum, bool):
+        recommended_maximum = min(recommended_maximum, int(existing_maximum))
+    if recommended_maximum < authored_steps:
+        return {}
+    step_schema["maximum"] = recommended_maximum
+    return {
+        "steps": {
+            "default": authored_steps,
+            "maximum": recommended_maximum,
+        }
+    }
+
+
+def _authored_step_defaults(
+    ui_graph: dict[str, Any],
+    object_info: dict[str, Any],
+) -> set[int]:
+    candidates = _candidate_workflow_graphs(ui_graph)
+    if candidates is None:
+        return set()
+    values: set[int] = set()
+    for graph in candidates:
+        for node in graph.get("nodes", []):
+            if not isinstance(node, dict) or int(node.get("mode") or 0) in {2, 4}:
+                continue
+            node_info = object_info.get(str(node.get("type") or ""))
+            if not isinstance(node_info, dict):
+                continue
+            inputs = _widget_values(
+                node,
+                node_info,
+                validate_model_choices=False,
+            )
+            value = inputs.get("steps")
+            if isinstance(value, int) and not isinstance(value, bool) and value > 0:
+                values.add(value)
+    return values
+
+
+def _executed_workflow_nodes(
+    api_graph: dict[str, Any],
+    object_info: dict[str, Any],
+) -> set[str]:
+    pending = [
+        node_id
+        for node_id, node in api_graph.items()
+        if bool((object_info.get(str(node.get("class_type") or "")) or {}).get("output_node"))
+    ]
+    executed = set(pending)
+    while pending:
+        node = api_graph.get(pending.pop())
+        inputs = node.get("inputs") if isinstance(node, dict) else None
+        if not isinstance(inputs, dict):
+            continue
+        for value in inputs.values():
+            if not isinstance(value, list) or len(value) != 2:
+                continue
+            origin = str(value[0])
+            if origin in api_graph and origin not in executed:
+                executed.add(origin)
+                pending.append(origin)
+    return executed
+
+
+def _is_model_cache_node(
+    class_type: str,
+    object_info: dict[str, Any],
+) -> bool:
+    node_info = object_info.get(class_type)
+    if not isinstance(node_info, dict):
+        return False
+    semantic_text = " ".join(
+        str(value or "")
+        for value in (
+            class_type,
+            node_info.get("display_name"),
+            node_info.get("description"),
+        )
+    )
+    semantic_text = re.sub(r"(?<=[a-z0-9])(?=[A-Z])", " ", semantic_text)
+    semantic_text = re.sub(r"(?<=[A-Z])(?=[A-Z][a-z])", " ", semantic_text)
+    tokens = _tokens(semantic_text)
+    if not (
+        tokens & {"cache", "cached", "caching"} and ("kv" in tokens or {"key", "value"} <= tokens)
+    ):
+        return False
+    input_info = node_info.get("input")
+    model_input = False
+    if isinstance(input_info, dict):
+        for section in ("required", "optional"):
+            definitions = input_info.get(section)
+            if not isinstance(definitions, dict):
+                continue
+            for spec in definitions.values():
+                if isinstance(spec, list) and spec and spec[0] == "MODEL":
+                    model_input = True
+    outputs = node_info.get("output")
+    model_output = isinstance(outputs, list) and "MODEL" in outputs
+    return model_input and model_output
 
 
 def _switch_input_origin(
