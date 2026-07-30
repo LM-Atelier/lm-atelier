@@ -2296,6 +2296,27 @@ async def catalog_preflight(
             )
             for filename in result.selected_files
         ]
+        workflow_component_folders: dict[str, str] = {}
+        workflow_contract_error: str | None = None
+        if result.workflow_template_id:
+            try:
+                selected_template = ComfyTemplateRegistry(services.settings).get(
+                    result.workflow_template_id,
+                    payload.role,
+                    remote_id=result.remote_id,
+                    revision=result.revision,
+                    selected_files=result.selected_files,
+                    comfy_paths=result.comfy_paths,
+                )
+                if (
+                    selected_template.sha256 != result.workflow_template_sha256
+                    or selected_template.selected_files != result.selected_files
+                    or selected_template.comfy_paths != result.comfy_paths
+                ):
+                    raise ValueError("workflow template changed; run the install check again")
+                workflow_component_folders = selected_template.component_folders
+            except ValueError as exc:
+                workflow_contract_error = str(exc)
         resolved = resolve_install_plan(
             remote_id=result.remote_id,
             revision=result.revision,
@@ -2306,6 +2327,7 @@ async def catalog_preflight(
             workflow_template_id=result.workflow_template_id,
             workflow_template_sha256=result.workflow_template_sha256,
             comfy_paths=result.comfy_paths,
+            workflow_component_folders=workflow_component_folders,
             source_remote_id=result.source_remote_id,
             auxiliary_kind=payload.auxiliary_kind,
         )
@@ -2313,6 +2335,11 @@ async def catalog_preflight(
             resolved = resolved.blocked(
                 "metadata_inspection_failed",
                 inspection_error,
+            )
+        if workflow_contract_error:
+            resolved = resolved.blocked(
+                "workflow_contract_changed",
+                workflow_contract_error,
             )
         if not result.can_install:
             resolved = resolved.blocked(

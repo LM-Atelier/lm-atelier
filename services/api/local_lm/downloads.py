@@ -1894,6 +1894,9 @@ class DownloadManager:
                             "probe": "bounded_media_output",
                             "operation": compiled.template.operation,
                             "workflow_template_id": compiled.template.id,
+                            "workflow_performance": compiled.input_schema.get(
+                                "x-lm-atelier-workflow-performance"
+                            ),
                         },
                     )
                 update_job_progress(

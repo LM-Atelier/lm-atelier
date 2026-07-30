@@ -15,7 +15,7 @@ from .domain import new_id
 from .model_manifests import ModelManifestInspection
 from .models import InstallPlan
 
-INSTALL_RESOLVER_VERSION = "install-resolver-v5"
+INSTALL_RESOLVER_VERSION = "install-resolver-v6"
 ACTIVATION_PROBE_VERSION = "activation-probe-v2"
 LAUNCH_CONTRACT_VERSION = "worker-launch-v1"
 
@@ -138,6 +138,7 @@ def resolve_install_plan(
     workflow_template_id: str | None = None,
     workflow_template_sha256: str | None = None,
     comfy_paths: dict[str, str] | None = None,
+    workflow_component_folders: dict[str, str] | None = None,
     source_remote_id: str | None = None,
     auxiliary_kind: str | None = None,
 ) -> ResolvedInstallPlan:
@@ -150,6 +151,7 @@ def resolve_install_plan(
             contract := _workflow_component_contract(
                 path := str(item["filename"]),
                 comfy_paths or {},
+                workflow_component_folders or {},
             )
         )
     }
@@ -279,6 +281,7 @@ def resolve_install_plan(
             COMFY_TEMPLATE_COMPILER_VERSION if workflow_template_id else None
         ),
         "comfy_paths": comfy_paths or {},
+        "workflow_component_folders": workflow_component_folders or {},
         "source_remote_id": source_remote_id,
         "auxiliary_kind": auxiliary_kind,
         "quantization": "modelopt" if engine == "vllm" else None,
@@ -316,7 +319,11 @@ def resolve_install_plan(
 def _workflow_component_contract(
     path: str,
     comfy_paths: dict[str, str],
+    component_folders: dict[str, str],
 ) -> tuple[str, str] | None:
+    declared_folder = component_folders.get(path)
+    if declared_folder in _WORKFLOW_COMPONENT_KINDS:
+        return _WORKFLOW_COMPONENT_KINDS[declared_folder], declared_folder
     parent = str(PurePosixPath(path).parent)
     parent = "." if parent == "." else parent
     folders = [

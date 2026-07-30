@@ -1580,6 +1580,11 @@ async def test_planned_media_activation_requires_output_and_records_evidence(
         async def capabilities(self) -> object:
             return SimpleNamespace(healthy=True, version="comfy-test")
 
+    performance = {
+        "version": 1,
+        "signals": [{"kind": "native-low-step", "steps": 4}],
+        "native_optimized": True,
+    }
     compiled = SimpleNamespace(
         template=SimpleNamespace(
             id="planned-image",
@@ -1590,7 +1595,7 @@ async def test_planned_media_activation_requires_output_and_records_evidence(
         ),
         ui_graph={},
         api_graph={"loader": {"class_type": "CheckpointLoaderSimple", "inputs": {}}},
-        input_schema={},
+        input_schema={"x-lm-atelier-workflow-performance": performance},
     )
     adapter = MediaAdapter()
     manager = DownloadManager(
@@ -1655,6 +1660,7 @@ async def test_planned_media_activation_requires_output_and_records_evidence(
         assert evidence.result == "ready"
         assert evidence.runtime_build == "comfy-test"
         assert evidence.workflow_contract_version == media_workflow_contract_version("a" * 64)
+        assert evidence.details_json["workflow_performance"] == performance
 
 
 async def test_adaptive_activation_failure_is_removed_before_retry(
