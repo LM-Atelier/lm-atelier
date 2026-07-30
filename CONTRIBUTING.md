@@ -37,7 +37,22 @@ discovery, preflight, and generation fixtures. Backend-supported models must
 work through capability introspection; curated per-model recipes may improve
 results but cannot be required for basic support.
 
-Run the local gate before requesting review:
+During development, run the checks closest to the files being changed:
+
+~~~powershell
+Set-Location services/api
+uv run ruff format .
+uv run ruff check .
+uv run mypy local_lm
+uv run pytest tests/test_relevant_module.py --basetemp=../../temp/focused -p no:cacheprovider
+~~~
+
+~~~bash
+npm --workspace @lm-atelier/web test
+npm run typecheck
+~~~
+
+Run the complete local gate once before requesting review:
 
 ```bash
 ./scripts/verify.sh
