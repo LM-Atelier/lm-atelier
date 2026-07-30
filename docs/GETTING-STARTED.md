@@ -34,11 +34,15 @@ Setup works in one direction, and each step depends on the one before it.
 1. **Runtime.** The engine for the role is downloaded and verified against a
    pinned checksum. This happens automatically the first time a role needs it,
    and you can start it yourself from the setup panel.
-2. **Model.** You choose a model, and its files are downloaded and checked
-   against expected hashes.
+2. **Model.** You choose a model. Before anything transfers you are shown what
+   it will cost - the download size, your free space, and the memory it needs to
+   load - and the files are then checked against expected hashes as they
+   arrive.
 3. **Activation.** The model is loaded and asked to produce one tiny output.
    Only after that does LM Atelier consider it usable. A model that downloads
-   but fails this step is not ready, and the panel says so.
+   but fails this step is not ready, and the panel says so. If activation later
+   goes stale - an update can change the runtime or workflow contract -
+   **Re-check model** proves it again without re-downloading.
 4. **Quick test.** A single small generation runs through the normal queue, end
    to end. This is what turns a role green.
 

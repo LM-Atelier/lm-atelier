@@ -53,3 +53,28 @@ export function downloadJson(value: unknown, filename: string): void {
   anchor.click();
   URL.revokeObjectURL(url);
 }
+
+/**
+ * A documentation link pinned to the running build.
+ *
+ * Linking at the default branch shows a reader instructions that may describe
+ * software they are not running. A release tag matches what they installed;
+ * anything that does not look like a release falls back to the branch, because a
+ * broken link helps nobody.
+ */
+export function docsLink(version: string, path: string): string {
+  const reference = /^\d+\.\d+\.\d+$/.test(version) ? `v${version}` : "main";
+  return `https://github.com/ajccarlson/lm-atelier/blob/${reference}/${path}`;
+}
+
+/** Help destinations, troubleshooting first because that is why people look. */
+export function supportLinks(version: string): [string, string][] {
+  return [
+    ["Troubleshooting", docsLink(version, "docs/TROUBLESHOOTING.md")],
+    ["Getting started", docsLink(version, "docs/GETTING-STARTED.md")],
+    ["Issues", "https://github.com/ajccarlson/lm-atelier/issues"],
+    ["Security", docsLink(version, "SECURITY.md")],
+    ["Support", docsLink(version, "SUPPORT.md")],
+    ["Privacy", docsLink(version, "docs/PRIVACY.md")],
+  ];
+}
