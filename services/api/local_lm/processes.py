@@ -8,6 +8,7 @@ import logging
 import os
 import re
 import sys
+import threading
 import time
 from dataclasses import dataclass, field
 from pathlib import Path, PurePosixPath
@@ -33,6 +34,7 @@ WORKER_LOG_BACKUP_COUNT = 3
 WORKER_STDERR_TAIL_BYTES = 16 * 1024
 WORKER_STDERR_DISPLAY_CHARS = 2_000
 WORKER_STDERR_DISPLAY_LINES = 12
+WINDOWS_CREATE_NO_WINDOW = 0x08000000
 
 _ANSI_ESCAPE = re.compile(r"\x1b(?:[@-_][0-?]*[ -/]*[@-~]|\][^\x07]*(?:\x07|\x1b\\))")
 _BEARER_SECRET = re.compile(r"(?i)\b(bearer)\s+\S+")
@@ -129,6 +131,12 @@ class _RotatingWorkerLog:
         return self.path.with_name(f"{self.path.name}.{index}")
 
 
+@dataclass(frozen=True)
+class _ProcessIdentity:
+    pid: int
+    create_time: float
+
+
 @dataclass
 class WorkerRecord:
     name: str
@@ -158,6 +166,10 @@ class ProcessSupervisor:
         self._workers: dict[str, WorkerRecord] = {}
         self._locks = {"chat": asyncio.Lock(), "media": asyncio.Lock()}
         self._private_output_suppression_depth = 0
+        self._identity_path = self.settings.state_dir / "worker-processes.json"
+        self._identity_lock = threading.Lock()
+        self._worker_identities = self._load_worker_identities()
+        self._reap_persisted_workers()
 
     @property
     def private_output_suppressed(self) -> bool:
@@ -266,7 +278,7 @@ class ProcessSupervisor:
                 profile.id,
                 estimated_memory_bytes=estimate,
             )
-        except Exception:
+        except (Exception, asyncio.CancelledError):
             self.settings.chat_engine = previous_engine
             raise
         return self.statuses()[0]
@@ -339,7 +351,7 @@ class ProcessSupervisor:
                 profile.id,
                 estimated_memory_bytes=estimate,
             )
-        except Exception:
+        except (Exception, asyncio.CancelledError):
             self.settings.chat_engine = previous_engine
             raise
         return self.statuses()[0]
@@ -532,18 +544,31 @@ class ProcessSupervisor:
     ) -> None:
         async with self._locks[name]:
             await self._stop_unlocked(name)
+            await self._ensure_port_available(name, health_url)
             startup_started_at = time.perf_counter()
             log_path = self.settings.log_dir / f"{name}-worker.log"
             worker_log = _RotatingWorkerLog(log_path)
             try:
-                process = await asyncio.create_subprocess_exec(
-                    *command,
-                    stdin=asyncio.subprocess.DEVNULL,
-                    stdout=asyncio.subprocess.PIPE,
-                    stderr=asyncio.subprocess.PIPE,
-                    env=subprocess_environment(),
-                    start_new_session=True,
-                )
+                environment = subprocess_environment()
+                if os.name == "nt":
+                    process = await asyncio.create_subprocess_exec(
+                        *command,
+                        stdin=asyncio.subprocess.DEVNULL,
+                        stdout=asyncio.subprocess.PIPE,
+                        stderr=asyncio.subprocess.PIPE,
+                        env=environment,
+                        start_new_session=True,
+                        creationflags=WINDOWS_CREATE_NO_WINDOW,
+                    )
+                else:
+                    process = await asyncio.create_subprocess_exec(
+                        *command,
+                        stdin=asyncio.subprocess.DEVNULL,
+                        stdout=asyncio.subprocess.PIPE,
+                        stderr=asyncio.subprocess.PIPE,
+                        env=environment,
+                        start_new_session=True,
+                    )
             except Exception as exc:
                 worker_log.close()
                 message = self._sanitize_diagnostic(str(exc))
@@ -561,11 +586,26 @@ class ProcessSupervisor:
             record.output_task = asyncio.create_task(self._capture_process_output(record))
             self._workers[name] = record
             try:
+                if process.returncode is None:
+                    self._record_worker_process_tree(name, process.pid)
                 await self._wait_healthy(record, health_url)
                 record.startup_duration_ms = round(
                     (time.perf_counter() - startup_started_at) * 1_000
                 )
                 record.state = "ready"
+            except asyncio.CancelledError:
+                cleanup = asyncio.create_task(self._terminate_record(record))
+                try:
+                    await asyncio.shield(cleanup)
+                except asyncio.CancelledError:
+                    with contextlib.suppress(Exception):
+                        await cleanup
+                except Exception:
+                    logger.exception("Could not clean up cancelled %s worker start", name)
+                finally:
+                    if self._workers.get(name) is record:
+                        self._workers.pop(name)
+                raise
             except Exception as exc:
                 record.startup_duration_ms = round(
                     (time.perf_counter() - startup_started_at) * 1_000
@@ -590,14 +630,247 @@ class ProcessSupervisor:
                     raise RuntimeError(
                         f"{record.name} worker exited with code {record.process.returncode}"
                     )
+                self._record_worker_process_tree(record.name, record.process.pid)
                 try:
                     response = await client.get(url, timeout=1)
                     if response.is_success:
-                        return
+                        if self._listener_owned_by_worker(record.process.pid, url):
+                            return
+                        raise RuntimeError(
+                            f"{record.name} worker health endpoint is served by another process"
+                        )
                 except httpx.HTTPError:
                     pass
                 await asyncio.sleep(0.2)
         raise TimeoutError(f"{record.name} worker did not become healthy before timeout")
+
+    async def _ensure_port_available(self, name: str, url: str) -> None:
+        parsed = urlparse(url)
+        host = parsed.hostname
+        port = parsed.port
+        if not host or not port:
+            raise ValueError(f"{name} worker health URL has no host and port")
+        try:
+            _reader, writer = await asyncio.wait_for(
+                asyncio.open_connection(host, port),
+                timeout=0.25,
+            )
+        except ConnectionRefusedError:
+            return
+        except (OSError, TimeoutError) as exc:
+            raise OSError(f"{name} worker port {host}:{port} could not be checked") from exc
+        writer.close()
+        with contextlib.suppress(OSError):
+            await writer.wait_closed()
+        raise OSError(f"{name} worker cannot start because {host}:{port} is already in use")
+
+    @staticmethod
+    def _listener_owned_by_worker(pid: int, url: str) -> bool:
+        parsed = urlparse(url)
+        port = parsed.port
+        if not port:
+            return False
+        try:
+            root = psutil.Process(pid)
+            processes = [root, *root.children(recursive=True)]
+        except (psutil.AccessDenied, psutil.NoSuchProcess):
+            return False
+        for process in processes:
+            try:
+                connections = process.net_connections(kind="tcp")
+            except (psutil.AccessDenied, psutil.NoSuchProcess, OSError):
+                continue
+            for connection in connections:
+                address = connection.laddr
+                connection_port = getattr(address, "port", None)
+                if connection_port is None and len(address) > 1:
+                    connection_port = address[1]
+                if connection.status == psutil.CONN_LISTEN and connection_port == port:
+                    return True
+        return False
+
+    def _load_worker_identities(self) -> dict[str, list[_ProcessIdentity]]:
+        if not self._identity_path.is_file():
+            return {}
+        try:
+            payload = json.loads(self._identity_path.read_text(encoding="utf-8"))
+            if not isinstance(payload, dict) or payload.get("version") != 1:
+                raise ValueError("unsupported worker identity record")
+            workers = payload.get("workers")
+            if not isinstance(workers, dict) or set(workers) - set(self._locks):
+                raise ValueError("invalid worker identity record")
+            result: dict[str, list[_ProcessIdentity]] = {}
+            for name, items in workers.items():
+                if not isinstance(items, list) or len(items) > 64:
+                    raise ValueError("invalid worker identity list")
+                identities: list[_ProcessIdentity] = []
+                for item in items:
+                    if not isinstance(item, dict):
+                        raise ValueError("invalid worker identity")
+                    pid = item.get("pid")
+                    create_time = item.get("create_time")
+                    if (
+                        not isinstance(pid, int)
+                        or isinstance(pid, bool)
+                        or pid <= 0
+                        or not isinstance(create_time, (int, float))
+                        or isinstance(create_time, bool)
+                        or create_time <= 0
+                    ):
+                        raise ValueError("invalid worker identity")
+                    identities.append(_ProcessIdentity(pid, float(create_time)))
+                if identities:
+                    result[name] = identities
+            return result
+        except (OSError, UnicodeError, ValueError, json.JSONDecodeError):
+            logger.warning("Discarding an invalid persisted worker identity record")
+            with contextlib.suppress(OSError):
+                self._identity_path.unlink()
+            return {}
+
+    def _persist_worker_identities(self) -> None:
+        if not self._worker_identities:
+            with contextlib.suppress(OSError):
+                self._identity_path.unlink()
+            return
+        payload = {
+            "version": 1,
+            "workers": {
+                name: [
+                    {"pid": identity.pid, "create_time": identity.create_time}
+                    for identity in identities
+                ]
+                for name, identities in sorted(self._worker_identities.items())
+            },
+        }
+        temporary = self._identity_path.with_suffix(".tmp")
+        try:
+            temporary.write_text(json.dumps(payload, sort_keys=True), encoding="utf-8")
+            os.replace(temporary, self._identity_path)
+        except OSError:
+            with contextlib.suppress(OSError):
+                temporary.unlink()
+            logger.exception("Could not persist worker process identities")
+
+    @staticmethod
+    def _matching_process(identity: _ProcessIdentity) -> psutil.Process | None:
+        if identity.pid == os.getpid():
+            return None
+        try:
+            process = psutil.Process(identity.pid)
+            if process.create_time() != identity.create_time:
+                return None
+            return process
+        except (psutil.AccessDenied, psutil.NoSuchProcess):
+            return None
+
+    @staticmethod
+    def _identity_may_still_exist(identity: _ProcessIdentity) -> bool:
+        if identity.pid == os.getpid():
+            return False
+        try:
+            return psutil.Process(identity.pid).create_time() == identity.create_time
+        except psutil.AccessDenied:
+            return True
+        except psutil.NoSuchProcess:
+            return False
+
+    def _record_worker_process_tree(self, name: str, pid: int) -> None:
+        try:
+            root = psutil.Process(pid)
+            processes = [root, *root.children(recursive=True)]
+        except (psutil.AccessDenied, psutil.NoSuchProcess):
+            return
+        identities: list[_ProcessIdentity] = []
+        for process in processes:
+            try:
+                identities.append(_ProcessIdentity(process.pid, process.create_time()))
+            except (psutil.AccessDenied, psutil.NoSuchProcess):
+                continue
+        identities.sort(key=lambda identity: identity.pid)
+        if not identities:
+            return
+        with self._identity_lock:
+            if self._worker_identities.get(name) == identities:
+                return
+            self._worker_identities[name] = identities
+            self._persist_worker_identities()
+
+    def _refresh_worker_identities_after_stop(self, name: str) -> None:
+        with self._identity_lock:
+            remaining = [
+                identity
+                for identity in self._worker_identities.get(name, [])
+                if self._identity_may_still_exist(identity)
+            ]
+            if remaining:
+                self._worker_identities[name] = remaining
+            else:
+                self._worker_identities.pop(name, None)
+            self._persist_worker_identities()
+
+    def _reap_persisted_workers(self) -> None:
+        matches: list[psutil.Process] = []
+        for identities in self._worker_identities.values():
+            for identity in identities:
+                process = self._matching_process(identity)
+                if process is not None:
+                    matches.append(process)
+        if matches:
+            self._terminate_processes(matches, self.settings.worker_shutdown_seconds)
+            logger.info("Attempted cleanup of %s persisted worker process(es)", len(matches))
+        for name in tuple(self._worker_identities):
+            self._refresh_worker_identities_after_stop(name)
+
+    @staticmethod
+    def _terminate_processes(
+        processes: list[psutil.Process],
+        timeout_seconds: float,
+    ) -> None:
+        by_pid = {process.pid: process for process in processes}
+        for process in tuple(by_pid.values()):
+            with contextlib.suppress(psutil.AccessDenied, psutil.NoSuchProcess):
+                for child in process.children(recursive=True):
+                    by_pid.setdefault(child.pid, child)
+        live: list[psutil.Process] = []
+        for process in by_pid.values():
+            try:
+                process.terminate()
+                live.append(process)
+            except (psutil.AccessDenied, psutil.NoSuchProcess):
+                continue
+        _gone, remaining = psutil.wait_procs(live, timeout=timeout_seconds)
+        for process in remaining:
+            with contextlib.suppress(psutil.AccessDenied, psutil.NoSuchProcess):
+                process.kill()
+        if remaining:
+            psutil.wait_procs(remaining, timeout=timeout_seconds)
+
+    @staticmethod
+    def _descendant_processes(pid: int) -> list[psutil.Process]:
+        try:
+            return psutil.Process(pid).children(recursive=True)
+        except (psutil.AccessDenied, psutil.NoSuchProcess):
+            return []
+
+    @staticmethod
+    def _terminate_descendants(
+        descendants: list[psutil.Process],
+        timeout_seconds: float,
+    ) -> None:
+        live: list[psutil.Process] = []
+        for process in descendants:
+            try:
+                process.terminate()
+                live.append(process)
+            except (psutil.AccessDenied, psutil.NoSuchProcess):
+                continue
+        _gone, remaining = psutil.wait_procs(live, timeout=timeout_seconds)
+        for process in remaining:
+            with contextlib.suppress(psutil.AccessDenied, psutil.NoSuchProcess):
+                process.kill()
+        if remaining:
+            psutil.wait_procs(remaining, timeout=timeout_seconds)
 
     async def _stop_unlocked(self, name: str) -> None:
         record = self._workers.pop(name, None)
@@ -607,6 +880,11 @@ class ProcessSupervisor:
 
     async def _terminate_record(self, record: WorkerRecord) -> None:
         try:
+            descendants = (
+                await asyncio.to_thread(self._descendant_processes, record.process.pid)
+                if record.process.returncode is None
+                else []
+            )
             if record.process.returncode is None:
                 with contextlib.suppress(ProcessLookupError):
                     record.process.terminate()
@@ -615,11 +893,19 @@ class ProcessSupervisor:
                         record.process.wait(), timeout=self.settings.worker_shutdown_seconds
                     )
                 except TimeoutError:
-                    record.process.kill()
+                    with contextlib.suppress(ProcessLookupError):
+                        record.process.kill()
                     await record.process.wait()
+            if descendants:
+                await asyncio.to_thread(
+                    self._terminate_descendants,
+                    descendants,
+                    self.settings.worker_shutdown_seconds,
+                )
             if record.output_task:
                 await record.output_task
         finally:
+            self._refresh_worker_identities_after_stop(record.name)
             record.log.close()
 
     async def _capture_process_output(self, record: WorkerRecord) -> None:
