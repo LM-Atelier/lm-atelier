@@ -450,15 +450,20 @@ async def worker_status(request: Request, session: SessionDep) -> list[WorkerSta
 
 
 @router.get("/runtimes", response_model=list[RuntimeStatus])
-async def runtime_status(request: Request) -> list[RuntimeStatus]:
+def runtime_status(request: Request) -> list[RuntimeStatus]:
+    # Deliberately synchronous: reading runtime status touches the filesystem, so
+    # the framework runs this in a worker thread rather than on the event loop.
     return _services(request).runtimes.statuses()
 
 
 @router.get("/setup/readiness", response_model=SetupReadinessReport)
-async def get_setup_readiness(
+def get_setup_readiness(
     request: Request,
     session: SessionDep,
 ) -> SetupReadinessReport:
+    # Deliberately synchronous, and polled every few seconds while setup is
+    # incomplete: this reads runtime status from disk and queries the database,
+    # so it belongs in a worker thread rather than blocking every other request.
     services = _services(request)
     return setup_readiness_report(
         session,

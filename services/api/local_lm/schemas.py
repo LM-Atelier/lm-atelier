@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from datetime import datetime
+from enum import StrEnum
 from typing import Annotated, Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, StringConstraints
@@ -236,6 +237,24 @@ class RegenerateRequest(ApiModel):
     settings: dict[str, Any] = Field(default_factory=dict)
 
 
+class RoutingReasonCode(StrEnum):
+    EXPLICIT_TEXT_MODE = "explicit_text_mode"
+    EXPLICIT_IMAGE_MODE = "explicit_image_mode"
+    EXPLICIT_VIDEO_MODE = "explicit_video_mode"
+    REPEAT_LAST_GENERATION = "repeat_last_generation"
+    ASSISTANT_SUGGESTION_SELECTED = "assistant_suggestion_selected"
+    DISCUSSION = "discussion"
+    TEXT_EDIT = "text_edit"
+    TEXT_MEDIA_TASK = "text_media_task"
+    VIDEO_CREATION = "video_creation"
+    PRIOR_IMAGE_EDIT = "prior_image_edit"
+    IMAGE_CREATION = "image_creation"
+    TEXT_TASK = "text_task"
+    DEFAULT_TEXT = "default_text"
+    MODEL_PLANNER = "model_planner"
+    GENERATION_OFFER_ACCEPTED = "generation_offer_accepted"
+
+
 class RoutingPlan(ApiModel):
     operation: Operation
     standalone_prompt: str
@@ -246,6 +265,7 @@ class RoutingPlan(ApiModel):
     parameter_overrides: dict[str, Any] = Field(default_factory=dict)
     output_count: int = Field(default=1, ge=1, le=16)
     confidence: float = Field(ge=0, le=1)
+    reason_code: RoutingReasonCode
     reason: str
 
 
