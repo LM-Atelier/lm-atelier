@@ -1808,18 +1808,26 @@ describe("App", () => {
       "href",
       "https://github.com/ajccarlson/lm-atelier/issues",
     );
+    // Documentation is pinned to the running release, so a reader is not shown
+    // instructions for software they are not running.
     expect(screen.getByRole("link", { name: "Security" })).toHaveAttribute(
       "href",
-      "https://github.com/ajccarlson/lm-atelier/blob/main/SECURITY.md",
+      "https://github.com/ajccarlson/lm-atelier/blob/v0.1.7/SECURITY.md",
     );
     expect(screen.getByRole("link", { name: "Support" })).toHaveAttribute(
       "href",
-      "https://github.com/ajccarlson/lm-atelier/blob/main/SUPPORT.md",
+      "https://github.com/ajccarlson/lm-atelier/blob/v0.1.7/SUPPORT.md",
     );
     expect(screen.getByRole("link", { name: "Privacy" })).toHaveAttribute(
       "href",
-      "https://github.com/ajccarlson/lm-atelier/blob/main/docs/PRIVACY.md",
+      "https://github.com/ajccarlson/lm-atelier/blob/v0.1.7/docs/PRIVACY.md",
     );
+    // The one document a stuck user needs was previously unreachable from here.
+    expect(screen.getByRole("link", { name: "Troubleshooting" })).toHaveAttribute(
+      "href",
+      "https://github.com/ajccarlson/lm-atelier/blob/v0.1.7/docs/TROUBLESHOOTING.md",
+    );
+    expect(screen.getByRole("link", { name: "Getting started" })).toBeInTheDocument();
 
     fireEvent.click(screen.getByRole("button", { name: "Copy data folder" }));
     await waitFor(() => {
