@@ -5,6 +5,7 @@ import logging
 from contextlib import asynccontextmanager, suppress
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Any
 
 import uvicorn
 from fastapi import FastAPI, Request, WebSocket, WebSocketDisconnect
@@ -49,6 +50,66 @@ logging.basicConfig(
 )
 logger = logging.getLogger("local_lm")
 AUTOMATIC_BACKUP_CHECK_INTERVAL_SECONDS = 60 * 60
+
+
+async def _cancel_task(task: asyncio.Task[Any] | None) -> None:
+    if task is None:
+        return
+    if not task.done():
+        task.cancel()
+    with suppress(asyncio.CancelledError):
+        await task
+
+
+async def _wait_for_websocket_disconnect(websocket: WebSocket) -> None:
+    while True:
+        message = await websocket.receive()
+        if message["type"] == "websocket.disconnect":
+            return
+
+
+async def _stream_events(websocket: WebSocket, broker: EventBroker, *, after: int) -> None:
+    disconnect_task = asyncio.create_task(
+        _wait_for_websocket_disconnect(websocket),
+        name="event-websocket-disconnect",
+    )
+    event_task: asyncio.Task[Any] | None = None
+    send_task: asyncio.Task[Any] | None = None
+    try:
+        async with broker.subscribe(after) as queue:
+            while True:
+                event_task = asyncio.create_task(queue.get(), name="event-websocket-next-event")
+                done, _ = await asyncio.wait(
+                    {disconnect_task, event_task},
+                    return_when=asyncio.FIRST_COMPLETED,
+                )
+                if disconnect_task in done:
+                    await _cancel_task(event_task)
+                    event_task = None
+                    await disconnect_task
+                    return
+
+                event = event_task.result()
+                event_task = None
+                send_task = asyncio.create_task(
+                    websocket.send_json(event.model_dump(mode="json")),
+                    name="event-websocket-send",
+                )
+                done, _ = await asyncio.wait(
+                    {disconnect_task, send_task},
+                    return_when=asyncio.FIRST_COMPLETED,
+                )
+                if disconnect_task in done:
+                    await _cancel_task(send_task)
+                    send_task = None
+                    await disconnect_task
+                    return
+                await send_task
+                send_task = None
+    finally:
+        await _cancel_task(event_task)
+        await _cancel_task(send_task)
+        await _cancel_task(disconnect_task)
 
 
 @dataclass
@@ -257,10 +318,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             return
         await websocket.accept()
         try:
-            async with services.events.subscribe(after) as queue:
-                while True:
-                    event = await queue.get()
-                    await websocket.send_json(event.model_dump(mode="json"))
+            await _stream_events(websocket, services.events, after=after)
         except WebSocketDisconnect:
             return
 
