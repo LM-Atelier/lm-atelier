@@ -15,8 +15,9 @@ _IMAGE_CREATE = re.compile(
     re.IGNORECASE,
 )
 _VIDEO_CREATE = re.compile(
+    # "clip art" is a still image, so the bare noun cannot claim the request.
     r"\b(?:create|generate|make|render|produce|animate)\b.*"
-    r"\b(?:video|animation|clip|movie|footage)\b",
+    r"\b(?:video|animation|clip(?!\s+art\b)|movie|footage)\b",
     re.IGNORECASE,
 )
 _DIRECT_IMAGE = re.compile(r"^\s*(?:draw|paint|illustrate|render)\b", re.IGNORECASE)
@@ -217,34 +218,138 @@ _VISUAL_COLOR_TERMS = {
 }
 _TEXTUAL_TASK_TERMS = {
     "advice",
+    "blurb",
+    "brief",
+    "bullet",
+    "bullets",
     "code",
     "document",
+    "essay",
     "grammar",
     "instructions",
     "list",
     "metaphor",
+    "note",
+    "notes",
+    "outline",
     "paragraph",
     "poem",
+    "points",
+    "prompt",
+    "prompts",
     "punctuation",
+    "recap",
+    "report",
     "script",
     "sentence",
     "story",
+    "summaries",
+    "summary",
+    "synopsis",
+    "transcript",
     "wording",
 }
-_TEXT_MEDIA_TASK_LEADING_VERBS = {"compose", "create", "draft", "generate", "write"}
+# Nouns that name a medium. Their presence is what lets the media branches claim
+# a request, so the text-task guard only has to run when one appears.
+_MEDIA_NOUNS = {
+    "animation",
+    "artwork",
+    "clip",
+    "drawing",
+    "footage",
+    "icon",
+    "illustration",
+    "image",
+    "images",
+    "logo",
+    "movie",
+    "painting",
+    "photo",
+    "photos",
+    "picture",
+    "pictures",
+    "portrait",
+    "poster",
+    "sketch",
+    "video",
+    "videos",
+    "wallpaper",
+}
+# Verbs that only ever produce text. A request opening with one of these is a
+# text task whatever medium it goes on to mention, so "summarize the article and
+# design a logo brief" is writing rather than illustration.
+_TEXT_ONLY_LEADING_VERBS = {
+    "analyse",
+    "analyze",
+    "answer",
+    "brainstorm",
+    "calculate",
+    "compute",
+    "count",
+    "critique",
+    "proofread",
+    "reply",
+    "respond",
+    "reword",
+    "rewrite",
+    "solve",
+    "summarise",
+    "summarize",
+    "translate",
+}
+# Verbs that produce either text or media. One of these opens a text task only
+# when the request also names something textual as the thing to produce.
+_TEXT_MEDIA_TASK_LEADING_VERBS = {
+    "compose",
+    "create",
+    "draft",
+    "generate",
+    "make",
+    "prepare",
+    "write",
+}
 
 
 def _intent_tokens(text: str) -> list[str]:
     return re.findall(r"[a-z0-9]+(?:-[a-z0-9]+)?", text.casefold())
 
 
+def _leading_intent_verb(tokens: list[str]) -> str | None:
+    """The first meaningful verb, skipping politeness and an indirect object."""
+    index = 0
+    while index < len(tokens) and tokens[index] in {"now", "please", "can", "you", "could"}:
+        index += 1
+    if index >= len(tokens):
+        return None
+    verb = tokens[index]
+    return verb
+
+
 def _clear_text_media_task(text: str) -> bool:
+    """Whether a request that mentions a medium is really asking for text.
+
+    This exists only to stop the media branches from claiming a writing task that
+    happens to name a medium, so it stays out of the way when no medium is
+    mentioned at all.
+
+    For a verb that could produce either, the first thing named after it is what
+    is being asked for; anything named later is source material. That separates
+    "make a list of image prompts" from "make an image based on the story".
+    """
     tokens = _intent_tokens(text)
-    return bool(
-        tokens
-        and tokens[0] in _TEXT_MEDIA_TASK_LEADING_VERBS
-        and set(tokens[1:]) & _TEXTUAL_TASK_TERMS
-    )
+    verb = _leading_intent_verb(tokens)
+    if not verb or not set(tokens) & _MEDIA_NOUNS:
+        return False
+    if verb in _TEXT_ONLY_LEADING_VERBS:
+        return True
+    if verb not in _TEXT_MEDIA_TASK_LEADING_VERBS:
+        return False
+    for token in tokens[tokens.index(verb) + 1 :]:
+        if token in _TEXTUAL_TASK_TERMS:
+            return True
+        if token in _MEDIA_NOUNS:
+            return False
+    return False
 
 
 def _clear_visual_edit_intent(text: str) -> bool:
