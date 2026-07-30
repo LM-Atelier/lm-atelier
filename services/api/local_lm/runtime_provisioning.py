@@ -1167,32 +1167,73 @@ class RuntimeProvisioner:
         return paths
 
     def _integrity_file_map(self, root: Path) -> dict[str, Path]:
+        """Enumerate the files that make up a managed runtime.
+
+        This runs on every status read, and status is read on every setup
+        readiness poll, so it walks with `os.scandir` and reuses the metadata the
+        directory read already returned. The previous `rglob` plus `resolve` plus
+        `stat` cost three or more syscalls per entry and took about 7.8 seconds
+        across the 55,000 files of the ComfyUI runtime - longer than the poll
+        interval, which is what made setup appear to hang.
+
+        Only a reparse point can refer somewhere else, so only a reparse point is
+        resolved and containment-checked. An ordinary entry cannot escape the
+        root because there is nothing to follow.
+        """
+
         files: dict[str, Path] = {}
         total_size = 0
-        for candidate in root.rglob("*"):
-            relative = candidate.relative_to(root)
-            relative_posix = str(relative).replace("\\", "/")
-            if relative_posix == _MANAGED_MARKER or self._mutable_runtime_path(relative):
-                continue
-            resolved = candidate.resolve()
-            self._ensure_inside(root, resolved)
-            if candidate.is_symlink() and resolved.is_dir():
-                raise RuntimeProvisioningError(
-                    "The runtime contains an unsupported dependency directory link."
-                )
-            if candidate.is_dir():
-                continue
-            if not resolved.is_file():
-                raise RuntimeProvisioningError(
-                    "The runtime contains an unsupported dependency file type."
-                )
-            files[relative_posix] = candidate
-            total_size += resolved.stat().st_size
-            if len(files) > _MAX_RUNTIME_FILES or total_size > _MAX_RUNTIME_BYTES:
-                raise RuntimeProvisioningError(
-                    "The runtime dependency tree exceeds its integrity limits."
-                )
+        stack = [root]
+        while stack:
+            with os.scandir(stack.pop()) as entries:
+                for entry in entries:
+                    candidate = Path(entry.path)
+                    relative = candidate.relative_to(root)
+                    relative_posix = str(relative).replace("\\", "/")
+                    if relative_posix == _MANAGED_MARKER or self._mutable_runtime_path(relative):
+                        continue
+                    if self._is_reparse_point(entry):
+                        resolved = candidate.resolve()
+                        self._ensure_inside(root, resolved)
+                        if resolved.is_dir():
+                            raise RuntimeProvisioningError(
+                                "The runtime contains an unsupported dependency directory link."
+                            )
+                        if not resolved.is_file():
+                            raise RuntimeProvisioningError(
+                                "The runtime contains an unsupported dependency file type."
+                            )
+                        size = resolved.stat().st_size
+                    elif entry.is_dir(follow_symlinks=False):
+                        stack.append(candidate)
+                        continue
+                    elif not entry.is_file(follow_symlinks=False):
+                        raise RuntimeProvisioningError(
+                            "The runtime contains an unsupported dependency file type."
+                        )
+                    else:
+                        size = entry.stat(follow_symlinks=False).st_size
+                    files[relative_posix] = candidate
+                    total_size += size
+                    if len(files) > _MAX_RUNTIME_FILES or total_size > _MAX_RUNTIME_BYTES:
+                        raise RuntimeProvisioningError(
+                            "The runtime dependency tree exceeds its integrity limits."
+                        )
         return files
+
+    @staticmethod
+    def _is_reparse_point(entry: os.DirEntry[str]) -> bool:
+        """Whether an entry can refer somewhere other than where it sits.
+
+        `is_symlink` misses Windows junctions, which carry a different reparse
+        tag, so the file attributes are consulted too. A junction escaping its
+        tree has already caused damage in this project once.
+        """
+
+        if entry.is_symlink():
+            return True
+        attributes = getattr(entry.stat(follow_symlinks=False), "st_file_attributes", 0)
+        return bool(attributes & getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0))
 
     @staticmethod
     def _mutable_runtime_path(relative: Path) -> bool:
