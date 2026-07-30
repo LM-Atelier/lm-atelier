@@ -693,6 +693,30 @@ def test_ordinal_selection_beyond_the_list_stays_text() -> None:
     assert plan.operation == Operation.TEXT
 
 
+@pytest.mark.parametrize(
+    "bullet",
+    ["-", "*", "•", "‣", "◦"],
+    ids=["hyphen", "asterisk", "bullet", "triangular", "white-bullet"],
+)
+def test_ordinal_selection_reads_bulleted_lists(bullet: str) -> None:
+    """A mangled bullet in the list pattern silently dropped these for a while."""
+    listing = (
+        "Here are some image ideas:\n"
+        f"{bullet} A fox curled beneath a snow-covered pine\n"
+        f"{bullet} A tram crossing a viaduct in golden fog"
+    )
+
+    plan = ModalityRouter().plan(
+        text="Make me the second one",
+        mode=RoutingMode.AUTO,
+        input_artifact_ids=[],
+        conversation=[{"role": "assistant", "content": listing}],
+    )
+
+    assert plan.operation == Operation.TEXT_TO_IMAGE
+    assert plan.standalone_prompt == "A tram crossing a viaduct in golden fog"
+
+
 def test_ordinal_selection_skips_media_summaries_to_find_the_list() -> None:
     plan = ModalityRouter().plan(
         text="Make me the first one",
