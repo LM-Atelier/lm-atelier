@@ -7,6 +7,7 @@ import shutil
 import subprocess
 import sys
 from pathlib import Path
+from time import monotonic
 from typing import Any
 
 import psutil
@@ -15,6 +16,9 @@ from .config import Settings
 from .platforms import assess_platform
 from .schemas import DeviceInfo, SystemInfo
 from .subprocess_env import subprocess_environment
+
+_CAPABILITY_CLASS_TTL_SECONDS = 60.0
+_capability_class_cache: tuple[float, str] | None = None
 
 
 def _cpu_model() -> str:
@@ -199,9 +203,29 @@ def collect_system_info(settings: Settings) -> SystemInfo:
     )
 
 
-def hardware_capability_class(settings: Settings) -> str:
-    """Return a stable hardware key without volatile free-memory measurements."""
+def reset_hardware_capability_class_cache() -> None:
+    """Forget the memoized capability class."""
 
+    global _capability_class_cache
+    _capability_class_cache = None
+
+
+def hardware_capability_class(settings: Settings) -> str:
+    """Return a stable hardware key without volatile free-memory measurements.
+
+    Enumerating devices shells out to `nvidia-smi` and `llama-server`, and this
+    runs once per installed model on every setup readiness poll, so a fresh
+    machine polling every few seconds spawned several subprocesses per poll and
+    made setup appear to hang. The key deliberately excludes volatile
+    measurements, so it is memoized briefly; the lifetime is short enough that a
+    genuine hardware or runtime change is picked up without a restart.
+    """
+
+    global _capability_class_cache
+    now = monotonic()
+    cached = _capability_class_cache
+    if cached and now - cached[0] < _CAPABILITY_CLASS_TTL_SECONDS:
+        return cached[1]
     system = collect_system_info(settings)
     stable_devices = sorted(
         (
@@ -223,4 +247,6 @@ def hardware_capability_class(settings: Settings) -> str:
     digest = hashlib.sha256(
         json.dumps(payload, sort_keys=True, separators=(",", ":")).encode()
     ).hexdigest()[:24]
-    return f"{system.platform.casefold()}-{system.architecture.casefold()}-{digest}"
+    capability_class = f"{system.platform.casefold()}-{system.architecture.casefold()}-{digest}"
+    _capability_class_cache = (now, capability_class)
+    return capability_class
