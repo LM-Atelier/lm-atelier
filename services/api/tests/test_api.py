@@ -6192,6 +6192,7 @@ async def test_catalog_preflight_blocks_gated_unsafe_weights(
     # passes in CI and fails on any machine where a Hugging Face credential has
     # been stored - which is every machine that has installed a gated model.
     monkeypatch.setattr(settings, "hf_token", None)
+
     async def inspect(
         _catalog: HuggingFaceCatalog,
         remote_id: str,
