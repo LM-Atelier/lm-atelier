@@ -259,6 +259,27 @@ class VerifiedSetup(ApiModel):
     digest: str
 
 
+class ResolvedSetupComponent(ApiModel):
+    target_folder: str
+    sha256: str
+    present: bool
+
+
+class ResolvedSetup(ApiModel):
+    """What an imported setup finds on this machine, and what it still needs."""
+
+    version: int
+    digest: str | None
+    components: list[ResolvedSetupComponent]
+    missing_components: list[dict[str, str]]
+    hardware_compatible: bool
+    # Provenance from the artifact, kept separate from anything earned here.
+    verified_elsewhere: bool
+    verified_here: bool
+    requires_approval: bool
+    ready_to_verify: bool
+
+
 class TrustDerivation(ApiModel):
     """Whether this machine could vouch for a workflow by rebuilding it."""
 

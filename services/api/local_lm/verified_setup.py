@@ -21,13 +21,22 @@ from __future__ import annotations
 import hashlib
 import json
 from collections.abc import Mapping
+from dataclasses import dataclass
 from typing import Any
 
+from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from .model_planner import model_components_for_install
+from .config import Settings
+from .hardware import hardware_envelope, hardware_envelope_satisfied
+from .model_planner import (
+    MODEL_COMPONENTS_KEY,
+    declared_model_components,
+    model_components_for_install,
+)
 from .models import (
     ModelCapabilityEvidence,
+    ModelComponentManifest,
     ModelInstall,
     ModelProfile,
     SetupVerification,
@@ -160,3 +169,96 @@ def local_identifiers_in(payload: Mapping[str, Any]) -> list[str]:
 
     walk(payload, "")
     return found
+
+
+# --- Resolving an imported record against this machine ------------------------
+#
+# Decided with Codex (R40/R36). An imported artifact resolves what this machine
+# already has and *offers* the rest: installed content-addressed components may
+# be selected automatically, anything missing stays behind the existing
+# approval-gated install path. A file must not be able to make this machine fetch
+# several gigabytes because it says so.
+#
+# Configuration travels; trust does not. The imported attestation is provenance -
+# it can say this artifact worked elsewhere on compatible hardware - but it
+# cannot authorize execution or become local capability evidence. The receiving
+# machine verifies its own bytes, rebuilds the graph, and runs its own probe.
+# A hardware envelope establishes compatibility, not identity of the local
+# runtime, drivers, files or result, so it cannot carry an attestation across
+# machines.
+
+
+@dataclass(frozen=True)
+class ResolvedComponent:
+    target_folder: str
+    sha256: str
+    install_id: str | None
+
+    @property
+    def present(self) -> bool:
+        return self.install_id is not None
+
+
+def resolve_verified_setup(
+    session: Session,
+    payload: Mapping[str, Any],
+    settings: Settings,
+) -> dict[str, Any]:
+    """What this machine already has for an imported setup, and what it lacks.
+
+    Reports only. Nothing is downloaded, pinned, trusted or activated here.
+    """
+    model = payload.get("model")
+    declared = model.get("components") if isinstance(model, Mapping) else None
+    components = declared_model_components({MODEL_COMPONENTS_KEY: declared})
+
+    resolved: list[ResolvedComponent] = []
+    for component in components:
+        install_id = _install_holding(session, component["target_folder"], component["sha256"])
+        resolved.append(
+            ResolvedComponent(component["target_folder"], component["sha256"], install_id)
+        )
+
+    missing = [item for item in resolved if not item.present]
+    envelope = payload.get("hardware")
+    hardware_compatible = hardware_envelope_satisfied(
+        envelope if isinstance(envelope, Mapping) else None,
+        hardware_envelope(settings),
+    )
+    attestation = payload.get("attestation")
+    verified_elsewhere = bool(
+        isinstance(attestation, Mapping) and attestation.get("generated_output")
+    )
+    return {
+        "version": VERIFIED_SETUP_VERSION,
+        "digest": payload.get("digest"),
+        "components": [
+            {
+                "target_folder": item.target_folder,
+                "sha256": item.sha256,
+                "present": item.present,
+            }
+            for item in resolved
+        ],
+        "missing_components": [
+            {"target_folder": item.target_folder, "sha256": item.sha256} for item in missing
+        ],
+        "hardware_compatible": hardware_compatible,
+        # Provenance, kept deliberately separate from anything this machine has
+        # earned: "verified elsewhere on compatible hardware" must never read as
+        # "verified here".
+        "verified_elsewhere": verified_elsewhere and hardware_compatible,
+        "verified_here": False,
+        "requires_approval": bool(missing),
+        "ready_to_verify": not missing and hardware_compatible,
+    }
+
+
+def _install_holding(session: Session, target_folder: str, sha256: str) -> str | None:
+    """The install holding this exact file, if any - a plain indexed lookup."""
+    return session.scalar(
+        select(ModelComponentManifest.model_install_id).where(
+            ModelComponentManifest.target_folder == target_folder,
+            ModelComponentManifest.sha256 == sha256,
+        )
+    )
