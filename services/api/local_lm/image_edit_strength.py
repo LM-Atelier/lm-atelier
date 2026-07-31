@@ -491,7 +491,9 @@ def estimate_image_edit_strength(
         scope = EditScope.MINIMAL
         confidence = EditConfidence.HIGH
         reasons.insert(0, EditReason.MINIMAL_ADJUSTMENT)
-    elif _has_phrase(normalized, _LOCALIZED_PHRASES) or words & _LOCALIZED_WORDS:
+    # Words only. A localized *phrase* was already handled by the earlier branch,
+    # so repeating that check here can never be true.
+    elif words & _LOCALIZED_WORDS:
         scope = EditScope.LOCALIZED
         confidence = EditConfidence.MEDIUM
         reasons.insert(0, EditReason.LOCALIZED_CHANGE)
