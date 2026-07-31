@@ -69,6 +69,15 @@ import {
   workflowImageEditCalibration,
 } from "./imageEditStrength";
 import { GlobalNotices } from "./GlobalNotices";
+import {
+  artifactOrigin,
+  artifactSource,
+  mediaOriginForPart,
+  mediaOriginLabel,
+  messagePartsForTranscript,
+  priorVisibleMediaByMessage,
+  type MediaOrigin,
+} from "./messageMedia";
 import { useLiveEvents } from "./useLiveEvents";
 import { useDraftClassification } from "./useDraftClassification";
 import { useGenerationModeSelection } from "./useGenerationModeSelection";
@@ -117,7 +126,6 @@ import type {
 type View = "chat" | "media" | "models" | "workflows" | "settings";
 type Visibility = "basic" | "advanced" | "expert";
 type PendingTurn = { id: string; text: string; mode: RoutingMode };
-type MediaOrigin = "uploaded" | "generated" | "edited";
 type ComposerAttachment = {
   id: string;
   kind: "image" | "video";
@@ -217,31 +225,6 @@ function StatusDot({ healthy, label }: { healthy: boolean; label?: string }) {
       aria-hidden={label ? undefined : true}
     />
   );
-}
-
-function artifactSource(artifactId: string | null): string | null {
-  return artifactId ? `/api/artifacts/${encodeURIComponent(artifactId)}/content` : null;
-}
-
-function artifactOrigin(artifact?: Artifact | null): MediaOrigin | null {
-  return artifact?.metadata_json.uploaded === true ? "uploaded" : null;
-}
-
-function mediaOriginForPart(
-  part: MessagePart,
-  operation?: string,
-  fallback?: MediaOrigin | null,
-): MediaOrigin | null {
-  if (!part.metadata_json.input_reference) {
-    if (operation === "image_to_image") return "edited";
-    if (fallback) return fallback;
-  }
-  return artifactOrigin(part.artifact) ?? fallback ?? null;
-}
-
-function mediaOriginLabel(origin: MediaOrigin | null, kind: "image" | "video"): string {
-  if (!origin) return `Attached ${kind}`;
-  return `${origin[0].toUpperCase()}${origin.slice(1)} ${kind}`;
 }
 
 function ArtifactPart({
@@ -584,6 +567,7 @@ function PartView({
 function MessageBubble({
   message,
   liveText,
+  hiddenInputArtifactIds,
   onRegenerate,
   onEdit,
   onSelectRevision,
@@ -594,6 +578,7 @@ function MessageBubble({
 }: {
   message: Message;
   liveText?: string;
+  hiddenInputArtifactIds?: ReadonlySet<string>;
   onRegenerate?: (messageId: string) => void;
   onEdit?: (messageId: string, text: string) => void;
   onSelectRevision?: (messageId: string, revisionId: string) => void;
@@ -602,7 +587,7 @@ function MessageBubble({
   onAnimateImage?: (part: MessagePart, origin: MediaOrigin) => void;
   onQuote?: (text: string) => void;
 }) {
-  const visibleParts = message.parts.filter((part) => part.type !== "generation_metadata");
+  const visibleParts = messagePartsForTranscript(message, hiddenInputArtifactIds);
   const userText = visibleParts.filter((part) => part.type === "text").map((part) => part.text || "").join("\n");
   const copyableText = (liveText || userText).trim();
   const chatProgress = visibleParts.find(
@@ -1999,6 +1984,7 @@ function ChatView({
   };
   if (!chat) return <EmptyState icon={<MessageSquare />} title="Start a local conversation" body="Create a chat and choose a model. Conversations stay on this machine." />;
   const messages = activeBranchMessages(chat);
+  const priorVisibleMedia = priorVisibleMediaByMessage(messages);
   const stoppable = messages.some(
     (message) => message.status === "pending"
       || (message.response_revisions ?? []).some(
@@ -2061,6 +2047,7 @@ function ChatView({
               <MessageBubble
                 message={message}
                 liveText={liveText[message.id]}
+                hiddenInputArtifactIds={priorVisibleMedia.get(message.id)}
                 onRegenerate={busy ? undefined : (messageId) => onRegenerate(
                   messageId,
                   chat.routing_mode === "auto" ? {} : settings,
