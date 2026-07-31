@@ -1267,6 +1267,13 @@ class DownloadManager:
                             completed_units=completed_bytes,
                             total_units=total_size or None,
                             unit="bytes" if total_size else None,
+                            # These bytes are the whole install, not this file, so
+                            # the fraction they produce is overall progress. Said
+                            # explicitly because `stage_progress` is derived from
+                            # the same units and would otherwise be the only
+                            # number present, labelled as if it described the one
+                            # file named in the stage.
+                            overall_progress=(completed_bytes / total_size if total_size else None),
                             bytes_reused=reused_bytes,
                             file_index=index + 1,
                             file_count=len(filenames),
