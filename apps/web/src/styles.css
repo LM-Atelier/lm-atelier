@@ -180,7 +180,6 @@ h1, h2, h3 { margin: 0; }
 .mode-select select { appearance: none; border: 0; outline: 0; background: transparent; color: inherit; font-size: 12px; font-weight: 600; padding: 0; }
 .mode-select select option { background: var(--panel); }
 .mode-image { color: var(--atelier-soft); } .mode-video { color: var(--cream); } .mode-auto { color: var(--accent-2); }
-.composer-note { display: block; text-align: center; color: var(--muted); margin-top: 8px; font-size: 10px; }
 .attachment-strip { display: flex; flex-wrap: wrap; gap: 8px; margin: 0 8px 8px; }
 .attachment-card { width: min(100%, 360px); min-width: 0; display: grid; grid-template-columns: 58px minmax(0, 1fr) auto; align-items: center; gap: 9px; padding: 6px; background: var(--panel-3); border: 1px solid var(--border); border-radius: 11px; }
 .attachment-preview { width: 58px; height: 48px; display: block; overflow: hidden; border-radius: 7px; background: #0c0b0a; outline: 1px solid #ffffff12; }
