@@ -57,8 +57,17 @@ def inspect_repository_metadata(
     selected_paths: list[str],
     *,
     role: str,
+    component_folders: Mapping[str, str] | None = None,
 ) -> ModelManifestInspection:
-    """Inspect bounded data-only metadata without importing repository code."""
+    """Inspect bounded data-only metadata without importing repository code.
+
+    `component_folders` maps a repository path to the ComfyUI directory the
+    compiled template installs it into. It is the authority when present:
+    inferring the folder from the path only works when the repository happens to
+    name its directories the way ComfyUI does, and falls back to `checkpoints`
+    when it does not - which silently mislabels every component of a
+    multi-component model.
+    """
 
     metadata: dict[str, dict[str, Any]] = {}
     components: list[InspectedComponent] = []
@@ -75,6 +84,7 @@ def inspect_repository_metadata(
     architecture, family = _repository_identity(metadata, components, role)
     selected = {_safe_path(value).as_posix() for value in selected_paths}
     by_path = {component.path: component for component in components}
+    declared_folders = dict(component_folders or {})
     resolved: list[InspectedComponent] = []
     for selected_path in sorted(selected):
         component = by_path.get(selected_path)
@@ -83,7 +93,7 @@ def inspect_repository_metadata(
                 InspectedComponent(
                     path=component.path,
                     kind=component.kind,
-                    target_folder=component.target_folder,
+                    target_folder=declared_folders.get(selected_path, component.target_folder),
                     architecture=component.architecture or architecture,
                     family=component.family or family,
                     metadata=component.metadata,
@@ -94,7 +104,9 @@ def inspect_repository_metadata(
             InspectedComponent(
                 path=selected_path,
                 kind=_component_kind_from_path(selected_path, role),
-                target_folder=_target_folder(selected_path, role),
+                target_folder=declared_folders.get(
+                    selected_path, _target_folder(selected_path, role)
+                ),
                 architecture=architecture,
                 family=family,
             )

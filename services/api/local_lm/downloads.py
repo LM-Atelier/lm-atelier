@@ -12,7 +12,7 @@ import re
 import shutil
 import subprocess
 import sys
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from contextlib import suppress
 from pathlib import Path, PurePosixPath
 from types import SimpleNamespace
@@ -281,11 +281,43 @@ class DownloadManager:
             return {"diffusion_models": "."}
         return {"checkpoints": "."}
 
+    def _inspect_staged_component_manifest(
+        self,
+        staging: Path,
+        filenames: list[str],
+        request: DownloadRequest,
+        compiled_template: CompiledComfyTemplate | None,
+    ) -> ModelManifestInspection | None:
+        """Read the staged files' component manifest, if they can be read.
+
+        Inspected whenever the files are here, not only under an install plan.
+        The manifest is what gives an install a content identity, and #294 gated
+        its *write* on the inspection while the inspection itself was still gated
+        on the plan - so plan-less installs recorded nothing at all.
+
+        Without a plan this is opportunistic: the install proceeds without a
+        content identity rather than failing because a header could not be read.
+        Under a plan an uninspectable download is still an error, raised here and
+        checked again by the caller.
+        """
+        try:
+            return self._inspect_staged_model(
+                staging,
+                filenames,
+                request.role,
+                compiled_template.template.component_folders if compiled_template else None,
+            )
+        except (OSError, ValueError):
+            if request.install_plan_id:
+                raise
+            return None
+
     @staticmethod
     def _inspect_staged_model(
         staging: Path,
         filenames: list[str],
         role: str,
+        component_folders: Mapping[str, str] | None = None,
     ) -> ModelManifestInspection:
         metadata: dict[str, bytes] = {}
         for filename in filenames:
@@ -308,7 +340,12 @@ class DownloadManager:
             elif lowered.endswith(".gguf"):
                 with path.open("rb") as handle:
                     metadata[filename] = handle.read(MAX_WEIGHT_HEADER_BYTES)
-        return inspect_repository_metadata(metadata, filenames, role=role)
+        return inspect_repository_metadata(
+            metadata,
+            filenames,
+            role=role,
+            component_folders=component_folders,
+        )
 
     @staticmethod
     def _validate_staged_plan(
@@ -1328,14 +1365,13 @@ class DownloadManager:
                         },
                     )
 
-                inspection = (
-                    self._inspect_staged_model(
-                        staging,
-                        filenames,
-                        request.role,
-                    )
-                    if request.install_plan_id
-                    else None
+                # Inspected whenever the staged files are here, not only under an
+                # install plan. The component manifest is what gives an install a
+                # content identity, and #294 gated its *write* on the inspection
+                # while the inspection itself was still gated on the plan - so
+                # plan-less installs still recorded nothing.
+                inspection = self._inspect_staged_component_manifest(
+                    staging, filenames, request, compiled_template
                 )
                 if request.install_plan_id:
                     if not inspection:
