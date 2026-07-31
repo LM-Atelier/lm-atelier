@@ -13,6 +13,7 @@ import type {
   CatalogPreflight,
   Chat,
   ChatDetail,
+  DraftClassification,
   CustomNodeInstall,
   CredentialStatus,
   EngineCapabilities,
@@ -144,6 +145,11 @@ export const api = {
     return request<Chat[]>(`/api/chats?${parameters}`);
   },
   chat: (id: string) => request<ChatDetail>(`/api/chats/${id}`),
+  classifyDraft: (chatId: string, text: string, mode: RoutingMode) =>
+    request<DraftClassification>(`/api/chats/${chatId}/classify-draft`, {
+      method: "POST",
+      body: JSON.stringify({ text, mode }),
+    }),
   createChat: (projectId?: string | null) =>
     request<Chat>("/api/chats", {
       method: "POST",

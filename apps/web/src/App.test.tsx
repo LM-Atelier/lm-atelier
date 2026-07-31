@@ -93,6 +93,7 @@ vi.mock("./api", () => ({
     projects: vi.fn().mockResolvedValue([]),
     chats: vi.fn().mockResolvedValue([]),
     chat: vi.fn(),
+    classifyDraft: vi.fn(),
     createProject: vi.fn(),
     updateProject: vi.fn(),
     deleteProject: vi.fn(),
@@ -295,6 +296,8 @@ describe("App", () => {
     vi.mocked(api.profiles).mockResolvedValue([]);
     vi.mocked(api.presets).mockResolvedValue([]);
     vi.mocked(api.chats).mockResolvedValue([]);
+    // No prior visual to reuse is the resting state for most of this suite.
+    vi.mocked(api.classifyDraft).mockResolvedValue({ references_prior_visual: false });
     vi.mocked(api.engines).mockResolvedValue([
       {
         engine: "mock",
@@ -4374,8 +4377,19 @@ describe("App", () => {
       </QueryClientProvider>,
     );
 
+    // The router, not the browser, decides whether a draft reuses the prior
+    // image; this stands in for it with the answers the server gives.
+    vi.mocked(api.classifyDraft).mockImplementation(async (_chatId, draft) => ({
+      references_prior_visual: draft.trim() === "Make it green",
+    }));
+
     const composer = await screen.findByRole("textbox", { name: "Message" });
     fireEvent.change(composer, { target: { value: "Create an image of a pear" } });
+    await waitFor(() => expect(api.classifyDraft).toHaveBeenCalledWith(
+      chat.id,
+      "Create an image of a pear",
+      "image",
+    ));
     fireEvent.click(screen.getByRole("button", { name: "Turn settings" }));
     expect(screen.getByLabelText(/Fresh image exclusion/)).toBeInTheDocument();
     expect(screen.queryByLabelText(/Edit image exclusion/)).not.toBeInTheDocument();
@@ -4383,7 +4397,7 @@ describe("App", () => {
 
     fireEvent.change(composer, { target: { value: "Make it green" } });
     fireEvent.click(screen.getByRole("button", { name: "Turn settings" }));
-    expect(screen.getByLabelText(/Edit image exclusion/)).toBeInTheDocument();
+    await waitFor(() => expect(screen.getByLabelText(/Edit image exclusion/)).toBeInTheDocument());
     expect(screen.queryByLabelText(/Fresh image exclusion/)).not.toBeInTheDocument();
     expect(screen.getByRole("button", { name: "Auto" })).toHaveAttribute("aria-pressed", "true");
     expect(screen.getByText("Predicted: localized")).toBeInTheDocument();

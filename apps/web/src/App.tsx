@@ -69,6 +69,7 @@ import {
   type WorkflowImageEditCalibration,
   workflowImageEditCalibration,
 } from "./imageEditStrength";
+import { useDraftClassification } from "./useDraftClassification";
 import {
   normalizeSettingsForFields,
   promptPreviewSettings,
@@ -139,10 +140,6 @@ const AUTO_PROFILE_ID = "__auto__";
 const RECENT_UNSUCCESSFUL_JOB_LIMIT = 3;
 const DISMISSED_JOB_ISSUES_KEY = "lm-atelier-dismissed-job-issues-before";
 const SETUP_DISMISSED_KEY = "lm-atelier-setup-dismissed";
-const PRIOR_VISUAL_EDIT = /^\s*(?:please\s+|now\s+)*(?:(?:make|change|turn|edit|modify|adjust)\s+(?:it|this|that|the\s+(?:image|picture|photo|illustration|artwork|logo|icon))\b|(?:add|remove|replace|recolor|crop|resize|brighten|darken|blur|sharpen|rotate|flip)\b)/i;
-const PRIOR_VISUAL_SOURCE = /\b(?:previous|prior|earlier|last|above)\s+(?:image|picture|photo|illustration|artwork|logo|icon)\b|^\s*(?:please\s+|now\s+)*(?:use|reuse|remix|restyle|transform|redo|recreate|continue)\b.*\b(?:it|this|that|the\s+(?:image|picture|photo|illustration|artwork|logo|icon))\b/i;
-const DIRECT_PRIOR_VIDEO = /^\s*(?:animate|make (?:it|this|that) move)\b/i;
-const TEXT_CONTEXT_REFERENCE = /\b(?:(?:previous|prior|earlier|above|last|preceding)\s+(?:story|response|answer|message|text|description|scene|passage|poem|idea|concept|discussion|conversation)|(?:that|this|the)\s+(?:story|response|answer|message|text|description|scene|passage|poem|idea|concept|discussion|conversation)|what\s+(?:you|i|we)\s+(?:wrote|described|said)|(?:our|the)\s+(?:conversation|discussion))\b/i;
 const AUTHORITATIVE_QUERY_ROOTS = new Set([
   "about",
   "artifact-storage",
@@ -1591,13 +1588,7 @@ function Composer({
       && part.metadata_json.preview !== true
     )
   );
-  const usePriorVisual = priorVisual
-    && !TEXT_CONTEXT_REFERENCE.test(text)
-    && (
-      PRIOR_VISUAL_EDIT.test(text)
-      || PRIOR_VISUAL_SOURCE.test(text)
-      || (mode === "video" && DIRECT_PRIOR_VIDEO.test(text))
-    );
+  const usePriorVisual = useDraftClassification(chat.id, text, mode, priorVisual);
   const imageEdit = mode === "image" && (
     attachments.some((attachment) => attachment.kind === "image")
     || (priorImage && usePriorVisual)
