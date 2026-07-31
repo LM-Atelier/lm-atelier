@@ -7,7 +7,14 @@ workflow by recompiling it, and - more importantly - when it may not.
 
 from __future__ import annotations
 
+from types import SimpleNamespace
+
+import pytest
+from httpx2 import AsyncClient
+
+from local_lm.db import SessionLocal
 from local_lm.workflow_trust import (
+    TrustDecision,
     canonical_graph,
     derive_trust,
     recorded_template_identity,
@@ -114,3 +121,89 @@ def test_malformed_template_identity_is_not_an_identity() -> None:
         "x",
         _SHA,
     )
+
+
+async def test_verification_vouches_for_a_rebuildable_workflow_first(
+    client: AsyncClient,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An imported workflow used to block verification with no way forward.
+
+    `workflow_untrusted` is a blocking readiness check, so the one operation that
+    could prove the setup works refused to start, and told the user to review a
+    ComfyUI graph. Anything this machine can rebuild for itself is now vouched
+    for before that decision is made.
+    """
+    from local_lm import api
+
+    workflow = (
+        await client.post(
+            "/api/workflows",
+            json={
+                "name": "Imported image recipe",
+                "operation": "text_to_image",
+                "engine": "mock",
+                "api_graph": {"1": {"class_type": "SaveImage", "inputs": {}}},
+                "trusted": False,
+            },
+        )
+    ).json()
+    revision_id = workflow["current_revision_id"]
+
+    async def rebuilt(services, definition, revision):  # type: ignore[no-untyped-def]
+        assert revision.id == revision_id
+        return TrustDecision(True, "derived_locally", "Rebuilt here.")
+
+    monkeypatch.setattr(api, "_derive_trust_for_revision", rebuilt)
+
+    with SessionLocal() as session:
+        vouched = await api._vouch_for_role_workflows(
+            SimpleNamespace(),  # type: ignore[arg-type]
+            session,
+            "image",
+        )
+        assert vouched == 1
+
+    listed = (await client.get("/api/workflows")).json()
+    match = next(item for item in listed if item["id"] == workflow["id"])
+    assert any(revision["trusted"] for revision in match["revisions"])
+
+
+async def test_verification_leaves_an_unrebuildable_workflow_untrusted(
+    client: AsyncClient,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Refusing to vouch must never become vouching by omission."""
+    from local_lm import api
+
+    workflow = (
+        await client.post(
+            "/api/workflows",
+            json={
+                "name": "Hand authored",
+                "operation": "text_to_image",
+                "engine": "mock",
+                "api_graph": {"1": {"class_type": "SaveImage", "inputs": {}}},
+                "trusted": False,
+            },
+        )
+    ).json()
+
+    async def refused(services, definition, revision):  # type: ignore[no-untyped-def]
+        return TrustDecision(False, "graph_differs", "Rebuilding produced something else.")
+
+    monkeypatch.setattr(api, "_derive_trust_for_revision", refused)
+
+    with SessionLocal() as session:
+        assert (
+            await api._vouch_for_role_workflows(
+                SimpleNamespace(),  # type: ignore[arg-type]
+                session,
+                "image",
+            )
+            == 0
+        )
+
+    listed = (await client.get("/api/workflows")).json()
+    match = next(item for item in listed if item["id"] == workflow["id"])
+    assert all(not revision["trusted"] for revision in match["revisions"])
