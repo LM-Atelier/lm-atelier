@@ -267,7 +267,9 @@ export function estimateImageEditStrength(
   } else if (minimal) {
     scope = "minimal";
     confidence = "high";
-  } else if (hasPhrase(text, localizedPhrases) || intersects(words, localizedWords)) {
+  // Words only. A localized *phrase* was already handled by the earlier branch,
+  // so repeating that check here can never be true.
+  } else if (intersects(words, localizedWords)) {
     scope = "localized";
     confidence = "medium";
   } else {
