@@ -27,7 +27,6 @@ from local_lm.model_manifests import (
     inspect_repository_metadata,
 )
 from local_lm.model_planner import (
-    media_workflow_contract_version,
     persist_install_plan,
     resolve_install_plan,
 )
@@ -1659,7 +1658,12 @@ async def test_planned_media_activation_requires_output_and_records_evidence(
         assert install and install.active is True
         assert evidence.result == "ready"
         assert evidence.runtime_build == "comfy-test"
-        assert evidence.workflow_contract_version == media_workflow_contract_version("a" * 64)
+        # Evidence is keyed on what the workflow executes, not the compiler
+        # version, so a compiler change that alters nothing leaves it valid.
+        revision = session.query(WorkflowRevision).one()
+        assert revision.artifact_sha256
+        assert evidence.workflow_contract_version == revision.artifact_sha256
+        assert install.manifest_json["activation_artifact_sha256"] == revision.artifact_sha256
         assert evidence.details_json["workflow_performance"] == performance
 
 

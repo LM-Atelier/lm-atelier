@@ -29,7 +29,7 @@ from .auxiliary_assets import (
     checkpoint_lora_extension,
     validate_lora_workflow_contract,
 )
-from .capability_evidence import record_capability_evidence
+from .capability_evidence import ACTIVATION_ARTIFACT_KEY, record_capability_evidence
 from .comfy_templates import (
     COMFY_TEMPLATE_COMPILER_VERSION,
     ComfyTemplateRegistry,
@@ -51,7 +51,7 @@ from .model_manifests import (
     ModelManifestInspection,
     inspect_repository_metadata,
 )
-from .model_planner import media_workflow_contract_version
+from .model_planner import workflow_artifact_contract
 from .models import (
     Chat,
     InstallPlan,
@@ -2078,9 +2078,7 @@ class DownloadManager:
                             ).items()
                         },
                         runtime_build=capabilities.version,
-                        workflow_contract_version=media_workflow_contract_version(
-                            compiled.template.sha256
-                        ),
+                        workflow_contract_version=workflow_revision.artifact_sha256,
                         details={
                             "probe": "bounded_media_output",
                             "operation": compiled.template.operation,
@@ -2096,6 +2094,14 @@ class DownloadManager:
                     queue_resource="primary_compute",
                     indeterminate=True,
                 )
+                if workflow_revision.artifact_sha256:
+                    # Pin the primary activation artifact. Derived edit workflows
+                    # must not displace it, or an edit would invalidate creation
+                    # readiness while both workflows are healthy.
+                    activated_install.manifest_json = {
+                        **activated_install.manifest_json,
+                        ACTIVATION_ARTIFACT_KEY: workflow_revision.artifact_sha256,
+                    }
                 job.result_json = {
                     "model_install_id": activated_install.id,
                     "profile_id": profile.id,
@@ -2375,6 +2381,13 @@ class DownloadManager:
             api_graph_json=compiled.api_graph,
             input_schema_json=input_schema,
             dependencies_json=dependencies,
+            artifact_sha256=workflow_artifact_contract(
+                operation=compiled.template.operation,
+                engine="comfyui",
+                api_graph=compiled.api_graph,
+                input_schema=input_schema,
+                dependencies=dependencies,
+            ),
             trusted=True,
         )
         session.add(revision)

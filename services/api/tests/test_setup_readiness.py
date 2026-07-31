@@ -7,6 +7,7 @@ from fastapi import FastAPI
 from httpx2 import AsyncClient
 
 from local_lm.adapters.contracts import ADAPTER_CONTRACT_VERSION
+from local_lm.comfy_templates import COMFY_TEMPLATE_COMPILER_VERSION
 from local_lm.config import Settings
 from local_lm.db import SessionLocal
 from local_lm.hardware import hardware_capability_class
@@ -90,6 +91,7 @@ def _add_install(
     }
     if template_sha256:
         manifest["workflow_template_sha256"] = template_sha256
+        manifest["workflow_template_id"] = f"template_{role}"
     install = ModelInstall(
         id=f"model_{role}",
         name=f"Synthetic {role}",
@@ -152,13 +154,20 @@ def _add_workflow(
         name=f"Synthetic {install.role}",
         operation=operation,
     )
+    # Mirrors what the compiler records, so the legacy evidence path is
+    # exercised the way it behaves in a real install rather than trivially.
     revision = WorkflowRevision(
         id=f"revision_{install.role}",
         workflow_id=definition.id,
         version=1,
         engine=install.engine,
         api_graph_json={"node": {"class_type": "Synthetic"}},
-        dependencies_json={"model_install_ids": [install.id]},
+        dependencies_json={
+            "model_install_ids": [install.id],
+            "compiler_version": COMFY_TEMPLATE_COMPILER_VERSION,
+            "template_id": f"template_{install.role}",
+            "template_sha256": install.manifest_json.get("workflow_template_sha256"),
+        },
         trusted=True,
     )
     definition.current_revision_id = revision.id
