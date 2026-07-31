@@ -788,11 +788,12 @@ class ConversationOrchestrator:
                 plan.standalone_prompt = f"{prior_prompt}. Follow-up instruction: {request.text}"
         plan.input_artifact_ids = resolved_input_ids
 
-        profile, model_selection = self._profile_for_operation(
+        profile, model_selection, workflow_revision = self._profile_and_workflow_for_operation(
             session,
             chat,
             plan.operation,
             f"{request.text}\n{plan.standalone_prompt}",
+            preferred_revision_id=self._setup_verification_workflow_id(session, chat),
         )
         profile_id = profile.id if profile else None
         vision_profile = (
@@ -801,13 +802,7 @@ class ConversationOrchestrator:
             else None
         )
         vision_profile_id = vision_profile.id if vision_profile else None
-        workflow_revision = self._workflow_for_operation(
-            session,
-            plan.operation,
-            project_id=chat.project_id,
-            model_install_id=profile.model_install_id if profile else None,
-            preferred_revision_id=self._setup_verification_workflow_id(session, chat),
-        )
+
         if plan.operation != Operation.TEXT and not workflow_revision:
             semantic_fallback = {
                 Operation.IMAGE_TO_IMAGE: Operation.TEXT_TO_IMAGE,
@@ -817,12 +812,17 @@ class ConversationOrchestrator:
                 plan.operation = semantic_fallback
                 plan.input_artifact_ids = []
                 resolved_input_ids = []
-                workflow_revision = self._workflow_for_operation(
+                (
+                    profile,
+                    model_selection,
+                    workflow_revision,
+                ) = self._profile_and_workflow_for_operation(
                     session,
-                    plan.operation,
-                    project_id=chat.project_id,
-                    model_install_id=profile.model_install_id if profile else None,
+                    chat,
+                    semantic_fallback,
+                    f"{request.text}\n{plan.standalone_prompt}",
                 )
+                profile_id = profile.id if profile else None
             if not workflow_revision:
                 raise ValueError(
                     "No ready workflow matches the active media engine. Install a supported "
@@ -1460,7 +1460,11 @@ class ConversationOrchestrator:
                     else Operation.TEXT_TO_VIDEO
                 )
 
-            profile, model_selection = self._profile_for_operation(
+            (
+                profile,
+                model_selection,
+                workflow_revision,
+            ) = self._profile_and_workflow_for_operation(
                 session,
                 chat,
                 operation,
@@ -1482,12 +1486,7 @@ class ConversationOrchestrator:
                 )
                 else None
             )
-            workflow_revision = self._workflow_for_operation(
-                session,
-                operation,
-                project_id=chat.project_id,
-                model_install_id=profile.model_install_id if profile else None,
-            )
+
             if operation != Operation.TEXT and not workflow_revision:
                 raise ValueError(
                     f"No ready workflow can perform ordered step {index + 1} ({operation.value})."
@@ -5002,10 +5001,96 @@ class ConversationOrchestrator:
             and install.active
         ]
         candidates = installed or profiles
+        ranked = cls._rank_profiles(candidates, prompt)
+        if ranked:
+            score, selected, matches = ranked[0]
+        else:
+            score, selected, matches = 0, default, []
+        return selected, {
+            "mode": "auto",
+            "profile_id": selected.id if selected else None,
+            "profile_name": selected.name if selected else None,
+            "profile_use_case": selected.use_case if selected else "",
+            "score": score,
+            "matched_terms": matches,
+            "fallback": score == 0,
+        }
+
+    def _profile_and_workflow_for_operation(
+        self,
+        session: Session,
+        chat: Chat,
+        operation: Operation,
+        prompt: str,
+        *,
+        preferred_revision_id: str | None = None,
+    ) -> tuple[ModelProfile | None, dict[str, Any], WorkflowRevision | None]:
+        profile, selection = self._profile_for_operation(session, chat, operation, prompt)
+        workflow = self._workflow_for_operation(
+            session,
+            operation,
+            project_id=chat.project_id,
+            model_install_id=profile.model_install_id if profile else None,
+            preferred_revision_id=preferred_revision_id,
+        )
+        if (
+            operation == Operation.TEXT
+            or (workflow and workflow.trusted)
+            or selection["mode"] == "explicit"
+            or preferred_revision_id
+            or self._project_workflow_pin_id(session, chat.project_id, operation)
+        ):
+            return profile, selection, workflow
+
+        role = self._role_for_operation(operation)
+        profiles = session.scalars(
+            select(ModelProfile)
+            .where(ModelProfile.role == role)
+            .order_by(ModelProfile.updated_at.desc(), ModelProfile.id)
+        ).all()
+        candidates: list[tuple[ModelProfile, WorkflowRevision]] = []
+        for candidate in profiles:
+            if candidate.id == (profile.id if profile else None) or not candidate.model_install_id:
+                continue
+            install = session.get(ModelInstall, candidate.model_install_id)
+            if not install or not install.active or install.engine != candidate.engine:
+                continue
+            candidate_workflow = self._workflow_for_operation(
+                session,
+                operation,
+                model_install_id=candidate.model_install_id,
+            )
+            if candidate_workflow and candidate_workflow.trusted:
+                candidates.append((candidate, candidate_workflow))
+
+        workflows_by_profile = {candidate.id: revision for candidate, revision in candidates}
+        ranked = self._rank_profiles([candidate for candidate, _ in candidates], prompt)
+        if not ranked:
+            return profile, selection, workflow
+        score, fallback_profile, matches = ranked[0]
+        fallback_selection = {
+            **selection,
+            "profile_id": fallback_profile.id,
+            "profile_name": fallback_profile.name,
+            "profile_use_case": fallback_profile.use_case,
+            "score": score,
+            "matched_terms": matches,
+            "fallback": True,
+            "fallback_reason": "operation_workflow_unavailable",
+            "fallback_from_profile_id": profile.id if profile else None,
+        }
+        return fallback_profile, fallback_selection, workflows_by_profile[fallback_profile.id]
+
+    @classmethod
+    def _rank_profiles(
+        cls,
+        profiles: list[ModelProfile],
+        prompt: str,
+    ) -> list[tuple[int, ModelProfile, list[str]]]:
         prompt_text = prompt.casefold()
         prompt_terms = cls._selection_terms(prompt_text)
         ranked: list[tuple[int, ModelProfile, list[str]]] = []
-        for profile in candidates:
+        for profile in profiles:
             use_case = profile.use_case.strip().casefold()
             use_case_terms = cls._selection_terms(use_case)
             matches = sorted(prompt_terms & use_case_terms)
@@ -5023,19 +5108,22 @@ class ConversationOrchestrator:
             ),
             reverse=True,
         )
-        if ranked:
-            score, selected, matches = ranked[0]
-        else:
-            score, selected, matches = 0, default, []
-        return selected, {
-            "mode": "auto",
-            "profile_id": selected.id if selected else None,
-            "profile_name": selected.name if selected else None,
-            "profile_use_case": selected.use_case if selected else "",
-            "score": score,
-            "matched_terms": matches,
-            "fallback": score == 0,
-        }
+        return ranked
+
+    @staticmethod
+    def _project_workflow_pin_id(
+        session: Session,
+        project_id: str | None,
+        operation: Operation,
+    ) -> str | None:
+        project = session.get(Project, project_id) if project_id else None
+        if not project or operation == Operation.TEXT:
+            return None
+        return (
+            project.video_workflow_revision_id
+            if "video" in operation.value
+            else project.image_workflow_revision_id
+        )
 
     def _profile_has_verified_vision(self, session: Session, profile: ModelProfile) -> bool:
         if not profile.model_install_id:
