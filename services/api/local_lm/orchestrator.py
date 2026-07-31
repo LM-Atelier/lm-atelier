@@ -80,6 +80,7 @@ from .image_edit_verification import (
     image_edit_verification_job_id,
     parse_image_edit_verification_assessment,
 )
+from .model_planner import revision_accepts_install, revision_declares_a_model
 from .models import (
     Artifact,
     Chat,
@@ -150,6 +151,31 @@ PENDING_OUTPUT_REFERENCE = re.compile(
 
 class ResponseRevisionConflict(ValueError):
     """A stable response cannot accept the requested revision transition."""
+
+
+class ProjectWorkflowPinInvalid(ValueError):
+    """A project pins a workflow revision that cannot run as pinned.
+
+    A pin names an exact executable contract, not "whatever is current under this
+    definition". So a broken pin is reported rather than quietly replaced:
+    falling through to generic selection would run a different graph than the
+    project asked for and hide the fact that the pin needs attention.
+    """
+
+    def __init__(
+        self,
+        *,
+        project_id: str,
+        revision_id: str,
+        role: str,
+        reason: str,
+        message: str,
+    ) -> None:
+        super().__init__(message)
+        self.project_id = project_id
+        self.revision_id = revision_id
+        self.role = role
+        self.reason = reason
 
 
 SELECTION_TERM_ALIASES = {
@@ -4860,6 +4886,33 @@ class ConversationOrchestrator:
                 return offer
         return None
 
+    def classify_draft(
+        self,
+        session: Session,
+        chat: Chat,
+        *,
+        text: str,
+        mode: RoutingMode | None,
+        parent_message_id: str | None,
+    ) -> bool:
+        """Answer the composer's pre-submit question with the router the turn will use.
+
+        Resolves mode and conversation context as `create_turn` does, so the
+        browser sees the classification the submitted turn will get. The one
+        difference is that a draft cannot reference a pending output that does
+        not exist yet, so the context head is always the latest completed one.
+        """
+        context_head = self._latest_completed_context_head(
+            session,
+            chat.id,
+            parent_message_id,
+        )
+        return self.router.references_prior_visual(
+            text=text,
+            mode=mode or RoutingMode(chat.routing_mode),
+            conversation=self._routing_context(session, chat, context_head),
+        )
+
     @staticmethod
     def _routing_context(
         session: Session, chat: Chat, parent_message_id: str | None
@@ -5309,35 +5362,34 @@ class ConversationOrchestrator:
         if preferred_revision_id:
             revision = session.get(WorkflowRevision, preferred_revision_id)
             definition = session.get(WorkflowDefinition, revision.workflow_id) if revision else None
-            dependencies = revision.dependencies_json.get("model_install_ids") if revision else None
-            declared_installs = (
-                {str(item) for item in dependencies} if isinstance(dependencies, list) else set()
-            )
             if (
                 revision
                 and definition
                 and definition.operation == operation.value
                 and self._workflow_matches_engine(revision)
-                and (not declared_installs or model_install_id in declared_installs)
+                and self._revision_accepts_install(session, revision, model_install_id)
             ):
                 return revision
             return None
         if project_id:
             project = session.get(Project, project_id)
+            is_video = "video" in operation.value
             revision_id = None
             if project:
                 revision_id = (
                     project.video_workflow_revision_id
-                    if "video" in operation.value
+                    if is_video
                     else project.image_workflow_revision_id
                 )
-            if revision_id:
-                revision = session.get(WorkflowRevision, revision_id)
-                definition = (
-                    session.get(WorkflowDefinition, revision.workflow_id) if revision else None
+            if project and revision_id:
+                return self._resolve_project_pin(
+                    session,
+                    project,
+                    revision_id,
+                    operation,
+                    model_install_id=model_install_id,
+                    role="video" if is_video else "image",
                 )
-                if revision and definition and definition.operation == operation.value:
-                    return revision
         definitions = session.scalars(
             select(WorkflowDefinition)
             .where(WorkflowDefinition.operation == operation.value)
@@ -5350,20 +5402,133 @@ class ConversationOrchestrator:
             revision = session.get(WorkflowRevision, definition.current_revision_id)
             if not revision or not self._workflow_matches_engine(revision):
                 continue
-            dependencies = revision.dependencies_json.get("model_install_ids")
-            declared_installs = (
-                {str(item) for item in dependencies} if isinstance(dependencies, list) else set()
-            )
-            if declared_installs:
-                if model_install_id in declared_installs:
+            if self._revision_declares_a_model(revision):
+                if self._revision_accepts_install(session, revision, model_install_id):
                     return revision
                 continue
             generic.append(revision)
         return generic[0] if generic else None
 
+    @staticmethod
+    def _revision_declares_a_model(revision: WorkflowRevision) -> bool:
+        return revision_declares_a_model(revision.dependencies_json)
+
+    def _revision_accepts_install(
+        self,
+        session: Session,
+        revision: WorkflowRevision,
+        model_install_id: str | None,
+    ) -> bool:
+        return revision_accepts_install(session, revision.dependencies_json, model_install_id)
+
     def _workflow_matches_engine(self, revision: WorkflowRevision) -> bool:
         engine = self.engines.settings.media_engine
         return revision.engine == engine and (engine == "mock" or bool(revision.api_graph_json))
+
+    @staticmethod
+    def _artifact_identical_successor(
+        session: Session,
+        definition: WorkflowDefinition,
+        pinned: WorkflowRevision,
+    ) -> WorkflowRevision:
+        """The current revision when it executes exactly what the pin executes.
+
+        A recompile that produces a byte-identical artifact is the same
+        executable contract under a new id, so the pin follows it and the setup
+        survives the release. Any other recompile leaves the pin where it is,
+        because adopting a changed graph is the user's decision to make.
+        """
+        current_id = definition.current_revision_id
+        if not current_id or current_id == pinned.id:
+            return pinned
+        current = session.get(WorkflowRevision, current_id)
+        if not current or not pinned.artifact_sha256:
+            return pinned
+        if current.artifact_sha256 != pinned.artifact_sha256:
+            return pinned
+        return current
+
+    def _project_pin_problem(
+        self,
+        session: Session,
+        revision: WorkflowRevision,
+        definition: WorkflowDefinition,
+        operation: Operation,
+        model_install_id: str | None,
+    ) -> str | None:
+        """Why this pinned revision cannot run, or None if it can.
+
+        These are the same checks the other two selection branches make. The pin
+        branch used to make only the first, so a pin for another engine or an
+        untrusted one was selected and then failed during execution with an error
+        that never mentioned the pin.
+        """
+        if definition.operation != operation.value:
+            return "operation_mismatch"
+        if not self._workflow_matches_engine(revision):
+            return "engine_mismatch"
+        if not revision.trusted:
+            return "untrusted"
+        if not self._revision_accepts_install(session, revision, model_install_id):
+            return "model_mismatch"
+        return None
+
+    _PIN_PROBLEM_MESSAGES = {
+        "missing": "The workflow this project pins no longer exists.",
+        "operation_mismatch": "The workflow this project pins does not perform this operation.",
+        "engine_mismatch": "The workflow this project pins was built for a different media engine.",
+        "untrusted": "The workflow this project pins has not been trusted.",
+        "model_mismatch": "The workflow this project pins requires a different model.",
+    }
+
+    def _resolve_project_pin(
+        self,
+        session: Session,
+        project: Project,
+        revision_id: str,
+        operation: Operation,
+        *,
+        model_install_id: str | None,
+        role: str,
+    ) -> WorkflowRevision:
+        """Resolve a project's pinned workflow, or say why it cannot be used.
+
+        A pin is a lockfile, not a preference: it names one executable contract.
+        So this never falls through to generic selection - running a different
+        graph than the project pinned would hide the broken pin behind output
+        that looks fine but was produced by something else.
+        """
+        pinned = session.get(WorkflowRevision, revision_id)
+        definition = session.get(WorkflowDefinition, pinned.workflow_id) if pinned else None
+        if not pinned or not definition:
+            raise ProjectWorkflowPinInvalid(
+                project_id=project.id,
+                revision_id=revision_id,
+                role=role,
+                reason="missing",
+                message=self._PIN_PROBLEM_MESSAGES["missing"],
+            )
+
+        candidate = self._artifact_identical_successor(session, definition, pinned)
+        problem = self._project_pin_problem(
+            session, candidate, definition, operation, model_install_id
+        )
+        if problem:
+            raise ProjectWorkflowPinInvalid(
+                project_id=project.id,
+                revision_id=pinned.id,
+                role=role,
+                reason=problem,
+                message=self._PIN_PROBLEM_MESSAGES[problem],
+            )
+
+        if candidate.id != pinned.id:
+            # Carry the pin forward so it keeps naming the revision in use.
+            if role == "video":
+                project.video_workflow_revision_id = candidate.id
+            else:
+                project.image_workflow_revision_id = candidate.id
+        return candidate
 
     @staticmethod
     def _input_part_type(artifact: Artifact) -> str:

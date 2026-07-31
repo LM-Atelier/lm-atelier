@@ -623,6 +623,36 @@ class ModalityRouter:
         except (json.JSONDecodeError, TypeError, ValueError):
             return fallback
 
+    @staticmethod
+    def _matches_prior_visual(normalized: str, mode: RoutingMode) -> bool:
+        """Whether the wording alone asks to reuse the most recent visual."""
+        if mode == RoutingMode.TEXT:
+            return False
+        if _PRIOR_IMAGE_EDIT.search(normalized) or _PRIOR_IMAGE_SOURCE.search(normalized):
+            return True
+        return mode == RoutingMode.VIDEO and bool(_DIRECT_VIDEO.search(normalized))
+
+    def references_prior_visual(
+        self,
+        *,
+        text: str,
+        mode: RoutingMode,
+        conversation: list[dict[str, Any]] | None = None,
+    ) -> bool:
+        """Whether this draft would reuse the prior visual, if one exists.
+
+        The composer needs this answer before a turn is submitted, to pick the
+        workflow schema and to decide whether edit strength applies. It used to
+        answer with its own copy of these patterns, which drifted; this exists so
+        there is one implementation and the browser can ask for it.
+
+        In AUTO mode the router may consult the chat model, so this is the
+        deterministic part of that decision rather than a promise about it.
+        """
+        if self._referenced_text_context(text, conversation or []):
+            return False
+        return self._matches_prior_visual(text.strip(), mode)
+
     def plan(
         self,
         *,
@@ -649,7 +679,7 @@ class ModalityRouter:
             use_prior_image = bool(
                 has_prior_image
                 and not referenced_text
-                and (_PRIOR_IMAGE_EDIT.search(normalized) or _PRIOR_IMAGE_SOURCE.search(normalized))
+                and self._matches_prior_visual(normalized, mode)
             )
             operation = (
                 Operation.IMAGE_TO_IMAGE
@@ -670,11 +700,7 @@ class ModalityRouter:
             use_prior_image = bool(
                 has_prior_image
                 and not referenced_text
-                and (
-                    _DIRECT_VIDEO.search(normalized)
-                    or _PRIOR_IMAGE_EDIT.search(normalized)
-                    or _PRIOR_IMAGE_SOURCE.search(normalized)
-                )
+                and self._matches_prior_visual(normalized, mode)
             )
             operation = (
                 Operation.IMAGE_TO_VIDEO

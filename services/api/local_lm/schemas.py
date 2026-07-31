@@ -233,6 +233,18 @@ class TurnRequest(ApiModel):
     idempotency_key: str | None = Field(default=None, max_length=200)
 
 
+class DraftClassificationRequest(ApiModel):
+    """An unsent composer draft, classified with the router the turn will use."""
+
+    text: str = Field(default="", max_length=200_000)
+    mode: RoutingMode | None = None
+    parent_message_id: str | None = None
+
+
+class DraftClassification(ApiModel):
+    references_prior_visual: bool
+
+
 class RegenerateRequest(ApiModel):
     settings: dict[str, Any] = Field(default_factory=dict)
 

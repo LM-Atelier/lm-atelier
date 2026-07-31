@@ -705,3 +705,8 @@ export interface AppEvent {
   payload: Record<string, unknown>;
   created_at: string;
 }
+
+/** The router's answer for an unsent draft, so the composer need not guess. */
+export interface DraftClassification {
+  references_prior_visual: boolean;
+}

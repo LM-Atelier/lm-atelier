@@ -13,6 +13,7 @@ import type {
   CatalogPreflight,
   Chat,
   ChatDetail,
+  DraftClassification,
   CustomNodeInstall,
   CredentialStatus,
   EngineCapabilities,
@@ -92,6 +93,16 @@ async function ensureSession(): Promise<void> {
   }
 }
 
+/** Whether a 403 is the CSRF guard rather than a genuine refusal. */
+async function isCsrfFailure(response: Response): Promise<boolean> {
+  try {
+    const payload = (await response.clone().json()) as { detail?: unknown };
+    return payload.detail === "CSRF check failed";
+  } catch {
+    return false;
+  }
+}
+
 async function request<T>(
   path: string,
   init: RequestInit = {},
@@ -104,10 +115,19 @@ async function request<T>(
     headers.set("x-local-lm-csrf", csrfToken);
   }
   const response = await fetch(path, { ...init, headers, credentials: "same-origin" });
-  if (response.status === 401 && path !== "/api/session" && retrySession) {
-    resetSession();
-    await ensureSession();
-    return request<T>(path, init, false);
+  if (path !== "/api/session" && retrySession) {
+    // A stale session answers 401, but a stale CSRF token answers 403, and only
+    // the first was retried. Since resetSession() clears the token on every
+    // socket close, a request that started just before a close went out with an
+    // empty header and got a permanent 403 with no way back.
+    const staleSession =
+      response.status === 401
+      || (response.status === 403 && (await isCsrfFailure(response)));
+    if (staleSession) {
+      resetSession();
+      await ensureSession();
+      return request<T>(path, init, false);
+    }
   }
   if (!response.ok) {
     let message = `${response.status} ${response.statusText}`;
@@ -144,6 +164,11 @@ export const api = {
     return request<Chat[]>(`/api/chats?${parameters}`);
   },
   chat: (id: string) => request<ChatDetail>(`/api/chats/${id}`),
+  classifyDraft: (chatId: string, text: string, mode: RoutingMode) =>
+    request<DraftClassification>(`/api/chats/${chatId}/classify-draft`, {
+      method: "POST",
+      body: JSON.stringify({ text, mode }),
+    }),
   createChat: (projectId?: string | null) =>
     request<Chat>("/api/chats", {
       method: "POST",

@@ -51,7 +51,11 @@ from .model_manifests import (
     ModelManifestInspection,
     inspect_repository_metadata,
 )
-from .model_planner import workflow_artifact_contract
+from .model_planner import (
+    MODEL_COMPONENTS_KEY,
+    model_components_for_install,
+    workflow_artifact_contract,
+)
 from .models import (
     Chat,
     InstallPlan,
@@ -1542,9 +1546,11 @@ class DownloadManager:
                     )
                     session.add(install)
                     session.flush()
-                    if request.install_plan_id:
-                        if not inspection:
-                            raise ValueError("downloaded model metadata could not be inspected")
+                    # Record the component manifest whenever inspection produced
+                    # one, not only under an install plan. The manifest is what
+                    # gives an install a content identity, so gating it on the
+                    # plan left plan-less installs unresolvable by content.
+                    if inspection:
                         for component in inspection.components:
                             session.add(
                                 ModelComponentManifest(
@@ -2362,8 +2368,21 @@ class DownloadManager:
                     "default": [],
                     "maxItems": 8,
                 }
+        # Both bindings are recorded. The install ids are what this machine uses
+        # today; the components are what another machine can resolve, since a
+        # local UUID means nothing after an export.
+        component_binding = sorted(
+            {
+                (item["target_folder"], item["sha256"])
+                for install_id in {install.id, *declared_installs}
+                for item in model_components_for_install(session, install_id)
+            }
+        )
         dependencies = {
             "model_install_ids": sorted({install.id, *declared_installs}),
+            MODEL_COMPONENTS_KEY: [
+                {"target_folder": folder, "sha256": digest} for folder, digest in component_binding
+            ],
             "compiler_version": COMFY_TEMPLATE_COMPILER_VERSION,
             "template_id": compiled.template.id,
             "template_sha256": compiled.template.sha256,

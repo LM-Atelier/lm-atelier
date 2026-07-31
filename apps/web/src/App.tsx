@@ -50,7 +50,7 @@ import {
 } from "lucide-react";
 import { AccessibleDialog } from "./AccessibleDialog";
 import { InstallConfirmDialog } from "./InstallConfirmDialog";
-import { api, connectEvents } from "./api";
+import { api } from "./api";
 import {
   supportLinks,
   downloadJson,
@@ -69,6 +69,9 @@ import {
   type WorkflowImageEditCalibration,
   workflowImageEditCalibration,
 } from "./imageEditStrength";
+import { GlobalNotices } from "./GlobalNotices";
+import { useLiveEvents } from "./useLiveEvents";
+import { useDraftClassification } from "./useDraftClassification";
 import {
   normalizeSettingsForFields,
   promptPreviewSettings,
@@ -77,7 +80,6 @@ import {
 } from "./settings";
 import type {
   ApplicationInfo,
-  AppEvent,
   Artifact,
   ArtifactLibraryItem,
   BackupInfo,
@@ -139,45 +141,7 @@ const AUTO_PROFILE_ID = "__auto__";
 const RECENT_UNSUCCESSFUL_JOB_LIMIT = 3;
 const DISMISSED_JOB_ISSUES_KEY = "lm-atelier-dismissed-job-issues-before";
 const SETUP_DISMISSED_KEY = "lm-atelier-setup-dismissed";
-const PRIOR_VISUAL_EDIT = /^\s*(?:please\s+|now\s+)*(?:(?:make|change|turn|edit|modify|adjust)\s+(?:it|this|that|the\s+(?:image|picture|photo|illustration|artwork|logo|icon))\b|(?:add|remove|replace|recolor|crop|resize|brighten|darken|blur|sharpen|rotate|flip)\b)/i;
-const PRIOR_VISUAL_SOURCE = /\b(?:previous|prior|earlier|last|above)\s+(?:image|picture|photo|illustration|artwork|logo|icon)\b|^\s*(?:please\s+|now\s+)*(?:use|reuse|remix|restyle|transform|redo|recreate|continue)\b.*\b(?:it|this|that|the\s+(?:image|picture|photo|illustration|artwork|logo|icon))\b/i;
-const DIRECT_PRIOR_VIDEO = /^\s*(?:animate|make (?:it|this|that) move)\b/i;
-const TEXT_CONTEXT_REFERENCE = /\b(?:(?:previous|prior|earlier|above|last|preceding)\s+(?:story|response|answer|message|text|description|scene|passage|poem|idea|concept|discussion|conversation)|(?:that|this|the)\s+(?:story|response|answer|message|text|description|scene|passage|poem|idea|concept|discussion|conversation)|what\s+(?:you|i|we)\s+(?:wrote|described|said)|(?:our|the)\s+(?:conversation|discussion))\b/i;
-const AUTHORITATIVE_QUERY_ROOTS = new Set([
-  "about",
-  "artifact-storage",
-  "artifacts",
-  "backups",
-  "catalog",
-  "chats",
-  "chat",
-  "credential",
-  "custom-nodes",
-  "engines",
-  "jobs",
-  "models",
-  "model-storage",
-  "presets",
-  "profiles",
-  "projects",
-  "recipes",
-  "runtimes",
-  "setup-readiness",
-  "system",
-  "workers",
-  "workflow-catalog-models",
-  "workflows",
-]);
 
-function aggregateWorkPlanStatus(steps: WorkPlan["steps"]): string {
-  const statuses = steps.map((step) => step.status);
-  if (statuses.length === 0) return "queued";
-  for (const active of ["running", "queued", "paused", "blocked"]) {
-    if (statuses.includes(active)) return active;
-  }
-  if (statuses.every((status) => status === "complete")) return "complete";
-  return new Set(statuses).size === 1 ? statuses[0] ?? "queued" : "partial";
-}
 function focusMainContent() {
   window.setTimeout(() => document.getElementById("main-content")?.focus(), 0);
 }
@@ -1591,13 +1555,7 @@ function Composer({
       && part.metadata_json.preview !== true
     )
   );
-  const usePriorVisual = priorVisual
-    && !TEXT_CONTEXT_REFERENCE.test(text)
-    && (
-      PRIOR_VISUAL_EDIT.test(text)
-      || PRIOR_VISUAL_SOURCE.test(text)
-      || (mode === "video" && DIRECT_PRIOR_VIDEO.test(text))
-    );
+  const usePriorVisual = useDraftClassification(chat.id, text, mode, priorVisual);
   const imageEdit = mode === "image" && (
     attachments.some((attachment) => attachment.kind === "image")
     || (priorImage && usePriorVisual)
@@ -4266,124 +4224,7 @@ export default function App() {
   const profiles = useQuery({ queryKey: ["profiles"], queryFn: api.profiles });
   const presets = useQuery({ queryKey: ["presets"], queryFn: api.presets });
   const workflows = useQuery({ queryKey: ["workflows"], queryFn: api.workflows });
-  useEffect(() => {
-    let dispose: (() => void) | undefined;
-    let mediaRefresh: number | undefined;
-    let authoritativeRefresh: number | undefined;
-    const scheduleMediaRefresh = () => {
-      if (mediaRefresh !== undefined) return;
-      mediaRefresh = window.setTimeout(() => {
-        mediaRefresh = undefined;
-        void client.invalidateQueries({ queryKey: ["chat"] });
-      }, 100);
-    };
-    const scheduleAuthoritativeRefresh = () => {
-      if (authoritativeRefresh !== undefined) return;
-      authoritativeRefresh = window.setTimeout(() => {
-        authoritativeRefresh = undefined;
-        void client.invalidateQueries({
-          predicate: (query) =>
-            AUTHORITATIVE_QUERY_ROOTS.has(String(query.queryKey[0] ?? "")),
-        });
-      }, 100);
-    };
-    void connectEvents(
-      (event: AppEvent) => {
-        if (event.type === "events.replay_gap") {
-          scheduleAuthoritativeRefresh();
-          return;
-        }
-        if (event.type === "text.delta") {
-          const messageId = String(event.payload.assistant_message_id ?? "");
-          const text = String(event.payload.text ?? "");
-          if (messageId) setLiveText((current) => ({ ...current, [messageId]: `${current[messageId] ?? ""}${text}` }));
-          return;
-        }
-        if (event.type === "job.progress") {
-          const snapshot = event.payload.job as Job | undefined;
-          if (snapshot?.id) {
-            client.setQueryData<Job[]>(["jobs"], (current) => {
-              if (!current) return [snapshot];
-              const index = current.findIndex((job) => job.id === snapshot.id);
-              if (index < 0) return [snapshot, ...current];
-              return current.map((job) => job.id === snapshot.id ? snapshot : job);
-            });
-            if (snapshot.work_plan_id) {
-              client.setQueriesData<WorkPlan[]>(
-                { queryKey: ["work-plans"] },
-                (current) => current?.map((plan) => {
-                  if (plan.id !== snapshot.work_plan_id) return plan;
-                  const stepStatus = snapshot.progress_json?.stage
-                    ?.startsWith("blocked by")
-                    ? "blocked"
-                    : snapshot.status;
-                  const steps = plan.steps.map((step) => (
-                    step.id === snapshot.work_step_id
-                      ? {
-                          ...step,
-                          status: stepStatus,
-                          error: stepStatus === "blocked"
-                            ? "Waiting for required work to be retried."
-                            : snapshot.error,
-                        }
-                      : step
-                  ));
-                  const statusCounts = steps.reduce<Record<string, number>>(
-                    (counts, step) => ({
-                      ...counts,
-                      [step.status]: (counts[step.status] ?? 0) + 1,
-                    }),
-                    {},
-                  );
-                  return {
-                    ...plan,
-                    status: aggregateWorkPlanStatus(steps),
-                    summary_json: {
-                      ...plan.summary_json,
-                      status_counts: statusCounts,
-                    },
-                    steps,
-                  };
-                }),
-              );
-            }
-          }
-          return;
-        }
-        if (event.type === "work_plan.created") {
-          void client.invalidateQueries({ queryKey: ["work-plans"] });
-        }
-        if (event.type.includes("progress") || event.type.startsWith("download.")) void client.invalidateQueries({ queryKey: ["jobs"] });
-        if (event.type.startsWith("download.") || event.type.startsWith("worker.") || event.type.startsWith("runtime.") || event.type.startsWith("setup.verification")) void client.invalidateQueries({ queryKey: ["setup-readiness"] });
-        if (event.type === "run.progress") void client.invalidateQueries({ queryKey: ["chat"] });
-        if (event.type === "download.completed") {
-          void client.invalidateQueries({ queryKey: ["models"] });
-          void client.invalidateQueries({ queryKey: ["profiles"] });
-          void client.invalidateQueries({ queryKey: ["model-storage"] });
-        }
-        if (["generation.progress", "generation.preview"].includes(event.type)) {
-          scheduleMediaRefresh();
-        }
-        if (["run.completed", "run.failed", "run.cancelled"].includes(event.type)) {
-          if (mediaRefresh !== undefined) window.clearTimeout(mediaRefresh);
-          mediaRefresh = undefined;
-          void client.invalidateQueries({ queryKey: ["chat"] });
-          void client.invalidateQueries({ queryKey: ["chats"] });
-          void client.invalidateQueries({ queryKey: ["jobs"] });
-          void client.invalidateQueries({ queryKey: ["artifacts"] });
-          void client.invalidateQueries({ queryKey: ["artifact-storage"] });
-          window.setTimeout(() => setLiveText({}), 200);
-        }
-      },
-      () => undefined,
-      scheduleAuthoritativeRefresh,
-    ).then((cleanup) => { dispose = cleanup; });
-    return () => {
-      if (mediaRefresh !== undefined) window.clearTimeout(mediaRefresh);
-      if (authoritativeRefresh !== undefined) window.clearTimeout(authoritativeRefresh);
-      dispose?.();
-    };
-  }, [client]);
+  const eventsConnected = useLiveEvents(client, setLiveText);
 
   const createChat = useMutation({
     mutationFn: (projectId?: string | null) => api.createChat(projectId),
@@ -4756,7 +4597,7 @@ export default function App() {
         />
       )}
       <JobsPanel />
-      {(send.error || regenerate.error || selectResponseRevision.error || branch.error || stop.error || cancelWorkPlan.error || cancelWorkStep.error || retryWorkStep.error || updateChat.error || createChat.error || createProject.error || importProject.error || manageChat.error || deleteChat.error || updateProject.error || deleteProject.error) && <div className="toast error" role="alert"><X size={16} />{(send.error || regenerate.error || selectResponseRevision.error || branch.error || stop.error || cancelWorkPlan.error || cancelWorkStep.error || retryWorkStep.error || updateChat.error || createChat.error || createProject.error || importProject.error || manageChat.error || deleteChat.error || updateProject.error || deleteProject.error)?.message}</div>}
+      <GlobalNotices connected={eventsConnected} mutations={[send, regenerate, selectResponseRevision, branch, stop, cancelWorkPlan, cancelWorkStep, retryWorkStep, updateChat, createChat, createProject, exportProject, importProject, manageChat, deleteChat, updateProject, deleteProject]} />
     </div>
   );
 }
