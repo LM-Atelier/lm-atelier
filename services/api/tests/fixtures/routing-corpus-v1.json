@@ -817,6 +817,20 @@
       "expected": "image_to_image"
     },
     {
+      "id": "explicit-image-context-edit-generic-01",
+      "text": "Change only the cube to bright red",
+      "mode": "image",
+      "has_prior_image": true,
+      "expected": "image_to_image"
+    },
+    {
+      "id": "explicit-image-context-edit-fresh-01",
+      "text": "Make an image of a green apple",
+      "mode": "image",
+      "has_prior_image": true,
+      "expected": "text_to_image"
+    },
+    {
       "id": "context-edit-generic-negative-01",
       "text": "Generate code that blurs an image",
       "mode": "auto",
