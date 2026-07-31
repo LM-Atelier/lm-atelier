@@ -43,6 +43,7 @@ def seed_ready_role(
     role: str,
     *,
     operation: str | None = None,
+    input_schema: dict[str, object] | None = None,
 ) -> tuple[ModelInstall, ModelProfile, WorkflowRevision | None]:
     install = ModelInstall(
         id=f"model_{role}",
@@ -92,7 +93,7 @@ def seed_ready_role(
             version=1,
             engine="mock",
             api_graph_json={"node": {"class_type": "Synthetic"}},
-            input_schema_json={},
+            input_schema_json=input_schema or {},
             dependencies_json={"model_install_ids": [install.id]},
             trusted=True,
         )
@@ -246,6 +247,53 @@ async def test_setup_verification_failure_is_bounded_and_self_cleaning(
         )
         assert session.scalars(select(Artifact)).all() == []
         assert session.scalars(select(Job)).all() == []
+
+
+async def test_setup_verification_uses_selected_workflow_settings(
+    client: AsyncClient,
+    app: FastAPI,
+    settings: Settings,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    seed_ready_role(
+        settings,
+        "image",
+        operation="image_to_image",
+        input_schema={
+            "type": "object",
+            "properties": {
+                "width": {"type": "integer", "readOnly": True},
+                "height": {"type": "integer", "readOnly": True},
+                "steps": {
+                    "type": "integer",
+                    "default": 4,
+                    "minimum": 1,
+                    "maximum": 4,
+                },
+            },
+        },
+    )
+    requests: list[MediaRequest] = []
+    adapter = app.state.services.engines.media
+    original_generate = adapter.generate
+
+    async def recording_generate(request: MediaRequest):  # type: ignore[no-untyped-def]
+        requests.append(request)
+        async for event in original_generate(request):
+            yield event
+
+    monkeypatch.setattr(adapter, "generate", recording_generate)
+
+    response = await client.post("/api/setup/verify/image")
+
+    assert response.status_code == 202
+    await wait_for_role(client, "image", "ready")
+    assert len(requests) == 1
+    assert requests[0].operation == "image_to_image"
+    assert len(requests[0].input_paths) == 1
+    assert requests[0].parameters["steps"] == 4
+    assert "width" not in requests[0].parameters
+    assert "height" not in requests[0].parameters
 
 
 async def test_setup_verification_cancellation_cleans_transient_state(

@@ -416,6 +416,9 @@ _CONTEXT_VIDEO_CREATE = re.compile(
     r"(?:video|animation)\b",
     re.IGNORECASE,
 )
+# An image prompt describes one moment. Enough for a full scene description,
+# far short of a transcript.
+MAX_VISUAL_SOURCE_CHARS = 1_200
 _MEDIA_CONTEXT_SUMMARY = re.compile(r"^\s*Generated (?:image|video|\d+ images?|\d+ videos?)\b")
 _ANOTHER_GENERATION = re.compile(
     r"^\s*(?:(?:please|now|ok(?:ay)?),?\s+)*"
@@ -659,7 +662,7 @@ class ModalityRouter:
                 and plan.operation == Operation.TEXT
             ):
                 return fallback
-            return self._with_text_context(plan, referenced_text)
+            return self._with_text_context(plan, referenced_text, conversation)
         except (json.JSONDecodeError, TypeError, ValueError):
             return fallback
 
@@ -710,7 +713,7 @@ class ModalityRouter:
         referenced_text = self._referenced_text_context(text, conversation or [])
 
         def grounded(plan: RoutingPlan) -> RoutingPlan:
-            return self._with_text_context(plan, referenced_text)
+            return self._with_text_context(plan, referenced_text, conversation)
 
         if mode == RoutingMode.TEXT:
             return self._text(
@@ -917,15 +920,63 @@ class ModalityRouter:
         return "\n\n".join(reversed(blocks))
 
     @staticmethod
-    def _with_text_context(plan: RoutingPlan, referenced_text: str | None) -> RoutingPlan:
+    def _visual_source_text(conversation: list[dict[str, Any]]) -> str | None:
+        """The prose a media request is asking to depict.
+
+        `_referenced_text_context` builds a labelled transcript - up to four
+        turns and 6,000 characters of "User:"/"Assistant:" - because that is the
+        right shape for deciding whether a message refers to earlier text. It is
+        the wrong thing to paste into an image prompt. A diffusion model weights
+        every token it is given, so a transcript hands it the user's own
+        instructions and several contradictory actions at once; that measurably
+        degraded person count, pose and anatomy in a monitored session.
+
+        What a media request needs is the single passage being referred to. So:
+        the most recent assistant prose, bounded at a sentence rather than
+        mid-word, and short enough to describe one moment.
+        """
+        for message in reversed(conversation):
+            if message.get("role") != "assistant":
+                continue
+            content = message.get("content")
+            if not isinstance(content, str):
+                continue
+            content = " ".join(content.split())
+            if not content or _MEDIA_CONTEXT_SUMMARY.match(content):
+                continue
+            return ModalityRouter._bounded_passage(content, MAX_VISUAL_SOURCE_CHARS)
+        return None
+
+    @staticmethod
+    def _bounded_passage(text: str, limit: int) -> str:
+        """Trim to `limit`, ending on a sentence rather than mid-word."""
+        if len(text) <= limit:
+            return text
+        window = text[:limit]
+        cut = max(window.rfind(". "), window.rfind("! "), window.rfind("? "))
+        if cut >= limit // 3:
+            return window[: cut + 1]
+        space = window.rfind(" ")
+        return (window[:space] if space > 0 else window).rstrip()
+
+    @staticmethod
+    def _with_text_context(
+        plan: RoutingPlan,
+        referenced_text: str | None,
+        conversation: list[dict[str, Any]] | None = None,
+    ) -> RoutingPlan:
         if not referenced_text or plan.operation == Operation.TEXT:
             return plan
-        if referenced_text in plan.standalone_prompt:
+        # `referenced_text` decides *whether* this refers to earlier text. What
+        # gets pasted into a media prompt is a different question, answered by
+        # `_visual_source_text`: one passage, not a labelled transcript.
+        source = ModalityRouter._visual_source_text(conversation or []) or referenced_text
+        if source in plan.standalone_prompt:
             return plan
         return plan.model_copy(
             update={
                 "standalone_prompt": (
-                    f"{plan.standalone_prompt.strip()}\n\nSource chat text:\n{referenced_text}"
+                    f"{plan.standalone_prompt.strip()}\n\nSource chat text:\n{source}"
                 )
             }
         )
