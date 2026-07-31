@@ -12,6 +12,7 @@ from httpx2 import ASGITransport, AsyncClient
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
+from local_lm.artifacts import ArtifactStore
 from local_lm.config import Settings
 from local_lm.db import SessionLocal
 from local_lm.exports import _CAS_IMPORT_SESSION_KEY, ProjectExporter
@@ -30,6 +31,7 @@ from local_lm.project_portability import (
     has_local_path,
     redact_local_paths,
 )
+from local_lm.schemas import SettingField
 
 WINDOWS_MODEL_PATH = r"C:\Users\alice\AppData\Local\LM Atelier\models\private.gguf"
 WINDOWS_LOG_PATH = r"\\workstation\private-share\lm-atelier\worker.log"
@@ -755,3 +757,75 @@ def test_import_keeps_settings_the_registry_does_not_define() -> None:
     kept = _without_load_scope_settings({"a_workflow_parameter": 3}, "image")
 
     assert kept == {"a_workflow_parameter": 3}
+
+
+def _exporter() -> ProjectExporter:
+    return ProjectExporter(Settings(), ArtifactStore(Settings()))
+
+
+def _field(key: str, kind: str = "number", **extra: object) -> SettingField:
+    return SettingField(
+        key=key,
+        label=key,
+        type=kind,
+        scope="request",
+        visibility="basic",
+        available=True,
+        **extra,  # type: ignore[arg-type]
+    )
+
+
+def test_imported_settings_are_validated_against_the_live_engine_schema() -> None:
+    """Imported settings used to be written verbatim.
+
+    A value the REST API would reject could therefore arrive through an archive
+    and fail later at generation time, where nothing connects the failure back to
+    the import. A described field with a bad value is dropped; a field the role
+    schema does not describe is kept, because a workflow contributes fields that
+    only exist once that workflow is selected.
+    """
+    exporter = _exporter()
+    exporter._known_fields = {"image": [_field("steps", "integer"), _field("cfg")]}
+
+    result = exporter._generation_settings(
+        {"image": {"steps": "not an integer", "cfg": 7.5, "a_workflow_parameter": 3}}
+    )
+
+    assert result["image"] == {"cfg": 7.5, "a_workflow_parameter": 3}
+
+
+def test_one_bad_setting_costs_only_itself() -> None:
+    """Rejecting the archive over a stale key would make old exports unimportable."""
+    exporter = _exporter()
+    exporter._known_fields = {"image": [_field("steps", "integer"), _field("cfg")]}
+
+    result = exporter._generation_settings({"image": {"steps": "not an integer", "cfg": 7.5}})
+
+    assert result["image"] == {"cfg": 7.5}
+
+
+def test_a_role_with_no_resolvable_schema_imports_unvalidated() -> None:
+    """An engine being down must not cost the user their settings."""
+    exporter = _exporter()
+    exporter._known_fields = {}
+
+    result = exporter._generation_settings({"image": {"steps": 30, "anything": "at all"}})
+
+    assert result["image"] == {"steps": 30, "anything": "at all"}
+
+
+def test_validation_does_not_defeat_workflow_contributed_fields() -> None:
+    """The regression this nearly reintroduced.
+
+    `loras` is contributed by a workflow's input schema, so it is absent from the
+    role schema while being entirely legitimate. An earlier attempt validated
+    against `ROLE_SETTINGS` and dropped settings exactly like it; validating
+    against the live role schema and dropping the undescribed would have done the
+    same thing for the same reason.
+    """
+    exporter = _exporter()
+    exporter._known_fields = {"image": [_field("steps", "integer")]}
+
+    result = exporter._generation_settings({"image": {"steps": 30, "loras": [{"id": "x"}]}})
+
+    assert result["image"] == {"steps": 30, "loras": [{"id": "x"}]}

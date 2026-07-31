@@ -6,6 +6,7 @@ import math
 import stat
 import tempfile
 import zipfile
+from collections.abc import Mapping
 from pathlib import Path, PurePosixPath
 from typing import IO, Any, cast
 
@@ -48,7 +49,8 @@ from .project_dependencies import (
 )
 from .project_portability import has_local_path, redact_local_paths
 from .prompt_helpers import STANDARD_CHAT_SCOPE
-from .schemas import ChatDetail, ProjectOut, RunOut, VisionSettings
+from .schemas import ChatDetail, ProjectOut, RunOut, SettingField, VisionSettings
+from .settings_registry import validate_settings
 
 _CAS_IMPORT_SESSION_KEY = "lm_atelier_project_import_cas"
 _AUXILIARY_ASSET_KINDS = {
@@ -110,6 +112,8 @@ class ProjectExporter:
     def __init__(self, settings: Settings, artifacts: ArtifactStore) -> None:
         self.settings = settings
         self.artifacts = artifacts
+        # Live engine schema per role, supplied per import by the request layer.
+        self._known_fields: dict[str, list[SettingField]] = {}
 
     def export(self, session: Session, project_id: str, *, include_media: bool = True) -> Artifact:
         project = session.get(Project, project_id)
@@ -884,7 +888,23 @@ class ProjectExporter:
 
         return remap(value), missing
 
-    def import_archive(self, session: Session, source: IO[bytes]) -> Project:
+    def import_archive(
+        self,
+        session: Session,
+        source: IO[bytes],
+        *,
+        known_fields: Mapping[str, list[SettingField]] | None = None,
+    ) -> Project:
+        """Import a project archive.
+
+        `known_fields` is the live engine schema per role, resolved by the
+        caller because only the request layer can await it. When a role is
+        absent - an engine that is not configured, or whose schema cannot be
+        read right now - that role's settings are imported unvalidated rather
+        than dropped: refusing to import because an engine is down would be
+        worse than importing something the user can correct.
+        """
+        self._known_fields = dict(known_fields or {})
         source.seek(0)
         cas_transaction = _ImportCasTransaction(session, self.artifacts.root)
         try:
@@ -2233,11 +2253,10 @@ class ProjectExporter:
         record["generation_settings_json"] = settings
         record["generation_preset_ids_json"] = portable_bindings
 
-    @staticmethod
-    def _generation_settings(value: Any) -> dict[str, dict[str, Any]]:
+    def _generation_settings(self, value: Any) -> dict[str, dict[str, Any]]:
         if not isinstance(value, dict):
             return {}
-        return cast(
+        redacted = cast(
             dict[str, dict[str, Any]],
             redact_local_paths(
                 {
@@ -2247,6 +2266,47 @@ class ProjectExporter:
                 }
             ),
         )
+        return {
+            role: self._validated_role_settings(role, settings)
+            for role, settings in redacted.items()
+        }
+
+    def _validated_role_settings(self, role: str, values: dict[str, Any]) -> dict[str, Any]:
+        """Keep the settings this engine actually accepts, and drop the rest.
+
+        Imported settings used to be written verbatim, so a value the REST API
+        would reject could arrive through an archive and fail later at
+        generation time, where nothing connects the failure to the import.
+
+        Validation is against the live engine schema, not the settings registry.
+        An earlier attempt used the registry and silently dropped legitimate
+        settings, because a workflow's input schema contributes fields the
+        registry does not know about.
+
+        A bad key costs only itself. Rejecting the archive over one stale
+        setting would make old exports unimportable after any engine change,
+        which is the failure this whole task exists to remove. And a key the role
+        schema does not describe is kept, not dropped - see below.
+        """
+        fields = self._known_fields.get(role)
+        if fields is None or not values:
+            return values
+        described = {field.key: field for field in fields}
+        kept: dict[str, Any] = {}
+        for key, item in values.items():
+            definition = described.get(key)
+            if definition is None:
+                # Not described by the role schema, which does not mean invalid:
+                # a workflow's input schema contributes fields that only appear
+                # once that workflow is selected. Validating what can be
+                # described must never mean deleting what cannot.
+                kept[key] = item
+                continue
+            try:
+                kept.update(validate_settings({key: item}, [definition]))
+            except ValueError:
+                continue
+        return kept
 
     @staticmethod
     def _vision_settings(value: Any) -> dict[str, Any]:
