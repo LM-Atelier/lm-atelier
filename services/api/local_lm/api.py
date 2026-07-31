@@ -175,6 +175,7 @@ from .schemas import (
     PromptHelperUpdate,
     ReferenceRecipe,
     RegenerateRequest,
+    ResolvedSetup,
     RunOut,
     RuntimeStatus,
     SettingField,
@@ -215,7 +216,7 @@ from .setup_verification import (
     setup_verification_settings,
     verification_evidence_key,
 )
-from .verified_setup import build_verified_setup
+from .verified_setup import build_verified_setup, resolve_verified_setup
 from .workflow_edit_calibration import validate_workflow_edit_calibration
 from .workflow_trust import (
     TRUST_DERIVATION_VERSION,
@@ -485,6 +486,32 @@ def get_setup_readiness(
         services.settings,
         services.runtimes,
         services.processes.statuses(),
+    )
+
+
+@router.post("/setup/resolve-setup", response_model=ResolvedSetup)
+def resolve_imported_setup(
+    payload: VerifiedSetup, request: Request, session: SessionDep
+) -> ResolvedSetup:
+    """Report what an imported setup finds here, and what it would still need.
+
+    Reports only. Nothing is downloaded, pinned, trusted or activated: an
+    imported file must not be able to make this machine fetch several gigabytes
+    because it says so. Missing components stay behind the existing
+    approval-gated install path.
+
+    Its attestation travels as provenance, never as permission. "Verified
+    elsewhere on compatible hardware" is reported separately from anything this
+    machine has earned, because the two must never be confused - a hardware
+    envelope establishes compatibility, not identity of the local runtime,
+    drivers, files, or result.
+    """
+    return ResolvedSetup.model_validate(
+        resolve_verified_setup(
+            session,
+            payload.model_dump(mode="json"),
+            _services(request).settings,
+        )
     )
 
 
