@@ -183,6 +183,7 @@ from .schemas import (
     StorageCleanupResult,
     SystemInfo,
     ToolCapabilityProbe,
+    TrustDerivation,
     TurnAccepted,
     TurnRequest,
     WorkerStatus,
@@ -214,6 +215,11 @@ from .setup_verification import (
     verification_evidence_key,
 )
 from .workflow_edit_calibration import validate_workflow_edit_calibration
+from .workflow_trust import (
+    TRUST_DERIVATION_VERSION,
+    derive_trust,
+    recorded_template_identity,
+)
 
 if TYPE_CHECKING:
     from .main import Services
@@ -4519,6 +4525,72 @@ async def update_workflow(
 async def export_workflow(workflow_id: str, session: SessionDep) -> WorkflowBundle:
     definition, revision = _workflow_and_revision(session, workflow_id)
     return _workflow_bundle(definition, revision)
+
+
+@router.post("/workflows/{workflow_id}/derive-trust", response_model=TrustDerivation)
+async def derive_workflow_trust(
+    workflow_id: str, request: Request, session: SessionDep
+) -> TrustDerivation:
+    """Trust a workflow this machine can rebuild for itself.
+
+    Import forces `trusted=False` and execution refuses untrusted revisions, so
+    an imported setup arrives inert. If recompiling the recorded template here
+    yields byte-identical bytes, the graph was derived on this machine from a
+    template already shipped here - the same assertion the compiler makes during
+    a normal install - and no human review adds anything. Anything that cannot be
+    re-derived still requires review, and this says which case it is.
+    """
+    definition, revision = _workflow_and_revision(session, workflow_id)
+    if revision.trusted:
+        return TrustDerivation(
+            version=TRUST_DERIVATION_VERSION,
+            trusted=True,
+            reason="already_trusted",
+            message="This workflow is already trusted.",
+        )
+
+    services = _services(request)
+    # Templates are indexed by media role, which the definition records as an
+    # operation.
+    role = "video" if "video" in definition.operation else "image"
+    identity = recorded_template_identity(revision.dependencies_json)
+    template: ComfyTemplate | None = None
+    recompiled_graph: dict[str, Any] | None = None
+    if identity:
+        template_id, _ = identity
+        try:
+            template = services.downloads.comfy_templates.get(template_id, role)
+        except (ValueError, LookupError, FileNotFoundError):
+            template = None
+        if template:
+            try:
+                describe_nodes = getattr(services.engines.media, "object_info", None)
+                if not callable(describe_nodes):
+                    raise RuntimeError("this media engine cannot describe its nodes")
+                object_info = await describe_nodes()
+                recompiled_graph = services.downloads.comfy_templates.compile(
+                    template_id,
+                    role,
+                    object_info,
+                ).api_graph
+            except Exception:
+                # The runtime is not up, or the template no longer compiles here.
+                # Either way this machine cannot vouch for the graph right now,
+                # which the decision below reports as a refusal rather than an
+                # error - nothing is wrong, it just cannot be proven yet.
+                recompiled_graph = None
+
+    decision = derive_trust(
+        dependencies=revision.dependencies_json,
+        stored_api_graph=revision.api_graph_json,
+        installed_template_sha256=template.sha256 if template else None,
+        recompiled_api_graph=recompiled_graph,
+        uses_only_core_nodes=template is not None,
+    )
+    if decision.trusted:
+        revision.trusted = True
+        session.commit()
+    return TrustDerivation(**decision.as_dict())
 
 
 @router.get("/workflows/{workflow_id}/open-target", response_model=WorkflowOpenTarget)

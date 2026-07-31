@@ -6946,3 +6946,61 @@ async def test_classify_draft_answers_with_the_router_that_plans_the_turn(
         json={"text": "Make her top red", "mode": "image"},
     )
     assert missing.status_code == 404
+
+
+async def test_derive_trust_refuses_a_workflow_it_cannot_rebuild(client: AsyncClient) -> None:
+    """An unprovable workflow must stay untrusted, and say why."""
+    imported = (
+        await client.post(
+            "/api/workflows/import",
+            json={
+                "format": "lm-atelier-workflow",
+                "version": 1,
+                "name": "Imported recipe",
+                "operation": "text_to_image",
+                "engine": "mock",
+                "api_graph": {"1": {"class_type": "SaveImage", "inputs": {}}},
+                # Hand-authored: no template identity to rebuild from.
+                "dependencies": {},
+            },
+        )
+    ).json()
+    assert imported["revisions"][0]["trusted"] is False
+
+    derived = await client.post(f"/api/workflows/{imported['id']}/derive-trust")
+
+    assert derived.status_code == 200, derived.text
+    body = derived.json()
+    assert body["trusted"] is False
+    assert body["reason"] == "no_template_identity"
+    assert body["message"]
+
+    # And the refusal is durable, not merely reported.
+    reloaded = (await client.get("/api/workflows")).json()
+    match = next(item for item in reloaded if item["id"] == imported["id"])
+    assert all(not revision["trusted"] for revision in match["revisions"])
+
+
+async def test_derive_trust_reports_an_already_trusted_workflow(client: AsyncClient) -> None:
+    workflow = (
+        await client.post(
+            "/api/workflows",
+            json={
+                "name": "Already trusted",
+                "operation": "text_to_image",
+                "engine": "mock",
+                "api_graph": {"1": {"class_type": "SaveImage", "inputs": {}}},
+                "trusted": True,
+            },
+        )
+    ).json()
+
+    derived = await client.post(f"/api/workflows/{workflow['id']}/derive-trust")
+
+    assert derived.status_code == 200, derived.text
+    assert derived.json() == {
+        "version": 1,
+        "trusted": True,
+        "reason": "already_trusted",
+        "message": "This workflow is already trusted.",
+    }

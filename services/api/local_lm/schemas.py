@@ -245,6 +245,15 @@ class DraftClassification(ApiModel):
     references_prior_visual: bool
 
 
+class TrustDerivation(ApiModel):
+    """Whether this machine could vouch for a workflow by rebuilding it."""
+
+    version: int
+    trusted: bool
+    reason: str
+    message: str
+
+
 class RegenerateRequest(ApiModel):
     settings: dict[str, Any] = Field(default_factory=dict)
 
