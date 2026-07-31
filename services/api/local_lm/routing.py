@@ -22,6 +22,16 @@ _VIDEO_CREATE = re.compile(
 )
 _DIRECT_IMAGE = re.compile(r"^\s*(?:draw|paint|illustrate|render)\b", re.IGNORECASE)
 _DIRECT_VIDEO = re.compile(r"^\s*(?:animate|make (?:it|this|that) move)\b", re.IGNORECASE)
+# An imperative arriving after a question, as in "..., now draw me a cat". The
+# leading separator is what distinguishes it from the same verb used
+# descriptively, as in "explain how painters work".
+_LATER_MEDIA_REQUEST = re.compile(
+    r"(?:[,;]|\bthen\b|\bnow\b|\binstead\b)\s*(?:please\s+)?"
+    r"(?:draw|paint|illustrate|render|animate|sketch|sharpen|blur|crop|"
+    r"brighten|darken|recolor|colorize|colourize|denoise|desaturate|mirror|"
+    r"outpaint|reframe|relight|retouch|straighten|upscale|zoom)\b",
+    re.IGNORECASE,
+)
 _PRIOR_IMAGE_EDIT = re.compile(
     r"^\s*(?:please\s+|now\s+)*(?:"
     r"(?:make|change|turn|edit|modify|adjust)\s+(?:it|this|that|the\s+"
@@ -506,6 +516,29 @@ class RouteConfirmationRequired(ValueError):
         self.plan = plan
 
 
+def _asks_for_media(normalized: str) -> bool:
+    """Whether a question also asks for something to be made.
+
+    A discussion opening followed by a real request is not pure discussion:
+    "Explain how this works, now draw me a cat" should reach the media branches.
+
+    This used to be approximated by searching for `for me|now|instead` anywhere
+    in the message, which fired on any incidental occurrence. "Explain why
+    diffusion models are popular now" dropped from 0.94 to 0.90 purely because it
+    ended in "now" - and 0.94 is the threshold that skips the model planner, so
+    an unambiguous question spent a whole planner round trip on a word that
+    happened to be there. Anchoring the phrase to the tail would not have helped,
+    since that "now" is at the tail.
+
+    The signal is deliberately narrow: an imperative in a *later* clause. The
+    create patterns cannot be used here, because they match descriptive uses
+    inside the very questions this branch exists to protect - "How do I make a
+    video loop smoothly?" contains "make ... video" and is a question. The
+    corpus caught that.
+    """
+    return bool(_LATER_MEDIA_REQUEST.search(normalized))
+
+
 class ModalityRouter:
     async def plan_with_model(
         self,
@@ -757,9 +790,7 @@ class ModalityRouter:
                     0.95,
                 )
 
-        if DISCUSSION_OPENING.search(normalized) and not re.search(
-            r"\b(?:for me|now|instead)\b", normalized, re.IGNORECASE
-        ):
+        if DISCUSSION_OPENING.search(normalized) and not _asks_for_media(normalized):
             return self._text(
                 normalized,
                 RoutingReasonCode.DISCUSSION,
