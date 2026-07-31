@@ -11,6 +11,7 @@ import itertools
 
 from local_lm.config import Settings
 from local_lm.db import SessionLocal
+from local_lm.model_manifests import inspect_repository_metadata
 from local_lm.model_planner import (
     declared_model_components,
     install_satisfies_components,
@@ -147,3 +148,71 @@ def test_declared_components_are_normalized_and_junk_is_dropped() -> None:
     ]
     assert declared_model_components({}) == []
     assert declared_model_components({"model_components": "nope"}) == []
+
+
+def _safetensors() -> bytes:
+    """The smallest well-formed safetensors file: a length prefix and a header."""
+    header = b"{}"
+    return len(header).to_bytes(8, "little") + header
+
+
+def test_the_template_decides_the_component_folder_not_the_repository_layout() -> None:
+    """A multi-component model must not land entirely in `checkpoints`.
+
+    `_target_folder` infers the folder from the repository path, which only works
+    when the repository happens to name its directories the way ComfyUI does. A
+    repository that does not - and most do not - fell back to `checkpoints` for
+    every component, so a model whose files really belong in `diffusion_models`,
+    `text_encoders` and `vae` recorded three identical wrong folders. Local
+    execution still worked, because execution uses the template; only the
+    portable record was wrong, which is the kind of defect that surfaces on
+    someone else's machine.
+    """
+    files = {
+        "split/dit.safetensors": _safetensors(),
+        "split/te.safetensors": _safetensors(),
+        "split/vae.safetensors": _safetensors(),
+    }
+    selected = sorted(files)
+
+    inferred = inspect_repository_metadata(files, selected, role="image")
+    assert {item.target_folder for item in inferred.components} == {"checkpoints"}
+
+    declared = inspect_repository_metadata(
+        files,
+        selected,
+        role="image",
+        component_folders={
+            "split/dit.safetensors": "diffusion_models",
+            "split/te.safetensors": "text_encoders",
+            "split/vae.safetensors": "vae",
+        },
+    )
+
+    assert {item.path: item.target_folder for item in declared.components} == {
+        "split/dit.safetensors": "diffusion_models",
+        "split/te.safetensors": "text_encoders",
+        "split/vae.safetensors": "vae",
+    }
+
+
+def test_an_undeclared_component_is_left_exactly_as_it_was() -> None:
+    """The template is the authority when it speaks, and silent when it does not.
+
+    Asserted as equivalence rather than against a fixed folder: what matters is
+    that naming some components cannot change the classification of the others.
+    """
+    files = {"loras/style.safetensors": _safetensors()}
+    selected = ["loras/style.safetensors"]
+
+    untouched = inspect_repository_metadata(files, selected, role="image")
+    with_others_declared = inspect_repository_metadata(
+        files,
+        selected,
+        role="image",
+        component_folders={"something/else.safetensors": "vae"},
+    )
+
+    assert [item.target_folder for item in with_others_declared.components] == [
+        item.target_folder for item in untouched.components
+    ]
