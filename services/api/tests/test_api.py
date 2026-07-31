@@ -4211,6 +4211,9 @@ async def test_project_pins_an_immutable_media_workflow_revision(client: AsyncCl
             json={
                 "name": "Project image recipe",
                 "operation": "text_to_image",
+                # Match the configured media engine. Without this the pin names a
+                # workflow that cannot run here, which is a different test.
+                "engine": "mock",
                 "api_graph": {"1": {"class_type": "SaveImage", "inputs": {}}},
                 "trusted": True,
             },
@@ -4238,8 +4241,190 @@ async def test_project_pins_an_immutable_media_workflow_revision(client: AsyncCl
         f"/api/chats/{chat['id']}/turns",
         json={"text": "Draw a blue cabin", "mode": "image"},
     )
-    assert turn.status_code == 202
+    assert turn.status_code == 202, turn.json()
     assert turn.json()["run"]["workflow_revision_id"] == revision_id
+
+
+async def test_a_project_pin_that_cannot_run_is_named_rather_than_replaced(
+    client: AsyncClient,
+) -> None:
+    """A pin is a lockfile, so a broken one is reported, not quietly swapped.
+
+    Falling through to generic selection would produce output from a different
+    graph than the project pinned, and the pin would stay broken and unmentioned.
+    """
+    # Trusted and well-formed, but built for an engine this install does not run.
+    other_engine = (
+        await client.post(
+            "/api/workflows",
+            json={
+                "name": "Wrong engine recipe",
+                "operation": "text_to_image",
+                "engine": "comfyui",
+                "api_graph": {"1": {"class_type": "SaveImage", "inputs": {}}},
+                "trusted": True,
+            },
+        )
+    ).json()
+    usable = (
+        await client.post(
+            "/api/workflows",
+            json={
+                "name": "Usable recipe",
+                "operation": "text_to_image",
+                "engine": "mock",
+                "api_graph": {"1": {"class_type": "SaveImage", "inputs": {}}},
+                "trusted": True,
+            },
+        )
+    ).json()
+    assert usable["current_revision_id"]
+
+    project = (
+        await client.post(
+            "/api/projects",
+            json={
+                "name": "Broken pin",
+                "image_workflow_revision_id": other_engine["current_revision_id"],
+            },
+        )
+    ).json()
+    chat = (
+        await client.post("/api/chats", json={"title": "Broken pin", "project_id": project["id"]})
+    ).json()
+
+    turn = await client.post(
+        f"/api/chats/{chat['id']}/turns",
+        json={"text": "Draw a blue cabin", "mode": "image"},
+    )
+
+    # A usable workflow exists; the point is that it is not silently substituted.
+    assert turn.status_code == 409, turn.json()
+    detail = turn.json()["detail"]
+    assert detail["code"] == "project_workflow_pin_invalid"
+    assert detail["reason"] == "engine_mismatch"
+    assert detail["project_id"] == project["id"]
+    assert detail["workflow_revision_id"] == other_engine["current_revision_id"]
+    assert detail["role"] == "image"
+    assert detail["actions"] == [
+        "update_project_workflow_pin",
+        "remove_project_workflow_pin",
+    ]
+
+
+async def test_an_untrusted_project_pin_is_refused_at_selection(client: AsyncClient) -> None:
+    """Trust used to be checked only during execution, which never named the pin."""
+    untrusted = (
+        await client.post(
+            "/api/workflows",
+            json={
+                "name": "Unreviewed recipe",
+                "operation": "text_to_image",
+                "engine": "mock",
+                "api_graph": {"1": {"class_type": "SaveImage", "inputs": {}}},
+                "trusted": False,
+            },
+        )
+    ).json()
+    project = (
+        await client.post(
+            "/api/projects",
+            json={
+                "name": "Unreviewed pin",
+                "image_workflow_revision_id": untrusted["current_revision_id"],
+            },
+        )
+    ).json()
+    chat = (
+        await client.post(
+            "/api/chats", json={"title": "Unreviewed pin", "project_id": project["id"]}
+        )
+    ).json()
+
+    turn = await client.post(
+        f"/api/chats/{chat['id']}/turns",
+        json={"text": "Draw a blue cabin", "mode": "image"},
+    )
+
+    assert turn.status_code == 409, turn.json()
+    assert turn.json()["detail"]["reason"] == "untrusted"
+
+
+async def _project_pin(client: AsyncClient, project_id: str) -> str | None:
+    """Read a project's image pin back. There is no single-project GET."""
+    projects = (await client.get("/api/projects")).json()
+    match = next(item for item in projects if item["id"] == project_id)
+    return match["image_workflow_revision_id"]
+
+
+async def test_a_pin_follows_only_an_artifact_identical_recompile(client: AsyncClient) -> None:
+    """The lockfile property: same contract migrates, changed contract does not.
+
+    A recompile that produces a byte-identical artifact is the same executable
+    contract under a new id, so the pin follows it and the setup survives the
+    release. A recompile that changes what runs leaves the pin alone, because
+    adopting a different graph is the user's decision.
+    """
+    graph = {"1": {"class_type": "SaveImage", "inputs": {}}}
+    workflow = (
+        await client.post(
+            "/api/workflows",
+            json={
+                "name": "Recompiled recipe",
+                "operation": "text_to_image",
+                "engine": "mock",
+                "api_graph": graph,
+                "trusted": True,
+            },
+        )
+    ).json()
+    pinned_revision_id = workflow["current_revision_id"]
+    project = (
+        await client.post(
+            "/api/projects",
+            json={"name": "Recompiled", "image_workflow_revision_id": pinned_revision_id},
+        )
+    ).json()
+    chat = (
+        await client.post("/api/chats", json={"title": "Recompiled", "project_id": project["id"]})
+    ).json()
+
+    # A recompile that executes exactly the same thing.
+    identical = (
+        await client.post(
+            f"/api/workflows/{workflow['id']}/revisions",
+            json={"api_graph": graph, "trusted": True},
+        )
+    ).json()
+    assert identical["id"] != pinned_revision_id
+
+    turn = await client.post(
+        f"/api/chats/{chat['id']}/turns",
+        json={"text": "Draw a blue cabin", "mode": "image"},
+    )
+    assert turn.status_code == 202, turn.json()
+    assert turn.json()["run"]["workflow_revision_id"] == identical["id"]
+    assert await _project_pin(client, project["id"]) == identical["id"]
+
+    # A recompile that executes something else must not be adopted silently.
+    changed = (
+        await client.post(
+            f"/api/workflows/{workflow['id']}/revisions",
+            json={
+                "api_graph": {"1": {"class_type": "SaveImage", "inputs": {"quality": 95}}},
+                "trusted": True,
+            },
+        )
+    ).json()
+
+    second = await client.post(
+        f"/api/chats/{chat['id']}/turns",
+        json={"text": "Draw a red cabin", "mode": "image"},
+    )
+    assert second.status_code == 202, second.json()
+    assert second.json()["run"]["workflow_revision_id"] == identical["id"]
+    assert second.json()["run"]["workflow_revision_id"] != changed["id"]
+    assert await _project_pin(client, project["id"]) == identical["id"]
 
 
 async def test_media_workflow_follows_the_selected_model_dependency(
