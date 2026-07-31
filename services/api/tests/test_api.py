@@ -4484,6 +4484,127 @@ async def test_media_workflow_follows_the_selected_model_dependency(
     assert turn.json()["run"]["workflow_revision_id"] == revisions[0]
 
 
+async def test_auto_media_selection_falls_back_to_operation_compatible_profile(
+    client: AsyncClient,
+    tmp_path: Path,
+) -> None:
+    installs = []
+    for name in ("text-image-model", "edit-only-model"):
+        model_dir = tmp_path / name
+        model_dir.mkdir()
+        (model_dir / f"{name}.safetensors").write_bytes(b"safe")
+        installs.append(
+            (
+                await client.post(
+                    "/api/models/import",
+                    json={
+                        "name": name,
+                        "role": "image",
+                        "engine": "mock",
+                        "local_path": str(model_dir),
+                    },
+                )
+            ).json()
+        )
+
+    profiles = (await client.get("/api/profiles?role=image")).json()
+    default_profile = next(profile for profile in profiles if profile["is_default"])
+    profiles_by_install = {
+        profile["model_install_id"]: profile for profile in profiles if profile["model_install_id"]
+    }
+    text_profile = profiles_by_install[installs[0]["id"]]
+    edit_profile = profiles_by_install[installs[1]["id"]]
+    updated = await client.patch(
+        f"/api/profiles/{edit_profile['id']}",
+        json={"use_case": "green wooden cube"},
+    )
+    assert updated.status_code == 200
+
+    with SessionLocal() as session:
+        seeded_text_workflows = session.scalars(
+            select(WorkflowDefinition).where(
+                WorkflowDefinition.operation == "text_to_image",
+            )
+        ).all()
+        for definition in seeded_text_workflows:
+            definition.current_revision_id = None
+        session.commit()
+
+    text_workflow = (
+        await client.post(
+            "/api/workflows",
+            json={
+                "name": "Text-only image workflow",
+                "operation": "text_to_image",
+                "engine": "mock",
+                "api_graph": {"node": {"class_type": "MockTextImage"}},
+                "dependencies": {"model_install_ids": [installs[0]["id"]]},
+                "trusted": True,
+            },
+        )
+    ).json()
+    edit_workflow = await client.post(
+        "/api/workflows",
+        json={
+            "name": "Edit-only image workflow",
+            "operation": "image_to_image",
+            "engine": "mock",
+            "api_graph": {"node": {"class_type": "MockEditImage"}},
+            "dependencies": {"model_install_ids": [installs[1]["id"]]},
+            "trusted": True,
+        },
+    )
+    assert edit_workflow.status_code == 201
+
+    chat = (await client.post("/api/chats", json={"title": "Auto fallback"})).json()
+    auto_turn = await client.post(
+        f"/api/chats/{chat['id']}/turns",
+        json={
+            "text": "Create one green wooden cube",
+            "mode": "image",
+        },
+    )
+    assert auto_turn.status_code == 202, auto_turn.json()
+    auto_run = auto_turn.json()["run"]
+    assert auto_run["profile_id"] == text_profile["id"]
+    assert auto_run["workflow_revision_id"] == text_workflow["current_revision_id"]
+    auto_selection = auto_run["provenance_json"]["model_selection"]
+    assert auto_selection["mode"] == "auto"
+    assert auto_selection["fallback"] is True
+    assert auto_selection["fallback_reason"] == "operation_workflow_unavailable"
+    assert auto_selection["fallback_from_profile_id"] == edit_profile["id"]
+
+    default_chat = (await client.post("/api/chats", json={"title": "Default fallback"})).json()
+    selected_default = await client.patch(
+        f"/api/chats/{default_chat['id']}",
+        json={"active_image_profile_id": None},
+    )
+    assert selected_default.status_code == 200
+    default_turn = await client.post(
+        f"/api/chats/{default_chat['id']}/turns",
+        json={"text": "Create one simple image", "mode": "image"},
+    )
+    assert default_turn.status_code == 202, default_turn.json()
+    default_run = default_turn.json()["run"]
+    assert default_run["profile_id"] == text_profile["id"]
+    default_selection = default_run["provenance_json"]["model_selection"]
+    assert default_selection["mode"] == "default"
+    assert default_selection["fallback_from_profile_id"] == default_profile["id"]
+
+    explicit_chat = (await client.post("/api/chats", json={"title": "Strict explicit"})).json()
+    selected_edit = await client.patch(
+        f"/api/chats/{explicit_chat['id']}",
+        json={"active_image_profile_id": edit_profile["id"]},
+    )
+    assert selected_edit.status_code == 200
+    explicit_turn = await client.post(
+        f"/api/chats/{explicit_chat['id']}/turns",
+        json={"text": "Create one green wooden cube", "mode": "image"},
+    )
+    assert explicit_turn.status_code == 422
+    assert "No ready workflow matches" in explicit_turn.json()["detail"]
+
+
 async def test_pinned_workflow_schema_drives_generation_settings(client: AsyncClient) -> None:
     workflow = (
         await client.post(
