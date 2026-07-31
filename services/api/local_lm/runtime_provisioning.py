@@ -177,13 +177,15 @@ class RuntimeProvisioner:
             update={
                 "state": "installing",
                 "progress": 0,
-                "progress_json": reduce_progress(
-                    current.progress_json.model_dump(mode="json")
-                    if current.progress_json
-                    else None,
-                    stage="preparing download",
-                    queue_resource="network_transfer",
-                    indeterminate=True,
+                "progress_json": ProgressV2.model_validate(
+                    reduce_progress(
+                        current.progress_json.model_dump(mode="json")
+                        if current.progress_json
+                        else None,
+                        stage="preparing download",
+                        queue_resource="network_transfer",
+                        indeterminate=True,
+                    )
                 ),
                 "message": "Preparing download.",
             }
@@ -1469,11 +1471,10 @@ class RuntimeProvisioner:
 
     def _runtime_progress(self, engine: RuntimeName) -> dict[str, Any] | None:
         current = self._states.get(engine)
-        return (
-            current.progress_json.model_dump(mode="json")
-            if current and current.progress_json
-            else None
-        )
+        progress = current.progress_json if current else None
+        if not progress:
+            return None
+        return ProgressV2.model_validate(progress).model_dump(mode="json")
 
     def _definition(self, engine: RuntimeName) -> dict[str, Any]:
         raw = self._manifest["engines"].get(engine)
