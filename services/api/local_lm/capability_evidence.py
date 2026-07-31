@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+from collections.abc import Mapping
 from typing import TYPE_CHECKING, Any, Literal, cast
 
 from sqlalchemy import select
@@ -9,7 +10,11 @@ from sqlalchemy.orm import Session
 
 from .adapters.contracts import ADAPTER_CONTRACT_VERSION
 from .config import Settings
-from .hardware import hardware_capability_class
+from .hardware import (
+    hardware_capability_class,
+    hardware_envelope,
+    hardware_envelope_satisfied,
+)
 from .model_planner import (
     ACTIVATION_PROBE_VERSION,
     LAUNCH_CONTRACT_VERSION,
@@ -99,6 +104,7 @@ def current_capability_evidence(
         else None
     )
     current_runtime = runtimes.status(runtime_name) if runtimes and runtime_name else None
+    current_envelope = hardware_envelope(settings)
     for evidence in session.scalars(
         select(ModelCapabilityEvidence)
         .where(
@@ -112,7 +118,7 @@ def current_capability_evidence(
             evidence.adapter_contract_version != ADAPTER_CONTRACT_VERSION
             or evidence.launch_contract_version != LAUNCH_CONTRACT_VERSION
             or evidence.probe_version != ACTIVATION_PROBE_VERSION
-            or evidence.hardware_class != hardware_capability_class(settings)
+            or not _hardware_still_sufficient(evidence, settings, current_envelope)
             or evidence.component_hashes_json != expected_hashes
             or evidence.workflow_contract_version not in accepted_workflows
             or (
@@ -127,6 +133,27 @@ def current_capability_evidence(
             continue
         return evidence
     return None
+
+
+def _hardware_still_sufficient(
+    evidence: ModelCapabilityEvidence,
+    settings: Settings,
+    current_envelope: Mapping[str, Any],
+) -> bool:
+    """Whether this machine can still do what the machine that proved it could.
+
+    `hardware_class` is an equality token over the CPU model, total memory and the
+    device list - and that device list is only populated when `llama-server` and
+    `nvidia-smi` resolve on PATH. So a driver update or a PATH change threw away
+    every proof on a machine that had not changed. Equality is kept as a fast
+    accept, and as the only test for rows recorded before envelopes existed, but
+    it is no longer allowed to reject on its own.
+    """
+    if evidence.hardware_class == hardware_capability_class(settings):
+        return True
+    if not evidence.hardware_envelope_json:
+        return False
+    return hardware_envelope_satisfied(evidence.hardware_envelope_json, current_envelope)
 
 
 def record_capability_evidence(
@@ -187,6 +214,7 @@ def record_capability_evidence(
         launch_contract_version=LAUNCH_CONTRACT_VERSION,
         workflow_contract_version=workflow_contract_version,
         hardware_class=hardware_class[:200],
+        hardware_envelope_json=hardware_envelope(settings),
         probe_version=ACTIVATION_PROBE_VERSION,
         details_json={
             **details,

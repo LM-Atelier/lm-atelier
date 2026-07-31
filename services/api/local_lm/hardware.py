@@ -6,6 +6,7 @@ import platform
 import shutil
 import subprocess
 import sys
+from collections.abc import Mapping
 from pathlib import Path
 from time import monotonic
 from typing import Any
@@ -250,3 +251,83 @@ def hardware_capability_class(settings: Settings) -> str:
     capability_class = f"{system.platform.casefold()}-{system.architecture.casefold()}-{digest}"
     _capability_class_cache = (now, capability_class)
     return capability_class
+
+
+# What a machine has to offer for a proof recorded elsewhere to still apply.
+#
+# `hardware_capability_class` is an equality token over the CPU model, total
+# memory and the device list - and that device list is only populated when
+# `llama-server` and `nvidia-smi` resolve on PATH. So a driver update or a PATH
+# change silently invalidated every proof on a machine that had not changed. An
+# envelope asks the question that actually matters: can this machine still do
+# what the machine that proved it could do.
+HARDWARE_ENVELOPE_VERSION = 1
+
+
+def hardware_envelope(settings: Settings) -> dict[str, Any]:
+    """What this machine offers, in comparable terms."""
+
+    system = collect_system_info(settings)
+    accelerators = [
+        device
+        for device in system.devices
+        if device.kind.casefold() != "cpu" and device.total_memory_bytes
+    ]
+    return {
+        "version": HARDWARE_ENVELOPE_VERSION,
+        "platform": system.platform.casefold(),
+        "architecture": system.architecture.casefold(),
+        "memory_bytes": system.memory_total_bytes,
+        "accelerator_memory_bytes": max(
+            (device.total_memory_bytes or 0 for device in accelerators),
+            default=0,
+        ),
+        "backends": sorted(
+            {
+                device.backend.casefold()
+                for device in accelerators
+                if isinstance(device.backend, str) and device.backend
+            }
+        ),
+    }
+
+
+def hardware_envelope_satisfied(
+    recorded: Mapping[str, Any] | None,
+    current: Mapping[str, Any],
+) -> bool:
+    """Whether `current` can still do what the machine that recorded this could.
+
+    Conservative on purpose. The envelope records what the proving machine
+    *had*, not what the run *needed*, so "at least as much memory" is an
+    approximation - but it errs towards refusing a claim rather than making one
+    that might not hold, and it does not throw away a proof because a driver
+    updated.
+    """
+    if not isinstance(recorded, Mapping) or not recorded:
+        return False
+    if recorded.get("version") != HARDWARE_ENVELOPE_VERSION:
+        return False
+    # A proof from another operating system or architecture says nothing here.
+    if recorded.get("platform") != current.get("platform"):
+        return False
+    if recorded.get("architecture") != current.get("architecture"):
+        return False
+
+    def _amount(source: Mapping[str, Any], key: str) -> int:
+        value = source.get(key)
+        return value if isinstance(value, int) and value >= 0 else 0
+
+    if _amount(current, "memory_bytes") < _amount(recorded, "memory_bytes"):
+        return False
+    required_accelerator = _amount(recorded, "accelerator_memory_bytes")
+    if required_accelerator and _amount(current, "accelerator_memory_bytes") < required_accelerator:
+        return False
+    recorded_backends = recorded.get("backends")
+    current_backends = current.get("backends")
+    if isinstance(recorded_backends, list) and recorded_backends:
+        available = set(current_backends) if isinstance(current_backends, list) else set()
+        # The proof used some accelerator backend; this machine needs one of them.
+        if not available & set(recorded_backends):
+            return False
+    return True
