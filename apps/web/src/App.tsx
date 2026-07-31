@@ -5,8 +5,7 @@ import {
   useEffect,
   useMemo,
   useRef,
-  useState,
-  type ReactNode,
+  useState, type ReactNode,
 } from "react";
 import { useInfiniteQuery, useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import ReactMarkdown from "react-markdown";
@@ -72,6 +71,7 @@ import {
 import { GlobalNotices } from "./GlobalNotices";
 import { useLiveEvents } from "./useLiveEvents";
 import { useDraftClassification } from "./useDraftClassification";
+import { useGenerationModeSelection } from "./useGenerationModeSelection";
 import {
   normalizeSettingsForFields,
   promptPreviewSettings,
@@ -1504,7 +1504,7 @@ function Composer({
   quoteTarget?: { text: string; requestId: number } | null;
 }) {
   const [text, setText] = useState("");
-  const mode = chat.routing_mode;
+  const { mode, changeMode, currentMode } = useGenerationModeSelection(chat.routing_mode, onMode);
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [promptHelperDraft, setPromptHelperDraft] = useState<string | null>(null);
   const [attachments, setAttachments] = useState<ComposerAttachment[]>([]);
@@ -1521,14 +1521,14 @@ function Composer({
         ? current
         : [...current, visualTarget.attachment]
     ));
-    onMode(visualTarget.mode);
+    changeMode(visualTarget.mode);
     if (visualTarget.mode === "video") {
       window.setTimeout(() => {
         setText((current) => current.trim() ? current : "Animate this image");
       }, 0);
     }
     textInput.current?.focus();
-  }, [visualTarget, onMode]);
+  }, [visualTarget, changeMode]);
   const consumedQuoteRequest = useRef<number | null>(null);
   useEffect(() => {
     if (!quoteTarget || consumedQuoteRequest.current === quoteTarget.requestId) return;
@@ -1576,7 +1576,8 @@ function Composer({
 
   const submit = (stopCurrent = false) => {
     if (!text.trim()) return;
-    const role = roleForMode(mode);
+    const selectedMode = currentMode();
+    const role = roleForMode(selectedMode);
     const engine = engines.find((item) => item.roles.includes(role));
     const fields = resolveWorkflowSettings(
       resolveCapabilitySettings(engine, role),
@@ -1585,9 +1586,9 @@ function Composer({
     const dispatch = stopCurrent ? onStopAndSend : onSend;
     dispatch(
       text.trim(),
-      mode,
+      selectedMode,
       attachments.map((item) => item.id),
-      mode === "auto" ? {} : normalizeSettingsForFields(settings, fields),
+      selectedMode === "auto" ? {} : normalizeSettingsForFields(settings, fields),
     );
     setText("");
     setAttachments([]);
@@ -1731,7 +1732,7 @@ function Composer({
                 {mode === "text" && <MessageSquare size={15} />}
                 {mode === "image" && <ImageIcon size={15} />}
                 {mode === "video" && <Film size={15} />}
-                <select aria-label="Generation mode" value={mode} onChange={(event) => onMode(event.target.value as RoutingMode)}>
+                <select aria-label="Generation mode" value={mode} onChange={(event) => changeMode(event.target.value as RoutingMode)}>
                   <option value="auto">Auto</option><option value="text">Text</option><option value="image">Image</option><option value="video">Video</option>
                 </select>
                 <ChevronDown size={13} />
@@ -1769,7 +1770,6 @@ function Composer({
             </span>
           </div>
         </div>
-        <small className="composer-note">Local models can make mistakes. Generation stays on this machine.</small>
       </div>
       {promptHelperDraft !== null && (
         <PromptHelperDialog
