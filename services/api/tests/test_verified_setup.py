@@ -15,11 +15,13 @@ from typing import Any
 
 from local_lm.config import Settings
 from local_lm.db import SessionLocal
+from local_lm.hardware import hardware_envelope
 from local_lm.models import ModelComponentManifest, ModelInstall
 from local_lm.verified_setup import (
     VERIFIED_SETUP_VERSION,
     build_verified_setup,
     local_identifiers_in,
+    resolve_verified_setup,
     verified_setup_digest,
 )
 
@@ -180,3 +182,98 @@ def test_local_identifiers_in_finds_what_it_is_for() -> None:
     assert local_identifiers_in({"nested": [{"profile_id": "x"}]}) == ["nested[0].profile_id"]
     # Portable identifiers are not flagged.
     assert local_identifiers_in({"remote_id": "acme/x", "template_id": "image_basic"}) == []
+
+
+def _artifact(settings: Settings, sha256: str = _SHA, **overrides: Any) -> dict[str, Any]:
+    payload: dict[str, Any] = {
+        "version": VERIFIED_SETUP_VERSION,
+        "role": "image",
+        "engine": "comfyui",
+        "model": {"components": [{"target_folder": "checkpoints", "sha256": sha256}]},
+        "workflow": None,
+        "settings": {"load": {}, "request": {}},
+        "hardware": hardware_envelope(settings),
+        "attestation": {"generated_output": True},
+        "digest": "d" * 64,
+    }
+    payload.update(overrides)
+    return payload
+
+
+def test_an_imported_setup_resolves_against_bytes_this_machine_already_has(
+    settings: Settings,
+) -> None:
+    """The point of content addressing: the local install has another name."""
+    with SessionLocal() as session:
+        _install(session, f"case{next(_COUNTER)}")
+
+        resolved = resolve_verified_setup(session, _artifact(settings), settings)
+
+        assert resolved["components"] == [
+            {"target_folder": "checkpoints", "sha256": _SHA, "present": True}
+        ]
+        assert resolved["missing_components"] == []
+        assert resolved["requires_approval"] is False
+        assert resolved["ready_to_verify"] is True
+        session.rollback()
+
+
+def test_missing_components_are_reported_for_approval_not_fetched(
+    settings: Settings,
+) -> None:
+    """An imported file must not be able to start a multi-gigabyte download."""
+    with SessionLocal() as session:
+        _install(session, f"case{next(_COUNTER)}")
+
+        resolved = resolve_verified_setup(session, _artifact(settings, sha256="e" * 64), settings)
+
+        assert resolved["missing_components"] == [
+            {"target_folder": "checkpoints", "sha256": "e" * 64}
+        ]
+        assert resolved["requires_approval"] is True
+        assert resolved["ready_to_verify"] is False
+        session.rollback()
+
+
+def test_an_imported_attestation_never_counts_as_local_verification(
+    settings: Settings,
+) -> None:
+    """Configuration travels; trust does not.
+
+    The artifact says a generation succeeded elsewhere. That is provenance, and
+    it must stay visibly distinct from anything this machine has earned.
+    """
+    with SessionLocal() as session:
+        _install(session, f"case{next(_COUNTER)}")
+
+        resolved = resolve_verified_setup(session, _artifact(settings), settings)
+
+        assert resolved["verified_elsewhere"] is True
+        assert resolved["verified_here"] is False
+        session.rollback()
+
+
+def test_incompatible_hardware_withdraws_even_the_elsewhere_claim(
+    settings: Settings,
+) -> None:
+    """A proof from hardware this machine cannot match recommends nothing here."""
+    with SessionLocal() as session:
+        _install(session, f"case{next(_COUNTER)}")
+        elsewhere = _artifact(
+            settings,
+            hardware={
+                "version": 1,
+                "platform": "linux",
+                "architecture": "amd64",
+                "memory_bytes": 1,
+                "accelerator_memory_bytes": 0,
+                "backends": [],
+            },
+        )
+
+        resolved = resolve_verified_setup(session, elsewhere, settings)
+
+        assert resolved["hardware_compatible"] is False
+        assert resolved["verified_elsewhere"] is False
+        assert resolved["ready_to_verify"] is False
+        session.rollback()
