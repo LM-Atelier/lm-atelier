@@ -634,7 +634,10 @@ async def start_setup_verification(
     if existing and (existing.state in ACTIVE_VERIFICATION_STATES or existing.state == "ready"):
         return existing
 
-    fields = await _engine_role_fields(request, role)
+    fields = workflow_settings(
+        await _engine_role_fields(request, role),
+        workflow.input_schema_json if workflow else None,
+    )
     settings = setup_verification_settings(fields, role)
     verification = existing or SetupVerification(
         role=role,
