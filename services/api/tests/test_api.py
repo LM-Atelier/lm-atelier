@@ -6185,8 +6185,13 @@ async def test_download_pause_resume_and_cancel(client: AsyncClient, monkeypatch
 
 
 async def test_catalog_preflight_blocks_gated_unsafe_weights(
-    client: AsyncClient, monkeypatch
+    client: AsyncClient, settings: Settings, monkeypatch
 ) -> None:  # type: ignore[no-untyped-def]
+    # The access check is `gated and not settings.hf_token`, and `hf_token` is
+    # loaded from the operating system credential vault. Without this the test
+    # passes in CI and fails on any machine where a Hugging Face credential has
+    # been stored - which is every machine that has installed a gated model.
+    monkeypatch.setattr(settings, "hf_token", None)
     async def inspect(
         _catalog: HuggingFaceCatalog,
         remote_id: str,
