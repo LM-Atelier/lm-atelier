@@ -24,6 +24,14 @@ class _StreamInactivityError(RuntimeError):
     pass
 
 
+def _has_image_content(messages: list[dict[str, Any]]) -> bool:
+    return any(
+        isinstance(content := message.get("content"), list)
+        and any(isinstance(part, dict) and part.get("type") == "image_url" for part in content)
+        for message in messages
+    )
+
+
 async def _bounded_response_json(response: httpx.Response) -> object:
     content_length = response.headers.get("content-length")
     if content_length:
@@ -228,6 +236,36 @@ class LlamaCppAdapter:
         retry_prefix: str | None = None
 
         try:
+            if _has_image_content(request.messages):
+                payload["stream"] = False
+                payload.pop("stream_options", None)
+                try:
+                    events = await self._complete_without_streaming(payload, cancel_event)
+                except httpx.HTTPStatusError as exc:
+                    yield self._stream_error("status", status_code=exc.response.status_code)
+                except httpx.TimeoutException:
+                    yield self._stream_error("inactivity")
+                except httpx.ConnectError:
+                    yield self._stream_error("connect")
+                except httpx.ReadError:
+                    yield self._stream_error("read")
+                except httpx.HTTPError:
+                    yield self._stream_error("transport")
+                except (
+                    _StreamProtocolError,
+                    json.JSONDecodeError,
+                    TypeError,
+                    ValueError,
+                    OverflowError,
+                    RecursionError,
+                    UnicodeError,
+                ):
+                    yield self._stream_error("protocol")
+                else:
+                    for event in events:
+                        yield event
+                return
+
             while True:
                 finish_reason: str | None = None
                 completion_frames = 0
@@ -401,6 +439,91 @@ class LlamaCppAdapter:
         finally:
             self._cancel_events.pop(request.run_id, None)
             self._cancelled.discard(request.run_id)
+
+    async def _complete_without_streaming(
+        self,
+        payload: dict[str, Any],
+        cancel_event: asyncio.Event,
+    ) -> list[ChatEvent]:
+        request_task = asyncio.create_task(self._request_completion(payload))
+        cancel_task = asyncio.create_task(cancel_event.wait())
+        tasks = {request_task, cancel_task}
+        try:
+            done, _pending = await asyncio.wait(tasks, return_when=asyncio.FIRST_COMPLETED)
+            if cancel_task in done and cancel_event.is_set():
+                return [ChatEvent(type="cancelled")]
+            return await request_task
+        finally:
+            for task in tasks:
+                if not task.done():
+                    task.cancel()
+            await asyncio.gather(*tasks, return_exceptions=True)
+
+    async def _request_completion(self, payload: dict[str, Any]) -> list[ChatEvent]:
+        async with self._client.stream(
+            "POST",
+            "/v1/chat/completions",
+            json=payload,
+            timeout=httpx.Timeout(
+                connect=10,
+                read=self.inactivity_seconds,
+                write=30,
+                pool=10,
+            ),
+        ) as response:
+            response.raise_for_status()
+            value = await _bounded_response_json(response)
+        return self._completion_events(value)
+
+    @staticmethod
+    def _completion_events(value: object) -> list[ChatEvent]:
+        if not isinstance(value, dict):
+            raise _StreamProtocolError
+        try:
+            json.dumps(value, allow_nan=False)
+        except (TypeError, ValueError, RecursionError) as exc:
+            raise _StreamProtocolError from exc
+
+        choices = value.get("choices")
+        if not isinstance(choices, list) or not choices or not isinstance(choices[0], dict):
+            raise _StreamProtocolError
+        choice = choices[0]
+        message = choice.get("message")
+        if not isinstance(message, dict):
+            raise _StreamProtocolError
+        content = message.get("content")
+        tool_calls = message.get("tool_calls")
+        if content is not None and not isinstance(content, str):
+            raise _StreamProtocolError
+        if tool_calls is not None and not isinstance(tool_calls, list):
+            raise _StreamProtocolError
+        finish_reason = choice.get("finish_reason")
+        if (
+            not isinstance(finish_reason, str)
+            or not 1 <= len(finish_reason) <= 64
+            or any(
+                not (character.isalnum() or character in {"_", "-", "."})
+                for character in finish_reason
+            )
+        ):
+            raise _StreamProtocolError
+
+        events: list[ChatEvent] = []
+        if content:
+            events.append(ChatEvent(type="delta", text=content))
+        if tool_calls:
+            events.append(ChatEvent(type="tool_delta", data={"tool_calls": tool_calls}))
+        metadata: dict[str, Any] = {}
+        for key in ("usage", "timings"):
+            item = value.get(key)
+            if item is not None:
+                if not isinstance(item, dict):
+                    raise _StreamProtocolError
+                metadata[key] = item
+        if metadata:
+            events.append(ChatEvent(type="usage", data=metadata))
+        events.append(ChatEvent(type="complete", data={"finish_reason": finish_reason}))
+        return events
 
     async def _next_line(
         self,
