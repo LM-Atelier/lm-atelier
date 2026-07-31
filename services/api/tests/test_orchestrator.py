@@ -47,6 +47,7 @@ def test_successful_media_evidence_requires_an_exact_official_contract(monkeypat
         id="revision-image",
         trusted=True,
         engine="comfyui",
+        artifact_sha256="d" * 64,
         input_schema_json={"x-lm-atelier-workflow-performance": performance},
         dependencies_json={
             "model_install_ids": [install.id],
@@ -101,6 +102,9 @@ def test_successful_media_evidence_requires_an_exact_official_contract(monkeypat
         == "evidence-key"
     )
     assert recorder.call_args.kwargs["component_hashes"] == {"model.safetensors": "a" * 64}
+    # Evidence is keyed on what the revision executes, not on the template it was
+    # compiled from, so a recompile that changes nothing keeps the proof.
+    assert recorder.call_args.kwargs["workflow_contract_version"] == revision.artifact_sha256
     assert recorder.call_args.kwargs["details"] == {
         "probe": "successful_media_output",
         "operation": "image_to_image",
