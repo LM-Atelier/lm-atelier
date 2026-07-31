@@ -253,3 +253,23 @@ def test_assent_normalization_is_linear_on_long_repeated_input(
 )
 def test_refusals_and_unrelated_text_are_not_assent(text: str) -> None:
     assert is_explicit_generation_assent(text) is False
+
+
+def test_the_offer_prompt_bound_stays_grammar_expressible() -> None:
+    """llama.cpp derives a GBNF grammar from this schema and rejects huge bounds.
+
+    A `maxLength` of 20,000 became a `{0,20000}` repetition that llama.cpp
+    refuses as exceeding its sane defaults, so the tool call failed and no offer
+    was ever produced - the feature was silently off rather than degraded. This
+    pins the bound to something a grammar can express, and to a length an actual
+    image or video prompt needs.
+    """
+    from local_lm.generation_offers import GENERATION_OFFER_TOOL, MAX_OFFER_PROMPT_CHARS
+
+    items = GENERATION_OFFER_TOOL["function"]["parameters"]["properties"]["items"]
+    prompt_field = items["items"]["properties"]["prompt"]
+
+    assert prompt_field["maxLength"] == MAX_OFFER_PROMPT_CHARS
+    assert MAX_OFFER_PROMPT_CHARS <= 4_000, (
+        "keep this expressible as a grammar repetition; llama.cpp rejects large bounds"
+    )
