@@ -141,6 +141,7 @@ const AUTO_PROFILE_ID = "__auto__";
 const RECENT_UNSUCCESSFUL_JOB_LIMIT = 3;
 const DISMISSED_JOB_ISSUES_KEY = "lm-atelier-dismissed-job-issues-before";
 const SETUP_DISMISSED_KEY = "lm-atelier-setup-dismissed";
+const CURRENT_CHAT_KEY = "local-lm-chat";
 
 function focusMainContent() {
   window.setTimeout(() => document.getElementById("main-content")?.focus(), 0);
@@ -4192,7 +4193,7 @@ export default function App() {
   const [view, setView] = useState<View>("chat");
   const [modelLibraryRole, setModelLibraryRole] = useState<EngineRole>("chat");
   const [setupOpen, setSetupOpen] = useState<boolean | null>(null);
-  const [currentChatId, setCurrentChatId] = useState<string | null>(() => localStorage.getItem("local-lm-chat"));
+  const [currentChatId, setCurrentChatId] = useState<string | null>(() => localStorage.getItem(CURRENT_CHAT_KEY));
   const [liveText, setLiveText] = useState<Record<string, string>>({});
   const [chatDrafts, setChatDrafts] = useState<Record<string, Partial<Chat>>>({});
   const [pendingTurns, setPendingTurns] = useState<Record<string, PendingTurn[]>>({});
@@ -4230,7 +4231,7 @@ export default function App() {
     mutationFn: (projectId?: string | null) => api.createChat(projectId),
     onSuccess: (created) => {
       setCurrentChatId(created.id);
-      localStorage.setItem("local-lm-chat", created.id);
+      localStorage.setItem(CURRENT_CHAT_KEY, created.id);
       setView("chat");
       focusMainContent();
       void client.invalidateQueries({ queryKey: ["chats"] });
@@ -4397,8 +4398,8 @@ export default function App() {
       if (activeChatId === deletedId) {
         const nextChatId = remainingChats.find((candidate) => !candidate.archived)?.id ?? null;
         setCurrentChatId(nextChatId);
-        if (nextChatId) localStorage.setItem("local-lm-chat", nextChatId);
-        else localStorage.removeItem("local-lm-chat");
+        if (nextChatId) localStorage.setItem(CURRENT_CHAT_KEY, nextChatId);
+        else localStorage.removeItem(CURRENT_CHAT_KEY);
       }
       client.removeQueries({ queryKey: ["chat", deletedId], exact: true });
       return { previousChats, previousCurrentChatId };
@@ -4417,8 +4418,8 @@ export default function App() {
       if (!context) return;
       client.setQueryData(["chats"], context.previousChats);
       setCurrentChatId(context.previousCurrentChatId);
-      if (context.previousCurrentChatId) localStorage.setItem("local-lm-chat", context.previousCurrentChatId);
-      else localStorage.removeItem("local-lm-chat");
+      if (context.previousCurrentChatId) localStorage.setItem(CURRENT_CHAT_KEY, context.previousCurrentChatId);
+      else localStorage.removeItem(CURRENT_CHAT_KEY);
     },
     onSettled: () => void client.invalidateQueries({ queryKey: ["chats"] }),
   });
@@ -4446,15 +4447,14 @@ export default function App() {
     mutationFn: api.importProject,
     onSuccess: (project) => {
       void client.invalidateQueries({ queryKey: ["projects"] });
-      void client.invalidateQueries({ queryKey: ["chats"] });
-      window.setTimeout(() => {
+      // Awaited, not timed: a slower refetch used to leave the import on nothing.
+      void client.invalidateQueries({ queryKey: ["chats"] }).then(() => {
         const importedChat = client.getQueryData<Chat[]>(["chats"])?.find((item) => item.project_id === project.id);
-        if (importedChat) {
-          setCurrentChatId(importedChat.id);
-          localStorage.setItem("local-lm-chat", importedChat.id);
-          setView("chat");
-        }
-      }, 100);
+        if (!importedChat) return;
+        setCurrentChatId(importedChat.id);
+        localStorage.setItem(CURRENT_CHAT_KEY, importedChat.id);
+        setView("chat");
+      });
     },
   });
 
@@ -4557,7 +4557,7 @@ export default function App() {
   return (
     <div className="app-shell">
       <a className="skip-link" href="#main-content">Skip to main content</a>
-      <Sidebar projects={allProjects} chats={allChats} engines={engines.data ?? []} presets={presets.data ?? []} workflows={workflows.data ?? []} currentChatId={activeChatId} view={view} setupState={setupReadiness.data?.state} onSetup={() => setSetupOpen(true)} onChat={(id) => { setCurrentChatId(id); localStorage.setItem("local-lm-chat", id); setView("chat"); focusMainContent(); }} onView={(nextView) => { setView(nextView); focusMainContent(); }} onNewChat={(projectId) => createChat.mutate(projectId)} onNewProject={() => { const name = window.prompt("Project name"); if (name?.trim()) createProject.mutate(name.trim()); }} onExportProject={(id, includeMedia) => exportProject.mutate({ id, includeMedia })} onImportProject={(file) => importProject.mutate(file)} onUpdateChat={(id, values) => manageChat.mutate({ id, values })} onDeleteChat={(id, deleteGeneratedMedia) => deleteChat.mutate({ id, deleteGeneratedMedia })} onUpdateProject={(id, values) => updateProject.mutate({ id, values })} onDeleteProject={(id) => deleteProject.mutate(id)} />
+      <Sidebar projects={allProjects} chats={allChats} engines={engines.data ?? []} presets={presets.data ?? []} workflows={workflows.data ?? []} currentChatId={activeChatId} view={view} setupState={setupReadiness.data?.state} onSetup={() => setSetupOpen(true)} onChat={(id) => { setCurrentChatId(id); localStorage.setItem(CURRENT_CHAT_KEY, id); setView("chat"); focusMainContent(); }} onView={(nextView) => { setView(nextView); focusMainContent(); }} onNewChat={(projectId) => createChat.mutate(projectId)} onNewProject={() => { const name = window.prompt("Project name"); if (name?.trim()) createProject.mutate(name.trim()); }} onExportProject={(id, includeMedia) => exportProject.mutate({ id, includeMedia })} onImportProject={(file) => importProject.mutate(file)} onUpdateChat={(id, values) => manageChat.mutate({ id, values })} onDeleteChat={(id, deleteGeneratedMedia) => deleteChat.mutate({ id, deleteGeneratedMedia })} onUpdateProject={(id, values) => updateProject.mutate({ id, values })} onDeleteProject={(id) => deleteProject.mutate(id)} />
       <main id="main-content" tabIndex={-1}>{activeContent}</main>
       {setupOpen === true && !setupReadiness.data && (
         <AccessibleDialog

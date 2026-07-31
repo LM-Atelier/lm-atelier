@@ -900,6 +900,40 @@ describe("App", () => {
     await waitFor(() => expect(vi.mocked(api.importProject).mock.calls[0]?.[0]).toBe(file));
   });
 
+  it("opens the imported project even when its chats arrive slowly", async () => {
+    // The imported chat used to be read from the cache behind a fixed 100ms
+    // timeout. A refetch slower than that left the user on nothing, with no
+    // error and nothing to retry - so this delays the refetch past that window.
+    const stamp = "2026-07-22T00:00:00Z";
+    const project = { id: "project-imported", name: "Imported", description: "", instructions: "", archived: false, image_workflow_revision_id: null, video_workflow_revision_id: null, created_at: stamp, updated_at: stamp };
+    const importedChat = { id: "chat-imported", project_id: project.id, title: "Imported chat", archived: false, routing_mode: "auto" as const, confirm_uncertain_media: false, active_chat_profile_id: null, active_image_profile_id: null, active_video_profile_id: null, active_head_message_id: null, created_at: stamp, updated_at: stamp };
+    vi.mocked(api.importProject).mockResolvedValue(project);
+    vi.mocked(api.projects).mockResolvedValue([project]);
+    let served = false;
+    vi.mocked(api.chats).mockImplementation(async () => {
+      if (!served) {
+        served = true;
+        return [];
+      }
+      await new Promise((resolve) => setTimeout(resolve, 250));
+      return [importedChat];
+    });
+    const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+    const { container } = render(
+      <QueryClientProvider client={client}>
+        <App />
+      </QueryClientProvider>,
+    );
+    const file = new File(["archive"], "portable.lm-atelier.zip", { type: "application/zip" });
+    const input = container.querySelector<HTMLInputElement>('input[accept*=".lm-atelier.zip"]');
+    fireEvent.change(input!, { target: { files: [file] } });
+
+    await waitFor(
+      () => expect(localStorage.getItem("local-lm-chat")).toBe(importedChat.id),
+      { timeout: 3000 },
+    );
+  });
+
   it("exports projects with or without embedded media", async () => {
     const click = vi.spyOn(HTMLAnchorElement.prototype, "click").mockImplementation(() => undefined);
     const stamp = "2026-07-22T00:00:00Z";
