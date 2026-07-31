@@ -58,14 +58,20 @@ _EXECUTION_DEPENDENCY_KEYS = (
 )
 
 
-def media_workflow_contract_version(template_sha256: str) -> str:
+def media_workflow_contract_version(
+    template_sha256: str,
+    compiler_version: int | None = None,
+) -> str:
     """The legacy contract key, derived from the compiler version.
 
     Retained so evidence recorded before the artifact contract can still be
-    recognised. New evidence uses `workflow_artifact_contract`.
+    recognised. Pass the compiler version the revision actually recorded: using
+    the current one would accept evidence from a compiler that no longer exists.
+    New evidence uses `workflow_artifact_contract`.
     """
 
-    payload = f"{COMFY_TEMPLATE_COMPILER_VERSION}:{template_sha256}".encode()
+    version = COMFY_TEMPLATE_COMPILER_VERSION if compiler_version is None else compiler_version
+    payload = f"{version}:{template_sha256}".encode()
     return hashlib.sha256(payload).hexdigest()
 
 
