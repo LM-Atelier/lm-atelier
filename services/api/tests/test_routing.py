@@ -813,3 +813,53 @@ def test_ordinal_selection_skips_media_summaries_to_find_the_list() -> None:
 
     assert plan.operation == Operation.TEXT_TO_IMAGE
     assert plan.standalone_prompt == "A fox curled beneath a snow-covered pine"
+
+
+_PRIOR_VISUAL_MODES = (RoutingMode.IMAGE, RoutingMode.VIDEO)
+
+
+@pytest.mark.parametrize("mode", _PRIOR_VISUAL_MODES)
+def test_references_prior_visual_agrees_with_the_plan_it_predicts(mode: RoutingMode) -> None:
+    """The composer's answer must be the one the submitted turn acts on.
+
+    The browser used to decide this with its own copy of the router's patterns,
+    which drifted until it misread most of the corpus. `references_prior_visual`
+    exists so there is one implementation; this asserts it stays the same one.
+    """
+    router = ModalityRouter()
+    cases = json.loads(CORPUS.read_text(encoding="utf-8"))["cases"]
+    reuse = {Operation.IMAGE_TO_IMAGE, Operation.IMAGE_TO_VIDEO}
+    disagreements = []
+    for case in cases:
+        text = str(case["text"])
+        plan = router.plan(
+            text=text,
+            mode=mode,
+            input_artifact_ids=[],
+            has_prior_image=True,
+        )
+        predicted = router.references_prior_visual(text=text, mode=mode)
+        if predicted != (plan.operation in reuse):
+            disagreements.append((case["id"], text, predicted, plan.operation))
+    assert not disagreements, disagreements
+
+
+@pytest.mark.parametrize("mode", _PRIOR_VISUAL_MODES)
+def test_references_prior_visual_defers_to_a_referenced_text_answer(mode: RoutingMode) -> None:
+    """Wording that points at prior prose is not a request to edit the image."""
+    router = ModalityRouter()
+    conversation = [{"role": "assistant", "content": "A glass orchard above a quiet sea."}]
+
+    assert router.references_prior_visual(text="Recolor the previous image", mode=mode)
+    assert not router.references_prior_visual(
+        text="Illustrate the previous story",
+        mode=mode,
+        conversation=conversation,
+    )
+
+
+def test_references_prior_visual_is_false_in_text_mode() -> None:
+    assert not ModalityRouter().references_prior_visual(
+        text="Recolor the previous image",
+        mode=RoutingMode.TEXT,
+    )

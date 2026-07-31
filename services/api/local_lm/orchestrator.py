@@ -4860,6 +4860,33 @@ class ConversationOrchestrator:
                 return offer
         return None
 
+    def classify_draft(
+        self,
+        session: Session,
+        chat: Chat,
+        *,
+        text: str,
+        mode: RoutingMode | None,
+        parent_message_id: str | None,
+    ) -> bool:
+        """Answer the composer's pre-submit question with the router the turn will use.
+
+        Resolves mode and conversation context as `create_turn` does, so the
+        browser sees the classification the submitted turn will get. The one
+        difference is that a draft cannot reference a pending output that does
+        not exist yet, so the context head is always the latest completed one.
+        """
+        context_head = self._latest_completed_context_head(
+            session,
+            chat.id,
+            parent_message_id,
+        )
+        return self.router.references_prior_visual(
+            text=text,
+            mode=mode or RoutingMode(chat.routing_mode),
+            conversation=self._routing_context(session, chat, context_head),
+        )
+
     @staticmethod
     def _routing_context(
         session: Session, chat: Chat, parent_message_id: str | None

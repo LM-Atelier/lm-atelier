@@ -139,6 +139,8 @@ from .schemas import (
     CustomNodeTrustRequest,
     CustomNodeUpdateRequest,
     DownloadRequest,
+    DraftClassification,
+    DraftClassificationRequest,
     EngineCapabilities,
     HealthOut,
     JobOut,
@@ -1670,6 +1672,34 @@ async def cancel_job(
             )
         raise HTTPException(404, "job not found")
     return refreshed
+
+
+@router.post("/chats/{chat_id}/classify-draft", response_model=DraftClassification)
+async def classify_chat_draft(
+    chat_id: str,
+    payload: DraftClassificationRequest,
+    request: Request,
+    session: ConversationSessionDep,
+) -> DraftClassification:
+    """Classify an unsent draft so the composer does not have to guess.
+
+    The browser previously kept its own copy of the router's patterns to decide
+    which workflow schema to show and whether edit strength applied. That copy
+    drifted every time the router learned a new phrasing, so the composer showed
+    the wrong controls for exactly the wording the server handled correctly.
+    """
+    chat = session.get(Chat, chat_id)
+    if not chat:
+        raise HTTPException(404, "chat not found")
+    return DraftClassification(
+        references_prior_visual=_services(request).orchestrator.classify_draft(
+            session,
+            chat,
+            text=payload.text,
+            mode=payload.mode,
+            parent_message_id=payload.parent_message_id,
+        )
+    )
 
 
 @router.post("/chats/{chat_id}/cancel", response_model=JobOut)

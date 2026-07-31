@@ -6726,3 +6726,38 @@ async def test_workflow_edit_calibration_is_validated_and_portable(
     )
     assert rejected_revision.status_code == 422
     assert "must identify a numeric workflow setting" in rejected_revision.text
+
+
+async def test_classify_draft_answers_with_the_router_that_plans_the_turn(
+    client: AsyncClient,
+) -> None:
+    """The composer asks the server rather than keeping its own copy of the patterns."""
+    chat = (await client.post("/api/chats", json={"title": "Draft classification"})).json()
+
+    edit = await client.post(
+        f"/api/chats/{chat['id']}/classify-draft",
+        json={"text": "Make her top red", "mode": "image"},
+    )
+    assert edit.status_code == 200
+    assert edit.json() == {"references_prior_visual": True}
+
+    fresh = await client.post(
+        f"/api/chats/{chat['id']}/classify-draft",
+        json={"text": "A lighthouse at dawn", "mode": "image"},
+    )
+    assert fresh.status_code == 200
+    assert fresh.json() == {"references_prior_visual": False}
+
+    # An empty draft is the composer's resting state and must be cheap and false.
+    empty = await client.post(
+        f"/api/chats/{chat['id']}/classify-draft",
+        json={"text": "", "mode": "image"},
+    )
+    assert empty.status_code == 200
+    assert empty.json() == {"references_prior_visual": False}
+
+    missing = await client.post(
+        "/api/chats/does-not-exist/classify-draft",
+        json={"text": "Make her top red", "mode": "image"},
+    )
+    assert missing.status_code == 404
