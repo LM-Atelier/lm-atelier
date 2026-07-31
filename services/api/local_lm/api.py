@@ -967,8 +967,26 @@ async def import_project(
     archive.file.seek(0)
     if size > _services(request).settings.max_project_import_bytes:
         raise HTTPException(413, "project archive exceeds the configured limit")
+    # Resolve the live engine schema per role so imported settings are validated
+    # the way the REST API validates them. Best effort: a role whose engine is
+    # not configured, or whose schema cannot be read now, imports unvalidated
+    # rather than failing the whole archive.
+    known_fields: dict[str, list[SettingField]] = {}
+    for settings_role in ("chat", "image", "video"):
+        try:
+            known_fields[settings_role] = await _engine_role_fields(
+                request,
+                settings_role,
+                allow_inactive=True,
+            )
+        except HTTPException:
+            continue
     try:
-        project = _services(request).exports.import_archive(session, archive.file)
+        project = _services(request).exports.import_archive(
+            session,
+            archive.file,
+            known_fields=known_fields,
+        )
     except ValueError as exc:
         session.rollback()
         raise HTTPException(422, str(exc)) from exc
