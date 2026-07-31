@@ -305,3 +305,30 @@ class GenerationOfferCollector:
         except (json.JSONDecodeError, TypeError, ValueError):
             return None
         return validate_generation_offer(payload)
+
+
+def is_machine_readable(text: str) -> bool:
+    """Whether appending prose to this answer would break it.
+
+    The offer question is normally appended to the assistant's reply, which is
+    how the user sees it and is worth keeping. But when the reply *is* the
+    deliverable - JSON the user asked for, or a single fenced code block - a
+    trailing sentence stops it parsing, stops it copying cleanly, and is joined
+    into any ordered-plan step that consumes the text.
+
+    Deliberately narrow. Prose that merely contains a code block is still prose,
+    so the question is still appended; only an answer that is entirely
+    machine-readable declines it.
+    """
+    stripped = text.strip()
+    if not stripped:
+        return False
+    if stripped.startswith("```") and stripped.endswith("```") and stripped.count("```") == 2:
+        return True
+    if stripped[0] in "{[" and stripped[-1] in "}]":
+        try:
+            json.loads(stripped)
+        except ValueError:
+            return False
+        return True
+    return False
