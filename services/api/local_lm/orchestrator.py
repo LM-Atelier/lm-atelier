@@ -80,6 +80,7 @@ from .image_edit_verification import (
     image_edit_verification_job_id,
     parse_image_edit_verification_assessment,
 )
+from .model_planner import revision_accepts_install, revision_declares_a_model
 from .models import (
     Artifact,
     Chat,
@@ -5361,16 +5362,12 @@ class ConversationOrchestrator:
         if preferred_revision_id:
             revision = session.get(WorkflowRevision, preferred_revision_id)
             definition = session.get(WorkflowDefinition, revision.workflow_id) if revision else None
-            dependencies = revision.dependencies_json.get("model_install_ids") if revision else None
-            declared_installs = (
-                {str(item) for item in dependencies} if isinstance(dependencies, list) else set()
-            )
             if (
                 revision
                 and definition
                 and definition.operation == operation.value
                 and self._workflow_matches_engine(revision)
-                and (not declared_installs or model_install_id in declared_installs)
+                and self._revision_accepts_install(session, revision, model_install_id)
             ):
                 return revision
             return None
@@ -5405,16 +5402,24 @@ class ConversationOrchestrator:
             revision = session.get(WorkflowRevision, definition.current_revision_id)
             if not revision or not self._workflow_matches_engine(revision):
                 continue
-            dependencies = revision.dependencies_json.get("model_install_ids")
-            declared_installs = (
-                {str(item) for item in dependencies} if isinstance(dependencies, list) else set()
-            )
-            if declared_installs:
-                if model_install_id in declared_installs:
+            if self._revision_declares_a_model(revision):
+                if self._revision_accepts_install(session, revision, model_install_id):
                     return revision
                 continue
             generic.append(revision)
         return generic[0] if generic else None
+
+    @staticmethod
+    def _revision_declares_a_model(revision: WorkflowRevision) -> bool:
+        return revision_declares_a_model(revision.dependencies_json)
+
+    def _revision_accepts_install(
+        self,
+        session: Session,
+        revision: WorkflowRevision,
+        model_install_id: str | None,
+    ) -> bool:
+        return revision_accepts_install(session, revision.dependencies_json, model_install_id)
 
     def _workflow_matches_engine(self, revision: WorkflowRevision) -> bool:
         engine = self.engines.settings.media_engine
@@ -5445,6 +5450,7 @@ class ConversationOrchestrator:
 
     def _project_pin_problem(
         self,
+        session: Session,
         revision: WorkflowRevision,
         definition: WorkflowDefinition,
         operation: Operation,
@@ -5463,11 +5469,7 @@ class ConversationOrchestrator:
             return "engine_mismatch"
         if not revision.trusted:
             return "untrusted"
-        declared = revision.dependencies_json.get("model_install_ids")
-        declared_installs = (
-            {str(item) for item in declared} if isinstance(declared, list) else set()
-        )
-        if declared_installs and model_install_id not in declared_installs:
+        if not self._revision_accepts_install(session, revision, model_install_id):
             return "model_mismatch"
         return None
 
@@ -5508,7 +5510,9 @@ class ConversationOrchestrator:
             )
 
         candidate = self._artifact_identical_successor(session, definition, pinned)
-        problem = self._project_pin_problem(candidate, definition, operation, model_install_id)
+        problem = self._project_pin_problem(
+            session, candidate, definition, operation, model_install_id
+        )
         if problem:
             raise ProjectWorkflowPinInvalid(
                 project_id=project.id,

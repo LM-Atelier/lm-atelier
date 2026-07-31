@@ -14,7 +14,7 @@ from .adapters.contracts import ADAPTER_CONTRACT_VERSION
 from .comfy_templates import COMFY_TEMPLATE_COMPILER_VERSION
 from .domain import new_id
 from .model_manifests import ModelManifestInspection
-from .models import InstallPlan
+from .models import InstallPlan, ModelComponentManifest
 
 INSTALL_RESOLVER_VERSION = "install-resolver-v6"
 ACTIVATION_PROBE_VERSION = "activation-probe-v2"
@@ -108,6 +108,109 @@ def workflow_artifact_contract(
     }
     encoded = json.dumps(payload, sort_keys=True, separators=(",", ":"), allow_nan=False)
     return hashlib.sha256(encoded.encode()).hexdigest()
+
+
+MODEL_COMPONENTS_KEY = "model_components"
+
+
+def declared_model_components(dependencies: Mapping[str, Any]) -> list[dict[str, str]]:
+    """The content-addressed model requirement a revision declares, if any.
+
+    `model_install_ids` names local rows, so it means nothing on another machine -
+    an exported workflow arrives pointing at UUIDs that do not exist here. This
+    says which *files* the workflow needs instead, by target folder and hash, so
+    it can be satisfied by whichever local install happens to hold them.
+
+    Deliberately not part of the artifact contract: what a revision executes is
+    the graph, not which local rows currently satisfy it.
+    """
+    declared = dependencies.get(MODEL_COMPONENTS_KEY)
+    if not isinstance(declared, list):
+        return []
+    pairs: set[tuple[str, str]] = set()
+    for item in declared:
+        if not isinstance(item, Mapping):
+            continue
+        folder = item.get("target_folder")
+        digest = item.get("sha256")
+        if not isinstance(folder, str) or not folder:
+            continue
+        if not isinstance(digest, str) or len(digest) != 64:
+            continue
+        pairs.add((folder, digest.lower()))
+    # Sorted and de-duplicated, so the requirement is stable to store and compare.
+    return [{"target_folder": folder, "sha256": digest} for folder, digest in sorted(pairs)]
+
+
+def model_components_for_install(session: Session, install_id: str) -> list[dict[str, str]]:
+    """The content identity of one install, from its component manifest."""
+    rows = session.scalars(
+        select(ModelComponentManifest).where(ModelComponentManifest.model_install_id == install_id)
+    ).all()
+    return [
+        {"target_folder": row.target_folder, "sha256": row.sha256.lower()}
+        for row in rows
+        if row.required and row.sha256 and len(row.sha256) == 64
+    ]
+
+
+def install_satisfies_components(
+    session: Session,
+    install_id: str,
+    components: list[dict[str, str]],
+) -> bool:
+    """Whether this install holds every declared component.
+
+    An install with no recorded manifest satisfies nothing, which is why callers
+    fall back to `model_install_ids` rather than treating an empty manifest as a
+    match - a missing manifest means unknown, not compatible.
+    """
+    if not components:
+        return False
+    available = {
+        (item["target_folder"], item["sha256"])
+        for item in model_components_for_install(session, install_id)
+    }
+    if not available:
+        return False
+    return all((item["target_folder"], item["sha256"]) in available for item in components)
+
+
+def revision_accepts_install(
+    session: Session,
+    dependencies: Mapping[str, Any],
+    model_install_id: str | None,
+) -> bool:
+    """Whether a revision's declared model binding admits this install.
+
+    Content first. `model_install_ids` names local rows, so an exported or
+    imported workflow arrives pointing at identifiers that do not exist on this
+    machine; its component hashes still resolve against whichever local install
+    holds the same files. The id list stays as the fallback, so a revision
+    recorded before content binding - or an install whose component manifest was
+    never written - behaves exactly as it did before.
+
+    One implementation, because selection, setup readiness and pin validation all
+    have to answer this the same way. They previously each spelled it out.
+    """
+    components = declared_model_components(dependencies)
+    if (
+        components
+        and model_install_id
+        and install_satisfies_components(session, model_install_id, components)
+    ):
+        return True
+    declared = dependencies.get("model_install_ids")
+    declared_installs = {str(item) for item in declared} if isinstance(declared, list) else set()
+    return not declared_installs or model_install_id in declared_installs
+
+
+def revision_declares_a_model(dependencies: Mapping[str, Any]) -> bool:
+    """Whether a revision is bound to particular models at all."""
+    if declared_model_components(dependencies):
+        return True
+    declared = dependencies.get("model_install_ids")
+    return isinstance(declared, list) and bool(declared)
 
 
 @dataclass(frozen=True)

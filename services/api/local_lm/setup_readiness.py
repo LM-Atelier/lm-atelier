@@ -8,6 +8,7 @@ from sqlalchemy.orm import Session
 
 from .capability_evidence import current_capability_evidence
 from .config import Settings
+from .model_planner import revision_accepts_install
 from .models import (
     Job,
     ModelCapabilityEvidence,
@@ -440,13 +441,7 @@ def _workflow_check(
         revision = session.get(WorkflowRevision, definition.current_revision_id)
         if not revision or revision.engine != install.engine:
             continue
-        raw_install_ids = revision.dependencies_json.get("model_install_ids")
-        install_ids = (
-            {str(value) for value in raw_install_ids}
-            if isinstance(raw_install_ids, list)
-            else set()
-        )
-        if install_ids and install.id not in install_ids:
+        if not revision_accepts_install(session, revision.dependencies_json, install.id):
             continue
         candidates.append(revision)
     valid = next(
