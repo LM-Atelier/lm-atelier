@@ -665,3 +665,65 @@ it("notifies the client after each event socket reconnect, not the initial open"
   expect(onReconnect).toHaveBeenCalledTimes(1);
   dispose();
 });
+
+it("recovers a stale CSRF token instead of failing permanently", async () => {
+  // resetSession() clears the token on every socket close, so a request that
+  // started just before a close goes out with an empty header. The server
+  // answers 403 for that, not 401, and only 401 used to be retried - which made
+  // a narrow race into a permanent dead end.
+  const chat = { id: "chat-1", title: "Recovered" };
+  const fetchMock = vi.fn()
+    .mockResolvedValueOnce(
+      new Response(JSON.stringify({ csrf_token: "first" }), {
+        status: 200,
+        headers: { "content-type": "application/json" },
+      }),
+    )
+    .mockResolvedValueOnce(
+      new Response(JSON.stringify({ detail: "CSRF check failed" }), {
+        status: 403,
+        headers: { "content-type": "application/json" },
+      }),
+    )
+    .mockResolvedValueOnce(
+      new Response(JSON.stringify({ csrf_token: "second" }), {
+        status: 200,
+        headers: { "content-type": "application/json" },
+      }),
+    )
+    .mockResolvedValueOnce(
+      new Response(JSON.stringify(chat), {
+        status: 201,
+        headers: { "content-type": "application/json" },
+      }),
+    );
+  vi.stubGlobal("fetch", fetchMock);
+
+  const { api } = await import("./api");
+  await expect(api.createChat(null)).resolves.toEqual(chat);
+  // A fresh session was fetched and the retry carried the new token.
+  expect(fetchMock.mock.calls[2][0]).toBe("/api/session");
+  expect(new Headers(fetchMock.mock.calls[3][1]?.headers).get("x-local-lm-csrf")).toBe("second");
+});
+
+it("does not retry a 403 that is a genuine refusal", async () => {
+  const fetchMock = vi.fn()
+    .mockResolvedValueOnce(
+      new Response(JSON.stringify({ csrf_token: "csrf" }), {
+        status: 200,
+        headers: { "content-type": "application/json" },
+      }),
+    )
+    .mockResolvedValueOnce(
+      new Response(JSON.stringify({ detail: "operation is not permitted" }), {
+        status: 403,
+        headers: { "content-type": "application/json" },
+      }),
+    );
+  vi.stubGlobal("fetch", fetchMock);
+
+  const { api, ApiError } = await import("./api");
+  await expect(api.createChat(null)).rejects.toBeInstanceOf(ApiError);
+  // Session, then the request. No retry, no second session fetch.
+  expect(fetchMock).toHaveBeenCalledTimes(2);
+});
