@@ -253,3 +253,55 @@ def test_assent_normalization_is_linear_on_long_repeated_input(
 )
 def test_refusals_and_unrelated_text_are_not_assent(text: str) -> None:
     assert is_explicit_generation_assent(text) is False
+
+
+def test_the_offer_prompt_bound_stays_grammar_expressible() -> None:
+    """llama.cpp derives a GBNF grammar from this schema and rejects huge bounds.
+
+    A `maxLength` of 20,000 became a `{0,20000}` repetition that llama.cpp
+    refuses as exceeding its sane defaults, so the tool call failed and no offer
+    was ever produced - the feature was silently off rather than degraded. This
+    pins the bound to something a grammar can express, and to a length an actual
+    image or video prompt needs.
+    """
+    from local_lm.generation_offers import GENERATION_OFFER_TOOL, MAX_OFFER_PROMPT_CHARS
+
+    items = GENERATION_OFFER_TOOL["function"]["parameters"]["properties"]["items"]
+    prompt_field = items["items"]["properties"]["prompt"]
+
+    assert prompt_field["maxLength"] == MAX_OFFER_PROMPT_CHARS
+    assert MAX_OFFER_PROMPT_CHARS <= 4_000, (
+        "keep this expressible as a grammar repetition; llama.cpp rejects large bounds"
+    )
+
+
+def test_prose_still_receives_the_offer_question() -> None:
+    """The append is the feature. It must keep working for ordinary answers."""
+    from local_lm.generation_offers import is_machine_readable
+
+    assert not is_machine_readable("Here are three prompts you could use.")
+    assert not is_machine_readable("")
+    # Prose that merely contains a code block is still prose.
+    assert not is_machine_readable('Try this:\n\n```json\n{"a": 1}\n```\n\nThat should work.')
+
+
+def test_an_answer_that_is_itself_the_deliverable_declines_the_append() -> None:
+    """Appending a sentence to JSON or a lone code block breaks it.
+
+    It stops parsing, stops copying cleanly, and is joined verbatim into any
+    ordered-plan step that consumes the text output.
+    """
+    from local_lm.generation_offers import is_machine_readable
+
+    assert is_machine_readable('{"prompts": ["a cat", "a dog"]}')
+    assert is_machine_readable("[1, 2, 3]")
+    assert is_machine_readable('```\nprint("hello")\n```')
+    assert is_machine_readable('```python\nprint("hello")\n```')
+
+
+def test_text_that_only_looks_like_json_is_still_prose() -> None:
+    """The check parses rather than pattern-matches, so near-misses stay prose."""
+    from local_lm.generation_offers import is_machine_readable
+
+    assert not is_machine_readable("{this is not json}")
+    assert not is_machine_readable("[see the list above]")

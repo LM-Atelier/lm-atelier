@@ -18,6 +18,12 @@ from .schemas import (
 )
 
 GENERATION_OFFER_VERSION = "generation-offer-v1"
+# A generation prompt is a sentence or two. The previous bound of 20,000 became a
+# `{0,20000}` repetition in the GBNF grammar llama.cpp derives from this schema,
+# which llama.cpp rejects as exceeding its sane defaults - so the tool call
+# failed outright and no offer was ever produced. A bound the grammar can express
+# is worth more than headroom nothing uses.
+MAX_OFFER_PROMPT_CHARS = 2_000
 MAX_GENERATION_OFFER_ARGUMENT_CHARS = 200_000
 MAX_GENERATION_OFFER_SOURCE_CHARS = 100_000
 GENERATION_OFFER_TIMEOUT_SECONDS = 8.0
@@ -52,7 +58,7 @@ GENERATION_OFFER_TOOL = {
                         "type": "object",
                         "properties": {
                             "mode": {"type": "string", "enum": ["image", "video"]},
-                            "prompt": {"type": "string", "maxLength": 20_000},
+                            "prompt": {"type": "string", "maxLength": MAX_OFFER_PROMPT_CHARS},
                         },
                         "required": ["mode", "prompt"],
                         "additionalProperties": False,
@@ -299,3 +305,30 @@ class GenerationOfferCollector:
         except (json.JSONDecodeError, TypeError, ValueError):
             return None
         return validate_generation_offer(payload)
+
+
+def is_machine_readable(text: str) -> bool:
+    """Whether appending prose to this answer would break it.
+
+    The offer question is normally appended to the assistant's reply, which is
+    how the user sees it and is worth keeping. But when the reply *is* the
+    deliverable - JSON the user asked for, or a single fenced code block - a
+    trailing sentence stops it parsing, stops it copying cleanly, and is joined
+    into any ordered-plan step that consumes the text.
+
+    Deliberately narrow. Prose that merely contains a code block is still prose,
+    so the question is still appended; only an answer that is entirely
+    machine-readable declines it.
+    """
+    stripped = text.strip()
+    if not stripped:
+        return False
+    if stripped.startswith("```") and stripped.endswith("```") and stripped.count("```") == 2:
+        return True
+    if stripped[0] in "{[" and stripped[-1] in "}]":
+        try:
+            json.loads(stripped)
+        except ValueError:
+            return False
+        return True
+    return False
