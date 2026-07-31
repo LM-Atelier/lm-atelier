@@ -80,7 +80,6 @@ from .image_edit_verification import (
     image_edit_verification_job_id,
     parse_image_edit_verification_assessment,
 )
-from .model_planner import media_workflow_contract_version
 from .models import (
     Artifact,
     Chat,
@@ -3398,7 +3397,7 @@ class ConversationOrchestrator:
             getattr(self.processes, "runtimes", None),
             component_hashes=component_hashes,
             runtime_build=capabilities.version,
-            workflow_contract_version=media_workflow_contract_version(template_sha256),
+            workflow_contract_version=revision.artifact_sha256,
             details={
                 "probe": "successful_media_output",
                 "operation": run.operation,

@@ -15,10 +15,68 @@ from .model_planner import (
     LAUNCH_CONTRACT_VERSION,
     media_workflow_contract_version,
 )
-from .models import ModelCapabilityEvidence, ModelInstall
+from .models import ModelCapabilityEvidence, ModelInstall, WorkflowRevision
 
 if TYPE_CHECKING:
     from .runtime_provisioning import RuntimeProvisioner
+
+
+ACTIVATION_ARTIFACT_KEY = "activation_artifact_sha256"
+
+
+def _accepted_workflow_contracts(session: Session, install: ModelInstall) -> set[str | None]:
+    """Workflow contract values that still describe this install's activation.
+
+    The primary value is the artifact hash of the workflow the install was
+    activated against, recorded at activation time. It is deliberately the
+    *primary* one: an install can also have derived edit workflows, and comparing
+    against whichever revision ran most recently would let an edit invalidate
+    creation readiness even though both workflows are healthy.
+
+    A legacy value - the old compiler-version key - is accepted alongside it, but
+    only when it matches the compiler version that revision actually recorded, so
+    it cannot validate an unrelated revision. Evidence recorded from then on uses
+    the artifact contract, so the legacy path disappears on the next successful
+    output or explicit activation.
+    """
+
+    template_sha256 = install.manifest_json.get("workflow_template_sha256")
+    if not isinstance(template_sha256, str):
+        # Not workflow-driven; the contract does not apply.
+        return {None}
+    accepted: set[str | None] = set()
+    recorded = install.manifest_json.get(ACTIVATION_ARTIFACT_KEY)
+    if isinstance(recorded, str) and recorded:
+        accepted.add(recorded)
+    for version in _recorded_compiler_versions(session, install, template_sha256):
+        accepted.add(media_workflow_contract_version(template_sha256, version))
+    return accepted or {None}
+
+
+def _recorded_compiler_versions(
+    session: Session,
+    install: ModelInstall,
+    template_sha256: str,
+) -> set[int]:
+    """Compiler versions declared by this install's own primary revisions."""
+
+    versions: set[int] = set()
+    template_id = install.manifest_json.get("workflow_template_id")
+    for revision in session.scalars(
+        select(WorkflowRevision).where(WorkflowRevision.engine == install.engine)
+    ).all():
+        dependencies = revision.dependencies_json or {}
+        if dependencies.get("template_sha256") != template_sha256:
+            continue
+        if template_id and dependencies.get("template_id") != template_id:
+            continue
+        declared = dependencies.get("model_install_ids")
+        if isinstance(declared, list) and install.id not in {str(item) for item in declared}:
+            continue
+        compiler = dependencies.get("compiler_version")
+        if isinstance(compiler, int):
+            versions.add(compiler)
+    return versions
 
 
 def current_capability_evidence(
@@ -34,12 +92,7 @@ def current_capability_evidence(
         for path, digest in (install.manifest_json.get("expected_sha256") or {}).items()
         if isinstance(path, str) and isinstance(digest, str)
     }
-    template_sha256 = install.manifest_json.get("workflow_template_sha256")
-    expected_workflow = (
-        media_workflow_contract_version(template_sha256)
-        if isinstance(template_sha256, str)
-        else None
-    )
+    accepted_workflows = _accepted_workflow_contracts(session, install)
     runtime_name = (
         cast(Literal["llama.cpp", "vllm", "comfyui"], install.engine)
         if install.engine in {"llama.cpp", "vllm", "comfyui"}
@@ -61,7 +114,7 @@ def current_capability_evidence(
             or evidence.probe_version != ACTIVATION_PROBE_VERSION
             or evidence.hardware_class != hardware_capability_class(settings)
             or evidence.component_hashes_json != expected_hashes
-            or evidence.workflow_contract_version != expected_workflow
+            or evidence.workflow_contract_version not in accepted_workflows
             or (
                 isinstance(runtime_release, str)
                 and (
