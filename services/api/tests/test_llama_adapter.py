@@ -272,6 +272,97 @@ async def test_llama_adapter_completes_when_terminal_choice_does_not_close_strea
         await adapter.close()
 
 
+async def test_llama_adapter_uses_bounded_non_streaming_completion_for_vision() -> None:
+    async def handler(request: httpx.Request) -> httpx.Response:
+        payload = json.loads(request.content)
+        assert payload["stream"] is False
+        assert "stream_options" not in payload
+        return httpx.Response(
+            200,
+            json={
+                "choices": [
+                    {
+                        "message": {"content": "The cube is red."},
+                        "finish_reason": "stop",
+                    }
+                ],
+                "usage": {"completion_tokens": 6},
+            },
+        )
+
+    adapter = LlamaCppAdapter("http://llama.test")
+    await adapter._client.aclose()
+    adapter._client = httpx.AsyncClient(
+        base_url="http://llama.test", transport=httpx.MockTransport(handler)
+    )
+    try:
+        events = await _collect_events(
+            adapter,
+            ChatRequest(
+                run_id="vision-completion",
+                messages=[
+                    {
+                        "role": "user",
+                        "content": [
+                            {"type": "text", "text": "What color is the cube?"},
+                            {
+                                "type": "image_url",
+                                "image_url": {"url": "data:image/png;base64,AAAA"},
+                            },
+                        ],
+                    }
+                ],
+            ),
+        )
+        assert [event.type for event in events] == ["delta", "usage", "complete"]
+        assert events[0].text == "The cube is red."
+        assert events[1].data == {"usage": {"completion_tokens": 6}}
+        assert events[2].data == {"finish_reason": "stop"}
+    finally:
+        await adapter.close()
+
+
+async def test_llama_adapter_cancels_a_blocked_non_streaming_vision_completion() -> None:
+    started = asyncio.Event()
+
+    async def handler(_request: httpx.Request) -> httpx.Response:
+        started.set()
+        await asyncio.Event().wait()
+        raise AssertionError("unreachable")
+
+    adapter = LlamaCppAdapter("http://llama.test")
+    await adapter._client.aclose()
+    adapter._client = httpx.AsyncClient(
+        base_url="http://llama.test", transport=httpx.MockTransport(handler)
+    )
+    request = ChatRequest(
+        run_id="cancel-vision-completion",
+        messages=[
+            {
+                "role": "user",
+                "content": [
+                    {"type": "text", "text": "Describe this image"},
+                    {
+                        "type": "image_url",
+                        "image_url": {"url": "data:image/png;base64,AAAA"},
+                    },
+                ],
+            }
+        ],
+    )
+    task = asyncio.create_task(_collect_events(adapter, request))
+    try:
+        await asyncio.wait_for(started.wait(), timeout=0.5)
+        await adapter.cancel(request.run_id)
+        events = await asyncio.wait_for(task, timeout=0.5)
+        assert [event.type for event in events] == ["cancelled"]
+    finally:
+        if not task.done():
+            task.cancel()
+        await asyncio.gather(task, return_exceptions=True)
+        await adapter.close()
+
+
 async def _collect_events(adapter: LlamaCppAdapter, request: ChatRequest):  # type: ignore[no-untyped-def]
     return [event async for event in adapter.stream(request)]
 
