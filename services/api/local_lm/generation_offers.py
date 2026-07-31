@@ -18,6 +18,12 @@ from .schemas import (
 )
 
 GENERATION_OFFER_VERSION = "generation-offer-v1"
+# A generation prompt is a sentence or two. The previous bound of 20,000 became a
+# `{0,20000}` repetition in the GBNF grammar llama.cpp derives from this schema,
+# which llama.cpp rejects as exceeding its sane defaults - so the tool call
+# failed outright and no offer was ever produced. A bound the grammar can express
+# is worth more than headroom nothing uses.
+MAX_OFFER_PROMPT_CHARS = 2_000
 MAX_GENERATION_OFFER_ARGUMENT_CHARS = 200_000
 MAX_GENERATION_OFFER_SOURCE_CHARS = 100_000
 GENERATION_OFFER_TIMEOUT_SECONDS = 8.0
@@ -52,7 +58,7 @@ GENERATION_OFFER_TOOL = {
                         "type": "object",
                         "properties": {
                             "mode": {"type": "string", "enum": ["image", "video"]},
-                            "prompt": {"type": "string", "maxLength": 20_000},
+                            "prompt": {"type": "string", "maxLength": MAX_OFFER_PROMPT_CHARS},
                         },
                         "required": ["mode", "prompt"],
                         "additionalProperties": False,
