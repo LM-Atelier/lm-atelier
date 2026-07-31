@@ -186,6 +186,7 @@ from .schemas import (
     TrustDerivation,
     TurnAccepted,
     TurnRequest,
+    VerifiedSetup,
     WorkerStatus,
     WorkflowBundle,
     WorkflowClone,
@@ -214,6 +215,7 @@ from .setup_verification import (
     setup_verification_settings,
     verification_evidence_key,
 )
+from .verified_setup import build_verified_setup
 from .workflow_edit_calibration import validate_workflow_edit_calibration
 from .workflow_trust import (
     TRUST_DERIVATION_VERSION,
@@ -483,6 +485,62 @@ def get_setup_readiness(
         services.settings,
         services.runtimes,
         services.processes.statuses(),
+    )
+
+
+@router.get("/setup/verified-setup/{role}", response_model=VerifiedSetup)
+def export_verified_setup(
+    role: Literal["chat", "image", "video"],
+    request: Request,
+    session: SessionDep,
+) -> VerifiedSetup:
+    """Export a setup that is known to work, with nothing local left in it.
+
+    Refuses unless a generation actually succeeded for this exact configuration.
+    A record that only says "this ought to work" is what the user already has;
+    the attestation is the part worth shipping.
+    """
+    services = _services(request)
+    report = setup_readiness_report(
+        session,
+        services.settings,
+        services.runtimes,
+        services.processes.statuses(),
+    )
+    readiness = next(item for item in report.roles if item.role == role)
+    install = session.get(ModelInstall, readiness.install_id) if readiness.install_id else None
+    profile = session.get(ModelProfile, readiness.profile_id) if readiness.profile_id else None
+    if not install or not profile:
+        raise HTTPException(409, "This role has no verified setup to export yet.")
+    workflow = (
+        session.get(WorkflowRevision, readiness.workflow_revision_id)
+        if readiness.workflow_revision_id
+        else None
+    )
+    evidence = current_capability_evidence(
+        session,
+        install,
+        services.settings,
+        services.runtimes,
+    )
+    if not evidence:
+        raise HTTPException(409, "This setup has no current activation evidence.")
+    verification = current_setup_verification(session, role, install, profile, workflow, evidence)
+    if not verification or verification.state != "verified":
+        raise HTTPException(
+            409,
+            "Run setup verification for this role first - an exported setup has to "
+            "carry proof that a real generation succeeded.",
+        )
+    return VerifiedSetup.model_validate(
+        build_verified_setup(
+            session,
+            verification=verification,
+            install=install,
+            profile=profile,
+            revision=workflow,
+            evidence=evidence,
+        )
     )
 
 

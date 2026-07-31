@@ -245,6 +245,20 @@ class DraftClassification(ApiModel):
     references_prior_visual: bool
 
 
+class VerifiedSetup(ApiModel):
+    """A working setup, described so another machine can resolve it."""
+
+    version: int
+    role: str
+    engine: str
+    model: dict[str, Any]
+    workflow: dict[str, Any] | None
+    settings: dict[str, Any]
+    hardware: dict[str, Any] | None
+    attestation: dict[str, Any]
+    digest: str
+
+
 class TrustDerivation(ApiModel):
     """Whether this machine could vouch for a workflow by rebuilding it."""
 
