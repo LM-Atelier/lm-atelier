@@ -863,3 +863,47 @@ def test_references_prior_visual_is_false_in_text_mode() -> None:
         text="Recolor the previous image",
         mode=RoutingMode.TEXT,
     )
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "Explain why diffusion models are popular now",
+        "Describe the scene instead",
+        "What is the fastest sampler for me",
+        "How do I make a video loop smoothly?",
+    ],
+)
+def test_an_incidental_word_does_not_cost_a_planner_round_trip(text: str) -> None:
+    """These are questions, and answering them needs no model planner.
+
+    The discussion branch used to be skipped whenever `for me`, `now` or
+    `instead` appeared *anywhere* in the message, which dropped confidence from
+    0.94 to 0.90 - and 0.94 is the threshold that skips the planner. So an
+    unambiguous question spent a full planner round trip because of a trailing
+    word. Anchoring the phrase to the tail would not have helped: in the first
+    case the "now" is at the tail.
+    """
+    plan = ModalityRouter().plan(text=text, mode=RoutingMode.AUTO, input_artifact_ids=[])
+
+    assert plan.operation == Operation.TEXT
+    assert plan.confidence >= 0.94, "this question should not reach the model planner"
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "Explain how this works, now draw me a cat",
+        "What is a diffusion model, then draw me one",
+        "Why is this blurry; then sharpen it",
+    ],
+)
+def test_a_question_followed_by_a_request_still_reaches_the_planner(text: str) -> None:
+    """The escape has to survive: these ask for something to be made.
+
+    Narrowing it must not become removing it - a later imperative clause is a
+    real request, and the planner is what decides between the two halves.
+    """
+    plan = ModalityRouter().plan(text=text, mode=RoutingMode.AUTO, input_artifact_ids=[])
+
+    assert plan.confidence < 0.94, "this should still be offered to the model planner"
