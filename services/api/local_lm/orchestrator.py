@@ -60,6 +60,7 @@ from .generation_offers import (
     generation_offer_from_metadata,
     generation_offer_metadata,
     is_explicit_generation_assent,
+    is_machine_readable,
     ordered_intent_for_offer,
     routing_plan_for_offer,
     should_extract_generation_offer,
@@ -2457,7 +2458,12 @@ class ConversationOrchestrator:
             if tool_calling_available and offer_relevant
             else None
         )
-        if offer and offer.message not in text_output:
+        # The question is appended so the user actually sees it - that is the
+        # feature. It is withheld only when the reply is itself the deliverable,
+        # where a trailing sentence would stop it parsing and would be joined
+        # into any ordered-plan step consuming the text. The offer is still
+        # recorded in metadata either way.
+        if offer and offer.message not in text_output and not is_machine_readable(text_output):
             text_output = "\n\n".join(value for value in (text_output, offer.message) if value)
 
         completed_assistant_id = assistant_id
