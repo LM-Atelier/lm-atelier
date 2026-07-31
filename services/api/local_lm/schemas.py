@@ -245,6 +245,41 @@ class DraftClassification(ApiModel):
     references_prior_visual: bool
 
 
+class VerifiedSetup(ApiModel):
+    """A working setup, described so another machine can resolve it."""
+
+    version: int
+    role: str
+    engine: str
+    model: dict[str, Any]
+    workflow: dict[str, Any] | None
+    settings: dict[str, Any]
+    hardware: dict[str, Any] | None
+    attestation: dict[str, Any]
+    digest: str
+
+
+class ResolvedSetupComponent(ApiModel):
+    target_folder: str
+    sha256: str
+    present: bool
+
+
+class ResolvedSetup(ApiModel):
+    """What an imported setup finds on this machine, and what it still needs."""
+
+    version: int
+    digest: str | None
+    components: list[ResolvedSetupComponent]
+    missing_components: list[dict[str, str]]
+    hardware_compatible: bool
+    # Provenance from the artifact, kept separate from anything earned here.
+    verified_elsewhere: bool
+    verified_here: bool
+    requires_approval: bool
+    ready_to_verify: bool
+
+
 class TrustDerivation(ApiModel):
     """Whether this machine could vouch for a workflow by rebuilding it."""
 

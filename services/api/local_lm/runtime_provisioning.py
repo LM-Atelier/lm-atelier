@@ -12,8 +12,9 @@ import stat
 import subprocess
 import sys
 import tarfile
+import time
 import zipfile
-from collections.abc import Mapping, MutableMapping
+from collections.abc import Callable, Mapping, MutableMapping
 from contextlib import suppress
 from pathlib import Path, PurePosixPath
 from typing import Any, Literal, cast
@@ -120,6 +121,21 @@ class RuntimeProvisioner:
         return [self.status(name) for name in RUNTIME_NAMES]
 
     def status(self, engine: RuntimeName) -> RuntimeStatus:
+        active = self._states.get(engine)
+        if active is not None:
+            return active
+        return self.verify_status(engine)
+
+    def verify_status(self, engine: RuntimeName) -> RuntimeStatus:
+        """Refresh one runtime from disk.
+
+        Managed runtimes are verified during installation and again when a new
+        application process starts. Normal status polling must use the verified
+        in-process state: a ComfyUI tree contains tens of thousands of immutable
+        files, and walking it for every setup poll can take longer than the poll
+        interval.
+        """
+
         definition = self._definition(engine)
         configured = self._configured_status(engine, definition)
         if configured:
@@ -277,11 +293,16 @@ class RuntimeProvisioner:
                     overlays,
                 )
                 self._apply_configuration(engine, installed, persist=True)
-                configured_status = self._configured_status(engine, definition)
-                if not configured_status:
-                    raise RuntimeProvisioningError(
-                        f"{engine} was installed but its required files are missing."
-                    )
+                configured_status = self._status(
+                    engine,
+                    definition,
+                    state="ready",
+                    supported=True,
+                    managed=True,
+                    progress=1,
+                    message="Ready.",
+                    asset=asset,
+                )
                 self._remove_completed_archive(archive)
                 for _overlay, overlay_archive in overlays:
                     self._remove_completed_archive(overlay_archive)
@@ -447,6 +468,13 @@ class RuntimeProvisioner:
         self._prune_stale_staging(parent, engine)
         staging.mkdir()
         try:
+            self._set_install_progress(
+                engine,
+                definition,
+                asset,
+                stage="extracting verified runtime",
+                message="Extracting verified runtime.",
+            )
             archive_type = str(asset["archive_type"])
             if archive_type == "zip":
                 self._extract_zip(archive, staging)
@@ -461,13 +489,40 @@ class RuntimeProvisioner:
                 )
             else:
                 raise RuntimeProvisioningError(f"Unsupported runtime archive type: {archive_type}")
+            self._set_install_progress(
+                engine,
+                definition,
+                asset,
+                stage="applying runtime security updates",
+                message="Applying runtime security updates.",
+            )
             for overlay, overlay_archive in overlays:
                 self._apply_security_overlay(staging, overlay, overlay_archive)
+            self._set_install_progress(
+                engine,
+                definition,
+                asset,
+                stage="validating runtime contract",
+                message="Validating runtime contract.",
+            )
             installed = self._resolve_installed_paths(staging, asset)
             self._verify_runtime_contract(staging, asset, installed)
             executable = installed["executable"]
             if os.name != "nt":
                 executable.chmod(executable.stat().st_mode | stat.S_IXUSR)
+            file_hashes = self._runtime_file_hashes(
+                staging,
+                asset,
+                progress=lambda completed, total: self._set_install_progress(
+                    engine,
+                    definition,
+                    asset,
+                    stage="recording runtime integrity",
+                    message="Recording runtime integrity.",
+                    completed_units=completed,
+                    total_units=total,
+                ),
+            )
             marker = {
                 "schema_version": 3,
                 "engine": engine,
@@ -478,7 +533,7 @@ class RuntimeProvisioner:
                 "license": definition["license"],
                 "overlays": self._overlay_marker(asset),
                 "runtime_contract_sha256": self._runtime_contract_sha256(asset),
-                "files": self._runtime_file_hashes(staging, asset),
+                "files": file_hashes,
             }
             (staging / _MANAGED_MARKER).write_text(
                 json.dumps(marker, indent=2) + "\n",
@@ -714,7 +769,9 @@ class RuntimeProvisioner:
     def _restore_managed_installations(self) -> None:
         for engine in RUNTIME_NAMES:
             definition = self._definition(engine)
-            if self._configured_status(engine, definition):
+            configured = self._configured_status(engine, definition)
+            if configured:
+                self._states[engine] = configured
                 continue
             asset = self._asset(engine, definition)
             if not asset or self._security_blocked(definition, asset):
@@ -725,6 +782,16 @@ class RuntimeProvisioner:
             try:
                 installed = self._resolve_installed_paths(final, asset)
                 self._apply_configuration(engine, installed, persist=True)
+                self._states[engine] = self._status(
+                    engine,
+                    definition,
+                    state="ready",
+                    supported=True,
+                    managed=True,
+                    progress=1,
+                    message="Ready.",
+                    asset=asset,
+                )
             except (OSError, RuntimeProvisioningError):
                 logger.warning("Ignored incomplete managed %s runtime at %s", engine, final)
 
@@ -734,8 +801,8 @@ class RuntimeProvisioner:
             asset = self._asset(engine, definition)
             if not asset:
                 continue
-            final = self._installation_path(engine, definition)
-            if self._managed_marker_matches(final, engine, definition, asset):
+            status = self._states.get(engine)
+            if status and status.state == "ready" and status.managed:
                 self._remove_completed_archive(self._archive_path(engine, definition, asset))
                 for overlay in self._security_overlays(asset):
                     self._remove_completed_archive(self._archive_path(engine, definition, overlay))
@@ -1151,6 +1218,8 @@ class RuntimeProvisioner:
         self,
         root: Path,
         asset: Mapping[str, Any],
+        *,
+        progress: Callable[[int, int], None] | None = None,
     ) -> dict[str, str]:
         files = self._integrity_file_map(root)
         required = set(self._runtime_file_paths(asset))
@@ -1158,7 +1227,17 @@ class RuntimeProvisioner:
             raise RuntimeProvisioningError(
                 "The runtime archive is missing a required integrity file."
             )
-        return {relative: self._sha256_file(path) for relative, path in sorted(files.items())}
+        ordered = sorted(files.items())
+        total = len(ordered)
+        hashes: dict[str, str] = {}
+        last_update = 0.0
+        for index, (relative, path) in enumerate(ordered, start=1):
+            hashes[relative] = self._sha256_file(path)
+            now = time.monotonic()
+            if progress and (index == total or now - last_update >= 0.25):
+                progress(index, total)
+                last_update = now
+        return hashes
 
     @staticmethod
     def _runtime_file_paths(asset: Mapping[str, Any]) -> list[str]:
@@ -1408,6 +1487,47 @@ class RuntimeProvisioner:
             downloaded_bytes=downloaded,
             size_bytes=expected_size,
             message="Downloading runtime.",
+        )
+
+    def _set_install_progress(
+        self,
+        engine: RuntimeName,
+        definition: Mapping[str, Any],
+        asset: Mapping[str, Any],
+        *,
+        stage: str,
+        message: str,
+        completed_units: int | None = None,
+        total_units: int | None = None,
+    ) -> None:
+        current = self._states.get(engine)
+        progress_json = reduce_progress(
+            current.progress_json.model_dump(mode="json")
+            if current and current.progress_json
+            else None,
+            stage=stage,
+            completed_units=completed_units,
+            total_units=total_units,
+            unit="files" if total_units is not None else None,
+            queue_resource="disk",
+            indeterminate=total_units is None,
+        )
+        stage_progress = (
+            completed_units / total_units
+            if completed_units is not None and total_units
+            else (current.progress if current else 0)
+        )
+        self._states[engine] = self._status(
+            engine,
+            definition,
+            state="installing",
+            supported=True,
+            progress=stage_progress,
+            progress_json=progress_json,
+            downloaded_bytes=int(asset["size_bytes"]),
+            size_bytes=int(asset["size_bytes"]),
+            message=message,
+            asset=asset,
         )
 
     def _status(
