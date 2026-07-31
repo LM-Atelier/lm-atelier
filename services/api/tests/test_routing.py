@@ -927,3 +927,74 @@ def test_a_question_followed_by_a_request_still_reaches_the_planner(text: str) -
     plan = ModalityRouter().plan(text=text, mode=RoutingMode.AUTO, input_artifact_ids=[])
 
     assert plan.confidence < 0.94, "this should still be offered to the model planner"
+
+
+def _scene_conversation(assistant_text: str) -> list[dict[str, str]]:
+    return [
+        {"role": "user", "content": "Write me a scene"},
+        {"role": "assistant", "content": assistant_text},
+        {"role": "user", "content": "no, make it darker and remove the second figure"},
+        {"role": "assistant", "content": "A single figure stands on the pier at dusk."},
+    ]
+
+
+def test_a_media_prompt_receives_one_passage_not_a_transcript() -> None:
+    """A diffusion model weights every token it is given.
+
+    The referenced-text builder assembles up to four labelled turns and 6,000
+    characters, which is right for deciding whether a message refers to earlier
+    text and wrong for an image prompt: it hands the model the user's own
+    instructions and several contradictory actions at once. A monitored session
+    measured that degrading person count, pose and anatomy.
+    """
+    plan = ModalityRouter().plan(
+        text="Make an image of the last scene",
+        mode=RoutingMode.IMAGE,
+        input_artifact_ids=[],
+        conversation=_scene_conversation("Two figures argue beneath a broken lighthouse."),
+    )
+
+    prompt = plan.standalone_prompt
+    assert "A single figure stands on the pier at dusk." in prompt
+    # The user's contradictory instruction must not reach the image prompt.
+    assert "remove the second figure" not in prompt
+    assert "User:" not in prompt
+    assert "Assistant:" not in prompt
+
+
+def test_the_visual_source_is_cut_at_a_sentence_not_mid_word() -> None:
+    """The old builder truncated with a bare slice and an ellipsis."""
+    from local_lm.routing import MAX_VISUAL_SOURCE_CHARS
+
+    sentence = "A lantern sways above the water. "
+    long_scene = sentence * 80
+    assert len(long_scene) > MAX_VISUAL_SOURCE_CHARS
+
+    plan = ModalityRouter().plan(
+        text="Make an image of the last scene",
+        mode=RoutingMode.IMAGE,
+        input_artifact_ids=[],
+        conversation=[{"role": "assistant", "content": long_scene}],
+    )
+
+    source = plan.standalone_prompt.split("Source chat text:\n", 1)[1]
+    assert len(source) <= MAX_VISUAL_SOURCE_CHARS
+    assert source.endswith(".")
+    assert "..." not in source
+
+
+def test_text_operations_still_receive_the_full_referenced_context() -> None:
+    """Only media prompts are narrowed; a text turn keeps its conversation."""
+    router = ModalityRouter()
+    conversation = _scene_conversation("Two figures argue beneath a broken lighthouse.")
+
+    plan = router.plan(
+        text="Summarize the previous story",
+        mode=RoutingMode.TEXT,
+        input_artifact_ids=[],
+        conversation=conversation,
+    )
+
+    assert plan.operation == Operation.TEXT
+    # `_with_text_context` returns early for text, so nothing is appended at all.
+    assert "Source chat text:" not in plan.standalone_prompt
