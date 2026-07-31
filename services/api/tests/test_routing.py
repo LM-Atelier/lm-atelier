@@ -233,6 +233,26 @@ def test_numeric_text_request_does_not_create_multiple_outputs() -> None:
             "Use the previous image in a watercolor style",
             Operation.IMAGE_TO_IMAGE,
         ),
+        (
+            RoutingMode.IMAGE,
+            "Make the jacket matte black instead, as in the most recent image",
+            Operation.IMAGE_TO_IMAGE,
+        ),
+        (
+            RoutingMode.IMAGE,
+            "Make the jacket matte black instead",
+            Operation.IMAGE_TO_IMAGE,
+        ),
+        (
+            RoutingMode.IMAGE,
+            "Restyle the latest image with softer lighting",
+            Operation.IMAGE_TO_IMAGE,
+        ),
+        (
+            RoutingMode.IMAGE,
+            "Increase the contrast in the current picture",
+            Operation.IMAGE_TO_IMAGE,
+        ),
         (RoutingMode.VIDEO, "Make it move", Operation.IMAGE_TO_VIDEO),
         (
             RoutingMode.VIDEO,

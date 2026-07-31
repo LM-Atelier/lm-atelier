@@ -60,8 +60,15 @@ _PRIOR_IMAGE_EDIT = re.compile(
     r")",
     re.IGNORECASE,
 )
+_DEFINITE_GARMENT_EDIT = re.compile(
+    r"^\s*(?:please\s+|now\s+)*"
+    r"(?:make|change|edit|modify|adjust|recolor)\s+the\s+"
+    r"(?:top|shirt|blouse|sweater|sweatshirt|jacket|coat|dress|outfit|"
+    r"pants|trousers|skirt|shoes|hair)\b",
+    re.IGNORECASE,
+)
 _PRIOR_IMAGE_SOURCE = re.compile(
-    r"\b(?:previous|prior|earlier|last|above)\s+"
+    r"\b(?:(?:previous|prior|earlier|last|above|latest|current)|most\s+recent)\s+"
     r"(?:image|picture|photo|illustration|artwork|logo|icon)\b|"
     r"^\s*(?:please\s+|now\s+)*(?:use|reuse|remix|restyle|transform|redo|"
     r"recreate|continue)\b.*\b(?:it|this|that|the\s+"
@@ -661,7 +668,11 @@ class ModalityRouter:
         """Whether the wording alone asks to reuse the most recent visual."""
         if mode == RoutingMode.TEXT:
             return False
-        if _PRIOR_IMAGE_EDIT.search(normalized) or _PRIOR_IMAGE_SOURCE.search(normalized):
+        if (
+            _PRIOR_IMAGE_EDIT.search(normalized)
+            or _PRIOR_IMAGE_SOURCE.search(normalized)
+            or (_DEFINITE_GARMENT_EDIT.search(normalized) and _clear_visual_edit_intent(normalized))
+        ):
             return True
         return mode == RoutingMode.VIDEO and bool(_DIRECT_VIDEO.search(normalized))
 

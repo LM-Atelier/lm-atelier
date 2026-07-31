@@ -862,3 +862,66 @@ def test_chat_progress_is_removed_without_discarding_text() -> None:
     ConversationOrchestrator._remove_chat_progress(message)
 
     assert message.parts == [text]
+
+
+async def test_chat_phase_advances_when_the_first_token_arrives() -> None:
+    """The phase used to say "waiting" for the whole generation.
+
+    It was set once before the stream and never updated, so a long answer that
+    was streaming perfectly well read as a stall - which is the same failure the
+    setup work was about: the interface saying nothing is happening while
+    something is.
+    """
+    from local_lm.adapters.base import ChatEvent
+
+    async def stream(_request):  # type: ignore[no-untyped-def]
+        yield ChatEvent(type="delta", text="Hello", data={})
+        yield ChatEvent(type="delta", text=" again", data={})
+        yield ChatEvent(type="error", text="", data={"error": "stop here"})
+
+    run = SimpleNamespace(
+        id="run-phase",
+        assistant_message_id="assistant-phase",
+        provenance_json={},
+    )
+
+    class FakeSession:
+        def get(self, model, identity):  # type: ignore[no-untyped-def]
+            return run if model is Run else None
+
+        def commit(self):  # type: ignore[no-untyped-def]
+            return None
+
+        def __enter__(self):  # type: ignore[no-untyped-def]
+            return self
+
+        def __exit__(self, *_exc):  # type: ignore[no-untyped-def]
+            return False
+
+    orchestrator = ConversationOrchestrator(
+        engines=SimpleNamespace(chat=SimpleNamespace(stream=stream), settings=SimpleNamespace()),
+        artifacts=Mock(),
+        events=SimpleNamespace(publish=AsyncMock()),
+        scheduler=Mock(),
+        processes=SimpleNamespace(runtimes=None),
+    )
+    phases = AsyncMock()
+    orchestrator._set_chat_phase = phases  # type: ignore[method-assign]
+    orchestrator._ensure_chat_worker = AsyncMock(return_value=None)  # type: ignore[method-assign]
+    orchestrator.session_factory = FakeSession  # type: ignore[assignment]
+    orchestrator._prepare_chat_context = AsyncMock(  # type: ignore[method-assign]
+        return_value=([], {}, {}, False)
+    )
+    orchestrator._persist_streamed_text = Mock()  # type: ignore[method-assign]
+    orchestrator._release_deferred_media_restart = Mock()  # type: ignore[method-assign]
+    orchestrator._begin_step_prewarm = Mock()  # type: ignore[method-assign]
+
+    with pytest.raises(RuntimeError):
+        await orchestrator._execute_chat("job-phase", "run-phase")
+
+    labels = [call.args[2] for call in phases.await_args_list]
+    assert "Waiting for first token" in labels
+    assert "Writing the response" in labels
+    assert labels.index("Writing the response") > labels.index("Waiting for first token")
+    # Announced once, not per token: each phase change commits.
+    assert labels.count("Writing the response") == 1

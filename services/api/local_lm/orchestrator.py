@@ -2391,6 +2391,10 @@ class ConversationOrchestrator:
             assistant_id = run.assistant_message_id
 
         await self._set_chat_phase(job_id, run_id, "Waiting for first token")
+        # Advanced once, on the first delta. Without this the phase says the
+        # model has not started for the entire generation, so a long answer that
+        # is streaming perfectly well reads as a stall.
+        streaming_announced = False
         accumulated = ""
         completion_metadata: dict[str, Any] = {}
         last_persisted_length = 0
@@ -2398,6 +2402,9 @@ class ConversationOrchestrator:
         try:
             async for event in self.engines.chat.stream(request):
                 if event.type == "delta":
+                    if not streaming_announced:
+                        streaming_announced = True
+                        await self._set_chat_phase(job_id, run_id, "Writing the response")
                     self._release_deferred_media_restart()
                     self._begin_step_prewarm()
                     accumulated += event.text
