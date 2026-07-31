@@ -206,7 +206,7 @@ from .settings_registry import (
     validate_settings,
     workflow_settings,
 )
-from .setup_readiness import setup_readiness_report
+from .setup_readiness import MEDIA_OPERATIONS_BY_ROLE, setup_readiness_report
 from .setup_verification import (
     ACTIVE_VERIFICATION_STATES,
     SETUP_VERIFICATION_SCOPE,
@@ -220,6 +220,7 @@ from .verified_setup import build_verified_setup, resolve_verified_setup
 from .workflow_edit_calibration import validate_workflow_edit_calibration
 from .workflow_trust import (
     TRUST_DERIVATION_VERSION,
+    TrustDecision,
     derive_trust,
     recorded_template_identity,
 )
@@ -582,6 +583,11 @@ async def start_setup_verification(
     session: ConversationSessionDep,
 ) -> SetupVerification:
     services = _services(request)
+    # Before deciding this role is blocked, vouch for anything this machine can
+    # rebuild for itself. An imported workflow is otherwise untrusted, and
+    # `workflow_untrusted` blocks verification with "review the workflow" as the
+    # only offered remedy.
+    await _vouch_for_role_workflows(services, session, role)
     report = setup_readiness_report(
         session,
         services.settings,
@@ -967,8 +973,26 @@ async def import_project(
     archive.file.seek(0)
     if size > _services(request).settings.max_project_import_bytes:
         raise HTTPException(413, "project archive exceeds the configured limit")
+    # Resolve the live engine schema per role so imported settings are validated
+    # the way the REST API validates them. Best effort: a role whose engine is
+    # not configured, or whose schema cannot be read now, imports unvalidated
+    # rather than failing the whole archive.
+    known_fields: dict[str, list[SettingField]] = {}
+    for settings_role in ("chat", "image", "video"):
+        try:
+            known_fields[settings_role] = await _engine_role_fields(
+                request,
+                settings_role,
+                allow_inactive=True,
+            )
+        except HTTPException:
+            continue
     try:
-        project = _services(request).exports.import_archive(session, archive.file)
+        project = _services(request).exports.import_archive(
+            session,
+            archive.file,
+            known_fields=known_fields,
+        )
     except ValueError as exc:
         session.rollback()
         raise HTTPException(422, str(exc)) from exc
@@ -4612,29 +4636,55 @@ async def export_workflow(workflow_id: str, session: SessionDep) -> WorkflowBund
     return _workflow_bundle(definition, revision)
 
 
-@router.post("/workflows/{workflow_id}/derive-trust", response_model=TrustDerivation)
-async def derive_workflow_trust(
-    workflow_id: str, request: Request, session: SessionDep
-) -> TrustDerivation:
-    """Trust a workflow this machine can rebuild for itself.
+async def _vouch_for_role_workflows(
+    services: Services,
+    session: Session,
+    role: Literal["chat", "image", "video"],
+) -> int:
+    """Trust any workflow for this role that this machine can rebuild itself.
 
-    Import forces `trusted=False` and execution refuses untrusted revisions, so
-    an imported setup arrives inert. If recompiling the recorded template here
-    yields byte-identical bytes, the graph was derived on this machine from a
-    template already shipped here - the same assertion the compiler makes during
-    a normal install - and no human review adds anything. Anything that cannot be
-    re-derived still requires review, and this says which case it is.
+    An imported workflow arrives untrusted, and `workflow_untrusted` is a
+    blocking readiness check - so setup verification refused to start, and told
+    the user to review a ComfyUI graph. That is a dead end for anyone who cannot
+    read one, and it is unnecessary whenever the graph recompiles here
+    byte-identically from a template already installed.
+
+    Runs before verification because that is the moment the media runtime is up
+    and the answer is obtainable. Anything that cannot be re-derived is left
+    untrusted, exactly as before.
     """
-    definition, revision = _workflow_and_revision(session, workflow_id)
-    if revision.trusted:
-        return TrustDerivation(
-            version=TRUST_DERIVATION_VERSION,
-            trusted=True,
-            reason="already_trusted",
-            message="This workflow is already trusted.",
-        )
+    operations = MEDIA_OPERATIONS_BY_ROLE[role]
+    if not operations:
+        return 0
+    vouched = 0
+    definitions = session.scalars(
+        select(WorkflowDefinition).where(WorkflowDefinition.operation.in_(operations))
+    ).all()
+    for definition in definitions:
+        if not definition.current_revision_id:
+            continue
+        revision = session.get(WorkflowRevision, definition.current_revision_id)
+        if not revision or revision.trusted:
+            continue
+        decision = await _derive_trust_for_revision(services, definition, revision)
+        if decision.trusted:
+            revision.trusted = True
+            vouched += 1
+    if vouched:
+        session.commit()
+    return vouched
 
-    services = _services(request)
+
+async def _derive_trust_for_revision(
+    services: Services,
+    definition: WorkflowDefinition,
+    revision: WorkflowRevision,
+) -> TrustDecision:
+    """Ask whether this machine can vouch for one revision by rebuilding it.
+
+    One implementation, shared by the explicit endpoint and by setup
+    verification, so the two can never answer differently.
+    """
     # Templates are indexed by media role, which the definition records as an
     # operation.
     role = "video" if "video" in definition.operation else "image"
@@ -4661,17 +4711,41 @@ async def derive_workflow_trust(
             except Exception:
                 # The runtime is not up, or the template no longer compiles here.
                 # Either way this machine cannot vouch for the graph right now,
-                # which the decision below reports as a refusal rather than an
-                # error - nothing is wrong, it just cannot be proven yet.
+                # which the decision reports as a refusal rather than an error -
+                # nothing is wrong, it just cannot be proven yet.
                 recompiled_graph = None
 
-    decision = derive_trust(
+    return derive_trust(
         dependencies=revision.dependencies_json,
         stored_api_graph=revision.api_graph_json,
         installed_template_sha256=template.sha256 if template else None,
         recompiled_api_graph=recompiled_graph,
         uses_only_core_nodes=template is not None,
     )
+
+
+@router.post("/workflows/{workflow_id}/derive-trust", response_model=TrustDerivation)
+async def derive_workflow_trust(
+    workflow_id: str, request: Request, session: SessionDep
+) -> TrustDerivation:
+    """Trust a workflow this machine can rebuild for itself.
+
+    Import forces `trusted=False` and execution refuses untrusted revisions, so
+    an imported setup arrives inert. If recompiling the recorded template here
+    yields byte-identical bytes, the graph was derived on this machine from a
+    template already shipped here - the same assertion the compiler makes during
+    a normal install - and no human review adds anything. Anything that cannot be
+    re-derived still requires review, and this says which case it is.
+    """
+    definition, revision = _workflow_and_revision(session, workflow_id)
+    if revision.trusted:
+        return TrustDerivation(
+            version=TRUST_DERIVATION_VERSION,
+            trusted=True,
+            reason="already_trusted",
+            message="This workflow is already trusted.",
+        )
+    decision = await _derive_trust_for_revision(_services(request), definition, revision)
     if decision.trusted:
         revision.trusted = True
         session.commit()

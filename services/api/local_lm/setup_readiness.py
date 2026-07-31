@@ -33,7 +33,7 @@ Role = Literal["chat", "image", "video"]
 CheckStatus = Literal["pass", "pending", "fail"]
 
 _ACTIVE_DOWNLOAD_STATES = {"queued", "running", "paused", "interrupted"}
-_MEDIA_OPERATIONS: dict[Role, set[str]] = {
+MEDIA_OPERATIONS_BY_ROLE: dict[Role, set[str]] = {
     "chat": set(),
     "image": {"text_to_image", "image_to_image"},
     "video": {"text_to_video", "image_to_video"},
@@ -431,7 +431,7 @@ def _workflow_check(
 ) -> tuple[WorkflowRevision | None, SetupReadinessCheck]:
     definitions = session.scalars(
         select(WorkflowDefinition)
-        .where(WorkflowDefinition.operation.in_(_MEDIA_OPERATIONS[role]))
+        .where(WorkflowDefinition.operation.in_(MEDIA_OPERATIONS_BY_ROLE[role]))
         .order_by(WorkflowDefinition.updated_at.desc(), WorkflowDefinition.id)
     ).all()
     candidates: list[WorkflowRevision] = []
