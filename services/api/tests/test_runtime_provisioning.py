@@ -431,9 +431,10 @@ async def test_external_comfy_archive_is_provisioned_without_bundling_it(
             "test-platform"
         ]
         managed_asset["runtime_probe"]["python"] = "3.13.15"
-        assert provisioner.status("comfyui").state == "missing"
-        managed_asset["runtime_probe"]["python"] = "3.13.14"
         assert provisioner.status("comfyui").state == "ready"
+        assert provisioner.verify_status("comfyui").state == "missing"
+        managed_asset["runtime_probe"]["python"] = "3.13.14"
+        assert provisioner.verify_status("comfyui").state == "ready"
         await provisioner.close()
 
     assert status.state == "ready"
@@ -510,8 +511,16 @@ def test_integrity_walk_lists_every_ordinary_file(
     (root / ".lm-atelier-runtime.json").write_text("{}", encoding="utf-8")
 
     found = provisioner._integrity_file_map(root)
+    progress: list[tuple[int, int]] = []
+    hashes = provisioner._runtime_file_hashes(
+        root,
+        {"executable": "a/one.bin"},
+        progress=lambda completed, total: progress.append((completed, total)),
+    )
 
     assert set(found) == {"a/one.bin", "a/b/two.bin"}
+    assert set(hashes) == set(found)
+    assert progress[-1] == (2, 2)
 
 
 async def test_installation_reclaims_staging_left_by_a_failed_attempt(
@@ -583,8 +592,20 @@ async def test_managed_runtime_integrity_change_is_not_reported_ready(
         assert set(marker["files"]) == {"backend.dll", "llama-server.exe"}
         (settings.llama_executable.parent / "backend.dll").write_bytes(b"changed dependency")
 
-        assert provisioner.status("llama.cpp").state == "missing"
+        # Ordinary polling remains cheap for the lifetime of a process. A new
+        # process performs the full integrity verification and rejects changes.
+        assert provisioner.status("llama.cpp").state == "ready"
         await provisioner.close()
+        restarted = RuntimeProvisioner(
+            settings,
+            manifest_path=manifest,
+            client=client,
+            environment={},
+            platform_key="test-platform",
+            allowed_download_hosts={"runtime.test"},
+        )
+        assert restarted.status("llama.cpp").state == "missing"
+        await restarted.close()
 
 
 async def test_same_release_asset_correction_replaces_only_the_owned_runtime(
