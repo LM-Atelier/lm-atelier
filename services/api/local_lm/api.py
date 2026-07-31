@@ -70,6 +70,7 @@ from .model_planner import (
     ResolvedInstallPlan,
     persist_install_plan,
     resolve_install_plan,
+    workflow_artifact_contract,
 )
 from .models import (
     AppSetting,
@@ -94,7 +95,11 @@ from .models import (
     WorkPlan,
     WorkStep,
 )
-from .orchestrator import ConversationOrchestrator, ResponseRevisionConflict
+from .orchestrator import (
+    ConversationOrchestrator,
+    ProjectWorkflowPinInvalid,
+    ResponseRevisionConflict,
+)
 from .ordered_planning import OrderedPlanConfirmationRequired
 from .platforms import list_platform_matrix
 from .preflight import assess_catalog_install
@@ -1246,6 +1251,21 @@ async def _accept_turn(
             detail={
                 "code": "idempotency_request_in_progress",
                 "message": str(exc),
+            },
+        ) from exc
+    except ProjectWorkflowPinInvalid as exc:
+        # Named rather than silently replaced: the caller can update or remove
+        # the pin, which is the only thing that actually resolves this.
+        raise HTTPException(
+            409,
+            detail={
+                "code": "project_workflow_pin_invalid",
+                "message": str(exc),
+                "project_id": exc.project_id,
+                "workflow_revision_id": exc.revision_id,
+                "role": exc.role,
+                "reason": exc.reason,
+                "actions": ["update_project_workflow_pin", "remove_project_workflow_pin"],
             },
         ) from exc
     except ResponseRevisionConflict as exc:
@@ -4450,6 +4470,16 @@ async def create_workflow(payload: WorkflowCreate, session: SessionDep) -> Workf
         input_schema_json=payload.input_schema,
         dependencies_json=payload.dependencies,
         trusted=payload.trusted,
+        # Every revision carries its artifact identity, not only compiled ones -
+        # otherwise a hand-authored or imported workflow cannot take part in
+        # capability evidence or in pin migration across recompiles.
+        artifact_sha256=workflow_artifact_contract(
+            operation=definition.operation,
+            engine=payload.engine,
+            api_graph=payload.api_graph,
+            input_schema=payload.input_schema,
+            dependencies=payload.dependencies,
+        ),
     )
     session.add(revision)
     session.flush()
@@ -4579,16 +4609,24 @@ async def create_workflow_revision(
         or 0
     )
     current = session.get(WorkflowRevision, definition.current_revision_id)
+    engine = current.engine if current else "comfyui"
     revision = WorkflowRevision(
         workflow_id=workflow_id,
         version=version + 1,
-        engine=current.engine if current else "comfyui",
+        engine=engine,
         engine_version=payload.engine_version,
         ui_graph_json=payload.ui_graph,
         api_graph_json=payload.api_graph,
         input_schema_json=payload.input_schema,
         dependencies_json=payload.dependencies,
         trusted=payload.trusted,
+        artifact_sha256=workflow_artifact_contract(
+            operation=definition.operation,
+            engine=engine,
+            api_graph=payload.api_graph,
+            input_schema=payload.input_schema,
+            dependencies=payload.dependencies,
+        ),
     )
     session.add(revision)
     session.flush()
