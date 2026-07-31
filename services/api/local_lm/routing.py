@@ -675,6 +675,7 @@ class ModalityRouter:
             _PRIOR_IMAGE_EDIT.search(normalized)
             or _PRIOR_IMAGE_SOURCE.search(normalized)
             or (_DEFINITE_GARMENT_EDIT.search(normalized) and _clear_visual_edit_intent(normalized))
+            or (_clear_visual_edit_intent(normalized) and not _IMAGE_CREATE.search(normalized))
         ):
             return True
         return mode == RoutingMode.VIDEO and bool(_DIRECT_VIDEO.search(normalized))

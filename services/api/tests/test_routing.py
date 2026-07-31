@@ -253,6 +253,11 @@ def test_numeric_text_request_does_not_create_multiple_outputs() -> None:
             "Increase the contrast in the current picture",
             Operation.IMAGE_TO_IMAGE,
         ),
+        (
+            RoutingMode.IMAGE,
+            "Change only the cube to bright red",
+            Operation.IMAGE_TO_IMAGE,
+        ),
         (RoutingMode.VIDEO, "Make it move", Operation.IMAGE_TO_VIDEO),
         (
             RoutingMode.VIDEO,
@@ -262,6 +267,11 @@ def test_numeric_text_request_does_not_create_multiple_outputs() -> None:
         (
             RoutingMode.IMAGE,
             "Create a fresh image of a green apple",
+            Operation.TEXT_TO_IMAGE,
+        ),
+        (
+            RoutingMode.IMAGE,
+            "Make an image of a green apple",
             Operation.TEXT_TO_IMAGE,
         ),
         (
