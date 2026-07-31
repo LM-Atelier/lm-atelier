@@ -180,6 +180,49 @@ async def test_runtime_download_resumes_verifies_and_persists(
     assert not list((settings.download_dir / "runtimes").glob("*.zip"))
 
 
+async def test_runtime_start_keeps_background_progress_typed(
+    settings,
+    tmp_path: Path,
+    monkeypatch,
+) -> None:  # type: ignore[no-untyped-def]
+    content = _zip_bytes({"llama-server.exe": b"runtime"})
+    manifest = tmp_path / "engines.json"
+    _write_manifest(manifest, llama_content=content)
+    settings.prepare()
+
+    async with httpx.AsyncClient() as client:
+        provisioner = RuntimeProvisioner(
+            settings,
+            manifest_path=manifest,
+            client=client,
+            environment={},
+            platform_key="test-platform",
+        )
+
+        async def observe_background_progress(
+            engine: runtime_provisioning.RuntimeName,
+        ) -> runtime_provisioning.RuntimeStatus:
+            definition = provisioner._definition(engine)
+            return provisioner._status(
+                engine,
+                definition,
+                state="installing",
+                supported=True,
+                message="Downloading runtime.",
+            )
+
+        monkeypatch.setattr(provisioner, "provision", observe_background_progress)
+        started = provisioner.start("llama.cpp")
+        background = provisioner._tasks["llama.cpp"]
+
+        assert started.progress_json is not None
+        assert started.progress_json.stage == "preparing download"
+        progressed = await background
+        assert progressed.progress_json is not None
+        assert progressed.progress_json.stage == "downloading runtime"
+        await provisioner.close()
+
+
 async def test_runtime_download_uses_shared_exact_byte_progress(
     settings,
     tmp_path: Path,
