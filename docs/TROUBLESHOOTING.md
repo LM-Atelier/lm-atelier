@@ -85,6 +85,98 @@ verified** in the model library means the same thing: installed, not yet proven.
 - Model support depends on its format, runtime workflow, and available system
   memory or VRAM. Installer support alone does not certify a model.
 
+## What the setup checklist is telling you
+
+Setup shows one line per problem, and each line is the exact sentence below.
+Search this page for the sentence you were shown.
+
+The code in the first column never appears in the app. It is what a diagnostic
+bundle and the `/api/setup/readiness` response use, so quote it if you are
+asking for help.
+
+### Waiting - nothing is wrong
+
+| Code | What you were shown |
+|---|---|
+| `runtime_installing` | The required runtime is being installed. |
+| `install_in_progress` | The model is being installed. |
+| `worker_starting` | The managed worker is starting. |
+| `generation_verification_running` | The local generation test is running. |
+
+The first ComfyUI install expands to several gigabytes across tens of thousands
+of files, so "being installed" can legitimately last several minutes with no
+visible change. Give it time before assuming it has hung.
+
+### The runtime
+
+| Code | What you were shown |
+|---|---|
+| `runtime_missing` | The required runtime is not installed. |
+| `runtime_failed` | The required runtime did not start or install. |
+| `runtime_unsupported` | Automatic setup for the required runtime is unavailable on this machine. |
+
+`runtime_missing` and `runtime_failed` both offer a button that installs or
+retries; a failed install is safe to retry, and a partial download is discarded
+rather than reused.
+
+`runtime_unsupported` deliberately offers **no** action. It means this machine
+cannot run that runtime - not that something went wrong - and the message
+carries the specific reason. Nothing in the app will change that answer, so use
+a different engine or a different machine.
+
+### The model
+
+| Code | What you were shown |
+|---|---|
+| `model_missing` | No active model is installed for this role. |
+| `install_failed` | The last model installation failed. |
+| `model_unsupported` | The active model is not compatible with this setup. |
+| `profile_missing` | No usable profile is bound to this model. |
+
+`model_unsupported` is about this machine and this engine, not about the model
+being bad. A model can be unsupported here and work elsewhere.
+
+### The workflow (image and video only)
+
+| Code | What you were shown |
+|---|---|
+| `workflow_missing` | No compatible workflow is installed for this model. |
+| `workflow_invalid` | The compatible workflow is incomplete. |
+| `workflow_untrusted` | The compatible workflow has not been trusted. |
+
+`workflow_untrusted` is usually an imported workflow. Starting verification will
+first try to rebuild it from the template it records: if the rebuild is
+byte-identical, it is trusted automatically and you will not see this again. If
+it cannot be rebuilt - hand-authored, edited after compiling, or needing nodes
+outside the ComfyUI core - it stays untrusted and needs review.
+
+### Activation and the generation test
+
+| Code | What you were shown |
+|---|---|
+| `activation_required` | The model has not passed an activation probe. |
+| `activation_failed` | The model did not pass its activation probe. |
+| `activation_stale` | The model must be rechecked for the current runtime and hardware. |
+| `generation_verification_required` | Run one quick local generation test. |
+| `generation_verification_failed` | The local generation test did not complete. |
+
+`activation_stale` does not mean anything broke. Evidence records the runtime
+and the machine it was proven on, so a runtime update can require a recheck.
+Activation is in-place and does not re-download the model.
+
+The generation test is the only step that proves the whole path works end to
+end, which is why setup is not finished without it.
+
+### The worker
+
+| Code | What you were shown |
+|---|---|
+| `worker_failed` | The managed worker exited unexpectedly. |
+| `worker_status_unavailable` | The managed worker status is unavailable. |
+
+Both offer a restart. If a worker fails repeatedly on the same model, the model
+is the more likely cause than the worker.
+
 ## Find local data
 
 - Windows: `%LOCALAPPDATA%\LMAtelier\data`
