@@ -509,6 +509,10 @@ class ModelCapabilityEvidence(TimestampMixin, Base):
     launch_contract_version: Mapped[str] = mapped_column(String(40))
     workflow_contract_version: Mapped[str | None] = mapped_column(String(100), nullable=True)
     hardware_class: Mapped[str] = mapped_column(String(200))
+    # What the proving machine offered, so a proof survives a driver update or a
+    # PATH change. Null on rows written before envelopes existed, which fall back
+    # to comparing `hardware_class` for equality.
+    hardware_envelope_json: Mapped[dict[str, Any] | None] = mapped_column(JSON, nullable=True)
     probe_version: Mapped[str] = mapped_column(String(40))
     failure_code: Mapped[str | None] = mapped_column(String(80), nullable=True)
     failure_reason: Mapped[str | None] = mapped_column(Text, nullable=True)
