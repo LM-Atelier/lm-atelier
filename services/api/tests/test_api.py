@@ -1879,8 +1879,13 @@ async def test_media_variations_create_ordered_independent_output_slots(
             assert len({run.assistant_message_id for run in runs}) == 4
             assert [job.payload_json["output_index"] for job in jobs] == [1, 2, 3, 4]
             assert [job.payload_json["output_count"] for job in jobs] == [4, 4, 4, 4]
-            assert runs[0].idempotency_key == "four-media-outputs"
-            assert all(run.idempotency_key is None for run in runs[1:])
+            # The accepted run keeps the key, its clones get none. Identify it by
+            # id rather than by creation order: on Windows the clock ticks every
+            # ~15 ms, so all four runs can share a created_at and the tiebreak
+            # falls to random ids.
+            keyed = {run.id: run.idempotency_key for run in runs}
+            assert keyed.pop(accepted["run"]["id"]) == "four-media-outputs"
+            assert all(key is None for key in keyed.values())
             assistant_ids = plan["summary_json"]["assistant_message_ids"]
             messages = [session.get(Message, message_id) for message_id in assistant_ids]
             assert all(message is not None for message in messages)
