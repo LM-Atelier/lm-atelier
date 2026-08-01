@@ -21,6 +21,7 @@ from local_lm.models import (
     Message,
     ModelInstall,
     ModelProfile,
+    ResponseRevision,
     Run,
     WorkPlan,
     WorkStep,
@@ -51,23 +52,53 @@ async def _wait_for_job(client: AsyncClient, kind: str) -> dict:  # type: ignore
     raise AssertionError(f"{kind} job did not finish")
 
 
+_RETRY_ASSESSMENT = json.dumps(
+    {
+        "requested_change_visible": False,
+        "unrelated_content_preserved": True,
+        "retry_recommended": True,
+        "direction": "increase",
+        "confidence": 0.94,
+    }
+)
+
+
+async def _wait_for_run(client: AsyncClient, run_id: str) -> dict:  # type: ignore[type-arg]
+    deadline = asyncio.get_running_loop().time() + 5
+    while asyncio.get_running_loop().time() < deadline:
+        run = (await client.get(f"/api/runs/{run_id}")).json()
+        if run["status"] in {
+            JobStatus.COMPLETE.value,
+            JobStatus.FAILED.value,
+            JobStatus.CANCELLED.value,
+            JobStatus.INTERRUPTED.value,
+        }:
+            assert run["status"] == JobStatus.COMPLETE.value
+            return run
+        await asyncio.sleep(0.03)
+    raise AssertionError(f"run {run_id} did not finish")
+
+
 @pytest.mark.parametrize(
-    ("assessment_raw", "expected_status", "expected_reason"),
+    (
+        "assessment_raw",
+        "turn_settings",
+        "expected_status",
+        "expected_reason",
+        "expected_retry",
+        "expected_execution_reason",
+    ),
     [
+        (_RETRY_ASSESSMENT, {}, "complete", "eligible", True, None),
         (
-            json.dumps(
-                {
-                    "requested_change_visible": False,
-                    "unrelated_content_preserved": True,
-                    "retry_recommended": True,
-                    "direction": "increase",
-                    "confidence": 0.94,
-                }
-            ),
+            _RETRY_ASSESSMENT,
+            {"denoise": 0.5},
             "complete",
             "eligible",
+            False,
+            "manual_strength_preserved",
         ),
-        ("not-json", "skipped", "invalid_assessment"),
+        ("not-json", {}, "skipped", "invalid_assessment", False, None),
     ],
 )
 async def test_image_edit_verification_is_dependent_at_most_once_and_non_destructive(
@@ -75,8 +106,11 @@ async def test_image_edit_verification_is_dependent_at_most_once_and_non_destruc
     app: FastAPI,
     monkeypatch: pytest.MonkeyPatch,
     assessment_raw: str,
+    turn_settings: dict[str, object],
     expected_status: str,
     expected_reason: str,
+    expected_retry: bool,
+    expected_execution_reason: str | None,
 ) -> None:
     original_capabilities = MockChatAdapter.capabilities
     captured: list[ChatRequest] = []
@@ -184,6 +218,7 @@ async def test_image_edit_verification_is_dependent_at_most_once_and_non_destruc
             "text": "Make the square green.",
             "mode": "image",
             "input_artifact_ids": [source_artifact_id],
+            "settings": turn_settings,
         },
     )
     assert accepted.status_code == 202
@@ -193,7 +228,16 @@ async def test_image_edit_verification_is_dependent_at_most_once_and_non_destruc
     assert verification_job["status"] == JobStatus.COMPLETE.value
     assert verification_job["result_json"]["status"] == expected_status
     assert verification_job["result_json"]["reason"] == expected_reason
-    assert verification_job["result_json"]["automatic_retry_executed"] is False
+    assert verification_job["result_json"]["automatic_retry_executed"] is expected_retry
+    assert (
+        verification_job["result_json"].get("retry_execution_reason") == expected_execution_reason
+    )
+    retry_run_id = verification_job["result_json"].get("retry_run_id")
+    if expected_retry:
+        assert isinstance(retry_run_id, str)
+        await _wait_for_run(client, retry_run_id)
+    else:
+        assert retry_run_id is None
     assert source_complete_when_streamed == [True]
     assert len(captured) == 1
     content = captured[0].messages[-1]["content"]
@@ -214,9 +258,30 @@ async def test_image_edit_verification_is_dependent_at_most_once_and_non_destruc
                 WorkStepDependency.depends_on_step_id == run.work_step_id,
             )
         )
-        assert image_ids == [job.payload_json["result_artifact_id"]]
         assert revision_id is not None
         assert dependency is not None
+        if expected_retry:
+            assert retry_run_id is not None
+            retry_run = session.get(Run, retry_run_id)
+            assert retry_run
+            retry_plan = session.get(WorkPlan, retry_run.work_plan_id)
+            assert retry_plan and retry_plan.source_action == "image_edit_verification_retry"
+            assert retry_run.settings_json["denoise"] == 0.62
+            assert retry_run.provenance_json["image_edit"]["strength"]["mode"] == "auto"
+            assert retry_run.provenance_json["image_edit_verification"]["reason"] == (
+                "retry_limit_reached"
+            )
+            revisions = session.scalars(
+                select(ResponseRevision)
+                .where(ResponseRevision.message_id == message.id)
+                .order_by(ResponseRevision.sequence)
+            ).all()
+            assert len(revisions) == 2
+            assert revisions[0].run_id == run.id
+            assert revisions[1].run_id == retry_run.id
+            assert message.active_response_revision_id == revisions[1].id
+        else:
+            assert image_ids == [job.payload_json["result_artifact_id"]]
         duplicate = orchestrator._queue_image_edit_verification(
             session,
             run,
