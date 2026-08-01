@@ -571,3 +571,27 @@ def test_same_fit_and_basis_prefers_more_total_capacity_headroom() -> None:
     )
 
     assert [item.key for item in ranked] == ["smaller", "larger"]
+
+
+def test_present_accelerator_with_unknown_capacity_is_unknown() -> None:
+    result = recommend_hardware_fit(
+        _capacity(accelerator=0, accelerator_free=None),
+        FitRequirements(
+            required_accelerator_backends=("cuda",),
+            minimum_accelerator_memory_bytes=8 * _GIB,
+        ),
+    )
+
+    assert result.status == "unknown"
+    assert any(reason.code == "accelerator_memory_unknown" for reason in result.reasons)
+    assert not any(reason.severity == "block" for reason in result.reasons)
+
+
+def test_declared_accelerator_minimum_without_a_device_is_unsupported() -> None:
+    result = recommend_hardware_fit(
+        _capacity(accelerator_backends=()),
+        FitRequirements(minimum_accelerator_memory_bytes=8 * _GIB),
+    )
+
+    assert result.status == "unsupported"
+    assert any(reason.code == "accelerator_missing" for reason in result.reasons)

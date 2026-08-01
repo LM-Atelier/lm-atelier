@@ -281,6 +281,20 @@ def recommend_hardware_fit(
         capacity.accelerators,
         requirements.required_accelerator_backends,
     )
+    if accelerator_capacity is None and requirements.minimum_accelerator_memory_bytes is not None:
+        reasons.append(
+            FitReason(
+                "accelerator_missing",
+                "block",
+                "No accelerator was detected for the declared minimum memory requirement.",
+            )
+        )
+        alternatives.append(
+            FitAlternative(
+                "choose_cpu_compatible_variant",
+                "Use a model variant that supports CPU execution.",
+            )
+        )
     system = _assess_memory(
         kind="system",
         capacity_bytes=capacity.system_memory_bytes,
@@ -451,24 +465,6 @@ def _assess_memory(
         )
 
     load_bytes = max(demanded) + concurrent_bytes
-    if minimum_bytes is not None and minimum_bytes + concurrent_bytes > capacity_bytes:
-        reasons.append(
-            FitReason(
-                f"{kind}_memory_below_minimum",
-                "block",
-                f"Available hardware is below the declared minimum {label} requirement.",
-            )
-        )
-        return _MemoryAssessment(
-            "unsupported",
-            "declared",
-            tuple(reasons),
-            False,
-            capacity_bytes,
-            available_bytes,
-            load_bytes,
-        )
-
     if capacity_bytes <= 0:
         reasons.append(
             FitReason(
@@ -480,6 +476,24 @@ def _assess_memory(
         return _MemoryAssessment(
             "unknown",
             basis,
+            tuple(reasons),
+            False,
+            capacity_bytes,
+            available_bytes,
+            load_bytes,
+        )
+
+    if minimum_bytes is not None and minimum_bytes + concurrent_bytes > capacity_bytes:
+        reasons.append(
+            FitReason(
+                f"{kind}_memory_below_minimum",
+                "block",
+                f"Available hardware is below the declared minimum {label} requirement.",
+            )
+        )
+        return _MemoryAssessment(
+            "unsupported",
+            "declared",
             tuple(reasons),
             False,
             capacity_bytes,
