@@ -3,7 +3,6 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import json
-import os
 import re
 from datetime import UTC, datetime, timedelta
 from pathlib import Path, PurePosixPath
@@ -12,6 +11,7 @@ from urllib.parse import quote, urlparse
 
 import httpx
 
+from .catalog_cache import CatalogCacheStore
 from .config import Settings
 from .domain import CompatibilityLevel
 from .gguf import automatic_mmproj_selection, gguf_identity_tokens
@@ -41,7 +41,7 @@ _FILENAME_QUANTIZATION = re.compile(
 )
 _PARAMETERS = re.compile(r"(?:^|[-_ ])(\d+(?:\.\d+)?)\s*([bmk])(?:$|[-_ ])", re.I)
 _REMOTE_ID = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]*/[A-Za-z0-9][A-Za-z0-9_.-]*$")
-_CACHE_VERSION = 4
+_CACHE_VERSION = 5
 
 
 class HuggingFaceCatalog:
@@ -56,7 +56,7 @@ class HuggingFaceCatalog:
             follow_redirects=True,
             verify=shared_tls_context(),
         )
-        self._cache_dir = settings.catalog_cache_dir
+        self._cache = CatalogCacheStore(settings.catalog_cache_dir)
 
     def set_token(self, token: str | None) -> None:
         if token:
@@ -119,6 +119,12 @@ class HuggingFaceCatalog:
             sort,
             limit,
         )
+        fresh = self._read_page_cache(
+            cache,
+            max_age_seconds=self._cache.policy.fresh_seconds,
+        )
+        if fresh is not None:
+            return fresh.model_copy(update={"stale": False})
         try:
             response = await self._client.get(url, params=None if cursor else params)
             response.raise_for_status()
@@ -162,12 +168,17 @@ class HuggingFaceCatalog:
             result = CatalogPage(items=items, next_cursor=next_cursor)
             self._write_cache(cache, result.model_dump_json())
             return result
-        except (httpx.HTTPError, ValueError):
+        except httpx.HTTPError as error:
+            if not self._is_transient_error(error):
+                raise
             candidates = [(cache, False)]
             if cursor is None:
                 candidates.append((fallback_cache, True))
             for candidate, is_fallback in candidates:
-                cached = self._read_page_cache(candidate)
+                cached = self._read_page_cache(
+                    candidate,
+                    max_age_seconds=self._cache.policy.stale_seconds,
+                )
                 if cached is None:
                     continue
                 items = self._filter_items(
@@ -206,6 +217,12 @@ class HuggingFaceCatalog:
         if not self._valid_remote_id(remote_id):
             raise ValueError("remote_id must be in owner/model form")
         cache = self._cache_path("detail", remote_id, revision, requested_role)
+        fresh = self._read_detail_cache(
+            cache,
+            max_age_seconds=self._cache.policy.fresh_seconds,
+        )
+        if fresh is not None:
+            return fresh
         try:
             response = await self._client.get(
                 f"/api/models/{remote_id}",
@@ -213,12 +230,15 @@ class HuggingFaceCatalog:
             )
             response.raise_for_status()
             payload = response.json()
-        except (httpx.HTTPError, ValueError):
-            if cache.is_file():
-                cached = json.loads(cache.read_text(encoding="utf-8"))
-                if not isinstance(cached, dict):
-                    raise ValueError("cached catalog detail must be an object") from None
-                return cast(dict[str, Any], cached)
+        except httpx.HTTPError as error:
+            if not self._is_transient_error(error):
+                raise
+            cached = self._read_detail_cache(
+                cache,
+                max_age_seconds=self._cache.policy.stale_seconds,
+            )
+            if cached is not None:
+                return cached
             raise
         siblings = []
         for sibling in payload.get("siblings") or []:
@@ -271,10 +291,9 @@ class HuggingFaceCatalog:
             path.as_posix(),
             max_bytes,
         )
-        if cache.is_file():
-            content = cache.read_bytes()
-            if len(content) <= max_bytes:
-                return content
+        cached_content = self._cache.read_bytes(cache)
+        if cached_content is not None and len(cached_content) <= max_bytes:
+            return cached_content
         encoded_path = "/".join(quote(part, safe="") for part in path.parts)
         encoded_revision = quote(revision, safe="")
         content_buffer = bytearray()
@@ -440,35 +459,75 @@ class HuggingFaceCatalog:
 
     def _cache_path(self, *parts: object) -> Path:
         key = hashlib.sha256(
-            json.dumps((_CACHE_VERSION, parts), sort_keys=True, default=str).encode()
+            json.dumps(
+                (_CACHE_VERSION, self._authorization_cache_scope(), parts),
+                sort_keys=True,
+                default=str,
+            ).encode()
         ).hexdigest()
-        return self._cache_dir / f"{key}.json"
+        return self._cache.path(key)
 
     def _binary_cache_path(self, *parts: object) -> Path:
-        return self._cache_path(*parts).with_suffix(".bin")
+        key = hashlib.sha256(
+            json.dumps(
+                (_CACHE_VERSION, self._authorization_cache_scope(), parts),
+                sort_keys=True,
+                default=str,
+            ).encode()
+        ).hexdigest()
+        return self._cache.path(key, suffix=".bin")
 
-    @staticmethod
-    def _write_cache(path: Path, content: str) -> None:
-        path.parent.mkdir(parents=True, exist_ok=True)
-        temporary = path.with_suffix(".partial")
-        temporary.write_text(content, encoding="utf-8")
-        os.replace(temporary, path)
+    def _write_cache(self, path: Path, content: str) -> None:
+        self._cache.write_text(path, content)
 
-    @staticmethod
-    def _write_binary_cache(path: Path, content: bytes) -> None:
-        path.parent.mkdir(parents=True, exist_ok=True)
-        temporary = path.with_suffix(".partial")
-        temporary.write_bytes(content)
-        os.replace(temporary, path)
+    def _write_binary_cache(self, path: Path, content: bytes) -> None:
+        self._cache.write_bytes(path, content)
 
-    @staticmethod
-    def _read_page_cache(path: Path) -> CatalogPage | None:
-        if not path.is_file():
+    def _read_page_cache(
+        self,
+        path: Path,
+        *,
+        max_age_seconds: float,
+    ) -> CatalogPage | None:
+        content = self._cache.read_text(path, max_age_seconds=max_age_seconds)
+        if content is None:
             return None
         try:
-            return CatalogPage.model_validate_json(path.read_text(encoding="utf-8"))
-        except (OSError, ValueError):
+            return CatalogPage.model_validate_json(content)
+        except ValueError:
             return None
+
+    def _read_detail_cache(
+        self,
+        path: Path,
+        *,
+        max_age_seconds: float,
+    ) -> dict[str, Any] | None:
+        content = self._cache.read_text(path, max_age_seconds=max_age_seconds)
+        if content is None:
+            return None
+        try:
+            cached = json.loads(content)
+        except ValueError:
+            return None
+        if not isinstance(cached, dict):
+            return None
+        return cast(dict[str, Any], cached)
+
+    def _authorization_cache_scope(self) -> str:
+        authorization = self._client.headers.get("authorization")
+        if not authorization:
+            return "public"
+        return hashlib.sha256(authorization.encode()).hexdigest()
+
+    @staticmethod
+    def _is_transient_error(error: httpx.HTTPError) -> bool:
+        if isinstance(error, httpx.RequestError):
+            return True
+        if isinstance(error, httpx.HTTPStatusError):
+            status = error.response.status_code
+            return status in {408, 425, 429} or status >= 500
+        return False
 
     @staticmethod
     def _pipeline_tag(role: str) -> str | None:
