@@ -40,6 +40,7 @@ import type {
   Workflow,
   WorkflowBundle,
   WorkflowRevision,
+  WorkerResetResult,
   WorkerSettings,
   WorkerStatus,
   WorkPlan,
@@ -429,6 +430,10 @@ export const api = {
   startMediaWorker: () => request<WorkerStatus>("/api/workers/media/start", { method: "POST" }),
   stopWorker: (name: "chat" | "media") =>
     request<WorkerStatus>(`/api/workers/${name}/stop`, { method: "POST" }),
+  restartWorker: (name: "chat" | "media") =>
+    request<WorkerStatus>(`/api/workers/${name}/restart`, { method: "POST" }),
+  resetWorker: (name: "chat" | "media") =>
+    request<WorkerResetResult>(`/api/workers/${name}/reset`, { method: "POST" }),
   backups: () => request<BackupInfo[]>("/api/backups"),
   createBackup: (includeMedia = false) =>
     request<BackupInfo>(`/api/backups?${new URLSearchParams({ include_media: String(includeMedia) })}`, { method: "POST" }),
