@@ -362,6 +362,10 @@ export interface WorkerStatus {
   log_path?: string | null;
 }
 
+export interface WorkerSettings {
+  worker_startup_seconds: number;
+}
+
 export interface RuntimeStatus {
   engine: "llama.cpp" | "vllm" | "comfyui";
   release: string;

@@ -1353,6 +1353,42 @@ async def test_worker_management_reports_missing_local_binaries(client: AsyncCli
     assert media.status_code == 422
 
 
+async def test_worker_startup_limit_is_editable_and_survives_restart(
+    client: AsyncClient,
+    settings: Settings,
+) -> None:
+    import os
+
+    from local_lm.runtime_config import runtime_config_path
+
+    current = await client.get("/api/workers/settings")
+    assert current.status_code == 200
+    assert current.json() == {"worker_startup_seconds": 60}
+
+    try:
+        updated = await client.put("/api/workers/settings", json={"worker_startup_seconds": 240})
+        assert updated.status_code == 200
+        assert updated.json() == {"worker_startup_seconds": 240}
+        # The running process applies it immediately: the supervisor reads this
+        # settings object at each worker start.
+        assert settings.worker_startup_seconds == 240
+        # The next launch reads it back from the persisted runtime config.
+        persisted = json.loads(runtime_config_path(settings.data_dir).read_text(encoding="utf-8"))
+        assert persisted["LOCAL_LM_WORKER_STARTUP_SECONDS"] == "240"
+    finally:
+        os.environ.pop("LOCAL_LM_WORKER_STARTUP_SECONDS", None)
+
+
+async def test_worker_startup_limit_rejects_values_outside_the_config_bounds(
+    client: AsyncClient,
+    settings: Settings,
+) -> None:
+    for value in (0, 601, -5):
+        response = await client.put("/api/workers/settings", json={"worker_startup_seconds": value})
+        assert response.status_code == 422
+    assert settings.worker_startup_seconds == 60
+
+
 async def test_runtime_status_exposes_pinned_external_setup(client: AsyncClient) -> None:
     response = await client.get("/api/runtimes")
 

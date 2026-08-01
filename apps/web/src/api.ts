@@ -40,6 +40,7 @@ import type {
   Workflow,
   WorkflowBundle,
   WorkflowRevision,
+  WorkerSettings,
   WorkerStatus,
   WorkPlan,
   WorkStep,
@@ -417,6 +418,9 @@ export const api = {
     request<GenerationPreset>("/api/presets/import", { method: "POST", body: JSON.stringify(bundle) }),
   deletePreset: (id: string) => request<void>(`/api/presets/${id}`, { method: "DELETE" }),
   workers: () => request<WorkerStatus[]>("/api/workers"),
+  workerSettings: () => request<WorkerSettings>("/api/workers/settings"),
+  updateWorkerSettings: (values: WorkerSettings) =>
+    request<WorkerSettings>("/api/workers/settings", { method: "PUT", body: JSON.stringify(values) }),
   runtimes: () => request<RuntimeStatus[]>("/api/runtimes"),
   installRuntime: (engine: RuntimeStatus["engine"]) =>
     request<RuntimeStatus>(`/api/runtimes/${engine}/install`, { method: "POST" }),
