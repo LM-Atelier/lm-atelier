@@ -3688,9 +3688,18 @@ async def test_image_request_uses_referenced_text_from_the_active_chat_branch(
     assert image_turn.status_code == 202
     image_run = image_turn.json()["run"]
     assert image_run["operation"] == "text_to_image"
-    assert "Source chat text:" in image_run["standalone_prompt"]
-    assert story_request in image_run["standalone_prompt"]
-    assert story_text in image_run["standalone_prompt"]
+    # The passage reaches the media engine as one compiled description rather
+    # than as the request with a chat excerpt pasted underneath it.
+    assert image_run["standalone_prompt"].startswith("One compiled moment:")
+    assert "Source chat text:" not in image_run["standalone_prompt"]
+
+    provenance = (await client.get(f"/api/runs/{image_run['id']}")).json()["provenance_json"]
+    compiled = provenance["visual_prompt"]
+    assert compiled["applied"] is True
+    assert compiled["reason"] == "compiled"
+    assert "Source chat text:" in compiled["original_prompt"]
+    assert story_text[:80] in compiled["original_prompt"]
+    assert provenance["routing"]["text_context"]
 
     image_message = await wait_for_assistant(client, chat["id"], "image")
     image = next(part for part in image_message["parts"] if part["type"] == "image")
@@ -3702,6 +3711,35 @@ async def test_image_request_uses_referenced_text_from_the_active_chat_branch(
     )
     assert image["artifact"]["metadata_json"]["semantic_description_confidence"] == "intent-only"
     assert image["artifact"]["metadata_json"]["visual_contents_inspected"] is False
+
+
+async def test_a_chat_can_send_its_referenced_text_uncompiled(client: AsyncClient) -> None:
+    """Turning the compiler off restores the passage the router assembled."""
+    chat = (await client.post("/api/chats", json={"title": "Uncompiled"})).json()
+    updated = await client.patch(
+        f"/api/chats/{chat['id']}",
+        json={"vision_settings_json": {"compile_visual_prompts": False}},
+    )
+    assert updated.status_code == 200
+    assert updated.json()["vision_settings_json"]["compile_visual_prompts"] is False
+
+    await client.post(
+        f"/api/chats/{chat['id']}/turns",
+        json={"text": "Write a short story about a silver fox at dusk.", "mode": "text"},
+    )
+    await wait_for_assistant(client, chat["id"], "text")
+
+    image_turn = await client.post(
+        f"/api/chats/{chat['id']}/turns",
+        json={"text": "Make an image based on the previous story", "mode": "auto"},
+    )
+    assert image_turn.status_code == 202
+    image_run = image_turn.json()["run"]
+    assert "Source chat text:" in image_run["standalone_prompt"]
+
+    provenance = (await client.get(f"/api/runs/{image_run['id']}")).json()["provenance_json"]
+    assert provenance["visual_prompt"]["applied"] is False
+    assert provenance["visual_prompt"]["reason"] == "disabled"
 
 
 async def test_prior_image_edit_falls_back_to_accumulated_text_prompt(
