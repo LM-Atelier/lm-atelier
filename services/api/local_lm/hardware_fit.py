@@ -61,6 +61,7 @@ class FitRequirements:
     supported_architectures: tuple[str, ...] = ()
     required_runtime_backends: tuple[str, ...] = ()
     required_accelerator_backends: tuple[str, ...] = ()
+    required_cpu_capabilities: tuple[str, ...] = ()
     minimum_system_memory_bytes: int | None = None
     recommended_system_memory_bytes: int | None = None
     estimated_system_memory_bytes: int | None = None
@@ -185,6 +186,24 @@ def recommend_hardware_fit(
                 "This runtime does not support the current processor architecture.",
             )
         )
+    missing_cpu_capabilities = _missing_values(
+        capacity.cpu_capabilities,
+        requirements.required_cpu_capabilities,
+    )
+    if missing_cpu_capabilities:
+        reasons.append(
+            FitReason(
+                "cpu_capability_missing",
+                "block",
+                "The processor lacks a capability required by this runtime or model.",
+            )
+        )
+        alternatives.append(
+            FitAlternative(
+                "choose_cpu_compatible_variant",
+                "Use a runtime or model variant compatible with this processor.",
+            )
+        )
     if requirements.required_runtime_backends and not _overlaps(
         capacity.runtime_backends, requirements.required_runtime_backends
     ):
@@ -297,7 +316,7 @@ def recommend_hardware_fit(
         alternatives.append(
             FitAlternative(
                 "free_current_memory",
-                "Close other GPU-heavy apps or unload idle models before starting.",
+                "Close other resource-heavy apps or unload idle models before starting.",
             )
         )
     if status in {"tight", "unsupported"}:
@@ -391,12 +410,19 @@ def _assess_memory(
         )
     elif recommended_bytes is not None:
         basis = "declared"
-        if recommended_bytes + concurrent_bytes <= capacity_bytes:
+        declared_fit = recommended_bytes + concurrent_bytes <= capacity_bytes
+        calculated_fit = (
+            estimated_bytes is None or estimated_bytes + concurrent_bytes <= capacity_bytes
+        )
+        if declared_fit and calculated_fit:
             status = "recommended"
             message = f"Hardware meets the declared recommended {label} capacity."
         else:
             status = "tight"
-            message = f"Hardware meets the minimum but not the recommended {label} capacity."
+            message = (
+                f"Hardware meets the minimum but the recommended or calculated {label} "
+                "need leaves too little headroom."
+            )
         reasons.append(
             FitReason(
                 f"{kind}_memory_declared",
@@ -476,6 +502,11 @@ def _matches(value: str, expected: tuple[str, ...]) -> bool:
 def _overlaps(available: tuple[str, ...], required: tuple[str, ...]) -> bool:
     normalized = {item.casefold() for item in available}
     return bool(normalized & {item.casefold() for item in required})
+
+
+def _missing_values(available: tuple[str, ...], required: tuple[str, ...]) -> set[str]:
+    normalized = {item.casefold() for item in available}
+    return {item.casefold() for item in required} - normalized
 
 
 def _best_accelerator(

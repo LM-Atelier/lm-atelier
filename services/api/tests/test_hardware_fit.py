@@ -150,6 +150,20 @@ def test_calculated_fit_with_little_headroom_is_tight() -> None:
     assert any(item.code == "choose_smaller_variant" for item in result.alternatives)
 
 
+def test_calculated_load_can_tighten_an_outdated_declared_recommendation() -> None:
+    result = recommend_hardware_fit(
+        _capacity(),
+        FitRequirements(
+            minimum_accelerator_memory_bytes=8 * _GIB,
+            recommended_accelerator_memory_bytes=12 * _GIB,
+            estimated_accelerator_memory_bytes=18 * _GIB,
+        ),
+    )
+
+    assert result.status == "tight"
+    assert result.basis == "declared"
+
+
 def test_declared_minimum_that_cannot_fit_is_unsupported() -> None:
     result = recommend_hardware_fit(
         _capacity(),
@@ -269,6 +283,19 @@ def test_unmeasured_non_test_evidence_does_not_make_a_fit_claim() -> None:
     assert result.status == "unknown"
     assert result.basis == "unknown"
     assert result.evidence_label is None
+
+
+def test_missing_required_cpu_capability_is_unsupported() -> None:
+    result = recommend_hardware_fit(
+        _capacity(),
+        FitRequirements(required_cpu_capabilities=("avx512",)),
+    )
+
+    assert result.status == "unsupported"
+    assert any(reason.code == "cpu_capability_missing" for reason in result.reasons)
+    assert any(
+        alternative.code == "choose_cpu_compatible_variant" for alternative in result.alternatives
+    )
 
 
 def test_required_backends_fail_closed_without_model_name_branches() -> None:
