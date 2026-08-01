@@ -244,10 +244,17 @@ def recommend_hardware_fit(
             matching_evidence.peak_accelerator_memory_bytes if matching_evidence else None,
         )
     )
+    test_claim: Literal["tested", "certified"] | None = None
+    if matching_evidence is not None:
+        if matching_evidence.claim == "tested":
+            test_claim = "tested"
+        elif matching_evidence.claim == "certified":
+            test_claim = "certified"
+    exact_test_claim = test_claim is not None
     if hard_block:
         status: FitStatus = "unsupported"
     elif not has_memory_requirements:
-        status = "unknown"
+        status = "recommended" if exact_test_claim else "unknown"
     else:
         status = _worst_status(system.status, accelerator.status)
 
@@ -277,16 +284,9 @@ def recommend_hardware_fit(
 
     basis = _strongest_basis(system.basis, accelerator.basis)
     evidence_label: Literal["tested", "certified"] | None = None
-    if (
-        matching_evidence is not None
-        and not hard_block
-        and (
-            matching_evidence.peak_system_memory_bytes is not None
-            or matching_evidence.peak_accelerator_memory_bytes is not None
-        )
-        and matching_evidence.claim in {"tested", "certified"}
-    ):
-        evidence_label = matching_evidence.claim
+    if test_claim is not None and not hard_block:
+        evidence_label = test_claim
+        basis = _strongest_basis(basis, test_claim)
     return HardwareFit(
         status=status,
         basis=basis,

@@ -181,15 +181,27 @@ def test_exact_certification_label_requires_matching_evidence() -> None:
     assert stale.status == "unknown"
 
 
-def test_matching_label_without_measurements_makes_no_tested_claim() -> None:
+def test_exact_recorded_matrix_can_be_labeled_without_a_memory_peak() -> None:
     result = recommend_hardware_fit(
         _capacity(),
-        FitRequirements(estimated_accelerator_memory_bytes=10 * _GIB),
+        FitRequirements(),
         evidence=FitEvidence(exact_match=True, claim="certified"),
     )
 
-    assert result.status == "likely"
-    assert result.basis == "calculated"
+    assert result.status == "recommended"
+    assert result.basis == "certified"
+    assert result.evidence_label == "certified"
+
+
+def test_unmeasured_non_test_evidence_does_not_make_a_fit_claim() -> None:
+    result = recommend_hardware_fit(
+        _capacity(),
+        FitRequirements(),
+        evidence=FitEvidence(exact_match=True, claim="measured"),
+    )
+
+    assert result.status == "unknown"
+    assert result.basis == "unknown"
     assert result.evidence_label is None
 
 
