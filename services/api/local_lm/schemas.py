@@ -28,6 +28,7 @@ class VisionSettings(ApiModel):
     max_video_frames: int = Field(default=6, ge=3, le=16)
     include_prior_visual: bool = True
     verify_image_edits: bool = False
+    compile_visual_prompts: bool = True
 
 
 class ProjectCreate(ApiModel):
@@ -314,6 +315,10 @@ class RoutingReasonCode(StrEnum):
 class RoutingPlan(ApiModel):
     operation: Operation
     standalone_prompt: str
+    # The chat passage this request is asking to depict, when it is asking for
+    # one. Carried apart from `standalone_prompt` so a media prompt can be
+    # compiled from the request and its source rather than their concatenation.
+    text_context: str | None = None
     negative_prompt: str | None = None
     input_artifact_ids: list[str] = Field(default_factory=list)
     profile_id: str | None = None

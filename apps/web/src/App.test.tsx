@@ -718,13 +718,15 @@ describe("App", () => {
     fireEvent.change(screen.getByLabelText("Project"), { target: { value: "" } });
     fireEvent.click(screen.getByRole("checkbox", { name: /Archived/ }));
     fireEvent.click(screen.getByRole("checkbox", { name: /Review image edits/ }));
+    // Prompt composition is on unless a chat turns it off, so this click clears it.
+    fireEvent.click(screen.getByRole("checkbox", { name: /Compose visual prompts/ }));
     fireEvent.click(screen.getByText("Save chat"));
     await waitFor(() => expect(vi.mocked(api.updateChat).mock.calls[0]?.[0]).toBe("chat-1"));
     expect(vi.mocked(api.updateChat).mock.calls[0]?.[1]).toMatchObject({
       title: "Renamed notes",
       project_id: null,
       archived: true,
-      vision_settings_json: { max_images: 4, verify_image_edits: true },
+      vision_settings_json: { max_images: 4, verify_image_edits: true, compile_visual_prompts: false },
     });
   });
 

@@ -115,6 +115,7 @@ from .schemas import (
     GenerationOffer,
     MessageOut,
     OrderedWorkIntent,
+    RoutingPlan,
     RunOut,
     TurnAccepted,
     TurnRequest,
@@ -134,6 +135,11 @@ from .setup_verification import (
     setup_verification_for_chat,
 )
 from .vision import PreparedVisualContext, VisionContextService, VisionInputError
+from .visual_prompt_compiler import (
+    compilation_provenance,
+    compile_visual_prompt,
+    visual_prompt_compilation_eligibility,
+)
 from .work_plans import plan_status_summary, refresh_plan_status
 
 logger = logging.getLogger(__name__)
@@ -787,6 +793,7 @@ class ConversationOrchestrator:
             if prior_prompt:
                 plan.standalone_prompt = f"{prior_prompt}. Follow-up instruction: {request.text}"
         plan.input_artifact_ids = resolved_input_ids
+        visual_prompt = await self._compiled_visual_prompt(chat, plan, request.text)
 
         profile, model_selection, workflow_revision = self._profile_and_workflow_for_operation(
             session,
@@ -1217,6 +1224,7 @@ class ConversationOrchestrator:
                 )
             provenance: dict[str, Any] = {
                 "routing": plan.model_dump(mode="json"),
+                **({"visual_prompt": visual_prompt} if visual_prompt else {}),
                 "model_selection": model_selection,
                 "input_artifact_ids": resolved_input_ids,
                 "model": model_provenance,
@@ -2646,6 +2654,47 @@ class ConversationOrchestrator:
             return False
         status = next(item for item in self.processes.statuses() if item.name == "chat")
         return status.state == "ready"
+
+    async def _compiled_visual_prompt(
+        self,
+        chat: Chat,
+        plan: RoutingPlan,
+        request_text: str,
+    ) -> dict[str, Any] | None:
+        """Replace a chat-derived media prompt with one compiled description.
+
+        Returns what to record, or `None` when this turn had no chat passage to
+        compile from. `plan` is mutated only when a usable prompt came back;
+        every other path leaves the router's prompt exactly as it was.
+        """
+        source_text = plan.text_context
+        if not source_text:
+            return None
+        settings = chat.vision_settings_json if isinstance(chat.vision_settings_json, dict) else {}
+        original = plan.standalone_prompt
+        eligibility = visual_prompt_compilation_eligibility(
+            plan.operation,
+            enabled=settings.get("compile_visual_prompts", True) is not False,
+            source_text=source_text,
+            compiler_available=await self._chat_planner_available(),
+        )
+        if not eligibility.eligible:
+            return compilation_provenance(eligibility.reason, original_prompt=original)
+        compiled, reason = await compile_visual_prompt(
+            self.engines.chat,
+            plan.operation,
+            request_text=request_text,
+            source_text=source_text,
+        )
+        if compiled is None:
+            return compilation_provenance(reason, original_prompt=original)
+        plan.standalone_prompt = compiled
+        return compilation_provenance(
+            reason,
+            original_prompt=original,
+            compiled_prompt=compiled,
+            source_characters=len(source_text),
+        )
 
     async def _prepare_chat_context(
         self, session: Session, run: Run

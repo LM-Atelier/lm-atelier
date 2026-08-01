@@ -31,7 +31,7 @@ from local_lm.project_portability import (
     has_local_path,
     redact_local_paths,
 )
-from local_lm.schemas import SettingField
+from local_lm.schemas import SettingField, VisionSettings
 
 WINDOWS_MODEL_PATH = r"C:\Users\alice\AppData\Local\LM Atelier\models\private.gguf"
 WINDOWS_LOG_PATH = r"\\workstation\private-share\lm-atelier\worker.log"
@@ -199,6 +199,7 @@ async def test_project_vision_context_round_trip_and_legacy_defaults(
         "max_video_frames": 5,
         "include_prior_visual": False,
         "verify_image_edits": True,
+        "compile_visual_prompts": True,
     }
     assert manifest["runs"][0]["vision_profile_id"] == profile["id"]
     portable_vision = manifest["runs"][0]["provenance_json"]["context"]["vision"]
@@ -262,6 +263,7 @@ async def test_project_vision_context_round_trip_and_legacy_defaults(
                 "max_video_frames": 5,
                 "include_prior_visual": False,
                 "verify_image_edits": True,
+                "compile_visual_prompts": True,
             }
             assert imported_run.vision_profile_id == imported_chat.active_vision_profile_id
             imported_vision = imported_run.provenance_json["context"]["vision"]
@@ -292,6 +294,7 @@ async def test_project_vision_context_round_trip_and_legacy_defaults(
                 "max_video_frames": 6,
                 "include_prior_visual": True,
                 "verify_image_edits": False,
+                "compile_visual_prompts": True,
             }
             assert legacy_run.vision_profile_id is None
 
@@ -829,3 +832,21 @@ def test_validation_does_not_defeat_workflow_contributed_fields() -> None:
     result = exporter._generation_settings({"image": {"steps": 30, "loras": [{"id": "x"}]}})
 
     assert result["image"] == {"steps": 30, "loras": [{"id": "x"}]}
+
+
+def test_every_vision_setting_this_build_writes_can_be_imported_again() -> None:
+    """A hand-written key list made each new vision setting reject our own archives.
+
+    `_validate_vision_settings` refuses unknown keys, which is right - an archive
+    must not smuggle settings this build cannot describe. But the known set was a
+    literal copy of the model's fields, so adding one field to `VisionSettings`
+    caused import to reject a manifest that export had just written, with
+    "project manifest has invalid vision settings" and no indication of which key.
+    """
+    exported = VisionSettings().model_dump(mode="json")
+
+    assert set(exported) == set(VisionSettings.model_fields)
+    ProjectExporter._validate_vision_settings(exported)
+
+    with pytest.raises(ValueError, match="invalid vision settings"):
+        ProjectExporter._validate_vision_settings({**exported, "not_a_setting": True})
