@@ -3108,6 +3108,8 @@ describe("App", () => {
       "llama.cpp",
       "main",
       [],
+      null,
+      null,
     ));
     // The transfer must not start until the cost has been shown and accepted.
     expect(await screen.findByRole("dialog", { name: /Install/ })).toBeInTheDocument();
@@ -3238,6 +3240,8 @@ describe("App", () => {
       "vllm",
       "main",
       [],
+      null,
+      null,
     ));
   });
 

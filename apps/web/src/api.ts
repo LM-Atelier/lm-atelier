@@ -498,6 +498,7 @@ export const api = {
     revision: string,
     selectedFiles: string[],
     auxiliaryKind: string | null = null,
+    workflowTemplateId: string | null = null,
   ) => request<CatalogPreflight>(`/api/catalog/${remoteId}/preflight`, {
     method: "POST",
     body: JSON.stringify({
@@ -506,6 +507,7 @@ export const api = {
       revision,
       selected_files: selectedFiles,
       auxiliary_kind: auxiliaryKind,
+      workflow_template_id: workflowTemplateId,
     }),
   }),
   recipes: () => request<ReferenceRecipe[]>("/api/recipes"),

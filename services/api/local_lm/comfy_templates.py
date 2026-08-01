@@ -261,6 +261,9 @@ class ComfyTemplateRegistry:
             template_role = _role_for_template(path.stem, raw)
             if template_role != role:
                 continue
+            operation = _operation_for_template(path.stem, role)
+            if operation is None:
+                continue
             dependencies = tuple(_model_dependencies(raw))
             if not dependencies:
                 continue
@@ -274,7 +277,7 @@ class ComfyTemplateRegistry:
                     id=path.stem,
                     path=path,
                     role=role,
-                    operation=_operation_for_template(path.stem, role),
+                    operation=operation,
                     score=0,
                     sha256=hashlib.sha256(path.read_bytes()).hexdigest(),
                     dependencies=dependencies,
@@ -387,8 +390,10 @@ class ComfyTemplateRegistry:
                 continue
             raw = _read_json(path)
             dependencies = tuple(_model_dependencies(raw))
+            operation = _operation_for_template(path.stem, role)
             if (
                 _role_for_template(path.stem, raw) != role
+                or operation is None
                 or not dependencies
                 or not _supports_dependency_bundle(dependencies)
                 or not _uses_only_core_nodes(raw)
@@ -399,7 +404,7 @@ class ComfyTemplateRegistry:
                 id=path.stem,
                 path=path,
                 role=role,
-                operation=_operation_for_template(path.stem, role),
+                operation=operation,
                 score=0,
                 sha256=hashlib.sha256(path.read_bytes()).hexdigest(),
                 dependencies=dependencies,
@@ -699,11 +704,31 @@ def _role_for_template(template_id: str, value: dict[str, Any] | None = None) ->
     return None
 
 
-def _operation_for_template(template_id: str, role: str) -> str:
-    tokens = _tokens(template_id)
+def _operation_markers(template_id: str) -> set[str]:
+    # Not _tokens: that helper splits letter and digit runs apart and drops
+    # single characters, so "i2v", "s2v", and "img2img" could never appear in
+    # its output and every Wan variant classified as text-to-video.
+    return set(re.findall(r"[a-z0-9]+", template_id.lower()))
+
+
+def _operation_for_template(template_id: str, role: str) -> str | None:
+    """Map a template id to a supported operation, or None for none.
+
+    None means the workflow needs an input LM Atelier cannot provide - an
+    audio- or speech-driven video template offered for a text prompt would
+    install a workflow whose required input never arrives.
+    """
+
+    markers = _operation_markers(template_id)
     if role == "video":
-        return "image_to_video" if {"i2v", "image2video"} & tokens else "text_to_video"
-    return "image_to_image" if {"img2img", "image2image", "edit"} & tokens else "text_to_image"
+        if {"i2v", "image2video", "img2video"} & markers:
+            return "image_to_video"
+        if {"s2v", "a2v", "speech2video", "audio2video"} & markers:
+            return None
+        return "text_to_video"
+    return (
+        "image_to_image" if {"img2img", "image2image", "i2i", "edit"} & markers else "text_to_image"
+    )
 
 
 def _read_json(path: Path) -> dict[str, Any]:

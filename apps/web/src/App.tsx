@@ -2458,6 +2458,10 @@ function ModelsView({ initialRole }: { initialRole: EngineRole }) {
             engine,
             "main",
             [],
+            null,
+            // Preflight the exact workflow this card represents; a repository
+            // can ship several and ranking must not answer for the user.
+            model.workflow_template_id ?? null,
           );
       if (!preflight.can_install) {
         const blockers = preflight.checks
@@ -2613,15 +2617,29 @@ function ModelsView({ initialRole }: { initialRole: EngineRole }) {
       ? modalities.includes("image")
       : modalities.includes("text") && !modalities.includes("image");
   });
-  const statusFor = (model: CatalogModel): "idle" | "preparing" | "downloading" | "installed" => (
-    installedRemoteIds.has(model.remote_id)
+  const installedTemplateIds = new Set(
+    installed.data
+      ?.filter((model) => model.role === role && model.active)
+      .map((model) => model.manifest_json.workflow_template_id)
+      .filter((value): value is string => typeof value === "string") ?? [],
+  );
+  const statusFor = (model: CatalogModel): "idle" | "preparing" | "downloading" | "installed" => {
+    // A workflow card is installed only when ITS template is: variants share
+    // one repository, and installing one must not disable the others.
+    const installedHere = model.workflow_template_id
+      ? installedTemplateIds.has(model.workflow_template_id)
+      : installedRemoteIds.has(model.remote_id);
+    return installedHere
       ? "installed"
       : activeDownloadIds.has(model.remote_id)
         ? "downloading"
-        : download.isPending && download.variables?.model.remote_id === model.remote_id
+        : download.isPending
+            && download.variables?.model.remote_id === model.remote_id
+            && (download.variables?.model.workflow_template_id ?? null)
+              === (model.workflow_template_id ?? null)
           ? "preparing"
-          : "idle"
-  );
+          : "idle";
+  };
   return (
     <div className="page-view">
       <header className="page-header"><div><h1>Model library</h1></div><div className="storage-actions"><div className="storage-pill"><HardDrive size={17} />{storage.data?.installed_count ?? installed.data?.length ?? 0} installed · {formatBytes(storage.data?.installed_bytes)}</div><button className="secondary compact-button" onClick={() => setImportOpen(true)}><Folder size={16} />Import local</button>{Boolean(storage.data?.partial_download_count) && <button className="secondary compact-button" disabled={cleanupDownloads.isPending} onClick={() => cleanupDownloads.mutate()}>Clean {storage.data?.partial_download_count} partial</button>}</div></header>
@@ -2632,7 +2650,7 @@ function ModelsView({ initialRole }: { initialRole: EngineRole }) {
         {installRecipe.error && <ErrorCallout message={installRecipe.error.message} />}
         <div className="recipe-grid">{recipes.data?.map((recipe) => <RecipeCard key={recipe.id} recipe={recipe} pending={installRecipe.isPending && installRecipe.variables === recipe.id} onInstall={() => installRecipe.mutate(recipe.id)} />)}</div>
       </section>
-      {(role === "image" || role === "video") && readyModels.length > 0 && <section className="workflow-ready-models"><div className="section-heading"><div><small>Declarative workflow available</small><h2>Automatic setup candidates</h2></div></div><div className="model-grid">{readyModels.map((model) => <ModelCard key={model.remote_id} model={model} role={role} runtime={runtimeFor(model)} status={statusFor(model)} onDownload={() => download.mutate({ model, selectedRole: role })} />)}</div></section>}
+      {(role === "image" || role === "video") && readyModels.length > 0 && <section className="workflow-ready-models"><div className="section-heading"><div><small>Declarative workflow available</small><h2>Automatic setup candidates</h2></div></div><div className="model-grid">{readyModels.map((model) => <ModelCard key={model.workflow_template_id ?? model.remote_id} model={model} role={role} runtime={runtimeFor(model)} status={statusFor(model)} onDownload={() => download.mutate({ model, selectedRole: role })} />)}</div></section>}
       <div className="toolbar">
         <form className="search-box" onSubmit={(event) => { event.preventDefault(); setSubmitted(query); }}><Search size={18} /><input value={query} onChange={(event) => setQuery(event.target.value)} placeholder="Search models" /></form>
         <select aria-label="Model role" value={role} onChange={(event) => setRole(event.target.value)}><option value="chat">Chat</option><option value="image">Image</option><option value="video">Video</option><option value="lora">LoRA</option></select>
