@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import json
+import os
+import time
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -9,6 +11,7 @@ import pytest
 
 from local_lm import downloads
 from local_lm.catalog import HuggingFaceCatalog
+from local_lm.catalog_cache import CatalogCachePolicy, CatalogCacheStore
 from local_lm.config import Settings
 from local_lm.domain import CompatibilityLevel
 from local_lm.downloads import DownloadManager
@@ -974,3 +977,217 @@ async def test_maximum_size_filter_hydrates_live_file_sizes(tmp_path) -> None:
         "large-commit",
     }
     assert all(request.url.params["blobs"] == "true" for request in detail_requests)
+
+
+async def test_catalog_reuses_fresh_exact_responses_without_network(tmp_path: Path) -> None:
+    requests: list[httpx.Request] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        requests.append(request)
+        if request.url.path == "/api/models":
+            return httpx.Response(
+                200,
+                json=[
+                    {
+                        "id": "owner/cached-model",
+                        "pipeline_tag": "text-generation",
+                        "tags": ["gguf"],
+                    }
+                ],
+            )
+        return httpx.Response(
+            200,
+            json={
+                "id": "owner/cached-model",
+                "sha": "resolved-revision",
+                "pipeline_tag": "text-generation",
+                "tags": ["gguf"],
+                "siblings": [],
+            },
+        )
+
+    catalog = HuggingFaceCatalog(Settings(data_dir=tmp_path))
+    await catalog.close()
+    catalog._client = httpx.AsyncClient(
+        base_url="https://huggingface.co",
+        transport=httpx.MockTransport(handler),
+    )
+    try:
+        first_page = await catalog.search(role="chat", sort="trending")
+        second_page = await catalog.search(role="chat", sort="trending")
+        first_detail = await catalog.inspect("owner/cached-model", requested_role="chat")
+        second_detail = await catalog.inspect("owner/cached-model", requested_role="chat")
+        catalog.set_token("different-local-token")
+        token_scoped_page = await catalog.search(role="chat", sort="trending")
+    finally:
+        await catalog.close()
+
+    assert first_page == second_page
+    assert first_page.stale is False
+    assert first_detail == second_detail
+    assert token_scoped_page == first_page
+    assert [request.url.path for request in requests] == [
+        "/api/models",
+        "/api/models/owner/cached-model",
+        "/api/models",
+    ]
+
+
+async def test_catalog_refreshes_an_expired_exact_search(tmp_path: Path) -> None:
+    requests: list[httpx.Request] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        requests.append(request)
+        return httpx.Response(200, json=[])
+
+    settings = Settings(data_dir=tmp_path)
+    catalog = HuggingFaceCatalog(settings)
+    await catalog.close()
+    catalog._client = httpx.AsyncClient(
+        base_url="https://huggingface.co",
+        transport=httpx.MockTransport(handler),
+    )
+    try:
+        await catalog.search(role="chat")
+        expired = time.time() - catalog._cache.policy.fresh_seconds - 1
+        for path in settings.catalog_cache_dir.glob("*.json"):
+            os.utime(path, (expired, expired))
+        await catalog.search(role="chat")
+    finally:
+        await catalog.close()
+
+    assert len(requests) == 2
+
+
+@pytest.mark.parametrize("failure", ["unauthorized", "invalid-json"])
+async def test_catalog_does_not_hide_non_transient_response_failures(
+    tmp_path: Path,
+    failure: str,
+) -> None:
+    mode = ["online"]
+
+    def handler(_request: httpx.Request) -> httpx.Response:
+        if mode[0] == "online":
+            return httpx.Response(200, json=[])
+        if failure == "unauthorized":
+            return httpx.Response(401, json={"error": "unauthorized"})
+        return httpx.Response(200, content=b"{")
+
+    settings = Settings(data_dir=tmp_path)
+    catalog = HuggingFaceCatalog(settings)
+    await catalog.close()
+    catalog._client = httpx.AsyncClient(
+        base_url="https://huggingface.co",
+        transport=httpx.MockTransport(handler),
+    )
+    try:
+        await catalog.search(role="chat")
+        expired = time.time() - catalog._cache.policy.fresh_seconds - 1
+        for path in settings.catalog_cache_dir.glob("*.json"):
+            os.utime(path, (expired, expired))
+        mode[0] = failure
+        expected = httpx.HTTPStatusError if failure == "unauthorized" else ValueError
+        with pytest.raises(expected):
+            await catalog.search(role="chat")
+    finally:
+        await catalog.close()
+
+
+async def test_catalog_does_not_serve_expired_or_poisoned_stale_entries(
+    tmp_path: Path,
+) -> None:
+    online = [True]
+
+    def handler(_request: httpx.Request) -> httpx.Response:
+        if not online[0]:
+            raise httpx.ConnectError("offline")
+        return httpx.Response(200, json=[])
+
+    settings = Settings(data_dir=tmp_path)
+    catalog = HuggingFaceCatalog(settings)
+    await catalog.close()
+    catalog._client = httpx.AsyncClient(
+        base_url="https://huggingface.co",
+        transport=httpx.MockTransport(handler),
+    )
+    try:
+        await catalog.search(role="chat")
+        online[0] = False
+        stale = time.time() - catalog._cache.policy.stale_seconds - 1
+        for path in settings.catalog_cache_dir.glob("*.json"):
+            os.utime(path, (stale, stale))
+        with pytest.raises(httpx.ConnectError):
+            await catalog.search(role="chat")
+
+        online[0] = True
+        await catalog.search(role="image")
+        online[0] = False
+        for path in settings.catalog_cache_dir.glob("*.json"):
+            path.write_text("not-json", encoding="utf-8")
+        with pytest.raises(httpx.ConnectError):
+            await catalog.search(role="image")
+    finally:
+        await catalog.close()
+
+
+def test_catalog_cache_pruning_is_deterministic_bounded_and_confined(
+    tmp_path: Path,
+) -> None:
+    root = tmp_path / "cache"
+    root.mkdir()
+    store = CatalogCacheStore(
+        root,
+        CatalogCachePolicy(
+            fresh_seconds=60,
+            stale_seconds=600,
+            partial_seconds=30,
+            max_entries=2,
+            max_bytes=4,
+        ),
+    )
+    now = time.time()
+    first = store.path("a" * 64)
+    second = store.path("b" * 64)
+    protected = store.path("c" * 64)
+    for path in (first, second, protected):
+        path.write_text("1234", encoding="utf-8")
+        os.utime(path, (now - 10, now - 10))
+    partial = root / ".orphan.partial"
+    partial.write_text("partial", encoding="utf-8")
+    os.utime(partial, (now - 60, now - 60))
+    outside = tmp_path / "outside.json"
+    outside.write_text("owner", encoding="utf-8")
+
+    store.prune(protected=protected)
+
+    assert not first.exists()
+    assert second.exists() is False
+    assert protected.read_text(encoding="utf-8") == "1234"
+    assert not partial.exists()
+    assert outside.read_text(encoding="utf-8") == "owner"
+    with pytest.raises(ValueError, match="escaped"):
+        store.write_text(outside, "changed")
+
+
+def test_catalog_cache_never_follows_symlinks(tmp_path: Path) -> None:
+    root = tmp_path / "cache"
+    root.mkdir()
+    outside = tmp_path / "outside.json"
+    outside.write_text("owner", encoding="utf-8")
+    link = root / f"{'d' * 64}.json"
+    try:
+        link.symlink_to(outside)
+    except OSError:
+        pytest.skip("file symlinks are unavailable on this host")
+    store = CatalogCacheStore(root)
+
+    assert store.read_text(link) is None
+    store.prune()
+    assert link.is_symlink()
+    assert outside.read_text(encoding="utf-8") == "owner"
+
+    store.write_text(link, "cache")
+
+    assert not link.is_symlink()
+    assert link.read_text(encoding="utf-8") == "cache"
+    assert outside.read_text(encoding="utf-8") == "owner"
