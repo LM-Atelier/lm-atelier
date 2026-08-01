@@ -13,7 +13,13 @@ from local_lm.hardware_fit import (
     rank_hardware_candidates,
     recommend_hardware_fit,
 )
-from local_lm.schemas import DeviceInfo, PlatformAssessment, SystemInfo
+from local_lm.preflight import _hardware_fit_check, assess_preflight_hardware_fit
+from local_lm.schemas import (
+    CatalogPreflightRequest,
+    DeviceInfo,
+    PlatformAssessment,
+    SystemInfo,
+)
 
 _GIB = 1024**3
 
@@ -484,3 +490,38 @@ def test_candidate_ranking_requires_stable_unique_keys(
 ) -> None:
     with pytest.raises(ValueError, match=message):
         rank_hardware_candidates(_capacity(), candidates)
+
+
+def test_unknown_estimated_preflight_fit_remains_advisory() -> None:
+    system = SystemInfo.model_construct(
+        platform="Windows",
+        architecture="AMD64",
+        cpu_model="Example CPU",
+        memory_total_bytes=16 * _GIB,
+        memory_available_bytes=12 * _GIB,
+        devices=[],
+    )
+    fit = assess_preflight_hardware_fit(
+        CatalogPreflightRequest(role="image", engine="comfyui"),
+        system,
+        estimated_ram_bytes=4 * _GIB,
+        estimated_vram_bytes=8 * _GIB,
+    )
+
+    assert fit.status == "unknown"
+    check = _hardware_fit_check(fit)
+    assert check.status == "warn"
+    assert check.detail.startswith("Hardware fit is unknown.")
+
+
+def test_declared_unsupported_fit_blocks_preflight() -> None:
+    fit = recommend_hardware_fit(
+        _capacity(),
+        FitRequirements(minimum_accelerator_memory_bytes=20 * _GIB),
+    )
+
+    check = _hardware_fit_check(fit)
+
+    assert fit.status == "unsupported"
+    assert check.status == "block"
+    assert check.detail.startswith("Unsupported by declared hardware requirements.")

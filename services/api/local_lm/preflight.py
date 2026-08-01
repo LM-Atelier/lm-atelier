@@ -504,9 +504,13 @@ def assess_preflight_hardware_fit(
 
 
 def _hardware_fit_check(fit: HardwareFit) -> CatalogPreflightCheck:
-    status: Literal["pass", "warn", "block"] = (
-        "pass" if fit.status in {"recommended", "likely"} else "warn"
-    )
+    status: Literal["pass", "warn", "block"]
+    if fit.status == "unsupported":
+        status = "block"
+    elif fit.status in {"recommended", "likely"}:
+        status = "pass"
+    else:
+        status = "warn"
     headline = {
         "recommended": "Recommended fit.",
         "likely": "Likely fit.",
