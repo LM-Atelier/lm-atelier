@@ -57,11 +57,13 @@ from local_lm.orchestrator import ConversationOrchestrator
 from local_lm.runtime_provisioning import RuntimeProvisioner
 from local_lm.scheduler import ResourceScheduler
 from local_lm.schemas import (
+    ChatCreate,
     DownloadRequest,
     EngineCapabilities,
     RuntimeStatus,
     SettingField,
     TurnRequest,
+    VisionSettings,
 )
 
 ONE_PIXEL_PNG = base64.b64decode(
@@ -266,6 +268,11 @@ async def test_about_reports_version_and_local_support_paths(
         "data_directory": str(settings.data_dir.resolve()),
         "log_directory": str(settings.log_dir.resolve()),
     }
+
+
+def test_new_chats_enable_edit_review_without_changing_legacy_defaults() -> None:
+    assert ChatCreate().vision_settings_json.verify_image_edits is True
+    assert VisionSettings().verify_image_edits is False
 
 
 async def test_project_and_chat_management_contract(client: AsyncClient) -> None:
