@@ -21,6 +21,7 @@ from local_lm.custom_nodes import CustomNodeManager
 from local_lm.db import SessionLocal
 from local_lm.events import EventBroker
 from local_lm.models import CustomNodeInstall, ModelInstall, ModelProfile
+from local_lm.network import shared_tls_context
 from local_lm.processes import (
     WORKER_STDERR_DISPLAY_CHARS,
     WORKER_STDERR_DISPLAY_LINES,
@@ -469,6 +470,7 @@ async def test_stopping_worker_terminates_descendant_process_tree(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:  # type: ignore[no-untyped-def]
     settings.prepare()
+    settings.worker_shutdown_seconds = 1
     supervisor = ProcessSupervisor(settings)
     child_pid_file = tmp_path / "child.pid"
     script = (
@@ -703,7 +705,10 @@ async def test_worker_health_probe_ignores_proxy_environment(
 
     await supervisor._wait_healthy(record, "http://127.0.0.1:12341/health")
 
-    assert captured == {"trust_env": False}
+    assert captured == {
+        "trust_env": False,
+        "verify": shared_tls_context(trust_environment=False),
+    }
     await supervisor.close()
 
 

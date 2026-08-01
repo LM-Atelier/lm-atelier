@@ -15,6 +15,7 @@ import httpx
 from .config import Settings
 from .domain import CompatibilityLevel
 from .gguf import automatic_mmproj_selection, gguf_identity_tokens
+from .network import shared_tls_context
 from .schemas import CatalogModel, CatalogPage
 
 SORTS = {
@@ -49,7 +50,11 @@ class HuggingFaceCatalog:
         if settings.hf_token:
             headers["authorization"] = f"Bearer {settings.hf_token}"
         self._client = httpx.AsyncClient(
-            base_url="https://huggingface.co", headers=headers, timeout=30, follow_redirects=True
+            base_url="https://huggingface.co",
+            headers=headers,
+            timeout=30,
+            follow_redirects=True,
+            verify=shared_tls_context(),
         )
         self._cache_dir = settings.catalog_cache_dir
 
