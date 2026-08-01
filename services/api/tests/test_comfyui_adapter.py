@@ -130,6 +130,27 @@ async def test_conditioning_images_are_staged_and_exposed_as_workflow_parameters
     assert b'filename="lm-atelier-run_conditioning-0.png"' in captured_body
 
 
+async def test_conditioning_upload_can_cancel_before_transfer(tmp_path: Path) -> None:
+    source = tmp_path / "source.png"
+    source.write_bytes(b"\x89PNG\r\n\x1a\nsource")
+    adapter = ComfyUIAdapter("http://comfy.test")
+    request = media_request(source)
+    events = adapter.generate(request)
+    try:
+        preparing = await anext(events)
+        staging = await anext(events)
+        await adapter.cancel(request.run_id)
+        cancelled = await anext(events)
+        with pytest.raises(StopAsyncIteration):
+            await anext(events)
+    finally:
+        await adapter.close()
+
+    assert (preparing.type, preparing.phase) == ("progress", "Preparing media workspace")
+    assert (staging.type, staging.phase) == ("progress", "Staging media inputs")
+    assert cancelled.type == "cancelled"
+
+
 async def test_conditioning_requires_an_input_and_rejects_non_images(tmp_path: Path) -> None:
     adapter = ComfyUIAdapter("http://comfy.test")
     try:
@@ -229,7 +250,15 @@ async def test_websocket_is_connected_before_a_warm_prompt_can_complete(
         await adapter.close()
 
     assert events == ["connected", "prompted"]
-    assert [event.type for event in generated] == ["queued", "complete"]
+    assert [(event.type, event.phase) for event in generated] == [
+        ("progress", "Preparing media workspace"),
+        ("progress", "Submitting media workflow"),
+        ("queued", "Queued in media runtime"),
+        ("progress", "Loading media model"),
+        ("progress", "Collecting media output"),
+        ("complete", "complete"),
+    ]
+    assert all(event.data.get("indeterminate") for event in generated[:-1])
     assert generated[-1].assets[0].name == "warm.png"
 
 
@@ -243,6 +272,12 @@ async def test_binary_previews_retain_the_latest_sampler_progress(
         def __init__(self) -> None:
             self.messages = iter(
                 [
+                    json.dumps(
+                        {
+                            "type": "execution_start",
+                            "data": {"prompt_id": prompt_id},
+                        }
+                    ),
                     json.dumps(
                         {
                             "type": "progress",
@@ -329,11 +364,15 @@ async def test_binary_previews_retain_the_latest_sampler_progress(
         await adapter.close()
 
     assert [(event.type, event.phase, event.progress) for event in events] == [
-        ("queued", "queued", 0),
+        ("progress", "Preparing media workspace", 0),
+        ("progress", "Submitting media workflow", 0),
+        ("queued", "Queued in media runtime", 0),
+        ("progress", "Loading media model", 0),
         ("progress", "sampling", 0.25),
         ("preview", "sampling", 0.25),
         ("progress", "sampling", 0.5),
         ("preview", "sampling", 0.5),
+        ("progress", "Collecting media output", 0),
         ("complete", "complete", 1),
     ]
 
@@ -511,7 +550,12 @@ async def test_cancel_wakes_a_blocked_comfyui_websocket(
             collecting.cancel()
         await adapter.close()
 
-    assert [event.type for event in events] == ["queued", "cancelled"]
+    assert [(event.type, event.phase) for event in events] == [
+        ("progress", "Preparing media workspace"),
+        ("progress", "Submitting media workflow"),
+        ("queued", "Queued in media runtime"),
+        ("cancelled", ""),
+    ]
     assert interrupted
     assert request.run_id not in adapter._jobs
     assert request.run_id not in adapter._cancel_events

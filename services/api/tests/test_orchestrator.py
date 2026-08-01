@@ -417,6 +417,76 @@ async def test_media_handoff_preloads_the_next_queued_text_profile() -> None:
     processes.start_media.assert_awaited_once()
 
 
+async def test_cancelled_chat_release_restores_planner_readiness() -> None:
+    chat = WorkerStatus(
+        name="chat",
+        state="ready",
+        managed=True,
+        running=True,
+        pid=21,
+        profile_id="profile-chat",
+    )
+
+    async def cancelled_stop(_name: str) -> None:
+        raise asyncio.CancelledError
+
+    processes = SimpleNamespace(
+        settings=SimpleNamespace(auto_unload_chat_for_media=True),
+        statuses=Mock(return_value=[chat]),
+        stop=cancelled_stop,
+    )
+    orchestrator = ConversationOrchestrator(
+        engines=SimpleNamespace(settings=SimpleNamespace()),
+        artifacts=Mock(),
+        events=Mock(),
+        scheduler=Mock(),
+        processes=processes,
+    )
+
+    with pytest.raises(asyncio.CancelledError):
+        await orchestrator._prepare_device_handoff("text_to_image")
+
+    assert orchestrator._chat_planner_ready.is_set()
+
+
+async def test_media_worker_startup_forwards_truthful_phases() -> None:
+    media = WorkerStatus(
+        name="media",
+        state="stopped",
+        managed=True,
+        running=False,
+    )
+
+    async def start_media(*, phase_callback) -> None:  # type: ignore[no-untyped-def]
+        for phase in (
+            "Provisioning media runtime",
+            "Validating media dependencies",
+            "Starting media runtime",
+        ):
+            await phase_callback(phase)
+
+    orchestrator = ConversationOrchestrator(
+        engines=SimpleNamespace(settings=SimpleNamespace()),
+        artifacts=Mock(),
+        events=Mock(),
+        scheduler=Mock(),
+        processes=SimpleNamespace(
+            statuses=Mock(return_value=[media]),
+            start_media=start_media,
+        ),
+    )
+    phases = AsyncMock()
+    orchestrator._set_media_phase = phases  # type: ignore[method-assign]
+
+    await orchestrator._ensure_media_worker(job_id="job-1", run_id="run-1")
+
+    assert [call.args[2] for call in phases.await_args_list] == [
+        "Provisioning media runtime",
+        "Validating media dependencies",
+        "Starting media runtime",
+    ]
+
+
 async def test_media_execution_awaits_inflight_handoff_restart() -> None:
     restart_release = asyncio.Event()
     restart_entered = asyncio.Event()
@@ -842,6 +912,25 @@ def test_media_progress_preserves_the_latest_preview() -> None:
     }
     assert parts[1].artifact_id == "sha256:preview"
     assert parts[1].metadata_json == {"preview": True}
+
+
+def test_indeterminate_media_phase_is_explicit() -> None:
+    message = Message(chat_id="chat-1", role="assistant", status="pending")
+
+    parts = ConversationOrchestrator._media_progress_parts(
+        message,
+        MediaEvent(
+            type="progress",
+            phase="Staging media inputs",
+            data={"indeterminate": True},
+        ),
+    )
+
+    assert parts[0].metadata_json == {
+        "progress": 0,
+        "phase": "Staging media inputs",
+        "indeterminate": True,
+    }
 
 
 def test_chat_progress_is_removed_without_discarding_text() -> None:
