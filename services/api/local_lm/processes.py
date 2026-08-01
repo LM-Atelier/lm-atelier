@@ -36,6 +36,14 @@ WORKER_LOG_BACKUP_COUNT = 3
 WORKER_STDERR_TAIL_BYTES = 16 * 1024
 WORKER_STDERR_DISPLAY_CHARS = 2_000
 WORKER_STDERR_DISPLAY_LINES = 12
+# asyncio's proactor loop tears a lost connection down inside a bare `finally:`,
+# after it has already delivered `connection_lost` to the protocol. So a failure
+# there - Windows reports WSAEINVAL (10022) or a reset - is logged once the
+# connection is fully handled, and nothing was dropped. The block is nine lines,
+# which is most of the twelve a user is shown when a worker dies, so leaving it
+# in the tail lets routine teardown noise hide the actual cause of a crash. It
+# stays in the worker log file; only the failure diagnostic drops it.
+WORKER_TEARDOWN_NOISE_MAX_LINES = 10
 WORKER_HEALTH_REQUEST_TIMEOUT_SECONDS = 5.0
 WORKER_HEALTH_INITIAL_DELAY_SECONDS = 0.25
 WORKER_HEALTH_MAX_DELAY_SECONDS = 2.0
@@ -45,6 +53,28 @@ WINDOWS_CREATE_NO_WINDOW = 0x08000000
 WINDOWS_SO_EXCLUSIVEADDRUSE = int(getattr(socket, "SO_EXCLUSIVEADDRUSE", -5))
 
 _ANSI_ESCAPE = re.compile(r"\x1b(?:[@-_][0-?]*[ -/]*[@-~]|\][^\x07]*(?:\x07|\x1b\\))")
+# asyncio composes the first line as "Exception in callback {callback}", but a
+# worker rarely writes it bare: captured logs from the field carry a "[ERROR] "
+# level tag or a timestamp and logger name in front of it, and a frozen runtime
+# renders the callback with empty parentheses rather than "(None)". Anchoring on
+# the start of the line matched only the shape reproduced in a bare interpreter
+# and would have missed every real occurrence, so the prefix is skipped instead.
+_TEARDOWN_PREFIX = rb"^.{0,120}?"
+_TEARDOWN_CALLBACK = re.compile(
+    _TEARDOWN_PREFIX + rb"Exception in callback _Proactor\w*\._call_connection_lost\b"
+)
+_TEARDOWN_CONTINUATION = re.compile(
+    rb"^(?:\s"
+    rb"|.{0,120}?handle: <Handle _Proactor\w*\._call_connection_lost"
+    rb"|.{0,120}?Traceback \(most recent call last\):"
+    rb"|.{0,120}?(?:OSError|ConnectionResetError|ConnectionAbortedError): \[WinError \d+\])"
+)
+# The block always ends on its exception line. Stopping there, rather than only
+# on the line budget, is what keeps a real traceback that follows immediately
+# from being swallowed along with it.
+_TEARDOWN_TERMINAL = re.compile(
+    _TEARDOWN_PREFIX + rb"(?:OSError|ConnectionResetError|ConnectionAbortedError): \[WinError \d+\]"
+)
 _BEARER_SECRET = re.compile(r"(?i)\b(bearer)\s+\S+")
 _NAMED_SECRET = re.compile(
     r"""(?ix)
@@ -158,6 +188,7 @@ class WorkerRecord:
     peak_memory_bytes: int = 0
     stderr_tail: bytearray = field(default_factory=bytearray)
     stderr_pending: bytearray = field(default_factory=bytearray)
+    suppressed_teardown_lines: int = 0
     output_task: asyncio.Task[None] | None = None
     monitor_task: asyncio.Task[None] | None = None
     failure_detail: str | None = None
@@ -1144,6 +1175,33 @@ class ProcessSupervisor:
         lowered = line.lower()
         return b"/health" in lowered and b"503" in lowered and b"get " in lowered
 
+    @staticmethod
+    def _is_connection_teardown_noise(record: WorkerRecord, line: bytes) -> bool:
+        """Whether this line belongs to asyncio's connection-teardown traceback.
+
+        `_ProactorBasePipeTransport._call_connection_lost` closes its socket
+        inside a bare `finally:`, having already delivered `connection_lost` to
+        the protocol. When Windows refuses the shutdown - WSAEINVAL after a
+        client disconnects - the error escapes into the callback and asyncio logs
+        nine lines. Nothing was lost: the connection had been handled in full.
+
+        Suppression starts only on that callback's own line, ends on the block's
+        exception line, and ends immediately on any line that is not traceback
+        continuation, so a real failure printed next is never swallowed. The
+        worker log file still records every line; this only decides what the
+        failure diagnostic shows.
+        """
+        if _TEARDOWN_CALLBACK.match(line):
+            record.suppressed_teardown_lines = WORKER_TEARDOWN_NOISE_MAX_LINES
+            return True
+        if record.suppressed_teardown_lines and _TEARDOWN_CONTINUATION.match(line):
+            record.suppressed_teardown_lines -= 1
+            if _TEARDOWN_TERMINAL.match(line):
+                record.suppressed_teardown_lines = 0
+            return True
+        record.suppressed_teardown_lines = 0
+        return False
+
     @classmethod
     def _append_stderr_tail(
         cls,
@@ -1159,6 +1217,8 @@ class ProcessSupervisor:
             record.stderr_pending.extend(lines.pop())
         for line in lines:
             if cls._is_loading_health_line(line):
+                continue
+            if cls._is_connection_teardown_noise(record, line):
                 continue
             record.stderr_tail.extend(line)
             overflow = len(record.stderr_tail) - WORKER_STDERR_TAIL_BYTES
