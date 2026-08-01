@@ -23,10 +23,25 @@ from local_lm.events import EventBroker
 from local_lm.models import CustomNodeInstall, ModelInstall, ModelProfile
 from local_lm.processes import (
     WORKER_STDERR_DISPLAY_CHARS,
+    WORKER_STDERR_DISPLAY_LINES,
     WORKER_STDERR_TAIL_BYTES,
     ProcessSupervisor,
     WorkerRecord,
     _RotatingWorkerLog,
+)
+
+# Reproduced verbatim from CPython 3.12 by making the socket teardown inside
+# `_ProactorBasePipeTransport._call_connection_lost` raise. asyncio composes the
+# first two lines; the rest is the traceback it prints for the callback.
+CONNECTION_TEARDOWN_BLOCK = (
+    b"Exception in callback _ProactorBasePipeTransport._call_connection_lost(None)\n"
+    b"handle: <Handle _ProactorBasePipeTransport._call_connection_lost(None)>\n"
+    b"Traceback (most recent call last):\n"
+    b'  File "asyncio\\events.py", line 88, in _run\n'
+    b"    self._context.run(self._callback, *self._args)\n"
+    b'  File "asyncio\\proactor_events.py", line 165, in _call_connection_lost\n'
+    b"    self._sock.shutdown(socket.SHUT_RDWR)\n"
+    b"OSError: [WinError 10022] An invalid argument was supplied\n"
 )
 
 
@@ -813,6 +828,139 @@ async def test_loading_health_503_lines_do_not_displace_stderr_tail(
     assert b"fatal model error" in record.stderr_tail
     assert b"/health" not in record.stderr_tail
     assert b"GET /health HTTP/1.1 503" in log_path.read_bytes()
+
+
+async def _captured_stderr(
+    settings: Any,
+    supervisor: ProcessSupervisor,
+    payload: bytes,
+    log_name: str,
+) -> tuple[WorkerRecord, Path]:
+    stdout = asyncio.StreamReader()
+    stderr = asyncio.StreamReader()
+    stdout.feed_eof()
+    stderr.feed_data(payload)
+    stderr.feed_eof()
+    log_path = settings.log_dir / log_name
+    record = WorkerRecord(
+        name="media",
+        process=SimpleNamespace(stdout=stdout, stderr=stderr),  # type: ignore[arg-type]
+        command=[],
+        log=_RotatingWorkerLog(log_path),
+    )
+    await supervisor._capture_process_output(record)
+    return record, log_path
+
+
+async def test_connection_teardown_noise_never_displaces_the_real_failure(
+    settings,
+) -> None:  # type: ignore[no-untyped-def]
+    """The diagnostic a user sees must not be filled with routine teardown.
+
+    asyncio logs eight lines when a proactor transport's socket refuses its
+    shutdown, which on Windows is WSAEINVAL after a client disconnects. It is
+    logged after `connection_lost` has already reached the protocol, so nothing
+    was dropped - but two of these blocks are sixteen lines, and only the last
+    twelve are shown when a worker dies. The cause would scroll away.
+    """
+    settings.prepare()
+    supervisor = ProcessSupervisor(settings)
+
+    record, log_path = await _captured_stderr(
+        settings,
+        supervisor,
+        b"CUDA error: out of memory while loading the checkpoint\n"
+        + CONNECTION_TEARDOWN_BLOCK
+        + CONNECTION_TEARDOWN_BLOCK,
+        "teardown-worker.log",
+    )
+
+    tail = supervisor._stderr_tail(record)
+    assert tail is not None
+    assert "CUDA error: out of memory" in tail
+    assert "WinError 10022" not in tail
+    assert "_call_connection_lost" not in tail
+    # Whole-log fidelity is the point of keeping the file: only the twelve-line
+    # diagnostic drops these lines.
+    assert b"WinError 10022" in log_path.read_bytes()
+
+
+async def test_a_real_traceback_after_teardown_noise_is_kept_in_full(
+    settings,
+) -> None:  # type: ignore[no-untyped-def]
+    """Suppression ends at the block's own exception line, not on a line budget.
+
+    Ending only on a budget would let the next traceback - which starts with the
+    same "Traceback (most recent call last):" line - be swallowed as if it were
+    more of the same block.
+    """
+    settings.prepare()
+    supervisor = ProcessSupervisor(settings)
+
+    real_failure = (
+        b"Traceback (most recent call last):\n"
+        b'  File "comfy\\execution.py", line 300, in execute\n'
+        b"    raise RuntimeError(message)\n"
+        b"RuntimeError: the workflow requires a node that is not installed\n"
+    )
+    record, _ = await _captured_stderr(
+        settings,
+        supervisor,
+        CONNECTION_TEARDOWN_BLOCK + real_failure,
+        "teardown-then-real-worker.log",
+    )
+
+    tail = supervisor._stderr_tail(record)
+    assert tail is not None
+    assert "WinError 10022" not in tail
+    assert "the workflow requires a node that is not installed" in tail
+    assert "comfy\\execution.py" in tail
+    # `_stderr_tail` strips each line for display, so compare on that basis.
+    assert tail.splitlines() == [
+        line.decode().strip() for line in real_failure.splitlines() if line.strip()
+    ]
+
+
+async def test_an_unrelated_callback_exception_is_still_reported(
+    settings,
+) -> None:  # type: ignore[no-untyped-def]
+    """Only this one teardown callback is filtered, not every asyncio error."""
+    settings.prepare()
+    supervisor = ProcessSupervisor(settings)
+
+    record, _ = await _captured_stderr(
+        settings,
+        supervisor,
+        b"Exception in callback ModelLoader._finish(None)\n"
+        b"OSError: [WinError 10022] An invalid argument was supplied\n",
+        "unrelated-callback-worker.log",
+    )
+
+    tail = supervisor._stderr_tail(record)
+    assert tail is not None
+    assert "ModelLoader._finish" in tail
+    assert "WinError 10022" in tail
+
+
+async def test_teardown_suppression_is_bounded_when_the_block_never_ends(
+    settings,
+) -> None:  # type: ignore[no-untyped-def]
+    """A malformed block cannot silence the stream indefinitely."""
+    settings.prepare()
+    supervisor = ProcessSupervisor(settings)
+
+    unterminated = b"Exception in callback _ProactorBasePipeTransport._call_connection_lost(None)\n"
+    record, _ = await _captured_stderr(
+        settings,
+        supervisor,
+        unterminated + (b"    frame line\n" * 40) + b"the real cause\n",
+        "unterminated-teardown-worker.log",
+    )
+
+    tail = supervisor._stderr_tail(record)
+    assert tail is not None
+    assert "the real cause" in tail
+    assert tail.count("frame line") <= WORKER_STDERR_DISPLAY_LINES
 
 
 async def test_chat_first_use_provisions_missing_runtime(
