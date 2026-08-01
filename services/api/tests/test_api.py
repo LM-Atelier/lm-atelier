@@ -1379,6 +1379,45 @@ async def test_worker_startup_limit_is_editable_and_survives_restart(
         os.environ.pop("LOCAL_LM_WORKER_STARTUP_SECONDS", None)
 
 
+async def test_worker_reset_cancels_blocking_jobs_and_stops_the_worker(
+    client: AsyncClient,
+) -> None:
+    with SessionLocal() as session:
+        session.add(Job(kind="chat", status="queued", phase="queued", payload_json={}))
+        session.add(Job(kind="image", status="queued", phase="queued", payload_json={}))
+        session.commit()
+
+    # The queued job locks the ordinary controls with an immediate 409...
+    assert (await client.post("/api/workers/chat/stop")).status_code == 409
+    assert (await client.post("/api/workers/chat/restart")).status_code == 409
+
+    # ...and reset is the way out. It cancels only this worker's jobs.
+    reset = await client.post("/api/workers/chat/reset")
+    assert reset.status_code == 200
+    body = reset.json()
+    assert body["cancelled_jobs"] == 1
+    assert body["worker"]["name"] == "chat"
+    assert body["worker"]["running"] is False
+
+    with SessionLocal() as session:
+        statuses = {job.kind: job.status for job in session.scalars(select(Job)).all()}
+    assert statuses["chat"] == "cancelled"
+    assert statuses["image"] == "queued"
+
+    # With the blocking job gone the ordinary controls answer again.
+    assert (await client.post("/api/workers/chat/stop")).status_code == 200
+
+
+async def test_worker_restart_requires_a_previously_loaded_chat_model(
+    client: AsyncClient,
+) -> None:
+    response = await client.post("/api/workers/chat/restart")
+    assert response.status_code == 409
+    assert "load a profile first" in response.json()["detail"]
+    assert (await client.post("/api/workers/other/restart")).status_code == 422
+    assert (await client.post("/api/workers/other/reset")).status_code == 422
+
+
 async def test_worker_startup_limit_rejects_values_outside_the_config_bounds(
     client: AsyncClient,
     settings: Settings,

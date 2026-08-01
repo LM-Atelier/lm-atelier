@@ -366,6 +366,11 @@ export interface WorkerSettings {
   worker_startup_seconds: number;
 }
 
+export interface WorkerResetResult {
+  worker: WorkerStatus;
+  cancelled_jobs: number;
+}
+
 export interface RuntimeStatus {
   engine: "llama.cpp" | "vllm" | "comfyui";
   release: string;

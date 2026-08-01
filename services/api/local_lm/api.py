@@ -189,6 +189,7 @@ from .schemas import (
     TurnAccepted,
     TurnRequest,
     VerifiedSetup,
+    WorkerResetResult,
     WorkerSettings,
     WorkerStatus,
     WorkflowBundle,
@@ -777,16 +778,19 @@ async def install_runtime(engine: str, request: Request) -> RuntimeStatus:
     return status
 
 
-def _ensure_worker_idle(session: Session, name: str) -> None:
-    kinds = (
+def _worker_job_kinds(name: str) -> list[str]:
+    return (
         [JobKind.CHAT.value, JobKind.EDIT_VERIFY.value]
         if name == "chat"
         else [JobKind.IMAGE.value, JobKind.VIDEO.value]
     )
+
+
+def _ensure_worker_idle(session: Session, name: str) -> None:
     busy_jobs = (
         session.scalar(
             select(func.count(Job.id)).where(
-                Job.kind.in_(kinds),
+                Job.kind.in_(_worker_job_kinds(name)),
                 Job.status.in_(["queued", "running", "paused"]),
             )
         )
@@ -824,38 +828,48 @@ def _validated_profile_install(
 @router.post("/workers/chat/load/{profile_id}", response_model=WorkerStatus)
 async def load_chat_worker(profile_id: str, request: Request, session: SessionDep) -> WorkerStatus:
     services = _services(request)
+    # Check before taking the lease: a wedged job holds "primary" indefinitely,
+    # and a request that hangs there cannot even report the 409 that explains it.
+    _ensure_worker_idle(session, "chat")
     async with services.scheduler.lease("primary"):
+        session.expire_all()
         _ensure_worker_idle(session, "chat")
-        profile = session.get(ModelProfile, profile_id)
-        if not profile or not profile.model_install_id:
-            raise HTTPException(404, "profile with a model install not found")
-        if profile.role != ModelRole.CHAT.value:
-            raise HTTPException(422, "chat worker requires a chat profile")
-        install = _validated_profile_install(
-            session,
-            model_install_id=profile.model_install_id,
-            role=profile.role,
-            engine=profile.engine,
-        )
-        if not install:
-            raise HTTPException(404, "profile with a model install not found")
-        try:
-            status = await services.processes.load_chat(profile, install)
-        except (OSError, RuntimeError, ValueError, TimeoutError) as exc:
-            raise HTTPException(422, str(exc)) from exc
-        setting = session.get(AppSetting, LAST_CHAT_PROFILE_KEY)
-        if setting:
-            setting.value_json = profile.id
-        else:
-            session.add(AppSetting(key=LAST_CHAT_PROFILE_KEY, value_json=profile.id))
-        session.commit()
-        return status
+        return await _load_chat_profile(services, session, profile_id)
+
+
+async def _load_chat_profile(services: Services, session: Session, profile_id: str) -> WorkerStatus:
+    profile = session.get(ModelProfile, profile_id)
+    if not profile or not profile.model_install_id:
+        raise HTTPException(404, "profile with a model install not found")
+    if profile.role != ModelRole.CHAT.value:
+        raise HTTPException(422, "chat worker requires a chat profile")
+    install = _validated_profile_install(
+        session,
+        model_install_id=profile.model_install_id,
+        role=profile.role,
+        engine=profile.engine,
+    )
+    if not install:
+        raise HTTPException(404, "profile with a model install not found")
+    try:
+        status = await services.processes.load_chat(profile, install)
+    except (OSError, RuntimeError, ValueError, TimeoutError) as exc:
+        raise HTTPException(422, str(exc)) from exc
+    setting = session.get(AppSetting, LAST_CHAT_PROFILE_KEY)
+    if setting:
+        setting.value_json = profile.id
+    else:
+        session.add(AppSetting(key=LAST_CHAT_PROFILE_KEY, value_json=profile.id))
+    session.commit()
+    return status
 
 
 @router.post("/workers/media/start", response_model=WorkerStatus)
 async def start_media_worker(request: Request, session: SessionDep) -> WorkerStatus:
     services = _services(request)
+    _ensure_worker_idle(session, "media")
     async with services.scheduler.lease("primary"):
+        session.expire_all()
         _ensure_worker_idle(session, "media")
         if services.settings.media_engine != "comfyui":
             raise HTTPException(422, "The ComfyUI media engine is not active.")
@@ -870,12 +884,76 @@ async def stop_worker(name: str, request: Request, session: SessionDep) -> Worke
     if name not in {"chat", "media"}:
         raise HTTPException(422, "worker must be chat or media")
     services = _services(request)
+    _ensure_worker_idle(session, name)
     async with services.scheduler.lease("primary"):
+        session.expire_all()
         _ensure_worker_idle(session, name)
         try:
             return await services.processes.stop(name)
         except ValueError as exc:
             raise HTTPException(422, str(exc)) from exc
+
+
+@router.post("/workers/{name}/restart", response_model=WorkerStatus)
+async def restart_worker(name: str, request: Request, session: SessionDep) -> WorkerStatus:
+    if name not in {"chat", "media"}:
+        raise HTTPException(422, "worker must be chat or media")
+    services = _services(request)
+    _ensure_worker_idle(session, name)
+    async with services.scheduler.lease("primary"):
+        session.expire_all()
+        _ensure_worker_idle(session, name)
+        if name == "media":
+            if services.settings.media_engine != "comfyui":
+                raise HTTPException(422, "The ComfyUI media engine is not active.")
+            try:
+                await services.processes.stop("media")
+                return await services.processes.start_media()
+            except (OSError, RuntimeError, ValueError, TimeoutError) as exc:
+                raise HTTPException(422, str(exc)) from exc
+        # The chat worker restarts with the model it ran last, whether or not it
+        # is currently running - a crashed worker still knows what to reload.
+        record = next((item for item in services.processes.statuses() if item.name == "chat"), None)
+        profile_id = record.profile_id if record else None
+        if not profile_id:
+            setting = session.get(AppSetting, LAST_CHAT_PROFILE_KEY)
+            profile_id = setting.value_json if setting else None
+        if not isinstance(profile_id, str) or not profile_id:
+            raise HTTPException(409, "no chat model has been loaded yet; load a profile first")
+        return await _load_chat_profile(services, session, profile_id)
+
+
+@router.post("/workers/{name}/reset", response_model=WorkerResetResult)
+async def reset_worker(name: str, request: Request, session: SessionDep) -> WorkerResetResult:
+    """Cancel this worker's blocking jobs and stop it.
+
+    The escape hatch for a wedged worker: every other worker control refuses to
+    act while jobs are queued, so a job that never finishes would otherwise lock
+    out exactly the control needed to clear it. Deliberately takes no scheduler
+    lease - the wedged job may hold it forever.
+    """
+
+    if name not in {"chat", "media"}:
+        raise HTTPException(422, "worker must be chat or media")
+    services = _services(request)
+    job_ids = list(
+        session.scalars(
+            select(Job.id).where(
+                Job.kind.in_(_worker_job_kinds(name)),
+                Job.status.in_(["queued", "running", "paused"]),
+            )
+        )
+    )
+    cancelled = 0
+    for job_id in job_ids:
+        if await services.orchestrator.cancel(job_id):
+            cancelled += 1
+    try:
+        worker = await services.processes.stop(name)
+    except ValueError as exc:
+        raise HTTPException(422, str(exc)) from exc
+    session.expire_all()
+    return WorkerResetResult(worker=worker, cancelled_jobs=cancelled)
 
 
 @router.get("/projects", response_model=list[ProjectOut])
