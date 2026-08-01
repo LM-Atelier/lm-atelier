@@ -142,6 +142,7 @@ from .visual_prompt_compiler import (
     visual_prompt_compilation_eligibility,
 )
 from .work_plans import plan_status_summary, refresh_plan_status
+from .workflow_edit_calibration import safe_workflow_edit_calibration
 
 logger = logging.getLogger(__name__)
 
@@ -3970,6 +3971,21 @@ class ConversationOrchestrator:
         strength_values = strength if isinstance(strength, dict) else {}
         bounds = strength_values.get("applied_bounds")
         bound_values = bounds if isinstance(bounds, dict) else {}
+        schedule_steps: float | None = None
+        if run.workflow_revision_id:
+            workflow_revision = session.get(WorkflowRevision, run.workflow_revision_id)
+            calibration = safe_workflow_edit_calibration(
+                workflow_revision.input_schema_json if workflow_revision else None
+            )
+            raw_steps = (
+                run.settings_json.get(calibration.steps_parameter)
+                if calibration and calibration.steps_parameter
+                else None
+            )
+            if isinstance(raw_steps, int | float) and not isinstance(raw_steps, bool):
+                numeric_steps = float(raw_steps)
+                if 0 < numeric_steps <= 10_000:
+                    schedule_steps = numeric_steps
         payload = ImageEditVerificationJobPayload(
             chat_id=chat.id,
             source_run_id=run.id,
@@ -3999,6 +4015,7 @@ class ConversationOrchestrator:
                 and not isinstance(value, bool)
                 else None
             ),
+            schedule_steps=schedule_steps,
         )
         step: WorkStep | None = None
         if run.work_plan_id and run.work_step_id:
@@ -4489,6 +4506,7 @@ class ConversationOrchestrator:
                 current_strength=payload.current_strength,
                 minimum=payload.minimum,
                 maximum=payload.maximum,
+                schedule_steps=payload.schedule_steps,
             )
             persisted = {
                 **decision.provenance(assessment),

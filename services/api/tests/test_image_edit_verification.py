@@ -9,6 +9,7 @@ from local_lm.domain import Operation
 from local_lm.image_edit_verification import (
     MAX_ASSESSMENT_CHARACTERS,
     ImageEditVerificationAssessment,
+    ImageEditVerificationJobPayload,
     VerificationDirection,
     VerificationReason,
     build_image_edit_verification_prompt,
@@ -214,6 +215,57 @@ def test_retry_increases_strength_within_bounds() -> None:
     }
 
 
+def test_short_schedule_retry_advances_at_least_one_effective_step() -> None:
+    assessment = _assessment()
+    decision = decide_image_edit_retry(
+        assessment,
+        attempt=0,
+        parameter="denoise",
+        current_strength=0.5,
+        minimum=0,
+        maximum=1,
+        schedule_steps=4,
+    )
+
+    assert decision.retry is True
+    assert decision.value_after == 0.75
+    assert decision.provenance(assessment)["strength_adjustment"]["schedule"] == {
+        "resolved_steps": 4,
+        "effective_steps_before": 2.0,
+        "effective_steps_after": 3.0,
+    }
+
+
+def test_very_short_schedule_retry_keeps_the_adjustment_bounded() -> None:
+    decision = decide_image_edit_retry(
+        _assessment(),
+        attempt=0,
+        parameter="denoise",
+        current_strength=0.5,
+        minimum=0,
+        maximum=1,
+        schedule_steps=2,
+    )
+
+    assert decision.retry is True
+    assert decision.value_after == 0.75
+
+
+def test_long_schedule_retry_keeps_the_bounded_default_adjustment() -> None:
+    decision = decide_image_edit_retry(
+        _assessment(),
+        attempt=0,
+        parameter="denoise",
+        current_strength=0.5,
+        minimum=0,
+        maximum=1,
+        schedule_steps=20,
+    )
+
+    assert decision.retry is True
+    assert decision.value_after == 0.62
+
+
 def test_retry_decreases_strength_when_preservation_failed() -> None:
     assessment = _assessment(
         visible=True,
@@ -231,6 +283,19 @@ def test_retry_decreases_strength_when_preservation_failed() -> None:
 
     assert decision.retry is True
     assert decision.value_after == 0.3
+
+
+def test_verification_payload_rejects_boolean_schedule_steps() -> None:
+    with pytest.raises(ValueError):
+        ImageEditVerificationJobPayload(
+            chat_id="chat",
+            source_run_id="run",
+            source_job_id="job",
+            source_artifact_id="source",
+            result_artifact_id="result",
+            vision_profile_id="profile",
+            schedule_steps=True,
+        )
 
 
 @pytest.mark.parametrize(

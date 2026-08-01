@@ -16,6 +16,7 @@ MAX_ASSESSMENT_CHARACTERS = 8_192
 MAX_REQUEST_CHARACTERS = 20_000
 DEFAULT_CONFIDENCE_THRESHOLD = 0.7
 DEFAULT_STRENGTH_ADJUSTMENT = 0.12
+MAX_SCHEDULE_AWARE_ADJUSTMENT = 0.25
 MAX_RETRY_ATTEMPTS = 1
 
 
@@ -66,8 +67,16 @@ class ImageEditVerificationJobPayload(BaseModel):
     current_strength: float | None = None
     minimum: float | None = None
     maximum: float | None = None
+    schedule_steps: float | None = Field(default=None, gt=0, le=10_000)
 
-    @field_validator("current_strength", "minimum", "maximum")
+    @field_validator("schedule_steps", mode="before")
+    @classmethod
+    def schedule_steps_must_be_numeric(cls, value: object) -> object:
+        if isinstance(value, bool):
+            raise ValueError("verification schedule steps must be numeric")
+        return value
+
+    @field_validator("current_strength", "minimum", "maximum", "schedule_steps")
     @classmethod
     def finite_optional_number(cls, value: float | None) -> float | None:
         if value is not None and not math.isfinite(value):
@@ -122,6 +131,7 @@ class ImageEditRetryDecision:
     value_after: float | None = None
     minimum: float | None = None
     maximum: float | None = None
+    schedule_steps: float | None = None
 
     def provenance(
         self,
@@ -150,6 +160,18 @@ class ImageEditRetryDecision:
                     "maximum": self.maximum,
                 },
             }
+            if self.schedule_steps is not None:
+                result["strength_adjustment"]["schedule"] = {
+                    "resolved_steps": self.schedule_steps,
+                    "effective_steps_before": round(
+                        self.value_before * self.schedule_steps,
+                        4,
+                    ),
+                    "effective_steps_after": round(
+                        self.value_after * self.schedule_steps,
+                        4,
+                    ),
+                }
         return result
 
 
@@ -236,6 +258,7 @@ def decide_image_edit_retry(
     maximum: float | None,
     confidence_threshold: float = DEFAULT_CONFIDENCE_THRESHOLD,
     adjustment: float = DEFAULT_STRENGTH_ADJUSTMENT,
+    schedule_steps: float | None = None,
 ) -> ImageEditRetryDecision:
     next_attempt = max(0, attempt) + 1
     if attempt >= MAX_RETRY_ATTEMPTS:
@@ -302,7 +325,15 @@ def decide_image_edit_retry(
     lower = minimum
     upper = maximum
     before = min(max(current_strength, lower), upper)
-    delta = adjustment
+    schedule_delta = (
+        min(MAX_SCHEDULE_AWARE_ADJUSTMENT, 1 / schedule_steps)
+        if schedule_steps is not None
+        and not isinstance(schedule_steps, bool)
+        and math.isfinite(schedule_steps)
+        and schedule_steps > 0
+        else 0
+    )
+    delta = max(adjustment, schedule_delta)
     candidate = (
         min(upper, before + delta)
         if assessment.direction == VerificationDirection.INCREASE
@@ -330,4 +361,5 @@ def decide_image_edit_retry(
         value_after=after,
         minimum=lower,
         maximum=upper,
+        schedule_steps=schedule_steps if schedule_delta else None,
     )

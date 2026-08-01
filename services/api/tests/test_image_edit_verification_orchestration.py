@@ -28,6 +28,7 @@ from local_lm.models import (
 )
 from local_lm.orchestrator import ConversationOrchestrator
 from local_lm.schemas import WorkerStatus
+from local_lm.workflow_edit_calibration import standard_edit_calibration
 
 
 def _orchestrator(*, session_factory=None) -> ConversationOrchestrator:  # type: ignore[no-untyped-def]
@@ -66,12 +67,30 @@ def test_successful_edit_queues_one_dependent_low_priority_verifier(monkeypatch)
     )
     profile = SimpleNamespace(id="profile-vision")
     plan = SimpleNamespace(id="plan-edit", source_action="send", summary_json={})
+    revision = SimpleNamespace(
+        id="revision-edit",
+        input_schema_json={
+            "type": "object",
+            "properties": {
+                "denoise": {"type": "number", "default": 0.5},
+                "steps": {"type": "integer", "default": 4},
+            },
+            "x-lm-atelier-edit-calibration": standard_edit_calibration(
+                parameter="denoise",
+                minimum=0,
+                maximum=1,
+                steps_parameter="steps",
+            ),
+        },
+    )
     run = SimpleNamespace(
         id="run-edit",
         chat_id=chat.id,
         operation=Operation.IMAGE_TO_IMAGE.value,
         work_plan_id=plan.id,
         work_step_id="step-source",
+        workflow_revision_id=revision.id,
+        settings_json={"denoise": 0.66, "steps": 4},
         provenance_json={
             "image_edit": {
                 "strength": {
@@ -88,6 +107,7 @@ def test_successful_edit_queues_one_dependent_low_priority_verifier(monkeypatch)
         (Artifact, source.id): source,
         (Artifact, result.id): result,
         (WorkPlan, plan.id): plan,
+        (WorkflowRevision, revision.id): revision,
     }
     added: list[object] = []
 
@@ -153,6 +173,7 @@ def test_successful_edit_queues_one_dependent_low_priority_verifier(monkeypatch)
         payload.maximum,
     ) == ("denoise", 0.66, 0.3, 0.8)
     assert payload.automatic_strength is True
+    assert payload.schedule_steps == 4
     assert dependencies[0].depends_on_step_id == run.work_step_id
 
 
