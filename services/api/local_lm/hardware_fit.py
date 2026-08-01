@@ -108,6 +108,19 @@ class HardwareFit:
 
 
 @dataclass(frozen=True, slots=True)
+class HardwareCandidate:
+    key: str
+    requirements: FitRequirements
+    evidence: FitEvidence | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class RankedHardwareCandidate:
+    key: str
+    fit: HardwareFit
+
+
+@dataclass(frozen=True, slots=True)
 class _MemoryAssessment:
     status: FitStatus
     basis: FitBasis
@@ -351,6 +364,45 @@ def recommend_hardware_fit(
     )
 
 
+def rank_hardware_candidates(
+    capacity: HardwareCapacity,
+    candidates: tuple[HardwareCandidate, ...],
+) -> tuple[RankedHardwareCandidate, ...]:
+    """Rank advisory candidates without replacing an explicit user choice.
+
+    General fit is ordered before evidence strength. Volatile free-memory
+    pressure deliberately does not affect this order; it remains a launch-time
+    warning on each fit. Equal candidates preserve the caller's catalog order.
+    """
+
+    seen: set[str] = set()
+    ranked: list[tuple[int, RankedHardwareCandidate]] = []
+    for position, candidate in enumerate(candidates):
+        key = candidate.key
+        if not key or key != key.strip():
+            raise ValueError(
+                "Hardware candidate keys must not be blank or contain surrounding whitespace."
+            )
+        if key in seen:
+            raise ValueError(f"Duplicate hardware candidate key: {key}")
+        seen.add(key)
+        ranked.append(
+            (
+                position,
+                RankedHardwareCandidate(
+                    key=key,
+                    fit=recommend_hardware_fit(
+                        capacity,
+                        candidate.requirements,
+                        evidence=candidate.evidence,
+                    ),
+                ),
+            )
+        )
+    ranked.sort(key=lambda item: _candidate_rank_key(item[1].fit, item[0]))
+    return tuple(item for _, item in ranked)
+
+
 def _assess_memory(
     *,
     kind: Literal["system", "accelerator"],
@@ -533,6 +585,25 @@ def _worst_status(first: FitStatus, second: FitStatus) -> FitStatus:
         "unsupported": 4,
     }
     return first if order[first] >= order[second] else second
+
+
+def _candidate_rank_key(fit: HardwareFit, position: int) -> tuple[int, int, int]:
+    status_order: dict[FitStatus, int] = {
+        "recommended": 0,
+        "likely": 1,
+        "tight": 2,
+        "unknown": 3,
+        "unsupported": 4,
+    }
+    basis_order: dict[FitBasis, int] = {
+        "certified": 0,
+        "tested": 1,
+        "measured": 2,
+        "declared": 3,
+        "calculated": 4,
+        "unknown": 5,
+    }
+    return (status_order[fit.status], basis_order[fit.basis], position)
 
 
 def _strongest_basis(first: FitBasis, second: FitBasis) -> FitBasis:

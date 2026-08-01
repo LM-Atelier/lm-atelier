@@ -7,8 +7,10 @@ from local_lm.hardware_fit import (
     BoundedSetting,
     FitEvidence,
     FitRequirements,
+    HardwareCandidate,
     HardwareCapacity,
     capacity_from_system_info,
+    rank_hardware_candidates,
     recommend_hardware_fit,
 )
 from local_lm.schemas import DeviceInfo, PlatformAssessment, SystemInfo
@@ -400,3 +402,85 @@ def test_invalid_ranges_are_rejected() -> None:
                 )
             ),
         )
+
+
+def test_candidates_rank_by_general_fit_then_strongest_evidence() -> None:
+    ranked = rank_hardware_candidates(
+        _capacity(),
+        (
+            HardwareCandidate("unknown", FitRequirements()),
+            HardwareCandidate(
+                "calculated-likely",
+                FitRequirements(estimated_accelerator_memory_bytes=8 * _GIB),
+            ),
+            HardwareCandidate(
+                "declared-recommended",
+                FitRequirements(recommended_accelerator_memory_bytes=8 * _GIB),
+            ),
+            HardwareCandidate(
+                "tested-recommended",
+                FitRequirements(),
+                FitEvidence(exact_match=True, claim="tested"),
+            ),
+            HardwareCandidate(
+                "tight",
+                FitRequirements(estimated_accelerator_memory_bytes=15 * _GIB),
+            ),
+            HardwareCandidate(
+                "unsupported",
+                FitRequirements(minimum_accelerator_memory_bytes=20 * _GIB),
+            ),
+        ),
+    )
+
+    assert [item.key for item in ranked] == [
+        "tested-recommended",
+        "declared-recommended",
+        "calculated-likely",
+        "tight",
+        "unknown",
+        "unsupported",
+    ]
+
+
+def test_candidate_ranking_keeps_free_memory_as_a_warning_not_a_model_reorder() -> None:
+    ranked = rank_hardware_candidates(
+        _capacity(accelerator_free=2 * _GIB),
+        (
+            HardwareCandidate(
+                "first",
+                FitRequirements(recommended_accelerator_memory_bytes=8 * _GIB),
+            ),
+            HardwareCandidate(
+                "second",
+                FitRequirements(recommended_accelerator_memory_bytes=8 * _GIB),
+            ),
+        ),
+    )
+
+    assert [item.key for item in ranked] == ["first", "second"]
+    assert all(
+        any(reason.code == "accelerator_memory_busy" for reason in item.fit.reasons)
+        for item in ranked
+    )
+
+
+@pytest.mark.parametrize(
+    "candidates, message",
+    [
+        ((HardwareCandidate(" ", FitRequirements()),), "must not be blank"),
+        (
+            (
+                HardwareCandidate("same", FitRequirements()),
+                HardwareCandidate("same", FitRequirements()),
+            ),
+            "Duplicate hardware candidate key",
+        ),
+    ],
+)
+def test_candidate_ranking_requires_stable_unique_keys(
+    candidates: tuple[HardwareCandidate, ...],
+    message: str,
+) -> None:
+    with pytest.raises(ValueError, match=message):
+        rank_hardware_candidates(_capacity(), candidates)
