@@ -214,24 +214,33 @@ def recommend_hardware_fit(
                 "This runtime does not support the current processor architecture.",
             )
         )
-    missing_cpu_capabilities = _missing_values(
-        capacity.cpu_capabilities,
-        requirements.required_cpu_capabilities,
-    )
-    if missing_cpu_capabilities:
+    if requirements.required_cpu_capabilities and not capacity.cpu_capabilities:
         reasons.append(
             FitReason(
-                "cpu_capability_missing",
-                "block",
-                "The processor lacks a capability required by this runtime or model.",
+                "cpu_capabilities_unknown",
+                "warning",
+                "Required processor capabilities could not be confirmed.",
             )
         )
-        alternatives.append(
-            FitAlternative(
-                "choose_cpu_compatible_variant",
-                "Use a runtime or model variant compatible with this processor.",
-            )
+    else:
+        missing_cpu_capabilities = _missing_values(
+            capacity.cpu_capabilities,
+            requirements.required_cpu_capabilities,
         )
+        if missing_cpu_capabilities:
+            reasons.append(
+                FitReason(
+                    "cpu_capability_missing",
+                    "block",
+                    "The processor lacks a capability required by this runtime or model.",
+                )
+            )
+            alternatives.append(
+                FitAlternative(
+                    "choose_cpu_compatible_variant",
+                    "Use a runtime or model variant compatible with this processor.",
+                )
+            )
     if requirements.required_runtime_backends and not _overlaps(
         capacity.runtime_backends, requirements.required_runtime_backends
     ):
@@ -347,8 +356,11 @@ def recommend_hardware_fit(
         elif matching_evidence.claim == "certified":
             test_claim = "certified"
     exact_test_claim = test_claim is not None
+    compatibility_unknown = any(reason.code == "cpu_capabilities_unknown" for reason in reasons)
     if hard_block:
         status: FitStatus = "unsupported"
+    elif compatibility_unknown and not exact_test_claim:
+        status = "unknown"
     elif not has_memory_requirements:
         status = "recommended" if exact_test_claim else "unknown"
     else:

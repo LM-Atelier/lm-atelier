@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from dataclasses import replace
+
 import pytest
 
 from local_lm.hardware_fit import (
@@ -300,6 +302,20 @@ def test_unmeasured_non_test_evidence_does_not_make_a_fit_claim() -> None:
     assert result.status == "unknown"
     assert result.basis == "unknown"
     assert result.evidence_label is None
+
+
+def test_unreported_cpu_capabilities_remain_unknown() -> None:
+    result = recommend_hardware_fit(
+        replace(_capacity(), cpu_capabilities=()),
+        FitRequirements(
+            required_cpu_capabilities=("avx2",),
+            estimated_system_memory_bytes=8 * _GIB,
+        ),
+    )
+
+    assert result.status == "unknown"
+    assert any(reason.code == "cpu_capabilities_unknown" for reason in result.reasons)
+    assert not any(reason.severity == "block" for reason in result.reasons)
 
 
 def test_missing_required_cpu_capability_is_unsupported() -> None:
