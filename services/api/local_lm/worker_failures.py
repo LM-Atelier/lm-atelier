@@ -76,8 +76,9 @@ _REMEDIES: dict[WorkerFailureCode, str] = {
     WorkerFailureCode.STARTUP_TIMEOUT: (
         "The worker did not finish starting in the time allowed. Large models "
         "read from a slow disk can take several minutes the first time. Try "
-        "again - a second start is usually much faster - and if it keeps timing "
-        "out, choose a smaller model."
+        "again - a second start is usually much faster. If it keeps timing "
+        "out, raise the startup time limit in the Workers section of the "
+        "Settings page, or choose a smaller model."
     ),
     WorkerFailureCode.CRASHED: (
         "The worker stopped unexpectedly. Try starting it again. If it stops "

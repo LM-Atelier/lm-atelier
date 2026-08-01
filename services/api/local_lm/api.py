@@ -118,6 +118,7 @@ from .prompt_helpers import (
 )
 from .recipes import get_reference_recipe, list_reference_recipes
 from .routing import RouteConfirmationRequired
+from .runtime_config import persist_runtime_values
 from .schemas import (
     ApplicationInfo,
     ArtifactCleanupRequest,
@@ -188,6 +189,7 @@ from .schemas import (
     TurnAccepted,
     TurnRequest,
     VerifiedSetup,
+    WorkerSettings,
     WorkerStatus,
     WorkflowBundle,
     WorkflowClone,
@@ -464,6 +466,25 @@ async def worker_status(request: Request, session: SessionDep) -> list[WorkerSta
             update={"active_jobs": active_jobs, "queued_jobs": queued_jobs}
         )
     return statuses
+
+
+@router.get("/workers/settings", response_model=WorkerSettings)
+async def get_worker_settings(request: Request) -> WorkerSettings:
+    return WorkerSettings(worker_startup_seconds=_services(request).settings.worker_startup_seconds)
+
+
+@router.put("/workers/settings", response_model=WorkerSettings)
+async def update_worker_settings(payload: WorkerSettings, request: Request) -> WorkerSettings:
+    services = _services(request)
+    seconds = payload.worker_startup_seconds
+    # Assigning the live Settings object takes effect on the next worker start;
+    # persisting keeps the value across application restarts.
+    services.settings.worker_startup_seconds = seconds
+    persist_runtime_values(
+        services.settings.data_dir,
+        {"LOCAL_LM_WORKER_STARTUP_SECONDS": f"{seconds:g}"},
+    )
+    return WorkerSettings(worker_startup_seconds=services.settings.worker_startup_seconds)
 
 
 @router.get("/runtimes", response_model=list[RuntimeStatus])

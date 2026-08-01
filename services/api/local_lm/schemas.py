@@ -1099,6 +1099,12 @@ class WorkerStatus(ApiModel):
     log_path: str | None = None
 
 
+class WorkerSettings(ApiModel):
+    # Bounds mirror Settings.worker_startup_seconds so a value accepted here is
+    # never rejected when the process restarts and reads it back from disk.
+    worker_startup_seconds: float = Field(ge=1, le=600)
+
+
 class RuntimeStatus(ApiModel):
     engine: Literal["llama.cpp", "vllm", "comfyui"]
     release: str

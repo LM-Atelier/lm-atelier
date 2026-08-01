@@ -135,7 +135,10 @@ engine path yourself, check that it still points at the program.
 Not necessarily a failure. A large model read from a slow disk can take several
 minutes the first time; a second attempt is usually much faster because the
 operating system has cached the file. If it times out repeatedly on the same
-model, that model is too large for this machine to load comfortably.
+model, raise the startup time limit in the Workers section of the Settings page
+- the default is 60 seconds, and up to 10 minutes is allowed. If it still times
+out at a generous limit, that model is too large for this machine to load
+comfortably.
 
 ### "stopped unexpectedly"
 

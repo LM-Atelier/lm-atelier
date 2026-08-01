@@ -80,6 +80,7 @@ import {
 } from "./messageMedia";
 import { useLiveEvents } from "./useLiveEvents";
 import { workerFailureSummary } from "./workerFailures";
+import { WorkerStartupLimit } from "./WorkerStartupLimit";
 import { useDraftClassification } from "./useDraftClassification";
 import { useGenerationModeSelection } from "./useGenerationModeSelection";
 import {
@@ -3334,7 +3335,10 @@ function SettingsView({ engines }: { engines: EngineCapabilities[] }) {
         {(createPreset.error || importError) && <ErrorCallout message={createPreset.error?.message || importError} />}
       </section>
       <section>
-        <div className="detail-title"><div><h2>Workers</h2></div></div>
+        <div className="detail-title">
+          <div><h2>Workers</h2><p>A model must finish loading within the startup time limit. Large models on slow disks can need more than the default 60 seconds.</p></div>
+          <WorkerStartupLimit />
+        </div>
         <div className="engine-grid">
           {workers.data?.map((worker) => (
             <WorkerStatusCard

@@ -205,6 +205,8 @@ vi.mock("./api", () => ({
     importPreset: vi.fn(),
     deletePreset: vi.fn(),
     workers: vi.fn().mockResolvedValue([]),
+    workerSettings: vi.fn().mockResolvedValue({ worker_startup_seconds: 60 }),
+    updateWorkerSettings: vi.fn(),
     runtimes: vi.fn().mockResolvedValue([]),
     installRuntime: vi.fn(),
     backups: vi.fn().mockResolvedValue([]),
@@ -314,6 +316,7 @@ describe("App", () => {
       },
     ]);
     vi.mocked(api.workers).mockResolvedValue([]);
+    vi.mocked(api.workerSettings).mockResolvedValue({ worker_startup_seconds: 60 });
     vi.mocked(api.runtimes).mockResolvedValue([]);
     vi.mocked(api.jobs).mockResolvedValue([]);
     vi.mocked(api.workPlans).mockResolvedValue([]);
@@ -2522,6 +2525,34 @@ describe("App", () => {
     expect(alert).toHaveTextContent("model loader: unsupported architecture");
     expect(alert).toHaveTextContent("Log · Data folder/logs/chat-worker.log");
     expect(screen.getByLabelText("chat worker error output")).toBeInTheDocument();
+  });
+
+  it("saves a raised worker startup time limit", async () => {
+    vi.mocked(api.updateWorkerSettings).mockResolvedValue({ worker_startup_seconds: 240 });
+    const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+    render(
+      <QueryClientProvider client={client}>
+        <App />
+      </QueryClientProvider>,
+    );
+
+    fireEvent.click(await screen.findByText("Settings"));
+    const input = await screen.findByLabelText("Worker startup time limit in seconds");
+    await waitFor(() => expect(input).toHaveValue(60));
+    const save = screen.getByRole("button", { name: "Save limit" });
+    // Nothing changed yet, so there is nothing to save.
+    expect(save).toBeDisabled();
+
+    // A value the server would reject never becomes a request.
+    fireEvent.change(input, { target: { value: "9000" } });
+    expect(save).toBeDisabled();
+
+    fireEvent.change(input, { target: { value: "240" } });
+    expect(save).toBeEnabled();
+    fireEvent.click(save);
+    await waitFor(() =>
+      expect(api.updateWorkerSettings).toHaveBeenCalledWith({ worker_startup_seconds: 240 }),
+    );
   });
 
   it("runs an executable structured-tool capability probe", async () => {
