@@ -2292,7 +2292,11 @@ class ConversationOrchestrator:
                         "step_id": event_payload["step_id"],
                     },
                 )
-                resume_chat_profile = await self._prepare_device_handoff(operation)
+                resume_chat_profile = await self._prepare_device_handoff(
+                    operation,
+                    job_id=job_id,
+                    run_id=run_id,
+                )
                 try:
                     if operation == Operation.TEXT.value:
                         await self._execute_chat(job_id, run_id)
@@ -2619,6 +2623,45 @@ class ConversationOrchestrator:
                 "phase": label.lower(),
                 "label": label,
             },
+        )
+
+    async def _set_media_phase(self, job_id: str, run_id: str, label: str) -> None:
+        event = MediaEvent(
+            type="progress",
+            progress=0,
+            phase=label,
+            data={"indeterminate": True},
+        )
+        with self.session_factory() as session:
+            job = session.get(Job, job_id)
+            run = session.get(Run, run_id)
+            if (
+                not job
+                or not run
+                or job.status
+                in {
+                    JobStatus.COMPLETE.value,
+                    JobStatus.FAILED.value,
+                    JobStatus.CANCELLED.value,
+                    JobStatus.INTERRUPTED.value,
+                }
+            ):
+                return
+            message = session.get(Message, run.assistant_message_id)
+            update_job_progress(
+                job,
+                stage=label,
+                queue_resource=job.queue_resource,
+                indeterminate=True,
+            )
+            if message:
+                self._replace_parts(message, self._media_progress_parts(message, event))
+            session.commit()
+        await self.scheduler.publish_job(job_id)
+        await self.events.publish(
+            "generation.progress",
+            run_id,
+            {"progress": 0, "phase": label, "job_id": job_id},
         )
 
     async def _ensure_chat_worker(self, run_id: str) -> WorkerStatus | None:
@@ -3192,7 +3235,13 @@ class ConversationOrchestrator:
             current_id = message.parent_id
         return candidates
 
-    async def _prepare_device_handoff(self, operation: str) -> str | None:
+    async def _prepare_device_handoff(
+        self,
+        operation: str,
+        *,
+        job_id: str | None = None,
+        run_id: str | None = None,
+    ) -> str | None:
         if (
             operation == Operation.TEXT.value
             or not self.processes.settings.auto_unload_chat_for_media
@@ -3204,8 +3253,13 @@ class ConversationOrchestrator:
         profile_id = chat_worker.profile_id
         if profile_id:
             self._chat_planner_ready.clear()
+        if job_id and run_id:
+            await self._set_media_phase(job_id, run_id, "Releasing chat model")
         try:
             await self.processes.stop("chat")
+        except asyncio.CancelledError:
+            self._chat_planner_ready.set()
+            raise
         except Exception:
             self._chat_planner_ready.set()
             raise
@@ -3391,13 +3445,27 @@ class ConversationOrchestrator:
         if self._media_restart_task is task:
             self._media_restart_task = None
 
-    async def _ensure_media_worker(self) -> None:
+    async def _ensure_media_worker(
+        self,
+        *,
+        job_id: str | None = None,
+        run_id: str | None = None,
+    ) -> None:
         restart_task = self._media_restart_task
         if restart_task and not restart_task.done():
+            if job_id and run_id:
+                await self._set_media_phase(job_id, run_id, "Waiting for media worker")
             await asyncio.shield(restart_task)
         status = next(item for item in self.processes.statuses() if item.name == "media")
         if not status.running or status.state != "ready":
-            await self.processes.start_media()
+            if job_id and run_id:
+
+                async def report_phase(phase: str) -> None:
+                    await self._set_media_phase(job_id, run_id, phase)
+
+                await self.processes.start_media(phase_callback=report_phase)
+            else:
+                await self.processes.start_media()
 
     async def _successful_media_capabilities(self) -> EngineCapabilities | None:
         try:
@@ -3501,40 +3569,8 @@ class ConversationOrchestrator:
 
     async def _execute_media(self, job_id: str, run_id: str) -> str | None:
         if self.engines.settings.media_engine == "comfyui":
-            status = next(item for item in self.processes.statuses() if item.name == "media")
-            if not status.running or status.state != "ready":
-                with self.session_factory() as session:
-                    job = session.get(Job, job_id)
-                    run = session.get(Run, run_id)
-                    message = session.get(Message, run.assistant_message_id) if run else None
-                    if job and message:
-                        event = MediaEvent(
-                            type="progress",
-                            progress=0,
-                            phase="preparing media runtime",
-                        )
-                        update_job_progress(
-                            job,
-                            stage=event.phase,
-                            queue_resource=job.queue_resource,
-                            indeterminate=True,
-                        )
-                        self._replace_parts(
-                            message,
-                            self._media_progress_parts(message, event),
-                        )
-                        session.commit()
-                await self.scheduler.publish_job(job_id)
-                await self.events.publish(
-                    "generation.progress",
-                    run_id,
-                    {
-                        "progress": 0,
-                        "phase": "preparing media runtime",
-                        "job_id": job_id,
-                    },
-                )
-                await self._ensure_media_worker()
+            await self._ensure_media_worker(job_id=job_id, run_id=run_id)
+        await self._set_media_phase(job_id, run_id, "Validating media workflow")
         with self.session_factory() as session:
             run = session.get(Run, run_id)
             if not run:
@@ -3607,6 +3643,7 @@ class ConversationOrchestrator:
         preview_artifact_id: str | None = None
         async for event in self.engines.media.generate(request):
             if event.type in {"progress", "queued"}:
+                indeterminate = event.type == "queued" or bool(event.data.get("indeterminate"))
                 with self.session_factory() as session:
                     job = session.get(Job, job_id)
                     message = session.get(Message, assistant_id)
@@ -3616,6 +3653,7 @@ class ConversationOrchestrator:
                             stage=event.phase,
                             stage_progress=event.progress,
                             queue_resource=job.queue_resource,
+                            indeterminate=indeterminate,
                         )
                         self._replace_parts(message, self._media_progress_parts(message, event))
                         session.commit()
@@ -4696,7 +4734,7 @@ class ConversationOrchestrator:
                     "progress": event.progress,
                     "phase": event.phase,
                     "indeterminate": event.type == "queued"
-                    or (event.progress <= 0 and "prepar" in event.phase.casefold()),
+                    or bool(event.data.get("indeterminate")),
                 },
             )
         ]

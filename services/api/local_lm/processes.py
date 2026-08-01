@@ -11,6 +11,7 @@ import socket
 import sys
 import threading
 import time
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
 from pathlib import Path, PurePosixPath
 from typing import TYPE_CHECKING, Any, Literal
@@ -428,13 +429,26 @@ class ProcessSupervisor:
     async def start_media(
         self,
         provisional_model_paths: tuple[Path, dict[str, str]] | None = None,
+        *,
+        phase_callback: Callable[[str], Awaitable[None]] | None = None,
     ) -> WorkerStatus:
+        async def report_phase(phase: str) -> None:
+            if phase_callback is None:
+                return
+            try:
+                await phase_callback(phase)
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                logger.warning("Could not publish media startup phase", exc_info=True)
+
         if (
             not self.settings.comfy_executable
             or not self.settings.comfy_executable.is_file()
             or not self.settings.comfy_directory
             or not (self.settings.comfy_directory / "main.py").is_file()
         ) and self.runtimes:
+            await report_phase("Provisioning media runtime")
             await self.runtimes.ensure("comfyui")
         executable = self.settings.comfy_executable
         directory = self.settings.comfy_directory
@@ -445,6 +459,7 @@ class ProcessSupervisor:
         if directory not in entrypoint.parents:
             raise ValueError("ComfyUI entrypoint escapes its configured directory")
         parsed = urlparse(self.settings.comfy_url)
+        await report_phase("Validating media dependencies")
         trusted_custom_nodes = await self._trusted_comfy_node_folders()
         output_directory = self.settings.comfy_output_dir.resolve()
         output_directory.mkdir(parents=True, exist_ok=True)
@@ -470,6 +485,7 @@ class ProcessSupervisor:
         ]
         if trusted_custom_nodes:
             command.extend(["--whitelist-custom-nodes", *trusted_custom_nodes])
+        await report_phase("Starting media runtime")
         await self._replace("media", command, self.settings.comfy_url + "/system_stats")
         return self.statuses()[1]
 

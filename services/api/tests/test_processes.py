@@ -1114,6 +1114,10 @@ async def test_media_first_use_provisions_missing_runtime(
     model_paths = tmp_path / "extra-model-paths.yaml"
     model_paths.write_text("{}", encoding="utf-8")
     captured: dict[str, object] = {}
+    phases: list[str] = []
+
+    async def record_phase(phase: str) -> None:
+        phases.append(phase)
 
     async def trusted_nodes() -> list[str]:
         return []
@@ -1135,9 +1139,14 @@ async def test_media_first_use_provisions_missing_runtime(
     monkeypatch.setattr(supervisor, "_write_comfy_model_paths", lambda *_args: model_paths)
     monkeypatch.setattr(supervisor, "_replace", replace)
 
-    await supervisor.start_media()
+    await supervisor.start_media(phase_callback=record_phase)
 
     runtimes.ensure.assert_awaited_once_with("comfyui")
+    assert phases == [
+        "Provisioning media runtime",
+        "Validating media dependencies",
+        "Starting media runtime",
+    ]
     assert captured["command"][0] == str(executable.resolve())
     assert captured["command"][1] == str((runtime / "main.py").resolve())
     assert captured["health_url"] == settings.comfy_url + "/system_stats"

@@ -351,13 +351,38 @@ class ComfyUIAdapter:
         prompt_id: str | None = None
         outputs_collected = False
         try:
+            yield MediaEvent(
+                type="progress",
+                phase="Preparing media workspace",
+                data={"indeterminate": True},
+            )
+            if cancel_event.is_set():
+                yield MediaEvent(type="cancelled")
+                return
             await self._sweep_stale_outputs()
             client_id = uuid4().hex
+            if request.input_paths:
+                yield MediaEvent(
+                    type="progress",
+                    phase="Staging media inputs",
+                    data={"indeterminate": True},
+                )
+                if cancel_event.is_set():
+                    yield MediaEvent(type="cancelled")
+                    return
             parameters = await self._request_parameters(request)
             if cancel_event.is_set():
                 yield MediaEvent(type="cancelled")
                 return
             graph = self._compile(request.workflow, parameters)
+            yield MediaEvent(
+                type="progress",
+                phase="Submitting media workflow",
+                data={"indeterminate": True},
+            )
+            if cancel_event.is_set():
+                yield MediaEvent(type="cancelled")
+                return
             async with websockets.connect(
                 self._websocket_url(client_id),
                 max_size=MAX_ADAPTER_PREVIEW_BYTES,
@@ -398,10 +423,11 @@ class ComfyUIAdapter:
                 yield MediaEvent(
                     type="queued",
                     progress=0,
-                    phase="queued",
-                    data={"prompt_id": prompt_id},
+                    phase="Queued in media runtime",
+                    data={"prompt_id": prompt_id, "indeterminate": True},
                 )
                 sampler_progress = 0.0
+                execution_started = False
                 messages = socket.__aiter__()
                 while True:
                     try:
@@ -445,6 +471,13 @@ class ComfyUIAdapter:
                         raise RuntimeError("ComfyUI returned a malformed progress event")
                     if data.get("prompt_id") not in {None, prompt_id}:
                         continue
+                    if message_type in {"execution_start", "executing"} and not execution_started:
+                        execution_started = True
+                        yield MediaEvent(
+                            type="progress",
+                            phase="Loading media model",
+                            data={"prompt_id": prompt_id, "indeterminate": True},
+                        )
                     if message_type == "progress":
                         try:
                             maximum = float(data.get("max") or 1)
@@ -476,6 +509,14 @@ class ComfyUIAdapter:
                     elif message_type == "execution_error":
                         raise RuntimeError(_execution_error_message(data))
 
+            if cancel_event.is_set():
+                yield MediaEvent(type="cancelled")
+                return
+            yield MediaEvent(
+                type="progress",
+                phase="Collecting media output",
+                data={"indeterminate": True},
+            )
             if cancel_event.is_set():
                 yield MediaEvent(type="cancelled")
                 return
