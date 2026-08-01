@@ -206,6 +206,8 @@ vi.mock("./api", () => ({
     deletePreset: vi.fn(),
     workers: vi.fn().mockResolvedValue([]),
     workerSettings: vi.fn().mockResolvedValue({ worker_startup_seconds: 60 }),
+    workerLogTail: vi.fn().mockResolvedValue({ name: "chat", text: "", truncated: false, log_bytes: 0 }),
+    workerLogLocation: vi.fn().mockResolvedValue({ path: "C:\\data\\logs" }),
     updateWorkerSettings: vi.fn(),
     runtimes: vi.fn().mockResolvedValue([]),
     installRuntime: vi.fn(),
@@ -2527,6 +2529,12 @@ describe("App", () => {
     expect(alert).toHaveTextContent("model loader: unsupported architecture");
     expect(alert).toHaveTextContent("Log · Data folder/logs/chat-worker.log");
     expect(screen.getByLabelText("chat worker error output")).toBeInTheDocument();
+
+    // More of the log is one click away, fetched only when asked for.
+    expect(api.workerLogTail).not.toHaveBeenCalled();
+    fireEvent.click(screen.getByRole("button", { name: "Show recent chat worker log" }));
+    await waitFor(() => expect(api.workerLogTail).toHaveBeenCalledWith("chat"));
+    expect(await screen.findByText("The log is empty.")).toBeInTheDocument();
   });
 
   it("offers cancel-and-reset when jobs block the worker controls", async () => {

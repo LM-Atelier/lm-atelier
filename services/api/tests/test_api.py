@@ -1333,6 +1333,31 @@ async def test_diagnostic_bundle_is_redacted(client: AsyncClient) -> None:
         assert b'"prompts_included": false' in payload
         assert b'"tokens_included": false' in payload
         assert b'"comfy_inactivity_seconds": 600' in payload
+        # Worker state travels with the bundle so a report shows what failed.
+        parsed = json.loads(payload)
+        assert {worker["name"] for worker in parsed["workers"]} == {"chat", "media"}
+        assert all(worker["state"] == "stopped" for worker in parsed["workers"])
+
+
+async def test_worker_log_tail_is_bounded_and_survives_a_missing_file(
+    client: AsyncClient,
+    settings: Settings,
+) -> None:
+    empty = await client.get("/api/workers/chat/log-tail")
+    assert empty.status_code == 200
+    assert empty.json() == {"name": "chat", "text": "", "truncated": False, "log_bytes": 0}
+
+    log_path = settings.log_dir / "chat-worker.log"
+    log_path.write_bytes(b"x" * (64 * 1024) + b"the line that matters\n")
+    tail = (await client.get("/api/workers/chat/log-tail")).json()
+    assert tail["truncated"] is True
+    assert tail["text"].endswith("the line that matters\n")
+    assert len(tail["text"]) == 64 * 1024
+    assert (await client.get("/api/workers/other/log-tail")).status_code == 422
+
+    location = (await client.get("/api/workers/log-location")).json()
+    assert Path(location["path"]).is_absolute()
+    assert location["path"].endswith("logs")
 
 
 async def test_worker_management_reports_missing_local_binaries(client: AsyncClient) -> None:
