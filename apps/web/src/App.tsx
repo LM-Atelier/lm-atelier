@@ -2617,29 +2617,18 @@ function ModelsView({ initialRole }: { initialRole: EngineRole }) {
       ? modalities.includes("image")
       : modalities.includes("text") && !modalities.includes("image");
   });
-  const installedTemplateIds = new Set(
-    installed.data
-      ?.filter((model) => model.role === role && model.active)
-      .map((model) => model.manifest_json.workflow_template_id)
-      .filter((value): value is string => typeof value === "string") ?? [],
-  );
-  const statusFor = (model: CatalogModel): "idle" | "preparing" | "downloading" | "installed" => {
-    // A workflow card is installed only when ITS template is: variants share
-    // one repository, and installing one must not disable the others.
-    const installedHere = model.workflow_template_id
-      ? installedTemplateIds.has(model.workflow_template_id)
-      : installedRemoteIds.has(model.remote_id);
-    return installedHere
+  const installedTemplateIds = new Set(installed.data?.filter((model) => model.role === role && model.active).map((model) => model.manifest_json.workflow_template_id).filter((value): value is string => typeof value === "string") ?? []);
+  // A workflow card is installed only when ITS template is: variants share one
+  // repository, and installing one must not disable the others.
+  const statusFor = (model: CatalogModel): "idle" | "preparing" | "downloading" | "installed" => (
+    (model.workflow_template_id ? installedTemplateIds.has(model.workflow_template_id) : installedRemoteIds.has(model.remote_id))
       ? "installed"
       : activeDownloadIds.has(model.remote_id)
         ? "downloading"
-        : download.isPending
-            && download.variables?.model.remote_id === model.remote_id
-            && (download.variables?.model.workflow_template_id ?? null)
-              === (model.workflow_template_id ?? null)
+        : download.isPending && download.variables?.model.remote_id === model.remote_id && (download.variables?.model.workflow_template_id ?? null) === (model.workflow_template_id ?? null)
           ? "preparing"
-          : "idle";
-  };
+          : "idle"
+  );
   return (
     <div className="page-view">
       <header className="page-header"><div><h1>Model library</h1></div><div className="storage-actions"><div className="storage-pill"><HardDrive size={17} />{storage.data?.installed_count ?? installed.data?.length ?? 0} installed · {formatBytes(storage.data?.installed_bytes)}</div><button className="secondary compact-button" onClick={() => setImportOpen(true)}><Folder size={16} />Import local</button>{Boolean(storage.data?.partial_download_count) && <button className="secondary compact-button" disabled={cleanupDownloads.isPending} onClick={() => cleanupDownloads.mutate()}>Clean {storage.data?.partial_download_count} partial</button>}</div></header>
