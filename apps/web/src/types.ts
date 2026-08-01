@@ -525,6 +525,8 @@ export interface CatalogModel {
   compatibility: string;
   compatibility_reasons: string[];
   required_runtime?: string | null;
+  workflow_template_id?: string | null;
+  operation?: string | null;
 }
 
 export interface CatalogPage {

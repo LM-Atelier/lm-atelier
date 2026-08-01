@@ -6873,6 +6873,154 @@ async def test_comfy_catalog_preflight_offers_a_provisional_adaptive_checkpoint(
     assert workflow_check["status"] == "warn"
 
 
+async def test_workflow_catalog_preserves_exact_variants_and_preflights_the_chosen_one(
+    client: AsyncClient,
+    settings: Settings,
+    tmp_path: Path,
+    monkeypatch,
+) -> None:  # type: ignore[no-untyped-def]
+    """One repository, several official workflows: the card and the preflight
+    must both say which one - ranking silently answered with the
+    alphabetically-first variant regardless of what the user picked."""
+    settings.media_engine = "comfyui"
+    external_runtime = tmp_path / "external-comfy"
+    external_runtime.mkdir()
+    settings.comfy_executable = external_runtime / "python.exe"
+    settings.comfy_executable.write_bytes(b"external runtime")
+    settings.comfy_directory = external_runtime / "ComfyUI"
+    templates = (
+        settings.comfy_directory
+        / ".venv"
+        / "Lib"
+        / "site-packages"
+        / "comfyui_workflow_templates_json"
+        / "templates"
+    )
+    templates.mkdir(parents=True)
+    (settings.comfy_directory / "main.py").write_text("", encoding="utf-8")
+
+    def template_graph(label: str) -> dict:  # type: ignore[type-arg]
+        return {
+            "nodes": [
+                {
+                    "id": 1,
+                    "type": "CheckpointLoaderSimple",
+                    "inputs": [],
+                    "outputs": [],
+                    "properties": {
+                        "cnr_id": "comfy-core",
+                        "models": [
+                            {
+                                "directory": "checkpoints",
+                                "name": "model.safetensors",
+                                "url": (
+                                    "https://huggingface.co/owner/shared/resolve/main/"
+                                    "model.safetensors"
+                                ),
+                            }
+                        ],
+                    },
+                    "widgets_values": ["model.safetensors"],
+                },
+                {
+                    "id": 2,
+                    "type": "SaveImage",
+                    "inputs": [],
+                    "outputs": [],
+                    "properties": {"cnr_id": "comfy-core"},
+                    "widgets_values": [label],
+                },
+            ],
+            "links": [],
+        }
+
+    (templates / "image_shared_base.json").write_text(
+        json.dumps(template_graph("base")), encoding="utf-8"
+    )
+    (templates / "image_shared_edit.json").write_text(
+        json.dumps(template_graph("edit")), encoding="utf-8"
+    )
+    (templates / "index.json").write_text(
+        json.dumps(
+            [
+                {"name": "image_shared_base", "date": "2026-07-10"},
+                {"name": "image_shared_edit", "date": "2026-07-10"},
+            ]
+        ),
+        encoding="utf-8",
+    )
+
+    async def inspect(
+        _catalog: HuggingFaceCatalog,
+        remote_id: str,
+        revision: str = "main",
+        requested_role: str | None = None,
+    ) -> dict:  # type: ignore[type-arg]
+        del revision, requested_role
+        assert remote_id == "owner/shared"
+        return {
+            "model": {
+                "remote_id": remote_id,
+                "name": "shared",
+                "license_id": "apache-2.0",
+                "architecture": "FluxPipeline",
+                "pipeline_tag": "text-to-image",
+                "formats": ["safetensors"],
+                "compatibility": "likely",
+                "compatibility_reasons": ["image pipeline metadata detected"],
+            },
+            "revision": "a" * 40,
+            "files": [{"filename": "model.safetensors", "size": 2_048, "sha256": "d" * 64}],
+        }
+
+    monkeypatch.setattr(HuggingFaceCatalog, "inspect", inspect)
+
+    # The catalog shows both variants, each naming its template and operation.
+    cards = (await client.get("/api/catalog/workflow-models?role=image")).json()
+    assert [card["workflow_template_id"] for card in cards] == [
+        "image_shared_base",
+        "image_shared_edit",
+    ]
+    assert [card["operation"] for card in cards] == ["text_to_image", "image_to_image"]
+    assert {card["remote_id"] for card in cards} == {"owner/shared"}
+
+    # A repository-only caller keeps the ranked fallback.
+    fallback = await client.post(
+        "/api/catalog/owner/shared/preflight",
+        json={"revision": "main", "role": "image", "engine": "comfyui", "selected_files": []},
+    )
+    assert fallback.status_code == 200
+    assert fallback.json()["workflow_template_id"] == "image_shared_base"
+
+    # Choosing the variant that ranking would not pick preflights exactly it.
+    chosen = await client.post(
+        "/api/catalog/owner/shared/preflight",
+        json={
+            "revision": "main",
+            "role": "image",
+            "engine": "comfyui",
+            "selected_files": [],
+            "workflow_template_id": "image_shared_edit",
+        },
+    )
+    assert chosen.status_code == 200
+    assert chosen.json()["workflow_template_id"] == "image_shared_edit"
+
+    # A template from another repository or role is refused, not substituted.
+    mismatched = await client.post(
+        "/api/catalog/owner/shared/preflight",
+        json={
+            "revision": "main",
+            "role": "image",
+            "engine": "comfyui",
+            "selected_files": [],
+            "workflow_template_id": "video_wan2_2_14B_t2v",
+        },
+    )
+    assert mismatched.status_code == 422
+    assert "does not belong" in mismatched.json()["detail"]
+
+
 async def test_comfy_catalog_preflight_pins_a_multirepository_official_bundle(
     client: AsyncClient,
     settings: Settings,

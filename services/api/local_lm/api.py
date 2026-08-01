@@ -2464,28 +2464,32 @@ async def workflow_catalog_models(request: Request, role: str) -> list[CatalogMo
     if role not in {"image", "video"}:
         return []
     registry = ComfyTemplateRegistry(_services(request).settings)
-    repositories: dict[str, CatalogModel] = {}
+    # One card per workflow template, not per repository: a repository can
+    # ship several official workflows for different operations, and collapsing
+    # them meant the alphabetically-first variant silently answered for all.
+    cards: list[CatalogModel] = []
     for template in registry.available(role):
-        key = template.remote_id.casefold()
-        if key in repositories:
-            continue
         remote_id = template.remote_id
-        repositories[key] = CatalogModel(
-            remote_id=remote_id,
-            name=remote_id.rsplit("/", 1)[-1],
-            author=remote_id.split("/", 1)[0],
-            pipeline_tag="text-to-image" if role == "image" else "text-to-video",
-            formats=sorted(
-                {
-                    Path(dependency.path).suffix.lower().lstrip(".")
-                    for dependency in template.dependencies
-                    if Path(dependency.path).suffix
-                }
-            ),
-            compatibility="likely",
-            compatibility_reasons=["Official ComfyUI workflow available"],
+        cards.append(
+            CatalogModel(
+                remote_id=remote_id,
+                name=template.id,
+                author=remote_id.split("/", 1)[0],
+                pipeline_tag=template.operation.replace("_", "-"),
+                formats=sorted(
+                    {
+                        Path(dependency.path).suffix.lower().lstrip(".")
+                        for dependency in template.dependencies
+                        if Path(dependency.path).suffix
+                    }
+                ),
+                compatibility="likely",
+                compatibility_reasons=["Official ComfyUI workflow available"],
+                workflow_template_id=template.id,
+                operation=template.operation,
+            )
         )
-    return sorted(repositories.values(), key=lambda item: item.remote_id.casefold())
+    return sorted(cards, key=lambda item: (item.remote_id.casefold(), item.name))
 
 
 @router.get("/catalog/{owner}/{name}", response_model=CatalogDetail)
@@ -2795,6 +2799,18 @@ async def resolve_catalog_preflight(
 
     registry = ComfyTemplateRegistry(services.settings)
     candidates = registry.matches(detail.model.remote_id, payload.role)
+    requested_template = (payload.workflow_template_id or "").strip()
+    if requested_template:
+        # The user chose an exact variant; preflight that one or refuse.
+        # Silently ranking a different template is how a text-to-video request
+        # once installed a speech-to-video workflow with an audio encoder.
+        candidates = [item for item in candidates if item.id == requested_template]
+        if not candidates:
+            raise HTTPException(
+                422,
+                "The selected workflow does not belong to this repository and role. "
+                "Refresh the catalog and choose a workflow again.",
+            )
     if not candidates:
         resolved_payload = payload.model_copy(update={"revision": detail.revision})
         result = assess_catalog_install(
