@@ -136,12 +136,12 @@ def capacity_from_system_info(
             )
         )
     return HardwareCapacity(
-        platform=system.platform,
-        architecture=system.architecture,
-        cpu_model=system.cpu_model,
+        platform=getattr(system, "platform", "unknown"),
+        architecture=getattr(system, "architecture", "unknown"),
+        cpu_model=getattr(system, "cpu_model", "CPU"),
         cpu_capabilities=tuple(dict.fromkeys(cpu_capabilities)),
         system_memory_bytes=system.memory_total_bytes,
-        system_memory_available_bytes=system.memory_available_bytes,
+        system_memory_available_bytes=getattr(system, "memory_available_bytes", None),
         accelerators=tuple(accelerators),
         runtime_backends=runtime_backends,
     )
