@@ -592,6 +592,8 @@ async def test_automatic_retry_reuses_source_turn_as_a_response_revision() -> No
             "scope": "localized",
             "confidence": "high",
         },
+        "preferred_profile_id": source_run.profile_id,
+        "preferred_workflow_revision_id": source_run.workflow_revision_id,
     }
     assert retry_run.provenance_json["image_edit_verification_retry"] == {
         "version": "image-edit-verification-v1",
@@ -603,3 +605,46 @@ async def test_automatic_retry_reuses_source_turn_as_a_response_revision() -> No
         "strength_before": 0.5,
         "strength_after": 0.62,
     }
+
+
+def test_retry_selection_pins_the_source_profile_and_workflow() -> None:
+    profile = SimpleNamespace(
+        id="profile-source",
+        role="image",
+        name="Source editor",
+        model_install_id="install-source",
+    )
+    workflow = SimpleNamespace(id="workflow-source")
+
+    class FakeSession:
+        def get(self, model, identity):  # type: ignore[no-untyped-def]
+            if model is ModelProfile and identity == profile.id:
+                return profile
+            return None
+
+    orchestrator = _orchestrator()
+    orchestrator._workflow_for_operation = Mock(return_value=workflow)  # type: ignore[method-assign]
+    fake_session = FakeSession()
+
+    selected, provenance, selected_workflow = orchestrator._profile_and_workflow_for_operation(
+        fake_session,  # type: ignore[arg-type]
+        SimpleNamespace(project_id=None),  # type: ignore[arg-type]
+        Operation.IMAGE_TO_IMAGE,
+        "Make the mug green",
+        preferred_profile_id=profile.id,
+        preferred_revision_id=workflow.id,
+    )
+
+    assert selected is profile
+    assert selected_workflow is workflow
+    assert provenance == {
+        "mode": "pinned_retry",
+        "profile_id": profile.id,
+        "profile_name": profile.name,
+    }
+    orchestrator._workflow_for_operation.assert_called_once_with(
+        fake_session,
+        Operation.IMAGE_TO_IMAGE,
+        model_install_id=profile.model_install_id,
+        preferred_revision_id=workflow.id,
+    )
