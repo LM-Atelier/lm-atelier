@@ -32,6 +32,11 @@ class VisionSettings(ApiModel):
     compile_visual_prompts: bool = True
 
 
+def new_chat_vision_settings() -> VisionSettings:
+    """Enable edit review for new chats without changing legacy settings defaults."""
+    return VisionSettings(verify_image_edits=True)
+
+
 class ProjectCreate(ApiModel):
     name: str = Field(min_length=1, max_length=200)
     description: str = Field(default="", max_length=10_000)
@@ -73,7 +78,7 @@ class ChatCreate(ApiModel):
     routing_mode: RoutingMode = RoutingMode.AUTO
     generation_settings_json: GenerationSettingsByRole = Field(default_factory=dict)
     generation_preset_ids_json: GenerationPresetIdsByRole = Field(default_factory=dict)
-    vision_settings_json: VisionSettings = Field(default_factory=VisionSettings)
+    vision_settings_json: VisionSettings = Field(default_factory=new_chat_vision_settings)
 
 
 class ChatUpdate(ApiModel):

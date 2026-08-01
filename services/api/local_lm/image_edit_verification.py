@@ -61,6 +61,7 @@ class ImageEditVerificationJobPayload(BaseModel):
     result_artifact_id: str = Field(min_length=1, max_length=100)
     vision_profile_id: str = Field(min_length=1, max_length=40)
     attempt: int = Field(default=0, ge=0, le=MAX_RETRY_ATTEMPTS)
+    automatic_strength: bool = False
     strength_parameter: str | None = Field(default=None, min_length=1, max_length=80)
     current_strength: float | None = None
     minimum: float | None = None

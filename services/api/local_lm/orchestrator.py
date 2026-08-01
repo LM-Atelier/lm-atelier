@@ -73,6 +73,7 @@ from .image_edit_strength import (
 from .image_edit_verification import (
     MAX_ASSESSMENT_CHARACTERS,
     VERIFICATION_VERSION,
+    ImageEditRetryDecision,
     ImageEditVerificationJobPayload,
     VerificationReason,
     build_image_edit_verification_prompt,
@@ -3869,6 +3870,18 @@ class ConversationOrchestrator:
             return existing.id
 
         chat = session.get(Chat, run.chat_id)
+        work_plan = session.get(WorkPlan, run.work_plan_id) if run.work_plan_id else None
+        if work_plan and work_plan.source_action == "image_edit_verification_retry":
+            run.provenance_json = {
+                **run.provenance_json,
+                "image_edit_verification": {
+                    "version": VERIFICATION_VERSION,
+                    "status": "skipped",
+                    "reason": VerificationReason.RETRY_LIMIT_REACHED.value,
+                    "automatic_retry_executed": False,
+                },
+            }
+            return None
         source_artifact_id = next(
             (
                 artifact_id
@@ -3929,6 +3942,7 @@ class ConversationOrchestrator:
             strength_parameter=(
                 value if isinstance((value := strength_values.get("parameter")), str) else None
             ),
+            automatic_strength=strength_values.get("mode") == "auto",
             current_strength=(
                 float(value)
                 if isinstance((value := strength_values.get("value")), int | float)
@@ -4117,6 +4131,103 @@ class ConversationOrchestrator:
             },
             job_status=job_status,
         )
+
+    async def _create_image_edit_verification_retry(
+        self,
+        session: Session,
+        payload: ImageEditVerificationJobPayload,
+        decision: ImageEditRetryDecision,
+    ) -> TurnAccepted:
+        source_run = session.get(Run, payload.source_run_id)
+        if (
+            not source_run
+            or source_run.operation != Operation.IMAGE_TO_IMAGE.value
+            or not decision.retry
+            or not decision.parameter
+            or decision.value_after is None
+        ):
+            raise ValueError("image edit retry source is unavailable")
+        source_user = session.scalar(
+            select(Message)
+            .options(selectinload(Message.parts))
+            .where(Message.id == source_run.user_message_id)
+        )
+        source_assistant = session.get(Message, source_run.assistant_message_id)
+        if not source_user or not source_assistant:
+            raise ValueError("image edit retry messages are unavailable")
+        text = "\n".join(part.text for part in source_user.parts if part.text).strip()
+        if not text:
+            raise ValueError("image edit retry prompt is unavailable")
+        workflow_revision = (
+            session.get(WorkflowRevision, source_run.workflow_revision_id)
+            if source_run.workflow_revision_id
+            else None
+        )
+        profile = (
+            session.get(ModelProfile, source_run.profile_id) if source_run.profile_id else None
+        )
+        source_run_id = source_run.id
+        source_chat_id = source_run.chat_id
+        source_settings = copy.deepcopy(source_run.settings_json)
+        workflow_schema = (
+            copy.deepcopy(workflow_revision.input_schema_json) if workflow_revision else None
+        )
+        profile_engine = profile.engine if profile else None
+        parent_message_id = source_user.parent_id
+        source_assistant_id = source_assistant.id
+        input_artifact_ids = self.input_artifact_ids_for_run(session, source_run)
+        image_edit = source_run.provenance_json.get("image_edit")
+        strength = image_edit.get("strength") if isinstance(image_edit, dict) else None
+        if not isinstance(strength, dict) or strength.get("mode") != "auto":
+            raise ValueError("image edit retry requires automatic strength")
+        inherited_strength = {
+            **copy.deepcopy(strength),
+            "parameter": decision.parameter,
+            "value": decision.value_after,
+        }
+        self._commit_before_await(session)
+        settings = await self.request_settings_for_operation(
+            Operation.IMAGE_TO_IMAGE,
+            source_settings,
+            input_schema=workflow_schema,
+            engine=profile_engine,
+        )
+        verification_job = session.get(Job, image_edit_verification_job_id(source_run_id))
+        if not verification_job or verification_job.status == JobStatus.CANCELLED.value:
+            raise asyncio.CancelledError
+        settings[decision.parameter] = decision.value_after
+        accepted = await self.create_turn(
+            session,
+            source_chat_id,
+            TurnRequest(
+                text=text,
+                mode=RoutingMode.IMAGE,
+                parent_message_id=parent_message_id,
+                input_artifact_ids=input_artifact_ids,
+                settings=settings,
+            ),
+            use_explicit_parent=True,
+            replacement_message_id=source_assistant_id,
+            source_action="image_edit_verification_retry",
+            inherited_image_edit_strength=inherited_strength,
+        )
+        retry_run = session.get(Run, accepted.run.id)
+        if retry_run:
+            retry_run.provenance_json = {
+                **retry_run.provenance_json,
+                "image_edit_verification_retry": {
+                    "version": VERIFICATION_VERSION,
+                    "source_run_id": source_run_id,
+                    "source_job_id": payload.source_job_id,
+                    "source_verification_job_id": image_edit_verification_job_id(source_run_id),
+                    "attempt": decision.attempt,
+                    "strength_parameter": decision.parameter,
+                    "strength_before": decision.value_before,
+                    "strength_after": decision.value_after,
+                },
+            }
+            session.commit()
+        return accepted
 
     async def _execute_image_edit_verification(self, job_id: str) -> None:
         media_stopped_for_verification = False
@@ -4349,9 +4460,45 @@ class ConversationOrchestrator:
                 "result_artifact_id": payload.result_artifact_id,
                 "automatic_retry_executed": False,
             }
+            accepted_retry: TurnAccepted | None = None
+            retry_unavailable = False
+            if decision.retry and payload.automatic_strength:
+                retry_session = self.session_factory()
+                try:
+                    accepted_retry = await self._create_image_edit_verification_retry(
+                        retry_session,
+                        payload,
+                        decision,
+                    )
+                except asyncio.CancelledError:
+                    raise
+                except Exception:
+                    retry_session.rollback()
+                    retry_unavailable = True
+                    logger.warning(
+                        "Automatic image edit retry was unavailable",
+                        exc_info=True,
+                    )
+                finally:
+                    retry_session.close()
             with self.session_factory() as session:
                 job = session.get(Job, job_id)
                 if job and job.status != JobStatus.CANCELLED.value:
+                    if decision.retry and not payload.automatic_strength:
+                        persisted["retry_execution_reason"] = "manual_strength_preserved"
+                    elif retry_unavailable:
+                        persisted["retry_execution_reason"] = "unavailable"
+                    elif accepted_retry:
+                        persisted.update(
+                            {
+                                "automatic_retry_executed": True,
+                                "retry_run_id": accepted_retry.run.id,
+                                "retry_work_plan_id": accepted_retry.run.work_plan_id,
+                                "retry_revision_id": accepted_retry.run.provenance_json.get(
+                                    "response_replacement", {}
+                                ).get("revision_id"),
+                            }
+                        )
                     self._persist_image_edit_verification(session, job, persisted)
                     session.commit()
         except asyncio.CancelledError:
