@@ -525,3 +525,40 @@ def test_declared_unsupported_fit_blocks_preflight() -> None:
     assert fit.status == "unsupported"
     assert check.status == "block"
     assert check.detail.startswith("Unsupported by declared hardware requirements.")
+
+
+def test_fit_exposes_structured_total_capacity_headroom() -> None:
+    result = recommend_hardware_fit(
+        _capacity(system_free=6 * _GIB, accelerator_free=4 * _GIB),
+        FitRequirements(
+            estimated_system_memory_bytes=8 * _GIB,
+            concurrent_system_memory_bytes=2 * _GIB,
+            estimated_accelerator_memory_bytes=10 * _GIB,
+            concurrent_accelerator_memory_bytes=1 * _GIB,
+        ),
+    )
+
+    assert [(item.kind, item.required_bytes, item.capacity_bytes) for item in result.resources] == [
+        ("system", 10 * _GIB, 32 * _GIB),
+        ("accelerator", 11 * _GIB, 16 * _GIB),
+    ]
+    assert [item.available_bytes for item in result.resources] == [6 * _GIB, 4 * _GIB]
+    assert all(item.immediate_pressure for item in result.resources)
+
+
+def test_same_fit_and_basis_prefers_more_total_capacity_headroom() -> None:
+    ranked = rank_hardware_candidates(
+        _capacity(),
+        (
+            HardwareCandidate(
+                "larger",
+                FitRequirements(estimated_accelerator_memory_bytes=12 * _GIB),
+            ),
+            HardwareCandidate(
+                "smaller",
+                FitRequirements(estimated_accelerator_memory_bytes=8 * _GIB),
+            ),
+        ),
+    )
+
+    assert [item.key for item in ranked] == ["smaller", "larger"]

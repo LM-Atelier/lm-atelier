@@ -98,12 +98,24 @@ class SettingRecommendation:
 
 
 @dataclass(frozen=True, slots=True)
+class FitResource:
+    kind: Literal["system", "accelerator"]
+    capacity_bytes: int
+    available_bytes: int | None
+    required_bytes: int
+    status: FitStatus
+    basis: FitBasis
+    immediate_pressure: bool
+
+
+@dataclass(frozen=True, slots=True)
 class HardwareFit:
     status: FitStatus
     basis: FitBasis
     evidence_label: Literal["tested", "certified"] | None
     reasons: tuple[FitReason, ...]
     alternatives: tuple[FitAlternative, ...]
+    resources: tuple[FitResource, ...]
     settings: tuple[SettingRecommendation, ...]
 
 
@@ -126,6 +138,9 @@ class _MemoryAssessment:
     basis: FitBasis
     reasons: tuple[FitReason, ...]
     immediate_pressure: bool
+    capacity_bytes: int
+    available_bytes: int | None
+    required_bytes: int | None
 
 
 def capacity_from_system_info(
@@ -360,6 +375,7 @@ def recommend_hardware_fit(
         evidence_label=evidence_label,
         reasons=tuple(reasons),
         alternatives=_deduplicate_alternatives(alternatives),
+        resources=_fit_resources(system, accelerator),
         settings=setting_recommendations,
     )
 
@@ -424,8 +440,17 @@ def _assess_memory(
         if value is not None
     ]
     if not demanded:
-        return _MemoryAssessment("recommended", basis, (), False)
+        return _MemoryAssessment(
+            "recommended",
+            basis,
+            (),
+            False,
+            capacity_bytes,
+            available_bytes,
+            None,
+        )
 
+    load_bytes = max(demanded) + concurrent_bytes
     if minimum_bytes is not None and minimum_bytes + concurrent_bytes > capacity_bytes:
         reasons.append(
             FitReason(
@@ -434,9 +459,16 @@ def _assess_memory(
                 f"Available hardware is below the declared minimum {label} requirement.",
             )
         )
-        return _MemoryAssessment("unsupported", "declared", tuple(reasons), False)
+        return _MemoryAssessment(
+            "unsupported",
+            "declared",
+            tuple(reasons),
+            False,
+            capacity_bytes,
+            available_bytes,
+            load_bytes,
+        )
 
-    load_bytes = max(demanded) + concurrent_bytes
     if capacity_bytes <= 0:
         reasons.append(
             FitReason(
@@ -445,7 +477,15 @@ def _assess_memory(
                 f"The required {label} capacity could not be confirmed.",
             )
         )
-        return _MemoryAssessment("unknown", basis, tuple(reasons), False)
+        return _MemoryAssessment(
+            "unknown",
+            basis,
+            tuple(reasons),
+            False,
+            capacity_bytes,
+            available_bytes,
+            load_bytes,
+        )
 
     utilization = load_bytes / capacity_bytes
     if measured_peak_bytes is not None and evidence_claim is not None:
@@ -506,7 +546,15 @@ def _assess_memory(
                 f"The model fits total {label}, but currently free capacity is lower.",
             )
         )
-    return _MemoryAssessment(status, basis, tuple(reasons), immediate_pressure)
+    return _MemoryAssessment(
+        status,
+        basis,
+        tuple(reasons),
+        immediate_pressure,
+        capacity_bytes,
+        available_bytes,
+        load_bytes,
+    )
 
 
 def _setting_recommendations(
@@ -587,7 +635,7 @@ def _worst_status(first: FitStatus, second: FitStatus) -> FitStatus:
     return first if order[first] >= order[second] else second
 
 
-def _candidate_rank_key(fit: HardwareFit, position: int) -> tuple[int, int, int]:
+def _candidate_rank_key(fit: HardwareFit, position: int) -> tuple[int, int, float, int]:
     status_order: dict[FitStatus, int] = {
         "recommended": 0,
         "likely": 1,
@@ -603,7 +651,39 @@ def _candidate_rank_key(fit: HardwareFit, position: int) -> tuple[int, int, int]
         "calculated": 4,
         "unknown": 5,
     }
-    return (status_order[fit.status], basis_order[fit.basis], position)
+    utilizations = [
+        resource.required_bytes / resource.capacity_bytes
+        for resource in fit.resources
+        if resource.capacity_bytes > 0
+    ]
+    utilization = max(utilizations, default=float("inf") if fit.resources else 0.0)
+    return (status_order[fit.status], basis_order[fit.basis], utilization, position)
+
+
+def _fit_resources(
+    system: _MemoryAssessment,
+    accelerator: _MemoryAssessment,
+) -> tuple[FitResource, ...]:
+    resources: list[FitResource] = []
+    assessments: tuple[tuple[Literal["system", "accelerator"], _MemoryAssessment], ...] = (
+        ("system", system),
+        ("accelerator", accelerator),
+    )
+    for kind, assessment in assessments:
+        if assessment.required_bytes is None:
+            continue
+        resources.append(
+            FitResource(
+                kind=kind,
+                capacity_bytes=assessment.capacity_bytes,
+                available_bytes=assessment.available_bytes,
+                required_bytes=assessment.required_bytes,
+                status=assessment.status,
+                basis=assessment.basis,
+                immediate_pressure=assessment.immediate_pressure,
+            )
+        )
+    return tuple(resources)
 
 
 def _strongest_basis(first: FitBasis, second: FitBasis) -> FitBasis:
