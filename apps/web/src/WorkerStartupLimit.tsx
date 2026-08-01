@@ -3,6 +3,28 @@ import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 
 import { api } from "./api";
 
+// A copyable absolute path rather than an "open folder" action: the hardened
+// local HTTP surface has no endpoint that executes anything, and keeping it
+// so is worth one paste into a file manager.
+export function WorkerLogFolderButton() {
+  const copyPath = useMutation({
+    mutationFn: async () => {
+      const location = await api.workerLogLocation();
+      await navigator.clipboard.writeText(location.path);
+    },
+  });
+  return (
+    <button
+      className="secondary"
+      disabled={copyPath.isPending}
+      title="Copies the full path of the folder holding the worker logs"
+      onClick={() => copyPath.mutate()}
+    >
+      {copyPath.isSuccess ? "Path copied" : "Copy log folder path"}
+    </button>
+  );
+}
+
 // The startup time limit is the one worker setting a user must be able to fix
 // unaided: a large model on a slow disk fails with a timeout whose remedy
 // points at this control. Bounds mirror the server's (1-600 seconds) so a

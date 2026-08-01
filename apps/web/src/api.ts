@@ -40,6 +40,8 @@ import type {
   Workflow,
   WorkflowBundle,
   WorkflowRevision,
+  WorkerLogLocation,
+  WorkerLogTail,
   WorkerResetResult,
   WorkerSettings,
   WorkerStatus,
@@ -434,6 +436,9 @@ export const api = {
     request<WorkerStatus>(`/api/workers/${name}/restart`, { method: "POST" }),
   resetWorker: (name: "chat" | "media") =>
     request<WorkerResetResult>(`/api/workers/${name}/reset`, { method: "POST" }),
+  workerLogTail: (name: "chat" | "media") =>
+    request<WorkerLogTail>(`/api/workers/${name}/log-tail`),
+  workerLogLocation: () => request<WorkerLogLocation>("/api/workers/log-location"),
   backups: () => request<BackupInfo[]>("/api/backups"),
   createBackup: (includeMedia = false) =>
     request<BackupInfo>(`/api/backups?${new URLSearchParams({ include_media: String(includeMedia) })}`, { method: "POST" }),

@@ -232,7 +232,7 @@ def build_services(settings: Settings) -> Services:
         runtimes=runtimes,
         backups=BackupManager(settings),
         exports=ProjectExporter(settings, artifacts),
-        diagnostics=DiagnosticBundleBuilder(settings, artifacts),
+        diagnostics=DiagnosticBundleBuilder(settings, artifacts, processes),
         custom_nodes=CustomNodeManager(settings),
         credentials=credentials,
     )

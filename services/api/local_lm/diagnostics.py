@@ -16,12 +16,19 @@ from .config import Settings
 from .domain import ArtifactKind, utcnow
 from .hardware import collect_system_info
 from .models import Artifact, Chat, Job, ModelInstall, Project, Run, WorkflowDefinition
+from .processes import ProcessSupervisor
 
 
 class DiagnosticBundleBuilder:
-    def __init__(self, settings: Settings, artifacts: ArtifactStore) -> None:
+    def __init__(
+        self,
+        settings: Settings,
+        artifacts: ArtifactStore,
+        processes: ProcessSupervisor,
+    ) -> None:
         self.settings = settings
         self.artifacts = artifacts
+        self.processes = processes
 
     def create(self, session: Session) -> Artifact:
         model_rows = session.execute(select(ModelInstall.role, ModelInstall.engine)).all()
@@ -67,6 +74,24 @@ class DiagnosticBundleBuilder:
                 "operation_counts": dict(workflow_engines),
             },
             "jobs": {"status_counts": dict(job_statuses)},
+            # statuses() sanitizes before it returns: commands and tails have
+            # local paths replaced, so nothing here weakens the privacy notes.
+            "workers": [
+                {
+                    "name": status.name,
+                    "state": status.state,
+                    "managed": status.managed,
+                    "running": status.running,
+                    "exit_code": status.exit_code,
+                    "failure_code": status.failure_code,
+                    "failure_detail": status.failure_detail,
+                    "startup_duration_ms": status.startup_duration_ms,
+                    "current_memory_bytes": status.current_memory_bytes,
+                    "peak_memory_bytes": status.peak_memory_bytes,
+                    "stderr_tail": status.stderr_tail,
+                }
+                for status in self.processes.statuses()
+            ],
             "logs": {
                 "file_count": len(log_files),
                 "total_bytes": sum(path.stat().st_size for path in log_files),
@@ -92,7 +117,9 @@ class DiagnosticBundleBuilder:
                     "README.txt",
                     "LM Atelier redacted diagnostics\n\n"
                     "This bundle excludes prompts, chat content, generated media, credentials, "
-                    "log contents, and absolute filesystem paths.\n",
+                    "log contents, and absolute filesystem paths.\n"
+                    "Worker entries include the same redacted failure output the application "
+                    "shows on screen, with local paths already replaced.\n",
                 )
             return self.artifacts.ingest_path(
                 session,

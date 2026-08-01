@@ -143,14 +143,16 @@ comfortably.
 ### "stopped unexpectedly"
 
 LM Atelier could not tell what went wrong, so it is showing the engine's own
-output unchanged. That output is the best evidence available; the worker log has
-more of it.
+output unchanged. That output is the best evidence available. "Show recent log"
+on the worker card displays more of it, and "Copy log folder path" in the
+Workers section gives you the folder holding the complete files.
 
-## Messages in a worker log that are not faults
+## Messages in a log that are not faults
 
-Worker logs record everything the engine writes, including lines that look
-alarming and are not. If you are reading a log to find out why something failed,
-you can skip these.
+Logs record everything the engine and the application write, including lines
+that look alarming and are not. The examples below can appear in a worker log
+or in `api.log`. If you are reading a log to find out why something failed, you
+can skip these.
 
 **`OSError: [WinError 10022] An invalid argument was supplied`, under
 `Exception in callback _ProactorBasePipeTransport._call_connection_lost`.**
