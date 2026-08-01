@@ -993,6 +993,34 @@ def test_the_visual_source_is_cut_at_a_sentence_not_mid_word() -> None:
     assert "..." not in source
 
 
+def test_the_source_passage_is_carried_apart_from_the_prompt() -> None:
+    """Concatenation loses which half is the request and which is the source.
+
+    The prompt compiler needs them separately: the request states what the user
+    wants and wins any disagreement, the passage supplies what is visible.
+    """
+    plan = ModalityRouter().plan(
+        text="Make an image of the last scene",
+        mode=RoutingMode.IMAGE,
+        input_artifact_ids=[],
+        conversation=_scene_conversation("Two figures argue beneath a broken lighthouse."),
+    )
+
+    assert plan.text_context == "A single figure stands on the pier at dusk."
+    assert plan.text_context in plan.standalone_prompt
+
+
+def test_a_prompt_with_no_referenced_text_carries_no_source_passage() -> None:
+    plan = ModalityRouter().plan(
+        text="Draw a blue cup on a windowsill",
+        mode=RoutingMode.IMAGE,
+        input_artifact_ids=[],
+        conversation=_scene_conversation("Two figures argue beneath a broken lighthouse."),
+    )
+
+    assert plan.text_context is None
+
+
 def test_text_operations_still_receive_the_full_referenced_context() -> None:
     """Only media prompts are narrowed; a text turn keeps its conversation."""
     router = ModalityRouter()

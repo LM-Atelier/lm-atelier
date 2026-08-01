@@ -89,6 +89,47 @@ class MockChatAdapter:
                 )
                 yield ChatEvent(type="complete", data={"finish_reason": "tool_calls"})
                 return
+        if tool_name == "compile_visual_prompt":
+            # A grammar-constrained engine cannot exceed the schema's own bound,
+            # so neither does the mock - that bound is what callers rely on.
+            limit = int(
+                request.tools[0]["function"]["parameters"]["properties"]["prompt"]["maxLength"]
+            )
+            content = next(
+                (
+                    str(message.get("content", ""))
+                    for message in reversed(request.messages)
+                    if message.get("role") == "user"
+                ),
+                "",
+            )
+            try:
+                passage = str(json.loads(content.rpartition("\n")[2]))
+            except ValueError:
+                passage = ""
+            moment = (
+                re.split(r"(?<=[.!?])\s+", passage.strip())[0] if passage.strip() else "a scene"
+            )
+            yield ChatEvent(
+                type="tool_delta",
+                data={
+                    "tool_calls": [
+                        {
+                            "index": 0,
+                            "id": "mock-visual-prompt",
+                            "type": "function",
+                            "function": {
+                                "name": "compile_visual_prompt",
+                                "arguments": json.dumps(
+                                    {"prompt": f"One compiled moment: {moment}"[:limit]}
+                                ),
+                            },
+                        }
+                    ]
+                },
+            )
+            yield ChatEvent(type="complete", data={"finish_reason": "tool_calls"})
+            return
         if request.tools and tool_name != "offer_generation":
             prompt = next(
                 (
