@@ -448,7 +448,7 @@ async def test_image_turn_resolves_verified_lora_stack_and_provenance(
     assert run["status"] == "complete"
     auxiliary = run["provenance_json"]["auxiliary_assets"]
     assert auxiliary["selection"] == {"mode": "explicit"}
-    assert auxiliary["graph_transform_version"] == "lora-graph-v1"
+    assert auxiliary["graph_transform_version"] == "lora-graph-v2"
     assert len(auxiliary["effective_graph_sha256"]) == 64
     assert auxiliary["lora_stack"] == [
         {
