@@ -79,6 +79,7 @@ import {
   type MediaOrigin,
 } from "./messageMedia";
 import { useLiveEvents } from "./useLiveEvents";
+import { workerFailureSummary } from "./workerFailures";
 import { useDraftClassification } from "./useDraftClassification";
 import { useGenerationModeSelection } from "./useGenerationModeSelection";
 import {
@@ -3053,9 +3054,13 @@ function WorkerStatusCard({
       </div>
       {failed && (
         <div className="worker-failure" role="alert">
-          <strong>{worker.failure_detail || `${worker.name} worker stopped unexpectedly.`}</strong>
+          <strong>{workerFailureSummary(worker)}</strong>
+          {worker.failure_remedy && <p className="worker-remedy">{worker.failure_remedy}</p>}
           {worker.stderr_tail && (
-            <pre aria-label={`${worker.name} worker error output`}>{worker.stderr_tail}</pre>
+            <details>
+              <summary>What the engine reported</summary>
+              <pre aria-label={`${worker.name} worker error output`}>{worker.stderr_tail}</pre>
+            </details>
           )}
           {worker.log_path && <small>Log · Data folder/{worker.log_path}</small>}
         </div>

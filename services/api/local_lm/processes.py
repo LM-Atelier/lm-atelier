@@ -25,6 +25,7 @@ from .gguf import GGUFSelectionError, automatic_mmproj_selection, validate_gguf_
 from .models import ModelAssetInstall, ModelInstall, ModelProfile
 from .schemas import WorkerStatus
 from .subprocess_env import subprocess_environment
+from .worker_failures import WorkerFailure, WorkerFailureCode, classify_worker_failure
 
 if TYPE_CHECKING:
     from .runtime_provisioning import RuntimeProvisioner
@@ -253,6 +254,7 @@ class ProcessSupervisor:
                 record.peak_memory_bytes = max(record.peak_memory_bytes, current_memory)
             stderr_tail = self._stderr_tail(record) if record and not running else None
             failure_detail = None
+            failure = WorkerFailure(WorkerFailureCode.UNKNOWN, None)
             if record and not running:
                 exit_code = (
                     record.process.returncode
@@ -261,6 +263,15 @@ class ProcessSupervisor:
                 )
                 failure_detail = record.failure_detail or (
                     f"{record.name} worker exited with code {exit_code}."
+                )
+                failure = classify_worker_failure(
+                    failure_detail=failure_detail,
+                    # Classify against everything retained, not the twelve lines
+                    # shown. The line that names an out-of-memory failure is
+                    # printed when the allocation fails and can be well above the
+                    # shutdown chatter that follows it.
+                    stderr_tail=self._retained_stderr(record),
+                    exit_code=record.process.returncode,
                 )
             result.append(
                 WorkerStatus(
@@ -279,6 +290,10 @@ class ProcessSupervisor:
                     current_memory_bytes=current_memory,
                     peak_memory_bytes=(record.peak_memory_bytes or None) if record else None,
                     failure_detail=failure_detail,
+                    failure_code=(
+                        failure.code if failure.code != WorkerFailureCode.UNKNOWN else None
+                    ),
+                    failure_remedy=failure.remedy,
                     stderr_tail=stderr_tail,
                     log_path=self._public_log_path(name),
                 )
@@ -1226,6 +1241,12 @@ class ProcessSupervisor:
                 del record.stderr_tail[:overflow]
         if len(record.stderr_pending) > WORKER_STDERR_TAIL_BYTES:
             del record.stderr_pending[:-WORKER_STDERR_TAIL_BYTES]
+
+    def _retained_stderr(self, record: WorkerRecord) -> str | None:
+        """Everything still buffered, sanitized but not trimmed for display."""
+        if not record.stderr_tail:
+            return None
+        return self._sanitize_diagnostic(record.stderr_tail.decode("utf-8", errors="replace"))
 
     def _stderr_tail(self, record: WorkerRecord) -> str | None:
         if not record.stderr_tail:

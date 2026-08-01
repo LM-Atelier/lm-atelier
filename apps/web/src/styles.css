@@ -381,6 +381,9 @@ h1, h2, h3 { margin: 0; }
 .worker-failure { display: grid; gap: 7px; margin-top: 10px; border: 1px solid #673337; border-radius: 8px; background: #241719; color: #e8b6b5; padding: 9px 10px; font-size: 11px; }
 .worker-failure pre { max-height: 92px; overflow: auto; margin: 0; white-space: pre-wrap; overflow-wrap: anywhere; color: #c9a3a2; font: 10px/1.45 ui-monospace, SFMono-Regular, Consolas, monospace; }
 .worker-failure small { color: #967a7c; overflow-wrap: anywhere; }
+.worker-remedy { margin: 0; color: #dfc7c6; font-size: 11px; line-height: 1.55; }
+.worker-failure details > summary { cursor: pointer; color: #b69293; font-size: 10px; }
+.worker-failure details[open] > summary { margin-bottom: 6px; }
 .runtime-note { margin: 10px 2px 0; font-size: 10px; line-height: 1.5; }
 .runtime-setup-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(240px, 1fr)); gap: 9px; margin-top: 10px; }
 .runtime-setup { display: grid; grid-template-columns: 1fr auto; align-items: center; gap: 7px 12px; padding: 11px 13px; border: 1px solid var(--border); border-radius: 11px; background: rgba(255, 255, 255, 0.015); }

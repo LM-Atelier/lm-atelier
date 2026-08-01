@@ -29,6 +29,7 @@ from local_lm.processes import (
     WorkerRecord,
     _RotatingWorkerLog,
 )
+from local_lm.worker_failures import WorkerFailureCode
 
 # Reproduced from CPython 3.12 by making the socket teardown inside
 # `_ProactorBasePipeTransport._call_connection_lost` raise. asyncio composes the
@@ -864,6 +865,38 @@ async def _captured_stderr(
     )
     await supervisor._capture_process_output(record)
     return record, log_path
+
+
+async def test_a_failure_is_classified_from_output_the_display_tail_cannot_show(
+    settings,
+) -> None:  # type: ignore[no-untyped-def]
+    """The line that names an out-of-memory failure is printed when it happens.
+
+    Everything after it - unloading, shutdown, the engine's parting messages -
+    pushes it out of the twelve lines a user is shown. Classifying against the
+    display string would therefore miss exactly the failures worth naming, so it
+    reads the whole retained buffer instead.
+    """
+    settings.prepare()
+    supervisor = ProcessSupervisor(settings)
+
+    record, _ = await _captured_stderr(
+        settings,
+        supervisor,
+        b"ggml_backend_cuda_buffer_type_alloc_buffer: allocating 8192.00 MiB "
+        b"on device 0 failed: out of memory\n" + (b"unloading model tensors\n" * 30),
+        "buried-oom-worker.log",
+    )
+    record.process = SimpleNamespace(returncode=1, pid=None)  # type: ignore[assignment]
+    supervisor._workers["media"] = record
+
+    status = next(item for item in supervisor.statuses() if item.name == "media")
+
+    assert status.stderr_tail is not None
+    assert "out of memory" not in status.stderr_tail, "the display tail must have scrolled past it"
+    assert status.failure_code == WorkerFailureCode.OOM_VRAM
+    assert status.failure_remedy is not None
+    assert "graphics card" in status.failure_remedy
 
 
 async def test_connection_teardown_noise_never_displaces_the_real_failure(
