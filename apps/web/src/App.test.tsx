@@ -2501,6 +2501,8 @@ describe("App", () => {
         active_jobs: 0,
         queued_jobs: 0,
         failure_detail: "chat worker exited with code 1.",
+        failure_code: "model_incompatible" as const,
+        failure_remedy: "The engine could not read this model file. Reinstall the model.",
         stderr_tail: "model loader: unsupported architecture",
         log_path: "logs/chat-worker.log",
       },
@@ -2514,7 +2516,9 @@ describe("App", () => {
 
     fireEvent.click(await screen.findByText("Settings"));
     const alert = await screen.findByRole("alert");
-    expect(alert).toHaveTextContent("chat worker exited with code 1.");
+    // The headline says what happened; the exit code is no longer the lead.
+    expect(alert).toHaveTextContent("The chat engine could not read the selected model.");
+    expect(alert).toHaveTextContent("Reinstall the model.");
     expect(alert).toHaveTextContent("model loader: unsupported architecture");
     expect(alert).toHaveTextContent("Log · Data folder/logs/chat-worker.log");
     expect(screen.getByLabelText("chat worker error output")).toBeInTheDocument();

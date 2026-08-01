@@ -347,6 +347,17 @@ export interface WorkerStatus {
   active_jobs: number;
   queued_jobs: number;
   failure_detail?: string | null;
+  failure_code?:
+    | "oom_vram"
+    | "oom_host"
+    | "port_in_use"
+    | "model_incompatible"
+    | "executable_missing"
+    | "startup_timeout"
+    | "crashed"
+    | "unknown"
+    | null;
+  failure_remedy?: string | null;
   stderr_tail?: string | null;
   log_path?: string | null;
 }
