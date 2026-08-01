@@ -53,20 +53,27 @@ WINDOWS_CREATE_NO_WINDOW = 0x08000000
 WINDOWS_SO_EXCLUSIVEADDRUSE = int(getattr(socket, "SO_EXCLUSIVEADDRUSE", -5))
 
 _ANSI_ESCAPE = re.compile(r"\x1b(?:[@-_][0-?]*[ -/]*[@-~]|\][^\x07]*(?:\x07|\x1b\\))")
-# asyncio composes the first line as "Exception in callback {callback}"; the
-# callback here is always a proactor transport's connection-teardown handler.
-_TEARDOWN_CALLBACK = re.compile(rb"^Exception in callback _Proactor\w*\._call_connection_lost\b")
+# asyncio composes the first line as "Exception in callback {callback}", but a
+# worker rarely writes it bare: captured logs from the field carry a "[ERROR] "
+# level tag or a timestamp and logger name in front of it, and a frozen runtime
+# renders the callback with empty parentheses rather than "(None)". Anchoring on
+# the start of the line matched only the shape reproduced in a bare interpreter
+# and would have missed every real occurrence, so the prefix is skipped instead.
+_TEARDOWN_PREFIX = rb"^.{0,120}?"
+_TEARDOWN_CALLBACK = re.compile(
+    _TEARDOWN_PREFIX + rb"Exception in callback _Proactor\w*\._call_connection_lost\b"
+)
 _TEARDOWN_CONTINUATION = re.compile(
     rb"^(?:\s"
-    rb"|handle: <Handle _Proactor\w*\._call_connection_lost"
-    rb"|Traceback \(most recent call last\):"
-    rb"|(?:OSError|ConnectionResetError|ConnectionAbortedError): \[WinError \d+\])"
+    rb"|.{0,120}?handle: <Handle _Proactor\w*\._call_connection_lost"
+    rb"|.{0,120}?Traceback \(most recent call last\):"
+    rb"|.{0,120}?(?:OSError|ConnectionResetError|ConnectionAbortedError): \[WinError \d+\])"
 )
 # The block always ends on its exception line. Stopping there, rather than only
 # on the line budget, is what keeps a real traceback that follows immediately
 # from being swallowed along with it.
 _TEARDOWN_TERMINAL = re.compile(
-    rb"^(?:OSError|ConnectionResetError|ConnectionAbortedError): \[WinError \d+\]"
+    _TEARDOWN_PREFIX + rb"(?:OSError|ConnectionResetError|ConnectionAbortedError): \[WinError \d+\]"
 )
 _BEARER_SECRET = re.compile(r"(?i)\b(bearer)\s+\S+")
 _NAMED_SECRET = re.compile(

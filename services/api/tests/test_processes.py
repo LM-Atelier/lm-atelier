@@ -30,7 +30,7 @@ from local_lm.processes import (
     _RotatingWorkerLog,
 )
 
-# Reproduced verbatim from CPython 3.12 by making the socket teardown inside
+# Reproduced from CPython 3.12 by making the socket teardown inside
 # `_ProactorBasePipeTransport._call_connection_lost` raise. asyncio composes the
 # first two lines; the rest is the traceback it prints for the callback.
 CONNECTION_TEARDOWN_BLOCK = (
@@ -41,6 +41,20 @@ CONNECTION_TEARDOWN_BLOCK = (
     b"    self._context.run(self._callback, *self._args)\n"
     b'  File "asyncio\\proactor_events.py", line 165, in _call_connection_lost\n'
     b"    self._sock.shutdown(socket.SHUT_RDWR)\n"
+    b"OSError: [WinError 10022] An invalid argument was supplied\n"
+)
+
+# The same failure as a real frozen media worker writes it, captured from
+# `media-worker.log.3` on a monitored install. A bare interpreter is not what
+# ships: the level tag comes first, the callback renders with empty parentheses,
+# and the traceback carries no source lines. Matching only the reproduction above
+# would have filtered nothing that actually occurs.
+FROZEN_RUNTIME_TEARDOWN_BLOCK = (
+    b"[ERROR] Exception in callback _ProactorBasePipeTransport._call_connection_lost()\n"
+    b"handle: <Handle _ProactorBasePipeTransport._call_connection_lost()>\n"
+    b"Traceback (most recent call last):\n"
+    b'  File "asyncio\\events.py", line 89, in _run\n'
+    b'  File "asyncio\\proactor_events.py", line 165, in _call_connection_lost\n'
     b"OSError: [WinError 10022] An invalid argument was supplied\n"
 )
 
@@ -882,6 +896,35 @@ async def test_connection_teardown_noise_never_displaces_the_real_failure(
     assert "_call_connection_lost" not in tail
     # Whole-log fidelity is the point of keeping the file: only the twelve-line
     # diagnostic drops these lines.
+    assert b"WinError 10022" in log_path.read_bytes()
+
+
+async def test_the_frozen_runtime_form_of_the_teardown_block_is_filtered(
+    settings,
+) -> None:  # type: ignore[no-untyped-def]
+    """The shape that actually ships, not the one a bare interpreter prints.
+
+    A packaged worker prefixes the level tag, renders the callback with empty
+    parentheses, and omits source lines from the traceback. An anchor that
+    required the line to begin with "Exception in callback" matched the
+    reproduction and none of the real captures.
+    """
+    settings.prepare()
+    supervisor = ProcessSupervisor(settings)
+
+    record, log_path = await _captured_stderr(
+        settings,
+        supervisor,
+        b"[ERROR] Could not allocate the requested VRAM for this workflow\n"
+        + FROZEN_RUNTIME_TEARDOWN_BLOCK * 3,
+        "frozen-teardown-worker.log",
+    )
+
+    tail = supervisor._stderr_tail(record)
+    assert tail is not None
+    assert "Could not allocate the requested VRAM" in tail
+    assert "WinError 10022" not in tail
+    assert "_call_connection_lost" not in tail
     assert b"WinError 10022" in log_path.read_bytes()
 
 
