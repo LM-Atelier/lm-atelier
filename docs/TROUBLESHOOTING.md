@@ -85,6 +85,25 @@ verified** in the model library means the same thing: installed, not yet proven.
 - Model support depends on its format, runtime workflow, and available system
   memory or VRAM. Installer support alone does not certify a model.
 
+## Messages in a worker log that are not faults
+
+Worker logs record everything the engine writes, including lines that look
+alarming and are not. If you are reading a log to find out why something failed,
+you can skip these.
+
+**`OSError: [WinError 10022] An invalid argument was supplied`, under
+`Exception in callback _ProactorBasePipeTransport._call_connection_lost`.**
+Windows only. This is Python's own networking layer tidying up a connection that
+has already closed - it appears when LM Atelier finishes talking to the image
+engine, including right after a successful generation test. The connection had
+already been handled in full before the message was written, so nothing was lost
+and no request failed. LM Atelier keeps these lines in the log file but leaves
+them out of the error it shows you when a worker stops, so they cannot crowd out
+the real cause.
+
+If a request actually failed, the reason appears in the application, not only in
+the log. Look for the error shown next to the message you sent.
+
 ## What the setup checklist is telling you
 
 Setup shows one line per problem, and each line is the exact sentence below.
