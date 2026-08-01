@@ -213,6 +213,8 @@ vi.mock("./api", () => ({
     loadChatWorker: vi.fn(),
     startMediaWorker: vi.fn(),
     stopWorker: vi.fn(),
+    restartWorker: vi.fn(),
+    resetWorker: vi.fn(),
     createBackup: vi.fn(),
     verifyBackup: vi.fn(),
     restoreBackup: vi.fn(),
@@ -2525,6 +2527,45 @@ describe("App", () => {
     expect(alert).toHaveTextContent("model loader: unsupported architecture");
     expect(alert).toHaveTextContent("Log · Data folder/logs/chat-worker.log");
     expect(screen.getByLabelText("chat worker error output")).toBeInTheDocument();
+  });
+
+  it("offers cancel-and-reset when jobs block the worker controls", async () => {
+    const busyWorker = {
+      name: "chat" as const,
+      state: "ready" as const,
+      managed: true,
+      running: true,
+      pid: 321,
+      profile_id: "profile-1",
+      command: [],
+      exit_code: null,
+      estimated_memory_bytes: null,
+      current_memory_bytes: null,
+      peak_memory_bytes: null,
+      active_jobs: 1,
+      queued_jobs: 2,
+    };
+    vi.mocked(api.workers).mockResolvedValue([busyWorker]);
+    vi.mocked(api.resetWorker).mockResolvedValue({
+      worker: { ...busyWorker, state: "stopped", running: false, active_jobs: 0, queued_jobs: 0 },
+      cancelled_jobs: 3,
+    });
+    const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+    render(
+      <QueryClientProvider client={client}>
+        <App />
+      </QueryClientProvider>,
+    );
+
+    fireEvent.click(await screen.findByText("Settings"));
+    // The ordinary controls stay refused while jobs are queued...
+    expect(await screen.findByRole("button", { name: "Unload chat worker" })).toBeDisabled();
+    expect(screen.getByRole("button", { name: "Restart chat worker" })).toBeDisabled();
+    // ...but the way out is enabled rather than locked behind the same gate.
+    const reset = screen.getByRole("button", { name: "Cancel chat jobs and reset the worker" });
+    expect(reset).toBeEnabled();
+    fireEvent.click(reset);
+    await waitFor(() => expect(api.resetWorker).toHaveBeenCalledWith("chat"));
   });
 
   it("saves a raised worker startup time limit", async () => {

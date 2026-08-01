@@ -79,8 +79,9 @@ import {
   type MediaOrigin,
 } from "./messageMedia";
 import { useLiveEvents } from "./useLiveEvents";
-import { workerFailureSummary } from "./workerFailures";
+import { StatusDot } from "./StatusDot";
 import { WorkerStartupLimit } from "./WorkerStartupLimit";
+import { WorkerStatusCard } from "./WorkerStatusCard";
 import { useDraftClassification } from "./useDraftClassification";
 import { useGenerationModeSelection } from "./useGenerationModeSelection";
 import {
@@ -122,7 +123,6 @@ import type {
   Workflow,
   WorkflowBundle,
   WorkPlan,
-  WorkerStatus,
 } from "./types";
 
 type View = "chat" | "media" | "models" | "workflows" | "settings";
@@ -215,17 +215,6 @@ function AtelierMark() {
       <path className="lma-l" d="M43 20h64v300h169v60H43z" />
       <path className="lma-ma" d="M125 20l118 109L356 20v360h-58v-92h-85l46-45h39v-82L164 303h-39z" />
     </svg>
-  );
-}
-
-function StatusDot({ healthy, label }: { healthy: boolean; label?: string }) {
-  return (
-    <span
-      className={`status-dot ${healthy ? "healthy" : "offline"}`}
-      role={label ? "img" : undefined}
-      aria-label={label ? `${label}: ${healthy ? "ready" : "unavailable"}` : undefined}
-      aria-hidden={label ? undefined : true}
-    />
   );
 }
 
@@ -3011,89 +3000,6 @@ function PresetEditor({
   );
 }
 
-function WorkerStatusCard({
-  worker,
-  startPending,
-  stopPending,
-  onStart,
-  onStop,
-}: {
-  worker: WorkerStatus;
-  startPending: boolean;
-  stopPending: boolean;
-  onStart: () => void;
-  onStop: () => void;
-}) {
-  const busy = worker.active_jobs + worker.queued_jobs > 0;
-  const busyTitle = busy ? "Wait for active and queued jobs before changing this worker" : undefined;
-  const failed = worker.state === "exited";
-  return (
-    <article className="engine-card">
-      <header>
-        <div>
-          <h3>{worker.name} worker</h3>
-          <p>
-            {worker.state === "ready"
-              ? `Ready · PID ${worker.pid}`
-              : worker.state === "starting"
-                ? "Starting and checking health"
-                : failed
-                  ? `Exited · code ${worker.exit_code ?? "unknown"}`
-                  : "Stopped or externally managed"}
-          </p>
-        </div>
-        <StatusDot healthy={worker.state === "ready"} />
-      </header>
-      <div className="worker-metrics">
-        <span><strong>{worker.active_jobs}</strong> active</span>
-        <span><strong>{worker.queued_jobs}</strong> queued</span>
-        <span><strong>{formatBytes(worker.current_memory_bytes)}</strong> current RAM</span>
-        <span><strong>{formatBytes(worker.peak_memory_bytes)}</strong> measured peak</span>
-        {worker.estimated_memory_bytes != null && (
-          <span><strong>{formatBytes(worker.estimated_memory_bytes)}</strong> estimated load</span>
-        )}
-      </div>
-      {failed && (
-        <div className="worker-failure" role="alert">
-          <strong>{workerFailureSummary(worker)}</strong>
-          {worker.failure_remedy && <p className="worker-remedy">{worker.failure_remedy}</p>}
-          {worker.stderr_tail && (
-            <details>
-              <summary>What the engine reported</summary>
-              <pre aria-label={`${worker.name} worker error output`}>{worker.stderr_tail}</pre>
-            </details>
-          )}
-          {worker.log_path && <small>Log · Data folder/{worker.log_path}</small>}
-        </div>
-      )}
-      <div className="capability-list">
-        {worker.name === "media" && !worker.running && (
-          <button
-            className="secondary compact-button"
-            aria-label={`Start ${worker.name} worker`}
-            disabled={busy || startPending}
-            title={busyTitle}
-            onClick={onStart}
-          >
-            Start ComfyUI
-          </button>
-        )}
-        {worker.running && (
-          <button
-            className="secondary compact-button"
-            aria-label={`Unload ${worker.name} worker`}
-            disabled={busy || stopPending}
-            title={busyTitle}
-            onClick={onStop}
-          >
-            Unload
-          </button>
-        )}
-      </div>
-    </article>
-  );
-}
-
 function RuntimeSetupCard({
   runtime,
   installPending,
@@ -3202,6 +3108,17 @@ function SettingsView({ engines }: { engines: EngineCapabilities[] }) {
   const loadChat = useMutation({ mutationFn: api.loadChatWorker, onSettled: refreshWorkers });
   const startMedia = useMutation({ mutationFn: api.startMediaWorker, onSettled: refreshWorkers });
   const stopWorker = useMutation({ mutationFn: api.stopWorker, onSettled: refreshWorkers });
+  const restartWorker = useMutation({
+    mutationFn: (name: "chat" | "media") => api.restartWorker(name),
+    onSettled: refreshWorkers,
+  });
+  const resetWorker = useMutation({
+    mutationFn: (name: "chat" | "media") => api.resetWorker(name),
+    onSettled: () => {
+      refreshWorkers();
+      void client.invalidateQueries({ queryKey: ["jobs"] });
+    },
+  });
   const installRuntime = useMutation({
     mutationFn: (engine: RuntimeStatus["engine"]) => api.installRuntime(engine),
     onSuccess: (value: RuntimeStatus) => {
@@ -3346,13 +3263,17 @@ function SettingsView({ engines }: { engines: EngineCapabilities[] }) {
               worker={worker}
               startPending={startMedia.isPending}
               stopPending={stopWorker.isPending}
+              restartPending={restartWorker.isPending}
+              resetPending={resetWorker.isPending}
               onStart={() => startMedia.mutate()}
               onStop={() => stopWorker.mutate(worker.name)}
+              onRestart={() => restartWorker.mutate(worker.name)}
+              onReset={() => resetWorker.mutate(worker.name)}
             />
           ))}
         </div>
         <ErrorCallout
-          message={(loadChat.error || startMedia.error || stopWorker.error)?.message}
+          message={(loadChat.error || startMedia.error || stopWorker.error || restartWorker.error || resetWorker.error)?.message}
         />
       </section>
       <section>

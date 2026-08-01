@@ -1105,6 +1105,11 @@ class WorkerSettings(ApiModel):
     worker_startup_seconds: float = Field(ge=1, le=600)
 
 
+class WorkerResetResult(ApiModel):
+    worker: WorkerStatus
+    cancelled_jobs: int
+
+
 class RuntimeStatus(ApiModel):
     engine: Literal["llama.cpp", "vllm", "comfyui"]
     release: str
