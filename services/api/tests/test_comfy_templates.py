@@ -1843,6 +1843,21 @@ def test_declared_acceleration_supports_every_media_operation(operation: str) ->
     assert subgraph["nodes"][0]["widgets_values"] == [True]
 
 
+def test_operation_classification_reads_compact_variant_markers() -> None:
+    """The tokenizer split "t2v" into unusable single characters, so every Wan
+    variant classified as text-to-video and an s2v template could answer a
+    text-to-video request with a workflow that needs an audio input."""
+    from local_lm.comfy_templates import _operation_for_template
+
+    assert _operation_for_template("video_wan2_2_14B_t2v", "video") == "text_to_video"
+    assert _operation_for_template("video_wan2_2_14B_i2v", "video") == "image_to_video"
+    # Speech-to-video matches no supported operation and must not be offered.
+    assert _operation_for_template("video_wan2_2_14B_s2v", "video") is None
+    assert _operation_for_template("image_qwen_image_edit", "image") == "image_to_image"
+    assert _operation_for_template("image_sdxl_img2img", "image") == "image_to_image"
+    assert _operation_for_template("image_sdxl_base", "image") == "text_to_image"
+
+
 def test_declared_acceleration_ignores_non_media_operations() -> None:
     subgraph = _four_step_edit_graph()
     ui_graph = {"nodes": [], "definitions": {"subgraphs": [subgraph]}}

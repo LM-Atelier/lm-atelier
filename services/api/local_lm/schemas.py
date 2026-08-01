@@ -812,6 +812,10 @@ class CatalogModel(ApiModel):
     compatibility: str
     compatibility_reasons: list[str] = Field(default_factory=list)
     required_runtime: str | None = None
+    # Set only on workflow catalog cards: one repository can ship several
+    # official workflows, and the card must say which one it is.
+    workflow_template_id: str | None = None
+    operation: str | None = None
 
 
 class CatalogPage(ApiModel):
@@ -831,6 +835,9 @@ class CatalogPreflightRequest(ApiModel):
     role: Literal["chat", "image", "video"]
     engine: str = Field(min_length=1, max_length=32)
     selected_files: list[str] = Field(default_factory=list, max_length=512)
+    # The exact workflow variant the user chose from the catalog. Absent for
+    # repository-only callers, which keep the ranked fallback.
+    workflow_template_id: str | None = Field(default=None, max_length=200)
     auxiliary_kind: (
         Literal[
             "lora",
