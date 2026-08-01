@@ -62,6 +62,24 @@ def test_runtime_configuration_survives_desktop_relaunch(tmp_path: Path) -> None
     assert "TOKEN" not in payload
 
 
+def test_saved_startup_limit_reaches_settings_on_the_next_launch(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:  # type: ignore[no-untyped-def]
+    data_dir = tmp_path / "data"
+    configure_persisted_runtime(data_dir, {"LOCAL_LM_WORKER_STARTUP_SECONDS": "240"})
+
+    relaunch: dict[str, str] = {}
+    configure_persisted_runtime(data_dir, relaunch)
+    assert relaunch == {"LOCAL_LM_WORKER_STARTUP_SECONDS": "240"}
+
+    # At launch the restored environment is what Settings reads.
+    monkeypatch.setenv(
+        "LOCAL_LM_WORKER_STARTUP_SECONDS", relaunch["LOCAL_LM_WORKER_STARTUP_SECONDS"]
+    )
+    assert Settings(data_dir=data_dir).worker_startup_seconds == 240
+
+
 def test_explicit_runtime_configuration_overrides_saved_value(tmp_path: Path) -> None:
     data_dir = tmp_path / "data"
     configure_persisted_runtime(

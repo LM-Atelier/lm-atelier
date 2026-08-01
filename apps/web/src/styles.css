@@ -435,6 +435,8 @@ h1, h2, h3 { margin: 0; }
 .profile-table.interactive > div > span:nth-child(3) { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .row-actions { display: flex; justify-content: flex-end; gap: 6px; }
 .row-actions .danger { margin-right: 0; }
+.inline-field { display: flex; align-items: center; gap: 7px; color: var(--muted); font-size: 12px; white-space: nowrap; }
+.inline-field input { width: 76px; }
 .backup-list { display: grid; gap: 8px; }
 .backup-row { display: grid; grid-template-columns: minmax(0, 1fr) auto; align-items: center; gap: 12px; border: 1px solid var(--border); border-radius: 11px; background: var(--panel); padding: 11px 13px; }
 .backup-copy { min-width: 0; display: grid; gap: 3px; }
