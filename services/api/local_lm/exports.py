@@ -1630,12 +1630,11 @@ class ProjectExporter:
 
     @staticmethod
     def _validate_vision_settings(value: object) -> None:
-        if not isinstance(value, dict) or set(value) - {
-            "max_images",
-            "max_video_frames",
-            "include_prior_visual",
-            "verify_image_edits",
-        }:
+        # Unknown keys are still refused - an archive must not smuggle settings
+        # this build cannot describe - but the set of known keys is read from the
+        # model. A hand-written copy of it made every new vision setting reject
+        # archives this same build had just written.
+        if not isinstance(value, dict) or set(value) - set(VisionSettings.model_fields):
             raise ValueError("project manifest has invalid vision settings")
         try:
             VisionSettings.model_validate(value, strict=True)

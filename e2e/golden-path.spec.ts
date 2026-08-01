@@ -190,6 +190,11 @@ test("persists a streamed text and contextual image golden path", async ({
           provenance?: {
             routing?: {
               standalone_prompt?: string;
+              text_context?: string;
+            };
+            visual_prompt?: {
+              applied?: boolean;
+              original_prompt?: string;
             };
           };
         };
@@ -202,12 +207,17 @@ test("persists a streamed text and contextual image golden path", async ({
   const generationMetadata = imageAssistant?.parts.find(
     (part) => part.type === "generation_metadata",
   );
-  const contextualPrompt = generationMetadata
-    ?.metadata_json.provenance
-    ?.routing
-    ?.standalone_prompt;
-  expect(contextualPrompt).toContain("Source chat text:");
-  expect(contextualPrompt).toContain(STORY_PROMPT);
+  const provenance = generationMetadata?.metadata_json.provenance;
+  const contextualPrompt = provenance?.routing?.standalone_prompt;
+  const compiledVisualPrompt = provenance?.visual_prompt;
+  // The link to the earlier text still has to survive persistence, but it now
+  // survives as one compiled description plus the passage it was compiled from,
+  // rather than as the request with a chat excerpt pasted underneath it.
+  expect(compiledVisualPrompt?.applied).toBe(true);
+  expect(contextualPrompt).not.toContain("Source chat text:");
+  expect(provenance?.routing?.text_context).toBeTruthy();
+  expect(compiledVisualPrompt?.original_prompt).toContain("Source chat text:");
+  expect(compiledVisualPrompt?.original_prompt).toContain(STORY_PROMPT);
 
   await page.reload();
   await expectPersistedConversation(page);

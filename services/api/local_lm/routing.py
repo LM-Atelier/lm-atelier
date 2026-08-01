@@ -973,12 +973,13 @@ class ModalityRouter:
         # `_visual_source_text`: one passage, not a labelled transcript.
         source = ModalityRouter._visual_source_text(conversation or []) or referenced_text
         if source in plan.standalone_prompt:
-            return plan
+            return plan.model_copy(update={"text_context": source})
         return plan.model_copy(
             update={
+                "text_context": source,
                 "standalone_prompt": (
                     f"{plan.standalone_prompt.strip()}\n\nSource chat text:\n{source}"
-                )
+                ),
             }
         )
 
