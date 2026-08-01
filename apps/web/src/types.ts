@@ -371,6 +371,17 @@ export interface WorkerResetResult {
   cancelled_jobs: number;
 }
 
+export interface WorkerLogTail {
+  name: "chat" | "media";
+  text: string;
+  truncated: boolean;
+  log_bytes: number;
+}
+
+export interface WorkerLogLocation {
+  path: string;
+}
+
 export interface RuntimeStatus {
   engine: "llama.cpp" | "vllm" | "comfyui";
   release: string;

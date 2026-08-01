@@ -1,3 +1,7 @@
+import { useState } from "react";
+import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
+
+import { api } from "./api";
 import { StatusDot } from "./StatusDot";
 import { formatBytes } from "./format";
 import type { WorkerStatus } from "./types";
@@ -7,29 +11,41 @@ export function WorkerStatusCard({
   worker,
   startPending,
   stopPending,
-  restartPending,
-  resetPending,
   onStart,
   onStop,
-  onRestart,
-  onReset,
 }: {
   worker: WorkerStatus;
   startPending: boolean;
   stopPending: boolean;
-  restartPending: boolean;
-  resetPending: boolean;
   onStart: () => void;
   onStop: () => void;
-  onRestart: () => void;
-  onReset: () => void;
 }) {
+  const client = useQueryClient();
+  const [showLog, setShowLog] = useState(false);
+  const refresh = () => {
+    void client.invalidateQueries({ queryKey: ["workers"] });
+    void client.invalidateQueries({ queryKey: ["jobs"] });
+  };
+  const restart = useMutation({
+    mutationFn: () => api.restartWorker(worker.name),
+    onSettled: refresh,
+  });
+  const reset = useMutation({
+    mutationFn: () => api.resetWorker(worker.name),
+    onSettled: refresh,
+  });
+  const logTail = useQuery({
+    queryKey: ["worker-log-tail", worker.name],
+    queryFn: () => api.workerLogTail(worker.name),
+    enabled: showLog,
+  });
   const busy = worker.active_jobs + worker.queued_jobs > 0;
   const busyTitle = busy ? "Wait for jobs to finish, or use Cancel jobs and reset" : undefined;
   const failed = worker.state === "exited";
   // Chat restarts with the model it ran last, so the record must know one;
   // media's stopped state is covered by the Start button instead.
   const restartable = worker.name === "chat" ? Boolean(worker.profile_id) : worker.running;
+  const error = restart.error ?? reset.error;
   return (
     <article className="engine-card">
       <header>
@@ -67,6 +83,18 @@ export function WorkerStatusCard({
             </details>
           )}
           {worker.log_path && <small>Log · Data folder/{worker.log_path}</small>}
+          <button
+            className="secondary compact-button"
+            aria-label={`Show recent ${worker.name} worker log`}
+            onClick={() => setShowLog((value) => !value)}
+          >
+            {showLog ? "Hide recent log" : "Show recent log"}
+          </button>
+          {showLog && logTail.data && (
+            <pre className="worker-log-tail" aria-label={`${worker.name} worker recent log`}>
+              {logTail.data.text || "The log is empty."}
+            </pre>
+          )}
         </div>
       )}
       <div className="capability-list">
@@ -96,25 +124,30 @@ export function WorkerStatusCard({
           <button
             className="secondary compact-button"
             aria-label={`Restart ${worker.name} worker`}
-            disabled={busy || restartPending}
+            disabled={busy || restart.isPending}
             title={busyTitle}
-            onClick={onRestart}
+            onClick={() => restart.mutate()}
           >
-            {restartPending ? "Restarting…" : "Restart"}
+            {restart.isPending ? "Restarting…" : "Restart"}
           </button>
         )}
         {busy && (
           <button
             className="secondary danger compact-button"
             aria-label={`Cancel ${worker.name} jobs and reset the worker`}
-            disabled={resetPending}
+            disabled={reset.isPending}
             title="Cancels this worker's queued and running jobs, then stops it"
-            onClick={onReset}
+            onClick={() => reset.mutate()}
           >
-            {resetPending ? "Resetting…" : "Cancel jobs and reset"}
+            {reset.isPending ? "Resetting…" : "Cancel jobs and reset"}
           </button>
         )}
       </div>
+      {error && (
+        <div className="callout error" role="alert">
+          <span>{error.message}</span>
+        </div>
+      )}
     </article>
   );
 }

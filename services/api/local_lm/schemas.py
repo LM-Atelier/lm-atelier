@@ -1110,6 +1110,17 @@ class WorkerResetResult(ApiModel):
     cancelled_jobs: int
 
 
+class WorkerLogTail(ApiModel):
+    name: Literal["chat", "media"]
+    text: str
+    truncated: bool
+    log_bytes: int
+
+
+class WorkerLogLocation(ApiModel):
+    path: str
+
+
 class RuntimeStatus(ApiModel):
     engine: Literal["llama.cpp", "vllm", "comfyui"]
     release: str

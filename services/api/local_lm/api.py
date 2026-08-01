@@ -189,6 +189,8 @@ from .schemas import (
     TurnAccepted,
     TurnRequest,
     VerifiedSetup,
+    WorkerLogLocation,
+    WorkerLogTail,
     WorkerResetResult,
     WorkerSettings,
     WorkerStatus,
@@ -954,6 +956,44 @@ async def reset_worker(name: str, request: Request, session: SessionDep) -> Work
         raise HTTPException(422, str(exc)) from exc
     session.expire_all()
     return WorkerResetResult(worker=worker, cancelled_jobs=cancelled)
+
+
+WORKER_LOG_TAIL_BYTES = 64 * 1024
+
+
+@router.get("/workers/log-location", response_model=WorkerLogLocation)
+def worker_log_location(request: Request) -> WorkerLogLocation:
+    """The absolute log folder, for the user to open themselves.
+
+    Deliberately a path and not an "open folder" action: the hardened local
+    HTTP surface has no endpoint that executes anything, and this keeps it so.
+    """
+
+    return WorkerLogLocation(path=str(_services(request).settings.log_dir.resolve()))
+
+
+@router.get("/workers/{name}/log-tail", response_model=WorkerLogTail)
+def worker_log_tail(name: str, request: Request) -> WorkerLogTail:
+    # Deliberately synchronous: this reads a file, so the framework runs it in
+    # a worker thread rather than on the event loop.
+    if name not in {"chat", "media"}:
+        raise HTTPException(422, "worker must be chat or media")
+    path = _services(request).settings.log_dir / f"{name}-worker.log"
+    try:
+        size = path.stat().st_size
+        with path.open("rb") as handle:
+            if size > WORKER_LOG_TAIL_BYTES:
+                handle.seek(-WORKER_LOG_TAIL_BYTES, os.SEEK_END)
+            payload = handle.read(WORKER_LOG_TAIL_BYTES)
+    except OSError:
+        size = 0
+        payload = b""
+    return WorkerLogTail(
+        name=cast(Literal["chat", "media"], name),
+        text=payload.decode("utf-8", errors="replace"),
+        truncated=size > WORKER_LOG_TAIL_BYTES,
+        log_bytes=size,
+    )
 
 
 @router.get("/projects", response_model=list[ProjectOut])

@@ -79,8 +79,9 @@ import {
   type MediaOrigin,
 } from "./messageMedia";
 import { useLiveEvents } from "./useLiveEvents";
+import { DownloadDiagnosticsButton } from "./DownloadDiagnosticsButton";
 import { StatusDot } from "./StatusDot";
-import { WorkerStartupLimit } from "./WorkerStartupLimit";
+import { WorkerLogFolderButton, WorkerStartupLimit } from "./WorkerStartupLimit";
 import { WorkerStatusCard } from "./WorkerStatusCard";
 import { useDraftClassification } from "./useDraftClassification";
 import { useGenerationModeSelection } from "./useGenerationModeSelection";
@@ -3108,17 +3109,6 @@ function SettingsView({ engines }: { engines: EngineCapabilities[] }) {
   const loadChat = useMutation({ mutationFn: api.loadChatWorker, onSettled: refreshWorkers });
   const startMedia = useMutation({ mutationFn: api.startMediaWorker, onSettled: refreshWorkers });
   const stopWorker = useMutation({ mutationFn: api.stopWorker, onSettled: refreshWorkers });
-  const restartWorker = useMutation({
-    mutationFn: (name: "chat" | "media") => api.restartWorker(name),
-    onSettled: refreshWorkers,
-  });
-  const resetWorker = useMutation({
-    mutationFn: (name: "chat" | "media") => api.resetWorker(name),
-    onSettled: () => {
-      refreshWorkers();
-      void client.invalidateQueries({ queryKey: ["jobs"] });
-    },
-  });
   const installRuntime = useMutation({
     mutationFn: (engine: RuntimeStatus["engine"]) => api.installRuntime(engine),
     onSuccess: (value: RuntimeStatus) => {
@@ -3254,7 +3244,10 @@ function SettingsView({ engines }: { engines: EngineCapabilities[] }) {
       <section>
         <div className="detail-title">
           <div><h2>Workers</h2><p>A model must finish loading within the startup time limit. Large models on slow disks can need more than the default 60 seconds.</p></div>
-          <WorkerStartupLimit />
+          <div className="row-actions">
+            <WorkerLogFolderButton />
+            <WorkerStartupLimit />
+          </div>
         </div>
         <div className="engine-grid">
           {workers.data?.map((worker) => (
@@ -3263,23 +3256,20 @@ function SettingsView({ engines }: { engines: EngineCapabilities[] }) {
               worker={worker}
               startPending={startMedia.isPending}
               stopPending={stopWorker.isPending}
-              restartPending={restartWorker.isPending}
-              resetPending={resetWorker.isPending}
               onStart={() => startMedia.mutate()}
               onStop={() => stopWorker.mutate(worker.name)}
-              onRestart={() => restartWorker.mutate(worker.name)}
-              onReset={() => resetWorker.mutate(worker.name)}
             />
           ))}
         </div>
         <ErrorCallout
-          message={(loadChat.error || startMedia.error || stopWorker.error || restartWorker.error || resetWorker.error)?.message}
+          message={(loadChat.error || startMedia.error || stopWorker.error)?.message}
         />
       </section>
       <section>
         <div className="detail-title">
           <div><h2>Recovery backups</h2></div>
           <div className="row-actions">
+            <DownloadDiagnosticsButton />
             <button
               className="secondary"
               disabled={createBackup.isPending}
