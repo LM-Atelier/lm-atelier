@@ -19,6 +19,7 @@ import websockets
 from websockets.exceptions import WebSocketException
 
 from ..domain import Operation
+from ..network import shared_tls_context
 from ..schemas import EngineCapabilities
 from ..settings_registry import IMAGE_SETTINGS, VIDEO_SETTINGS
 from .base import GeneratedAsset, MediaEvent, MediaRequest
@@ -121,6 +122,7 @@ class ComfyUIAdapter:
             base_url=self.base_url,
             timeout=httpx.Timeout(connect=10, read=120, write=120, pool=10),
             trust_env=False,
+            verify=shared_tls_context(trust_environment=False),
         )
         self._jobs: dict[str, str] = {}
         self._cancelled: set[str] = set()

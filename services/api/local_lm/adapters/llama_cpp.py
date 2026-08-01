@@ -8,6 +8,7 @@ from typing import Any
 import httpx
 
 from ..domain import Operation
+from ..network import shared_tls_context
 from ..schemas import EngineCapabilities
 from ..settings_registry import CHAT_SETTINGS
 from .base import ChatEvent, ChatRequest, estimate_chat_tokens
@@ -61,6 +62,7 @@ class LlamaCppAdapter:
             base_url=self.base_url,
             timeout=httpx.Timeout(connect=10, read=inactivity_seconds, write=30, pool=10),
             trust_env=False,
+            verify=shared_tls_context(trust_environment=False),
         )
         self._cancelled: set[str] = set()
         self._cancel_events: dict[str, asyncio.Event] = {}

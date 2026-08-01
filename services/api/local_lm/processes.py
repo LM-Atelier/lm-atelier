@@ -24,6 +24,7 @@ from .config import Settings
 from .events import EventBroker
 from .gguf import GGUFSelectionError, automatic_mmproj_selection, validate_gguf_selection
 from .models import ModelAssetInstall, ModelInstall, ModelProfile
+from .network import shared_tls_context
 from .schemas import WorkerStatus
 from .subprocess_env import subprocess_environment
 from .worker_failures import WorkerFailure, WorkerFailureCode, classify_worker_failure
@@ -716,7 +717,10 @@ class ProcessSupervisor:
         loop = asyncio.get_running_loop()
         deadline = loop.time() + self.settings.worker_startup_seconds
         delay = WORKER_HEALTH_INITIAL_DELAY_SECONDS
-        async with httpx.AsyncClient(trust_env=False) as client:
+        async with httpx.AsyncClient(
+            trust_env=False,
+            verify=shared_tls_context(trust_environment=False),
+        ) as client:
             while loop.time() < deadline:
                 if record.process.returncode is not None:
                     raise RuntimeError(
@@ -784,7 +788,10 @@ class ProcessSupervisor:
         )
         failures = 0
         try:
-            async with httpx.AsyncClient(trust_env=False) as client:
+            async with httpx.AsyncClient(
+                trust_env=False,
+                verify=shared_tls_context(trust_environment=False),
+            ) as client:
                 while True:
                     done, _ = await asyncio.wait(
                         {process_wait},

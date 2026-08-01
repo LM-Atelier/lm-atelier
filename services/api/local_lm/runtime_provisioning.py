@@ -24,6 +24,7 @@ from uuid import uuid4
 import httpx
 
 from .config import Settings
+from .network import shared_tls_context
 from .progress import reduce_progress
 from .runtime_config import persist_runtime_values
 from .schemas import ProgressV2, RuntimeStatus
@@ -94,6 +95,7 @@ class RuntimeProvisioner:
         self._manifest = self._read_manifest(self.manifest_path)
         self._client = client or httpx.AsyncClient(
             follow_redirects=True,
+            verify=shared_tls_context(),
             timeout=httpx.Timeout(connect=30, read=120, write=30, pool=30),
         )
         self._owns_client = client is None
