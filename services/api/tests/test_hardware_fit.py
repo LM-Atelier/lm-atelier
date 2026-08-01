@@ -8,8 +8,10 @@ from local_lm.hardware_fit import (
     FitEvidence,
     FitRequirements,
     HardwareCapacity,
+    capacity_from_system_info,
     recommend_hardware_fit,
 )
+from local_lm.schemas import DeviceInfo, PlatformAssessment, SystemInfo
 
 _GIB = 1024**3
 
@@ -41,6 +43,70 @@ def _capacity(
         ),
         runtime_backends=runtime_backends,
     )
+
+
+def test_system_inventory_conversion_preserves_each_device_and_cpu_capabilities() -> None:
+    system = SystemInfo(
+        platform="Windows",
+        platform_release="11",
+        distribution="Windows",
+        distribution_version="11",
+        architecture="AMD64",
+        python_version="3.12",
+        cpu_model="Example CPU",
+        cpu_count=16,
+        memory_total_bytes=32 * _GIB,
+        memory_available_bytes=20 * _GIB,
+        disk_total_bytes=100 * _GIB,
+        disk_free_bytes=50 * _GIB,
+        ffmpeg_available=False,
+        devices=[
+            DeviceInfo(
+                id="cuda:0",
+                name="CUDA GPU",
+                kind="gpu",
+                total_memory_bytes=16 * _GIB,
+                available_memory_bytes=12 * _GIB,
+                backend="cuda",
+            ),
+            DeviceInfo(
+                id="directml:0",
+                name="DirectML GPU",
+                kind="gpu",
+                total_memory_bytes=8 * _GIB,
+                available_memory_bytes=7 * _GIB,
+                backend="directml",
+            ),
+            DeviceInfo(
+                id="cpu:0",
+                name="Example CPU",
+                kind="cpu",
+                total_memory_bytes=32 * _GIB,
+                available_memory_bytes=20 * _GIB,
+                backend="cpu",
+                details={"flags": ["AVX2", "FMA", "AVX2"]},
+            ),
+        ],
+        support=PlatformAssessment(
+            platform_status="target",
+            platform_label="Windows",
+            accelerator_status="primary",
+            accelerator_label="NVIDIA",
+            certification_status="hardware-pending",
+            chat_ready=True,
+            reference_media_ready=True,
+        ),
+    )
+
+    capacity = capacity_from_system_info(system, runtime_backends=("comfyui",))
+
+    assert capacity.cpu_model == "Example CPU"
+    assert capacity.cpu_capabilities == ("avx2", "fma")
+    assert [(item.backend, item.total_memory_bytes) for item in capacity.accelerators] == [
+        ("cuda", 16 * _GIB),
+        ("directml", 8 * _GIB),
+    ]
+    assert capacity.runtime_backends == ("comfyui",)
 
 
 def test_declared_recommended_capacity_is_recommended() -> None:

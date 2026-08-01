@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Literal
+from typing import Any, Literal
+
+from .schemas import SystemInfo
 
 FitStatus = Literal["recommended", "likely", "tight", "unsupported", "unknown"]
 FitBasis = Literal["unknown", "calculated", "declared", "measured", "tested", "certified"]
@@ -110,6 +112,39 @@ class _MemoryAssessment:
     basis: FitBasis
     reasons: tuple[FitReason, ...]
     immediate_pressure: bool
+
+
+def capacity_from_system_info(
+    system: SystemInfo,
+    *,
+    runtime_backends: tuple[str, ...] = (),
+) -> HardwareCapacity:
+    """Translate public system inventory without combining unlike accelerators."""
+
+    cpu_capabilities: list[str] = []
+    accelerators: list[AcceleratorCapacity] = []
+    for device in system.devices:
+        if device.kind.casefold() == "cpu":
+            cpu_capabilities.extend(_declared_cpu_capabilities(device.details))
+            continue
+        accelerators.append(
+            AcceleratorCapacity(
+                backend=device.backend or "unknown",
+                name=device.name,
+                total_memory_bytes=device.total_memory_bytes or 0,
+                available_memory_bytes=device.available_memory_bytes,
+            )
+        )
+    return HardwareCapacity(
+        platform=system.platform,
+        architecture=system.architecture,
+        cpu_model=system.cpu_model,
+        cpu_capabilities=tuple(dict.fromkeys(cpu_capabilities)),
+        system_memory_bytes=system.memory_total_bytes,
+        system_memory_available_bytes=system.memory_available_bytes,
+        accelerators=tuple(accelerators),
+        runtime_backends=runtime_backends,
+    )
 
 
 def recommend_hardware_fit(
@@ -421,6 +456,17 @@ def _setting_recommendations(
             )
         )
     return tuple(recommendations)
+
+
+def _declared_cpu_capabilities(details: dict[str, Any]) -> tuple[str, ...]:
+    capabilities: list[str] = []
+    for key in ("capabilities", "features", "flags"):
+        value = details.get(key)
+        if isinstance(value, str):
+            capabilities.extend(value.split())
+        elif isinstance(value, list):
+            capabilities.extend(item for item in value if isinstance(item, str))
+    return tuple(item.casefold() for item in capabilities if item.strip())
 
 
 def _matches(value: str, expected: tuple[str, ...]) -> bool:
