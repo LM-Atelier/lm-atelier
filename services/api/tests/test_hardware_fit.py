@@ -94,6 +94,15 @@ def test_system_inventory_conversion_preserves_each_device_and_cpu_capabilities(
                 backend="cpu",
                 details={"flags": ["AVX2", "FMA", "AVX2"]},
             ),
+            DeviceInfo(
+                id="llama:cpu",
+                name="llama.cpp CPU",
+                kind="accelerator",
+                total_memory_bytes=32 * _GIB,
+                available_memory_bytes=20 * _GIB,
+                backend="CPU",
+                details={"features": "AVX2"},
+            ),
         ],
         support=PlatformAssessment(
             platform_status="target",

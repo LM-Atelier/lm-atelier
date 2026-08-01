@@ -153,7 +153,7 @@ def capacity_from_system_info(
     cpu_capabilities: list[str] = []
     accelerators: list[AcceleratorCapacity] = []
     for device in system.devices:
-        if device.kind.casefold() == "cpu":
+        if device.kind.casefold() == "cpu" or (device.backend or "").casefold() == "cpu":
             cpu_capabilities.extend(_declared_cpu_capabilities(device.details))
             continue
         accelerators.append(
