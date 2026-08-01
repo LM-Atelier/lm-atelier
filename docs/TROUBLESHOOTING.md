@@ -85,6 +85,64 @@ verified** in the model library means the same thing: installed, not yet proven.
 - Model support depends on its format, runtime workflow, and available system
   memory or VRAM. Installer support alone does not certify a model.
 
+## When a worker stops, and what the message means
+
+Settings shows one sentence for a stopped worker, with advice underneath and the
+engine's own output behind "What the engine reported". Search this page for the
+sentence you were shown.
+
+### "needs more graphics memory than this computer has free"
+
+The model did not fit on the graphics card. Nothing is broken and nothing needs
+reinstalling - the model is simply larger than the card can hold.
+
+The most reliable fix is a smaller or more compressed model: for chat models a
+lower quantisation of the same model, and for image and video models a version
+published at a smaller size. Reducing image dimensions and step count lowers the
+requirement for image and video work specifically. Close other programs using the
+card - a browser with hardware acceleration and a game launcher can hold a
+surprising amount. If the model exposes a layer-offload setting, moving fewer
+layers onto the card trades speed for fitting.
+
+### "needs more system memory than this computer has free"
+
+The same problem in main memory rather than on the card. Close other programs and
+try again, or choose a smaller model. On Windows the paging file is used while a
+model loads, so increasing its size can be enough on its own.
+
+### "could not start because its port is already in use"
+
+Almost always a copy of the engine left running from an earlier session, holding
+the port the new one needs. Restarting LM Atelier clears it. If it persists,
+something else on the machine is using that port and ending that program is the
+fix.
+
+### "could not read the selected model"
+
+The file is present but the engine cannot use it: an unsupported format or
+architecture, a file built for a newer engine than the one installed, or an
+incomplete download. Reinstall the model first, since a truncated download looks
+exactly like this. If it fails again, the model is not supported by this engine
+version - choose one listed as supported.
+
+### "engine program could not be started"
+
+The runtime is missing or cannot run. Reinstall it from setup. If you set an
+engine path yourself, check that it still points at the program.
+
+### "took too long to start"
+
+Not necessarily a failure. A large model read from a slow disk can take several
+minutes the first time; a second attempt is usually much faster because the
+operating system has cached the file. If it times out repeatedly on the same
+model, that model is too large for this machine to load comfortably.
+
+### "stopped unexpectedly"
+
+LM Atelier could not tell what went wrong, so it is showing the engine's own
+output unchanged. That output is the best evidence available; the worker log has
+more of it.
+
 ## Messages in a worker log that are not faults
 
 Worker logs record everything the engine writes, including lines that look

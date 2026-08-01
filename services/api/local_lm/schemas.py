@@ -7,6 +7,7 @@ from typing import Annotated, Any, Literal
 from pydantic import BaseModel, ConfigDict, Field, StringConstraints
 
 from .domain import Operation, RoutingMode
+from .worker_failures import WorkerFailureCode
 
 
 class ApiModel(BaseModel):
@@ -1085,6 +1086,10 @@ class WorkerStatus(ApiModel):
     active_jobs: int = 0
     queued_jobs: int = 0
     failure_detail: str | None = None
+    # What kind of failure this was, and what the user can do about it. Both are
+    # derived from the same output `stderr_tail` carries; neither replaces it.
+    failure_code: WorkerFailureCode | None = None
+    failure_remedy: str | None = None
     stderr_tail: str | None = None
     log_path: str | None = None
 
