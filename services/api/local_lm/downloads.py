@@ -26,7 +26,7 @@ from sqlalchemy.orm import Session
 from .adapters.base import ChatAdapter, ChatRequest, MediaRequest
 from .auxiliary_assets import (
     COMFY_AUXILIARY_FOLDERS,
-    checkpoint_lora_extension,
+    detect_lora_extension,
     validate_lora_workflow_contract,
 )
 from .capability_evidence import ACTIVATION_ARTIFACT_KEY, record_capability_evidence
@@ -2386,7 +2386,7 @@ class DownloadManager:
             if current and isinstance(current.dependencies_json.get("model_install_ids"), list)
             else set()
         )
-        lora_extension = checkpoint_lora_extension(compiled.api_graph)
+        lora_extension = detect_lora_extension(compiled.api_graph)
         current_extensions = current.dependencies_json.get("extensions") if current else None
         current_lora_extension = (
             current_extensions.get("lora") if isinstance(current_extensions, dict) else None
@@ -2396,7 +2396,7 @@ class DownloadManager:
             and current.dependencies_json.get("template_sha256") == compiled.template.sha256
             and current.dependencies_json.get("compiler_version") == COMFY_TEMPLATE_COMPILER_VERSION
             and install.id in declared_installs
-            and (not lora_extension or current_lora_extension == lora_extension)
+            and current_lora_extension == lora_extension
         ):
             return current
         version = max((item.version for item in definition.revisions), default=0) + 1
