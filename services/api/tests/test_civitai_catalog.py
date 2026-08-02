@@ -469,3 +469,56 @@ async def test_requests_are_serialized(tmp_path: Path) -> None:
         await catalog.close()
 
     assert max_active == 1
+
+
+async def test_versions_lists_general_summaries_in_provider_order_and_caches(
+    tmp_path: Path,
+) -> None:
+    requested_paths: list[str] = []
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        requested_paths.append(request.url.path)
+        return httpx.Response(
+            200,
+            json=_item(
+                modelVersions=[
+                    _version(
+                        id=203,
+                        name="Version 3",
+                        publishedAt="2026-07-31T00:00:00Z",
+                        description="Sharper hands",
+                    ),
+                    _version(id=202, name="Mature only", nsfwLevel=5),
+                    _version(id=201, publishedAt="2026-07-30T00:00:00Z"),
+                ],
+            ),
+        )
+
+    catalog = _catalog(tmp_path, handler)
+    try:
+        summary = await catalog.versions("101")
+        again = await catalog.versions("101")
+    finally:
+        await catalog.close()
+
+    # One request: the second call answered from the fresh cache.
+    assert requested_paths == ["/api/v1/models/101"]
+    assert summary == again
+    assert summary["model_id"] == "101"
+    assert summary["model_name"] == "Safe model"
+    # The mature version is absent, not marked, and provider order holds.
+    assert [entry["version_id"] for entry in summary["versions"]] == ["203", "201"]
+    assert summary["versions"][0]["changelog"] == "Sharper hands"
+    assert summary["versions"][0]["published_at"] == "2026-07-31T00:00:00Z"
+
+
+async def test_versions_refuses_a_mature_parent_model(tmp_path: Path) -> None:
+    async def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, json=_item(nsfw=True))
+
+    catalog = _catalog(tmp_path, handler)
+    try:
+        with pytest.raises(ValueError, match="not available in the general catalog"):
+            await catalog.versions("101")
+    finally:
+        await catalog.close()

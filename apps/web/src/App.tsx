@@ -55,8 +55,6 @@ import {
   downloadJson,
   formatBytes,
   formatDate,
-  formatEta,
-  formatTransferRate,
 } from "./format";
 import {
   calibratedImageEditStrength,
@@ -91,11 +89,12 @@ import { focusMainContent, roleForMode } from "./viewHelpers";
 import { CompareButton } from "./CompareButton";
 import { FirstRunSetup, SetupWizard } from "./SetupWizard";
 import { CustomNodesPanel } from "./CustomNodesPanel";
+import { ModelUpdatesPanel } from "./ModelUpdatesPanel";
+import { RuntimeSetupCard } from "./RuntimeSetupCard";
 import { RegistryInstallsPanel } from "./RegistryInstallsPanel";
 import { WorkflowPackageReview } from "./WorkflowPackageReview";
 import { useWorkflowPackageImport } from "./useWorkflowPackageImport";
 import { JobsPanel } from "./JobsPanel";
-import { progressSampleIsFresh } from "./jobProgress";
 import { editVisionNote, workshopTranscript } from "./promptWorkshop";
 import { WorkerLogFolderButton, WorkerStartupLimit } from "./WorkerStartupLimit";
 import { WorkerStatusCard } from "./WorkerStatusCard";
@@ -2533,6 +2532,7 @@ function ModelsView({ initialRole }: { initialRole: EngineRole }) {
   return (
     <div className="page-view">
       <header className="page-header"><div><h1>Model library</h1></div><div className="storage-actions"><div className="storage-pill"><HardDrive size={17} />{storage.data?.installed_count ?? installed.data?.length ?? 0} installed · {formatBytes(storage.data?.installed_bytes)}</div><button className="secondary compact-button" onClick={() => setImportOpen(true)}><Folder size={16} />Import local</button>{Boolean(storage.data?.partial_download_count) && <button className="secondary compact-button" disabled={cleanupDownloads.isPending} onClick={() => cleanupDownloads.mutate()}>Clean {storage.data?.partial_download_count} partial</button>}</div></header>
+      <ModelUpdatesPanel onInstall={(model, selectedRole) => download.mutate({ model, selectedRole })} />
       <section className="recipe-section">
         <div className="section-heading"><div><h2>Reference recipes</h2></div></div>
         {recipes.isLoading && <div className="loading-line" />}
@@ -2886,73 +2886,6 @@ function PresetEditor({
       {error && <ErrorCallout message={error.message} />}
       <footer className="editor-actions"><button className="secondary danger" onClick={() => remove.mutate()}>Delete</button><button className="secondary" onClick={() => reset.mutate()}>Reset</button><button className="secondary" onClick={() => exportBundle.mutate()}>Export</button><button className="secondary" onClick={() => clone.mutate()}>Clone</button><button className="primary" onClick={() => save.mutate()} disabled={!name.trim() || save.isPending}>Save preset</button></footer>
     </AccessibleDialog>
-  );
-}
-
-function RuntimeSetupCard({
-  runtime,
-  installPending,
-  onInstall,
-}: {
-  runtime: RuntimeStatus;
-  installPending: boolean;
-  onInstall: (engine: RuntimeStatus["engine"]) => void;
-}) {
-  const structured = runtime.progress_json;
-  const exactProgress = structured?.indeterminate
-    ? null
-    : structured?.overall_progress ?? structured?.stage_progress ?? runtime.progress;
-  const stateLabel = runtime.state === "ready"
-    ? "Ready"
-    : runtime.state === "installing"
-      ? exactProgress === null
-        ? structured?.stage || "Working"
-        : `${Math.round(exactProgress * 100)}%`
-      : runtime.state === "unsupported"
-        ? "Manual setup required"
-        : runtime.state === "failed"
-          ? "Setup failed"
-          : "Not installed";
-  const detail = runtime.security_status === "blocked"
-    ? `${runtime.license} · ${runtime.security_message || runtime.message}`
-    : runtime.engine === "comfyui"
-      ? `${runtime.license} · downloaded separately`
-      : runtime.message;
-  const transfer = structured?.rate_bytes_per_second && progressSampleIsFresh(structured)
-    ? [
-        formatTransferRate(structured.rate_bytes_per_second),
-        typeof structured.eta_seconds === "number"
-          ? formatEta(structured.eta_seconds)
-          : null,
-      ].filter(Boolean).join(" · ")
-    : null;
-  return (
-    <article className="runtime-setup">
-      <div>
-        <strong>{runtime.engine}</strong>
-        <span>{runtime.release} · {stateLabel}</span>
-      </div>
-      {runtime.state === "installing" && (
-        <progress
-          value={exactProgress ?? undefined}
-          max={1}
-          aria-label={`${runtime.engine} setup progress`}
-        />
-      )}
-      {runtime.state !== "installing" && runtime.state !== "ready" && runtime.supported && (
-        <button
-          className="secondary compact-button"
-          disabled={installPending}
-          onClick={() => onInstall(runtime.engine)}
-        >
-          {runtime.state === "failed"
-            ? "Retry"
-            : `Install${runtime.size_bytes ? ` · ${formatBytes(runtime.size_bytes)}` : ""}`}
-        </button>
-      )}
-      <small>{detail}</small>
-      {transfer && <small>{transfer}</small>}
-    </article>
   );
 }
 

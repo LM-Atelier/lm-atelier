@@ -33,6 +33,7 @@ from .chat_deletion import (
     delete_exchange,
 )
 from .chat_forking import ForkSourceNotFound, fork_chat_from_message
+from .civitai_catalog import CivitaiCatalog
 from .comfy_registry import ComfyRegistryClient
 from .comfy_registry_activation import (
     ComfyRegistryActivationError,
@@ -102,6 +103,7 @@ from .model_planner import (
     resolve_install_plan,
     workflow_artifact_contract,
 )
+from .model_updates import installed_civitai_identities, newer_version
 from .models import (
     AppSetting,
     Artifact,
@@ -197,6 +199,7 @@ from .schemas import (
     ModelProfileOut,
     ModelProfileUpdate,
     ModelStorageInfo,
+    ModelUpdateOut,
     PlatformMatrixEntry,
     PresetBundle,
     PresetClone,
@@ -3727,6 +3730,59 @@ async def model_storage(request: Request, session: SessionDep) -> ModelStorageIn
         ),
         partial_download_count=len(partials),
     )
+
+
+@router.get("/models/updates", response_model=list[ModelUpdateOut])
+async def check_model_updates(request: Request, session: SessionDep) -> list[ModelUpdateOut]:
+    """Compare installed provider versions on demand; the request is the consent.
+
+    Nothing polls in the background - this asks the provider only when the
+    user asks, and only about models whose install manifests name an exact
+    version. A provider that cannot answer yields "unknown", never a guess.
+    """
+
+    services = _services(request)
+    identities = installed_civitai_identities(session)
+    summaries: dict[str, dict[str, Any] | None] = {}
+    if identities:
+        # Per-request construction, like the Registry preparation clients: the
+        # source registry only carries browse providers, and the disk cache
+        # makes a fresh adapter as warm as a held one.
+        source = CivitaiCatalog(services.settings, token=services.settings.civitai_token)
+        try:
+            for identity in identities:
+                if identity.model_id in summaries:
+                    continue
+                try:
+                    summaries[identity.model_id] = await source.versions(identity.model_id)
+                except Exception:  # noqa: BLE001 - one model must not hide the rest
+                    summaries[identity.model_id] = None
+        finally:
+            await source.close()
+    report: list[ModelUpdateOut] = []
+    for identity in identities:
+        summary = summaries.get(identity.model_id)
+        candidate = newer_version(identity, summary) if summary is not None else None
+        state: Literal["update_available", "current", "unknown"] = (
+            "unknown" if summary is None else "current" if candidate is None else "update_available"
+        )
+        report.append(
+            ModelUpdateOut(
+                install_id=identity.install_id,
+                name=identity.name,
+                kind=identity.kind,
+                model_id=identity.model_id,
+                installed_version_id=identity.version_id,
+                installed_version_name=identity.version_name,
+                state=state,
+                update_version_id=candidate.version_id if candidate else None,
+                update_version_name=candidate.version_name if candidate else None,
+                update_published_at=candidate.published_at if candidate else None,
+                update_base_model=candidate.base_model if candidate else None,
+                update_changelog=candidate.changelog if candidate else None,
+            )
+        )
+    return report
 
 
 @router.post("/models/import", response_model=ModelInstallOut, status_code=201)

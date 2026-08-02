@@ -257,6 +257,58 @@ class CivitaiCatalog:
             "CivitAI file inspection is unavailable before verified transfer support"
         )
 
+    async def versions(self, model_id: str) -> dict[str, Any]:
+        """General-audience versions of one model, in the provider's order.
+
+        Light summaries for staleness comparison only; installing a candidate
+        goes back through `inspect` and the full verified pipeline, so nothing
+        here needs files or compatibility. Mature and unrated versions are
+        absent, not marked - the general catalog never names what it excludes.
+        """
+        if not self.validate_item_id(model_id):
+            raise ValueError("CivitAI model id must be a positive decimal integer")
+        cache_path = self._cache_path("versions", model_id)
+        cached = self._read_detail_cache(
+            cache_path,
+            max_age_seconds=self._cache.policy.fresh_seconds,
+        )
+        if cached is not None:
+            return cached
+        try:
+            payload = await self._request_json(f"/api/v1/models/{model_id}")
+            if not self._is_general_item(payload):
+                raise ValueError("CivitAI item is not available in the general catalog")
+            summary = {
+                "model_id": str(payload.get("id") or ""),
+                "model_name": str(payload.get("name") or "") or None,
+                "versions": [
+                    {
+                        "version_id": str(version.get("id") or ""),
+                        "version_name": str(version.get("name") or "") or None,
+                        "published_at": str(version.get("publishedAt") or "") or None,
+                        "base_model": str(version.get("baseModel") or "") or None,
+                        "changelog": str(version.get("description") or "")[:4096] or None,
+                    }
+                    for version in self._versions(payload)
+                    if self._is_general_version(version)
+                ],
+            }
+            self._cache.write_text(
+                cache_path,
+                json.dumps(summary, sort_keys=True, separators=(",", ":")),
+            )
+            return summary
+        except (httpx.HTTPError, ValueError) as error:
+            if not self._is_transient_error(error):
+                raise
+            stale = self._read_detail_cache(
+                cache_path,
+                max_age_seconds=self._cache.policy.stale_seconds,
+            )
+            if stale is None:
+                raise
+            return stale
+
     async def close(self) -> None:
         await self._client.aclose()
 

@@ -855,6 +855,23 @@ export interface WorkflowPackagePreparation {
 }
 
 /** One prepared package and the two explicit decisions it is waiting for. */
+/** One installed asset's staleness verdict; "unknown" means the provider
+ * could not answer, never a guess. */
+export interface ModelUpdate {
+  install_id: string;
+  name: string;
+  kind: string;
+  model_id: string;
+  installed_version_id: string;
+  installed_version_name: string | null;
+  state: "update_available" | "current" | "unknown";
+  update_version_id: string | null;
+  update_version_name: string | null;
+  update_published_at: string | null;
+  update_base_model: string | null;
+  update_changelog: string | null;
+}
+
 export interface RegistryInstall {
   id: string;
   package_id: string;

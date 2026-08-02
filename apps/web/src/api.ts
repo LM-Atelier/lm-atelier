@@ -27,6 +27,7 @@ import type {
   ModelAssetInstall,
   ModelInstall,
   ModelStorageInfo,
+  ModelUpdate,
   ModelProfile,
   ModelProfileBundle,
   PlatformMatrixEntry,
@@ -370,6 +371,12 @@ export const api = {
     }),
   models: () => request<ModelInstall[]>("/api/models"),
   modelStorage: () => request<ModelStorageInfo>("/api/models/storage"),
+  modelUpdates: () => request<ModelUpdate[]>("/api/models/updates"),
+  catalogItemDetail: (source: string, itemId: string, role: string | null) => {
+    const parameters = new URLSearchParams({ source, id: itemId });
+    if (role) parameters.set("role", role);
+    return request<CatalogDetail>(`/api/catalog/item?${parameters}`);
+  },
   deleteModel: (id: string, deleteProfiles = false) =>
     request<void>(
       `/api/models/${id}?${new URLSearchParams({ delete_profiles: String(deleteProfiles) })}`,
