@@ -232,6 +232,7 @@ vi.mock("./api", () => ({
     download: vi.fn(),
     importModel: vi.fn(),
     workflows: vi.fn(),
+    editTemplates: vi.fn().mockResolvedValue([]),
     createWorkflow: vi.fn(),
     updateWorkflow: vi.fn(),
     createWorkflowRevision: vi.fn(),
@@ -3894,7 +3895,79 @@ describe("App", () => {
     expect(screen.queryByRole("dialog", { name: "Prompt workshop" })).not.toBeInTheDocument();
   });
 
+  it("applies a one-click edit template through the composer", async () => {
+    const stamp = "2026-07-28T00:00:00Z";
+    const chat: Chat = {
+      id: "chat-studio",
+      project_id: null,
+      title: "Studio source",
+      archived: false,
+      routing_mode: "image",
+      confirm_uncertain_media: false,
+      active_chat_profile_id: null,
+      active_image_profile_id: null,
+      active_video_profile_id: null,
+      active_head_message_id: null,
+      created_at: stamp,
+      updated_at: stamp,
+    };
+    localStorage.setItem("local-lm-chat", chat.id);
+    vi.mocked(api.chats).mockResolvedValue([chat]);
+    vi.mocked(api.chat).mockResolvedValue({ ...chat, messages: [] });
+    vi.mocked(api.upload).mockResolvedValue({
+      id: "artifact-studio-source",
+      media_type: "image/png",
+      size_bytes: 512,
+      metadata_json: {},
+      created_at: stamp,
+    } as never);
+    vi.mocked(api.editTemplates).mockResolvedValue([
+      {
+        id: "tpl-watercolor",
+        name: "Watercolor painting",
+        description: "Repaint the photo as a soft watercolor.",
+        instruction: "Transform this image into a watercolor painting. Keep the composition exactly as it is.{subject}",
+        operation: "image_to_image",
+        settings_json: { strength: 0.55 },
+        trigger_words_json: [],
+        content_rating: "general",
+        builtin: true,
+        enabled: true,
+      },
+    ]);
+    const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+    const { container } = render(
+      <QueryClientProvider client={client}>
+        <App />
+      </QueryClientProvider>,
+    );
+
+    await screen.findByRole("textbox", { name: "Message" });
+    const upload = container.querySelector<HTMLInputElement>('input[accept="image/*,video/*"]');
+    fireEvent.change(upload!, {
+      target: { files: [new File(["png"], "harbor.png", { type: "image/png" })] },
+    });
+    await waitFor(() => expect(api.upload).toHaveBeenCalled());
+    fireEvent.click(await screen.findByRole("button", { name: "Open editing studio" }));
+
+    expect(await screen.findByRole("dialog", { name: "Editing studio" })).toBeVisible();
+    await waitFor(() => expect(api.editTemplates).toHaveBeenCalled());
+    fireEvent.click(await screen.findByRole("option", { name: /Watercolor painting/ }));
+    fireEvent.change(screen.getByRole("textbox", { name: "Add detail (optional)" }), {
+      target: { value: "Focus on the harbor." },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "Use this edit" }));
+
+    // The full instruction is in the composer, visible and editable - the
+    // send stays an ordinary edit turn.
+    expect(screen.getByRole("textbox", { name: "Message" })).toHaveValue(
+      "Transform this image into a watercolor painting. Keep the composition exactly as it is. Focus on the harbor.",
+    );
+    expect(screen.queryByRole("dialog", { name: "Editing studio" })).not.toBeInTheDocument();
+  });
+
   it("grounds an image-edit improvement in the source image and says so", async () => {
+
     const stamp = "2026-07-28T00:00:00Z";
     const chat: Chat = {
       id: "chat-edit-workshop",

@@ -44,6 +44,7 @@ CHECKED_CONTRACTS = {
     "ChatDetail": "ChatDetail",
     "CredentialStatus": "CredentialStatus",
     "DraftClassification": "DraftClassification",
+    "EditTemplate": "EditTemplateOut",
     "EngineCapabilities": "EngineCapabilities",
     "ExchangeDeletion": "ExchangeDeletionOut",
     "Job": "JobOut",

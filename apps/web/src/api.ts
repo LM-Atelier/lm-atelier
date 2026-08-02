@@ -40,6 +40,7 @@ import type {
   SystemInfo,
   ToolCapabilityProbe,
   TurnAccepted,
+  EditTemplate,
   Workflow,
   WorkflowBundle,
   WorkflowPackageAnalysis,
@@ -595,6 +596,7 @@ export const api = {
   workflowOpenTarget: (id: string) => request<{ url: string; filename: string; ui_graph: Record<string, unknown> }>(`/api/workflows/${id}/open-target`),
   importWorkflow: (bundle: WorkflowBundle) =>
     request<Workflow>("/api/workflows/import", { method: "POST", body: JSON.stringify(bundle) }),
+  editTemplates: () => request<EditTemplate[]>("/api/edit-templates"),
   analyzeWorkflowPackage: (uiGraph: Record<string, unknown>) =>
     request<WorkflowPackageAnalysis>("/api/workflows/packages/analyze", {
       method: "POST",

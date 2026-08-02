@@ -785,6 +785,19 @@ class WorkflowOpenTarget(ApiModel):
     ui_graph: dict[str, Any]
 
 
+class EditTemplateOut(ApiModel):
+    id: str
+    name: str
+    description: str
+    instruction: str
+    operation: str
+    settings_json: dict[str, Any]
+    trigger_words_json: list[str]
+    content_rating: ContentRating
+    builtin: bool
+    enabled: bool
+
+
 class WorkflowPackageAnalyzeRequest(ApiModel):
     ui_graph: dict[str, Any]
 
