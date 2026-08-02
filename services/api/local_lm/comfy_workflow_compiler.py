@@ -119,16 +119,17 @@ def _nodes_by_id(workflow: Mapping[str, object]) -> dict[str, Mapping[str, objec
         identifier = _identifier(value.get("id"), "node id")
         if identifier in result:
             raise WorkflowCompilationError("duplicate_node", "workflow has a duplicate node")
-        mode = value.get("mode", 0)
-        if isinstance(mode, bool) or not isinstance(mode, int):
-            raise WorkflowCompilationError(
-                "invalid_node_mode", f"node {identifier} has invalid mode"
-            )
-        if mode != 0:
-            raise WorkflowCompilationError(
-                "unsupported_node_mode",
-                f"node {identifier} uses a frontend-only execution mode",
-            )
+        if value.get("type") not in _IGNORED_FRONTEND_NODE_TYPES:
+            mode = value.get("mode", 0)
+            if isinstance(mode, bool) or not isinstance(mode, int):
+                raise WorkflowCompilationError(
+                    "invalid_node_mode", f"node {identifier} has invalid mode"
+                )
+            if mode != 0:
+                raise WorkflowCompilationError(
+                    "unsupported_node_mode",
+                    f"node {identifier} uses a frontend-only execution mode",
+                )
         result[identifier] = value
     return result
 
