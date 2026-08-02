@@ -1027,13 +1027,18 @@ function GenerationSettingsPanel({
   const strengthField = allFields.find(
     (field) => field.key === strengthParameter && field.available,
   );
-  const fields = allFields.filter(
+  const visibleFields = allFields.filter(
     (field) =>
       field.scope !== "load"
       && visibilityRank[field.visibility] <= visibilityRank[visibility]
       && field.available
       && field.key !== strengthParameter,
   );
+  // LoRAs are a list of assets with their own strengths, not one more number
+  // among steps and guidance. They get their own section so choosing one is a
+  // deliberate act rather than scrolling past it.
+  const loraField = visibleFields.find((field) => field.key === "loras");
+  const fields = visibleFields.filter((field) => field.key !== "loras");
   const effectiveValue = (field: SettingField): unknown => {
     let value = field.default;
     for (const layer of [
@@ -1113,6 +1118,18 @@ function GenerationSettingsPanel({
         ))}
         {!engine && <p className="muted">No {role} engine is configured.</p>}
       </div>
+      {loraField && (
+        <section className="settings-section" aria-label="LoRAs">
+          <h4>LoRAs</h4>
+          <div className="settings-list">
+            <SettingControl
+              field={loraField}
+              value={effectiveValue(loraField)}
+              onChange={(value) => onValues({ ...values, [loraField.key]: value })}
+            />
+          </div>
+        </section>
+      )}
       <div className="generation-settings-actions">
         <button className="secondary" type="button" onClick={onReset}>{resetLabel}</button>
       </div>
