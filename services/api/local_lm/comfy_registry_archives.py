@@ -66,7 +66,7 @@ def stage_comfy_registry_archive(
     """Validate and extract an immutable registry archive without executing it."""
     if expected_sha256 is not None and not _ARCHIVE_HASH.fullmatch(expected_sha256):
         raise ComfyRegistryArchiveError("invalid expected archive hash")
-    if destination.exists():
+    if destination.exists() or destination.is_symlink():
         raise ComfyRegistryArchiveError("archive staging destination already exists")
     if not destination.parent.is_dir():
         raise ComfyRegistryArchiveError("archive staging parent does not exist")
@@ -80,6 +80,13 @@ def stage_comfy_registry_archive(
     try:
         with zipfile.ZipFile(io.BytesIO(payload)) as archive:
             entries = _validate_entries(archive)
+            expanded_bytes = sum(
+                entry.info.file_size for entry in entries if not entry.info.is_dir()
+            )
+            if shutil.disk_usage(destination.parent).free < expanded_bytes:
+                raise ComfyRegistryArchiveError(
+                    "insufficient disk space for Comfy Registry archive"
+                )
             report = _extract_entries(archive, entries, destination, archive_sha256)
     except ComfyRegistryArchiveError:
         shutil.rmtree(destination, ignore_errors=True)
