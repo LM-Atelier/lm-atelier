@@ -31,7 +31,11 @@ from .comfy_templates import (
     ComfyTemplateRegistry,
 )
 from .config import Settings
-from .credentials import CredentialVaultUnavailable
+from .credentials import (
+    CredentialProvider,
+    CredentialVaultUnavailable,
+    credential_provider,
+)
 from .custom_nodes import custom_node_dependency_errors
 from .db import SessionLocal, get_session
 from .domain import (
@@ -314,45 +318,67 @@ async def ready() -> dict[str, str]:
     return {"version": __version__}
 
 
-@router.get("/credentials/huggingface", response_model=CredentialStatus)
-async def huggingface_credential_status(request: Request) -> CredentialStatus:
-    state = _services(request).credentials.state()
+def _provider(value: str) -> CredentialProvider:
+    try:
+        return credential_provider(value)
+    except ValueError as exc:
+        raise HTTPException(404, str(exc)) from exc
+
+
+def _credential_status(provider: CredentialProvider, request: Request) -> CredentialStatus:
+    state = _services(request).credentials.state(provider)
     return CredentialStatus(
+        provider=provider,
         configured=state.configured,
         source=state.source,
         vault_available=state.vault_available,
     )
 
 
-@router.put("/credentials/huggingface", response_model=CredentialStatus)
-async def set_huggingface_credential(payload: CredentialSet, request: Request) -> CredentialStatus:
+def _refresh_credential_clients(
+    services: Services, provider: CredentialProvider, token: str | None
+) -> None:
+    if provider == "huggingface":
+        services.settings.hf_token = token
+        services.catalog.set_token(token)
+        services.downloads.set_token(token)
+    else:
+        services.settings.civitai_token = token
+
+
+@router.get("/credentials/{provider}", response_model=CredentialStatus)
+async def credential_status(provider: str, request: Request) -> CredentialStatus:
+    return _credential_status(_provider(provider), request)
+
+
+@router.put("/credentials/{provider}", response_model=CredentialStatus)
+async def set_credential(
+    provider: str, payload: CredentialSet, request: Request
+) -> CredentialStatus:
     services = _services(request)
+    selected = _provider(provider)
     try:
-        services.credentials.set_token(payload.token)
+        services.credentials.set_token(payload.token, selected)
     except ValueError as exc:
         raise HTTPException(409, str(exc)) from exc
     except CredentialVaultUnavailable as exc:
         raise HTTPException(503, str(exc)) from exc
-    token = services.credentials.token()
-    services.settings.hf_token = token
-    services.catalog.set_token(token)
-    services.downloads.set_token(token)
-    return await huggingface_credential_status(request)
+    _refresh_credential_clients(services, selected, services.credentials.token(selected))
+    return _credential_status(selected, request)
 
 
-@router.delete("/credentials/huggingface", response_model=CredentialStatus)
-async def delete_huggingface_credential(request: Request) -> CredentialStatus:
+@router.delete("/credentials/{provider}", response_model=CredentialStatus)
+async def delete_credential(provider: str, request: Request) -> CredentialStatus:
     services = _services(request)
+    selected = _provider(provider)
     try:
-        services.credentials.delete_token()
+        services.credentials.delete_token(selected)
     except ValueError as exc:
         raise HTTPException(409, str(exc)) from exc
     except CredentialVaultUnavailable as exc:
         raise HTTPException(503, str(exc)) from exc
-    services.settings.hf_token = None
-    services.catalog.set_token(None)
-    services.downloads.set_token(None)
-    return await huggingface_credential_status(request)
+    _refresh_credential_clients(services, selected, None)
+    return _credential_status(selected, request)
 
 
 @router.get("/system", response_model=SystemInfo)

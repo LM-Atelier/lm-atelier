@@ -1286,8 +1286,9 @@ class ProcessSupervisor:
 
     def _sanitize_diagnostic(self, value: str) -> str:
         value = _ANSI_ESCAPE.sub("", value)
-        if self.settings.hf_token:
-            value = value.replace(self.settings.hf_token, "[redacted]")
+        for token in (self.settings.hf_token, self.settings.civitai_token):
+            if token:
+                value = value.replace(token, "[redacted]")
         for private_root, replacement in (
             (str(self.settings.data_dir.expanduser().resolve()), "[data folder]"),
             (str(Path.home().resolve()), "[home]"),

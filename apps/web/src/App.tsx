@@ -48,6 +48,7 @@ import {
   X,
 } from "lucide-react";
 import { AccessibleDialog } from "./AccessibleDialog";
+import { CredentialSettingsCard } from "./CredentialSettingsCard";
 import { InstallConfirmDialog } from "./InstallConfirmDialog";
 import { api } from "./api";
 import {
@@ -3077,7 +3078,6 @@ function RuntimeSetupCard({
 
 function SettingsView({ engines }: { engines: EngineCapabilities[] }) {
   const client = useQueryClient();
-  const [hfToken, setHfToken] = useState("");
   const [selectedProfile, setSelectedProfile] = useState<ModelProfile | null>(null);
   const [selectedPreset, setSelectedPreset] = useState<GenerationPreset | null>(null);
   const [presetName, setPresetName] = useState("");
@@ -3100,18 +3100,6 @@ function SettingsView({ engines }: { engines: EngineCapabilities[] }) {
     refetchInterval: (query) => query.state.data?.some((runtime) => runtime.state === "installing") ? 2_000 : false,
   });
   const backups = useQuery({ queryKey: ["backups"], queryFn: api.backups });
-  const credential = useQuery({ queryKey: ["credential", "huggingface"], queryFn: api.credentialStatus });
-  const saveCredential = useMutation({
-    mutationFn: () => api.setHuggingFaceToken(hfToken),
-    onSuccess: (value) => {
-      setHfToken("");
-      client.setQueryData(["credential", "huggingface"], value);
-    },
-  });
-  const removeCredential = useMutation({
-    mutationFn: api.deleteHuggingFaceToken,
-    onSuccess: (value) => client.setQueryData(["credential", "huggingface"], value),
-  });
   const refreshWorkers = () => void client.invalidateQueries({ queryKey: ["workers"] });
   const loadChat = useMutation({ mutationFn: api.loadChatWorker, onSettled: refreshWorkers });
   const startMedia = useMutation({ mutationFn: api.startMediaWorker, onSettled: refreshWorkers });
@@ -3222,17 +3210,20 @@ function SettingsView({ engines }: { engines: EngineCapabilities[] }) {
   return (
     <div className="page-view settings-page">
       <header className="page-header"><div><h1>Settings</h1></div></header>
-      <section>
-        <div className="detail-title"><div><h2>Hugging Face access</h2><p>Private and gated model access is stored in your operating system credential vault. The token is never displayed after saving.</p></div><span className={`badge ${credential.data?.configured ? "tested" : ""}`}>{credential.data?.configured ? `Configured · ${credential.data.source.replace("credential_vault", "credential vault")}` : "Not configured"}</span></div>
-        <div className="preset-create">
-          <input aria-label="Hugging Face access token" type="password" autoComplete="off" placeholder="hf_…" value={hfToken} onChange={(event) => setHfToken(event.target.value)} disabled={credential.data?.source === "environment"} />
-          <button className="primary" disabled={!hfToken.trim() || saveCredential.isPending || credential.data?.source === "environment" || credential.data?.vault_available === false} onClick={() => saveCredential.mutate()}>{saveCredential.isPending ? "Saving…" : "Save token"}</button>
-          {credential.data?.configured && <button className="secondary danger" disabled={removeCredential.isPending || credential.data.source === "environment"} onClick={() => removeCredential.mutate()}>{removeCredential.isPending ? "Removing…" : "Remove"}</button>}
-        </div>
-        {credential.data?.source === "environment" && <p className="muted runtime-note">The LOCAL_LM_HF_TOKEN environment variable currently takes precedence. Unset it before managing the token here.</p>}
-        {credential.data && !credential.data.vault_available && <div className="callout error" role="alert">No supported operating-system credential vault is available. Configure one or use LOCAL_LM_HF_TOKEN for this process.</div>}
-        {(credential.error || saveCredential.error || removeCredential.error) && <ErrorCallout message={(credential.error || saveCredential.error || removeCredential.error)?.message} />}
-      </section>
+      <CredentialSettingsCard
+        provider="huggingface"
+        providerLabel="Hugging Face"
+        description="Access private and gated models. The token stays in your operating-system credential vault and is never displayed after saving."
+        environmentVariable="LOCAL_LM_HF_TOKEN"
+        placeholder="hf_..."
+      />
+      <CredentialSettingsCard
+        provider="civitai"
+        providerLabel="CivitAI"
+        description="Store a CivitAI API token securely for authenticated catalog downloads."
+        environmentVariable="LOCAL_LM_CIVITAI_TOKEN"
+        placeholder="CivitAI API token"
+      />
       <section><h2>Engines</h2><div className="engine-grid">{engines.map((engine) => <article className="engine-card" key={`${engine.engine}:${engine.roles.join()}`}><header><div className="model-icon"><Cpu /></div><div><h3>{engine.engine}</h3><p>{engine.roles.join(" · ")} · {engine.version}</p></div><StatusDot healthy={engine.healthy} label={`${engine.engine} engine`} /></header>{engine.roles.includes("chat") && <div className="capability-list"><button className="secondary compact-button" onClick={() => toolProbe.mutate()} disabled={toolProbe.isPending}>{toolProbe.isPending ? "Testing…" : "Test structured tools"}</button></div>}</article>)}</div>{toolProbe.data && <div className={`callout ${toolProbe.data.passed ? "success" : "error"}`} role={toolProbe.data.passed ? "status" : "alert"}>{toolProbe.data.passed ? `Structured tool schema passed on ${toolProbe.data.engine} ${toolProbe.data.version}.` : `Structured tool schema failed: ${toolProbe.data.error || "unknown response"}`}</div>}{toolProbe.error && <ErrorCallout message={toolProbe.error.message} />}<div className="runtime-setup-grid">{runtimes.data?.map((runtime) => <RuntimeSetupCard key={runtime.engine} runtime={runtime} installPending={installRuntime.isPending} onInstall={(engine) => installRuntime.mutate(engine)} />)}</div>{(runtimes.error || installRuntime.error) && <ErrorCallout message={(runtimes.error || installRuntime.error)?.message} />}</section>
       <section><h2>Machine</h2>{system.data && <div className="metric-grid"><div className="cpu-metric"><Cpu /><span><strong>{system.data.cpu_model}</strong><small>CPU model</small></span></div><div><HardDrive /><span><strong>{formatBytes(system.data.disk_free_bytes)}</strong> disk free</span></div></div>}<div className="device-list">{system.data?.devices.filter((device) => device.kind !== "cpu").map((device) => <div key={device.id}><span className="device-icon"><Cpu size={18} /></span><span><strong>{device.name}</strong><small>{device.backend}</small></span></div>)}</div></section>
       <section>

@@ -179,9 +179,9 @@ vi.mock("./api", () => ({
     }),
     platforms: vi.fn().mockResolvedValue([]),
     createDiagnostics: vi.fn(),
-    credentialStatus: vi.fn().mockResolvedValue({ provider: "huggingface", configured: false, source: "none", vault_available: true }),
-    setHuggingFaceToken: vi.fn(),
-    deleteHuggingFaceToken: vi.fn(),
+    credentialStatus: vi.fn((provider: "huggingface" | "civitai") => Promise.resolve({ provider, configured: false, source: "none", vault_available: true })),
+    setCredentialToken: vi.fn(),
+    deleteCredentialToken: vi.fn(),
     models: vi.fn(),
     modelAssets: vi.fn().mockResolvedValue([]),
     updateModelAsset: vi.fn(),
@@ -1893,13 +1893,13 @@ describe("App", () => {
     expect(technicalDetails).not.toContain("private chat content");
   });
 
-  it("stores a Hugging Face token without echoing it back", async () => {
-    vi.mocked(api.setHuggingFaceToken).mockResolvedValue({
-      provider: "huggingface",
+  it.each([["Hugging Face", "huggingface"], ["CivitAI", "civitai"]] as const)("stores a %s token without echoing it back", async (label, provider) => {
+    vi.mocked(api.setCredentialToken).mockImplementation(async (savedProvider) => ({
+      provider: savedProvider,
       configured: true,
       source: "credential_vault",
       vault_available: true,
-    });
+    }));
     const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
     render(
       <QueryClientProvider client={client}>
@@ -1907,15 +1907,14 @@ describe("App", () => {
       </QueryClientProvider>,
     );
     fireEvent.click(await screen.findByText("Settings"));
-    const input = await screen.findByLabelText("Hugging Face access token");
+    const input = await screen.findByLabelText(`${label} access token`);
     fireEvent.change(input, { target: { value: "temporary-token" } });
-    fireEvent.click(screen.getByText("Save token"));
-    await waitFor(() => expect(api.setHuggingFaceToken).toHaveBeenCalledWith("temporary-token"));
+    fireEvent.click(screen.getByRole("button", { name: `Save ${label} token` }));
+    await waitFor(() => expect(api.setCredentialToken).toHaveBeenCalledWith(provider, "temporary-token"));
     await waitFor(() => expect(input).toHaveValue(""));
     expect(screen.queryByDisplayValue("temporary-token")).not.toBeInTheDocument();
-    expect(await screen.findByText("Configured · credential vault")).toBeInTheDocument();
+    expect(screen.getByTestId(`credential-${provider}`)).toHaveTextContent("Configured - credential vault");
   });
-
   it("opens a model profile in the schema-driven settings editor", async () => {
     vi.mocked(api.profiles).mockResolvedValue([
       {

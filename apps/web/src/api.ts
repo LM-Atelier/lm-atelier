@@ -15,6 +15,7 @@ import type {
   ChatDetail,
   DraftClassification,
   CustomNodeInstall,
+  CredentialProvider,
   CredentialStatus,
   EngineCapabilities,
   GenerationPreset,
@@ -345,14 +346,17 @@ export const api = {
   about: () => request<ApplicationInfo>("/api/about"),
   platforms: () => request<PlatformMatrixEntry[]>("/api/platforms"),
   createDiagnostics: () => request<{ url: string }>("/api/diagnostics", { method: "POST" }),
-  credentialStatus: () => request<CredentialStatus>("/api/credentials/huggingface"),
-  setHuggingFaceToken: (token: string) =>
-    request<CredentialStatus>("/api/credentials/huggingface", {
+  credentialStatus: (provider: CredentialProvider) =>
+    request<CredentialStatus>(`/api/credentials/${encodeURIComponent(provider)}`),
+  setCredentialToken: (provider: CredentialProvider, token: string) =>
+    request<CredentialStatus>(`/api/credentials/${encodeURIComponent(provider)}`, {
       method: "PUT",
       body: JSON.stringify({ token }),
     }),
-  deleteHuggingFaceToken: () =>
-    request<CredentialStatus>("/api/credentials/huggingface", { method: "DELETE" }),
+  deleteCredentialToken: (provider: CredentialProvider) =>
+    request<CredentialStatus>(`/api/credentials/${encodeURIComponent(provider)}`, {
+      method: "DELETE",
+    }),
   models: () => request<ModelInstall[]>("/api/models"),
   modelStorage: () => request<ModelStorageInfo>("/api/models/storage"),
   deleteModel: (id: string, deleteProfiles = false) =>
