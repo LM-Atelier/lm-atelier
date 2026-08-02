@@ -45,6 +45,9 @@ _CACHE_VERSION = 5
 
 
 class HuggingFaceCatalog:
+    source_id = "huggingface"
+    display_name = "Hugging Face"
+
     def __init__(self, settings: Settings) -> None:
         headers = {"user-agent": "local-lm/0.1"}
         if settings.hf_token:
@@ -560,8 +563,12 @@ class HuggingFaceCatalog:
         return cursor
 
     @staticmethod
+    def validate_item_id(item_id: str) -> bool:
+        return bool(_REMOTE_ID.fullmatch(item_id))
+
+    @staticmethod
     def _valid_remote_id(remote_id: str) -> bool:
-        return bool(_REMOTE_ID.fullmatch(remote_id))
+        return HuggingFaceCatalog.validate_item_id(remote_id)
 
     @staticmethod
     def _filter_items(

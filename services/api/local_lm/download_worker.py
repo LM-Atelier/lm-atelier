@@ -12,6 +12,9 @@ _MAX_DOWNLOAD_FILES = 512
 
 def main() -> int:
     payload: dict[str, Any] = json.load(sys.stdin.buffer)
+    kind = str(payload.get("kind") or "huggingface")
+    if kind != "huggingface":
+        raise ValueError(f"unsupported download worker kind: {kind}")
     raw_files = payload.get("files")
     if isinstance(raw_files, list):
         files = [str(item) for item in raw_files]

@@ -6455,6 +6455,62 @@ async def test_download_pause_resume_and_cancel(client: AsyncClient, monkeypatch
     await client.post(f"/api/jobs/{failed_id}/cancel")
 
 
+async def test_catalog_registry_routes_search_and_generic_detail(
+    client: AsyncClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    async def inspect(
+        _catalog: HuggingFaceCatalog,
+        remote_id: str,
+        revision: str = "main",
+        requested_role: str | None = None,
+    ) -> dict[str, object]:
+        return {
+            "model": {
+                "remote_id": remote_id,
+                "name": "Registry model",
+                "compatibility": "likely",
+            },
+            "revision": revision,
+            "files": [],
+        }
+
+    monkeypatch.setattr(HuggingFaceCatalog, "inspect", inspect)
+
+    missing = await client.get("/api/catalog", params={"source": "missing"})
+    assert missing.status_code == 404
+    assert missing.json()["detail"] == "unknown catalog source: missing"
+
+    detail = await client.get(
+        "/api/catalog/item",
+        params={
+            "source": "huggingface",
+            "id": "owner/model",
+            "revision": "a" * 40,
+            "role": "image",
+        },
+    )
+    assert detail.status_code == 200
+    assert detail.json()["model"]["remote_id"] == "owner/model"
+    assert detail.json()["revision"] == "a" * 40
+
+
+async def test_catalog_generic_detail_rejects_invalid_item_before_inspection(
+    client: AsyncClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    async def inspect(*_args: object, **_kwargs: object) -> dict[str, object]:
+        raise AssertionError("invalid item IDs must not reach the source")
+
+    monkeypatch.setattr(HuggingFaceCatalog, "inspect", inspect)
+
+    response = await client.get(
+        "/api/catalog/item",
+        params={"source": "huggingface", "id": "not-a-repository"},
+    )
+
+    assert response.status_code == 422
+    assert response.json()["detail"] == "invalid catalog item id"
+
+
 async def test_catalog_preflight_blocks_gated_unsafe_weights(
     client: AsyncClient, settings: Settings, monkeypatch
 ) -> None:  # type: ignore[no-untyped-def]

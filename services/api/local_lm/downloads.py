@@ -2689,6 +2689,7 @@ class DownloadManager:
             self._workers[job_id] = process
             payload = json.dumps(
                 {
+                    "kind": "huggingface",
                     "repo_id": remote_id,
                     "files": filenames,
                     "revision": revision,
@@ -2884,6 +2885,7 @@ class DownloadManager:
         self._workers[job_id] = process
         payload = json.dumps(
             {
+                "kind": "huggingface",
                 "repo_id": remote_id,
                 "filename": filename,
                 "revision": revision,

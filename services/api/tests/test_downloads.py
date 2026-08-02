@@ -1025,6 +1025,7 @@ async def test_download_worker_receives_token_over_stdin_not_command_line(
     assert path == "C:/models/model.gguf"
     assert workers[0].command[-2:] == ["-m", "local_lm.download_worker"]
     assert "secret-token" not in " ".join(workers[0].command)
+    assert json.loads(workers[0].payload)["kind"] == "huggingface"
     assert json.loads(workers[0].payload)["token"] == "secret-token"
     assert environments[0]["HF_HUB_DISABLE_PROGRESS_BARS"] == "1"
     assert "LOCAL_LM_HF_TOKEN" not in environments[0]
@@ -1059,6 +1060,7 @@ async def test_planned_components_use_one_bounded_parallel_worker(
     )
 
     payload = json.loads(workers[0].payload)
+    assert payload["kind"] == "huggingface"
     assert payload["files"] == ["model.gguf", "mmproj.gguf"]
     assert payload["max_workers"] == 2
     assert paths == {

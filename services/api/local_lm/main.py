@@ -24,6 +24,7 @@ from .api import recover_model_delete_quarantines, router
 from .artifacts import ArtifactStore
 from .backups import BackupManager
 from .catalog import HuggingFaceCatalog
+from .catalog_sources import CatalogSources
 from .config import Settings, get_settings
 from .credentials import CredentialStore
 from .custom_nodes import CustomNodeManager
@@ -188,7 +189,7 @@ class Services:
     events: EventBroker
     artifacts: ArtifactStore
     engines: EngineRegistry
-    catalog: HuggingFaceCatalog
+    catalog_sources: CatalogSources
     downloads: DownloadManager
     scheduler: ResourceScheduler
     orchestrator: ConversationOrchestrator
@@ -199,6 +200,13 @@ class Services:
     diagnostics: DiagnosticBundleBuilder
     custom_nodes: CustomNodeManager
     credentials: CredentialStore
+
+    @property
+    def catalog(self) -> HuggingFaceCatalog:
+        source = self.catalog_sources.get("huggingface")
+        if not isinstance(source, HuggingFaceCatalog):
+            raise RuntimeError("the default Hugging Face catalog source is unavailable")
+        return source
 
 
 def build_services(settings: Settings) -> Services:
@@ -217,13 +225,14 @@ def build_services(settings: Settings) -> Services:
     scheduler = ResourceScheduler(events)
     processes = ProcessSupervisor(settings, runtimes, events)
     orchestrator = ConversationOrchestrator(engines, artifacts, events, scheduler, processes)
+    catalog = HuggingFaceCatalog(settings)
     services = Services(
         settings=settings,
         security=SessionSecurity(settings),
         events=events,
         artifacts=artifacts,
         engines=engines,
-        catalog=HuggingFaceCatalog(settings),
+        catalog_sources=CatalogSources([catalog]),
         downloads=DownloadManager(
             settings,
             events,
@@ -331,7 +340,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 await services.downloads.close()
                 await services.orchestrator.close()
                 await services.runtimes.close()
-                await services.catalog.close()
+                await services.catalog_sources.close()
                 await services.engines.close()
                 await services.processes.close()
 
