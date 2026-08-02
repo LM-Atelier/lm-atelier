@@ -70,9 +70,11 @@ import {
   artifactSource,
   mediaOriginForPart,
   mediaOriginLabel,
+  editLineageForResult,
   editSourceUrlForResult,
   messagePartsForTranscript,
   priorVisibleMediaByMessage,
+  type EditLineageStep,
   type MediaOrigin,
 } from "./messageMedia";
 import { useLiveEvents } from "./useLiveEvents";
@@ -86,7 +88,7 @@ import { MessageTimestamp } from "./MessageTimestamp";
 import { PendingResponseStatus } from "./PendingResponseStatus";
 import { MarkdownText } from "./MarkdownText";
 import { focusMainContent, roleForMode } from "./viewHelpers";
-import { CompareButton } from "./CompareButton";
+import { ArtifactPart } from "./ArtifactPart";
 import { FirstRunSetup, SetupWizard } from "./SetupWizard";
 import { CustomNodesPanel } from "./CustomNodesPanel";
 import { MediaLibraryView } from "./MediaLibraryView";
@@ -204,71 +206,6 @@ function formatTechnicalDetails(
   ].join("\n");
 }
 
-function ArtifactPart({
-  part,
-  origin,
-  onEditImage,
-  onAnimateImage,
-  onReferenceMedia,
-  compareSourceUrl,
-}: {
-  part: MessagePart;
-  origin: MediaOrigin | null;
-  onEditImage?: (part: MessagePart, origin: MediaOrigin) => void;
-  onAnimateImage?: (part: MessagePart, origin: MediaOrigin) => void;
-  onReferenceMedia?: (part: MessagePart, origin: MediaOrigin) => void;
-  compareSourceUrl?: string | null;
-}) {
-  const proxyId = typeof part.metadata_json.browser_proxy_artifact_id === "string" ? part.metadata_json.browser_proxy_artifact_id : null;
-  const posterId = typeof part.metadata_json.poster_artifact_id === "string"
-    ? part.metadata_json.poster_artifact_id
-    : null;
-  const source = artifactSource(proxyId ?? part.artifact_id);
-  const poster = artifactSource(posterId) ?? undefined;
-  if (!part.artifact_id) return null;
-  const preview = Boolean(part.metadata_json.preview);
-  const inputReference = part.metadata_json.input_reference === true;
-  if (!source) {
-    return <div className="submission-progress"><LoaderCircle size={16} />Loading media</div>;
-  }
-  if (part.type === "attachment") {
-    const name = part.artifact?.original_name || "Attachment";
-    return <a className="message-attachment" href={source} download><Paperclip size={14} />{name}</a>;
-  }
-  const kind = part.type === "video" ? "video" : "image";
-  const label = preview ? "Generation preview" : mediaOriginLabel(
-    origin,
-    kind,
-  );
-  const callbackOrigin = origin ?? (inputReference ? "uploaded" : "generated");
-  if (part.type === "image") {
-    return (
-      <figure className={`media-card ${preview ? "preview" : ""}`}>
-        <img src={source} alt={label} loading="lazy" />
-        <figcaption>
-          <ImageIcon size={14} /> {label}
-          {!preview && onEditImage && <button type="button" onClick={() => onEditImage(part, callbackOrigin)}>Edit</button>}
-          {!preview && onAnimateImage && <button type="button" onClick={() => onAnimateImage(part, callbackOrigin)}>Animate</button>}
-          {!preview && onReferenceMedia && <button type="button" onClick={() => onReferenceMedia(part, callbackOrigin)}>Reference</button>}
-          {!preview && compareSourceUrl && source && <CompareButton before={compareSourceUrl} after={source} />}
-          {!preview && <a href={source} download>Download</a>}
-        </figcaption>
-      </figure>
-    );
-  }
-  return (
-    <figure className="media-card">
-      {/* Generated media has no caption track to point at, and an empty one would claim an affordance that is not there. */}
-      {/* eslint-disable-next-line jsx-a11y-x/media-has-caption */}
-      <video src={source} poster={poster} controls preload="metadata" aria-label={label} />
-      <figcaption>
-        <Film size={14} /> {label}
-        <a href={source} download>Download</a>
-      </figcaption>
-    </figure>
-  );
-}
-
 /** The library's Edit action: attach the image in the chat composer, switch
  * to image mode, and open the studio. */
 function libraryEditTarget(artifact: ArtifactLibraryItem): VisualTarget {
@@ -295,6 +232,7 @@ function PartView({
   onAnimateImage,
   onReferenceMedia,
   compareSourceUrl,
+  lineage,
 }: {
   part: MessagePart;
   liveText?: string;
@@ -304,13 +242,14 @@ function PartView({
   onAnimateImage?: (part: MessagePart, origin: MediaOrigin) => void;
   onReferenceMedia?: (part: MessagePart, origin: MediaOrigin) => void;
   compareSourceUrl?: string | null;
+  lineage?: EditLineageStep[];
 }) {
   if (part.type === "text") {
     const text = liveText || part.text || "";
     return markdown ? <MarkdownText text={text} /> : <div className="message-text">{text}</div>;
   }
   if (part.type === "image" || part.type === "video" || part.type === "attachment") {
-    return <ArtifactPart part={part} origin={origin} onEditImage={onEditImage} onAnimateImage={onAnimateImage} onReferenceMedia={onReferenceMedia} compareSourceUrl={compareSourceUrl} />;
+    return <ArtifactPart part={part} origin={origin} onEditImage={onEditImage} onAnimateImage={onAnimateImage} onReferenceMedia={onReferenceMedia} compareSourceUrl={compareSourceUrl} lineage={lineage} />;
   }
   if (part.type === "progress") {
     const progress = Number(part.metadata_json.progress ?? 0);
@@ -349,6 +288,7 @@ function MessageBubble({
   onDeleteExchange,
   onForkThread,
   compareSourceUrl,
+  lineage,
 }: {
   message: Message;
   liveText?: string;
@@ -364,6 +304,7 @@ function MessageBubble({
   onDeleteExchange?: (messageId: string) => void;
   onForkThread?: (messageId: string) => void;
   compareSourceUrl?: string | null;
+  lineage?: EditLineageStep[];
 }) {
   const visibleParts = messagePartsForTranscript(message, hiddenInputArtifactIds);
   const userText = visibleParts.filter((part) => part.type === "text").map((part) => part.text || "").join("\n");
@@ -446,7 +387,7 @@ function MessageBubble({
     <article className={`message ${message.role}`}>
       <div className="avatar">{message.role === "user" ? "You" : <Bot size={19} />}</div>
       <div className="message-content">
-        {editing ? <div className="message-edit"><textarea aria-label="Edit message" rows={4} value={draft} onChange={(event) => setDraft(event.target.value)} /><div><button onClick={() => { setDraft(userText); setEditing(false); }}>Cancel</button><button className="primary" disabled={!draft.trim()} onClick={() => { onEdit?.(message.id, draft.trim()); setEditing(false); }}>Send edited message</button></div></div> : renderedParts.map((part) => <PartView key={part.id} part={part} liveText={liveText} markdown={message.role === "assistant"} origin={mediaOriginForPart(part, operation, message.role === "assistant" ? "generated" : null)} onEditImage={onEditImage} onAnimateImage={onAnimateImage} onReferenceMedia={onReferenceMedia} compareSourceUrl={message.role === "assistant" ? compareSourceUrl : undefined} />)}
+        {editing ? <div className="message-edit"><textarea aria-label="Edit message" rows={4} value={draft} onChange={(event) => setDraft(event.target.value)} /><div><button onClick={() => { setDraft(userText); setEditing(false); }}>Cancel</button><button className="primary" disabled={!draft.trim()} onClick={() => { onEdit?.(message.id, draft.trim()); setEditing(false); }}>Send edited message</button></div></div> : renderedParts.map((part) => <PartView key={part.id} part={part} liveText={liveText} markdown={message.role === "assistant"} origin={mediaOriginForPart(part, operation, message.role === "assistant" ? "generated" : null)} onEditImage={onEditImage} onAnimateImage={onAnimateImage} onReferenceMedia={onReferenceMedia} compareSourceUrl={message.role === "assistant" ? compareSourceUrl : undefined} lineage={message.role === "assistant" ? lineage : undefined} />)}
         {liveText && !visibleParts.some((part) => part.type === "text") && (
           <MarkdownText text={liveText} />
         )}
@@ -1904,6 +1845,7 @@ function ChatView({
           const compareSourceUrl = message.role === "assistant"
             ? editSourceUrlForResult(messages, messageIndex)
             : null;
+          const lineage = compareSourceUrl ? editLineageForResult(messages, messageIndex) : undefined;
           const isPrimaryOutput = messagePlan?.summary_json.assistant_message_id === message.id;
           return (
             <Fragment key={message.id}>
@@ -1918,6 +1860,7 @@ function ChatView({
                 message={message}
                 liveText={liveText[message.id]}
                 compareSourceUrl={compareSourceUrl}
+                lineage={lineage}
                 hiddenInputArtifactIds={priorVisibleMedia.get(message.id)}
                 onRegenerate={busy ? undefined : (messageId) => onRegenerate(
                   messageId,
