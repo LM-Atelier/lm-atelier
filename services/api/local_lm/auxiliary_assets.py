@@ -407,6 +407,35 @@ def resolve_lora_stack(
     return ResolvedLoraStack(settings, provenance, _graph_hash(transformed))
 
 
+def trigger_words_to_apply(provenance: list[dict[str, Any]], prompt: str) -> list[str]:
+    """Trigger words the prompt still needs, from enabled stack items.
+
+    A word the prompt already carries, in any casing, is not repeated - the
+    model hearing it twice helps nothing and the transcript reads doubled.
+    Order follows the stack so provenance and prompt agree.
+    """
+
+    lowered = prompt.casefold()
+    applied: list[str] = []
+    seen: set[str] = set()
+    for item in provenance:
+        if not item.get("enabled"):
+            continue
+        words = item.get("trigger_words")
+        if not isinstance(words, list):
+            continue
+        for word in words:
+            if not isinstance(word, str):
+                continue
+            cleaned = word.strip()
+            key = cleaned.casefold()
+            if not cleaned or key in lowered or key in seen:
+                continue
+            seen.add(key)
+            applied.append(cleaned)
+    return applied
+
+
 def transform_lora_graph(
     graph: dict[str, Any],
     extension: dict[str, Any],

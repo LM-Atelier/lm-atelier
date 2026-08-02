@@ -12,6 +12,7 @@ from local_lm.auxiliary_assets import (
     resolve_lora_stack,
     select_automatic_lora_stack,
     transform_lora_graph,
+    trigger_words_to_apply,
     validate_lora_workflow_contract,
 )
 from local_lm.db import SessionLocal
@@ -370,3 +371,20 @@ def test_model_only_lora_extension_fails_closed_for_multiple_model_paths() -> No
     dependencies = {"extensions": {"lora": {"mode": "model_only", "model": ["base", 0]}}}
     with pytest.raises(ValueError, match="every supported sampler"):
         validate_lora_workflow_contract(graph, schema, dependencies)
+
+
+def test_trigger_words_apply_once_and_never_repeat_the_prompt() -> None:
+    provenance = [
+        {"enabled": True, "trigger_words": ["m1ssi0nary", "soft light"]},
+        {"enabled": True, "trigger_words": ["Soft Light", "film grain"]},
+        {"enabled": False, "trigger_words": ["disabled-word"]},
+        {"enabled": True},
+    ]
+
+    applied = trigger_words_to_apply(provenance, "A portrait in soft light by a window")
+
+    # Deduplicated across items, case-insensitive against the prompt, and
+    # words from disabled items never leak in.
+    assert applied == ["m1ssi0nary", "film grain"]
+    assert trigger_words_to_apply(provenance, "m1ssi0nary shot on film grain in Soft Light") == []
+    assert trigger_words_to_apply([], "anything") == []
