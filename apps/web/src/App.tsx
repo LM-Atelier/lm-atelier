@@ -92,6 +92,7 @@ import { ArtifactPart } from "./ArtifactPart";
 import { FirstRunSetup, SetupWizard } from "./SetupWizard";
 import { CustomNodesPanel } from "./CustomNodesPanel";
 import { MediaLibraryView } from "./MediaLibraryView";
+import { MediaOutputPlan } from "./MediaOutputPlan";
 import { ModelUpdatesPanel } from "./ModelUpdatesPanel";
 import { RuntimeSetupCard } from "./RuntimeSetupCard";
 import { RegistryInstallsPanel } from "./RegistryInstallsPanel";
@@ -157,6 +158,9 @@ type VisualTarget = {
   // Open the editing studio once the image is attached - the library's Edit
   // entry point, where no instruction has been drafted yet.
   studio?: boolean;
+  // Companions from a library multi-select; the studio's "Apply to each"
+  // path then runs one turn per image.
+  extraAttachments?: ComposerAttachment[];
 };
 type SendTurnVariables = PendingTurn & {
   chatId: string;
@@ -206,20 +210,23 @@ function formatTechnicalDetails(
   ].join("\n");
 }
 
-/** The library's Edit action: attach the image in the chat composer, switch
- * to image mode, and open the studio. */
-function libraryEditTarget(artifact: ArtifactLibraryItem): VisualTarget {
+/** The library's Edit action: attach the selection in the chat composer,
+ * switch to image mode, and open the studio. */
+function libraryEditTarget(artifacts: ArtifactLibraryItem[]): VisualTarget | null {
+  const [first, ...rest] = artifacts.map((artifact): ComposerAttachment => ({
+    id: artifact.id,
+    kind: "image",
+    artifact,
+    // Stored uploads keep their filename; generated media has none.
+    origin: artifact.original_name ? "uploaded" : "generated",
+  }));
+  if (!first) return null;
   return {
-    attachment: {
-      id: artifact.id,
-      kind: "image",
-      artifact,
-      // Stored uploads keep their filename; generated media has none.
-      origin: artifact.original_name ? "uploaded" : "generated",
-    },
+    attachment: first,
     mode: "image",
     requestId: Date.now(),
     studio: true,
+    extraAttachments: rest,
   };
 }
 
@@ -1279,11 +1286,11 @@ function Composer({
   useEffect(() => {
     if (!visualTarget || consumedVisualRequest.current === visualTarget.requestId) return;
     consumedVisualRequest.current = visualTarget.requestId;
-    setAttachments((current) => (
-      current.some((item) => item.id === visualTarget.attachment.id)
-        ? current
-        : [...current, visualTarget.attachment]
-    ));
+    setAttachments((current) => {
+      const additions = [visualTarget.attachment, ...(visualTarget.extraAttachments ?? [])]
+        .filter((addition) => !current.some((item) => item.id === addition.id));
+      return additions.length ? [...current, ...additions] : current;
+    });
     if (visualTarget.mode) changeMode(visualTarget.mode);
     if (visualTarget.mode === "video") {
       window.setTimeout(() => {
@@ -1626,73 +1633,6 @@ function workflowSchemaForTurn(
   const workflow = workflows.find((item) => item.operation === operation);
   return workflow?.revisions.find((item) => item.id === workflow.current_revision_id)
     ?.input_schema_json;
-}
-
-function MediaOutputPlan({
-  plan,
-  onCancelStep,
-  onRetryStep,
-}: {
-  plan: WorkPlan;
-  onCancelStep: (stepId: string) => void;
-  onRetryStep: (stepId: string) => void;
-}) {
-  const steps = [...plan.steps].sort((left, right) => left.ordinal - right.ordinal);
-  const ordered = plan.planner_version === "ordered-work-v1";
-  const counts = steps.reduce<Record<string, number>>((current, step) => {
-    current[step.status] = (current[step.status] ?? 0) + 1;
-    return current;
-  }, {});
-  const summary = Object.entries(counts)
-    .map(([status, count]) => `${count} ${status.replace("_", " ")}`)
-    .join(" · ");
-  return (
-    <details className="media-output-plan">
-      <summary>
-        <span>{ordered ? `${steps.length}-step plan` : `${steps.length} media outputs`}</span>
-        <small>{summary}</small>
-      </summary>
-      <ol>
-        {steps.map((step) => {
-          const cancellable = ["queued", "running", "paused", "blocked"].includes(step.status);
-          const retryable = ["failed", "cancelled", "interrupted"].includes(step.status);
-          const outputType = step.output_contract_json[0]?.type;
-          const typeLabel = typeof outputType === "string"
-            ? outputType[0].toUpperCase() + outputType.slice(1)
-            : "Work";
-          return (
-            <li key={step.id}>
-              <span>
-                <strong>
-                  {ordered ? `Step ${step.ordinal} · ${typeLabel}` : `Output ${step.ordinal}`}
-                </strong>
-                <small>{step.status.replace("_", " ")}</small>
-                {step.error && <small className="error-text">{step.error}</small>}
-              </span>
-              {cancellable && (
-                <button
-                  className="secondary compact-button"
-                  aria-label={`Cancel output ${step.ordinal}`}
-                  onClick={() => onCancelStep(step.id)}
-                >
-                  Cancel
-                </button>
-              )}
-              {retryable && (
-                <button
-                  className="secondary compact-button"
-                  aria-label={`Retry output ${step.ordinal}`}
-                  onClick={() => onRetryStep(step.id)}
-                >
-                  Retry
-                </button>
-              )}
-            </li>
-          );
-        })}
-      </ol>
-    </details>
-  );
 }
 
 function ChatView({
@@ -3642,8 +3582,10 @@ export default function App() {
     },
   });
 
-  const openLibraryEdit = useCallback((artifact: ArtifactLibraryItem) => {
-    setLibraryEdit(libraryEditTarget(artifact));
+  const openLibraryEdit = useCallback((artifacts: ArtifactLibraryItem[]) => {
+    const target = libraryEditTarget(artifacts);
+    if (!target) return;
+    setLibraryEdit(target);
     if (!activeChatId) createChat.mutate(null);
     setView("chat");
     focusMainContent();
@@ -3652,7 +3594,7 @@ export default function App() {
   const allChats = useMemo(() => chats.data ?? [], [chats.data]);
   const allProjects = useMemo(() => projects.data ?? [], [projects.data]);
   const activeContent = useMemo(() => {
-    if (view === "media") return <MediaLibraryView onEditImage={openLibraryEdit} />;
+    if (view === "media") return <MediaLibraryView onEditImages={openLibraryEdit} />;
     if (view === "models") return <ModelsView key={modelLibraryRole} initialRole={modelLibraryRole} />;
     if (view === "workflows") return <WorkflowsView />;
     if (view === "settings") return <SettingsView engines={engines.data ?? []} />;

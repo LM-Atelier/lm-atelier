@@ -120,6 +120,8 @@ Windows, or PowerShell 7 on Linux. Install the pinned Chromium build once with
 ## Documentation
 
 - [Getting started](docs/GETTING-STARTED.md)
+- [Editing studio](docs/EDITING-STUDIO.md)
+- [Workflow packages](docs/WORKFLOW-PACKAGES.md)
 - [Architecture](docs/ARCHITECTURE.md)
 - [Runtime adapters](docs/ADAPTERS.md)
 - [Privacy and local data](docs/PRIVACY.md)
