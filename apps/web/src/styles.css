@@ -79,6 +79,10 @@ button:focus-visible, a:focus-visible, input:focus-visible, textarea:focus-visib
 .sidebar-chat-row { display: grid; grid-template-columns: minmax(0, 1fr) auto; align-items: center; }
 .chat-main { width: 100%; display: flex; align-items: center; gap: 8px; border: 0; background: transparent; color: #8f98a7; padding: 7px 6px 7px 10px; border-radius: 8px; cursor: pointer; min-width: 0; text-align: left; }
 .chat-main span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+/* Flex items shrink by default, so a long title squeezed these icons and the
+   row-to-row size varied. The text truncates instead; the icon never does. */
+.chat-main > svg, .project-main > svg, .primary-nav button > svg,
+.sidebar-footer > button > svg { flex: 0 0 auto; }
 .chat-main small { margin-left: auto; color: var(--atelier-soft); font-size: 8px; text-transform: uppercase; }
 .chat-main:hover, .chat-main.active { background: var(--panel-2); color: #eef0f5; }
 .sidebar-chat-row > .inline-add { opacity: 0; }.sidebar-chat-row:hover > .inline-add, .sidebar-chat-row:focus-within > .inline-add { opacity: 1; }
