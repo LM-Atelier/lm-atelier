@@ -88,6 +88,7 @@ import { EmptyState } from "./EmptyState";
 import { AtelierMark } from "./AtelierMark";
 import { EditingStudio } from "./EditingStudio";
 import { MessageTimestamp } from "./MessageTimestamp";
+import { PendingResponseStatus } from "./PendingResponseStatus";
 import { CompareButton } from "./CompareButton";
 import { FirstRunSetup, SetupWizard } from "./SetupWizard";
 import { WorkflowPackageReview } from "./WorkflowPackageReview";
@@ -392,25 +393,6 @@ function MarkdownText({ text }: { text: string }) {
   );
 }
 
-function PendingResponseStatus({ label, startedAt }: { label: string; startedAt: string }) {
-  const [seconds, setSeconds] = useState(
-    () => Math.max(0, Math.floor((Date.now() - Date.parse(startedAt)) / 1_000)),
-  );
-  useEffect(() => {
-    const timer = window.setInterval(
-      () => setSeconds(Math.max(0, Math.floor((Date.now() - Date.parse(startedAt)) / 1_000))),
-      1_000,
-    );
-    return () => window.clearInterval(timer);
-  }, [startedAt]);
-  return (
-    <div className="submission-progress pending-response" role="status">
-      <LoaderCircle size={17} />
-      <span>{label}<small aria-hidden="true"> · {seconds}s</small></span>
-    </div>
-  );
-}
-
 function PartView({
   part,
   liveText,
@@ -542,6 +524,11 @@ function MessageBubble({
       ? item.matched_terms.filter((term): term is string => typeof term === "string")
       : []
   )))).slice(0, 3);
+  const appliedTriggerWords = Array.isArray(auxiliaryAssets?.trigger_words_applied)
+    ? auxiliaryAssets.trigger_words_applied.filter(
+        (word): word is string => typeof word === "string" && Boolean(word),
+      )
+    : [];
   const usage = context?.usage as Record<string, unknown> | undefined;
   const inputTokens = Number(usage?.prompt_tokens ?? context?.input_tokens ?? 0);
   const contextLimit = Number(context?.context_limit ?? 0);
@@ -585,6 +572,7 @@ function MessageBubble({
                 {automaticLoraTerms.length > 0 ? ` — matched ${automaticLoraTerms.join(", ")}` : ""}
               </span>
             )}
+            {appliedTriggerWords.length > 0 && <span>Added trigger words: {appliedTriggerWords.join(", ")}</span>}
             {contextLimit > 0 && (
               <span>
                 Context {inputTokens.toLocaleString()} / {contextLimit.toLocaleString()} tokens
