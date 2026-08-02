@@ -1004,15 +1004,9 @@ class ConversationOrchestrator:
             if media_plan_estimate["estimated_bytes"] > available_bytes:
                 raise ValueError("There is not enough free storage to queue this media request.")
             media_plan_estimate["available_bytes_at_admission"] = available_bytes
-            plan.parameter_overrides = {
-                **plan.parameter_overrides,
-                "_media_plan_estimate": media_plan_estimate,
-            }
+            plan.media_plan_estimate = media_plan_estimate
         if generation_estimate:
-            plan.parameter_overrides = {
-                **plan.parameter_overrides,
-                "_generation_estimate": generation_estimate,
-            }
+            plan.generation_estimate = generation_estimate
         if (
             mode == RoutingMode.AUTO
             and chat.confirm_uncertain_media
