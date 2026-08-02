@@ -16,6 +16,7 @@ dependencies = [
   "huggingface-hub>=1.24.0,<2",
   "httpx>=0.28,<1",
   "keyring>=25,<26",
+  "packaging>=26,<27",
   "pydantic-settings>=2.10,<3",
   "pillow>=12.3,<13",
   "python-multipart>=0.0.20,<1",
