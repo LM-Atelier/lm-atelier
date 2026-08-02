@@ -635,3 +635,10 @@ h1, h2, h3 { margin: 0; }
 .studio-subject input { border: 1px solid var(--border); border-radius: 8px; background: var(--panel); color: #e8ebef; padding: 8px 10px; }
 .editing-studio footer { display: flex; justify-content: flex-end; gap: 8px; }
 .setup-total { color: var(--muted); margin: -6px 0 12px; }
+.compare-dialog { width: min(760px, 96vw); }
+.compare-stage { position: relative; overflow: hidden; border-radius: 11px; border: 1px solid var(--border); }
+.compare-stage img { display: block; width: 100%; max-height: 60vh; object-fit: contain; background: #0d0c0a; }
+.compare-stage img + img { position: absolute; inset: 0; height: 100%; }
+.compare-divider { position: absolute; top: 0; bottom: 0; width: 2px; background: #d9a05b; }
+.compare-slider { display: grid; gap: 5px; margin: 12px 0; }
+.compare-legend { color: var(--muted); display: flex; align-items: center; gap: 6px; }
