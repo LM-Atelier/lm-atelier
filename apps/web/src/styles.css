@@ -378,6 +378,7 @@ h1, h2, h3 { margin: 0; }
 .prompt-helper-conversation .media-card { max-width: 520px; }
 .prompt-helper-conversation .message-meta { display: none; }
 .prompt-helper-adopt { justify-self: start; }
+.prompt-helper-vision-note { color: var(--muted); }
 .prompt-helper-compose { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 9px; align-items: end; }
 .prompt-helper-compose textarea { resize: vertical; font: inherit; }
 .prompt-helper-compose button { min-height: 38px; }
