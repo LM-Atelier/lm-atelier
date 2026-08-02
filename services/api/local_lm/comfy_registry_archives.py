@@ -1,0 +1,253 @@
+from __future__ import annotations
+
+import hashlib
+import io
+import re
+import shutil
+import stat
+import unicodedata
+import zipfile
+from dataclasses import dataclass
+from pathlib import Path, PurePosixPath
+
+MAX_ARCHIVE_BYTES = 64 * 1024 * 1024
+MAX_ARCHIVE_ENTRIES = 4_096
+MAX_ARCHIVE_EXPANDED_BYTES = 256 * 1024 * 1024
+MAX_ARCHIVE_FILE_BYTES = 64 * 1024 * 1024
+MAX_ARCHIVE_PATH_CHARACTERS = 1_024
+MAX_ARCHIVE_COMPONENT_CHARACTERS = 255
+
+_ARCHIVE_HASH = re.compile(r"^[0-9a-fA-F]{64}$")
+_NATIVE_SUFFIXES = {".dll", ".dylib", ".exe", ".pyd", ".so"}
+_RESERVED_WINDOWS_NAMES = {
+    "AUX",
+    "CON",
+    "NUL",
+    "PRN",
+    *(f"COM{number}" for number in range(1, 10)),
+    *(f"LPT{number}" for number in range(1, 10)),
+}
+_SUPPORTED_COMPRESSION = {zipfile.ZIP_STORED, zipfile.ZIP_DEFLATED}
+
+
+class ComfyRegistryArchiveError(ValueError):
+    pass
+
+
+@dataclass(frozen=True)
+class ComfyRegistryArchiveReport:
+    archive_sha256: str
+    manifest_sha256: str
+    entry_count: int
+    file_count: int
+    expanded_bytes: int
+    python_file_count: int
+    dependency_manifests: tuple[str, ...]
+    install_scripts: tuple[str, ...]
+    startup_hooks: tuple[str, ...]
+    native_files: tuple[str, ...]
+    top_level_entries: tuple[str, ...]
+    review_required: bool = True
+
+
+@dataclass(frozen=True)
+class _ValidatedEntry:
+    info: zipfile.ZipInfo
+    path: PurePosixPath
+    key: str
+
+
+def stage_comfy_registry_archive(
+    archive_path: Path,
+    destination: Path,
+    *,
+    expected_sha256: str | None = None,
+) -> ComfyRegistryArchiveReport:
+    """Validate and extract an immutable registry archive without executing it."""
+    if expected_sha256 is not None and not _ARCHIVE_HASH.fullmatch(expected_sha256):
+        raise ComfyRegistryArchiveError("invalid expected archive hash")
+    if destination.exists():
+        raise ComfyRegistryArchiveError("archive staging destination already exists")
+    if not destination.parent.is_dir():
+        raise ComfyRegistryArchiveError("archive staging parent does not exist")
+
+    payload = _read_bounded_archive(archive_path)
+    archive_sha256 = hashlib.sha256(payload).hexdigest()
+    if expected_sha256 is not None and archive_sha256 != expected_sha256.lower():
+        raise ComfyRegistryArchiveError("registry archive hash does not match")
+
+    destination.mkdir()
+    try:
+        with zipfile.ZipFile(io.BytesIO(payload)) as archive:
+            entries = _validate_entries(archive)
+            report = _extract_entries(archive, entries, destination, archive_sha256)
+    except ComfyRegistryArchiveError:
+        shutil.rmtree(destination, ignore_errors=True)
+        raise
+    except (OSError, RuntimeError, zipfile.BadZipFile, zipfile.LargeZipFile) as exc:
+        shutil.rmtree(destination, ignore_errors=True)
+        raise ComfyRegistryArchiveError("invalid Comfy Registry archive") from exc
+    return report
+
+
+def _read_bounded_archive(path: Path) -> bytes:
+    try:
+        with path.open("rb") as source:
+            payload = source.read(MAX_ARCHIVE_BYTES + 1)
+    except OSError as exc:
+        raise ComfyRegistryArchiveError("could not read Comfy Registry archive") from exc
+    if len(payload) > MAX_ARCHIVE_BYTES:
+        raise ComfyRegistryArchiveError("Comfy Registry archive exceeds the size limit")
+    return payload
+
+
+def _validate_entries(archive: zipfile.ZipFile) -> tuple[_ValidatedEntry, ...]:
+    infos = archive.infolist()
+    if not infos:
+        raise ComfyRegistryArchiveError("Comfy Registry archive is empty")
+    if len(infos) > MAX_ARCHIVE_ENTRIES:
+        raise ComfyRegistryArchiveError("Comfy Registry archive has too many entries")
+
+    entries: list[_ValidatedEntry] = []
+    kinds: dict[str, str] = {}
+    expanded_bytes = 0
+    for info in infos:
+        path, key = _safe_member_path(info.filename)
+        if key in kinds:
+            raise ComfyRegistryArchiveError("Comfy Registry archive has duplicate paths")
+        is_directory = info.is_dir()
+        kinds[key] = "directory" if is_directory else "file"
+        _validate_entry_type(info, is_directory)
+        if not is_directory:
+            if info.file_size > MAX_ARCHIVE_FILE_BYTES:
+                raise ComfyRegistryArchiveError("Comfy Registry archive file is too large")
+            expanded_bytes += info.file_size
+            if expanded_bytes > MAX_ARCHIVE_EXPANDED_BYTES:
+                raise ComfyRegistryArchiveError(
+                    "Comfy Registry archive expands beyond the size limit"
+                )
+        entries.append(_ValidatedEntry(info, path, key))
+
+    for entry in entries:
+        parts = entry.key.split("/")
+        for index in range(1, len(parts)):
+            if kinds.get("/".join(parts[:index])) == "file":
+                raise ComfyRegistryArchiveError(
+                    "Comfy Registry archive has a file-directory collision"
+                )
+        if not entry.info.is_dir() and kinds.get(entry.key) == "directory":
+            raise ComfyRegistryArchiveError("Comfy Registry archive has a file-directory collision")
+    return tuple(entries)
+
+
+def _safe_member_path(value: str) -> tuple[PurePosixPath, str]:
+    if (
+        not value
+        or "\x00" in value
+        or chr(92) in value
+        or value.startswith("/")
+        or len(value) > MAX_ARCHIVE_PATH_CHARACTERS
+        or re.match(r"^[A-Za-z]:", value)
+    ):
+        raise ComfyRegistryArchiveError("Comfy Registry archive contains an unsafe path")
+    normalized = value[:-1] if value.endswith("/") else value
+    raw_parts = normalized.split("/")
+    if not normalized or any(part in {"", ".", ".."} for part in raw_parts):
+        raise ComfyRegistryArchiveError("Comfy Registry archive contains an unsafe path")
+    for part in raw_parts:
+        if (
+            len(part) > MAX_ARCHIVE_COMPONENT_CHARACTERS
+            or part.rstrip(" .") != part
+            or ":" in part
+            or any(ord(character) < 32 or ord(character) == 127 for character in part)
+            or part.split(".", 1)[0].upper() in _RESERVED_WINDOWS_NAMES
+        ):
+            raise ComfyRegistryArchiveError("Comfy Registry archive contains an unsafe path")
+    path = PurePosixPath(*raw_parts)
+    key = "/".join(unicodedata.normalize("NFC", part).casefold() for part in path.parts)
+    return path, key
+
+
+def _validate_entry_type(info: zipfile.ZipInfo, is_directory: bool) -> None:
+    mode = info.external_attr >> 16
+    file_type = stat.S_IFMT(mode)
+    if stat.S_ISLNK(mode):
+        raise ComfyRegistryArchiveError("Comfy Registry archive cannot contain links")
+    if file_type not in {0, stat.S_IFREG, stat.S_IFDIR}:
+        raise ComfyRegistryArchiveError("Comfy Registry archive cannot contain special files")
+    if info.flag_bits & 0x1:
+        raise ComfyRegistryArchiveError("Comfy Registry archive cannot be encrypted")
+    if info.compress_type not in _SUPPORTED_COMPRESSION:
+        raise ComfyRegistryArchiveError("Comfy Registry archive uses unsupported compression")
+    if is_directory and info.file_size:
+        raise ComfyRegistryArchiveError("Comfy Registry archive has an invalid directory")
+
+
+def _extract_entries(
+    archive: zipfile.ZipFile,
+    entries: tuple[_ValidatedEntry, ...],
+    destination: Path,
+    archive_sha256: str,
+) -> ComfyRegistryArchiveReport:
+    file_manifest: list[tuple[str, int, str]] = []
+    dependency_manifests: list[str] = []
+    install_scripts: list[str] = []
+    startup_hooks: list[str] = []
+    native_files: list[str] = []
+    python_file_count = 0
+    expanded_bytes = 0
+
+    for entry in entries:
+        target = destination.joinpath(*entry.path.parts)
+        if entry.info.is_dir():
+            target.mkdir(parents=True, exist_ok=True)
+            continue
+        target.parent.mkdir(parents=True, exist_ok=True)
+        digest = hashlib.sha256()
+        written = 0
+        with archive.open(entry.info) as source, target.open("xb") as output:
+            while chunk := source.read(1024 * 1024):
+                written += len(chunk)
+                if written > entry.info.file_size or written > MAX_ARCHIVE_FILE_BYTES:
+                    raise ComfyRegistryArchiveError(
+                        "Comfy Registry archive entry exceeds its declared size"
+                    )
+                digest.update(chunk)
+                output.write(chunk)
+        if written != entry.info.file_size:
+            raise ComfyRegistryArchiveError(
+                "Comfy Registry archive entry size does not match metadata"
+            )
+        relative = entry.path.as_posix()
+        suffix = entry.path.suffix.lower()
+        lower_name = entry.path.name.lower()
+        expanded_bytes += written
+        python_file_count += suffix == ".py"
+        if lower_name in {"pyproject.toml", "requirements.txt", "setup.cfg"} or (
+            lower_name.startswith("requirements-") and lower_name.endswith(".txt")
+        ):
+            dependency_manifests.append(relative)
+        if lower_name in {"install.py", "setup.py"}:
+            install_scripts.append(relative)
+        if lower_name == "prestartup_script.py":
+            startup_hooks.append(relative)
+        if suffix in _NATIVE_SUFFIXES:
+            native_files.append(relative)
+        file_manifest.append((relative, written, digest.hexdigest()))
+
+    manifest = "".join(
+        f"{path}\x00{size}\x00{digest}\n" for path, size, digest in sorted(file_manifest)
+    )
+    return ComfyRegistryArchiveReport(
+        archive_sha256=archive_sha256,
+        manifest_sha256=hashlib.sha256(manifest.encode()).hexdigest(),
+        entry_count=len(entries),
+        file_count=len(file_manifest),
+        expanded_bytes=expanded_bytes,
+        python_file_count=python_file_count,
+        dependency_manifests=tuple(sorted(dependency_manifests)),
+        install_scripts=tuple(sorted(install_scripts)),
+        startup_hooks=tuple(sorted(startup_hooks)),
+        native_files=tuple(sorted(native_files)),
+        top_level_entries=tuple(sorted({entry.path.parts[0] for entry in entries})),
+    )

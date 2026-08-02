@@ -67,7 +67,9 @@ Name: "{autodesktop}\LM Atelier"; Filename: "{app}\{#MyAppExeName}"; WorkingDir:
 Name: "desktopicon"; Description: "Create a desktop shortcut"; GroupDescription: "Additional shortcuts:"
 
 [Run]
-Filename: "{app}\{#MyAppExeName}"; Description: "Open LM Atelier"; Flags: nowait postinstall skipifsilent
+; --first-run-setup lands the browser in setup so models and workers are
+; ready before the workspace is first shown; the app clears the flag itself.
+Filename: "{app}\{#MyAppExeName}"; Parameters: "--first-run-setup"; Description: "Open LM Atelier"; Flags: nowait postinstall skipifsilent
 
 [Code]
 var

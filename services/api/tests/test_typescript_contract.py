@@ -65,6 +65,10 @@ CHECKED_CONTRACTS = {
     "WorkerResetResult": "WorkerResetResult",
     "WorkerSettings": "WorkerSettings",
     "WorkerStatus": "WorkerStatus",
+    "WorkflowAssetReference": "WorkflowAssetReferenceOut",
+    "WorkflowPackageAnalysis": "WorkflowPackageAnalysisOut",
+    "WorkflowPackageIssue": "WorkflowPackageIssueOut",
+    "WorkflowPackageRequirement": "WorkflowPackageRequirementOut",
     "WorkPlan": "WorkPlanOut",
     "WorkStep": "WorkStepOut",
 }

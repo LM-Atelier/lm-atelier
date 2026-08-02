@@ -38,6 +38,10 @@ from .comfy_templates import (
     ComfyTemplate,
     ComfyTemplateRegistry,
 )
+from .comfy_workflow_packages import (
+    WorkflowPackageError,
+    analyze_comfyui_workflow_package,
+)
 from .config import Settings
 from .credentials import (
     CredentialProvider,
@@ -207,11 +211,17 @@ from .schemas import (
     WorkerResetResult,
     WorkerSettings,
     WorkerStatus,
+    WorkflowAssetReferenceOut,
     WorkflowBundle,
     WorkflowClone,
     WorkflowCreate,
+    WorkflowMissingNodeOut,
     WorkflowOpenTarget,
     WorkflowOut,
+    WorkflowPackageAnalysisOut,
+    WorkflowPackageAnalyzeRequest,
+    WorkflowPackageIssueOut,
+    WorkflowPackageRequirementOut,
     WorkflowRevisionCreate,
     WorkflowRevisionOut,
     WorkflowUpdate,
@@ -5034,6 +5044,121 @@ async def workflow_open_target(
         url=_services(request).settings.comfy_url,
         filename=f"{filename or 'workflow'}.comfyui.json",
         ui_graph=revision.ui_graph_json,
+    )
+
+
+def _local_asset_filenames(session: Session) -> set[str]:
+    """Filenames this machine holds, as a workflow might reference them."""
+
+    filenames: set[str] = set()
+    for install in session.scalars(select(ModelInstall)).all():
+        files = install.manifest_json.get("files")
+        if not isinstance(files, list):
+            continue
+        for entry in files:
+            if isinstance(entry, str) and entry:
+                filenames.add(entry)
+                filenames.add(PurePosixPath(entry.replace("\\", "/")).name)
+    for asset in session.scalars(select(ModelAssetInstall)).all():
+        filenames.add(PurePosixPath(asset.local_path.replace("\\", "/")).name)
+    return filenames
+
+
+def _installed_package_versions(session: Session) -> dict[str, set[str]]:
+    """Version evidence for installed custom-node packages, exact only.
+
+    Installs record git revisions; workflows may pin registry versions. Until
+    the registry resolver bridges the two, an unmatched pin correctly reads
+    unresolved - fail closed, never inferred.
+    """
+
+    versions: dict[str, set[str]] = {}
+    for install in session.scalars(select(CustomNodeInstall)).all():
+        versions.setdefault(install.name, set()).add(install.revision)
+    return versions
+
+
+@router.post("/workflows/packages/analyze", response_model=WorkflowPackageAnalysisOut)
+async def analyze_workflow_package(
+    payload: WorkflowPackageAnalyzeRequest, request: Request, session: SessionDep
+) -> WorkflowPackageAnalysisOut:
+    """Report what a raw ComfyUI package needs, without persisting or executing it."""
+
+    services = _services(request)
+    available_node_types: set[str] = set()
+    node_inventory_available = False
+    describe_nodes = getattr(services.engines.media, "object_info", None)
+    if callable(describe_nodes):
+        try:
+            object_info = await describe_nodes()
+            available_node_types = {str(node_type) for node_type in object_info}
+            node_inventory_available = True
+        except Exception:  # noqa: BLE001
+            # The media runtime is not up, so node availability is unknown.
+            # The report says so instead of failing - and instead of letting
+            # "every node missing" masquerade as a finding.
+            node_inventory_available = False
+    try:
+        analysis = analyze_comfyui_workflow_package(
+            payload.ui_graph,
+            available_node_types=available_node_types,
+            available_asset_filenames=_local_asset_filenames(session),
+            installed_package_versions=_installed_package_versions(session),
+        )
+    except WorkflowPackageError as exc:
+        raise api_error(422, exc.code, str(exc)) from exc
+    return WorkflowPackageAnalysisOut(
+        format_version=analysis.format_version,
+        frontend_version=analysis.frontend_version,
+        node_count=analysis.node_count,
+        link_count=analysis.link_count,
+        subgraph_count=analysis.subgraph_count,
+        operation_guess=analysis.operation_guess,
+        truncated=analysis.truncated,
+        required_node_types=list(analysis.required_node_types),
+        frontend_node_types=list(analysis.frontend_node_types),
+        missing_node_types=list(analysis.missing_node_types),
+        missing_nodes=[
+            WorkflowMissingNodeOut(
+                node_type=missing.node_type,
+                count=missing.count,
+                package_id=missing.package_id,
+            )
+            for missing in analysis.missing_nodes
+        ],
+        custom_packages=[
+            WorkflowPackageRequirementOut(
+                package_id=package.package_id,
+                versions=list(package.versions),
+                node_types=list(package.node_types),
+                locally_resolved=package.locally_resolved,
+            )
+            for package in analysis.custom_packages
+        ],
+        asset_references=[
+            WorkflowAssetReferenceOut(
+                filename=asset.filename,
+                suffix=asset.suffix,
+                policy=asset.policy,
+                kind=asset.kind,
+                source_url=asset.source_url,
+                present_locally=asset.present_locally,
+            )
+            for asset in analysis.asset_references
+        ],
+        issues=[
+            WorkflowPackageIssueOut(
+                code=issue.code,
+                count=issue.count,
+                node_types=list(issue.node_types),
+                severity=issue.severity,
+            )
+            for issue in analysis.issues
+        ],
+        ready=analysis.ready,
+        runtime_nodes_available=analysis.runtime_nodes_available,
+        dependencies_resolved=analysis.dependencies_resolved,
+        node_inventory_available=node_inventory_available,
     )
 
 

@@ -1,6 +1,6 @@
 """Delete one user turn and everything the exchange produced.
 
-The service half of the owner's delete-a-turn request: given a user message,
+The service half of deleting a turn: given a user message,
 remove it, its assistant answer (every branch step and response revision),
 the runs and jobs that produced them, and the exchange's work plan - and
 release the generated media so the existing retention sweep reclaims it.

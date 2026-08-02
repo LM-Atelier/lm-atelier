@@ -38,6 +38,16 @@ def test_download_worker_uses_frozen_executable_dispatch(monkeypatch) -> None:  
     assert download_worker_command() == ["/opt/lm-atelier/lm-atelier", "--download-worker"]
 
 
+def test_first_run_setup_flag_lands_the_browser_in_setup() -> None:
+    """The installer's hand-off: the flag becomes a query the web app reads."""
+
+    base = "http://127.0.0.1:12310"
+    assert desktop.launch_url(base, ["--first-run-setup"]) == f"{base}/?firstRunSetup=1"
+    assert desktop.launch_url(base, []) == base
+    # An unrelated flag must not trigger setup.
+    assert desktop.launch_url(base, ["--download-worker"]) == base
+
+
 def test_desktop_console_script_uses_persistence_aware_launcher() -> None:
     project = Path(__file__).resolve().parents[1] / "pyproject.toml"
     assert 'lm-atelier = "local_lm.desktop:main"' in project.read_text(encoding="utf-8")

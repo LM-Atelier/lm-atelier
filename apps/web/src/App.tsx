@@ -82,7 +82,10 @@ import { useLiveEvents } from "./useLiveEvents";
 import { DownloadDiagnosticsButton } from "./DownloadDiagnosticsButton";
 import { StatusDot } from "./StatusDot";
 import { ErrorCallout } from "./ErrorCallout";
-import { SetupWizard } from "./SetupWizard";
+import { EmptyState } from "./EmptyState";
+import { FirstRunSetup, SetupWizard } from "./SetupWizard";
+import { WorkflowPackageReview } from "./WorkflowPackageReview";
+import { useWorkflowPackageImport } from "./useWorkflowPackageImport";
 import { JobsPanel } from "./JobsPanel";
 import { progressSampleIsFresh } from "./jobProgress";
 import { editVisionNote, workshopTranscript } from "./promptWorkshop";
@@ -91,6 +94,7 @@ import { WorkerStatusCard } from "./WorkerStatusCard";
 import { useComposerUploads } from "./useComposerUploads";
 import type { ComposerAttachment } from "./useComposerUploads";
 import { useDraftClassification } from "./useDraftClassification";
+import { useFirstRunSetup } from "./useFirstRunSetup";
 import { useGenerationModeSelection } from "./useGenerationModeSelection";
 import { useMessageActions } from "./useMessageActions";
 import {
@@ -126,7 +130,6 @@ import type {
   SystemInfo,
   TurnAccepted,
   Workflow,
-  WorkflowBundle,
   WorkPlan,
 } from "./types";
 
@@ -197,16 +200,6 @@ function formatTechnicalDetails(
     ...devices,
     ...runtimes,
   ].join("\n");
-}
-
-function EmptyState({ icon, title, body }: { icon: React.ReactNode; title: string; body: string }) {
-  return (
-    <div className="empty-state">
-      <div className="empty-icon">{icon}</div>
-      <h2>{title}</h2>
-      <p>{body}</p>
-    </div>
-  );
 }
 
 function AtelierMark() {
@@ -2143,7 +2136,7 @@ function ModelCard({
       <div className="model-copy">
         <h3>{model.name}</h3><p>{model.author} · {model.pipeline_tag || model.library_name || "model"}</p>
         <div className="badges"><span className={`badge ${model.compatibility}`}>{displayCompatibility}</span>{model.gated && <span className="badge">Gated</span>}{model.formats.slice(0, 2).map((format) => <span className="badge" key={format}>{format}</span>)}{model.quantizations.slice(0, 2).map((value) => <span className="badge" key={value}>{value}</span>)}</div>
-        <small>{formatDate(model.last_modified)}{model.compatibility_reasons.length ? ` · ${model.compatibility_reasons.join(" · ")}` : ""}</small>
+        <small>{model.total_size_bytes != null ? `${formatBytes(model.total_size_bytes)} · ` : ""}{formatDate(model.last_modified)}{model.compatibility_reasons.length ? ` · ${model.compatibility_reasons.join(" · ")}` : ""}</small>
       </div>
       <div className="model-stats">{model.trending_score != null && <span title="Hugging Face trending score"><Sparkles size={14} />{model.trending_score.toLocaleString()}</span>}<span><Download size={14} />{model.downloads?.toLocaleString() ?? "—"}</span><button className="primary compact-button" title={model.compatibility === "unsupported" || runtimeUnavailable ? model.compatibility_reasons.join(" ") : undefined} onClick={onDownload} disabled={status !== "idle" || model.compatibility === "unsupported" || runtimeUnavailable}>{actionLabel}</button></div>
     </article>
@@ -2362,10 +2355,6 @@ function ModelsView({ initialRole }: { initialRole: EngineRole }) {
   const [fileFormat, setFileFormat] = useState("");
   const [gated, setGated] = useState("");
   const [quantization, setQuantization] = useState("");
-  const [licenseId, setLicenseId] = useState("");
-  const [architecture, setArchitecture] = useState("");
-  const [minParameters, setMinParameters] = useState("");
-  const [maxParameters, setMaxParameters] = useState("");
   const [maxSizeGb, setMaxSizeGb] = useState("");
   const [updatedWithinDays, setUpdatedWithinDays] = useState("");
   const [installedChatCapability, setInstalledChatCapability] = useState("");
@@ -2379,10 +2368,6 @@ function ModelsView({ initialRole }: { initialRole: EngineRole }) {
     file_format: fileFormat,
     gated,
     quantization,
-    license_id: licenseId,
-    architecture,
-    min_parameters: minParameters ? String(Number(minParameters) * 1_000_000_000) : "",
-    max_parameters: maxParameters ? String(Number(maxParameters) * 1_000_000_000) : "",
     max_size_bytes: maxSizeGb ? String(Number(maxSizeGb) * 1024 ** 3) : "",
     updated_within_days: updatedWithinDays,
   };
@@ -2637,7 +2622,7 @@ function ModelsView({ initialRole }: { initialRole: EngineRole }) {
         <select aria-label="Model role" value={role} onChange={(event) => setRole(event.target.value)}><option value="chat">Chat</option><option value="image">Image</option><option value="video">Video</option><option value="lora">LoRA</option></select>
         <select aria-label="Model order" value={sort} onChange={(event) => setSort(event.target.value)}><option value="trending">Trending on Hugging Face</option><option value="downloads">Downloads</option><option value="likes">Likes</option><option value="newest">Newest</option><option value="updated">Recently updated</option><option value="compatible">Compatible first</option></select>
       </div>
-      <div className="catalog-filters"><select aria-label="Compatibility filter" value={compatibility} onChange={(event) => setCompatibility(event.target.value)}><option value="">All compatibility</option><option value="likely">Automatic test available</option><option value="advanced_import">Advanced import</option><option value="unsupported">Unsupported</option></select><select aria-label="Last updated filter" value={updatedWithinDays} onChange={(event) => setUpdatedWithinDays(event.target.value)}><option value="">Updated any time</option><option value="7">Updated this week</option><option value="30">Updated this month</option><option value="90">Updated in 3 months</option><option value="365">Updated this year</option></select><select aria-label="Format filter" value={fileFormat} onChange={(event) => setFileFormat(event.target.value)}><option value="">All formats</option><option value="gguf">GGUF</option><option value="safetensors">safetensors</option></select><select aria-label="Access filter" value={gated} onChange={(event) => setGated(event.target.value)}><option value="">All access</option><option value="open">Open</option><option value="gated">Gated</option></select><input aria-label="Quantization filter" placeholder="Quantization (Q4_K_M, FP8…)" value={quantization} onChange={(event) => setQuantization(event.target.value)} /><input aria-label="Architecture filter" placeholder="Architecture" value={architecture} onChange={(event) => setArchitecture(event.target.value)} /><input aria-label="License filter" placeholder="License" value={licenseId} onChange={(event) => setLicenseId(event.target.value)} /><input aria-label="Minimum parameters" type="number" min="0" placeholder="Min parameters (B)" value={minParameters} onChange={(event) => setMinParameters(event.target.value)} /><input aria-label="Maximum parameters" type="number" min="0" placeholder="Max parameters (B)" value={maxParameters} onChange={(event) => setMaxParameters(event.target.value)} /><input aria-label="Maximum download size" type="number" min="0" placeholder="Max download (GB)" value={maxSizeGb} onChange={(event) => setMaxSizeGb(event.target.value)} /></div>
+      <div className="catalog-filters"><select aria-label="Compatibility filter" value={compatibility} onChange={(event) => setCompatibility(event.target.value)}><option value="">All compatibility</option><option value="likely">Automatic test available</option><option value="advanced_import">Advanced import</option><option value="unsupported">Unsupported</option></select><select aria-label="Last updated filter" value={updatedWithinDays} onChange={(event) => setUpdatedWithinDays(event.target.value)}><option value="">Updated any time</option><option value="7">Updated this week</option><option value="30">Updated this month</option><option value="90">Updated in 3 months</option><option value="365">Updated this year</option></select><select aria-label="Format filter" value={fileFormat} onChange={(event) => setFileFormat(event.target.value)}><option value="">All formats</option><option value="gguf">GGUF</option><option value="safetensors">safetensors</option></select><select aria-label="Access filter" value={gated} onChange={(event) => setGated(event.target.value)}><option value="">All access</option><option value="open">Open</option><option value="gated">Gated</option></select><input aria-label="Quantization filter" placeholder="Quantization (Q4_K_M, FP8…)" value={quantization} onChange={(event) => setQuantization(event.target.value)} /><input aria-label="Maximum download size" type="number" min="0" placeholder="Max download (GB)" value={maxSizeGb} onChange={(event) => setMaxSizeGb(event.target.value)} /></div>
       {(installed.data?.length ?? 0) > 0 && <section>
         <div className="section-heading">
           <h2>Installed models</h2>
@@ -2830,17 +2815,12 @@ function WorkflowsView() {
   const restore = useMutation({ mutationFn: ({ id, revisionId }: { id: string; revisionId: string }) => api.restoreWorkflowRevision(id, revisionId), onSuccess: refresh });
   const exportBundle = useMutation({ mutationFn: (id: string) => api.exportWorkflow(id), onSuccess: (bundle) => downloadJson(bundle, `${bundle.name.replaceAll(/[^a-z0-9]+/gi, "-").toLowerCase()}.lm-atelier-workflow.json`) });
   const openInComfy = useMutation({ mutationFn: (id: string) => api.workflowOpenTarget(id), onSuccess: (target) => { downloadJson(target.ui_graph, target.filename); window.open(target.url, "_blank", "noopener,noreferrer"); } });
-  const importBundleMutation = useMutation({
-    mutationFn: async (file: File) => {
-      const bundle = JSON.parse(await file.text()) as WorkflowBundle;
-      if (bundle.format !== "lm-atelier-workflow") throw new Error("This is not an LM Atelier workflow bundle.");
-      return api.importWorkflow(bundle);
-    },
-    onSuccess: refresh,
-  });
-  const importBundle = (file?: File) => {
-    if (file) importBundleMutation.mutate(file);
-  };
+  const {
+    importFile: importBundle,
+    importError,
+    packageReview,
+    closePackageReview,
+  } = useWorkflowPackageImport(refresh);
   const openCreate = () => { setEditing(false); setName("Custom image workflow"); setDescription(""); setOperation("text_to_image"); setGraph("{}"); setUiGraph("{}"); setInputSchema("{}"); setDependencies("{}"); setTrusted(false); setNewOpen(true); };
   const openEdit = () => { if (!selected) return; const revision = selected.revisions.find((item) => item.id === selected.current_revision_id) ?? selected.revisions.at(-1); if (!revision) return; setEditing(true); setName(selected.name); setDescription(selected.description); setOperation(selected.operation); setGraph(JSON.stringify(revision.api_graph_json, null, 2)); setUiGraph(JSON.stringify(revision.ui_graph_json, null, 2)); setInputSchema(JSON.stringify(revision.input_schema_json, null, 2)); setDependencies(JSON.stringify(revision.dependencies_json, null, 2)); setTrusted(revision.trusted); setNewOpen(true); };
   const selectedRevision = selected?.revisions.find((revision) => revision.id === selectedRevisionId) ?? selected?.revisions.find((revision) => revision.id === selected.current_revision_id) ?? selected?.revisions.at(-1);
@@ -2848,7 +2828,8 @@ function WorkflowsView() {
   return (
     <div className="page-view">
       <header className="page-header"><div><h1>Workflows</h1></div><div className="storage-actions"><input ref={importInput} hidden type="file" accept="application/json,.json" onChange={(event) => { void importBundle(event.target.files?.[0]); event.target.value = ""; }} /><button className="secondary" onClick={() => importInput.current?.click()}>Import bundle</button><button className="primary" onClick={openCreate}><Plus size={17} />New workflow</button></div></header>
-      {(importBundleMutation.error || clone.error || restore.error || exportBundle.error || openInComfy.error) && <ErrorCallout message={(importBundleMutation.error || clone.error || restore.error || exportBundle.error || openInComfy.error)?.message} />}
+      {(importError || clone.error || restore.error || exportBundle.error || openInComfy.error) && <ErrorCallout message={(importError || clone.error || restore.error || exportBundle.error || openInComfy.error)?.message} />}
+      {packageReview && <WorkflowPackageReview analysis={packageReview.analysis} fileName={packageReview.fileName} onClose={closePackageReview} />}
       {selected && <div className="storage-actions"><button className="secondary" onClick={() => openInComfy.mutate(selected.id)}>Download UI graph and open in ComfyUI</button></div>}
       <div className="workflow-layout">
         <div className="workflow-list">{workflows.data?.map((workflow) => <button key={workflow.id} className={selected?.id === workflow.id ? "selected" : ""} onClick={() => { setSelectedId(workflow.id); setSelectedRevisionId(workflow.current_revision_id); }}><WorkflowIcon size={18} /><span><strong>{workflow.name}</strong><small>{workflow.operation} · {workflow.revisions.length} revision{workflow.revisions.length === 1 ? "" : "s"}</small></span></button>)}</div>
@@ -3688,11 +3669,8 @@ export default function App() {
     queryFn: api.setupReadiness,
     refetchInterval: (query) => query.state.data?.state === "ready" ? false : 3_000,
   });
-  const setupVisible = setupOpen ?? Boolean(
-    setupReadiness.data
-    && setupReadiness.data.state !== "ready"
-    && sessionStorage.getItem(SETUP_DISMISSED_KEY) !== "1",
-  );
+  const setupVisible = setupOpen ?? Boolean(setupReadiness.data && setupReadiness.data.state !== "ready" && sessionStorage.getItem(SETUP_DISMISSED_KEY) !== "1");
+  const [firstRunSetup, exitFirstRunSetup] = useFirstRunSetup();
   const projects = useQuery({
     queryKey: ["projects"],
     queryFn: () => api.projects(true),
@@ -4041,6 +4019,9 @@ export default function App() {
     }} />;
   }, [view, modelLibraryRole, engines.data, profiles.data, presets.data, workflows.data, allProjects, chat.data, chatDrafts, liveText, pendingTurns, workPlans.data, send, regenerate, selectResponseRevision, branch, stop, cancelWorkPlan, cancelWorkStep, retryWorkStep, updateChat, deleteExchange, forkThread, client]);
 
+  if (firstRunSetup && setupReadiness.data) {
+    return <FirstRunSetup report={setupReadiness.data} onExit={exitFirstRunSetup} onOpenModels={(role) => { exitFirstRunSetup(); setModelLibraryRole(role); setView("models"); }} onOpenWorkflows={() => { exitFirstRunSetup(); setView("workflows"); }} />;
+  }
   return (
     <div className="app-shell">
       <a className="skip-link" href="#main-content">Skip to main content</a>
