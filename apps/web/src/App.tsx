@@ -1698,7 +1698,7 @@ function Composer({
           </div>
         </div>
       </div>
-      {studioOpen && <EditingStudio onClose={() => setStudioOpen(false)} onPick={(instruction) => { setText(instruction); setStudioOpen(false); window.setTimeout(() => textInput.current?.focus(), 0); }} />}
+      {studioOpen && <EditingStudio currentInstruction={text} onClose={() => setStudioOpen(false)} onPick={(instruction) => { setText(instruction); setStudioOpen(false); window.setTimeout(() => textInput.current?.focus(), 0); }} />}
       {promptHelperDraft !== null && (
         <PromptHelperDialog
           sourceChat={chat}

@@ -164,6 +164,7 @@ from .schemas import (
     DownloadRequest,
     DraftClassification,
     DraftClassificationRequest,
+    EditTemplateCreate,
     EditTemplateOut,
     EngineCapabilities,
     ExchangeDeletionOut,
@@ -3273,6 +3274,46 @@ async def list_edit_templates(session: SessionDep) -> list[EditTemplate]:
             .order_by(EditTemplate.builtin.desc(), EditTemplate.name)
         ).all()
     )
+
+
+@router.post("/edit-templates", response_model=EditTemplateOut, status_code=201)
+async def create_edit_template(payload: EditTemplateCreate, session: SessionDep) -> EditTemplate:
+    """Save an edit that worked as a reusable one-click template."""
+
+    existing = session.scalar(select(EditTemplate).where(EditTemplate.name == payload.name))
+    if existing:
+        raise api_error(
+            409, "edit-template-name-taken", "A template with this name already exists."
+        )
+    template = EditTemplate(
+        name=payload.name,
+        description=payload.description,
+        instruction=payload.instruction,
+        operation="image_to_image",
+        settings_json=payload.settings_json,
+        trigger_words_json=[],
+        content_rating="general",
+        builtin=False,
+        enabled=True,
+    )
+    session.add(template)
+    session.commit()
+    return template
+
+
+@router.delete("/edit-templates/{template_id}", status_code=204)
+async def delete_edit_template(template_id: str, session: SessionDep) -> Response:
+    """Built-ins disable instead: deleting one would resurrect it at next seed."""
+
+    template = session.get(EditTemplate, template_id)
+    if not template:
+        raise HTTPException(404, "edit template not found")
+    if template.builtin:
+        template.enabled = False
+    else:
+        session.delete(template)
+    session.commit()
+    return Response(status_code=204)
 
 
 @router.get("/recipes", response_model=list[ReferenceRecipe])

@@ -642,3 +642,6 @@ h1, h2, h3 { margin: 0; }
 .compare-divider { position: absolute; top: 0; bottom: 0; width: 2px; background: #d9a05b; }
 .compare-slider { display: grid; gap: 5px; margin: 12px 0; }
 .compare-legend { color: var(--muted); display: flex; align-items: center; gap: 6px; }
+.studio-save { display: grid; gap: 6px; margin-bottom: 12px; }
+.studio-save input { border: 1px solid var(--border); border-radius: 8px; background: var(--panel); color: #e8ebef; padding: 8px 10px; }
+.studio-save span, .studio-save small { color: var(--muted); }

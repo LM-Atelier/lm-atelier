@@ -1,5 +1,5 @@
 import { useState } from "react";
-import { useQuery } from "@tanstack/react-query";
+import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { Wand2 } from "lucide-react";
 import { AccessibleDialog } from "./AccessibleDialog";
 import { api } from "./api";
@@ -14,11 +14,26 @@ import { MAX_SUBJECT_CHARACTERS, renderTemplateInstruction } from "./editTemplat
 export function EditingStudio({
   onPick,
   onClose,
+  currentInstruction = "",
 }: {
   onPick: (instruction: string) => void;
   onClose: () => void;
+  // The composer's draft, offered for saving as a personal template.
+  currentInstruction?: string;
 }) {
+  const client = useQueryClient();
   const templates = useQuery({ queryKey: ["edit-templates"], queryFn: api.editTemplates });
+  const [saveName, setSaveName] = useState("");
+  const save = useMutation({
+    mutationFn: () => api.createEditTemplate({
+      name: saveName.trim(),
+      instruction: currentInstruction.trim(),
+    }),
+    onSuccess: () => {
+      setSaveName("");
+      void client.invalidateQueries({ queryKey: ["edit-templates"] });
+    },
+  });
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [subject, setSubject] = useState("");
   const selected = templates.data?.find((template) => template.id === selectedId) ?? null;
@@ -59,6 +74,26 @@ export function EditingStudio({
           onChange={(event) => setSubject(event.target.value)}
         />
       </label>
+      {currentInstruction.trim() && (
+        <div className="studio-save">
+          <span>Keep the composer's current instruction as a template:</span>
+          <input
+            aria-label="Template name"
+            placeholder="Name this edit"
+            value={saveName}
+            maxLength={200}
+            onChange={(event) => setSaveName(event.target.value)}
+          />
+          <button
+            className="secondary compact-button"
+            disabled={!saveName.trim() || save.isPending}
+            onClick={() => save.mutate()}
+          >
+            {save.isPending ? "Saving…" : "Save as template"}
+          </button>
+          {save.error && <small role="alert">{save.error.message}</small>}
+        </div>
+      )}
       <footer>
         <button className="secondary" onClick={onClose}>Cancel</button>
         <button
