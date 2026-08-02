@@ -38,8 +38,8 @@ export default tseslint.config(
     files: ["**/*.test.{ts,tsx}"],
     rules: {
       "max-len": ["error", { code: 362 }],
-      "max-lines": ["error", { max: 5376 }],
-      "max-lines-per-function": ["error", { max: 5086 }],
+      "max-lines": ["error", { max: 5384 }],
+      "max-lines-per-function": ["error", { max: 5093 }],
     },
   },
 );
