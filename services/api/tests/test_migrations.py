@@ -85,6 +85,31 @@ def test_migrations_round_trip(tmp_path) -> None:  # type: ignore[no-untyped-def
             row[1]
             for row in connection.execute("PRAGMA table_info(comfy_registry_installs)").fetchall()
         }
+        workflow_id_type = next(
+            row[2]
+            for row in connection.execute("PRAGMA table_info(workflow_definitions)").fetchall()
+            if row[1] == "id"
+        )
+        workflow_revision_definition_type = next(
+            row[2]
+            for row in connection.execute("PRAGMA table_info(workflow_revisions)").fetchall()
+            if row[1] == "workflow_id"
+        )
+        registry_install_id_type = next(
+            row[2]
+            for row in connection.execute("PRAGMA table_info(comfy_registry_installs)").fetchall()
+            if row[1] == "id"
+        )
+        component_manifest_id_type = next(
+            row[2]
+            for row in connection.execute("PRAGMA table_info(model_component_manifests)").fetchall()
+            if row[1] == "id"
+        )
+        capability_evidence_id_type = next(
+            row[2]
+            for row in connection.execute("PRAGMA table_info(model_capability_evidence)").fetchall()
+            if row[1] == "id"
+        )
         unique_run_indexes = {
             tuple(
                 column[2]
@@ -145,10 +170,220 @@ def test_migrations_round_trip(tmp_path) -> None:  # type: ignore[no-untyped-def
     } <= registry_install_columns
     assert ("chat_id", "idempotency_key") in unique_run_indexes
     assert ("idempotency_key",) not in unique_run_indexes
+    assert workflow_id_type == "VARCHAR(64)"
+    assert workflow_revision_definition_type == "VARCHAR(64)"
+    assert registry_install_id_type == "VARCHAR(64)"
+    assert component_manifest_id_type == "VARCHAR(64)"
+    assert capability_evidence_id_type == "VARCHAR(64)"
 
     command.downgrade(config, "base")
     command.upgrade(config, "head")
     with sqlite3.connect(settings.state_dir / "local-lm.sqlite3") as connection:
+        assert connection.execute("PRAGMA integrity_check").fetchone() == ("ok",)
+
+
+def test_generated_identifier_width_migration_preserves_existing_rows(
+    tmp_path: Path,
+) -> None:
+    settings = Settings(data_dir=tmp_path / "generated-identifier-widths")
+    settings.prepare()
+    config = alembic_config(settings)
+    command.upgrade(config, "e6c42a9b13fd")
+    database = settings.state_dir / "local-lm.sqlite3"
+    timestamp = "2026-08-02 00:00:00"
+    workflow_id = f"workflow_{'a' * 32}"
+    revision_id = f"wfrev_{'b' * 32}"
+    registry_id = f"registry_{'c' * 32}"
+    model_id = f"model_{'d' * 32}"
+    component_id = f"component_{'e' * 32}"
+    evidence_id = f"evidence_{'f' * 32}"
+    with sqlite3.connect(database) as connection:
+        connection.execute(
+            """
+            INSERT INTO model_installs (
+                id, name, role, engine, local_path, size_bytes, compatibility,
+                manifest_json, active, created_at, updated_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                model_id,
+                "Existing model",
+                "image",
+                "comfyui",
+                "models/existing.safetensors",
+                1,
+                "ready",
+                "{}",
+                1,
+                timestamp,
+                timestamp,
+            ),
+        )
+        connection.execute(
+            """
+            INSERT INTO model_component_manifests (
+                id, model_install_id, kind, relative_path, target_folder,
+                required, metadata_json, created_at, updated_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                component_id,
+                model_id,
+                "checkpoint",
+                "existing.safetensors",
+                "checkpoints",
+                1,
+                "{}",
+                timestamp,
+                timestamp,
+            ),
+        )
+        connection.execute(
+            """
+            INSERT INTO model_capability_evidence (
+                id, model_install_id, evidence_key, result,
+                component_hashes_json, runtime_build, adapter_contract_version,
+                launch_contract_version, hardware_class, probe_version,
+                details_json, probed_at, created_at, updated_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                evidence_id,
+                model_id,
+                "existing-evidence",
+                "passed",
+                "{}",
+                "test-runtime",
+                1,
+                "test-contract",
+                "test-hardware",
+                "test-probe",
+                "{}",
+                timestamp,
+                timestamp,
+                timestamp,
+            ),
+        )
+        connection.execute(
+            """
+            INSERT INTO workflow_definitions (
+                id, name, operation, description, created_at, updated_at
+            ) VALUES (?, ?, ?, ?, ?, ?)
+            """,
+            (
+                workflow_id,
+                "Existing workflow",
+                "text_to_image",
+                "",
+                timestamp,
+                timestamp,
+            ),
+        )
+        connection.execute(
+            """
+            INSERT INTO workflow_revisions (
+                id, workflow_id, version, engine, ui_graph_json, api_graph_json,
+                input_schema_json, dependencies_json, trusted, created_at, updated_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                revision_id,
+                workflow_id,
+                1,
+                "comfyui",
+                "{}",
+                "{}",
+                "{}",
+                "{}",
+                0,
+                timestamp,
+                timestamp,
+            ),
+        )
+        connection.execute(
+            """
+            INSERT INTO comfy_registry_installs (
+                id, package_id, package_version, registry_record_id, repository_url,
+                download_url, archive_sha256, manifest_sha256, installed_path,
+                node_types_json, pip_dependencies_json, review_json, trusted, active,
+                created_at, updated_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                registry_id,
+                "example-node",
+                "1.2.3",
+                "record-123",
+                "https://github.com/example/node",
+                "https://api.comfy.org/example.zip",
+                "d" * 64,
+                "e" * 64,
+                "example-node",
+                "[]",
+                "[]",
+                "{}",
+                0,
+                0,
+                timestamp,
+                timestamp,
+            ),
+        )
+        connection.commit()
+
+    command.upgrade(config, "head")
+
+    with sqlite3.connect(database) as connection:
+        workflow_type = next(
+            row[2]
+            for row in connection.execute("PRAGMA table_info(workflow_definitions)").fetchall()
+            if row[1] == "id"
+        )
+        revision_workflow_type = next(
+            row[2]
+            for row in connection.execute("PRAGMA table_info(workflow_revisions)").fetchall()
+            if row[1] == "workflow_id"
+        )
+        registry_type = next(
+            row[2]
+            for row in connection.execute("PRAGMA table_info(comfy_registry_installs)").fetchall()
+            if row[1] == "id"
+        )
+        component_type = next(
+            row[2]
+            for row in connection.execute("PRAGMA table_info(model_component_manifests)").fetchall()
+            if row[1] == "id"
+        )
+        evidence_type = next(
+            row[2]
+            for row in connection.execute("PRAGMA table_info(model_capability_evidence)").fetchall()
+            if row[1] == "id"
+        )
+        assert workflow_type == "VARCHAR(64)"
+        assert revision_workflow_type == "VARCHAR(64)"
+        assert registry_type == "VARCHAR(64)"
+        assert component_type == "VARCHAR(64)"
+        assert evidence_type == "VARCHAR(64)"
+        assert connection.execute(
+            "SELECT id FROM workflow_definitions WHERE id = ?",
+            (workflow_id,),
+        ).fetchone() == (workflow_id,)
+        assert connection.execute(
+            "SELECT workflow_id FROM workflow_revisions WHERE id = ?",
+            (revision_id,),
+        ).fetchone() == (workflow_id,)
+        assert connection.execute(
+            "SELECT id FROM comfy_registry_installs WHERE id = ?",
+            (registry_id,),
+        ).fetchone() == (registry_id,)
+        assert connection.execute(
+            "SELECT id FROM model_component_manifests WHERE id = ?",
+            (component_id,),
+        ).fetchone() == (component_id,)
+        assert connection.execute(
+            "SELECT id FROM model_capability_evidence WHERE id = ?",
+            (evidence_id,),
+        ).fetchone() == (evidence_id,)
+        assert connection.execute("PRAGMA foreign_key_check").fetchall() == []
         assert connection.execute("PRAGMA integrity_check").fetchone() == ("ok",)
 
 

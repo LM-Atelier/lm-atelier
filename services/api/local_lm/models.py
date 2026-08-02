@@ -466,7 +466,7 @@ class ModelComponentManifest(TimestampMixin, Base):
     )
 
     id: Mapped[str] = mapped_column(
-        String(40),
+        String(64),
         primary_key=True,
         default=lambda: new_id("component"),
     )
@@ -495,7 +495,7 @@ class ModelCapabilityEvidence(TimestampMixin, Base):
     )
 
     id: Mapped[str] = mapped_column(
-        String(40),
+        String(64),
         primary_key=True,
         default=lambda: new_id("evidence"),
     )
@@ -614,7 +614,7 @@ class WorkflowDefinition(TimestampMixin, Base):
     __tablename__ = "workflow_definitions"
 
     id: Mapped[str] = mapped_column(
-        String(40), primary_key=True, default=lambda: new_id("workflow")
+        String(64), primary_key=True, default=lambda: new_id("workflow")
     )
     name: Mapped[str] = mapped_column(String(240), index=True)
     operation: Mapped[str] = mapped_column(String(32))
@@ -679,7 +679,7 @@ class ComfyRegistryInstall(TimestampMixin, Base):
     )
 
     id: Mapped[str] = mapped_column(
-        String(40), primary_key=True, default=lambda: new_id("registry")
+        String(64), primary_key=True, default=lambda: new_id("registry")
     )
     package_id: Mapped[str] = mapped_column(String(100), index=True)
     package_version: Mapped[str] = mapped_column(String(100))
