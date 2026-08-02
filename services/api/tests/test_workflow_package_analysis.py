@@ -134,6 +134,91 @@ async def test_a_resolved_package_reports_an_open_gate(
     assert payload["ready"] is True
 
 
+async def test_an_installed_package_at_the_pinned_revision_counts_as_resolved(
+    client: AsyncClient,
+    app: FastAPI,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Exact version evidence from custom-node installs reaches the analyzer."""
+
+    from local_lm.db import SessionLocal
+    from local_lm.models import CustomNodeInstall
+
+    revision = "b" * 40
+    with SessionLocal() as session:
+        session.add(
+            CustomNodeInstall(
+                name="rgthree-comfy",
+                source_url="https://example.invalid/rgthree-comfy",
+                revision=revision,
+                installed_path="C:/synthetic/custom-nodes/rgthree-comfy",
+                tree_hash="c" * 64,
+            )
+        )
+        session.commit()
+
+    async def object_info() -> dict[str, Any]:
+        return {"Power Lora Loader": {}}
+
+    monkeypatch.setattr(
+        app.state.services.engines.media,
+        "object_info",
+        object_info,
+        raising=False,
+    )
+    response = await client.post(
+        "/api/workflows/packages/analyze",
+        json={
+            "ui_graph": _workflow(
+                [_node(1, "Power Lora Loader", package="rgthree-comfy", version=revision)]
+            )
+        },
+    )
+
+    assert response.status_code == 200
+    payload = response.json()
+    packages = {package["package_id"]: package for package in payload["custom_packages"]}
+    assert packages["rgthree-comfy"]["locally_resolved"] is True
+    assert all(issue["code"] != "unresolved_custom_node_package" for issue in payload["issues"])
+    assert payload["ready"] is True
+
+
+async def test_a_pin_without_matching_install_evidence_stays_unresolved(
+    client: AsyncClient,
+    app: FastAPI,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A registry-version pin cannot be vouched for by a different revision (R153)."""
+
+    async def object_info() -> dict[str, Any]:
+        return {"Power Lora Loader": {}}
+
+    monkeypatch.setattr(
+        app.state.services.engines.media,
+        "object_info",
+        object_info,
+        raising=False,
+    )
+    response = await client.post(
+        "/api/workflows/packages/analyze",
+        json={
+            "ui_graph": _workflow(
+                [_node(1, "Power Lora Loader", package="rgthree-comfy", version="1.2.3")]
+            )
+        },
+    )
+
+    assert response.status_code == 200
+    payload = response.json()
+    packages = {package["package_id"]: package for package in payload["custom_packages"]}
+    assert packages["rgthree-comfy"]["locally_resolved"] is False
+    assert any(
+        issue["code"] == "unresolved_custom_node_package" and issue["severity"] == "blocking"
+        for issue in payload["issues"]
+    )
+    assert payload["ready"] is False
+
+
 async def test_a_referenced_model_this_machine_holds_counts_as_present(
     client: AsyncClient,
     app: FastAPI,

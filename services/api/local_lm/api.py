@@ -5064,6 +5064,20 @@ def _local_asset_filenames(session: Session) -> set[str]:
     return filenames
 
 
+def _installed_package_versions(session: Session) -> dict[str, set[str]]:
+    """Version evidence for installed custom-node packages, exact only.
+
+    Installs record git revisions; workflows may pin registry versions. Until
+    the registry resolver bridges the two, an unmatched pin correctly reads
+    unresolved - fail closed, never inferred (R153).
+    """
+
+    versions: dict[str, set[str]] = {}
+    for install in session.scalars(select(CustomNodeInstall)).all():
+        versions.setdefault(install.name, set()).add(install.revision)
+    return versions
+
+
 @router.post("/workflows/packages/analyze", response_model=WorkflowPackageAnalysisOut)
 async def analyze_workflow_package(
     payload: WorkflowPackageAnalyzeRequest, request: Request, session: SessionDep
@@ -5089,6 +5103,7 @@ async def analyze_workflow_package(
             payload.ui_graph,
             available_node_types=available_node_types,
             available_asset_filenames=_local_asset_filenames(session),
+            installed_package_versions=_installed_package_versions(session),
         )
     except WorkflowPackageError as exc:
         raise api_error(422, exc.code, str(exc)) from exc

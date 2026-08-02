@@ -10,6 +10,7 @@ const ISSUE_DESCRIPTIONS: Record<string, string> = {
   unsafe_asset_reference: "References a file outside the model folders",
   unsupported_asset_format: "References a model format this app cannot verify",
   unidentified_custom_node_package: "Uses custom nodes with no declared package",
+  unresolved_custom_node_package: "Needs a package version this machine does not have installed",
   unversioned_custom_node_package: "Uses a package without a pinned version",
 };
 
