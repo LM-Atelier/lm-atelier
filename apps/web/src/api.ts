@@ -12,6 +12,7 @@ import type {
   CatalogDetail,
   CatalogPreflight,
   Chat,
+  ContentRating,
   ChatDetail,
   DraftClassification,
   CustomNodeInstall,
@@ -531,6 +532,7 @@ export const api = {
     workflowTemplateSha256: string | null = null,
     installPlanId: string | null = null,
     auxiliaryKind: string | null = null,
+    contentRating: ContentRating = "unknown",
   ) =>
     request<Job>("/api/downloads", {
       method: "POST",
@@ -548,6 +550,7 @@ export const api = {
         workflow_template_sha256: workflowTemplateSha256,
         install_plan_id: installPlanId,
         auxiliary_kind: auxiliaryKind,
+        content_rating: contentRating,
       }),
     }),
   modelAssets: (kind?: string) =>

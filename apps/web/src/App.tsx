@@ -2496,9 +2496,10 @@ function ModelsView({ initialRole }: { initialRole: EngineRole }) {
         preflight.workflow_template_sha256,
         preflight.install_plan?.id ?? null,
       ] as const;
+      const contentRating = preflight.content_rating ?? "unknown";
       return auxiliaryKind
-        ? api.download(...downloadArguments, auxiliaryKind)
-        : api.download(...downloadArguments);
+        ? api.download(...downloadArguments, auxiliaryKind, contentRating)
+        : api.download(...downloadArguments, null, contentRating);
     },
     onSuccess: () => {
       setPendingInstall(null);
