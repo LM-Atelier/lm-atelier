@@ -1209,7 +1209,7 @@ class HealthOut(ApiModel):
 
 
 class CredentialStatus(ApiModel):
-    provider: Literal["huggingface"] = "huggingface"
+    provider: Literal["huggingface", "civitai"]
     configured: bool
     source: Literal["none", "environment", "credential_vault"]
     vault_available: bool

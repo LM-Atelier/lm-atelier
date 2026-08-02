@@ -36,6 +36,7 @@ class Settings(BaseSettings):
     worker_shutdown_seconds: float = Field(default=10, ge=1, le=60)
     auto_unload_chat_for_media: bool = True
     hf_token: str | None = None
+    civitai_token: str | None = None
     max_upload_bytes: int = 100 * 1024 * 1024
     vision_max_images: int = Field(default=4, ge=1, le=16)
     vision_max_image_bytes: int = Field(

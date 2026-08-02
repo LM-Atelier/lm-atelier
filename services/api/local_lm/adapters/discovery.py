@@ -63,7 +63,7 @@ def load_external_adapter(kind: Literal["chat", "media"], name: str, settings: S
         raise AdapterLoadError(f"adapter {group}:{name} does not expose a callable factory")
     # Adapters are explicitly trusted in-process Python extensions, but their
     # engine contract does not require access to download credentials.
-    adapter_settings = settings.model_copy(update={"hf_token": None})
+    adapter_settings = settings.model_copy(update={"hf_token": None, "civitai_token": None})
     try:
         adapter = factory(adapter_settings)
     except Exception:
