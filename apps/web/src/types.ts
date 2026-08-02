@@ -118,6 +118,8 @@ export interface Chat {
   vision_settings_json?: Record<string, unknown>;
   generation_settings_json?: GenerationSettingsByRole;
   generation_preset_ids_json?: GenerationPresetIdsByRole;
+  // Empty unless this chat was forked from a message in another one.
+  origin_json?: Record<string, unknown>;
   created_at: string;
   updated_at: string;
 }

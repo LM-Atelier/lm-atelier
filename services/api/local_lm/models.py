@@ -84,6 +84,8 @@ class Chat(TimestampMixin, Base):
     generation_settings_json: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
     generation_preset_ids_json: Mapped[dict[str, str | None]] = mapped_column(JSON, default=dict)
     vision_settings_json: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
+    # Where a forked thread came from, empty for chats created directly.
+    origin_json: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict, server_default="{}")
 
     project: Mapped[Project | None] = relationship(back_populates="chats")
     messages: Mapped[list[Message]] = relationship(

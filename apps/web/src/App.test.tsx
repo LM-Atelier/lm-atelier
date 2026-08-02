@@ -115,6 +115,7 @@ vi.mock("./api", () => ({
     regenerateMessage: vi.fn(),
     selectResponseRevision: vi.fn(),
     deleteExchange: vi.fn(),
+    forkThread: vi.fn(),
     branchMessage: vi.fn(),
     cancelChat: vi.fn(),
     jobs: vi.fn().mockResolvedValue([]),
