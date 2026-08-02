@@ -176,6 +176,27 @@ def test_ignores_unlinked_note_nodes() -> None:
     assert "3" not in compiled.api_graph
 
 
+@pytest.mark.parametrize("node_type", ["MarkdownNote", "Note"])
+@pytest.mark.parametrize("mode", [1, 2, 3, 4])
+def test_ignores_frontend_modes_on_unlinked_note_nodes(node_type: str, mode: int) -> None:
+    workflow = _workflow()
+    workflow["nodes"].append(
+        {
+            "id": 3,
+            "type": node_type,
+            "mode": mode,
+            "inputs": [],
+            "outputs": [],
+            "widgets_values": ["note"],
+        }
+    )
+
+    compiled = compile_comfyui_ui_graph(workflow, _object_info())
+
+    assert compiled.execution_order == ("1", "2")
+    assert "3" not in compiled.api_graph
+
+
 def test_rejects_workflows_without_executable_nodes() -> None:
     workflow = {
         "version": 0.4,
