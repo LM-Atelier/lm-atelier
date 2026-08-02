@@ -33,6 +33,7 @@ from .chat_deletion import (
     delete_exchange,
 )
 from .chat_forking import ForkSourceNotFound, fork_chat_from_message
+from .comfy_registry_installs import installed_comfy_registry_versions
 from .comfy_templates import (
     COMFY_TEMPLATE_COMPILER_VERSION,
     ComfyTemplate,
@@ -5123,12 +5124,12 @@ def _local_asset_filenames(session: Session) -> set[str]:
 def _installed_package_versions(session: Session) -> dict[str, set[str]]:
     """Version evidence for installed custom-node packages, exact only.
 
-    Installs record git revisions; workflows may pin registry versions. Until
-    the registry resolver bridges the two, an unmatched pin correctly reads
-    unresolved - fail closed, never inferred.
+    Git installs contribute their pinned revisions. Registry installs contribute
+    exact declared versions only after their immutable records are trusted and
+    active. Unmatched pins remain unresolved rather than being inferred.
     """
 
-    versions: dict[str, set[str]] = {}
+    versions = installed_comfy_registry_versions(session)
     for install in session.scalars(select(CustomNodeInstall)).all():
         versions.setdefault(install.name, set()).add(install.revision)
     return versions
