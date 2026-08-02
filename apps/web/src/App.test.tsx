@@ -3952,6 +3952,78 @@ describe("App", () => {
     expect(screen.queryByRole("dialog", { name: "Prompt workshop" })).not.toBeInTheDocument();
   });
 
+  it("applies one template as a separate edit turn per attached image", async () => {
+    const stamp = "2026-07-28T00:00:00Z";
+    const chat: Chat = {
+      id: "chat-batch-studio",
+      project_id: null,
+      title: "Batch studio",
+      archived: false,
+      routing_mode: "image",
+      confirm_uncertain_media: false,
+      active_chat_profile_id: null,
+      active_image_profile_id: null,
+      active_video_profile_id: null,
+      active_head_message_id: null,
+      created_at: stamp,
+      updated_at: stamp,
+    };
+    localStorage.setItem("local-lm-chat", chat.id);
+    vi.mocked(api.chats).mockResolvedValue([chat]);
+    vi.mocked(api.chat).mockResolvedValue({ ...chat, messages: [] });
+    const uploaded = (id: string) => ({
+      id,
+      media_type: "image/png",
+      size_bytes: 512,
+      metadata_json: {},
+      created_at: stamp,
+    }) as never;
+    vi.mocked(api.upload)
+      .mockResolvedValueOnce(uploaded("artifact-batch-1"))
+      .mockResolvedValueOnce(uploaded("artifact-batch-2"));
+    vi.mocked(api.editTemplates).mockResolvedValue([
+      {
+        id: "tpl-colorize",
+        name: "Colorize",
+        description: "Add realistic color.",
+        instruction: "Colorize this photograph. Change nothing except adding color.",
+        operation: "image_to_image",
+        settings_json: {},
+        trigger_words_json: [],
+        content_rating: "general",
+        builtin: true,
+        enabled: true,
+      },
+    ]);
+    vi.mocked(api.sendTurn).mockResolvedValue({} as never);
+    const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+    const { container } = render(
+      <QueryClientProvider client={client}>
+        <App />
+      </QueryClientProvider>,
+    );
+
+    await screen.findByRole("textbox", { name: "Message" });
+    const upload = container.querySelector<HTMLInputElement>('input[accept="image/*,video/*"]');
+    fireEvent.change(upload!, {
+      target: { files: [
+        new File(["a"], "one.png", { type: "image/png" }),
+        new File(["b"], "two.png", { type: "image/png" }),
+      ] },
+    });
+    await waitFor(() => expect(api.upload).toHaveBeenCalledTimes(2));
+    fireEvent.click(screen.getByRole("button", { name: "Open editing studio" }));
+    fireEvent.click(await screen.findByRole("option", { name: /Colorize/ }));
+    fireEvent.click(screen.getByRole("button", { name: "Apply to each of 2 images" }));
+
+    // Two independent edit turns, one image each - not one turn with both.
+    await waitFor(() => expect(api.sendTurn).toHaveBeenCalledTimes(2));
+    const calls = vi.mocked(api.sendTurn).mock.calls;
+    expect(calls[0][3]).toEqual(["artifact-batch-1"]);
+    expect(calls[1][3]).toEqual(["artifact-batch-2"]);
+    expect(calls[0][1]).toContain("Colorize this photograph.");
+  });
+
   it("applies a one-click edit template through the composer", async () => {
     const stamp = "2026-07-28T00:00:00Z";
     const chat: Chat = {
