@@ -17,8 +17,9 @@ import {
   Bot,
   Check,
   ChevronDown,
+  ChevronLeft,
+  ChevronRight,
   CircleStop,
-  Copy,
   Cpu,
   Download,
   Film,
@@ -33,6 +34,7 @@ import {
   MoreHorizontal,
   Paperclip,
   Pause,
+  Pencil,
   Play,
   Plus,
   Quote,
@@ -48,6 +50,7 @@ import {
   X,
 } from "lucide-react";
 import { AccessibleDialog } from "./AccessibleDialog";
+import { CopyTextButton } from "./CopyTextButton";
 import { CredentialSettingsCard } from "./CredentialSettingsCard";
 import { InstallConfirmDialog } from "./InstallConfirmDialog";
 import { api } from "./api";
@@ -348,22 +351,6 @@ function MediaLibraryView() {
   );
 }
 
-async function copyToClipboard(text: string): Promise<void> {
-  if (navigator.clipboard?.writeText) {
-    await navigator.clipboard.writeText(text);
-    return;
-  }
-  const textarea = document.createElement("textarea");
-  textarea.value = text;
-  textarea.style.position = "fixed";
-  textarea.style.opacity = "0";
-  document.body.appendChild(textarea);
-  textarea.select();
-  const copied = document.execCommand("copy");
-  textarea.remove();
-  if (!copied) throw new Error("Clipboard access is unavailable");
-}
-
 function ErrorCallout({
   message,
   action,
@@ -405,42 +392,6 @@ function MessageTimestamp({ at }: { at: string }) {
     <time className="message-timestamp" dateTime={at} title={date.toLocaleString()}>
       {label}
     </time>
-  );
-}
-
-function CopyTextButton({
-  text,
-  label,
-  className,
-  buttonText = "Copy",
-}: {
-  text: string;
-  label: string;
-  className?: string;
-  buttonText?: string;
-}) {
-  const [copied, setCopied] = useState(false);
-  const resetTimer = useRef<number | undefined>(undefined);
-  useEffect(() => () => {
-    if (resetTimer.current !== undefined) window.clearTimeout(resetTimer.current);
-  }, []);
-  return (
-    <button
-      type="button"
-      className={className}
-      aria-label={copied ? `${label} copied` : label}
-      title={copied ? "Copied" : label}
-      onClick={() => {
-        void copyToClipboard(text).then(() => {
-          setCopied(true);
-          if (resetTimer.current !== undefined) window.clearTimeout(resetTimer.current);
-          resetTimer.current = window.setTimeout(() => setCopied(false), 1_500);
-        });
-      }}
-    >
-      {copied ? <Check size={13} /> : <Copy size={13} />}
-      <span>{copied ? "Copied" : buttonText}</span>
-    </button>
   );
 }
 
@@ -658,7 +609,7 @@ function MessageBubble({
           <MarkdownText text={liveText} />
         )}
         {showChatStartup && <PendingResponseStatus label={chatProgress?.text || "Starting chat"} startedAt={message.created_at} />}
-        {message.role === "user" && message.status === "complete" && !editing && <div className="message-meta"><MessageTimestamp at={message.created_at} />{onEdit && <button onClick={() => setEditing(true)}>Edit and branch</button>}{copyableText && <CopyTextButton text={copyableText} label="Copy user message" />}{onDeleteExchange && !confirmingDelete && <button aria-label="Delete this turn" onClick={() => setConfirmingDelete(true)}>Delete</button>}{onDeleteExchange && confirmingDelete && <span className="delete-confirm"><span>Also deletes the answer and its media.</span><button className="danger" onClick={() => { setConfirmingDelete(false); onDeleteExchange(message.id); }}>Delete turn</button><button onClick={() => setConfirmingDelete(false)}>Keep</button></span>}</div>}
+        {message.role === "user" && message.status === "complete" && !editing && <div className="message-meta"><MessageTimestamp at={message.created_at} />{confirmingDelete ? <span className="delete-confirm"><span>Also deletes the answer and its media.</span><button className="danger" onClick={() => { setConfirmingDelete(false); onDeleteExchange?.(message.id); }}>Delete turn</button><button onClick={() => setConfirmingDelete(false)}>Keep</button></span> : <span className="message-actions">{onEdit && <button onClick={() => setEditing(true)} aria-label="Edit message" title="Edit"><Pencil size={14} /></button>}{copyableText && <CopyTextButton text={copyableText} label="Copy user message" buttonText="" />}{onDeleteExchange && <button aria-label="Delete this turn" title="Delete turn" onClick={() => setConfirmingDelete(true)}><Trash2 size={14} /></button>}</span>}</div>}
         {message.role === "assistant" && message.status === "cancelled" && !visibleParts.some((part) => part.type === "error") && (
           <div className="message-meta"><span>Generation cancelled</span></div>
         )}
@@ -686,43 +637,58 @@ function MessageBubble({
                 {compactedMessages === 1 ? "" : "s"} · full transcript preserved
               </span>
             )}
-            {copyableText && <CopyTextButton text={copyableText} label="Copy assistant message" />}
-            {copyableText && onQuote && (
-              <button onClick={() => onQuote(copyableText)} aria-label="Quote response">
-                <Quote size={13} /> Quote
-              </button>
-            )}
             {regenerationPending && <span>Regenerating…</span>}
+            {/* Always visible, unlike the hover actions below: cycling between
+                answers is navigation, and a control the user cannot see is a
+                control they do not know exists. */}
             {completedRevisions.length > 1 && onSelectRevision && (
               <span className="response-revision-controls">
                 <button
                   disabled={revisionIndex <= 0}
+                  title="Previous answer"
                   onClick={() => onSelectRevision(
                     message.id,
                     completedRevisions[revisionIndex - 1]!.id,
                   )}
                   aria-label="Previous response revision"
                 >
-                  Previous
+                  <ChevronLeft size={14} />
                 </button>
                 <span>{revisionIndex + 1} / {completedRevisions.length}</span>
                 <button
                   disabled={revisionIndex >= completedRevisions.length - 1}
+                  title="Next answer"
                   onClick={() => onSelectRevision(
                     message.id,
                     completedRevisions[revisionIndex + 1]!.id,
                   )}
                   aria-label="Next response revision"
                 >
-                  Next
+                  <ChevronRight size={14} />
                 </button>
               </span>
             )}
-            {onRegenerate && (
-              <button onClick={() => onRegenerate(message.id)} aria-label="Regenerate response">
-                <RotateCcw size={13} /> Regenerate
-              </button>
-            )}
+            {/* Revealed on hover, and on keyboard focus - hover alone would
+                put these actions out of reach without a mouse. */}
+            <span className="message-actions">
+              {copyableText && (
+                <CopyTextButton
+                  text={copyableText}
+                  label="Copy assistant message"
+                  buttonText=""
+                />
+              )}
+              {copyableText && onQuote && (
+                <button onClick={() => onQuote(copyableText)} aria-label="Quote response" title="Quote">
+                  <Quote size={14} />
+                </button>
+              )}
+              {onRegenerate && (
+                <button onClick={() => onRegenerate(message.id)} aria-label="Regenerate response" title="Regenerate">
+                  <RotateCcw size={14} />
+                </button>
+              )}
+            </span>
           </div>
         )}
         {message.role === "assistant" && message.status !== "complete" && copyableText && (

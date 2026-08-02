@@ -2039,7 +2039,7 @@ describe("App", () => {
     expect(screen.getAllByText("LoRA Auto used Atelier Ink — matched ink, watercolor" )).toHaveLength(2);
     expect(screen.getAllByText("Compacted 4 earlier messages · full transcript preserved")).toHaveLength(2);
     expect(screen.queryByText(/earlier messages omitted/)).not.toBeInTheDocument();
-    fireEvent.click(screen.getAllByText("Edit and branch").at(-1)!);
+    fireEvent.click(screen.getAllByRole("button", { name: "Edit message" }).at(-1)!);
     expect(screen.getByDisplayValue("Edited question")).toBeInTheDocument();
   });
 
@@ -4898,7 +4898,7 @@ describe("App", () => {
     fireEvent.click(screen.getByRole("button", { name: "Regenerate response" }));
     await waitFor(() => expect(api.regenerateMessage).toHaveBeenCalledWith(assistantMessage.id, { max_tokens: 4096 }));
 
-    fireEvent.click(screen.getByText("Edit and branch"));
+    fireEvent.click(screen.getByRole("button", { name: "Edit message" }));
     fireEvent.change(screen.getByLabelText("Edit message"), { target: { value: "Count to 1000" } });
     fireEvent.click(screen.getByText("Send edited message"));
     await waitFor(() => expect(api.branchMessage).toHaveBeenCalledWith(
