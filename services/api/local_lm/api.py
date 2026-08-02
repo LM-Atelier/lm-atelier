@@ -24,7 +24,7 @@ from . import __version__
 from .auxiliary_assets import COMFY_AUXILIARY_FOLDERS, validate_lora_workflow_contract
 from .capability_evidence import current_capability_evidence, evidence_input_modalities
 from .capability_probe import probe_structured_tools
-from .catalog import HuggingFaceCatalog
+from .catalog_sources import CatalogSource, CatalogSourceNotFound
 from .comfy_templates import (
     COMFY_TEMPLATE_COMPILER_VERSION,
     ComfyTemplate,
@@ -2400,6 +2400,7 @@ async def artifact_content(
 @router.get("/catalog", response_model=CatalogPage)
 async def catalog_search(
     request: Request,
+    source: str = Query(default="huggingface", min_length=1, max_length=32),
     query: str = "",
     role: str | None = None,
     sort: str = "trending",
@@ -2417,7 +2418,10 @@ async def catalog_search(
     updated_within_days: int | None = Query(default=None, ge=1, le=3650),
 ) -> CatalogPage:
     services = _services(request)
-    catalog: HuggingFaceCatalog = services.catalog
+    try:
+        catalog: CatalogSource = services.catalog_sources.get(source)
+    except CatalogSourceNotFound as exc:
+        raise HTTPException(404, str(exc)) from exc
     try:
         media_catalog = role in {"image", "video"} and services.settings.media_engine == "comfyui"
         page = await catalog.search(
@@ -2481,7 +2485,7 @@ async def catalog_search(
     except Exception as exc:
         raise HTTPException(
             503,
-            "Hugging Face is temporarily unavailable. Check your connection and retry.",
+            f"{catalog.display_name} is temporarily unavailable. Check your connection and retry.",
         ) from exc
 
 
@@ -2516,6 +2520,32 @@ async def workflow_catalog_models(request: Request, role: str) -> list[CatalogMo
             )
         )
     return sorted(cards, key=lambda item: (item.remote_id.casefold(), item.name))
+
+
+@router.get("/catalog/item", response_model=CatalogDetail)
+async def catalog_item_detail(
+    request: Request,
+    source: str = Query(default="huggingface", min_length=1, max_length=32),
+    item_id: str = Query(alias="id", min_length=1, max_length=500),
+    revision: str = "main",
+    role: str | None = None,
+) -> CatalogDetail:
+    services = _services(request)
+    try:
+        selected_source = services.catalog_sources.get(source)
+    except CatalogSourceNotFound as exc:
+        raise HTTPException(404, str(exc)) from exc
+    if not selected_source.validate_item_id(item_id):
+        raise HTTPException(422, "invalid catalog item id")
+    try:
+        detail = await selected_source.inspect(item_id, revision, role)
+        return CatalogDetail.model_validate(detail)
+    except Exception as exc:
+        raise HTTPException(
+            503,
+            f"{selected_source.display_name} is temporarily unavailable. "
+            "Check your connection and retry.",
+        ) from exc
 
 
 @router.get("/catalog/{owner}/{name}", response_model=CatalogDetail)
