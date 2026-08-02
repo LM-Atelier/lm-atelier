@@ -147,6 +147,10 @@ export interface Run {
   provenance_json: Record<string, unknown>;
   error: string | null;
   created_at: string;
+  updated_at: string;
+  started_at: string | null;
+  completed_at: string | null;
+  duration_ms: number | null;
 }
 
 export interface TurnAccepted {
@@ -179,6 +183,10 @@ export interface Job {
   cancellable: boolean;
   created_at: string;
   updated_at: string;
+  // Added to JobOut by #220 for phase durations; the browser type never
+  // gained them, so the data was unreachable until the contract gate caught it.
+  started_at: string | null;
+  completed_at: string | null;
 }
 
 export interface ProgressV2 {

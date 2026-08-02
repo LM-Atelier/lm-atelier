@@ -1664,8 +1664,12 @@ async def test_expensive_auto_video_reports_estimate_before_queueing(
     response = await client.post(f"/api/chats/{chat['id']}/turns", json=payload)
     assert response.status_code == 409
     detail = response.json()["detail"]
-    estimate = detail["plan"]["parameter_overrides"]["_generation_estimate"]
+    # The estimate is a named top-level field, matching the ordered-plan 409,
+    # rather than an underscore marker buried in the plan.
+    estimate = detail["estimate"]
     assert detail["plan"]["operation"] == "text_to_video"
+    assert detail["plan"]["generation_estimate"] == estimate
+    assert "parameter_overrides" not in detail["plan"]
     assert estimate["duration_seconds"] == 5.04
     assert estimate["estimated_intermediate_bytes"] > estimate["estimated_output_bytes"]
 
@@ -6927,6 +6931,64 @@ async def test_comfy_catalog_preflight_offers_a_provisional_adaptive_checkpoint(
         check for check in payload["checks"] if check["id"] == "workflow-template"
     )
     assert workflow_check["status"] == "warn"
+
+
+async def test_a_queued_run_keeps_the_model_selected_when_it_was_submitted(
+    app: FastAPI,
+    client: AsyncClient,
+) -> None:
+    """A queue entry executes with the model chosen when it entered the queue.
+
+    Switching the chat's active model afterwards must not retarget work that is
+    already waiting: the user asked for that generation with that model, and a
+    late-bound read would silently produce something they never requested. The
+    same late-binding shape that #327 fixed for the routing mode.
+    """
+    first = (
+        await client.post(
+            "/api/profiles",
+            json={"name": "First choice", "role": "chat", "engine": "mock"},
+        )
+    ).json()
+    second = (
+        await client.post(
+            "/api/profiles",
+            json={"name": "Second choice", "role": "chat", "engine": "mock"},
+        )
+    ).json()
+    chat = (await client.post("/api/chats", json={"title": "Snapshot"})).json()
+    assert (
+        await client.patch(f"/api/chats/{chat['id']}", json={"active_chat_profile_id": first["id"]})
+    ).status_code == 200
+
+    # Hold the compute lease so the turn stays queued while the chat changes.
+    async with app.state.services.scheduler.lease("primary"):
+        accepted = await client.post(
+            f"/api/chats/{chat['id']}/turns", json={"text": "Explain queues", "mode": "text"}
+        )
+        assert accepted.status_code == 202
+        run_id = accepted.json()["run"]["id"]
+
+        switched = await client.patch(
+            f"/api/chats/{chat['id']}", json={"active_chat_profile_id": second["id"]}
+        )
+        assert switched.status_code == 200
+        assert switched.json()["active_chat_profile_id"] == second["id"]
+
+        with SessionLocal() as session:
+            queued = session.get(Run, run_id)
+            assert queued is not None
+            assert queued.status in {"queued", "routing", "pending"}
+            assert queued.profile_id == first["id"], (
+                "the queued run must keep the model selected at submission"
+            )
+
+    completed = await wait_for_run(client, run_id)
+    assert completed["status"] == "complete"
+    with SessionLocal() as session:
+        finished = session.get(Run, run_id)
+        assert finished is not None
+        assert finished.profile_id == first["id"]
 
 
 async def test_workflow_catalog_preserves_exact_variants_and_preflights_the_chosen_one(

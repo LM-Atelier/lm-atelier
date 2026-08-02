@@ -575,6 +575,8 @@ describe("App", () => {
       error: null,
       attempt: 0,
       cancellable: true,
+      started_at: null,
+      completed_at: null,
       created_at: "2026-07-28T00:00:00Z",
       updated_at: "2026-07-28T00:00:00Z",
     }]);
@@ -633,6 +635,8 @@ describe("App", () => {
       error: null,
       attempt: 0,
       cancellable: true,
+      started_at: null,
+      completed_at: null,
       created_at: stamp,
       updated_at: stamp,
     };
@@ -1364,6 +1368,12 @@ describe("App", () => {
     fireEvent.click(screen.getByRole("button", { name: "advanced" }));
     const addLora = await screen.findByRole("button", { name: "Add LoRA" });
     await waitFor(() => expect(addLora).toBeEnabled());
+
+    // LoRAs live in their own section rather than inline among the numeric
+    // settings, so choosing one is deliberate instead of scrolled past.
+    const loraSection = screen.getByRole("region", { name: "LoRAs" });
+    expect(loraSection).toContainElement(addLora);
+
     fireEvent.click(addLora);
 
     expect(screen.getByRole("combobox", { name: "LoRA 1" })).toHaveDisplayValue("Atelier Ink");
@@ -1397,6 +1407,8 @@ describe("App", () => {
       error: null,
       attempt: 1,
       cancellable: true,
+      started_at: null,
+      completed_at: null,
       created_at: stamp,
       updated_at: stamp,
     };
@@ -1454,6 +1466,8 @@ describe("App", () => {
         error: null,
         attempt: 1,
         cancellable: true,
+        started_at: null,
+        completed_at: null,
         created_at: stamp,
         updated_at: stamp,
       },
@@ -1489,6 +1503,8 @@ describe("App", () => {
         error: null,
         attempt: 0,
         cancellable: true,
+        started_at: null,
+        completed_at: null,
         created_at: stamp,
         updated_at: stamp,
       },
@@ -1544,6 +1560,8 @@ describe("App", () => {
       error: null,
       attempt: 1,
       cancellable: true,
+      started_at: null,
+      completed_at: null,
       created_at: stamp,
       updated_at: stamp,
     }]);
@@ -1571,6 +1589,8 @@ describe("App", () => {
       error: `loader ${index + 1} crashed`,
       attempt: 1,
       cancellable: false,
+      started_at: null,
+      completed_at: null,
       created_at: `2026-07-2${index + 1}T00:00:00Z`,
       updated_at: `2026-07-2${index + 1}T00:00:00Z`,
     }));
@@ -1608,6 +1628,8 @@ describe("App", () => {
       error: "old loader failure",
       attempt: 1,
       cancellable: false,
+      started_at: null,
+      completed_at: null,
       created_at: "2026-07-24T00:00:00Z",
       updated_at: "2026-07-24T00:00:00Z",
     };
@@ -2039,7 +2061,7 @@ describe("App", () => {
     expect(screen.getAllByText("LoRA Auto used Atelier Ink — matched ink, watercolor" )).toHaveLength(2);
     expect(screen.getAllByText("Compacted 4 earlier messages · full transcript preserved")).toHaveLength(2);
     expect(screen.queryByText(/earlier messages omitted/)).not.toBeInTheDocument();
-    fireEvent.click(screen.getAllByText("Edit and branch").at(-1)!);
+    fireEvent.click(screen.getAllByRole("button", { name: "Edit message" }).at(-1)!);
     expect(screen.getByDisplayValue("Edited question")).toBeInTheDocument();
   });
 
@@ -4150,6 +4172,10 @@ describe("App", () => {
         provenance_json: {},
         error: null,
         created_at: stamp,
+        updated_at: stamp,
+        started_at: null,
+        completed_at: null,
+        duration_ms: null,
       },
       user_message: {
         id: "user-origin",
@@ -4734,6 +4760,14 @@ describe("App", () => {
     expect(screen.getAllByText("Generated image")).toHaveLength(2);
     expect(screen.getByRole("combobox", { name: "Generation mode" })).toHaveValue("video");
 
+    // Reference attaches the same artifact without touching the mode - the
+    // distinction from Edit and Animate, which deliberately do change it.
+    vi.mocked(api.updateChat).mockClear();
+    fireEvent.click(screen.getByRole("button", { name: "Reference" }));
+    expect(screen.getByRole("combobox", { name: "Generation mode" })).toHaveValue("video");
+    expect(api.updateChat).not.toHaveBeenCalled();
+    expect(screen.getByRole("link", { name: "Preview sha256:animate-source" })).toBeVisible();
+
     fireEvent.click(screen.getByRole("button", { name: "Turn settings" }));
     expect(await screen.findByRole("spinbutton", { name: /Image motion frames/ })).toBeInTheDocument();
     expect(screen.queryByRole("spinbutton", { name: /Text video frames/ })).not.toBeInTheDocument();
@@ -4898,7 +4932,7 @@ describe("App", () => {
     fireEvent.click(screen.getByRole("button", { name: "Regenerate response" }));
     await waitFor(() => expect(api.regenerateMessage).toHaveBeenCalledWith(assistantMessage.id, { max_tokens: 4096 }));
 
-    fireEvent.click(screen.getByText("Edit and branch"));
+    fireEvent.click(screen.getByRole("button", { name: "Edit message" }));
     fireEvent.change(screen.getByLabelText("Edit message"), { target: { value: "Count to 1000" } });
     fireEvent.click(screen.getByText("Send edited message"));
     await waitFor(() => expect(api.branchMessage).toHaveBeenCalledWith(

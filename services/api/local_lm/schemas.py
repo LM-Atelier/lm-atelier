@@ -346,7 +346,12 @@ class RoutingPlan(ApiModel):
     input_artifact_ids: list[str] = Field(default_factory=list)
     profile_id: str | None = None
     workflow_id: str | None = None
-    parameter_overrides: dict[str, Any] = Field(default_factory=dict)
+    # Cost projections computed at admission. These were previously stuffed
+    # into a `parameter_overrides` dict under underscore-prefixed keys and
+    # read by the browser through that internal marker; they are contract, so
+    # they are named fields like the sibling ordered-plan 409 already used.
+    generation_estimate: dict[str, Any] | None = None
+    media_plan_estimate: dict[str, Any] | None = None
     output_count: int = Field(default=1, ge=1, le=16)
     confidence: float = Field(ge=0, le=1)
     reason_code: RoutingReasonCode

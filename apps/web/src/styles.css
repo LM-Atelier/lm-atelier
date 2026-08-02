@@ -79,6 +79,10 @@ button:focus-visible, a:focus-visible, input:focus-visible, textarea:focus-visib
 .sidebar-chat-row { display: grid; grid-template-columns: minmax(0, 1fr) auto; align-items: center; }
 .chat-main { width: 100%; display: flex; align-items: center; gap: 8px; border: 0; background: transparent; color: #8f98a7; padding: 7px 6px 7px 10px; border-radius: 8px; cursor: pointer; min-width: 0; text-align: left; }
 .chat-main span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+/* Flex items shrink by default, so a long title squeezed these icons and the
+   row-to-row size varied. The text truncates instead; the icon never does. */
+.chat-main > svg, .project-main > svg, .primary-nav button > svg,
+.sidebar-footer > button > svg { flex: 0 0 auto; }
 .chat-main small { margin-left: auto; color: var(--atelier-soft); font-size: 8px; text-transform: uppercase; }
 .chat-main:hover, .chat-main.active { background: var(--panel-2); color: #eef0f5; }
 .sidebar-chat-row > .inline-add { opacity: 0; }.sidebar-chat-row:hover > .inline-add, .sidebar-chat-row:focus-within > .inline-add { opacity: 1; }
@@ -140,6 +144,12 @@ h1, h2, h3 { margin: 0; }
 .message-edit > div > button:not(.primary) { border: 0; background: transparent; color: #929ba8; cursor: pointer; }
 .message-meta { display: flex; flex-wrap: wrap; align-items: center; gap: 8px 12px; margin-top: 9px; color: #6f7886; font-size: 10px; }
 .response-revision-controls { display: inline-flex; align-items: center; gap: 5px; }
+/* Actions stay out of the way until wanted. Revealed on hover and on keyboard
+   focus - hover alone would make them unreachable without a mouse. The
+   revision arrows above are deliberately not in here: they never hide. */
+.message-actions { display: inline-flex; align-items: center; gap: 4px; opacity: 0; transition: opacity .12s ease; }
+.message:hover .message-actions, .message-actions:focus-within { opacity: 1; }
+@media (hover: none) { .message-actions { opacity: 1; } }
 .message-meta button { display: inline-flex; align-items: center; gap: 5px; border: 0; border-radius: 7px; background: transparent; color: #818b99; padding: 4px 6px; cursor: pointer; }
 .message-meta button:hover { background: var(--panel-2); color: #d9dee6; }
 .message.optimistic { opacity: .82; }
@@ -207,7 +217,12 @@ h1, h2, h3 { margin: 0; }
 .segmented button { flex: 1; border: 0; background: transparent; color: #7f8794; border-radius: 7px; padding: 7px; text-transform: capitalize; cursor: pointer; }
 .segmented button.active { background: var(--panel-3); color: var(--cream); }
 .settings-list { overflow-y: auto; padding: 12px 22px 25px; }
-.generation-settings-panel { min-height: 0; display: grid; grid-template-rows: auto minmax(0, 1fr) auto; }
+/* Rows: visibility segmented, scrolling settings, optional LoRA section, actions. */
+.generation-settings-panel { min-height: 0; display: grid; grid-template-rows: auto minmax(0, 1fr) auto auto; }
+.settings-section { border-top: 1px solid var(--border); }
+.settings-section > h4 { margin: 0; padding: 12px 22px 0; color: var(--muted); font-size: 11px; font-weight: 700; letter-spacing: .09em; text-transform: uppercase; }
+.settings-section .settings-list { padding-top: 4px; }
+.settings-section .setting-row:last-child { border-bottom: 0; }
 .generation-settings-panel .setting-row { margin: 0; }
 .generation-settings-actions { display: flex; justify-content: flex-end; padding: 15px 22px; border-top: 1px solid var(--border); }
 .setting-row { display: grid; grid-template-columns: 1fr 105px; align-items: center; gap: 14px; padding: 13px 0; border-bottom: 1px solid var(--border); }
