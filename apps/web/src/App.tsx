@@ -44,6 +44,7 @@ import {
   Sparkles,
   Trash2,
   Upload,
+  Wand2,
   Workflow as WorkflowIcon,
   X,
 } from "lucide-react";
@@ -83,6 +84,8 @@ import { DownloadDiagnosticsButton } from "./DownloadDiagnosticsButton";
 import { StatusDot } from "./StatusDot";
 import { ErrorCallout } from "./ErrorCallout";
 import { EmptyState } from "./EmptyState";
+import { AtelierMark } from "./AtelierMark";
+import { EditingStudio } from "./EditingStudio";
 import { FirstRunSetup, SetupWizard } from "./SetupWizard";
 import { WorkflowPackageReview } from "./WorkflowPackageReview";
 import { useWorkflowPackageImport } from "./useWorkflowPackageImport";
@@ -200,15 +203,6 @@ function formatTechnicalDetails(
     ...devices,
     ...runtimes,
   ].join("\n");
-}
-
-function AtelierMark() {
-  return (
-    <svg viewBox="0 0 400 400" role="img" aria-label="LM Atelier">
-      <path className="lma-l" d="M43 20h64v300h169v60H43z" />
-      <path className="lma-ma" d="M125 20l118 109L356 20v360h-58v-92h-85l46-45h39v-82L164 303h-39z" />
-    </svg>
-  );
 }
 
 function ArtifactPart({
@@ -1459,6 +1453,7 @@ function Composer({
   const { mode, changeMode, currentMode } = useGenerationModeSelection(chat.routing_mode, onMode);
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [promptHelperDraft, setPromptHelperDraft] = useState<string | null>(null);
+  const [studioOpen, setStudioOpen] = useState(false);
   const [attachments, setAttachments] = useState<ComposerAttachment[]>([]);
   const { uploading, uploadError, setUploadError, uploadFiles } = useComposerUploads(
     (attachment) => setAttachments((current) => [...current, attachment]),
@@ -1677,6 +1672,7 @@ function Composer({
                 </select>
                 <ChevronDown size={13} />
               </label>
+              {imageEdit && <button className="icon-button" onClick={() => setStudioOpen(true)} aria-label="Open editing studio" title="One-click edits"><Wand2 size={18} /></button>}
               <button className="icon-button" onClick={() => setSettingsOpen(true)} aria-label="Turn settings"><SlidersHorizontal size={18} /></button>
             </div>
             <span className="composer-submit-actions">
@@ -1711,6 +1707,7 @@ function Composer({
           </div>
         </div>
       </div>
+      {studioOpen && <EditingStudio onClose={() => setStudioOpen(false)} onPick={(instruction) => { setText(instruction); setStudioOpen(false); window.setTimeout(() => textInput.current?.focus(), 0); }} />}
       {promptHelperDraft !== null && (
         <PromptHelperDialog
           sourceChat={chat}

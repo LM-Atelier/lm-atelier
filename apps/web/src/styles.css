@@ -626,3 +626,11 @@ h1, h2, h3 { margin: 0; }
 .install-confirm .install-warning { color: #e7c86b; line-height: 1.5; margin: 0 0 12px; }
 .install-confirm footer { display: flex; justify-content: flex-end; gap: 10px; margin-top: 20px; }
 .first-run-shell { min-height: 100vh; display: grid; place-items: center; background: var(--bg); }
+.editing-studio { width: min(680px, 96vw); }
+.studio-template-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(190px, 1fr)); gap: 9px; margin: 12px 0; }
+.studio-template { display: grid; gap: 4px; justify-items: start; text-align: left; border: 1px solid var(--border); border-radius: 10px; background: var(--panel-2); padding: 11px; cursor: pointer; }
+.studio-template.selected { border-color: #d9a05b; }
+.studio-template small { color: var(--muted); }
+.studio-subject { display: grid; gap: 5px; margin-bottom: 12px; }
+.studio-subject input { border: 1px solid var(--border); border-radius: 8px; background: var(--panel); color: #e8ebef; padding: 8px 10px; }
+.editing-studio footer { display: flex; justify-content: flex-end; gap: 8px; }

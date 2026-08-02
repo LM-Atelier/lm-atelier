@@ -93,6 +93,7 @@ from .models import (
     Artifact,
     Chat,
     CustomNodeInstall,
+    EditTemplate,
     GenerationPreset,
     InstallPlan,
     Job,
@@ -163,6 +164,7 @@ from .schemas import (
     DownloadRequest,
     DraftClassification,
     DraftClassificationRequest,
+    EditTemplateOut,
     EngineCapabilities,
     ExchangeDeletionOut,
     HealthOut,
@@ -3258,6 +3260,19 @@ async def resume_download(job_id: str, request: Request, session: SessionDep) ->
     if not job:
         raise HTTPException(404, "download job not found")
     return job
+
+
+@router.get("/edit-templates", response_model=list[EditTemplateOut])
+async def list_edit_templates(session: SessionDep) -> list[EditTemplate]:
+    """Enabled one-click edits, built-ins first, then by name."""
+
+    return list(
+        session.scalars(
+            select(EditTemplate)
+            .where(EditTemplate.enabled.is_(True))
+            .order_by(EditTemplate.builtin.desc(), EditTemplate.name)
+        ).all()
+    )
 
 
 @router.get("/recipes", response_model=list[ReferenceRecipe])

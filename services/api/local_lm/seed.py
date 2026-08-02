@@ -5,6 +5,7 @@ from sqlalchemy.orm import Session
 
 from .config import Settings
 from .domain import ModelRole, Operation
+from .edit_templates import seed_edit_templates
 from .models import ModelInstall, ModelProfile, WorkflowDefinition, WorkflowRevision
 from .profile_service import (
     ensure_profile_for_install,
@@ -14,6 +15,7 @@ from .profile_service import (
 
 
 def seed_defaults(session: Session, settings: Settings) -> None:
+    seed_edit_templates(session)
     reconcile_profile_bindings(session)
     profile_specs = [
         ("Default", ModelRole.CHAT.value, settings.chat_engine),
