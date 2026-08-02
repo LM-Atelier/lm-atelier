@@ -14,6 +14,8 @@ class ApiModel(BaseModel):
     model_config = ConfigDict(from_attributes=True)
 
 
+ContentRating = Literal["general", "mature", "unknown"]
+
 GenerationSettingsByRole = dict[
     Literal["chat", "image", "video"],
     dict[str, Any],
@@ -816,6 +818,10 @@ class CatalogModel(ApiModel):
     # official workflows, and the card must say which one it is.
     workflow_template_id: str | None = None
     operation: str | None = None
+    # Neutral provider-declared rating. The public app renders nothing from
+    # it (general-only source); it exists so install provenance is honest and
+    # the private overlay inherits one labeling mechanism (R125).
+    content_rating: ContentRating = "unknown"
 
 
 class CatalogPage(ApiModel):
@@ -884,6 +890,8 @@ class CatalogPreflight(ApiModel):
     checks: list[CatalogPreflightCheck]
     install_plan: InstallPlanOut | None = None
     auxiliary_kind: str | None = None
+    # Copied server-side from the catalog detail, never client-supplied.
+    content_rating: ContentRating = "unknown"
 
 
 class DownloadRequest(ApiModel):
@@ -902,6 +910,7 @@ class DownloadRequest(ApiModel):
     workflow_path: str | None = None
     workflow_template_id: str | None = None
     workflow_template_sha256: str | None = None
+    content_rating: ContentRating = "unknown"
     default_settings: dict[str, Any] = Field(default_factory=dict)
     auxiliary_kind: (
         Literal[

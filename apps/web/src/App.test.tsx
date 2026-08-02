@@ -3127,6 +3127,8 @@ describe("App", () => {
       null,
       null,
       "plan-chat",
+      null,
+      "unknown",
     ));
   });
 
@@ -3328,6 +3330,7 @@ describe("App", () => {
       null,
       "plan-lora",
       "lora",
+      "unknown",
     ));
   });
 
