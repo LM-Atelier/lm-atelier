@@ -25,6 +25,7 @@ import {
   Film,
   Folder,
   Gauge,
+  GitBranch,
   HardDrive,
   Image as ImageIcon,
   Library,
@@ -89,8 +90,8 @@ import { WorkerStatusCard } from "./WorkerStatusCard";
 import { useComposerUploads } from "./useComposerUploads";
 import type { ComposerAttachment } from "./useComposerUploads";
 import { useDraftClassification } from "./useDraftClassification";
-import { useExchangeDeletion } from "./useExchangeDeletion";
 import { useGenerationModeSelection } from "./useGenerationModeSelection";
+import { useMessageActions } from "./useMessageActions";
 import {
   normalizeSettingsForFields,
   promptPreviewSettings,
@@ -524,6 +525,7 @@ function MessageBubble({
   onReferenceMedia,
   onQuote,
   onDeleteExchange,
+  onForkThread,
 }: {
   message: Message;
   liveText?: string;
@@ -537,6 +539,7 @@ function MessageBubble({
   onReferenceMedia?: (part: MessagePart, origin: MediaOrigin) => void;
   onQuote?: (text: string) => void;
   onDeleteExchange?: (messageId: string) => void;
+  onForkThread?: (messageId: string) => void;
 }) {
   const visibleParts = messagePartsForTranscript(message, hiddenInputArtifactIds);
   const userText = visibleParts.filter((part) => part.type === "text").map((part) => part.text || "").join("\n");
@@ -696,6 +699,11 @@ function MessageBubble({
               {onRegenerate && (
                 <button onClick={() => onRegenerate(message.id)} aria-label="Regenerate response" title="Regenerate">
                   <RotateCcw size={14} />
+                </button>
+              )}
+              {onForkThread && (
+                <button onClick={() => onForkThread(message.id)} aria-label="Start a new thread here" title="New thread from here">
+                  <GitBranch size={14} />
                 </button>
               )}
             </span>
@@ -1897,6 +1905,7 @@ function ChatView({
   onCancelStep,
   onRetryStep,
   onDeleteExchange,
+  onForkThread,
 }: {
   chat?: ChatDetail;
   engines: EngineCapabilities[];
@@ -1933,6 +1942,7 @@ function ChatView({
   onCancelStep: (stepId: string) => void;
   onRetryStep: (stepId: string) => void;
   onDeleteExchange: (messageId: string) => void;
+  onForkThread: (messageId: string) => void;
 }) {
   const endRef = useRef<HTMLDivElement>(null);
   const messagesRef = useRef<HTMLDivElement>(null);
@@ -2070,6 +2080,7 @@ function ChatView({
                 })}
                 onQuote={(text) => setQuoteTarget({ text, requestId: Date.now() })}
                 onDeleteExchange={busy ? undefined : onDeleteExchange}
+                onForkThread={busy ? undefined : onForkThread}
               />
             </Fragment>
           );
@@ -4190,7 +4201,7 @@ export default function App() {
       void client.invalidateQueries({ queryKey: ["jobs"] });
     },
   });
-  const deleteExchange = useExchangeDeletion();
+  const { deleteExchange, forkThread } = useMessageActions(setCurrentChatId, setView);
   const refreshWorkStep = () => {
     void client.invalidateQueries({ queryKey: ["chat", activeChatId] });
     void client.invalidateQueries({ queryKey: ["work-plans", activeChatId] });
@@ -4437,7 +4448,7 @@ export default function App() {
           stopCurrent: true,
         });
       }
-    }} onDeleteExchange={deleteExchange.mutate} onCancelPlan={(planId) => {
+    }} onDeleteExchange={deleteExchange.mutate} onForkThread={forkThread.mutate} onCancelPlan={(planId) => {
       cancelWorkPlan.mutate(planId);
     }} onCancelStep={(stepId) => {
       cancelWorkStep.mutate(stepId);
@@ -4455,7 +4466,7 @@ export default function App() {
         });
       }
     }} />;
-  }, [view, modelLibraryRole, engines.data, profiles.data, presets.data, workflows.data, allProjects, chat.data, chatDrafts, liveText, pendingTurns, workPlans.data, send, regenerate, selectResponseRevision, branch, stop, cancelWorkPlan, cancelWorkStep, retryWorkStep, updateChat, deleteExchange, client]);
+  }, [view, modelLibraryRole, engines.data, profiles.data, presets.data, workflows.data, allProjects, chat.data, chatDrafts, liveText, pendingTurns, workPlans.data, send, regenerate, selectResponseRevision, branch, stop, cancelWorkPlan, cancelWorkStep, retryWorkStep, updateChat, deleteExchange, forkThread, client]);
 
   return (
     <div className="app-shell">

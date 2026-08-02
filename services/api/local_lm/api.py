@@ -32,6 +32,7 @@ from .chat_deletion import (
     ExchangeNotFound,
     delete_exchange,
 )
+from .chat_forking import ForkSourceNotFound, fork_chat_from_message
 from .comfy_templates import (
     COMFY_TEMPLATE_COMPILER_VERSION,
     ComfyTemplate,
@@ -1589,6 +1590,21 @@ async def get_message(message_id: str, session: ConversationSessionDep) -> Messa
     if not message:
         raise HTTPException(404, "message not found")
     return message
+
+
+@router.post("/messages/{message_id}/fork", response_model=ChatOut, status_code=201)
+async def fork_thread_from_message(message_id: str, session: ConversationSessionDep) -> Chat:
+    """Start a new chat carrying the history up to this message."""
+
+    try:
+        fork = fork_chat_from_message(session, message_id)
+    except ForkSourceNotFound as exc:
+        raise api_error(404, "fork-source-not-found", str(exc)) from exc
+    session.commit()
+    created = session.get(Chat, fork.chat_id)
+    if not created:  # pragma: no cover - the row was just committed
+        raise api_error(500, "fork-unavailable", "the forked chat could not be read back")
+    return created
 
 
 @router.delete("/messages/{message_id}/exchange", response_model=ExchangeDeletionOut)

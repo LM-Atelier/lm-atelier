@@ -206,6 +206,9 @@ class ChatOut(ApiModel):
     generation_settings_json: GenerationSettingsByRole
     generation_preset_ids_json: GenerationPresetIdsByRole
     vision_settings_json: VisionSettings
+    # Empty for a chat created directly; carries the source chat and message
+    # when this thread was forked from one.
+    origin_json: dict[str, Any] = Field(default_factory=dict)
     created_at: datetime
     updated_at: datetime
 
