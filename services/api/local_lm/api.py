@@ -3762,30 +3762,24 @@ async def check_model_updates(request: Request, session: SessionDep) -> list[Mod
     report: list[ModelUpdateOut] = []
     for identity in identities:
         summary = summaries.get(identity.model_id)
-        base = {
-            "install_id": identity.install_id,
-            "name": identity.name,
-            "kind": identity.kind,
-            "model_id": identity.model_id,
-            "installed_version_id": identity.version_id,
-            "installed_version_name": identity.version_name,
-        }
-        if summary is None:
-            report.append(ModelUpdateOut(**base, state="unknown"))
-            continue
-        candidate = newer_version(identity, summary)
-        if candidate is None:
-            report.append(ModelUpdateOut(**base, state="current"))
-            continue
+        candidate = newer_version(identity, summary) if summary is not None else None
+        state: Literal["update_available", "current", "unknown"] = (
+            "unknown" if summary is None else "current" if candidate is None else "update_available"
+        )
         report.append(
             ModelUpdateOut(
-                **base,
-                state="update_available",
-                update_version_id=candidate.version_id,
-                update_version_name=candidate.version_name,
-                update_published_at=candidate.published_at,
-                update_base_model=candidate.base_model,
-                update_changelog=candidate.changelog,
+                install_id=identity.install_id,
+                name=identity.name,
+                kind=identity.kind,
+                model_id=identity.model_id,
+                installed_version_id=identity.version_id,
+                installed_version_name=identity.version_name,
+                state=state,
+                update_version_id=candidate.version_id if candidate else None,
+                update_version_name=candidate.version_name if candidate else None,
+                update_published_at=candidate.published_at if candidate else None,
+                update_base_model=candidate.base_model if candidate else None,
+                update_changelog=candidate.changelog if candidate else None,
             )
         )
     return report
