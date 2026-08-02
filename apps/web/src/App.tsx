@@ -83,6 +83,8 @@ import { DownloadDiagnosticsButton } from "./DownloadDiagnosticsButton";
 import { StatusDot } from "./StatusDot";
 import { ErrorCallout } from "./ErrorCallout";
 import { SetupWizard } from "./SetupWizard";
+import { WorkflowPackageReview } from "./WorkflowPackageReview";
+import { useWorkflowPackageImport } from "./useWorkflowPackageImport";
 import { JobsPanel } from "./JobsPanel";
 import { progressSampleIsFresh } from "./jobProgress";
 import { editVisionNote, workshopTranscript } from "./promptWorkshop";
@@ -126,7 +128,6 @@ import type {
   SystemInfo,
   TurnAccepted,
   Workflow,
-  WorkflowBundle,
   WorkPlan,
 } from "./types";
 
@@ -2830,17 +2831,12 @@ function WorkflowsView() {
   const restore = useMutation({ mutationFn: ({ id, revisionId }: { id: string; revisionId: string }) => api.restoreWorkflowRevision(id, revisionId), onSuccess: refresh });
   const exportBundle = useMutation({ mutationFn: (id: string) => api.exportWorkflow(id), onSuccess: (bundle) => downloadJson(bundle, `${bundle.name.replaceAll(/[^a-z0-9]+/gi, "-").toLowerCase()}.lm-atelier-workflow.json`) });
   const openInComfy = useMutation({ mutationFn: (id: string) => api.workflowOpenTarget(id), onSuccess: (target) => { downloadJson(target.ui_graph, target.filename); window.open(target.url, "_blank", "noopener,noreferrer"); } });
-  const importBundleMutation = useMutation({
-    mutationFn: async (file: File) => {
-      const bundle = JSON.parse(await file.text()) as WorkflowBundle;
-      if (bundle.format !== "lm-atelier-workflow") throw new Error("This is not an LM Atelier workflow bundle.");
-      return api.importWorkflow(bundle);
-    },
-    onSuccess: refresh,
-  });
-  const importBundle = (file?: File) => {
-    if (file) importBundleMutation.mutate(file);
-  };
+  const {
+    importFile: importBundle,
+    importError,
+    packageReview,
+    closePackageReview,
+  } = useWorkflowPackageImport(refresh);
   const openCreate = () => { setEditing(false); setName("Custom image workflow"); setDescription(""); setOperation("text_to_image"); setGraph("{}"); setUiGraph("{}"); setInputSchema("{}"); setDependencies("{}"); setTrusted(false); setNewOpen(true); };
   const openEdit = () => { if (!selected) return; const revision = selected.revisions.find((item) => item.id === selected.current_revision_id) ?? selected.revisions.at(-1); if (!revision) return; setEditing(true); setName(selected.name); setDescription(selected.description); setOperation(selected.operation); setGraph(JSON.stringify(revision.api_graph_json, null, 2)); setUiGraph(JSON.stringify(revision.ui_graph_json, null, 2)); setInputSchema(JSON.stringify(revision.input_schema_json, null, 2)); setDependencies(JSON.stringify(revision.dependencies_json, null, 2)); setTrusted(revision.trusted); setNewOpen(true); };
   const selectedRevision = selected?.revisions.find((revision) => revision.id === selectedRevisionId) ?? selected?.revisions.find((revision) => revision.id === selected.current_revision_id) ?? selected?.revisions.at(-1);
@@ -2848,7 +2844,8 @@ function WorkflowsView() {
   return (
     <div className="page-view">
       <header className="page-header"><div><h1>Workflows</h1></div><div className="storage-actions"><input ref={importInput} hidden type="file" accept="application/json,.json" onChange={(event) => { void importBundle(event.target.files?.[0]); event.target.value = ""; }} /><button className="secondary" onClick={() => importInput.current?.click()}>Import bundle</button><button className="primary" onClick={openCreate}><Plus size={17} />New workflow</button></div></header>
-      {(importBundleMutation.error || clone.error || restore.error || exportBundle.error || openInComfy.error) && <ErrorCallout message={(importBundleMutation.error || clone.error || restore.error || exportBundle.error || openInComfy.error)?.message} />}
+      {(importError || clone.error || restore.error || exportBundle.error || openInComfy.error) && <ErrorCallout message={(importError || clone.error || restore.error || exportBundle.error || openInComfy.error)?.message} />}
+      {packageReview && <WorkflowPackageReview analysis={packageReview.analysis} fileName={packageReview.fileName} onClose={closePackageReview} />}
       {selected && <div className="storage-actions"><button className="secondary" onClick={() => openInComfy.mutate(selected.id)}>Download UI graph and open in ComfyUI</button></div>}
       <div className="workflow-layout">
         <div className="workflow-list">{workflows.data?.map((workflow) => <button key={workflow.id} className={selected?.id === workflow.id ? "selected" : ""} onClick={() => { setSelectedId(workflow.id); setSelectedRevisionId(workflow.current_revision_id); }}><WorkflowIcon size={18} /><span><strong>{workflow.name}</strong><small>{workflow.operation} · {workflow.revisions.length} revision{workflow.revisions.length === 1 ? "" : "s"}</small></span></button>)}</div>

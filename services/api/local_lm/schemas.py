@@ -785,6 +785,69 @@ class WorkflowOpenTarget(ApiModel):
     ui_graph: dict[str, Any]
 
 
+class WorkflowPackageAnalyzeRequest(ApiModel):
+    ui_graph: dict[str, Any]
+
+
+class WorkflowPackageRequirementOut(ApiModel):
+    package_id: str
+    versions: list[str]
+    node_types: list[str]
+    locally_resolved: bool
+
+
+class WorkflowAssetReferenceOut(ApiModel):
+    filename: str
+    suffix: str
+    policy: Literal["supported", "blocked", "unsupported"]
+    kind: Literal["checkpoint", "configuration", "embedding", "lora", "upscaler", "vae"]
+    source_url: str | None
+    present_locally: bool
+
+
+class WorkflowPackageIssueOut(ApiModel):
+    code: str
+    count: int
+    node_types: list[str]
+    severity: Literal["blocking", "advisory"]
+
+
+class WorkflowMissingNodeOut(ApiModel):
+    node_type: str
+    count: int
+    package_id: str | None
+
+
+class WorkflowPackageAnalysisOut(ApiModel):
+    """The analyzer report, field names frozen with the analyzer (R152).
+
+    `ready` is the one trust/activation gate the browser obeys; it is computed
+    by the analyzer, never re-derived client-side from list emptiness.
+    `node_inventory_available` is this endpoint's own honesty flag: when the
+    media runtime cannot enumerate its nodes, `missing_node_types` covers every
+    runtime node and must be presented as "unknown", not as "missing".
+    """
+
+    format_version: str
+    frontend_version: str | None
+    node_count: int
+    link_count: int
+    subgraph_count: int
+    operation_guess: Literal["image", "unknown", "video"]
+    truncated: bool
+    required_node_types: list[str]
+    frontend_node_types: list[str]
+    missing_node_types: list[str]
+    missing_nodes: list[WorkflowMissingNodeOut]
+    custom_packages: list[WorkflowPackageRequirementOut]
+    asset_references: list[WorkflowAssetReferenceOut]
+    issues: list[WorkflowPackageIssueOut]
+    ready: bool
+    runtime_nodes_available: bool
+    dependencies_resolved: bool
+    node_inventory_available: bool
+
+
 class CustomNodeInstallRequest(ApiModel):
     name: str = Field(min_length=1, max_length=240)
     source_url: str = Field(min_length=1, max_length=1000)

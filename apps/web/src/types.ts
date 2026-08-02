@@ -771,3 +771,58 @@ export interface AppEvent {
 export interface DraftClassification {
   references_prior_visual: boolean;
 }
+
+/** Analyzer report for a raw ComfyUI package (field names frozen with the
+ * backend DTO per R150/R151; paired in the TypeScript contract gate). */
+export interface WorkflowPackageRequirement {
+  package_id: string;
+  versions: string[];
+  node_types: string[];
+  locally_resolved: boolean;
+}
+
+export interface WorkflowAssetReference {
+  filename: string;
+  suffix: string;
+  policy: "supported" | "blocked" | "unsupported";
+  kind: "checkpoint" | "configuration" | "embedding" | "lora" | "upscaler" | "vae";
+  source_url: string | null;
+  present_locally: boolean;
+}
+
+export interface WorkflowPackageIssue {
+  code: string;
+  count: number;
+  node_types: string[];
+  severity: "blocking" | "advisory";
+}
+
+export interface WorkflowMissingNode {
+  node_type: string;
+  count: number;
+  package_id: string | null;
+}
+
+export interface WorkflowPackageAnalysis {
+  format_version: string;
+  frontend_version: string | null;
+  node_count: number;
+  link_count: number;
+  subgraph_count: number;
+  operation_guess: "image" | "unknown" | "video";
+  truncated: boolean;
+  required_node_types: string[];
+  frontend_node_types: string[];
+  missing_node_types: string[];
+  missing_nodes: WorkflowMissingNode[];
+  custom_packages: WorkflowPackageRequirement[];
+  asset_references: WorkflowAssetReference[];
+  issues: WorkflowPackageIssue[];
+  /** The one trust/activation gate the browser obeys; analyzer-computed. */
+  ready: boolean;
+  runtime_nodes_available: boolean;
+  dependencies_resolved: boolean;
+  /** False when the media runtime could not list nodes - "missing" is then
+   * "unknown" and must be presented that way. */
+  node_inventory_available: boolean;
+}

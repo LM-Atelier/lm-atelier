@@ -42,6 +42,7 @@ import type {
   TurnAccepted,
   Workflow,
   WorkflowBundle,
+  WorkflowPackageAnalysis,
   WorkflowRevision,
   WorkerLogLocation,
   WorkerLogTail,
@@ -594,6 +595,11 @@ export const api = {
   workflowOpenTarget: (id: string) => request<{ url: string; filename: string; ui_graph: Record<string, unknown> }>(`/api/workflows/${id}/open-target`),
   importWorkflow: (bundle: WorkflowBundle) =>
     request<Workflow>("/api/workflows/import", { method: "POST", body: JSON.stringify(bundle) }),
+  analyzeWorkflowPackage: (uiGraph: Record<string, unknown>) =>
+    request<WorkflowPackageAnalysis>("/api/workflows/packages/analyze", {
+      method: "POST",
+      body: JSON.stringify({ ui_graph: uiGraph }),
+    }),
   customNodes: () => request<CustomNodeInstall[]>("/api/custom-nodes"),
   installCustomNode: (payload: { name: string; source_url: string; revision: string }) =>
     request<CustomNodeInstall>("/api/custom-nodes", { method: "POST", body: JSON.stringify(payload) }),
