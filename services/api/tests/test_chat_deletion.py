@@ -143,6 +143,35 @@ async def test_an_artifact_still_referenced_elsewhere_is_retained(
     assert artifact_id not in result.released_artifact_ids
 
 
+async def test_the_delete_endpoint_removes_an_exchange_with_typed_refusals(
+    client: AsyncClient,
+) -> None:
+    chat = (await client.post("/api/chats", json={"title": "Endpoint"})).json()
+    kept = await _text_exchange(client, chat["id"], "Keep this turn")
+    removed = await _image_exchange(client, chat["id"], "Create one image of a red kite")
+
+    # Deleting the earlier turn while a later reply exists refuses, typed.
+    refused = await client.delete(f"/api/messages/{kept['user_message']['id']}/exchange")
+    assert refused.status_code == 409
+    assert refused.json()["code"] == "exchange-has-replies"
+    assert refused.json()["reply_count"] == 1
+
+    deleted = await client.delete(f"/api/messages/{removed['user_message']['id']}/exchange")
+    assert deleted.status_code == 200
+    body = deleted.json()
+    assert body["released_artifact_ids"], "the generated image loses its last reference"
+    assert removed["user_message"]["id"] in body["message_ids"]
+
+    detail = (await client.get(f"/api/chats/{chat['id']}")).json()
+    remaining = {message["id"] for message in detail["messages"]}
+    assert kept["user_message"]["id"] in remaining
+    assert not remaining & set(body["message_ids"])
+
+    again = await client.delete(f"/api/messages/{removed['user_message']['id']}/exchange")
+    assert again.status_code == 404
+    assert again.json()["code"] == "exchange-not-found"
+
+
 async def test_deleting_twice_reports_not_found(client: AsyncClient) -> None:
     chat = (await client.post("/api/chats", json={"title": "Idempotent"})).json()
     exchange = await _text_exchange(client, chat["id"], "Delete me twice")

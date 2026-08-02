@@ -13,6 +13,7 @@ import type {
   CatalogPreflight,
   Chat,
   ContentRating,
+  ExchangeDeletion,
   ChatDetail,
   DraftClassification,
   CustomNodeInstall,
@@ -294,6 +295,8 @@ export const api = {
       method: "POST",
       body: JSON.stringify({ settings }),
     }),
+  deleteExchange: (messageId: string) =>
+    request<ExchangeDeletion>(`/api/messages/${messageId}/exchange`, { method: "DELETE" }),
   selectResponseRevision: (messageId: string, revisionId: string) =>
     request<Message>(`/api/messages/${messageId}/revisions/${revisionId}/select`, {
       method: "POST",

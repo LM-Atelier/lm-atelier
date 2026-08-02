@@ -214,6 +214,18 @@ class ChatDetail(ChatOut):
     messages: list[MessageOut]
 
 
+class ExchangeDeletionOut(ApiModel):
+    chat_id: str
+    user_message_id: str
+    message_ids: list[str]
+    run_ids: list[str]
+    job_ids: list[str]
+    work_plan_ids: list[str]
+    released_artifact_ids: list[str]
+    retained_artifact_ids: list[str]
+    new_head_message_id: str | None = None
+
+
 class PromptHelperCreate(ApiModel):
     source_chat_id: str = Field(min_length=1, max_length=40)
     draft_prompt: Annotated[

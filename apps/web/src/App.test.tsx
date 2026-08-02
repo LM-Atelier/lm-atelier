@@ -114,6 +114,7 @@ vi.mock("./api", () => ({
     stopAndSendTurn: vi.fn(),
     regenerateMessage: vi.fn(),
     selectResponseRevision: vi.fn(),
+    deleteExchange: vi.fn(),
     branchMessage: vi.fn(),
     cancelChat: vi.fn(),
     jobs: vi.fn().mockResolvedValue([]),
@@ -4906,6 +4907,25 @@ describe("App", () => {
       "text",
       { max_tokens: 4096 },
     ));
+
+    // Deleting a turn is two-step: the intent button, then a confirmation
+    // that names what else goes with it.
+    vi.mocked(api.deleteExchange).mockResolvedValue({
+      chat_id: chat.id,
+      user_message_id: userMessage.id,
+      message_ids: [userMessage.id, assistantMessage.id],
+      run_ids: [],
+      job_ids: [],
+      work_plan_ids: [],
+      released_artifact_ids: [],
+      retained_artifact_ids: [],
+      new_head_message_id: null,
+    });
+    fireEvent.click(screen.getByRole("button", { name: "Delete this turn" }));
+    expect(api.deleteExchange).not.toHaveBeenCalled();
+    expect(screen.getByText("Also deletes the answer and its media.")).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "Delete turn" }));
+    await waitFor(() => expect(api.deleteExchange).toHaveBeenCalledWith(userMessage.id));
 
     fireEvent.change(screen.getByRole("textbox", { name: "Message" }), { target: { value: "Count to 1000" } });
     fireEvent.click(screen.getByRole("button", { name: "Send" }));
