@@ -233,6 +233,8 @@ vi.mock("./api", () => ({
     importModel: vi.fn(),
     workflows: vi.fn(),
     editTemplates: vi.fn().mockResolvedValue([]),
+    createEditTemplate: vi.fn(),
+    deleteEditTemplate: vi.fn(),
     createWorkflow: vi.fn(),
     updateWorkflow: vi.fn(),
     createWorkflowRevision: vi.fn(),
@@ -4019,6 +4021,18 @@ describe("App", () => {
       "Transform this image into a watercolor painting. Keep the composition exactly as it is. Focus on the harbor.",
     );
     expect(screen.queryByRole("dialog", { name: "Editing studio" })).not.toBeInTheDocument();
+
+    // Reopening with a drafted instruction offers to keep it as a template.
+    vi.mocked(api.createEditTemplate).mockResolvedValue({ id: "tpl-mine" } as never);
+    fireEvent.click(screen.getByRole("button", { name: "Open editing studio" }));
+    fireEvent.change(await screen.findByRole("textbox", { name: "Template name" }), {
+      target: { value: "Harbor watercolor" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "Save as template" }));
+    await waitFor(() => expect(api.createEditTemplate).toHaveBeenCalledWith({
+      name: "Harbor watercolor",
+      instruction: "Transform this image into a watercolor painting. Keep the composition exactly as it is. Focus on the harbor.",
+    }));
   });
 
   it("grounds an image-edit improvement in the source image and says so", async () => {

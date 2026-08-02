@@ -81,3 +81,47 @@ async def test_instruction_rendering_bounds_and_splices_the_subject() -> None:
     assert render_instruction(without_slot, "Keep the sky pale.") == (
         "Colorize this photograph. Keep the sky pale."
     )
+
+
+async def test_a_saved_edit_becomes_a_reusable_template(client: AsyncClient) -> None:
+    created = await client.post(
+        "/api/edit-templates",
+        json={
+            "name": "My harbor look",
+            "description": "The warm harbor grade.",
+            "instruction": "Relight this image with warm evening light. Keep everything in place.",
+            "settings_json": {"strength": 0.4},
+        },
+    )
+
+    assert created.status_code == 201
+    saved = created.json()
+    assert saved["builtin"] is False
+    listed = (await client.get("/api/edit-templates")).json()
+    assert "My harbor look" in [template["name"] for template in listed]
+
+    duplicate = await client.post(
+        "/api/edit-templates",
+        json={"name": "My harbor look", "instruction": "Different."},
+    )
+    assert duplicate.status_code == 409
+    assert duplicate.json()["code"] == "edit-template-name-taken"
+
+
+async def test_deleting_a_builtin_disables_it_instead(client: AsyncClient) -> None:
+    listed = (await client.get("/api/edit-templates")).json()
+    watercolor = next(t for t in listed if t["name"] == "Watercolor painting")
+
+    assert (await client.delete(f"/api/edit-templates/{watercolor['id']}")).status_code == 204
+    remaining = [t["name"] for t in (await client.get("/api/edit-templates")).json()]
+    assert "Watercolor painting" not in remaining
+
+    # A user template deletes outright.
+    saved = (
+        await client.post(
+            "/api/edit-templates",
+            json={"name": "Disposable", "instruction": "Sharpen this image slightly."},
+        )
+    ).json()
+    assert (await client.delete(f"/api/edit-templates/{saved['id']}")).status_code == 204
+    assert (await client.delete(f"/api/edit-templates/{saved['id']}")).status_code == 404

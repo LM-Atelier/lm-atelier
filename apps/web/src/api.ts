@@ -597,6 +597,10 @@ export const api = {
   importWorkflow: (bundle: WorkflowBundle) =>
     request<Workflow>("/api/workflows/import", { method: "POST", body: JSON.stringify(bundle) }),
   editTemplates: () => request<EditTemplate[]>("/api/edit-templates"),
+  createEditTemplate: (payload: { name: string; description?: string; instruction: string; settings_json?: Record<string, unknown> }) =>
+    request<EditTemplate>("/api/edit-templates", { method: "POST", body: JSON.stringify(payload) }),
+  deleteEditTemplate: (id: string) =>
+    request<void>(`/api/edit-templates/${id}`, { method: "DELETE" }),
   analyzeWorkflowPackage: (uiGraph: Record<string, unknown>) =>
     request<WorkflowPackageAnalysis>("/api/workflows/packages/analyze", {
       method: "POST",
