@@ -54,3 +54,43 @@ export function jobProgressText(job: Job): string {
   }
   return pieces.filter(Boolean).join(" · ");
 }
+
+export interface DownloadAggregate {
+  remainingBytes: number;
+  rateBytesPerSecond: number | null;
+  jobCount: number;
+}
+
+/** One number to plan around while several downloads run.
+ *
+ * Only byte-denominated jobs with known totals contribute, and the combined
+ * rate exists only when at least one fresh sample does - no figure is ever
+ * synthesized for a stalled or just-started transfer.
+ */
+export function aggregateDownloadProgress(jobs: Job[]): DownloadAggregate | null {
+  let remaining = 0;
+  let rate = 0;
+  let sawFreshRate = false;
+  let counted = 0;
+  for (const job of jobs) {
+    if (job.kind !== "download" || !["queued", "running"].includes(job.status)) continue;
+    const progress = job.progress_json;
+    if (progress?.unit !== "bytes" || progress.total_units == null) continue;
+    remaining += Math.max(0, progress.total_units - (progress.completed_units ?? 0));
+    counted += 1;
+    if (
+      progressSampleIsFresh(progress)
+      && typeof progress.rate_bytes_per_second === "number"
+      && progress.rate_bytes_per_second > 0
+    ) {
+      rate += progress.rate_bytes_per_second;
+      sawFreshRate = true;
+    }
+  }
+  if (counted === 0 || remaining === 0) return null;
+  return {
+    remainingBytes: remaining,
+    rateBytesPerSecond: sawFreshRate ? rate : null,
+    jobCount: counted,
+  };
+}

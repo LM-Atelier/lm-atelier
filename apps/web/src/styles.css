@@ -634,3 +634,4 @@ h1, h2, h3 { margin: 0; }
 .studio-subject { display: grid; gap: 5px; margin-bottom: 12px; }
 .studio-subject input { border: 1px solid var(--border); border-radius: 8px; background: var(--panel); color: #e8ebef; padding: 8px 10px; }
 .editing-studio footer { display: flex; justify-content: flex-end; gap: 8px; }
+.setup-total { color: var(--muted); margin: -6px 0 12px; }
