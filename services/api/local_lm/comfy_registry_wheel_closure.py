@@ -9,6 +9,7 @@ from dataclasses import dataclass
 from packaging.utils import canonicalize_name
 
 from .comfy_registry_wheel_artifacts import (
+    ComfyRegistryWheelArtifact,
     ComfyRegistryWheelArtifactError,
     ComfyRegistryWheelArtifactManifest,
     build_comfy_registry_wheel_artifact_manifest,
@@ -70,7 +71,7 @@ def advance_comfy_registry_wheel_closure(
     marker_environment: Mapping[str, str],
 ) -> ComfyRegistryWheelClosure:
     """Extend one verified closure round and re-plan the complete locked set."""
-    _validate_closure(closure)
+    validate_comfy_registry_wheel_closure(closure)
     if closure.complete:
         raise ComfyRegistryWheelClosureError(
             "closure_already_complete", "Wheel dependency closure is already complete"
@@ -188,13 +189,16 @@ def _plan_closure(
     )
 
 
-def _validate_closure(closure: ComfyRegistryWheelClosure) -> None:
+def validate_comfy_registry_wheel_closure(
+    closure: ComfyRegistryWheelClosure,
+) -> tuple[ComfyRegistryWheelArtifact, ...]:
+    """Revalidate a frozen dependency closure and return its locked artifacts."""
     if not isinstance(closure, ComfyRegistryWheelClosure):
         raise ComfyRegistryWheelClosureError(
             "invalid_closure", "Wheel dependency closure is invalid"
         )
     try:
-        validate_comfy_registry_wheel_artifact_manifest(closure.manifest)
+        artifacts = validate_comfy_registry_wheel_artifact_manifest(closure.manifest)
     except ComfyRegistryWheelArtifactError as exc:
         raise ComfyRegistryWheelClosureError(
             "invalid_closure", "Wheel dependency closure manifest is invalid"
@@ -242,6 +246,7 @@ def _validate_closure(closure: ComfyRegistryWheelClosure) -> None:
             "closure_hash_mismatch",
             "Wheel dependency closure hash does not match its contents",
         )
+    return artifacts
 
 
 def _history(value: object) -> tuple[str, ...]:
