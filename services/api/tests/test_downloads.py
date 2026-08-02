@@ -2051,3 +2051,72 @@ async def test_template_workflow_exposes_model_only_loras(
         assert refreshed.id != revision.id
         assert refreshed.dependencies_json["extensions"] == {}
         assert "loras" not in refreshed.input_schema_json["properties"]
+
+
+async def test_a_slow_large_transfer_still_reports_its_speed(
+    settings: Settings,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Transfer rate needs byte samples closer together than five seconds.
+
+    The monitor used to write one only when overall progress advanced a tenth
+    of a percent. On a 40 GB install that is 40 MB of movement, which on a
+    normal connection takes far longer than the rate window - so the speed the
+    user was promised never appeared.
+    """
+    settings.prepare()
+    configure_database(settings)
+    init_db()
+    manager = DownloadManager(settings, EventBroker())
+    monkeypatch.setattr("local_lm.downloads._TRANSFER_SAMPLE_SECONDS", 0.01)
+
+    total_size = 40 * 1024**3
+    staging = tmp_path / "staging"
+    staging.mkdir()
+    with SessionLocal() as session:
+        session.add(
+            Job(
+                id="job_slow_transfer",
+                kind=JobKind.DOWNLOAD.value,
+                status=JobStatus.RUNNING.value,
+                phase="downloading",
+                payload_json={},
+            )
+        )
+        session.commit()
+
+    # One megabyte of movement per sample: real progress, but far below the
+    # old 0.1%-of-total threshold that used to gate a write.
+    transferred = iter(range(0, 6 * 1024**2, 1024**2))
+
+    def written_bytes(_pid: int) -> int:
+        return next(transferred, 5 * 1024**2)
+
+    monkeypatch.setattr(DownloadManager, "_process_tree_write_bytes", staticmethod(written_bytes))
+    stop = asyncio.Event()
+
+    async def run_monitor() -> None:
+        await manager._monitor_transfer(
+            job_id="job_slow_transfer",
+            filename="model.safetensors",
+            staging=staging,
+            process=SimpleNamespace(pid=1234),  # type: ignore[arg-type]
+            file_size=total_size,
+            completed_bytes=0,
+            total_size=total_size,
+            stop=stop,
+        )
+
+    task = asyncio.create_task(run_monitor())
+    await asyncio.sleep(0.2)
+    stop.set()
+    await task
+
+    with SessionLocal() as session:
+        job = session.get(Job, "job_slow_transfer")
+        assert job is not None
+        progress = job.progress_json
+    assert progress["unit"] == "bytes"
+    assert progress["completed_units"] > 0
+    assert progress["rate_bytes_per_second"], "a moving transfer must report its speed"

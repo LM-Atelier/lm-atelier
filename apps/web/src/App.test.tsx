@@ -5318,9 +5318,38 @@ describe("App", () => {
     expect(screen.getByText("Uploaded image")).toBeVisible();
     expect(vi.mocked(api.upload)).toHaveBeenCalledTimes(1);
     expect(vi.mocked(api.upload)).toHaveBeenCalledWith(image);
+    // The skipped file is named, not silently dropped.
+    expect(screen.getByRole("alert")).toHaveTextContent("Only images and videos can be attached.");
     fireEvent.click(screen.getByRole("button", { name: "Animate attached image" }));
     await waitFor(() => expect(api.updateChat).toHaveBeenCalledWith("chat-drop", { routing_mode: "video" }));
     expect(textarea).toHaveValue("Animate this image");
     expect(textarea).toHaveFocus();
+
+    // Selecting several files attaches all of them, and one refusal does not
+    // abandon the rest of the selection.
+    const first = new File(["a"], "first.png", { type: "image/png" });
+    const refused = new File(["b"], "huge.png", { type: "image/png" });
+    const third = new File(["c"], "third.png", { type: "image/png" });
+    vi.mocked(api.upload).mockReset();
+    vi.mocked(api.upload)
+      .mockResolvedValueOnce({
+        id: "art_first", sha256: "first", kind: "input", media_type: "image/png",
+        size_bytes: 1, original_name: "first.png", metadata_json: { origin: "uploaded" },
+        created_at: stamp, url: "/api/artifacts/art_first/content",
+      })
+      .mockRejectedValueOnce(new Error("upload exceeds the size limit"))
+      .mockResolvedValueOnce({
+        id: "art_third", sha256: "third", kind: "input", media_type: "image/png",
+        size_bytes: 1, original_name: "third.png", metadata_json: { origin: "uploaded" },
+        created_at: stamp, url: "/api/artifacts/art_third/content",
+      });
+    const picker = document.querySelector('input[type="file"][accept="image/*,video/*"]')!;
+    expect(picker).toHaveAttribute("multiple");
+    fireEvent.change(picker, { target: { files: [first, refused, third] } });
+
+    await waitFor(() => expect(vi.mocked(api.upload)).toHaveBeenCalledTimes(3));
+    expect(await screen.findByRole("link", { name: "Preview first.png" })).toBeInTheDocument();
+    expect(await screen.findByRole("link", { name: "Preview third.png" })).toBeInTheDocument();
+    expect(screen.getByRole("alert")).toHaveTextContent("huge.png: upload exceeds the size limit");
   });
 });

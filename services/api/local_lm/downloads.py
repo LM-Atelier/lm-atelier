@@ -86,6 +86,10 @@ if TYPE_CHECKING:
 
 _REMOTE_ID = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]*/[A-Za-z0-9][A-Za-z0-9_.-]*$")
 _TRANSFER_ATTEMPTS = 3
+# How often a running transfer records a byte sample. Must stay comfortably
+# under the five-second window `progress._byte_rate` allows between samples,
+# or the displayed transfer rate silently disappears.
+_TRANSFER_SAMPLE_SECONDS = 1.0
 _PROVISIONAL_INSTALL_KEY = "_provisional_install"
 logger = logging.getLogger(__name__)
 _VISION_PROBE_DATA_URL = (
@@ -2954,6 +2958,7 @@ class DownloadManager:
         initial_write_bytes = self._process_tree_write_bytes(process.pid)
         maximum_transferred = initial_current_bytes
         last_reported = -1.0
+        last_written_bytes = -1
         while not stop.is_set():
             staged_bytes = self._staged_current_file_bytes(staging, completed_bytes, file_size)
             written_bytes = max(
@@ -2969,7 +2974,13 @@ class DownloadManager:
                 maximum_transferred = min(maximum_transferred, file_size)
             transferred_bytes = completed_bytes + maximum_transferred
             progress = min(transferred_bytes / total_size, 1.0) if total_size else 0.0
-            if last_reported < 0 or progress - last_reported >= 0.001:
+            # Record a sample whenever bytes actually moved, not only when the
+            # overall fraction advances a tenth of a percent. Transfer rate is
+            # derived from the gap between consecutive byte samples and is
+            # discarded when that gap exceeds five seconds, so on a large
+            # install the old threshold (0.1% of tens of gigabytes) meant the
+            # samples were always too far apart and no speed was ever shown.
+            if last_reported < 0 or transferred_bytes > last_written_bytes:
                 with SessionLocal() as session:
                     job = session.get(Job, job_id)
                     if not job or job.status != JobStatus.RUNNING.value:
@@ -2996,8 +3007,9 @@ class DownloadManager:
                     },
                 )
                 last_reported = progress
+                last_written_bytes = transferred_bytes
             with suppress(TimeoutError):
-                await asyncio.wait_for(stop.wait(), timeout=1)
+                await asyncio.wait_for(stop.wait(), timeout=_TRANSFER_SAMPLE_SECONDS)
 
     @classmethod
     def _staged_current_file_bytes(
