@@ -15,7 +15,9 @@ from packaging.version import InvalidVersion, Version
 
 from .comfy_registry_dependencies import (
     ComfyRegistryDependency,
+    ComfyRegistryDependencyError,
     ComfyRegistryDependencyPlan,
+    plan_comfy_registry_dependencies,
 )
 
 MAX_PYPI_PROJECT_DOCUMENT_BYTES = 2 * 1024 * 1024
@@ -84,6 +86,49 @@ def current_comfy_registry_wheel_target() -> tuple[dict[str, str], tuple[str, ..
     return environment, tuple(str(tag) for tag in sys_tags())
 
 
+def comfy_registry_wheel_target_sha256(
+    marker_environment: Mapping[str, str],
+    supported_tags: Sequence[str],
+) -> str:
+    """Validate and identify an explicit wheel compatibility target."""
+    _, _, _, target_sha256 = _wheel_target(marker_environment, supported_tags)
+    return target_sha256
+
+
+def select_comfy_registry_wheel_artifact(
+    requirement: str,
+    project_document: object,
+    *,
+    marker_environment: Mapping[str, str],
+    supported_tags: Sequence[str],
+) -> ComfyRegistryWheelArtifact:
+    """Select the newest compatible binary artifact for one inert requirement."""
+    try:
+        plan = plan_comfy_registry_dependencies([requirement])
+    except ComfyRegistryDependencyError as exc:
+        raise ComfyRegistryWheelArtifactError(
+            "invalid_wheel_requirement", "Wheel requirement is invalid"
+        ) from exc
+    dependency = plan.dependencies[0]
+    if dependency.marker is not None:
+        raise ComfyRegistryWheelArtifactError(
+            "invalid_wheel_requirement",
+            "Wheel selection requires an already-evaluated requirement",
+        )
+    environment, tags, ranks, _ = _wheel_target(
+        marker_environment,
+        supported_tags,
+    )
+    return _resolve_dependency(
+        dependency,
+        project_document,
+        environment,
+        tags,
+        ranks,
+        prefer_latest_version=True,
+    )
+
+
 def resolve_comfy_registry_wheel_artifacts(
     plan: ComfyRegistryDependencyPlan,
     project_documents: Mapping[str, object],
@@ -97,8 +142,10 @@ def resolve_comfy_registry_wheel_artifacts(
             "version_resolution_required",
             "Registry dependency versions must be exact before resolving wheel artifacts",
         )
-    environment = _marker_environment(marker_environment)
-    tags, ranks = _supported_tags(supported_tags)
+    environment, tags, ranks, target_sha256 = _wheel_target(
+        marker_environment,
+        supported_tags,
+    )
     active = _active_dependencies(plan.dependencies, environment)
     documents = _project_documents(project_documents)
     expected = {dependency.name for dependency in active}
@@ -116,12 +163,6 @@ def resolve_comfy_registry_wheel_artifacts(
         _resolve_dependency(dependency, documents[dependency.name], environment, tags, ranks)
         for dependency in active
     )
-    target_payload = {
-        "version": 1,
-        "marker_environment": dict(sorted(environment.items())),
-        "supported_tags": [str(tag) for tag in tags],
-    }
-    target_sha256 = _payload_sha256(target_payload, "wheel target")
     manifest_payload = {
         "version": 1,
         "declaration_sha256": plan.declaration_sha256,
@@ -134,6 +175,20 @@ def resolve_comfy_registry_wheel_artifacts(
         artifacts,
         _payload_sha256(manifest_payload, "wheel artifact manifest"),
     )
+
+
+def _wheel_target(
+    marker_environment: Mapping[str, str],
+    supported_tags: Sequence[str],
+) -> tuple[dict[str, str], tuple[Tag, ...], dict[Tag, int], str]:
+    environment = _marker_environment(marker_environment)
+    tags, ranks = _supported_tags(supported_tags)
+    payload = {
+        "version": 1,
+        "marker_environment": dict(sorted(environment.items())),
+        "supported_tags": [str(tag) for tag in tags],
+    }
+    return environment, tags, ranks, _payload_sha256(payload, "wheel target")
 
 
 def _marker_environment(value: Mapping[str, str]) -> dict[str, str]:
@@ -254,6 +309,8 @@ def _resolve_dependency(
     environment: Mapping[str, str],
     supported_tags: tuple[Tag, ...],
     ranks: Mapping[Tag, int],
+    *,
+    prefer_latest_version: bool = False,
 ) -> ComfyRegistryWheelArtifact:
     project = _project_document(dependency.name, document)
     candidates: list[_Candidate] = []
@@ -277,6 +334,21 @@ def _resolve_dependency(
             "no_compatible_wheel",
             f"No non-yanked, hash-bound compatible wheel exists for {dependency.requirement}",
         )
+    if prefer_latest_version:
+        specifier = Requirement(dependency.requirement).specifier
+        versions = sorted({Version(candidate.artifact.version) for candidate in candidates})
+        eligible = tuple(specifier.filter(versions, prereleases=None))
+        if not eligible:
+            raise ComfyRegistryWheelArtifactError(
+                "no_compatible_wheel",
+                f"No non-yanked, hash-bound compatible wheel exists for {dependency.requirement}",
+            )
+        best_version = max(eligible)
+        candidates = [
+            candidate
+            for candidate in candidates
+            if Version(candidate.artifact.version) == best_version
+        ]
     best_rank = min(candidate.rank for candidate in candidates)
     ranked = [candidate for candidate in candidates if candidate.rank == best_rank]
     best_build = max(candidate.build for candidate in ranked)

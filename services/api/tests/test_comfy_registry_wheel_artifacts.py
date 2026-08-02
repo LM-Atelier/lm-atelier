@@ -9,8 +9,10 @@ import local_lm.comfy_registry_wheel_artifacts as artifact_module
 from local_lm.comfy_registry_dependencies import plan_comfy_registry_dependencies
 from local_lm.comfy_registry_wheel_artifacts import (
     ComfyRegistryWheelArtifactError,
+    comfy_registry_wheel_target_sha256,
     current_comfy_registry_wheel_target,
     resolve_comfy_registry_wheel_artifacts,
+    select_comfy_registry_wheel_artifact,
 )
 
 _SHA256 = "a" * 64
@@ -198,6 +200,64 @@ def test_unresolved_version_constraint_cannot_select_an_artifact() -> None:
         ["example-package>=1"],
         {"example-package": _document()},
     )
+
+
+def test_single_requirement_selector_prefers_newest_stable_compatible_version() -> None:
+    selected = select_comfy_registry_wheel_artifact(
+        "example-package>=1,<3",
+        _document(
+            _file("example_package-1.2.3-py3-none-any.whl"),
+            _file("example_package-2.0.0-py3-none-any.whl"),
+            _file("example_package-2.1.0rc1-py3-none-any.whl"),
+        ),
+        marker_environment=_environment(),
+        supported_tags=(_UNIVERSAL_TAG,),
+    )
+
+    assert selected.version == "2.0.0"
+    assert selected.requirement == "example-package<3,>=1"
+
+
+def test_single_requirement_selector_uses_prerelease_when_it_is_only_match() -> None:
+    selected = select_comfy_registry_wheel_artifact(
+        "example-package>=2",
+        _document(_file("example_package-3.0.0rc1-py3-none-any.whl")),
+        marker_environment=_environment(),
+        supported_tags=(_UNIVERSAL_TAG,),
+    )
+
+    assert selected.version == "3.0.0rc1"
+
+
+def test_single_requirement_selector_rejects_unevaluated_marker() -> None:
+    with pytest.raises(ComfyRegistryWheelArtifactError) as raised:
+        select_comfy_registry_wheel_artifact(
+            "example-package>=1; sys_platform == 'win32'",
+            _document(),
+            marker_environment=_environment(),
+            supported_tags=(_UNIVERSAL_TAG,),
+        )
+
+    assert raised.value.code == "invalid_wheel_requirement"
+
+
+def test_explicit_wheel_target_identity_is_stable_and_order_sensitive() -> None:
+    environment = _environment()
+    first = comfy_registry_wheel_target_sha256(
+        environment,
+        ("cp312-cp312-win_amd64", _UNIVERSAL_TAG),
+    )
+    second = comfy_registry_wheel_target_sha256(
+        dict(reversed(list(environment.items()))),
+        ("cp312-cp312-win_amd64", _UNIVERSAL_TAG),
+    )
+    reversed_tags = comfy_registry_wheel_target_sha256(
+        environment,
+        (_UNIVERSAL_TAG, "cp312-cp312-win_amd64"),
+    )
+
+    assert first == second
+    assert first != reversed_tags
 
 
 @pytest.mark.parametrize(
