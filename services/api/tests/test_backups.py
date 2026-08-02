@@ -23,6 +23,7 @@ from local_lm.main import (
     ensure_automatic_recovery_backup,
     maintain_automatic_recovery_backups,
 )
+from local_lm.runtime_provisioning import RuntimeProvisioner
 
 
 class VerificationConnection:
@@ -208,6 +209,41 @@ async def test_app_startup_creates_and_stops_automatic_backup_maintenance(
         assert maintenance.done() is False
 
     assert maintenance.cancelled() is True
+
+
+async def test_app_serves_while_managed_runtime_verification_is_pending(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:  # type: ignore[no-untyped-def]
+    started = asyncio.Event()
+    release = asyncio.Event()
+
+    def start_slow_restore(self: RuntimeProvisioner) -> asyncio.Task[None]:
+        async def restore() -> None:
+            started.set()
+            await release.wait()
+
+        task = asyncio.create_task(restore(), name="verify-managed-runtimes")
+        self._restore_task = task
+        return task
+
+    monkeypatch.setattr(RuntimeProvisioner, "start_restore", start_slow_restore)
+    settings = Settings(
+        data_dir=tmp_path / "data",
+        dev=True,
+        chat_engine="mock",
+        media_engine="mock",
+    )
+    app = create_app(settings)
+
+    async with app.router.lifespan_context(app):
+        await asyncio.wait_for(started.wait(), timeout=1)
+        restore = app.state.services.runtimes._restore_task
+        assert restore is not None
+        assert restore.done() is False
+        release.set()
+
+    assert restore.done() is True
 
 
 async def test_app_startup_reconciles_orphaned_model_quarantine(
