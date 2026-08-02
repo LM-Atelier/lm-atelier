@@ -219,6 +219,59 @@ async def test_a_pin_without_matching_install_evidence_stays_unresolved(
     assert payload["ready"] is False
 
 
+async def test_a_trusted_active_registry_version_counts_as_resolved(
+    client: AsyncClient,
+    app: FastAPI,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from local_lm.db import SessionLocal
+    from local_lm.models import ComfyRegistryInstall
+
+    with SessionLocal() as session:
+        session.add(
+            ComfyRegistryInstall(
+                package_id="rgthree-comfy",
+                package_version="1.2.3",
+                registry_record_id="registry-record-123",
+                repository_url="https://github.com/rgthree/rgthree-comfy.git",
+                download_url="https://cdn.comfy.org/rgthree/1.2.3.zip",
+                archive_sha256="a" * 64,
+                manifest_sha256="b" * 64,
+                installed_path="lm-atelier-registry_rgthree",
+                node_types_json=["Power Lora Loader"],
+                pip_dependencies_json=[],
+                review_json={"review_required": True},
+                trusted=True,
+                active=True,
+            )
+        )
+        session.commit()
+
+    async def object_info() -> dict[str, Any]:
+        return {"Power Lora Loader": {}}
+
+    monkeypatch.setattr(
+        app.state.services.engines.media,
+        "object_info",
+        object_info,
+        raising=False,
+    )
+    response = await client.post(
+        "/api/workflows/packages/analyze",
+        json={
+            "ui_graph": _workflow(
+                [_node(1, "Power Lora Loader", package="rgthree-comfy", version="1.2.3")]
+            )
+        },
+    )
+
+    assert response.status_code == 200
+    payload = response.json()
+    packages = {package["package_id"]: package for package in payload["custom_packages"]}
+    assert packages["rgthree-comfy"]["locally_resolved"] is True
+    assert payload["ready"] is True
+
+
 async def test_a_referenced_model_this_machine_holds_counts_as_present(
     client: AsyncClient,
     app: FastAPI,

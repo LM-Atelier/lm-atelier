@@ -583,6 +583,33 @@ class GenerationPreset(TimestampMixin, Base):
     is_default: Mapped[bool] = mapped_column(Boolean, default=False)
 
 
+class EditTemplate(TimestampMixin, Base):
+    """A one-click edit: a named instruction scaffold over an edit workflow.
+
+    Templates are data, not machinery - applying one composes an ordinary
+    image turn from the scaffold and settings, so verification, retries, and
+    revision cycling behave exactly as they do for a hand-written edit.
+    """
+
+    __tablename__ = "edit_templates"
+    __table_args__ = (UniqueConstraint("name", name="uq_edit_template_name"),)
+
+    id: Mapped[str] = mapped_column(String(40), primary_key=True, default=lambda: new_id("edittpl"))
+    name: Mapped[str] = mapped_column(String(200), index=True)
+    description: Mapped[str] = mapped_column(Text, default="")
+    # The complete edit instruction; "{subject}" marks where an optional
+    # user addition is spliced in. Plain text otherwise.
+    instruction: Mapped[str] = mapped_column(Text)
+    operation: Mapped[str] = mapped_column(String(32), default="image_to_image")
+    settings_json: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
+    trigger_words_json: Mapped[list[str]] = mapped_column(JSON, default=list)
+    content_rating: Mapped[str] = mapped_column(String(16), default="general", index=True)
+    # Seeded templates ship with the app and may be refreshed on upgrade;
+    # user-saved ones never are.
+    builtin: Mapped[bool] = mapped_column(Boolean, default=False)
+    enabled: Mapped[bool] = mapped_column(Boolean, default=True)
+
+
 class WorkflowDefinition(TimestampMixin, Base):
     __tablename__ = "workflow_definitions"
 
@@ -639,6 +666,34 @@ class CustomNodeInstall(TimestampMixin, Base):
     trusted: Mapped[bool] = mapped_column(Boolean, default=False, index=True)
     active: Mapped[bool] = mapped_column(Boolean, default=True, index=True)
     security_json: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
+
+
+class ComfyRegistryInstall(TimestampMixin, Base):
+    __tablename__ = "comfy_registry_installs"
+    __table_args__ = (
+        UniqueConstraint(
+            "package_id",
+            "package_version",
+            name="uq_comfy_registry_install_package_version",
+        ),
+    )
+
+    id: Mapped[str] = mapped_column(
+        String(40), primary_key=True, default=lambda: new_id("registry")
+    )
+    package_id: Mapped[str] = mapped_column(String(100), index=True)
+    package_version: Mapped[str] = mapped_column(String(100))
+    registry_record_id: Mapped[str] = mapped_column(String(1000), unique=True)
+    repository_url: Mapped[str] = mapped_column(String(1000))
+    download_url: Mapped[str] = mapped_column(String(1000))
+    archive_sha256: Mapped[str] = mapped_column(String(64))
+    manifest_sha256: Mapped[str] = mapped_column(String(64))
+    installed_path: Mapped[str] = mapped_column(Text, unique=True)
+    node_types_json: Mapped[list[str]] = mapped_column(JSON, default=list)
+    pip_dependencies_json: Mapped[list[str]] = mapped_column(JSON, default=list)
+    review_json: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
+    trusted: Mapped[bool] = mapped_column(Boolean, default=False, index=True)
+    active: Mapped[bool] = mapped_column(Boolean, default=False, index=True)
 
 
 class Job(TimestampMixin, Base):

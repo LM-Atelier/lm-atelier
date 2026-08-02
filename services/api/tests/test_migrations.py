@@ -81,6 +81,10 @@ def test_migrations_round_trip(tmp_path) -> None:  # type: ignore[no-untyped-def
             row[1]
             for row in connection.execute("PRAGMA table_info(model_asset_installs)").fetchall()
         }
+        registry_install_columns = {
+            row[1]
+            for row in connection.execute("PRAGMA table_info(comfy_registry_installs)").fetchall()
+        }
         unique_run_indexes = {
             tuple(
                 column[2]
@@ -94,6 +98,7 @@ def test_migrations_round_trip(tmp_path) -> None:  # type: ignore[no-untyped-def
         "messages",
         "generation_presets",
         "custom_node_installs",
+        "comfy_registry_installs",
         "model_asset_installs",
         "turn_creation_claims",
     } <= tables
@@ -122,6 +127,19 @@ def test_migrations_round_trip(tmp_path) -> None:  # type: ignore[no-untyped-def
         "active",
         "verified_at",
     } <= asset_columns
+    assert {
+        "package_id",
+        "package_version",
+        "registry_record_id",
+        "archive_sha256",
+        "manifest_sha256",
+        "installed_path",
+        "node_types_json",
+        "pip_dependencies_json",
+        "review_json",
+        "trusted",
+        "active",
+    } <= registry_install_columns
     assert ("chat_id", "idempotency_key") in unique_run_indexes
     assert ("idempotency_key",) not in unique_run_indexes
 

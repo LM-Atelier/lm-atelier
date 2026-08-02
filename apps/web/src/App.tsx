@@ -44,6 +44,7 @@ import {
   Sparkles,
   Trash2,
   Upload,
+  Wand2,
   Workflow as WorkflowIcon,
   X,
 } from "lucide-react";
@@ -74,6 +75,7 @@ import {
   artifactSource,
   mediaOriginForPart,
   mediaOriginLabel,
+  editSourceUrlForResult,
   messagePartsForTranscript,
   priorVisibleMediaByMessage,
   type MediaOrigin,
@@ -83,6 +85,11 @@ import { DownloadDiagnosticsButton } from "./DownloadDiagnosticsButton";
 import { StatusDot } from "./StatusDot";
 import { ErrorCallout } from "./ErrorCallout";
 import { EmptyState } from "./EmptyState";
+import { AtelierMark } from "./AtelierMark";
+import { EditingStudio } from "./EditingStudio";
+import { MessageTimestamp } from "./MessageTimestamp";
+import { PendingResponseStatus } from "./PendingResponseStatus";
+import { CompareButton } from "./CompareButton";
 import { FirstRunSetup, SetupWizard } from "./SetupWizard";
 import { WorkflowPackageReview } from "./WorkflowPackageReview";
 import { useWorkflowPackageImport } from "./useWorkflowPackageImport";
@@ -202,27 +209,20 @@ function formatTechnicalDetails(
   ].join("\n");
 }
 
-function AtelierMark() {
-  return (
-    <svg viewBox="0 0 400 400" role="img" aria-label="LM Atelier">
-      <path className="lma-l" d="M43 20h64v300h169v60H43z" />
-      <path className="lma-ma" d="M125 20l118 109L356 20v360h-58v-92h-85l46-45h39v-82L164 303h-39z" />
-    </svg>
-  );
-}
-
 function ArtifactPart({
   part,
   origin,
   onEditImage,
   onAnimateImage,
   onReferenceMedia,
+  compareSourceUrl,
 }: {
   part: MessagePart;
   origin: MediaOrigin | null;
   onEditImage?: (part: MessagePart, origin: MediaOrigin) => void;
   onAnimateImage?: (part: MessagePart, origin: MediaOrigin) => void;
   onReferenceMedia?: (part: MessagePart, origin: MediaOrigin) => void;
+  compareSourceUrl?: string | null;
 }) {
   const proxyId = typeof part.metadata_json.browser_proxy_artifact_id === "string" ? part.metadata_json.browser_proxy_artifact_id : null;
   const posterId = typeof part.metadata_json.poster_artifact_id === "string"
@@ -255,6 +255,7 @@ function ArtifactPart({
           {!preview && onEditImage && <button type="button" onClick={() => onEditImage(part, callbackOrigin)}>Edit</button>}
           {!preview && onAnimateImage && <button type="button" onClick={() => onAnimateImage(part, callbackOrigin)}>Animate</button>}
           {!preview && onReferenceMedia && <button type="button" onClick={() => onReferenceMedia(part, callbackOrigin)}>Reference</button>}
+          {!preview && compareSourceUrl && source && <CompareButton before={compareSourceUrl} after={source} />}
           {!preview && <a href={source} download>Download</a>}
         </figcaption>
       </figure>
@@ -347,25 +348,6 @@ function MediaLibraryView() {
   );
 }
 
-function MessageTimestamp({ at }: { at: string }) {
-  const date = new Date(at);
-  if (Number.isNaN(date.getTime())) return null;
-  const sameDay = date.toDateString() === new Date().toDateString();
-  const label = sameDay
-    ? date.toLocaleTimeString([], { hour: "numeric", minute: "2-digit" })
-    : date.toLocaleString([], {
-        month: "short",
-        day: "numeric",
-        hour: "numeric",
-        minute: "2-digit",
-      });
-  return (
-    <time className="message-timestamp" dateTime={at} title={date.toLocaleString()}>
-      {label}
-    </time>
-  );
-}
-
 function nodeText(node: ReactNode): string {
   if (typeof node === "string" || typeof node === "number") return String(node);
   if (Array.isArray(node)) return node.map(nodeText).join("");
@@ -411,25 +393,6 @@ function MarkdownText({ text }: { text: string }) {
   );
 }
 
-function PendingResponseStatus({ label, startedAt }: { label: string; startedAt: string }) {
-  const [seconds, setSeconds] = useState(
-    () => Math.max(0, Math.floor((Date.now() - Date.parse(startedAt)) / 1_000)),
-  );
-  useEffect(() => {
-    const timer = window.setInterval(
-      () => setSeconds(Math.max(0, Math.floor((Date.now() - Date.parse(startedAt)) / 1_000))),
-      1_000,
-    );
-    return () => window.clearInterval(timer);
-  }, [startedAt]);
-  return (
-    <div className="submission-progress pending-response" role="status">
-      <LoaderCircle size={17} />
-      <span>{label}<small aria-hidden="true"> · {seconds}s</small></span>
-    </div>
-  );
-}
-
 function PartView({
   part,
   liveText,
@@ -438,6 +401,7 @@ function PartView({
   onEditImage,
   onAnimateImage,
   onReferenceMedia,
+  compareSourceUrl,
 }: {
   part: MessagePart;
   liveText?: string;
@@ -446,13 +410,14 @@ function PartView({
   onEditImage?: (part: MessagePart, origin: MediaOrigin) => void;
   onAnimateImage?: (part: MessagePart, origin: MediaOrigin) => void;
   onReferenceMedia?: (part: MessagePart, origin: MediaOrigin) => void;
+  compareSourceUrl?: string | null;
 }) {
   if (part.type === "text") {
     const text = liveText || part.text || "";
     return markdown ? <MarkdownText text={text} /> : <div className="message-text">{text}</div>;
   }
   if (part.type === "image" || part.type === "video" || part.type === "attachment") {
-    return <ArtifactPart part={part} origin={origin} onEditImage={onEditImage} onAnimateImage={onAnimateImage} onReferenceMedia={onReferenceMedia} />;
+    return <ArtifactPart part={part} origin={origin} onEditImage={onEditImage} onAnimateImage={onAnimateImage} onReferenceMedia={onReferenceMedia} compareSourceUrl={compareSourceUrl} />;
   }
   if (part.type === "progress") {
     const progress = Number(part.metadata_json.progress ?? 0);
@@ -490,6 +455,7 @@ function MessageBubble({
   onQuote,
   onDeleteExchange,
   onForkThread,
+  compareSourceUrl,
 }: {
   message: Message;
   liveText?: string;
@@ -504,6 +470,7 @@ function MessageBubble({
   onQuote?: (text: string) => void;
   onDeleteExchange?: (messageId: string) => void;
   onForkThread?: (messageId: string) => void;
+  compareSourceUrl?: string | null;
 }) {
   const visibleParts = messagePartsForTranscript(message, hiddenInputArtifactIds);
   const userText = visibleParts.filter((part) => part.type === "text").map((part) => part.text || "").join("\n");
@@ -557,6 +524,11 @@ function MessageBubble({
       ? item.matched_terms.filter((term): term is string => typeof term === "string")
       : []
   )))).slice(0, 3);
+  const appliedTriggerWords = Array.isArray(auxiliaryAssets?.trigger_words_applied)
+    ? auxiliaryAssets.trigger_words_applied.filter(
+        (word): word is string => typeof word === "string" && Boolean(word),
+      )
+    : [];
   const usage = context?.usage as Record<string, unknown> | undefined;
   const inputTokens = Number(usage?.prompt_tokens ?? context?.input_tokens ?? 0);
   const contextLimit = Number(context?.context_limit ?? 0);
@@ -581,7 +553,7 @@ function MessageBubble({
     <article className={`message ${message.role}`}>
       <div className="avatar">{message.role === "user" ? "You" : <Bot size={19} />}</div>
       <div className="message-content">
-        {editing ? <div className="message-edit"><textarea aria-label="Edit message" rows={4} value={draft} onChange={(event) => setDraft(event.target.value)} /><div><button onClick={() => { setDraft(userText); setEditing(false); }}>Cancel</button><button className="primary" disabled={!draft.trim()} onClick={() => { onEdit?.(message.id, draft.trim()); setEditing(false); }}>Send edited message</button></div></div> : renderedParts.map((part) => <PartView key={part.id} part={part} liveText={liveText} markdown={message.role === "assistant"} origin={mediaOriginForPart(part, operation, message.role === "assistant" ? "generated" : null)} onEditImage={onEditImage} onAnimateImage={onAnimateImage} onReferenceMedia={onReferenceMedia} />)}
+        {editing ? <div className="message-edit"><textarea aria-label="Edit message" rows={4} value={draft} onChange={(event) => setDraft(event.target.value)} /><div><button onClick={() => { setDraft(userText); setEditing(false); }}>Cancel</button><button className="primary" disabled={!draft.trim()} onClick={() => { onEdit?.(message.id, draft.trim()); setEditing(false); }}>Send edited message</button></div></div> : renderedParts.map((part) => <PartView key={part.id} part={part} liveText={liveText} markdown={message.role === "assistant"} origin={mediaOriginForPart(part, operation, message.role === "assistant" ? "generated" : null)} onEditImage={onEditImage} onAnimateImage={onAnimateImage} onReferenceMedia={onReferenceMedia} compareSourceUrl={message.role === "assistant" ? compareSourceUrl : undefined} />)}
         {liveText && !visibleParts.some((part) => part.type === "text") && (
           <MarkdownText text={liveText} />
         )}
@@ -600,6 +572,7 @@ function MessageBubble({
                 {automaticLoraTerms.length > 0 ? ` — matched ${automaticLoraTerms.join(", ")}` : ""}
               </span>
             )}
+            {appliedTriggerWords.length > 0 && <span>Added trigger words: {appliedTriggerWords.join(", ")}</span>}
             {contextLimit > 0 && (
               <span>
                 Context {inputTokens.toLocaleString()} / {contextLimit.toLocaleString()} tokens
@@ -1459,6 +1432,7 @@ function Composer({
   const { mode, changeMode, currentMode } = useGenerationModeSelection(chat.routing_mode, onMode);
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [promptHelperDraft, setPromptHelperDraft] = useState<string | null>(null);
+  const [studioOpen, setStudioOpen] = useState(false);
   const [attachments, setAttachments] = useState<ComposerAttachment[]>([]);
   const { uploading, uploadError, setUploadError, uploadFiles } = useComposerUploads(
     (attachment) => setAttachments((current) => [...current, attachment]),
@@ -1677,6 +1651,7 @@ function Composer({
                 </select>
                 <ChevronDown size={13} />
               </label>
+              {imageEdit && <button className="icon-button" onClick={() => setStudioOpen(true)} aria-label="Open editing studio" title="One-click edits"><Wand2 size={18} /></button>}
               <button className="icon-button" onClick={() => setSettingsOpen(true)} aria-label="Turn settings"><SlidersHorizontal size={18} /></button>
             </div>
             <span className="composer-submit-actions">
@@ -1711,6 +1686,7 @@ function Composer({
           </div>
         </div>
       </div>
+      {studioOpen && <EditingStudio currentInstruction={text} onClose={() => setStudioOpen(false)} onPick={(instruction) => { setText(instruction); setStudioOpen(false); window.setTimeout(() => textInput.current?.focus(), 0); }} />}
       {promptHelperDraft !== null && (
         <PromptHelperDialog
           sourceChat={chat}
@@ -1996,8 +1972,11 @@ function ChatView({
       <div className="messages" ref={messagesRef} onScroll={trackMessageScroll}>
         {messages.length === 0 && pendingTurns.length === 0 ? (
           <EmptyState icon={<Sparkles />} title="What should we make?" body="Ask anything or create an image or video. Auto mode picks the model." />
-        ) : messages.map((message) => {
+        ) : messages.map((message, messageIndex) => {
           const messagePlan = planByAssistantMessage.get(message.id);
+          const compareSourceUrl = message.role === "assistant"
+            ? editSourceUrlForResult(messages, messageIndex)
+            : null;
           const isPrimaryOutput = messagePlan?.summary_json.assistant_message_id === message.id;
           return (
             <Fragment key={message.id}>
@@ -2011,6 +1990,7 @@ function ChatView({
               <MessageBubble
                 message={message}
                 liveText={liveText[message.id]}
+                compareSourceUrl={compareSourceUrl}
                 hiddenInputArtifactIds={priorVisibleMedia.get(message.id)}
                 onRegenerate={busy ? undefined : (messageId) => onRegenerate(
                   messageId,

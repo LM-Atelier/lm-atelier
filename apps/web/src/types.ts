@@ -826,3 +826,17 @@ export interface WorkflowPackageAnalysis {
    * "unknown" and must be presented that way. */
   node_inventory_available: boolean;
 }
+
+/** A one-click edit: a named instruction scaffold over an edit workflow. */
+export interface EditTemplate {
+  id: string;
+  name: string;
+  description: string;
+  instruction: string;
+  operation: string;
+  settings_json: Record<string, unknown>;
+  trigger_words_json: string[];
+  content_rating: "general" | "mature" | "unknown";
+  builtin: boolean;
+  enabled: boolean;
+}

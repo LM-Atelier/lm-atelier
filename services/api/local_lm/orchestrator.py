@@ -24,6 +24,7 @@ from .auxiliary_assets import (
     resolve_lora_stack,
     select_automatic_lora_stack,
     transform_lora_graph,
+    trigger_words_to_apply,
     workflow_lora_extension,
 )
 from .capability_evidence import (
@@ -1264,6 +1265,10 @@ class ConversationOrchestrator:
                         ),
                         "graph_transform_version": LORA_GRAPH_TRANSFORM_VERSION,
                         "effective_graph_sha256": lora_resolution.graph_sha256,
+                        "trigger_words_applied": trigger_words_to_apply(
+                            lora_resolution.provenance,
+                            plan.standalone_prompt,
+                        ),
                     }
                     if lora_resolution
                     else None
@@ -1913,6 +1918,10 @@ class ConversationOrchestrator:
                             ),
                             "graph_transform_version": LORA_GRAPH_TRANSFORM_VERSION,
                             "effective_graph_sha256": resolved["lora_resolution"].graph_sha256,
+                            "trigger_words_applied": trigger_words_to_apply(
+                                resolved["lora_resolution"].provenance,
+                                step_intent.prompt,
+                            ),
                         }
                         if resolved["lora_resolution"]
                         else None
@@ -5653,14 +5662,25 @@ class ConversationOrchestrator:
             or not isinstance(edit, dict)
             or edit.get("policy") != "preserve_unrequested_details_v1"
         ):
-            return run.standalone_prompt
-        return (
-            "Apply the requested edit visibly to the supplied image. Preserve areas "
-            "that the edit does not affect. Keep each person's facial identity, hair, "
-            "skin tone, body proportions, and pose unless the request explicitly changes "
-            "them. Do not simply reproduce the source unchanged. Requested edit: "
-            f"{run.standalone_prompt}"
-        )
+            prompt = run.standalone_prompt
+        else:
+            prompt = (
+                "Apply the requested edit visibly to the supplied image. Preserve areas "
+                "that the edit does not affect. Keep each person's facial identity, hair, "
+                "skin tone, body proportions, and pose unless the request explicitly changes "
+                "them. Do not simply reproduce the source unchanged. Requested edit: "
+                f"{run.standalone_prompt}"
+            )
+        # Trigger words recorded at accept ride the same snapshot as the rest
+        # of the run: what was decided when it queued is what executes, however
+        # the library changes in between.
+        auxiliary = run.provenance_json.get("auxiliary_assets") or {}
+        words = [
+            word
+            for word in auxiliary.get("trigger_words_applied", [])
+            if isinstance(word, str) and word
+        ]
+        return f"{prompt}, {', '.join(words)}" if words else prompt
 
     @staticmethod
     def _job_kind(operation: Operation) -> JobKind:

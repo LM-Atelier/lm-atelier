@@ -650,7 +650,7 @@ def test_windows_installer_creates_start_menu_and_application_launchers() -> Non
 def test_locked_logo_geometry_and_colors_stay_consistent() -> None:
     mark = (ROOT / "docs/assets/lm-atelier-mark.svg").read_text()
     social = (ROOT / "docs/assets/social-preview.svg").read_text()
-    app = (ROOT / "apps/web/src/App.tsx").read_text()
+    app = (ROOT / "apps/web/src/AtelierMark.tsx").read_text()
     icon_builder = (ROOT / "scripts/build-icons.py").read_text()
 
     light_path = "M43 20h64v300h169v60H43z"

@@ -4,8 +4,8 @@ import { Activity, Bot, Check, Film, Image as ImageIcon, LoaderCircle } from "lu
 import { AccessibleDialog } from "./AccessibleDialog";
 import { ErrorCallout } from "./ErrorCallout";
 import { api } from "./api";
-import { formatBytes } from "./format";
-import { jobProgressFraction, jobProgressText } from "./jobProgress";
+import { formatBytes, formatEta } from "./format";
+import { aggregateDownloadProgress, jobProgressFraction, jobProgressText } from "./jobProgress";
 import type {
   ReferenceRecipe,
   RuntimeStatus,
@@ -160,6 +160,7 @@ export function SetupWizard({
     startWorker.mutate(preparable);
   }, [autoPrepare, report, startWorker]);
   const error = installRecipe.error || retryInstall.error || installRuntime.error || startWorker.error || verifyRole.error || activateModel.error;
+  const downloadTotal = aggregateDownloadProgress(jobs.data ?? []);
 
   return (
     <AccessibleDialog
@@ -172,6 +173,14 @@ export function SetupWizard({
       <p className="setup-intro">
         Install each model with one click. Ready means activation passed and a quick local generation completed.
       </p>
+      {downloadTotal && (
+        <p className="setup-total" role="status">
+          {formatBytes(downloadTotal.remainingBytes)} left to download
+          {downloadTotal.rateBytesPerSecond
+            ? ` · ${formatEta(downloadTotal.remainingBytes / downloadTotal.rateBytesPerSecond)} at the current speed`
+            : ""}
+        </p>
+      )}
       <div className="setup-role-grid" aria-live="polite">
         {report.roles.map((role) => {
           // A ready role that has not loaded its model still has something to

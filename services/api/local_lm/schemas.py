@@ -785,6 +785,26 @@ class WorkflowOpenTarget(ApiModel):
     ui_graph: dict[str, Any]
 
 
+class EditTemplateCreate(ApiModel):
+    name: str = Field(min_length=1, max_length=200)
+    description: str = Field(default="", max_length=2_000)
+    instruction: str = Field(min_length=1, max_length=20_000)
+    settings_json: dict[str, Any] = Field(default_factory=dict)
+
+
+class EditTemplateOut(ApiModel):
+    id: str
+    name: str
+    description: str
+    instruction: str
+    operation: str
+    settings_json: dict[str, Any]
+    trigger_words_json: list[str]
+    content_rating: ContentRating
+    builtin: bool
+    enabled: bool
+
+
 class WorkflowPackageAnalyzeRequest(ApiModel):
     ui_graph: dict[str, Any]
 
