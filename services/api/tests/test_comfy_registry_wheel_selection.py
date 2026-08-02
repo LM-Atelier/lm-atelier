@@ -18,6 +18,7 @@ from local_lm.comfy_registry_wheel_metadata import (
 from local_lm.comfy_registry_wheel_selection import (
     ComfyRegistryWheelSelectionError,
     select_comfy_registry_wheel_versions,
+    validate_comfy_registry_wheel_selection,
 )
 
 _TAG = "py3-none-any"
@@ -159,11 +160,31 @@ def test_selects_newest_wheel_satisfying_every_active_constraint() -> None:
     )
 
     assert selection.metadata_plan_sha256 == plan.plan_sha256
+    assert selection.artifact_manifest_sha256 == plan.artifact_manifest_sha256
     assert selection.artifacts[0].name == "shared"
     assert selection.artifacts[0].version == "2.0"
     assert selection.artifacts[0].requirement == "shared<3,>=1"
     assert len(selection.target_sha256) == 64
     assert len(selection.selection_sha256) == 64
+    assert validate_comfy_registry_wheel_selection(selection) == selection.artifacts
+
+
+def test_selection_validator_rejects_mutated_source_and_payload() -> None:
+    plan = _metadata_plan([("alpha", "1.0", ["dependency>=1"], True)])
+    selection = _select(
+        plan,
+        {"dependency": _document("dependency", "1.0")},
+    )
+
+    with pytest.raises(ComfyRegistryWheelSelectionError) as source:
+        validate_comfy_registry_wheel_selection(
+            replace(selection, artifact_manifest_sha256="0" * 64)
+        )
+    assert source.value.code == "selection_hash_mismatch"
+
+    with pytest.raises(ComfyRegistryWheelSelectionError) as payload:
+        validate_comfy_registry_wheel_selection(replace(selection, selection_sha256="0" * 64))
+    assert payload.value.code == "selection_hash_mismatch"
 
 
 def test_requested_extras_survive_constraint_consolidation() -> None:

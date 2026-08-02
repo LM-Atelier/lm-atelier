@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from copy import deepcopy
+from dataclasses import replace
 
 import pytest
 from packaging.markers import default_environment
@@ -9,10 +10,12 @@ import local_lm.comfy_registry_wheel_artifacts as artifact_module
 from local_lm.comfy_registry_dependencies import plan_comfy_registry_dependencies
 from local_lm.comfy_registry_wheel_artifacts import (
     ComfyRegistryWheelArtifactError,
+    build_comfy_registry_wheel_artifact_manifest,
     comfy_registry_wheel_target_sha256,
     current_comfy_registry_wheel_target,
     resolve_comfy_registry_wheel_artifacts,
     select_comfy_registry_wheel_artifact,
+    validate_comfy_registry_wheel_artifact_manifest,
 )
 
 _SHA256 = "a" * 64
@@ -394,6 +397,36 @@ def test_manifest_changes_when_artifact_hash_or_target_changes() -> None:
     assert first.manifest_sha256 != changed_hash.manifest_sha256
     assert first.target_sha256 != changed_target.target_sha256
     assert first.manifest_sha256 != changed_target.manifest_sha256
+
+
+def test_public_manifest_builder_and_validator_preserve_exact_manifest() -> None:
+    manifest = _resolve(["example-package==1.2.3"], {"example-package": _document()})
+
+    rebuilt = build_comfy_registry_wheel_artifact_manifest(
+        manifest.declaration_sha256,
+        manifest.target_sha256,
+        manifest.artifacts,
+    )
+
+    assert rebuilt == manifest
+    assert validate_comfy_registry_wheel_artifact_manifest(rebuilt) == manifest.artifacts
+
+
+def test_manifest_validator_rejects_stale_hash_and_duplicate_packages() -> None:
+    manifest = _resolve(["example-package==1.2.3"], {"example-package": _document()})
+    changed = replace(manifest, manifest_sha256="0" * 64)
+
+    with pytest.raises(ComfyRegistryWheelArtifactError) as stale:
+        validate_comfy_registry_wheel_artifact_manifest(changed)
+    assert stale.value.code == "artifact_manifest_hash_mismatch"
+
+    with pytest.raises(ComfyRegistryWheelArtifactError) as duplicate:
+        build_comfy_registry_wheel_artifact_manifest(
+            manifest.declaration_sha256,
+            manifest.target_sha256,
+            (*manifest.artifacts, *manifest.artifacts),
+        )
+    assert duplicate.value.code == "invalid_artifact_manifest"
 
 
 def test_future_minor_simple_api_is_feature_detected_but_new_major_fails() -> None:
