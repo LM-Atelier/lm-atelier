@@ -475,6 +475,41 @@ describe("App", () => {
     fireEvent.click(screen.getByRole("button", { name: "Run quick test" }));
     await waitFor(() => expect(api.verifySetupRole).toHaveBeenCalledWith("image"));
   });
+  it("runs installer first-run setup before the workspace, preparing workers unasked", async () => {
+    window.history.replaceState(null, "", "/?firstRunSetup=1");
+    vi.mocked(api.setupReadiness).mockResolvedValue(setupReport(
+      setupRole("chat", "ready", null, {
+        checks: [
+          {
+            code: "worker_not_loaded",
+            status: "pass",
+            message: "This model is not loaded yet. The first request will wait while it loads.",
+            action: "prepare_worker",
+          },
+        ],
+      }),
+      setupRole("image"),
+      setupRole("video"),
+    ));
+    vi.mocked(api.loadChatWorker).mockResolvedValue({ name: "chat", state: "ready" } as never);
+    const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+    render(
+      <QueryClientProvider client={client}>
+        <App />
+      </QueryClientProvider>,
+    );
+
+    // Setup is the whole surface: the workspace does not exist behind it.
+    expect(await screen.findByRole("dialog", { name: "Setup complete" })).toBeInTheDocument();
+    expect(screen.queryByRole("region", { name: "Projects and chats" })).not.toBeInTheDocument();
+    // The point of installer-time setup: the load is paid here, unasked.
+    await waitFor(() => expect(api.loadChatWorker).toHaveBeenCalledWith("profile-chat"));
+
+    fireEvent.click(screen.getByRole("button", { name: "Done" }));
+    expect(await screen.findByRole("region", { name: "Projects and chats" })).toBeInTheDocument();
+    expect(window.location.search).toBe("");
+  });
+
   it("names the load a ready role has not paid yet and offers to pay it now", async () => {
     vi.mocked(api.setupReadiness).mockResolvedValue(setupReport(
       setupRole("chat", "ready", null, {

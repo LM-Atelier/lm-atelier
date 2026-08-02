@@ -5069,7 +5069,7 @@ def _installed_package_versions(session: Session) -> dict[str, set[str]]:
 
     Installs record git revisions; workflows may pin registry versions. Until
     the registry resolver bridges the two, an unmatched pin correctly reads
-    unresolved - fail closed, never inferred (R153).
+    unresolved - fail closed, never inferred.
     """
 
     versions: dict[str, set[str]] = {}

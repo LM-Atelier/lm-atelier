@@ -9,6 +9,7 @@ import time
 import urllib.error
 import urllib.request
 import webbrowser
+from collections.abc import Sequence
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Literal
@@ -153,17 +154,35 @@ def _browser_enabled() -> bool:
     return value.strip().lower() not in _FALSE_VALUES
 
 
+def launch_url(base_url: str, arguments: Sequence[str]) -> str:
+    """The URL the browser opens, honoring the installer's setup hand-off.
+
+    The installer's final step runs the app with --first-run-setup so the
+    person lands in setup - choosing models, watching real download progress,
+    and preparing workers - before the workspace is ever shown. The flag
+    travels as a query parameter the web app reads; everything it triggers is
+    the same provisioning machinery the in-app wizard uses, not an
+    installer-side copy of it.
+    """
+
+    if "--first-run-setup" in arguments:
+        return f"{base_url}/?firstRunSetup=1"
+    return base_url
+
+
 def _open_browser_when_ready(
     url: str,
     expected_identity: str,
     data_dir: Path,
     timeout_seconds: float = 30,
+    *,
+    open_url: str | None = None,
 ) -> None:
     deadline = time.monotonic() + timeout_seconds
     while time.monotonic() < deadline:
         probe = _probe_instance(url, expected_identity)
         if probe.state == "owned":
-            webbrowser.open(url)
+            webbrowser.open(open_url or url)
             return
         if probe.state == "conflict":
             print(_port_conflict_message(url, data_dir, probe.reason), file=sys.stderr)
@@ -224,7 +243,7 @@ def main() -> int:
     probe = _probe_instance(url, expected_identity)
     if probe.state == "owned":
         if _browser_enabled():
-            webbrowser.open(url)
+            webbrowser.open(launch_url(url, sys.argv[1:]))
         return 0
     if probe.state == "conflict":
         print(
@@ -238,6 +257,7 @@ def main() -> int:
         threading.Thread(
             target=_open_browser_when_ready,
             args=(url, expected_identity, settings.data_dir),
+            kwargs={"open_url": launch_url(url, sys.argv[1:])},
             name="open-lm-atelier",
             daemon=True,
         ).start()

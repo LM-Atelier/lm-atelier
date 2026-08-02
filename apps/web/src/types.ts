@@ -773,7 +773,7 @@ export interface DraftClassification {
 }
 
 /** Analyzer report for a raw ComfyUI package (field names frozen with the
- * backend DTO per R150/R151; paired in the TypeScript contract gate). */
+ * backend DTO; paired in the TypeScript contract gate). */
 export interface WorkflowPackageRequirement {
   package_id: string;
   versions: string[];
