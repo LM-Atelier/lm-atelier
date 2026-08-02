@@ -101,6 +101,15 @@ folder listed in [Troubleshooting](TROUBLESHOOTING.md). Updates keep it.
 Nothing about your chats or media leaves the machine. Model downloads reach the
 model host, and that is the only network traffic setup needs.
 
+## Keeping installed models current
+
+The Model library's **Check for updates** asks the provider - only when you
+press it, never in the background - whether any installed asset with an exact
+recorded version has something newer. The report keeps its three answers
+separate: updates available, up to date, and could not check. Installing an
+update goes through the same verified flow as any install, with the changelog
+shown beforehand; nothing updates itself.
+
 ## If a step will not complete
 
 Start with [Troubleshooting](TROUBLESHOOTING.md), which lists the setup states
