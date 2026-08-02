@@ -15,6 +15,7 @@ from local_lm.comfy_registry_archives import (
     ComfyRegistryArchiveError,
     _safe_member_path,
     stage_comfy_registry_archive,
+    verify_staged_comfy_registry_archive,
 )
 
 
@@ -56,6 +57,21 @@ def test_archive_is_staged_inertly_with_a_deterministic_report(tmp_path: Path) -
     assert report.native_files == ("node/native.pyd",)
     assert report.top_level_entries == ("node",)
     assert report.review_required
+    verify_staged_comfy_registry_archive(
+        destination,
+        expected_manifest_sha256=report.manifest_sha256,
+        expected_file_count=report.file_count,
+        expected_expanded_bytes=report.expanded_bytes,
+    )
+
+    (destination / "node" / "__init__.py").write_bytes(b"changed")
+    with pytest.raises(ComfyRegistryArchiveError, match="contents have changed"):
+        verify_staged_comfy_registry_archive(
+            destination,
+            expected_manifest_sha256=report.manifest_sha256,
+            expected_file_count=report.file_count,
+            expected_expanded_bytes=report.expanded_bytes,
+        )
 
 
 def test_manifest_hash_is_independent_of_zip_entry_order(tmp_path: Path) -> None:

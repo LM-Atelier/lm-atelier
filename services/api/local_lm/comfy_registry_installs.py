@@ -1,15 +1,34 @@
 from __future__ import annotations
 
 import re
+import stat
 from collections.abc import Mapping
 from dataclasses import dataclass
+from pathlib import Path
 from urllib.parse import urlparse
 
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from .comfy_registry import ComfyNodeResolution
-from .comfy_registry_archives import ComfyRegistryArchiveReport
+from .comfy_registry_archives import (
+    ComfyRegistryArchiveReport,
+    verify_staged_comfy_registry_archive,
+)
+from .comfy_registry_dependencies import (
+    ComfyRegistryDependencyError,
+    plan_comfy_registry_dependencies,
+)
+from .comfy_registry_wheel_closure import (
+    ComfyRegistryWheelClosure,
+    ComfyRegistryWheelClosureError,
+    validate_comfy_registry_wheel_closure,
+)
+from .comfy_registry_wheel_environments import (
+    ComfyRegistryWheelEnvironmentError,
+    ComfyRegistryWheelEnvironmentReport,
+    verify_comfy_registry_wheel_environment,
+)
 from .models import ComfyRegistryInstall
 
 _PACKAGE_ID = re.compile(r"^[a-z0-9][a-z0-9._-]{0,99}$")
@@ -17,6 +36,7 @@ _SEMANTIC_VERSION = re.compile(r"^[0-9]+\.[0-9]+\.[0-9]+(?:[-+][0-9A-Za-z.-]+)?$
 _DIGEST = re.compile(r"^[0-9a-fA-F]{64}$")
 _INSTALL_PATH = re.compile(r"^lm-atelier-registry_[A-Za-z0-9._-]{1,200}$")
 _REPOSITORY_PART = re.compile(r"^[A-Za-z0-9_.-]+$")
+_ENVIRONMENT_PATH = re.compile(r"^registry-wheels-([0-9a-f]{64})$")
 
 
 class ComfyRegistryInstallError(ValueError):
@@ -36,6 +56,13 @@ class _InstallIdentity:
     node_types: tuple[str, ...]
     pip_dependencies: tuple[str, ...]
     review: dict[str, object]
+
+
+@dataclass(frozen=True)
+class ComfyRegistryLaunchContract:
+    custom_node_folders: tuple[str, ...]
+    site_packages: tuple[Path, ...]
+    node_types: tuple[str, ...]
 
 
 def installed_comfy_registry_versions(session: Session) -> dict[str, set[str]]:
@@ -109,6 +136,125 @@ def persist_comfy_registry_install(
     session.add(install)
     session.flush()
     return install
+
+
+def bind_comfy_registry_wheel_environment(
+    install: ComfyRegistryInstall,
+    closure: ComfyRegistryWheelClosure,
+    report: ComfyRegistryWheelEnvironmentReport,
+    destination: Path,
+    *,
+    environment_root: Path,
+) -> None:
+    """Bind an inert Registry install to one exact verified dependency overlay."""
+    if not isinstance(install, ComfyRegistryInstall) or install.trusted or install.active:
+        raise ComfyRegistryInstallError("Registry install must be inactive and untrusted")
+    try:
+        artifacts = validate_comfy_registry_wheel_closure(closure)
+    except ComfyRegistryWheelClosureError as exc:
+        raise ComfyRegistryInstallError("Registry wheel closure is invalid") from exc
+    if not closure.complete:
+        raise ComfyRegistryInstallError("Registry wheel closure is incomplete")
+    try:
+        dependency_plan = plan_comfy_registry_dependencies(install.pip_dependencies_json)
+    except ComfyRegistryDependencyError as exc:
+        raise ComfyRegistryInstallError("Registry dependency declarations are invalid") from exc
+    if dependency_plan.declaration_sha256 != closure.manifest.declaration_sha256:
+        raise ComfyRegistryInstallError("Registry wheel closure does not match the install")
+    root = _managed_root(environment_root)
+    path = _managed_environment_path(root, destination)
+    try:
+        verified = verify_comfy_registry_wheel_environment(
+            path,
+            expected_closure_sha256=closure.closure_sha256,
+            expected_environment_sha256=report.environment_sha256,
+        )
+    except ComfyRegistryWheelEnvironmentError as exc:
+        raise ComfyRegistryInstallError("Registry wheel environment is invalid") from exc
+    if (
+        verified != report
+        or report.closure_sha256 != closure.closure_sha256
+        or report.artifact_count != len(artifacts)
+    ):
+        raise ComfyRegistryInstallError("Registry wheel environment identity does not match")
+    identity = (closure.closure_sha256, report.environment_sha256, path.name)
+    current = (
+        install.wheel_closure_sha256,
+        install.wheel_environment_sha256,
+        install.wheel_environment_path,
+    )
+    if any(value is not None for value in current) and current != identity:
+        raise ComfyRegistryInstallError("Registry install is already bound to another environment")
+    (
+        install.wheel_closure_sha256,
+        install.wheel_environment_sha256,
+        install.wheel_environment_path,
+    ) = identity
+
+
+def trusted_comfy_registry_launch_contract(
+    session: Session,
+    *,
+    custom_node_root: Path,
+    environment_root: Path,
+) -> ComfyRegistryLaunchContract:
+    """Revalidate every trusted active Registry package for a stopped-worker launch."""
+    installs = session.scalars(
+        select(ComfyRegistryInstall)
+        .where(
+            ComfyRegistryInstall.trusted.is_(True),
+            ComfyRegistryInstall.active.is_(True),
+        )
+        .order_by(ComfyRegistryInstall.installed_path)
+    ).all()
+    if not installs:
+        return ComfyRegistryLaunchContract((), (), ())
+    node_root = _managed_root(custom_node_root)
+    wheel_root = _managed_root(environment_root)
+    folders: list[str] = []
+    site_packages: set[Path] = set()
+    node_types: set[str] = set()
+    for install in installs:
+        folder = _registry_node_path(node_root, install.installed_path)
+        review = _activation_review(install.review_json)
+        try:
+            verify_staged_comfy_registry_archive(
+                folder,
+                expected_manifest_sha256=install.manifest_sha256,
+                expected_file_count=review["file_count"],
+                expected_expanded_bytes=review["expanded_bytes"],
+            )
+        except ValueError as exc:
+            raise ComfyRegistryInstallError("Registry node files failed verification") from exc
+        if not (
+            install.wheel_closure_sha256
+            and install.wheel_environment_sha256
+            and install.wheel_environment_path
+        ):
+            raise ComfyRegistryInstallError("Registry install has no verified wheel environment")
+        environment = _managed_environment_path(
+            wheel_root,
+            wheel_root / install.wheel_environment_path,
+        )
+        try:
+            verify_comfy_registry_wheel_environment(
+                environment,
+                expected_closure_sha256=install.wheel_closure_sha256,
+                expected_environment_sha256=install.wheel_environment_sha256,
+            )
+        except ComfyRegistryWheelEnvironmentError as exc:
+            raise ComfyRegistryInstallError(
+                "Registry wheel environment failed verification"
+            ) from exc
+        declared_nodes = _node_types(install.node_types_json)
+        folders.append(folder.name)
+        site_packages.add(environment / "site-packages")
+        node_types.update(declared_nodes)
+    return ComfyRegistryLaunchContract(
+        tuple(folders),
+        tuple(sorted(site_packages)),
+        tuple(sorted(node_types)),
+    )
 
 
 def _identity(
@@ -275,3 +421,68 @@ def _paths(values: object) -> list[str]:
     if tuple(result) != tuple(sorted(set(result))):
         raise ComfyRegistryInstallError("invalid Registry archive review paths")
     return result
+
+
+def _managed_root(value: Path) -> Path:
+    if not isinstance(value, Path) or _is_link_or_reparse(value):
+        raise ComfyRegistryInstallError("managed Registry root is invalid")
+    try:
+        root = value.resolve(strict=True)
+    except OSError as exc:
+        raise ComfyRegistryInstallError("managed Registry root is missing") from exc
+    if not root.is_dir() or _is_link_or_reparse(root):
+        raise ComfyRegistryInstallError("managed Registry root is invalid")
+    return root
+
+
+def _managed_environment_path(root: Path, value: Path) -> Path:
+    if not isinstance(value, Path) or not _ENVIRONMENT_PATH.fullmatch(value.name):
+        raise ComfyRegistryInstallError("managed Registry wheel environment path is invalid")
+    try:
+        path = value.resolve(strict=True)
+    except OSError as exc:
+        raise ComfyRegistryInstallError("managed Registry wheel environment is missing") from exc
+    if path.parent != root or _is_link_or_reparse(value) or _is_link_or_reparse(path):
+        raise ComfyRegistryInstallError("managed Registry wheel environment path is invalid")
+    return path
+
+
+def _registry_node_path(root: Path, value: object) -> Path:
+    if not isinstance(value, str) or not _INSTALL_PATH.fullmatch(value):
+        raise ComfyRegistryInstallError("managed Registry node path is invalid")
+    try:
+        path = (root / value).resolve(strict=True)
+    except OSError as exc:
+        raise ComfyRegistryInstallError("managed Registry node files are missing") from exc
+    if path.parent != root or _is_link_or_reparse(root / value):
+        raise ComfyRegistryInstallError("managed Registry node path is invalid")
+    return path
+
+
+def _activation_review(value: object) -> dict[str, int]:
+    if not isinstance(value, dict) or value.get("review_required") is not True:
+        raise ComfyRegistryInstallError("Registry install review evidence is invalid")
+    return {
+        "file_count": _count(value.get("file_count"), "archive file count"),
+        "expanded_bytes": _count(value.get("expanded_bytes"), "archive expanded size"),
+    }
+
+
+def _node_types(value: object) -> tuple[str, ...]:
+    if not isinstance(value, list) or not value or len(value) > 4_096:
+        raise ComfyRegistryInstallError("Registry install node types are invalid")
+    nodes = tuple(_text(item, "node type", 200) for item in value)
+    if len(nodes) != len(set(nodes)):
+        raise ComfyRegistryInstallError("Registry install node types are invalid")
+    return nodes
+
+
+def _is_link_or_reparse(path: Path) -> bool:
+    try:
+        info = path.lstat()
+    except OSError:
+        return True
+    return path.is_symlink() or bool(
+        getattr(info, "st_file_attributes", 0)
+        & getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0x400)
+    )

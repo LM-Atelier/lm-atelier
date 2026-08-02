@@ -692,6 +692,9 @@ class ComfyRegistryInstall(TimestampMixin, Base):
     node_types_json: Mapped[list[str]] = mapped_column(JSON, default=list)
     pip_dependencies_json: Mapped[list[str]] = mapped_column(JSON, default=list)
     review_json: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
+    wheel_closure_sha256: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    wheel_environment_sha256: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    wheel_environment_path: Mapped[str | None] = mapped_column(Text, nullable=True)
     trusted: Mapped[bool] = mapped_column(Boolean, default=False, index=True)
     active: Mapped[bool] = mapped_column(Boolean, default=False, index=True)
 

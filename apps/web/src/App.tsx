@@ -1,15 +1,12 @@
 import {
   Fragment,
-  isValidElement,
   useCallback,
   useEffect,
   useMemo,
   useRef,
-  useState, type ReactNode,
+  useState,
 } from "react";
 import { useInfiniteQuery, useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import ReactMarkdown from "react-markdown";
-import remarkGfm from "remark-gfm";
 import {
   ArrowDown,
   ArrowUp,
@@ -89,6 +86,8 @@ import { AtelierMark } from "./AtelierMark";
 import { EditingStudio } from "./EditingStudio";
 import { MessageTimestamp } from "./MessageTimestamp";
 import { PendingResponseStatus } from "./PendingResponseStatus";
+import { MarkdownText } from "./MarkdownText";
+import { focusMainContent, roleForMode } from "./viewHelpers";
 import { CompareButton } from "./CompareButton";
 import { FirstRunSetup, SetupWizard } from "./SetupWizard";
 import { WorkflowPackageReview } from "./WorkflowPackageReview";
@@ -162,16 +161,6 @@ const visibilityRank: Record<Visibility, number> = { basic: 0, advanced: 1, expe
 const AUTO_PROFILE_ID = "__auto__";
 const SETUP_DISMISSED_KEY = "lm-atelier-setup-dismissed";
 const CURRENT_CHAT_KEY = "local-lm-chat";
-
-function focusMainContent() {
-  window.setTimeout(() => document.getElementById("main-content")?.focus(), 0);
-}
-
-function roleForMode(mode: RoutingMode): EngineRole {
-  if (mode === "video") return "video";
-  if (mode === "image") return "image";
-  return "chat";
-}
 
 function formatTechnicalDetails(
   application: ApplicationInfo,
@@ -344,51 +333,6 @@ function MediaLibraryView() {
           <div><strong>{artifact.original_name ?? artifact.kind}</strong><small>{formatBytes(artifact.size_bytes)} · {artifact.reference_count} reference{artifact.reference_count === 1 ? "" : "s"}</small><span><a href={source} download>Download</a><code>{artifact.sha256.slice(0, 12)}</code><button className="icon-button danger" aria-label={`Delete ${artifact.original_name ?? artifact.kind}`} disabled={deleteArtifact.isPending && deleteArtifact.variables === artifact.id} onClick={() => { const references = artifact.reference_count ? ` and remove ${artifact.reference_count} appearance${artifact.reference_count === 1 ? "" : "s"} from chats` : ""; if (window.confirm(`Permanently delete ${artifact.original_name ?? artifact.kind}${references}?`)) deleteArtifact.mutate(artifact.id); }}><Trash2 size={14} /></button></span></div>
         </article>;
       })}</div> : <EmptyState icon={<ImageIcon />} title="No generated media" body="Generated images and videos appear here." />}
-    </div>
-  );
-}
-
-function nodeText(node: ReactNode): string {
-  if (typeof node === "string" || typeof node === "number") return String(node);
-  if (Array.isArray(node)) return node.map(nodeText).join("");
-  if (isValidElement<{ children?: ReactNode }>(node)) return nodeText(node.props.children);
-  return "";
-}
-
-function MarkdownText({ text }: { text: string }) {
-  return (
-    <div className="message-text markdown">
-      <ReactMarkdown
-        remarkPlugins={[remarkGfm]}
-        components={{
-          a: ({ children, href, ...props }) => {
-            const external = /^https?:\/\//i.test(href ?? "");
-            return (
-              <a
-                {...props}
-                href={href}
-                {...(external
-                  ? { target: "_blank", rel: "noopener noreferrer" }
-                  : {})}
-              >
-                {children}
-              </a>
-            );
-          },
-          img: ({ alt }) => <span className="markdown-image-reference">[Image: {alt || "link"}]</span>,
-          pre: ({ children }) => {
-            const code = nodeText(children).replace(/\n$/, "");
-            return (
-              <div className="markdown-code-block">
-                {code && <CopyTextButton text={code} label="Copy code block" className="block-copy" />}
-                <pre>{children}</pre>
-              </div>
-            );
-          },
-        }}
-      >
-        {text}
-      </ReactMarkdown>
     </div>
   );
 }
@@ -1433,6 +1377,7 @@ function Composer({
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [promptHelperDraft, setPromptHelperDraft] = useState<string | null>(null);
   const [studioOpen, setStudioOpen] = useState(false);
+  const [templateSettings, setTemplateSettings] = useState<{ name: string; settings: Record<string, unknown> } | null>(null);
   const [attachments, setAttachments] = useState<ComposerAttachment[]>([]);
   const { uploading, uploadError, setUploadError, uploadFiles } = useComposerUploads(
     (attachment) => setAttachments((current) => [...current, attachment]),
@@ -1516,10 +1461,16 @@ function Composer({
       text.trim(),
       selectedMode,
       attachments.map((item) => item.id),
-      selectedMode === "auto" ? {} : normalizeSettingsForFields(settings, fields),
+      selectedMode === "auto"
+        ? {}
+        : normalizeSettingsForFields(
+            templateSettings ? { ...settings, ...templateSettings.settings } : settings,
+            fields,
+          ),
     );
     setText("");
     setAttachments([]);
+    setTemplateSettings(null);
   };
 
   return (
@@ -1613,6 +1564,12 @@ function Composer({
             })}
           </div>
         )}
+        {templateSettings && (
+          <div className="template-settings-chip">
+            <span>{templateSettings.name} settings apply to this send</span>
+            <button aria-label="Remove template settings" onClick={() => setTemplateSettings(null)}><X size={12} /></button>
+          </div>
+        )}
         <div className="composer">
           <textarea
             ref={textInput}
@@ -1686,7 +1643,16 @@ function Composer({
           </div>
         </div>
       </div>
-      {studioOpen && <EditingStudio currentInstruction={text} onClose={() => setStudioOpen(false)} onPick={(instruction) => { setText(instruction); setStudioOpen(false); window.setTimeout(() => textInput.current?.focus(), 0); }} />}
+      {studioOpen && <EditingStudio currentInstruction={text} onClose={() => setStudioOpen(false)} onPick={(instruction, template) => { setText(instruction); setTemplateSettings(Object.keys(template.settings_json).length ? { name: template.name, settings: template.settings_json } : null); setStudioOpen(false); window.setTimeout(() => textInput.current?.focus(), 0); }} imageCount={attachments.filter((item) => item.kind === "image").length} onApplyToEach={(instruction, template) => {
+        const role = roleForMode("image");
+        const engine = engines.find((item) => item.roles.includes(role));
+        const fields = resolveWorkflowSettings(resolveCapabilitySettings(engine, role), workflowSchema);
+        const merged = normalizeSettingsForFields({ ...settings, ...template.settings_json }, fields);
+        // One ordinary edit turn per image: each queues, verifies, and retries
+        // alone; the pending-work bound errs clearly rather than truncating.
+        for (const item of attachments.filter((entry) => entry.kind === "image")) onSend(instruction, "image", [item.id], merged);
+        setAttachments([]); setText(""); setTemplateSettings(null); setStudioOpen(false);
+      }} />}
       {promptHelperDraft !== null && (
         <PromptHelperDialog
           sourceChat={chat}

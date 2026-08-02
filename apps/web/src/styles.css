@@ -645,3 +645,5 @@ h1, h2, h3 { margin: 0; }
 .studio-save { display: grid; gap: 6px; margin-bottom: 12px; }
 .studio-save input { border: 1px solid var(--border); border-radius: 8px; background: var(--panel); color: #e8ebef; padding: 8px 10px; }
 .studio-save span, .studio-save small { color: var(--muted); }
+.template-settings-chip { display: flex; align-items: center; gap: 7px; margin: 0 2px 7px; color: var(--muted); font-size: 12px; }
+.template-settings-chip button { display: inline-flex; padding: 2px; }

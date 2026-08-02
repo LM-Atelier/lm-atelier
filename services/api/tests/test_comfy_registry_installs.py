@@ -1,19 +1,27 @@
 from __future__ import annotations
 
+import hashlib
 from collections.abc import Generator
 from dataclasses import replace
+from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 from sqlalchemy import create_engine, func, select
 from sqlalchemy.orm import Session
 
+import local_lm.comfy_registry_installs as install_module
 from local_lm.comfy_registry import ComfyNodeResolution
 from local_lm.comfy_registry_archives import ComfyRegistryArchiveReport
+from local_lm.comfy_registry_dependencies import plan_comfy_registry_dependencies
 from local_lm.comfy_registry_installs import (
     ComfyRegistryInstallError,
+    bind_comfy_registry_wheel_environment,
     installed_comfy_registry_versions,
     persist_comfy_registry_install,
+    trusted_comfy_registry_launch_contract,
 )
+from local_lm.comfy_registry_wheel_environments import ComfyRegistryWheelEnvironmentReport
 from local_lm.db import Base
 from local_lm.models import ComfyRegistryInstall
 
@@ -151,6 +159,134 @@ def test_installed_versions_include_only_trusted_active_records(session: Session
     session.flush()
 
     assert installed_comfy_registry_versions(session) == {"comfyui-example-node": {"1.2.3"}}
+
+
+def test_exact_wheel_environment_is_bound_before_trust(
+    session: Session,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    install = persist_comfy_registry_install(
+        session,
+        resolution=_resolution(),
+        archive=_archive(),
+        installed_path="lm-atelier-registry_example",
+    )
+    closure_sha256 = "c" * 64
+    environment_sha256 = "d" * 64
+    dependency_plan = plan_comfy_registry_dependencies(install.pip_dependencies_json)
+    closure = SimpleNamespace(
+        complete=True,
+        closure_sha256=closure_sha256,
+        manifest=SimpleNamespace(declaration_sha256=dependency_plan.declaration_sha256),
+    )
+    report = ComfyRegistryWheelEnvironmentReport(
+        closure_sha256,
+        environment_sha256,
+        1,
+        2,
+        100,
+        (),
+    )
+    root = tmp_path / "environments"
+    root.mkdir()
+    destination = root / f"registry-wheels-{closure_sha256}"
+    destination.mkdir()
+    monkeypatch.setattr(
+        install_module,
+        "validate_comfy_registry_wheel_closure",
+        lambda _closure: (object(),),
+    )
+    monkeypatch.setattr(
+        install_module,
+        "verify_comfy_registry_wheel_environment",
+        lambda *_args, **_kwargs: report,
+    )
+
+    bind_comfy_registry_wheel_environment(
+        install,
+        closure,  # type: ignore[arg-type]
+        report,
+        destination,
+        environment_root=root,
+    )
+
+    assert install.wheel_closure_sha256 == closure_sha256
+    assert install.wheel_environment_sha256 == environment_sha256
+    assert install.wheel_environment_path == destination.name
+
+
+def test_trusted_launch_contract_revalidates_node_code_and_overlay(
+    session: Session,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    node_root = tmp_path / "custom_nodes"
+    node_root.mkdir()
+    folder_name = "lm-atelier-registry_example"
+    folder = node_root / folder_name
+    folder.mkdir()
+    content = b"NODE_CLASS_MAPPINGS = {}"
+    (folder / "node.py").write_bytes(content)
+    manifest = (
+        f"node.py{chr(0)}{len(content)}{chr(0)}{hashlib.sha256(content).hexdigest()}{chr(10)}"
+    )
+    install = persist_comfy_registry_install(
+        session,
+        resolution=_resolution(),
+        archive=_archive(
+            manifest_sha256=hashlib.sha256(manifest.encode()).hexdigest(),
+            entry_count=1,
+            file_count=1,
+            expanded_bytes=len(content),
+            python_file_count=1,
+        ),
+        installed_path=folder_name,
+    )
+    closure_sha256 = "c" * 64
+    environment_sha256 = "d" * 64
+    environment_root = tmp_path / "environments"
+    environment_root.mkdir()
+    environment = environment_root / f"registry-wheels-{closure_sha256}"
+    site_packages = environment / "site-packages"
+    site_packages.mkdir(parents=True)
+    install.wheel_closure_sha256 = closure_sha256
+    install.wheel_environment_sha256 = environment_sha256
+    install.wheel_environment_path = environment.name
+    install.trusted = True
+    install.active = True
+    session.flush()
+    report = ComfyRegistryWheelEnvironmentReport(
+        closure_sha256,
+        environment_sha256,
+        1,
+        0,
+        0,
+        (),
+    )
+    monkeypatch.setattr(
+        install_module,
+        "verify_comfy_registry_wheel_environment",
+        lambda *_args, **_kwargs: report,
+    )
+
+    contract = trusted_comfy_registry_launch_contract(
+        session,
+        custom_node_root=node_root,
+        environment_root=environment_root,
+    )
+
+    assert contract.custom_node_folders == (folder_name,)
+    assert contract.site_packages == (site_packages,)
+    assert contract.node_types == ("ExampleLoader", "ExampleSampler")
+
+    (folder / "node.py").write_bytes(b"changed")
+    with pytest.raises(ComfyRegistryInstallError, match="node files failed verification"):
+        trusted_comfy_registry_launch_contract(
+            session,
+            custom_node_root=node_root,
+            environment_root=environment_root,
+        )
 
 
 def test_registry_record_cannot_change_archive_identity(session: Session) -> None:
