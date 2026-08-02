@@ -22,6 +22,12 @@ default and can select an appropriate configured model for each request.
 - Guided model installation that pins checksums, shows what a download costs,
   and proves the model produces output before calling it ready
 - Contextual image creation and editing within conversations
+- An editing studio of one-click edits - restyle, colorize, restore, relight -
+  with room to save your own, plus a before/after slider on every edit result
+- Automatic LoRA trigger words, applied when needed and always listed with the
+  answer they shaped
+- Installer-driven first-run setup that chooses models, downloads with one
+  combined figure and time estimate, and loads workers before the first request
 - Durable queues, regeneration history, per-chat settings, and reusable presets
 - Local model, media, conversation, and storage management
 
