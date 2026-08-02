@@ -14,6 +14,7 @@ from packaging.version import InvalidVersion, Version
 from .comfy_registry_wheel_artifacts import (
     ComfyRegistryWheelArtifact,
     ComfyRegistryWheelArtifactError,
+    build_comfy_registry_wheel_artifact_manifest,
     comfy_registry_wheel_target_sha256,
     select_comfy_registry_wheel_artifact,
 )
@@ -36,6 +37,7 @@ class ComfyRegistryWheelSelectionError(ValueError):
 
 @dataclass(frozen=True)
 class ComfyRegistryWheelSelection:
+    artifact_manifest_sha256: str
     metadata_plan_sha256: str
     target_sha256: str
     artifacts: tuple[ComfyRegistryWheelArtifact, ...]
@@ -50,7 +52,7 @@ def select_comfy_registry_wheel_versions(
     supported_tags: Sequence[str],
 ) -> ComfyRegistryWheelSelection:
     """Select exact compatible wheels for an inert transitive metadata frontier."""
-    metadata_plan_sha256 = _validated_plan(plan)
+    metadata_plan_sha256 = validate_comfy_registry_wheel_metadata_plan(plan)
     if plan.unavailable_metadata:
         raise ComfyRegistryWheelSelectionError(
             "metadata_unavailable",
@@ -96,19 +98,68 @@ def select_comfy_registry_wheel_versions(
     selected = tuple(sorted(artifacts, key=lambda item: (item.name, item.requirement)))
     payload = {
         "version": 1,
+        "artifact_manifest_sha256": plan.artifact_manifest_sha256,
         "metadata_plan_sha256": metadata_plan_sha256,
         "target_sha256": target_sha256,
         "artifacts": [_artifact_payload(artifact) for artifact in selected],
     }
     return ComfyRegistryWheelSelection(
-        metadata_plan_sha256,
-        target_sha256,
-        selected,
-        _payload_sha256(payload),
+        artifact_manifest_sha256=plan.artifact_manifest_sha256,
+        metadata_plan_sha256=metadata_plan_sha256,
+        target_sha256=target_sha256,
+        artifacts=selected,
+        selection_sha256=_payload_sha256(payload),
     )
 
 
-def _validated_plan(plan: ComfyRegistryWheelMetadataPlan) -> str:
+def validate_comfy_registry_wheel_selection(
+    selection: ComfyRegistryWheelSelection,
+) -> tuple[ComfyRegistryWheelArtifact, ...]:
+    """Revalidate a frozen target-bound transitive artifact selection."""
+    if not isinstance(selection, ComfyRegistryWheelSelection):
+        raise ComfyRegistryWheelSelectionError(
+            "invalid_selection", "Wheel artifact selection is invalid"
+        )
+    artifact_manifest_sha256 = _selection_digest(selection.artifact_manifest_sha256)
+    metadata_plan_sha256 = _selection_digest(selection.metadata_plan_sha256)
+    target_sha256 = _selection_digest(selection.target_sha256)
+    selection_sha256 = _selection_digest(selection.selection_sha256)
+    if (
+        not isinstance(selection.artifacts, tuple)
+        or len(selection.artifacts) > MAX_REGISTRY_WHEEL_SELECTION_ARTIFACTS
+    ):
+        raise ComfyRegistryWheelSelectionError(
+            "invalid_selection", "Wheel artifact selection is invalid"
+        )
+    try:
+        validated = build_comfy_registry_wheel_artifact_manifest(
+            metadata_plan_sha256,
+            target_sha256,
+            selection.artifacts,
+        ).artifacts
+    except ComfyRegistryWheelArtifactError as exc:
+        raise ComfyRegistryWheelSelectionError(
+            "invalid_selection", "Wheel artifact selection is invalid"
+        ) from exc
+    payload = {
+        "version": 1,
+        "artifact_manifest_sha256": artifact_manifest_sha256,
+        "metadata_plan_sha256": metadata_plan_sha256,
+        "target_sha256": target_sha256,
+        "artifacts": [_artifact_payload(artifact) for artifact in validated],
+    }
+    if not hmac.compare_digest(_payload_sha256(payload), selection_sha256):
+        raise ComfyRegistryWheelSelectionError(
+            "selection_hash_mismatch",
+            "Wheel artifact selection hash does not match its contents",
+        )
+    return validated
+
+
+def validate_comfy_registry_wheel_metadata_plan(
+    plan: ComfyRegistryWheelMetadataPlan,
+) -> str:
+    """Revalidate a frozen metadata dependency plan and return its digest."""
     if not isinstance(plan, ComfyRegistryWheelMetadataPlan):
         raise ComfyRegistryWheelSelectionError(
             "invalid_metadata_plan", "Wheel metadata plan is invalid"
@@ -337,6 +388,15 @@ def _digest(value: object) -> str:
             "invalid_metadata_plan", "Wheel metadata digest is invalid"
         )
     return value.lower()
+
+
+def _selection_digest(value: object) -> str:
+    try:
+        return _digest(value)
+    except ComfyRegistryWheelSelectionError as exc:
+        raise ComfyRegistryWheelSelectionError(
+            "invalid_selection", "Wheel artifact selection digest is invalid"
+        ) from exc
 
 
 def _artifact_payload(artifact: ComfyRegistryWheelArtifact) -> dict[str, object]:

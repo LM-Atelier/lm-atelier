@@ -1,13 +1,14 @@
 from __future__ import annotations
 
 import hashlib
+import hmac
 import json
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from urllib.parse import unquote, urlparse
 
 from packaging.markers import Marker, default_environment
-from packaging.requirements import Requirement
+from packaging.requirements import InvalidRequirement, Requirement
 from packaging.specifiers import InvalidSpecifier, SpecifierSet
 from packaging.tags import Tag, parse_tag, sys_tags
 from packaging.utils import InvalidWheelFilename, canonicalize_name, parse_wheel_filename
@@ -26,6 +27,7 @@ MAX_WHEEL_ARTIFACT_BYTES = 2 * 1024 * 1024 * 1024
 MAX_WHEEL_FILENAME_CHARACTERS = 500
 MAX_WHEEL_URL_CHARACTERS = 2_000
 MAX_SUPPORTED_WHEEL_TAGS = 4_096
+MAX_WHEEL_MANIFEST_ARTIFACTS = 256
 _DIGEST_CHARACTERS = frozenset("0123456789abcdefABCDEF")
 _MARKER_ENVIRONMENT_KEYS = frozenset(
     {
@@ -129,6 +131,69 @@ def select_comfy_registry_wheel_artifact(
     )
 
 
+def build_comfy_registry_wheel_artifact_manifest(
+    declaration_sha256: str,
+    target_sha256: str,
+    artifacts: Sequence[ComfyRegistryWheelArtifact],
+) -> ComfyRegistryWheelArtifactManifest:
+    """Build an immutable manifest from already-selected inert wheel records."""
+    declaration = _digest_value(declaration_sha256, "declaration")
+    target = _digest_value(target_sha256, "target")
+    if (
+        isinstance(artifacts, str | bytes)
+        or not isinstance(artifacts, Sequence)
+        or len(artifacts) > MAX_WHEEL_MANIFEST_ARTIFACTS
+    ):
+        raise ComfyRegistryWheelArtifactError(
+            "invalid_artifact_manifest", "Wheel artifact collection is invalid"
+        )
+    selected = tuple(_validated_artifact(artifact) for artifact in artifacts)
+    if selected != tuple(sorted(selected, key=lambda item: (item.name, item.requirement))):
+        raise ComfyRegistryWheelArtifactError(
+            "invalid_artifact_manifest", "Wheel artifacts are not canonical"
+        )
+    names = [artifact.name for artifact in selected]
+    filenames = [artifact.filename for artifact in selected]
+    if len(names) != len(set(names)) or len(filenames) != len(set(filenames)):
+        raise ComfyRegistryWheelArtifactError(
+            "invalid_artifact_manifest", "Wheel artifacts contain duplicates"
+        )
+    payload = {
+        "version": 1,
+        "declaration_sha256": declaration,
+        "target_sha256": target,
+        "artifacts": [_artifact_payload(artifact) for artifact in selected],
+    }
+    return ComfyRegistryWheelArtifactManifest(
+        declaration,
+        target,
+        selected,
+        _payload_sha256(payload, "wheel artifact manifest"),
+    )
+
+
+def validate_comfy_registry_wheel_artifact_manifest(
+    manifest: ComfyRegistryWheelArtifactManifest,
+) -> tuple[ComfyRegistryWheelArtifact, ...]:
+    """Revalidate a frozen artifact manifest and return its canonical records."""
+    if not isinstance(manifest, ComfyRegistryWheelArtifactManifest):
+        raise ComfyRegistryWheelArtifactError(
+            "invalid_artifact_manifest", "Wheel artifact manifest is invalid"
+        )
+    expected = build_comfy_registry_wheel_artifact_manifest(
+        manifest.declaration_sha256,
+        manifest.target_sha256,
+        manifest.artifacts,
+    )
+    manifest_sha256 = _digest_value(manifest.manifest_sha256, "manifest")
+    if not hmac.compare_digest(expected.manifest_sha256, manifest_sha256):
+        raise ComfyRegistryWheelArtifactError(
+            "artifact_manifest_hash_mismatch",
+            "Wheel artifact manifest hash does not match its contents",
+        )
+    return expected.artifacts
+
+
 def resolve_comfy_registry_wheel_artifacts(
     plan: ComfyRegistryDependencyPlan,
     project_documents: Mapping[str, object],
@@ -163,17 +228,10 @@ def resolve_comfy_registry_wheel_artifacts(
         _resolve_dependency(dependency, documents[dependency.name], environment, tags, ranks)
         for dependency in active
     )
-    manifest_payload = {
-        "version": 1,
-        "declaration_sha256": plan.declaration_sha256,
-        "target_sha256": target_sha256,
-        "artifacts": [_artifact_payload(artifact) for artifact in artifacts],
-    }
-    return ComfyRegistryWheelArtifactManifest(
+    return build_comfy_registry_wheel_artifact_manifest(
         plan.declaration_sha256,
         target_sha256,
         artifacts,
-        _payload_sha256(manifest_payload, "wheel artifact manifest"),
     )
 
 
@@ -541,6 +599,87 @@ def _metadata_sha256(value: object, filename: str) -> str | None:
             "invalid_project_metadata", f"PyPI metadata hash for {filename} is invalid"
         )
     return _sha256(value, f"metadata for {filename}")
+
+
+def _validated_artifact(value: object) -> ComfyRegistryWheelArtifact:
+    if not isinstance(value, ComfyRegistryWheelArtifact):
+        raise ComfyRegistryWheelArtifactError(
+            "invalid_artifact_manifest", "Wheel artifact is invalid"
+        )
+    name = value.name
+    if (
+        not isinstance(name, str)
+        or not name
+        or len(name) > 200
+        or _has_control(name)
+        or canonicalize_name(name) != name
+    ):
+        raise ComfyRegistryWheelArtifactError(
+            "invalid_artifact_manifest", "Wheel artifact name is invalid"
+        )
+    try:
+        version = Version(value.version)
+        requirement = Requirement(value.requirement)
+        wheel_name, wheel_version, _, wheel_tags = parse_wheel_filename(value.filename)
+    except (InvalidRequirement, InvalidVersion, InvalidWheelFilename) as exc:
+        raise ComfyRegistryWheelArtifactError(
+            "invalid_artifact_manifest", "Wheel artifact identity is invalid"
+        ) from exc
+    if (
+        str(version) != value.version
+        or requirement.url is not None
+        or canonicalize_name(requirement.name) != name
+        or not requirement.specifier.contains(version, prereleases=True)
+        or str(wheel_name) != name
+        or wheel_version != version
+    ):
+        raise ComfyRegistryWheelArtifactError(
+            "invalid_artifact_manifest", "Wheel artifact identity is invalid"
+        )
+    tags = tuple(sorted(str(tag) for tag in wheel_tags))
+    if value.wheel_tags != tags:
+        raise ComfyRegistryWheelArtifactError(
+            "invalid_artifact_manifest", "Wheel artifact tags are invalid"
+        )
+    try:
+        compatibility = parse_tag(value.compatibility_tag)
+    except ValueError as exc:
+        raise ComfyRegistryWheelArtifactError(
+            "invalid_artifact_manifest", "Wheel artifact selected tag is invalid"
+        ) from exc
+    if len(compatibility) != 1 or value.compatibility_tag not in tags:
+        raise ComfyRegistryWheelArtifactError(
+            "invalid_artifact_manifest", "Wheel artifact selected tag is invalid"
+        )
+    if _wheel_url(value.url, value.filename) != value.url:
+        raise ComfyRegistryWheelArtifactError(
+            "invalid_artifact_manifest", "Wheel artifact URL is invalid"
+        )
+    _digest_value(value.sha256, "wheel")
+    if value.metadata_sha256 is not None:
+        _digest_value(value.metadata_sha256, "metadata")
+    if (
+        not isinstance(value.size_bytes, int)
+        or isinstance(value.size_bytes, bool)
+        or value.size_bytes < 0
+        or value.size_bytes > MAX_WHEEL_ARTIFACT_BYTES
+    ):
+        raise ComfyRegistryWheelArtifactError(
+            "invalid_artifact_manifest", "Wheel artifact size is invalid"
+        )
+    return value
+
+
+def _digest_value(value: object, label: str) -> str:
+    if (
+        not isinstance(value, str)
+        or len(value) != 64
+        or any(character not in _DIGEST_CHARACTERS for character in value)
+    ):
+        raise ComfyRegistryWheelArtifactError(
+            "invalid_artifact_manifest", f"Wheel artifact {label} digest is invalid"
+        )
+    return value.lower()
 
 
 def _artifact_payload(artifact: ComfyRegistryWheelArtifact) -> dict[str, object]:
