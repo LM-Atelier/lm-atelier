@@ -5,6 +5,7 @@ import stat
 import zipfile
 from collections.abc import Iterable
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -197,6 +198,23 @@ def test_per_file_and_expanded_sizes_are_bounded(
 
     with pytest.raises(ComfyRegistryArchiveError, match="file is too large"):
         stage_comfy_registry_archive(source, tmp_path / "staged")
+
+
+def test_insufficient_disk_space_is_rejected_before_extraction(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    source = write_archive(tmp_path / "node.zip", [("node.py", b"123456789")])
+    monkeypatch.setattr(
+        registry_archives.shutil,
+        "disk_usage",
+        lambda _path: SimpleNamespace(free=8),
+    )
+    destination = tmp_path / "staged"
+
+    with pytest.raises(ComfyRegistryArchiveError, match="insufficient disk space"):
+        stage_comfy_registry_archive(source, destination)
+    assert not destination.exists()
 
 
 def test_entry_count_is_bounded(tmp_path: Path) -> None:
