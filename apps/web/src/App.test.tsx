@@ -240,6 +240,7 @@ vi.mock("./api", () => ({
     exportWorkflow: vi.fn(),
     workflowOpenTarget: vi.fn(),
     importWorkflow: vi.fn(),
+    analyzeWorkflowPackage: vi.fn(),
     validateWorkflow: vi.fn(),
     customNodes: vi.fn().mockResolvedValue([]),
     installCustomNode: vi.fn(),
@@ -3479,6 +3480,90 @@ describe("App", () => {
     expect(screen.getByDisplayValue("20")).toBeInTheDocument();
     expect(screen.getByText("v2 · current")).toBeInTheDocument();
     expect(screen.queryByText("Restore as new revision")).not.toBeInTheDocument();
+  });
+
+  it("reviews a raw ComfyUI workflow instead of rejecting it", async () => {
+    vi.mocked(api.workflows).mockResolvedValue([]);
+    vi.mocked(api.analyzeWorkflowPackage).mockResolvedValue({
+      format_version: "0.4",
+      frontend_version: "1.45.21",
+      node_count: 12,
+      link_count: 14,
+      subgraph_count: 0,
+      operation_guess: "image",
+      truncated: false,
+      required_node_types: ["KSampler", "Power Lora Loader"],
+      frontend_node_types: ["Note"],
+      missing_node_types: ["Power Lora Loader"],
+      missing_nodes: [
+        { node_type: "Power Lora Loader", count: 1, package_id: "rgthree-comfy" },
+      ],
+      custom_packages: [
+        { package_id: "rgthree-comfy", versions: ["1.2.3"], node_types: ["Power Lora Loader"], locally_resolved: false },
+      ],
+      asset_references: [
+        { filename: "legacy.ckpt", suffix: ".ckpt", policy: "blocked", kind: "checkpoint", source_url: null, present_locally: false },
+      ],
+      issues: [
+        { code: "blocked_asset_format", count: 1, node_types: [], severity: "blocking" },
+      ],
+      ready: false,
+      runtime_nodes_available: false,
+      dependencies_resolved: false,
+      node_inventory_available: true,
+    });
+    const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+    const { container } = render(
+      <QueryClientProvider client={client}>
+        <App />
+      </QueryClientProvider>,
+    );
+    fireEvent.click(await screen.findByText("Workflows"));
+    const graph = { version: 0.4, nodes: [{ id: 1, type: "KSampler" }], links: [] };
+    const input = container.querySelector<HTMLInputElement>('input[accept="application/json,.json"]');
+    fireEvent.change(input!, {
+      target: { files: [new File([JSON.stringify(graph)], "photoflow.json", { type: "application/json" })] },
+    });
+
+    await waitFor(() => expect(api.analyzeWorkflowPackage).toHaveBeenCalledWith(graph));
+    expect(await screen.findByRole("dialog", { name: "Review workflow package" })).toBeVisible();
+    // The gate is the analyzer's, and it is closed: nothing importable or trustable yet.
+    expect(screen.getByText(
+      "This workflow cannot be imported or trusted until everything below is resolved.",
+    )).toBeInTheDocument();
+    expect(screen.getByText("Power Lora Loader")).toBeInTheDocument();
+    expect(screen.getByText("· 1 node · from rgthree-comfy")).toBeInTheDocument();
+    expect(screen.getByText("legacy.ckpt")).toBeInTheDocument();
+    expect(screen.getByText("blocked")).toBeInTheDocument();
+    expect(api.importWorkflow).not.toHaveBeenCalled();
+  });
+
+  it("still imports LM Atelier bundles directly", async () => {
+    vi.mocked(api.workflows).mockResolvedValue([]);
+    vi.mocked(api.importWorkflow).mockResolvedValue({
+      id: "workflow-imported",
+      name: "Bundle",
+      operation: "text_to_image",
+      description: "",
+      current_revision_id: null,
+      revisions: [],
+    });
+    const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+    const { container } = render(
+      <QueryClientProvider client={client}>
+        <App />
+      </QueryClientProvider>,
+    );
+    fireEvent.click(await screen.findByText("Workflows"));
+    const bundle = { format: "lm-atelier-workflow", version: 1, name: "Bundle", operation: "text_to_image", api_graph: {} };
+    const input = container.querySelector<HTMLInputElement>('input[accept="application/json,.json"]');
+    fireEvent.change(input!, {
+      target: { files: [new File([JSON.stringify(bundle)], "bundle.lm-atelier-workflow.json", { type: "application/json" })] },
+    });
+
+    await waitFor(() => expect(api.importWorkflow).toHaveBeenCalled());
+    expect(api.analyzeWorkflowPackage).not.toHaveBeenCalled();
+    expect(screen.queryByRole("dialog", { name: "Review workflow package" })).not.toBeInTheDocument();
   });
 
   it("browses generated media and exposes retention-safe cleanup", async () => {
