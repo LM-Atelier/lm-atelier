@@ -33,7 +33,12 @@ from .chat_deletion import (
     delete_exchange,
 )
 from .chat_forking import ForkSourceNotFound, fork_chat_from_message
+from .comfy_registry import ComfyRegistryClient
+from .comfy_registry_closure_driver import ComfyRegistryWheelMetadataClient
+from .comfy_registry_downloads import ComfyRegistryArchiveDownloader
 from .comfy_registry_installs import installed_comfy_registry_versions
+from .comfy_registry_wheel_downloads import ComfyRegistryWheelDownloader
+from .comfy_registry_wheel_projects import ComfyRegistryWheelProjectClient
 from .comfy_templates import (
     COMFY_TEMPLATE_COMPILER_VERSION,
     ComfyTemplate,
@@ -55,6 +60,7 @@ from .domain import (
     ArtifactKind,
     CompatibilityLevel,
     JobKind,
+    JobStatus,
     MessageRole,
     MessageStatus,
     ModelRole,
@@ -225,6 +231,7 @@ from .schemas import (
     WorkflowPackageAnalysisOut,
     WorkflowPackageAnalyzeRequest,
     WorkflowPackageIssueOut,
+    WorkflowPackagePrepareRequest,
     WorkflowPackageRequirementOut,
     WorkflowRevisionCreate,
     WorkflowRevisionOut,
@@ -250,6 +257,12 @@ from .setup_verification import (
 )
 from .verified_setup import build_verified_setup, resolve_verified_setup
 from .workflow_edit_calibration import validate_workflow_edit_calibration
+from .workflow_package_preparation import (
+    PreparationContext,
+    WorkflowPackagePreparationError,
+    prepare_workflow_package,
+    refuse_interpreter_probe,
+)
 from .workflow_trust import (
     TRUST_DERIVATION_VERSION,
     TrustDecision,
@@ -5133,6 +5146,128 @@ def _installed_package_versions(session: Session) -> dict[str, set[str]]:
     for install in session.scalars(select(CustomNodeInstall)).all():
         versions.setdefault(install.name, set()).add(install.revision)
     return versions
+
+
+_REGISTRY_PREPARE_TASKS: dict[str, asyncio.Task[None]] = {}
+
+
+async def _run_workflow_package_preparation(
+    services: Services,
+    job_id: str,
+    package_id: str,
+    version: str,
+) -> None:
+    """One durable preparation job: lease held, worker state told truthfully."""
+
+    def report(name: str, done: int | None, total: int | None) -> None:
+        with SessionLocal() as session:
+            job = session.get(Job, job_id)
+            if not job:
+                return
+            update_job_progress(
+                job,
+                stage=name,
+                completed_units=done,
+                total_units=total,
+                unit="bytes" if total is not None else None,
+                indeterminate=total is None,
+            )
+            session.commit()
+
+    try:
+        async with services.scheduler.job_lease(job_id, resource="media_compute", group="primary"):
+            media = next(
+                (status for status in services.processes.statuses() if status.name == "media"),
+                None,
+            )
+            media_stopped = media is None or (not media.running and media.state != "starting")
+            with SessionLocal() as session:
+                preparation = await prepare_workflow_package(
+                    session,
+                    package_id=package_id,
+                    version=version,
+                    context=PreparationContext.from_settings(services.settings),
+                    media_worker_stopped=media_stopped,
+                    interpreter_probe=refuse_interpreter_probe,
+                    registry_client=ComfyRegistryClient(),
+                    project_client=ComfyRegistryWheelProjectClient(),
+                    metadata_client=ComfyRegistryWheelMetadataClient(),
+                    archive_downloader=ComfyRegistryArchiveDownloader(),
+                    wheel_downloader=ComfyRegistryWheelDownloader(),
+                    phase=report,
+                )
+                job = session.get(Job, job_id)
+                if job:
+                    job.status = JobStatus.COMPLETE.value
+                    job.payload_json = {
+                        **job.payload_json,
+                        "preparation": {
+                            "install_id": preparation.install_id,
+                            "installed_path": preparation.installed_path,
+                            "wheel_environment_path": preparation.wheel_environment_path,
+                            "archive_sha256": preparation.archive_sha256,
+                            "manifest_sha256": preparation.manifest_sha256,
+                            "wheel_closure_sha256": preparation.wheel_closure_sha256,
+                            "wheel_environment_sha256": preparation.wheel_environment_sha256,
+                            "reused_wheel_environment": preparation.reused_wheel_environment,
+                        },
+                    }
+                    update_job_progress(job, stage="Prepared, inactive and untrusted")
+                session.commit()
+    except asyncio.CancelledError:
+        raise
+    except WorkflowPackagePreparationError as exc:
+        with SessionLocal() as session:
+            job = session.get(Job, job_id)
+            if job:
+                job.status = JobStatus.FAILED.value
+                job.error = str(exc)
+                job.payload_json = {**job.payload_json, "error_code": exc.code}
+                update_job_progress(job, stage="Preparation refused")
+            session.commit()
+    except Exception as exc:  # noqa: BLE001 - the job must never die silently
+        with SessionLocal() as session:
+            job = session.get(Job, job_id)
+            if job:
+                job.status = JobStatus.FAILED.value
+                job.error = str(exc)
+                update_job_progress(job, stage="Preparation failed")
+            session.commit()
+    await services.scheduler.publish_job(job_id)
+
+
+@router.post("/workflows/packages/prepare", response_model=JobOut, status_code=202)
+async def prepare_workflow_package_endpoint(
+    payload: WorkflowPackagePrepareRequest, request: Request, session: SessionDep
+) -> Job:
+    """Queue one package preparation; the result stays inactive and untrusted."""
+
+    services = _services(request)
+    # Refuse before queueing when the machine cannot prepare at all - a job
+    # that must fail on its first step is a worse answer than a typed 422.
+    try:
+        PreparationContext.from_settings(services.settings)
+    except WorkflowPackagePreparationError as exc:
+        raise api_error(422, exc.code, str(exc)) from exc
+    job = Job(
+        kind=JobKind.REGISTRY_PREPARE.value,
+        status=JobStatus.QUEUED.value,
+        payload_json={"package_id": payload.package_id, "version": payload.version},
+        cancellable=True,
+    )
+    session.add(job)
+    session.commit()
+    task = asyncio.create_task(
+        _run_workflow_package_preparation(services, job.id, payload.package_id, payload.version),
+        name=f"registry-prepare-{job.id}",
+    )
+    _REGISTRY_PREPARE_TASKS[job.id] = task
+
+    def _discard(done: asyncio.Task[None], key: str = job.id) -> None:
+        _REGISTRY_PREPARE_TASKS.pop(key, None)
+
+    task.add_done_callback(_discard)
+    return job
 
 
 @router.post("/workflows/packages/analyze", response_model=WorkflowPackageAnalysisOut)
