@@ -71,7 +71,6 @@ import {
 } from "./imageEditStrength";
 import { GlobalNotices } from "./GlobalNotices";
 import {
-  artifactOrigin,
   artifactSource,
   mediaOriginForPart,
   mediaOriginLabel,
@@ -84,6 +83,8 @@ import { DownloadDiagnosticsButton } from "./DownloadDiagnosticsButton";
 import { StatusDot } from "./StatusDot";
 import { WorkerLogFolderButton, WorkerStartupLimit } from "./WorkerStartupLimit";
 import { WorkerStatusCard } from "./WorkerStatusCard";
+import { useComposerUploads } from "./useComposerUploads";
+import type { ComposerAttachment } from "./useComposerUploads";
 import { useDraftClassification } from "./useDraftClassification";
 import { useExchangeDeletion } from "./useExchangeDeletion";
 import { useGenerationModeSelection } from "./useGenerationModeSelection";
@@ -95,7 +96,6 @@ import {
 } from "./settings";
 import type {
   ApplicationInfo,
-  Artifact,
   ArtifactLibraryItem,
   BackupInfo,
   CatalogModel,
@@ -131,12 +131,6 @@ import type {
 type View = "chat" | "media" | "models" | "workflows" | "settings";
 type Visibility = "basic" | "advanced" | "expert";
 type PendingTurn = { id: string; text: string; mode: RoutingMode };
-type ComposerAttachment = {
-  id: string;
-  kind: "image" | "video";
-  artifact?: Artifact | null;
-  origin: MediaOrigin;
-};
 type VisualTarget = {
   attachment: ComposerAttachment;
   mode: "image" | "video";
@@ -1490,7 +1484,9 @@ function Composer({
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [promptHelperDraft, setPromptHelperDraft] = useState<string | null>(null);
   const [attachments, setAttachments] = useState<ComposerAttachment[]>([]);
-  const [uploading, setUploading] = useState(false);
+  const { uploading, uploadError, setUploadError, uploadFiles } = useComposerUploads(
+    (attachment) => setAttachments((current) => [...current, attachment]),
+  );
   const [dropActive, setDropActive] = useState(false);
   const fileInput = useRef<HTMLInputElement>(null);
   const textInput = useRef<HTMLTextAreaElement>(null);
@@ -1576,25 +1572,6 @@ function Composer({
     setAttachments([]);
   };
 
-  const upload = async (file?: File) => {
-    if (!file) return;
-    setUploading(true);
-    try {
-      const artifact = await api.upload(file);
-      setAttachments((current) => [
-        ...current,
-        {
-          id: artifact.id,
-          kind: file.type.startsWith("video/") ? "video" : "image",
-          artifact,
-          origin: artifactOrigin(artifact) ?? "uploaded",
-        },
-      ]);
-    } finally {
-      setUploading(false);
-    }
-  };
-
   return (
     <>
       <div
@@ -1611,13 +1588,18 @@ function Composer({
         onDrop={(event) => {
           event.preventDefault();
           setDropActive(false);
-          const files = Array.from(event.dataTransfer.files).filter(
+          const dropped = Array.from(event.dataTransfer.files);
+          const files = dropped.filter(
             (file) => file.type.startsWith("image/") || file.type.startsWith("video/"),
           );
-          for (const file of files) void upload(file);
+          setUploadError(
+            files.length < dropped.length ? "Only images and videos can be attached." : "",
+          );
+          void uploadFiles(files);
         }}
       >
         {dropActive && <div className="drop-hint">Drop images or videos to attach</div>}
+        {uploadError && <ErrorCallout message={uploadError} />}
         {attachments.length > 0 && (
           <div className="attachment-strip">
             {attachments.map((attachment) => {
@@ -1699,7 +1681,7 @@ function Composer({
           <div className="composer-tools">
             <div className="left-tools">
               <button className="icon-button" onClick={() => fileInput.current?.click()} disabled={uploading} aria-label="Attach file"><Paperclip size={18} /></button>
-              <input ref={fileInput} hidden type="file" accept="image/*,video/*" onChange={(event) => void upload(event.target.files?.[0])} />
+              <input ref={fileInput} hidden multiple type="file" accept="image/*,video/*" onChange={(event) => { setUploadError(""); void uploadFiles(Array.from(event.target.files ?? [])); event.target.value = ""; }} />
               <button
                 className="icon-button"
                 onClick={() => setPromptHelperDraft(text.trim())}
