@@ -134,10 +134,20 @@ def _rehash_manifest(
 
 
 def test_dependency_free_metadata_produces_stable_empty_frontier() -> None:
-    first = _plan()
-    second = _plan()
+    manifest, documents = _inputs()
+    first = plan_comfy_registry_wheel_metadata(
+        manifest,
+        documents,
+        marker_environment=_environment(),
+    )
+    second = plan_comfy_registry_wheel_metadata(
+        manifest,
+        documents,
+        marker_environment=_environment(),
+    )
 
     assert first == second
+    assert first.artifact_manifest_sha256 == manifest.manifest_sha256
     assert first.requirements == ()
     assert first.frontier == ()
     assert first.unavailable_metadata == ()

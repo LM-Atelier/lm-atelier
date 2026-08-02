@@ -74,6 +74,7 @@ class ComfyRegistryWheelMetadataFrontier:
 
 @dataclass(frozen=True)
 class ComfyRegistryWheelMetadataPlan:
+    artifact_manifest_sha256: str
     requirements: tuple[ComfyRegistryWheelMetadataRequirement, ...]
     frontier: tuple[ComfyRegistryWheelMetadataFrontier, ...]
     unavailable_metadata: tuple[str, ...]
@@ -139,12 +140,15 @@ def plan_comfy_registry_wheel_metadata(
         "conflicts": list(conflicts),
     }
     return ComfyRegistryWheelMetadataPlan(
-        requirements,
-        frontier,
-        unavailable,
-        bool(unavailable) or any(item.status != "satisfied" for item in frontier),
-        conflicts,
-        _payload_sha256(payload),
+        artifact_manifest_sha256=manifest.manifest_sha256,
+        requirements=requirements,
+        frontier=frontier,
+        unavailable_metadata=unavailable,
+        resolution_required=(
+            bool(unavailable) or any(item.status != "satisfied" for item in frontier)
+        ),
+        conflicts=conflicts,
+        plan_sha256=_payload_sha256(payload),
     )
 
 
