@@ -474,6 +474,76 @@ describe("App", () => {
     fireEvent.click(screen.getByRole("button", { name: "Run quick test" }));
     await waitFor(() => expect(api.verifySetupRole).toHaveBeenCalledWith("image"));
   });
+  it("names the load a ready role has not paid yet and offers to pay it now", async () => {
+    vi.mocked(api.setupReadiness).mockResolvedValue(setupReport(
+      setupRole("chat", "ready", null, {
+        checks: [
+          {
+            code: "worker_not_loaded",
+            status: "pass",
+            message: "This model is not loaded yet. The first request will wait while it loads.",
+            action: "prepare_worker",
+          },
+          {
+            code: "generation_verified",
+            status: "pass",
+            message: "A local generation completed with this setup.",
+            action: null,
+          },
+        ],
+      }),
+      // Keeps the wizard open; a fully ready report never opens it on its own.
+      setupRole("image", "action_required", "select_model"),
+      setupRole("video"),
+    ));
+    vi.mocked(api.loadChatWorker).mockResolvedValue({ name: "chat", state: "ready" } as never);
+    const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+    render(
+      <QueryClientProvider client={client}>
+        <App />
+      </QueryClientProvider>,
+    );
+
+    // The wait is stated on a card that still reads Ready, because the role is
+    // ready - the old copy said only that the model would load "when used".
+    expect(await screen.findByText(
+      "This model is not loaded yet. The first request will wait while it loads.",
+    )).toBeInTheDocument();
+    expect(screen.getByText("Or skip: the first request loads it instead.")).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "Prepare now" }));
+    await waitFor(() => expect(api.loadChatWorker).toHaveBeenCalledWith("profile-chat"));
+  });
+
+  it("offers nothing to prepare once the model is already loaded", async () => {
+    vi.mocked(api.setupReadiness).mockResolvedValue(setupReport(
+      setupRole("chat", "ready", null, {
+        checks: [
+          { code: "worker_ready", status: "pass", message: "The managed worker is ready.", action: null },
+          {
+            code: "generation_verified",
+            status: "pass",
+            message: "A local generation completed with this setup.",
+            action: null,
+          },
+        ],
+      }),
+      // Keeps the wizard open; a fully ready report closes it and proves nothing.
+      setupRole("image", "action_required", "select_model"),
+      setupRole("video"),
+    ));
+    const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+    render(
+      <QueryClientProvider client={client}>
+        <App />
+      </QueryClientProvider>,
+    );
+
+    expect(await screen.findByRole("dialog", { name: "Set up LM Atelier" })).toBeInTheDocument();
+    expect(screen.getAllByText("A local generation completed with this setup.").length)
+      .toBeGreaterThan(0);
+    expect(screen.queryByRole("button", { name: "Prepare now" })).not.toBeInTheDocument();
+  });
+
   it("offers only a hardware-eligible one-click reference recipe", async () => {
     vi.mocked(api.setupReadiness).mockResolvedValue(setupReport(
       setupRole("chat", "action_required", "select_model"),

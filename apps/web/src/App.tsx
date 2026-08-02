@@ -61,7 +61,6 @@ import {
   formatBytes,
   formatDate,
   formatEta,
-  formatStageElapsed,
   formatTransferRate,
 } from "./format";
 import {
@@ -85,6 +84,9 @@ import {
 import { useLiveEvents } from "./useLiveEvents";
 import { DownloadDiagnosticsButton } from "./DownloadDiagnosticsButton";
 import { StatusDot } from "./StatusDot";
+import { ErrorCallout } from "./ErrorCallout";
+import { SetupWizard } from "./SetupWizard";
+import { jobProgressFraction, jobProgressText, progressSampleIsFresh } from "./jobProgress";
 import { WorkerLogFolderButton, WorkerStartupLimit } from "./WorkerStartupLimit";
 import { WorkerStatusCard } from "./WorkerStatusCard";
 import { useComposerUploads } from "./useComposerUploads";
@@ -110,20 +112,17 @@ import type {
   EngineRole,
   GenerationPreset,
   GenerationPresetBundle,
-  Job,
   Message,
   MessagePart,
   ModelAssetInstall,
   ModelInstall,
   ModelProfile,
   ModelProfileBundle,
-  ProgressV2,
   Project,
   ReferenceRecipe,
   RoutingMode,
   RuntimeStatus,
   SetupReadinessReport,
-  SetupRoleReadiness,
   SettingField,
   SystemInfo,
   TurnAccepted,
@@ -354,31 +353,6 @@ function MediaLibraryView() {
           <div><strong>{artifact.original_name ?? artifact.kind}</strong><small>{formatBytes(artifact.size_bytes)} · {artifact.reference_count} reference{artifact.reference_count === 1 ? "" : "s"}</small><span><a href={source} download>Download</a><code>{artifact.sha256.slice(0, 12)}</code><button className="icon-button danger" aria-label={`Delete ${artifact.original_name ?? artifact.kind}`} disabled={deleteArtifact.isPending && deleteArtifact.variables === artifact.id} onClick={() => { const references = artifact.reference_count ? ` and remove ${artifact.reference_count} appearance${artifact.reference_count === 1 ? "" : "s"} from chats` : ""; if (window.confirm(`Permanently delete ${artifact.original_name ?? artifact.kind}${references}?`)) deleteArtifact.mutate(artifact.id); }}><Trash2 size={14} /></button></span></div>
         </article>;
       })}</div> : <EmptyState icon={<ImageIcon />} title="No generated media" body="Generated images and videos appear here." />}
-    </div>
-  );
-}
-
-function ErrorCallout({
-  message,
-  action,
-}: {
-  message?: string | null;
-  action?: ReactNode;
-}) {
-  const [dismissed, setDismissed] = useState<string | null>(null);
-  if (!message || dismissed === message) return null;
-  return (
-    <div className={`callout error${action ? " action-callout" : ""}`} role="alert">
-      <span>{message}</span>
-      {action}
-      <button
-        type="button"
-        className="callout-dismiss"
-        aria-label="Dismiss error"
-        onClick={() => setDismissed(message)}
-      >
-        <X size={13} />
-      </button>
     </div>
   );
 }
@@ -3686,286 +3660,8 @@ function Sidebar({
   );
 }
 
-function jobProgressFraction(job: Job): number | null {
-  const progress = job.progress_json;
-  if (progress?.indeterminate) return null;
-  const structured = progress?.overall_progress ?? progress?.stage_progress;
-  if (job.status === "queued" && (structured === null || structured === undefined)) {
-    return null;
-  }
-  const legacy = Number.isFinite(job.progress) ? job.progress : null;
-  const value = structured === null || structured === undefined
-    ? legacy
-    : legacy === null
-      ? structured
-      : Math.max(structured, legacy);
-  if (typeof value === "number" && Number.isFinite(value)) {
-    return Math.min(1, Math.max(0, value));
-  }
-  if (job.status === "queued") return null;
-  return Number.isFinite(job.progress) ? Math.min(1, Math.max(0, job.progress)) : null;
-}
-
-function progressSampleIsFresh(progress: ProgressV2): boolean {
-  const updatedAt = Date.parse(progress.updated_at);
-  return Number.isFinite(updatedAt) && Math.abs(Date.now() - updatedAt) <= 5_000;
-}
-
 function jobDisplayName(kind: string): string {
   return kind === "edit_verify" ? "Image edit check" : kind;
-}
-
-function jobProgressText(job: Job): string {
-  const progress = job.progress_json;
-  const pieces = [progress?.stage || job.phase];
-  if (
-    ["queued", "running"].includes(job.status)
-    && typeof progress?.stage_elapsed_ms === "number"
-    && Number.isFinite(progress.stage_elapsed_ms)
-  ) {
-    const startedAt = progress.stage_started_at ? Date.parse(progress.stage_started_at) : NaN;
-    const elapsed = Number.isFinite(startedAt)
-      ? Math.max(progress.stage_elapsed_ms, Date.now() - startedAt)
-      : progress.stage_elapsed_ms;
-    pieces.push(formatStageElapsed(elapsed));
-  }
-  const fraction = jobProgressFraction(job);
-  if (fraction !== null) pieces.push(`${Math.round(fraction * 100)}%`);
-  if (job.status === "queued" && typeof progress?.queue_position === "number") {
-    pieces.push(progress.queue_position > 0 ? `${progress.queue_position} ahead` : "Next");
-  }
-  const freshSample = progress ? progressSampleIsFresh(progress) : false;
-  if (freshSample && typeof progress?.rate_bytes_per_second === "number") {
-    pieces.push(formatTransferRate(progress.rate_bytes_per_second));
-  }
-  if (freshSample && typeof progress?.eta_seconds === "number") {
-    pieces.push(formatEta(progress.eta_seconds));
-  }
-  return pieces.filter(Boolean).join(" · ");
-}
-
-function setupRoleName(role: SetupRoleReadiness["role"]): string {
-  return role === "chat" ? "Chat" : role === "image" ? "Image" : "Video";
-}
-
-function recipeFitsSystem(recipe: ReferenceRecipe, system: SystemInfo): boolean {
-  if (system.memory_total_bytes < recipe.hardware.minimum_ram_gb * 1024 ** 3) return false;
-  if (recipe.total_size_bytes != null && system.disk_free_bytes < recipe.total_size_bytes) return false;
-  if (recipe.hardware.minimum_vram_gb == null) return true;
-  return system.devices.some(
-    (device) =>
-      device.total_memory_bytes != null
-      && device.total_memory_bytes >= recipe.hardware.minimum_vram_gb! * 1024 ** 3,
-  );
-}
-
-function SetupWizard({
-  report,
-  onClose,
-  onOpenModels,
-  onOpenWorkflows,
-}: {
-  report: SetupReadinessReport;
-  onClose: () => void;
-  onOpenModels: (role: SetupRoleReadiness["role"]) => void;
-  onOpenWorkflows: () => void;
-}) {
-  const client = useQueryClient();
-  const recipes = useQuery({ queryKey: ["recipes"], queryFn: api.recipes });
-  const system = useQuery({ queryKey: ["system"], queryFn: api.system });
-  const jobs = useQuery({
-    queryKey: ["jobs"],
-    queryFn: api.jobs,
-    refetchInterval: report.state === "ready" ? false : 3_000,
-  });
-  const refresh = () => {
-    void client.invalidateQueries({ queryKey: ["setup-readiness"] });
-    void client.invalidateQueries({ queryKey: ["jobs"] });
-    void client.invalidateQueries({ queryKey: ["models"] });
-    void client.invalidateQueries({ queryKey: ["profiles"] });
-    void client.invalidateQueries({ queryKey: ["runtimes"] });
-    void client.invalidateQueries({ queryKey: ["workers"] });
-    void client.invalidateQueries({ queryKey: ["workflows"] });
-  };
-  const installRecipe = useMutation({
-    mutationFn: (recipeId: string) => api.installRecipe(recipeId),
-    onSuccess: refresh,
-  });
-  const retryInstall = useMutation({
-    mutationFn: (jobId: string) => api.resumeDownload(jobId),
-    onSuccess: refresh,
-  });
-  const activateModel = useMutation({
-    mutationFn: (installId: string) => api.activateModel(installId),
-    onSuccess: refresh,
-  });
-  const installRuntime = useMutation({
-    mutationFn: (engine: RuntimeStatus["engine"]) => api.installRuntime(engine),
-    onSuccess: refresh,
-  });
-  const restartWorker = useMutation({
-    mutationFn: (role: SetupRoleReadiness) => {
-      if (role.role === "chat" && role.profile_id) return api.loadChatWorker(role.profile_id);
-      if (role.role !== "chat") return api.startMediaWorker();
-      throw new Error("Choose a chat model before starting its worker.");
-    },
-    onSuccess: refresh,
-  });  const verifyRole = useMutation({
-    mutationFn: (role: SetupRoleReadiness["role"]) => api.verifySetupRole(role),
-    onSuccess: refresh,
-  });
-  const suitableRecipes = (role: SetupRoleReadiness["role"]) => (
-    !system.data
-      ? []
-      : (recipes.data ?? [])
-        .filter((recipe) => recipe.role === role && recipeFitsSystem(recipe, system.data))
-        .sort((left, right) => (
-          Number(right.certified) - Number(left.certified)
-          || (left.total_size_bytes ?? Number.MAX_SAFE_INTEGER)
-            - (right.total_size_bytes ?? Number.MAX_SAFE_INTEGER)
-        ))
-  );
-  const performAction = (role: SetupRoleReadiness) => {
-    if (role.next_action === "verify_generation") {
-      verifyRole.mutate(role.role);
-      return;
-    }
-    if (role.next_action === "retry_install" && role.job_id) {
-      retryInstall.mutate(role.job_id);
-      return;
-    }
-    if (role.next_action === "activate_model" && role.install_id) {
-      activateModel.mutate(role.install_id);
-      return;
-    }
-    if (
-      ["install_runtime", "retry_runtime"].includes(role.next_action ?? "")
-      && ["llama.cpp", "vllm", "comfyui"].includes(role.engine ?? "")
-    ) {
-      installRuntime.mutate(role.engine as RuntimeStatus["engine"]);
-      return;
-    }
-    if (role.next_action === "restart_worker") {
-      restartWorker.mutate(role);
-      return;
-    }
-    if (["repair_workflow", "review_workflow"].includes(role.next_action ?? "")) {
-      onOpenWorkflows();
-      return;
-    }
-    onOpenModels(role.role);
-  };
-  const actionLabel = (role: SetupRoleReadiness): string => {
-    if (role.next_action === "verify_generation") return "Run quick test";
-    if (role.next_action === "retry_install") return "Retry install";
-    if (role.next_action === "activate_model") return "Re-check model";
-    if (role.next_action === "install_runtime") return "Install runtime";
-    if (role.next_action === "retry_runtime") return "Retry runtime";
-    if (role.next_action === "restart_worker") return "Restart worker";
-    if (["repair_workflow", "review_workflow"].includes(role.next_action ?? "")) {
-      return "Review workflows";
-    }
-    return `Choose ${role.role} model`;
-  };
-  const pendingRole = restartWorker.variables?.role;
-  const error = installRecipe.error || retryInstall.error || installRuntime.error || restartWorker.error || verifyRole.error || activateModel.error;
-
-  return (
-    <AccessibleDialog
-      title={report.state === "ready" ? "Setup complete" : "Set up LM Atelier"}
-      eyebrow="Local models"
-      closeLabel="Close setup"
-      onClose={onClose}
-      className="setup-wizard"
-    >
-      <p className="setup-intro">
-        Install each model with one click. Ready means activation passed and a quick local generation completed.
-      </p>
-      <div className="setup-role-grid" aria-live="polite">
-        {report.roles.map((role) => {
-          const issue = role.checks.find((check) => check.status !== "pass")
-            ?? role.checks.at(-1);
-          const job = jobs.data?.find((candidate) => candidate.id === role.job_id);
-          const recipe = role.next_action === "select_model"
-            ? suitableRecipes(role.role)[0]
-            : undefined;
-          const actionPending = (
-            (retryInstall.isPending && retryInstall.variables === role.job_id)
-            || (activateModel.isPending && activateModel.variables === role.install_id)
-            || (installRuntime.isPending && installRuntime.variables === role.engine)
-            || (restartWorker.isPending && pendingRole === role.role)
-            || (verifyRole.isPending && verifyRole.variables === role.role)
-          );
-          return (
-            <article className={`setup-role ${role.state}`} key={role.role}>
-              <header>
-                <span className="setup-role-icon">
-                  {role.role === "chat" ? <Bot /> : role.role === "image" ? <ImageIcon /> : <Film />}
-                </span>
-                <span><strong>{setupRoleName(role.role)}</strong><small>{role.state === "ready" ? "Ready" : role.state === "in_progress" ? "In progress" : "Action needed"}</small></span>
-                {role.state === "ready" ? <Check aria-hidden="true" /> : role.state === "in_progress" ? <LoaderCircle className="spin" aria-hidden="true" /> : <Activity aria-hidden="true" />}
-              </header>
-              <p>{issue?.message ?? "Setup status is unavailable."}</p>
-              {job && (
-                <div className="setup-job">
-                  <small>{jobProgressText(job)}</small>
-                  <div
-                    className="progress-track"
-                    role="progressbar"
-                    aria-label={`${setupRoleName(role.role)} setup progress`}
-                    aria-valuemin={0}
-                    aria-valuemax={100}
-                    aria-valuenow={jobProgressFraction(job) === null
-                      ? undefined
-                      : Math.round(jobProgressFraction(job)! * 100)}
-                  >
-                    <div
-                      className={jobProgressFraction(job) === null ? "indeterminate" : undefined}
-                      style={jobProgressFraction(job) === null
-                        ? undefined
-                        : { width: `${jobProgressFraction(job)! * 100}%` }}
-                    />
-                  </div>
-                </div>
-              )}
-              {role.state === "action_required" && (
-                <div className="setup-actions">
-                  {recipe && (
-                    <button
-                      className="primary compact-button"
-                      disabled={installRecipe.isPending}
-                      onClick={() => installRecipe.mutate(recipe.id)}
-                    >
-                      {installRecipe.isPending && installRecipe.variables === recipe.id
-                        ? "Starting…"
-                        : `Install ${recipe.name}`}
-                    </button>
-                  )}
-                  {role.next_action && (
-                    <button
-                      className={recipe ? "secondary compact-button" : "primary compact-button"}
-                      disabled={actionPending}
-                      onClick={() => performAction(role)}
-                    >
-                      {actionPending ? "Working…" : actionLabel(role)}
-                    </button>
-                  )}
-                  {recipe && <small>Reference candidate · {formatBytes(recipe.total_size_bytes)}</small>}
-                </div>
-              )}
-            </article>
-          );
-        })}
-      </div>
-      {error && <ErrorCallout message={error.message} />}
-      {recipes.error && <ErrorCallout message="Reference choices are temporarily unavailable. You can still browse the model library." />}
-      <footer>
-        <button className={report.state === "ready" ? "primary" : "secondary"} onClick={onClose}>
-          {report.state === "ready" ? "Done" : "Not now"}
-        </button>
-      </footer>
-    </AccessibleDialog>
-  );
 }
 
 function JobsPanel() {
