@@ -60,3 +60,23 @@ export function priorVisibleMediaByMessage(
   }
   return priorByMessage;
 }
+
+/** The edit source shown alongside a generated image: the newest image the
+ * user's own turn carried as an input reference. Absent for pure
+ * text-to-image turns, so the compare affordance only appears where a
+ * comparison exists. */
+export function editSourceUrlForResult(messages: Message[], resultIndex: number): string | null {
+  for (let index = resultIndex; index >= 0; index -= 1) {
+    const message = messages[index];
+    if (message.role !== "user") continue;
+    const reference = [...message.parts]
+      .reverse()
+      .find((part) =>
+        part.type === "image"
+        && Boolean(part.artifact_id)
+        && part.metadata_json.input_reference === true,
+      );
+    return reference ? artifactSource(reference.artifact_id) : null;
+  }
+  return null;
+}

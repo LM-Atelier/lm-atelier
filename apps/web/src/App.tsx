@@ -75,6 +75,7 @@ import {
   artifactSource,
   mediaOriginForPart,
   mediaOriginLabel,
+  editSourceUrlForResult,
   messagePartsForTranscript,
   priorVisibleMediaByMessage,
   type MediaOrigin,
@@ -86,6 +87,8 @@ import { ErrorCallout } from "./ErrorCallout";
 import { EmptyState } from "./EmptyState";
 import { AtelierMark } from "./AtelierMark";
 import { EditingStudio } from "./EditingStudio";
+import { MessageTimestamp } from "./MessageTimestamp";
+import { CompareButton } from "./CompareButton";
 import { FirstRunSetup, SetupWizard } from "./SetupWizard";
 import { WorkflowPackageReview } from "./WorkflowPackageReview";
 import { useWorkflowPackageImport } from "./useWorkflowPackageImport";
@@ -211,12 +214,14 @@ function ArtifactPart({
   onEditImage,
   onAnimateImage,
   onReferenceMedia,
+  compareSourceUrl,
 }: {
   part: MessagePart;
   origin: MediaOrigin | null;
   onEditImage?: (part: MessagePart, origin: MediaOrigin) => void;
   onAnimateImage?: (part: MessagePart, origin: MediaOrigin) => void;
   onReferenceMedia?: (part: MessagePart, origin: MediaOrigin) => void;
+  compareSourceUrl?: string | null;
 }) {
   const proxyId = typeof part.metadata_json.browser_proxy_artifact_id === "string" ? part.metadata_json.browser_proxy_artifact_id : null;
   const posterId = typeof part.metadata_json.poster_artifact_id === "string"
@@ -249,6 +254,7 @@ function ArtifactPart({
           {!preview && onEditImage && <button type="button" onClick={() => onEditImage(part, callbackOrigin)}>Edit</button>}
           {!preview && onAnimateImage && <button type="button" onClick={() => onAnimateImage(part, callbackOrigin)}>Animate</button>}
           {!preview && onReferenceMedia && <button type="button" onClick={() => onReferenceMedia(part, callbackOrigin)}>Reference</button>}
+          {!preview && compareSourceUrl && source && <CompareButton before={compareSourceUrl} after={source} />}
           {!preview && <a href={source} download>Download</a>}
         </figcaption>
       </figure>
@@ -341,25 +347,6 @@ function MediaLibraryView() {
   );
 }
 
-function MessageTimestamp({ at }: { at: string }) {
-  const date = new Date(at);
-  if (Number.isNaN(date.getTime())) return null;
-  const sameDay = date.toDateString() === new Date().toDateString();
-  const label = sameDay
-    ? date.toLocaleTimeString([], { hour: "numeric", minute: "2-digit" })
-    : date.toLocaleString([], {
-        month: "short",
-        day: "numeric",
-        hour: "numeric",
-        minute: "2-digit",
-      });
-  return (
-    <time className="message-timestamp" dateTime={at} title={date.toLocaleString()}>
-      {label}
-    </time>
-  );
-}
-
 function nodeText(node: ReactNode): string {
   if (typeof node === "string" || typeof node === "number") return String(node);
   if (Array.isArray(node)) return node.map(nodeText).join("");
@@ -432,6 +419,7 @@ function PartView({
   onEditImage,
   onAnimateImage,
   onReferenceMedia,
+  compareSourceUrl,
 }: {
   part: MessagePart;
   liveText?: string;
@@ -440,13 +428,14 @@ function PartView({
   onEditImage?: (part: MessagePart, origin: MediaOrigin) => void;
   onAnimateImage?: (part: MessagePart, origin: MediaOrigin) => void;
   onReferenceMedia?: (part: MessagePart, origin: MediaOrigin) => void;
+  compareSourceUrl?: string | null;
 }) {
   if (part.type === "text") {
     const text = liveText || part.text || "";
     return markdown ? <MarkdownText text={text} /> : <div className="message-text">{text}</div>;
   }
   if (part.type === "image" || part.type === "video" || part.type === "attachment") {
-    return <ArtifactPart part={part} origin={origin} onEditImage={onEditImage} onAnimateImage={onAnimateImage} onReferenceMedia={onReferenceMedia} />;
+    return <ArtifactPart part={part} origin={origin} onEditImage={onEditImage} onAnimateImage={onAnimateImage} onReferenceMedia={onReferenceMedia} compareSourceUrl={compareSourceUrl} />;
   }
   if (part.type === "progress") {
     const progress = Number(part.metadata_json.progress ?? 0);
@@ -484,6 +473,7 @@ function MessageBubble({
   onQuote,
   onDeleteExchange,
   onForkThread,
+  compareSourceUrl,
 }: {
   message: Message;
   liveText?: string;
@@ -498,6 +488,7 @@ function MessageBubble({
   onQuote?: (text: string) => void;
   onDeleteExchange?: (messageId: string) => void;
   onForkThread?: (messageId: string) => void;
+  compareSourceUrl?: string | null;
 }) {
   const visibleParts = messagePartsForTranscript(message, hiddenInputArtifactIds);
   const userText = visibleParts.filter((part) => part.type === "text").map((part) => part.text || "").join("\n");
@@ -575,7 +566,7 @@ function MessageBubble({
     <article className={`message ${message.role}`}>
       <div className="avatar">{message.role === "user" ? "You" : <Bot size={19} />}</div>
       <div className="message-content">
-        {editing ? <div className="message-edit"><textarea aria-label="Edit message" rows={4} value={draft} onChange={(event) => setDraft(event.target.value)} /><div><button onClick={() => { setDraft(userText); setEditing(false); }}>Cancel</button><button className="primary" disabled={!draft.trim()} onClick={() => { onEdit?.(message.id, draft.trim()); setEditing(false); }}>Send edited message</button></div></div> : renderedParts.map((part) => <PartView key={part.id} part={part} liveText={liveText} markdown={message.role === "assistant"} origin={mediaOriginForPart(part, operation, message.role === "assistant" ? "generated" : null)} onEditImage={onEditImage} onAnimateImage={onAnimateImage} onReferenceMedia={onReferenceMedia} />)}
+        {editing ? <div className="message-edit"><textarea aria-label="Edit message" rows={4} value={draft} onChange={(event) => setDraft(event.target.value)} /><div><button onClick={() => { setDraft(userText); setEditing(false); }}>Cancel</button><button className="primary" disabled={!draft.trim()} onClick={() => { onEdit?.(message.id, draft.trim()); setEditing(false); }}>Send edited message</button></div></div> : renderedParts.map((part) => <PartView key={part.id} part={part} liveText={liveText} markdown={message.role === "assistant"} origin={mediaOriginForPart(part, operation, message.role === "assistant" ? "generated" : null)} onEditImage={onEditImage} onAnimateImage={onAnimateImage} onReferenceMedia={onReferenceMedia} compareSourceUrl={message.role === "assistant" ? compareSourceUrl : undefined} />)}
         {liveText && !visibleParts.some((part) => part.type === "text") && (
           <MarkdownText text={liveText} />
         )}
@@ -1993,8 +1984,11 @@ function ChatView({
       <div className="messages" ref={messagesRef} onScroll={trackMessageScroll}>
         {messages.length === 0 && pendingTurns.length === 0 ? (
           <EmptyState icon={<Sparkles />} title="What should we make?" body="Ask anything or create an image or video. Auto mode picks the model." />
-        ) : messages.map((message) => {
+        ) : messages.map((message, messageIndex) => {
           const messagePlan = planByAssistantMessage.get(message.id);
+          const compareSourceUrl = message.role === "assistant"
+            ? editSourceUrlForResult(messages, messageIndex)
+            : null;
           const isPrimaryOutput = messagePlan?.summary_json.assistant_message_id === message.id;
           return (
             <Fragment key={message.id}>
@@ -2008,6 +2002,7 @@ function ChatView({
               <MessageBubble
                 message={message}
                 liveText={liveText[message.id]}
+                compareSourceUrl={compareSourceUrl}
                 hiddenInputArtifactIds={priorVisibleMedia.get(message.id)}
                 onRegenerate={busy ? undefined : (messageId) => onRegenerate(
                   messageId,

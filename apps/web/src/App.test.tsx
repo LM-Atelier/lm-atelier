@@ -4906,6 +4906,18 @@ describe("App", () => {
     expect(await screen.findByRole("img", { name: "Uploaded image" })).toBeVisible();
     expect(screen.getByRole("img", { name: "Edited image" })).toBeVisible();
     expect(screen.queryByText("Attached image")).not.toBeInTheDocument();
+
+    // The result of an edit can be held against its source directly.
+    fireEvent.click(screen.getByRole("button", { name: "Compare" }));
+    expect(await screen.findByRole("dialog", { name: "Compare with the source" })).toBeVisible();
+    expect(screen.getByRole("img", { name: "The source before the edit" })).toBeVisible();
+    expect(screen.getByRole("img", { name: "The edited result" })).toBeVisible();
+    fireEvent.change(screen.getByRole("slider", { name: "Comparison position" }), {
+      target: { value: "80" },
+    });
+    expect(screen.getByRole("img", { name: "The edited result" })).toHaveStyle(
+      "clip-path: inset(0 0 0 80%)",
+    );
   });
   it("selects prior-image workflow controls only for an explicit visual follow-up", async () => {
     const stamp = "2026-07-22T00:00:00Z";
