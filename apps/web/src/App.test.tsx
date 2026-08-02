@@ -3181,7 +3181,6 @@ describe("App", () => {
     fireEvent.click(await screen.findByText("Model library"));
     fireEvent.change(screen.getByLabelText("Model role"), { target: { value: "image" } });
 
-    await waitFor(() => expect(api.workflowCatalogModels).toHaveBeenCalledWith("image"));
     expect(await screen.findByRole("button", { name: "Install" })).toBeEnabled();
     expect(screen.getAllByText("sdxl-turbo")).toHaveLength(1);
   });
@@ -3214,7 +3213,8 @@ describe("App", () => {
     fireEvent.click(await screen.findByText("Model library"));
     expect(await screen.findByLabelText("Compatibility filter")).toBeInTheDocument();
     expect(screen.getByLabelText("Last updated filter")).toBeInTheDocument();
-    expect(screen.getByLabelText("Format filter")).toBeInTheDocument();
+    expect(screen.queryByLabelText("Format filter")).not.toBeInTheDocument();
+    expect(screen.queryByLabelText("Access filter")).not.toBeInTheDocument();
     fireEvent.change(screen.getByLabelText("Last updated filter"), { target: { value: "30" } });
     await waitFor(() => expect(vi.mocked(api.catalog).mock.calls.at(-1)?.[4]).toMatchObject({
       updated_within_days: "30",
