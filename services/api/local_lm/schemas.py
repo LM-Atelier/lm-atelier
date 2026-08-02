@@ -805,6 +805,28 @@ class EditTemplateOut(ApiModel):
     enabled: bool
 
 
+class WorkflowPackagePrepareRequest(ApiModel):
+    package_id: str = Field(min_length=1, max_length=200)
+    version: str | None = Field(default=None, max_length=200)
+
+
+class WorkflowPackagePreparationOut(ApiModel):
+    """The identities a completed preparation is bound to.
+
+    Preparation commits inactive and untrusted, always; trusting and
+    activating what these hashes describe are separate explicit steps.
+    """
+
+    install_id: str
+    installed_path: str
+    wheel_environment_path: str
+    archive_sha256: str
+    manifest_sha256: str
+    wheel_closure_sha256: str
+    wheel_environment_sha256: str
+    reused_wheel_environment: bool
+
+
 class WorkflowPackageAnalyzeRequest(ApiModel):
     ui_graph: dict[str, Any]
 
