@@ -3786,6 +3786,63 @@ describe("App", () => {
       expect(api.updateChat).toHaveBeenCalledWith(chat.id, { routing_mode: "image" }));
   });
 
+  it("edits a library selection together through the studio", async () => {
+    const stamp = "2026-07-22T00:00:00Z";
+    const chat: Chat = {
+      id: "chat-batch-edit",
+      project_id: null,
+      title: "Batch edit",
+      archived: false,
+      routing_mode: "image",
+      confirm_uncertain_media: false,
+      active_chat_profile_id: null,
+      active_image_profile_id: null,
+      active_video_profile_id: null,
+      active_head_message_id: null,
+      created_at: stamp,
+      updated_at: stamp,
+    };
+    localStorage.setItem("local-lm-chat", chat.id);
+    vi.mocked(api.chats).mockResolvedValue([chat]);
+    vi.mocked(api.chat).mockResolvedValue({ ...chat, messages: [] });
+    const libraryImage = (id: string, name: string) => ({
+      id,
+      sha256: id.replace("sha256:", "").padEnd(16, "0"),
+      kind: "image",
+      media_type: "image/png",
+      size_bytes: 2048,
+      original_name: name,
+      metadata_json: {},
+      created_at: stamp,
+      url: `/api/artifacts/${id}/content`,
+      reference_count: 0,
+      chat_ids: [],
+      project_ids: [],
+    });
+    vi.mocked(api.artifacts).mockResolvedValue([
+      libraryImage("sha256:one", "one.png"),
+      libraryImage("sha256:two", "two.png"),
+    ]);
+    const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+    render(
+      <QueryClientProvider client={client}>
+        <App />
+      </QueryClientProvider>,
+    );
+
+    fireEvent.click(await screen.findByText("Media library"));
+    fireEvent.click(await screen.findByRole("checkbox", { name: "Select one.png" }));
+    fireEvent.click(screen.getByRole("checkbox", { name: "Select two.png" }));
+    expect(screen.getByText("2 images selected")).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "Edit together in the studio" }));
+
+    // Both land in the composer, and the studio offers the per-image batch.
+    expect(await screen.findByRole("dialog", { name: "Editing studio" })).toBeVisible();
+    expect(screen.getByRole("link", { name: "Preview one.png" })).toBeVisible();
+    expect(screen.getByRole("link", { name: "Preview two.png" })).toBeVisible();
+    expect(screen.getByRole("button", { name: "Apply to each of 2 images" })).toBeInTheDocument();
+  });
+
   it("explains when cleanup only finds media still in the recovery window", async () => {
     vi.mocked(api.artifactStorage).mockResolvedValue({
       total_bytes: 2048,
