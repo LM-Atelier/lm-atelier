@@ -1526,6 +1526,9 @@ async def _accept_turn(
                 "code": "route_confirmation_required",
                 "message": str(exc),
                 "plan": exc.plan.model_dump(mode="json"),
+                # Top level, matching the ordered-plan 409 below, so a client
+                # reads one shape rather than digging into the plan.
+                "estimate": exc.plan.generation_estimate,
             },
         ) from exc
     except OrderedPlanConfirmationRequired as exc:

@@ -227,8 +227,7 @@ export const api = {
       const detail = error instanceof ApiError && error.detail && typeof error.detail === "object" ? error.detail as Record<string, unknown> : null;
       const plan = detail?.plan && typeof detail.plan === "object" ? detail.plan as Record<string, unknown> : null;
       const operation = typeof plan?.operation === "string" ? plan.operation : "";
-      const overrides = plan?.parameter_overrides && typeof plan.parameter_overrides === "object" ? plan.parameter_overrides as Record<string, unknown> : null;
-      const estimate = overrides?._generation_estimate && typeof overrides._generation_estimate === "object" ? overrides._generation_estimate as Record<string, unknown> : null;
+      const estimate = detail?.estimate && typeof detail.estimate === "object" ? detail.estimate as Record<string, unknown> : null;
       const duration = typeof estimate?.duration_seconds === "number" ? `, about ${estimate.duration_seconds} seconds of output` : "";
       const intermediate = typeof estimate?.estimated_intermediate_bytes === "number" ? ` and up to ${Math.ceil(estimate.estimated_intermediate_bytes / 1024 ** 3)} GB of intermediate data` : "";
       const orderedSteps = Array.isArray(plan?.steps)
