@@ -121,6 +121,7 @@ def _selection(
 
 def test_two_transitive_rounds_close_to_one_complete_locked_manifest() -> None:
     manifest, metadata = _initial([("alpha", "1.0", ["beta>=1"])])
+    root_declaration_sha256 = manifest.declaration_sha256
     closure = plan_comfy_registry_wheel_closure(
         manifest,
         metadata,
@@ -175,6 +176,7 @@ def test_two_transitive_rounds_close_to_one_complete_locked_manifest() -> None:
     ]
     assert len(complete.manifest_history) == 3
     assert len(complete.closure_sha256) == 64
+    assert complete.manifest.declaration_sha256 == root_declaration_sha256
 
 
 def test_dependency_free_manifest_is_complete_without_selection() -> None:
