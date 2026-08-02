@@ -26,6 +26,12 @@ from .auxiliary_assets import COMFY_AUXILIARY_FOLDERS, validate_lora_workflow_co
 from .capability_evidence import current_capability_evidence, evidence_input_modalities
 from .capability_probe import probe_structured_tools
 from .catalog_sources import CatalogSource, CatalogSourceNotFound
+from .chat_deletion import (
+    ExchangeBusy,
+    ExchangeHasReplies,
+    ExchangeNotFound,
+    delete_exchange,
+)
 from .comfy_templates import (
     COMFY_TEMPLATE_COMPILER_VERSION,
     ComfyTemplate,
@@ -153,6 +159,7 @@ from .schemas import (
     DraftClassification,
     DraftClassificationRequest,
     EngineCapabilities,
+    ExchangeDeletionOut,
     HealthOut,
     JobOut,
     MessageOut,
@@ -1579,6 +1586,30 @@ async def get_message(message_id: str, session: ConversationSessionDep) -> Messa
     if not message:
         raise HTTPException(404, "message not found")
     return message
+
+
+@router.delete("/messages/{message_id}/exchange", response_model=ExchangeDeletionOut)
+async def delete_message_exchange(
+    message_id: str, session: ConversationSessionDep
+) -> ExchangeDeletionOut:
+    """Delete one user turn, its answer, and everything the exchange produced.
+
+    Refusals mirror the service's two product decisions: a turn with later
+    replies must have them deleted first (`exchange-has-replies`), and a turn
+    with live jobs is history-in-progress, not history
+    (`exchange-busy`).
+    """
+
+    try:
+        result = delete_exchange(session, message_id)
+    except ExchangeHasReplies as exc:
+        raise api_error(409, "exchange-has-replies", str(exc), reply_count=exc.reply_count) from exc
+    except ExchangeBusy as exc:
+        raise api_error(409, "exchange-busy", str(exc), job_count=exc.job_count) from exc
+    except ExchangeNotFound as exc:
+        raise api_error(404, "exchange-not-found", str(exc)) from exc
+    session.commit()
+    return ExchangeDeletionOut.model_validate(result)
 
 
 def _inherited_auto_image_edit_strength(run: Run) -> dict[str, Any] | None:

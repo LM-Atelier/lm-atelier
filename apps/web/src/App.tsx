@@ -85,6 +85,7 @@ import { StatusDot } from "./StatusDot";
 import { WorkerLogFolderButton, WorkerStartupLimit } from "./WorkerStartupLimit";
 import { WorkerStatusCard } from "./WorkerStatusCard";
 import { useDraftClassification } from "./useDraftClassification";
+import { useExchangeDeletion } from "./useExchangeDeletion";
 import { useGenerationModeSelection } from "./useGenerationModeSelection";
 import {
   normalizeSettingsForFields,
@@ -568,6 +569,7 @@ function MessageBubble({
   onEditImage,
   onAnimateImage,
   onQuote,
+  onDeleteExchange,
 }: {
   message: Message;
   liveText?: string;
@@ -579,6 +581,7 @@ function MessageBubble({
   onEditImage?: (part: MessagePart, origin: MediaOrigin) => void;
   onAnimateImage?: (part: MessagePart, origin: MediaOrigin) => void;
   onQuote?: (text: string) => void;
+  onDeleteExchange?: (messageId: string) => void;
 }) {
   const visibleParts = messagePartsForTranscript(message, hiddenInputArtifactIds);
   const userText = visibleParts.filter((part) => part.type === "text").map((part) => part.text || "").join("\n");
@@ -599,6 +602,7 @@ function MessageBubble({
     : visibleParts;
   const [editing, setEditing] = useState(false);
   const [draft, setDraft] = useState(userText);
+  const [confirmingDelete, setConfirmingDelete] = useState(false);
   const metadata = message.parts.find((part) => part.type === "generation_metadata")?.metadata_json;
   const context = metadata?.context as Record<string, unknown> | undefined;
   const provenance = metadata?.provenance as Record<string, unknown> | undefined;
@@ -660,7 +664,7 @@ function MessageBubble({
           <MarkdownText text={liveText} />
         )}
         {showChatStartup && <PendingResponseStatus label={chatProgress?.text || "Starting chat"} startedAt={message.created_at} />}
-        {message.role === "user" && message.status === "complete" && !editing && <div className="message-meta"><MessageTimestamp at={message.created_at} />{onEdit && <button onClick={() => setEditing(true)}>Edit and branch</button>}{copyableText && <CopyTextButton text={copyableText} label="Copy user message" />}</div>}
+        {message.role === "user" && message.status === "complete" && !editing && <div className="message-meta"><MessageTimestamp at={message.created_at} />{onEdit && <button onClick={() => setEditing(true)}>Edit and branch</button>}{copyableText && <CopyTextButton text={copyableText} label="Copy user message" />}{onDeleteExchange && !confirmingDelete && <button aria-label="Delete this turn" onClick={() => setConfirmingDelete(true)}>Delete</button>}{onDeleteExchange && confirmingDelete && <span className="delete-confirm"><span>Also deletes the answer and its media.</span><button className="danger" onClick={() => { setConfirmingDelete(false); onDeleteExchange(message.id); }}>Delete turn</button><button onClick={() => setConfirmingDelete(false)}>Keep</button></span>}</div>}
         {message.role === "assistant" && message.status === "cancelled" && !visibleParts.some((part) => part.type === "error") && (
           <div className="message-meta"><span>Generation cancelled</span></div>
         )}
@@ -1917,6 +1921,7 @@ function ChatView({
   onCancelPlan,
   onCancelStep,
   onRetryStep,
+  onDeleteExchange,
 }: {
   chat?: ChatDetail;
   engines: EngineCapabilities[];
@@ -1952,6 +1957,7 @@ function ChatView({
   onCancelPlan: (planId: string) => void;
   onCancelStep: (stepId: string) => void;
   onRetryStep: (stepId: string) => void;
+  onDeleteExchange: (messageId: string) => void;
 }) {
   const endRef = useRef<HTMLDivElement>(null);
   const messagesRef = useRef<HTMLDivElement>(null);
@@ -2078,6 +2084,7 @@ function ChatView({
                   requestId: Date.now(),
                 })}
                 onQuote={(text) => setQuoteTarget({ text, requestId: Date.now() })}
+                onDeleteExchange={busy ? undefined : onDeleteExchange}
               />
             </Fragment>
           );
@@ -4198,6 +4205,7 @@ export default function App() {
       void client.invalidateQueries({ queryKey: ["jobs"] });
     },
   });
+  const deleteExchange = useExchangeDeletion();
   const refreshWorkStep = () => {
     void client.invalidateQueries({ queryKey: ["chat", activeChatId] });
     void client.invalidateQueries({ queryKey: ["work-plans", activeChatId] });
@@ -4444,7 +4452,7 @@ export default function App() {
           stopCurrent: true,
         });
       }
-    }} onCancelPlan={(planId) => {
+    }} onDeleteExchange={deleteExchange.mutate} onCancelPlan={(planId) => {
       cancelWorkPlan.mutate(planId);
     }} onCancelStep={(stepId) => {
       cancelWorkStep.mutate(stepId);
@@ -4462,7 +4470,7 @@ export default function App() {
         });
       }
     }} />;
-  }, [view, modelLibraryRole, engines.data, profiles.data, presets.data, workflows.data, allProjects, chat.data, chatDrafts, liveText, pendingTurns, workPlans.data, send, regenerate, selectResponseRevision, branch, stop, cancelWorkPlan, cancelWorkStep, retryWorkStep, updateChat, client]);
+  }, [view, modelLibraryRole, engines.data, profiles.data, presets.data, workflows.data, allProjects, chat.data, chatDrafts, liveText, pendingTurns, workPlans.data, send, regenerate, selectResponseRevision, branch, stop, cancelWorkPlan, cancelWorkStep, retryWorkStep, updateChat, deleteExchange, client]);
 
   return (
     <div className="app-shell">
