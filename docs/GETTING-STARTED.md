@@ -53,6 +53,12 @@ download.
 
 ## First run
 
+Installing from the packaged installer flows straight into setup: the
+workspace appears only after the roles you chose are ready or you skip. In
+that flow workers are also loaded ahead of time, so the first request pays
+nothing. Everything below applies the same way when setup runs inside the
+application.
+
 1. Launch LM Atelier. The setup panel opens by itself when anything is
    incomplete. If you dismiss it, reopen it from **Setup** in the sidebar.
 2. Work one role at a time, starting with chat. Each card shows the current
@@ -60,12 +66,18 @@ download.
 3. When a card offers a recommended model, that choice already fits your
    reported memory and disk. You can instead browse the full catalog from the
    model library.
-4. Wait for the download. Progress is shown on the card, and the download
-   survives a restart.
+4. Wait for the download. Progress is shown on the card, and when several
+   downloads run at once one line above the cards totals what is left and,
+   while transfer rates are fresh, roughly how long it will take. Downloads
+   survive a restart.
 5. Run the quick test when the card offers it. A role is only **Ready** once a
    real local generation has completed.
 
 Repeat for image and video if your machine supports them.
+
+A ready role whose model is not loaded yet says so - the first request would
+wait while it loads - and offers **Prepare now** to pay that wait immediately
+instead. Skipping is fine; nothing breaks either way.
 
 ## Knowing a role really works
 
