@@ -3731,6 +3731,61 @@ describe("App", () => {
     await waitFor(() => expect(screen.queryByText("observatory.png")).not.toBeInTheDocument());
   });
 
+  it("edits a library image straight into the composer with the studio open", async () => {
+    const stamp = "2026-07-22T00:00:00Z";
+    const chat: Chat = {
+      id: "chat-library-edit",
+      project_id: null,
+      title: "Library edit",
+      archived: false,
+      routing_mode: "auto",
+      confirm_uncertain_media: false,
+      active_chat_profile_id: null,
+      active_image_profile_id: null,
+      active_video_profile_id: null,
+      active_head_message_id: null,
+      created_at: stamp,
+      updated_at: stamp,
+    };
+    localStorage.setItem("local-lm-chat", chat.id);
+    let currentChat = { ...chat, messages: [] };
+    vi.mocked(api.chats).mockResolvedValue([chat]);
+    vi.mocked(api.chat).mockImplementation(async () => currentChat);
+    vi.mocked(api.updateChat).mockImplementation(async (_id, values) => {
+      currentChat = { ...currentChat, ...values };
+      return { ...chat, ...values };
+    });
+    vi.mocked(api.artifacts).mockResolvedValue([{
+      id: "sha256:library-image",
+      sha256: "0123456789abcdef",
+      kind: "image",
+      media_type: "image/png",
+      size_bytes: 2048,
+      original_name: "observatory.png",
+      metadata_json: {},
+      created_at: stamp,
+      url: "/api/artifacts/sha256:library-image/content",
+      reference_count: 1,
+      chat_ids: [chat.id],
+      project_ids: [],
+    }]);
+    const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+    render(
+      <QueryClientProvider client={client}>
+        <App />
+      </QueryClientProvider>,
+    );
+
+    fireEvent.click(await screen.findByText("Media library"));
+    fireEvent.click(await screen.findByRole("button", { name: "Edit observatory.png" }));
+
+    // Back in the chat: image attached, mode switched, studio ready to pick.
+    expect(await screen.findByRole("dialog", { name: "Editing studio" })).toBeVisible();
+    expect(screen.getByRole("link", { name: "Preview observatory.png" })).toBeVisible();
+    await waitFor(() =>
+      expect(api.updateChat).toHaveBeenCalledWith(chat.id, { routing_mode: "image" }));
+  });
+
   it("explains when cleanup only finds media still in the recovery window", async () => {
     vi.mocked(api.artifactStorage).mockResolvedValue({
       total_bytes: 2048,

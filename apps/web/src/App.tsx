@@ -89,9 +89,11 @@ import { focusMainContent, roleForMode } from "./viewHelpers";
 import { CompareButton } from "./CompareButton";
 import { FirstRunSetup, SetupWizard } from "./SetupWizard";
 import { CustomNodesPanel } from "./CustomNodesPanel";
+import { MediaLibraryView } from "./MediaLibraryView";
 import { ModelUpdatesPanel } from "./ModelUpdatesPanel";
 import { RuntimeSetupCard } from "./RuntimeSetupCard";
 import { RegistryInstallsPanel } from "./RegistryInstallsPanel";
+import { useProjectMutations } from "./useProjectMutations";
 import { WorkflowPackageReview } from "./WorkflowPackageReview";
 import { useWorkflowPackageImport } from "./useWorkflowPackageImport";
 import { JobsPanel } from "./JobsPanel";
@@ -150,6 +152,9 @@ type VisualTarget = {
   // the user chose, the way Edit and Animate deliberately do.
   mode: "image" | "video" | null;
   requestId: number;
+  // Open the editing studio once the image is attached - the library's Edit
+  // entry point, where no instruction has been drafted yet.
+  studio?: boolean;
 };
 type SendTurnVariables = PendingTurn & {
   chatId: string;
@@ -264,78 +269,21 @@ function ArtifactPart({
   );
 }
 
-function MediaLibraryView() {
-  const client = useQueryClient();
-  const [kind, setKind] = useState("");
-  const [search, setSearch] = useState("");
-  const artifacts = useQuery({
-    queryKey: ["artifacts", kind, search],
-    queryFn: () => api.artifacts(kind, search),
-  });
-  const storage = useQuery({ queryKey: ["artifact-storage"], queryFn: api.artifactStorage });
-  const cleanup = useMutation({
-    mutationFn: () => api.cleanupArtifacts(false),
-    onSuccess: () => {
-      void client.invalidateQueries({ queryKey: ["artifacts"] });
-      void client.invalidateQueries({ queryKey: ["artifact-storage"] });
+/** The library's Edit action: attach the image in the chat composer, switch
+ * to image mode, and open the studio. */
+function libraryEditTarget(artifact: ArtifactLibraryItem): VisualTarget {
+  return {
+    attachment: {
+      id: artifact.id,
+      kind: "image",
+      artifact,
+      // Stored uploads keep their filename; generated media has none.
+      origin: artifact.original_name ? "uploaded" : "generated",
     },
-  });
-  const deleteArtifact = useMutation({
-    mutationFn: api.deleteArtifact,
-    onMutate: async (artifactId: string) => {
-      await client.cancelQueries({ queryKey: ["artifacts"] });
-      const previous = client.getQueriesData<ArtifactLibraryItem[]>({ queryKey: ["artifacts"] });
-      for (const [queryKey, items] of previous) {
-        client.setQueryData(
-          queryKey,
-          items?.filter((artifact) => artifact.id !== artifactId),
-        );
-      }
-      return { previous };
-    },
-    onError: (_error, _artifactId, context) => {
-      for (const [queryKey, items] of context?.previous ?? []) {
-        client.setQueryData(queryKey, items);
-      }
-    },
-    onSettled: () => {
-      void client.invalidateQueries({ queryKey: ["artifacts"] });
-      void client.invalidateQueries({ queryKey: ["artifact-storage"] });
-      void client.invalidateQueries({ queryKey: ["chat"] });
-    },
-  });
-  return (
-    <div className="page-view media-library">
-      <header className="page-header">
-        <div><h1>Media library</h1></div>
-      </header>
-      {storage.data && <section className={`artifact-storage-summary ${storage.data.warning ? "warning" : ""}`}>
-        <div><strong>{formatBytes(storage.data.total_bytes)}</strong><small>{storage.data.total_count} stored artifacts</small></div>
-        <div><strong>{formatBytes(storage.data.referenced_bytes)}</strong><small>{storage.data.referenced_count} referenced</small></div>
-        <div><strong>{formatBytes(storage.data.disk_free_bytes)}</strong><small>disk available</small></div>
-        <div><strong>{formatBytes(storage.data.eligible_bytes)}</strong><small>{storage.data.eligible_count} eligible for cleanup</small></div>
-        <button className="secondary" disabled={(!storage.data.eligible_count && !(storage.data.retention_pending_count ?? 0)) || cleanup.isPending} onClick={() => cleanup.mutate()}>{cleanup.isPending ? "Cleaning…" : "Run cleanup"}</button>
-      </section>}
-      <div className="media-toolbar">
-        <div className="workspace-search"><Search size={14} /><input aria-label="Search media" placeholder="Search filenames or hashes" value={search} onChange={(event) => setSearch(event.target.value)} /></div>
-        <select aria-label="Media type" value={kind} onChange={(event) => setKind(event.target.value)}><option value="">Images and videos</option><option value="image">Images</option><option value="video">Videos</option></select>
-      </div>
-      {cleanup.data && <div className="callout success" role="status">{cleanup.data.removed_count > 0 && <>Removed {cleanup.data.removed_count} artifact{cleanup.data.removed_count === 1 ? "" : "s"} and reclaimed {formatBytes(cleanup.data.reclaimed_bytes)}. </>}{cleanup.data.marked_count > 0 ? `${cleanup.data.marked_count} newly unreferenced artifact${cleanup.data.marked_count === 1 ? "" : "s"} entered the ${storage.data?.retention_days ?? 30}-day recovery window.` : cleanup.data.retention_pending_count > 0 ? `${cleanup.data.retention_pending_count} artifact${cleanup.data.retention_pending_count === 1 ? "" : "s"} ${cleanup.data.retention_pending_count === 1 ? "remains" : "remain"} in the recovery window; none are eligible yet.` : cleanup.data.removed_count === 0 ? "Nothing needed cleanup." : null}</div>}
-      {(cleanup.error || deleteArtifact.error) && <ErrorCallout message={cleanup.error?.message || deleteArtifact.error?.message} />}
-      {artifacts.data?.length ? <div className="media-grid">{artifacts.data.map((artifact) => {
-        const source = `/api/artifacts/${encodeURIComponent(artifact.id)}/content`;
-        const proxyId = typeof artifact.metadata_json.browser_proxy_artifact_id === "string" ? artifact.metadata_json.browser_proxy_artifact_id : null;
-        const playbackSource = proxyId ? `/api/artifacts/${encodeURIComponent(proxyId)}/content` : source;
-        const posterId = typeof artifact.metadata_json.poster_artifact_id === "string" ? artifact.metadata_json.poster_artifact_id : null;
-        return <article className="gallery-card" key={artifact.id}>
-          {/* Generated media has no caption track to point at, and an empty one would claim an affordance that is not there. */}
-          {/* eslint-disable-next-line jsx-a11y-x/media-has-caption */}
-          {artifact.kind === "image" ? <img src={source} alt={artifact.original_name ?? "Generated image"} loading="lazy" /> : <video src={playbackSource} poster={posterId ? `/api/artifacts/${encodeURIComponent(posterId)}/content` : undefined} controls preload="metadata" />}
-          <div><strong>{artifact.original_name ?? artifact.kind}</strong><small>{formatBytes(artifact.size_bytes)} · {artifact.reference_count} reference{artifact.reference_count === 1 ? "" : "s"}</small><span><a href={source} download>Download</a><code>{artifact.sha256.slice(0, 12)}</code><button className="icon-button danger" aria-label={`Delete ${artifact.original_name ?? artifact.kind}`} disabled={deleteArtifact.isPending && deleteArtifact.variables === artifact.id} onClick={() => { const references = artifact.reference_count ? ` and remove ${artifact.reference_count} appearance${artifact.reference_count === 1 ? "" : "s"} from chats` : ""; if (window.confirm(`Permanently delete ${artifact.original_name ?? artifact.kind}${references}?`)) deleteArtifact.mutate(artifact.id); }}><Trash2 size={14} /></button></span></div>
-        </article>;
-      })}</div> : <EmptyState icon={<ImageIcon />} title="No generated media" body="Generated images and videos appear here." />}
-    </div>
-  );
+    mode: "image",
+    requestId: Date.now(),
+    studio: true,
+  };
 }
 
 function PartView({
@@ -1401,6 +1349,10 @@ function Composer({
         setText((current) => current.trim() ? current : "Animate this image");
       }, 0);
     }
+    if (visualTarget.studio) {
+      // After the attach renders, like the Animate prefill above.
+      window.setTimeout(() => setStudioOpen(true), 0);
+    }
     textInput.current?.focus();
   }, [visualTarget, changeMode]);
   const consumedQuoteRequest = useRef<number | null>(null);
@@ -1829,6 +1781,7 @@ function ChatView({
   onRetryStep,
   onDeleteExchange,
   onForkThread,
+  libraryEdit,
 }: {
   chat?: ChatDetail;
   engines: EngineCapabilities[];
@@ -1866,12 +1819,19 @@ function ChatView({
   onRetryStep: (stepId: string) => void;
   onDeleteExchange: (messageId: string) => void;
   onForkThread: (messageId: string) => void;
+  libraryEdit?: VisualTarget | null;
 }) {
   const endRef = useRef<HTMLDivElement>(null);
   const messagesRef = useRef<HTMLDivElement>(null);
   const followMessages = useRef(true);
   const previousChatId = useRef<string | undefined>(undefined);
   const [visualTarget, setVisualTarget] = useState<VisualTarget | null>(null);
+  const consumedLibraryEdit = useRef<number | null>(null);
+  useEffect(() => {
+    if (!libraryEdit || consumedLibraryEdit.current === libraryEdit.requestId) return;
+    consumedLibraryEdit.current = libraryEdit.requestId;
+    setVisualTarget(libraryEdit);
+  }, [libraryEdit]);
   const [quoteTarget, setQuoteTarget] = useState<{ text: string; requestId: number } | null>(null);
   useEffect(() => {
     if (previousChatId.current !== chat?.id) {
@@ -3499,6 +3459,7 @@ function Sidebar({
 export default function App() {
   const client = useQueryClient();
   const [view, setView] = useState<View>("chat");
+  const [libraryEdit, setLibraryEdit] = useState<VisualTarget | null>(null);
   const [modelLibraryRole, setModelLibraryRole] = useState<EngineRole>("chat");
   const [setupOpen, setSetupOpen] = useState<boolean | null>(null);
   const [currentChatId, setCurrentChatId] = useState<string | null>(() => localStorage.getItem(CURRENT_CHAT_KEY));
@@ -3729,45 +3690,26 @@ export default function App() {
     },
     onSettled: () => void client.invalidateQueries({ queryKey: ["chats"] }),
   });
-  const updateProject = useMutation({
-    mutationFn: ({ id, values }: { id: string; values: Partial<Project> }) => api.updateProject(id, values),
-    onSuccess: () => void client.invalidateQueries({ queryKey: ["projects"] }),
-  });
-  const deleteProject = useMutation({
-    mutationFn: api.deleteProject,
-    onSuccess: () => {
-      void client.invalidateQueries({ queryKey: ["projects"] });
-      void client.invalidateQueries({ queryKey: ["chats"] });
+  const { updateProject, deleteProject, exportProject, importProject } = useProjectMutations({
+    client,
+    onImportedChat: (chatId) => {
+      setCurrentChatId(chatId);
+      localStorage.setItem(CURRENT_CHAT_KEY, chatId);
+      setView("chat");
     },
   });
-  const exportProject = useMutation({
-    mutationFn: ({ id, includeMedia = true }: { id: string; includeMedia?: boolean }) => api.exportProject(id, includeMedia),
-    onSuccess: (artifact) => {
-      const link = document.createElement("a");
-      link.href = artifact.url;
-      link.download = "";
-      link.click();
-    },
-  });
-  const importProject = useMutation({
-    mutationFn: api.importProject,
-    onSuccess: (project) => {
-      void client.invalidateQueries({ queryKey: ["projects"] });
-      // Awaited, not timed: a slower refetch used to leave the import on nothing.
-      void client.invalidateQueries({ queryKey: ["chats"] }).then(() => {
-        const importedChat = client.getQueryData<Chat[]>(["chats"])?.find((item) => item.project_id === project.id);
-        if (!importedChat) return;
-        setCurrentChatId(importedChat.id);
-        localStorage.setItem(CURRENT_CHAT_KEY, importedChat.id);
-        setView("chat");
-      });
-    },
-  });
+
+  const openLibraryEdit = useCallback((artifact: ArtifactLibraryItem) => {
+    setLibraryEdit(libraryEditTarget(artifact));
+    if (!activeChatId) createChat.mutate(null);
+    setView("chat");
+    focusMainContent();
+  }, [activeChatId, createChat]);
 
   const allChats = useMemo(() => chats.data ?? [], [chats.data]);
   const allProjects = useMemo(() => projects.data ?? [], [projects.data]);
   const activeContent = useMemo(() => {
-    if (view === "media") return <MediaLibraryView />;
+    if (view === "media") return <MediaLibraryView onEditImage={openLibraryEdit} />;
     if (view === "models") return <ModelsView key={modelLibraryRole} initialRole={modelLibraryRole} />;
     if (view === "workflows") return <WorkflowsView />;
     if (view === "settings") return <SettingsView engines={engines.data ?? []} />;
@@ -3788,7 +3730,7 @@ export default function App() {
       ));
       updateChat.mutate({ id: displayedChat.id, values });
     };
-    return <ChatView key={displayedChat?.id ?? "empty-chat"} chat={displayedChat} engines={engines.data ?? []} profiles={profiles.data ?? []} presets={presets.data ?? []} workflows={workflows.data ?? []} project={allProjects.find((item) => item.id === displayedChat?.project_id)} liveText={liveText} pendingTurns={displayedChat ? pendingTurns[displayedChat.id] ?? [] : []} workPlans={workPlans.data ?? []} settings={scopedSettings} presetId={presetId} onSettings={(settings) => {
+    return <ChatView key={displayedChat?.id ?? "empty-chat"} libraryEdit={libraryEdit} chat={displayedChat} engines={engines.data ?? []} profiles={profiles.data ?? []} presets={presets.data ?? []} workflows={workflows.data ?? []} project={allProjects.find((item) => item.id === displayedChat?.project_id)} liveText={liveText} pendingTurns={displayedChat ? pendingTurns[displayedChat.id] ?? [] : []} workPlans={workPlans.data ?? []} settings={scopedSettings} presetId={presetId} onSettings={(settings) => {
       if (!displayedChat) return;
       const role = roleForMode(displayedChat.routing_mode);
       persistActiveChat({
@@ -3858,7 +3800,7 @@ export default function App() {
         });
       }
     }} />;
-  }, [view, modelLibraryRole, engines.data, profiles.data, presets.data, workflows.data, allProjects, chat.data, chatDrafts, liveText, pendingTurns, workPlans.data, send, regenerate, selectResponseRevision, branch, stop, cancelWorkPlan, cancelWorkStep, retryWorkStep, updateChat, deleteExchange, forkThread, client]);
+  }, [view, modelLibraryRole, engines.data, profiles.data, presets.data, workflows.data, allProjects, chat.data, chatDrafts, liveText, pendingTurns, workPlans.data, send, regenerate, selectResponseRevision, branch, stop, cancelWorkPlan, cancelWorkStep, retryWorkStep, updateChat, deleteExchange, forkThread, client, libraryEdit, openLibraryEdit]);
 
   if (firstRunSetup && setupReadiness.data) {
     return <FirstRunSetup report={setupReadiness.data} onExit={exitFirstRunSetup} onOpenModels={(role) => { exitFirstRunSetup(); setModelLibraryRole(role); setView("models"); }} onOpenWorkflows={() => { exitFirstRunSetup(); setView("workflows"); }} />;
