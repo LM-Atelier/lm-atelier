@@ -73,7 +73,7 @@ async def test_composes_resolve_close_prepare_in_order(monkeypatch: pytest.Monke
         assert resolution.package_id == "example-pack"
         assert kwargs["marker_environment"] == {"sys_platform": "win32"}
         assert kwargs["supported_tags"] == ("py3-none-any",)
-        kwargs["progress"]("fetching_projects", 1, 2)
+        await kwargs["progress"]("fetching_projects", 1, ("a", "b"))
         return closure
 
     async def fake_prepare(session: Any, **kwargs: Any) -> Any:
@@ -81,8 +81,8 @@ async def test_composes_resolve_close_prepare_in_order(monkeypatch: pytest.Monke
         assert kwargs["closure"] == "closure-object"
         assert kwargs["media_worker_stopped"] is True
         assert kwargs["custom_node_root"] == _CONTEXT.custom_node_root
-        kwargs["archive_progress"](10, 100)
-        kwargs["wheel_progress"]("a.whl", 5, 50)
+        await kwargs["archive_progress"](10, 100)
+        await kwargs["wheel_progress"]("a.whl", 5, 50)
         return prepared
 
     monkeypatch.setattr(composition, "drive_comfy_registry_wheel_closure", fake_drive)

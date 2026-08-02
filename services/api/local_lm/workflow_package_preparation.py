@@ -58,7 +58,7 @@ class PreparationContext:
     state_root: Path
 
     @classmethod
-    def from_settings(cls, settings: Settings) -> "PreparationContext":
+    def from_settings(cls, settings: Settings) -> PreparationContext:
         if not settings.comfy_executable or not settings.comfy_directory:
             raise WorkflowPackagePreparationError(
                 "managed_runtime_unavailable",
@@ -127,8 +127,8 @@ async def prepare_workflow_package(
             "The managed runtime's package target could not be determined.",
         ) from exc
 
-    def _closure_progress(name: str, round_number: int, items: int) -> None:
-        _phase(f"Dependencies: {name.replace('_', ' ')} (round {round_number})", items, None)
+    async def _closure_progress(name: str, round_number: int, items: tuple[str, ...]) -> None:
+        _phase(f"Dependencies: {name.replace('_', ' ')} (round {round_number})", len(items), None)
 
     try:
         closure_result = await drive_comfy_registry_wheel_closure(
@@ -142,10 +142,10 @@ async def prepare_workflow_package(
     except ComfyRegistryWheelClosureDriverError as exc:
         raise WorkflowPackagePreparationError(exc.code, str(exc)) from exc
 
-    def _archive_progress(downloaded: int, total: int | None) -> None:
+    async def _archive_progress(downloaded: int, total: int | None) -> None:
         _phase("Downloading the node archive", downloaded, total)
 
-    def _wheel_progress(filename: str, downloaded: int, total: int | None) -> None:
+    async def _wheel_progress(filename: str, downloaded: int, total: int | None) -> None:
         _phase(f"Downloading {filename}", downloaded, total)
 
     try:
