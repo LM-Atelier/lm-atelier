@@ -2027,6 +2027,8 @@ async def cancel_job(
     )
     if job.kind == JobKind.DOWNLOAD.value:
         changed = await _services(request).downloads.cancel(job_id)
+    elif job.kind == JobKind.REGISTRY_PREPARE.value:
+        changed = await _cancel_registry_preparation(job_id)
     else:
         changed = await _services(request).orchestrator.cancel(job_id)
     if not changed:
@@ -5151,6 +5153,44 @@ def _installed_package_versions(session: Session) -> dict[str, set[str]]:
 _REGISTRY_PREPARE_TASKS: dict[str, asyncio.Task[None]] = {}
 
 
+async def _cancel_registry_preparation(job_id: str) -> bool:
+    """Cancel the live task first, then mark the row; never the reverse.
+
+    Marking the row while the task keeps mutating disk and network would let
+    a later success write COMPLETE over CANCELLED.
+    """
+
+    task = _REGISTRY_PREPARE_TASKS.get(job_id)
+    if task is not None and not task.done():
+        task.cancel()
+        with suppress(asyncio.CancelledError, Exception):
+            await task
+    with SessionLocal() as session:
+        job = session.get(Job, job_id)
+        if not job or job.status in {
+            JobStatus.COMPLETE.value,
+            JobStatus.FAILED.value,
+            JobStatus.CANCELLED.value,
+        }:
+            return False
+        job.status = JobStatus.CANCELLED.value
+        update_job_progress(job, stage="cancelled", indeterminate=True)
+        session.commit()
+    return True
+
+
+async def shutdown_registry_preparations() -> None:
+    """Cancel and await every live preparation task at service shutdown."""
+
+    tasks = [task for task in _REGISTRY_PREPARE_TASKS.values() if not task.done()]
+    for task in tasks:
+        task.cancel()
+    for task in tasks:
+        with suppress(asyncio.CancelledError, Exception):
+            await task
+    _REGISTRY_PREPARE_TASKS.clear()
+
+
 async def _run_workflow_package_preparation(
     services: Services,
     job_id: str,
@@ -5199,7 +5239,7 @@ async def _run_workflow_package_preparation(
             )
             with SessionLocal() as session:
                 job = session.get(Job, job_id)
-                if job:
+                if job and job.status != JobStatus.CANCELLED.value:
                     job.status = JobStatus.COMPLETE.value
                     job.payload_json = {
                         **job.payload_json,
@@ -5221,7 +5261,7 @@ async def _run_workflow_package_preparation(
     except WorkflowPackagePreparationError as exc:
         with SessionLocal() as session:
             job = session.get(Job, job_id)
-            if job:
+            if job and job.status != JobStatus.CANCELLED.value:
                 job.status = JobStatus.FAILED.value
                 job.error = str(exc)
                 job.payload_json = {**job.payload_json, "error_code": exc.code}
@@ -5230,7 +5270,7 @@ async def _run_workflow_package_preparation(
     except Exception as exc:  # noqa: BLE001 - the job must never die silently
         with SessionLocal() as session:
             job = session.get(Job, job_id)
-            if job:
+            if job and job.status != JobStatus.CANCELLED.value:
                 job.status = JobStatus.FAILED.value
                 job.error = str(exc)
                 update_job_progress(job, stage="Preparation failed")

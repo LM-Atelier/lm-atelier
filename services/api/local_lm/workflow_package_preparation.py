@@ -22,6 +22,7 @@ from .comfy_registry_closure_driver import (
     drive_comfy_registry_wheel_closure,
 )
 from .comfy_registry_downloads import ComfyRegistryArchiveDownloader
+from .comfy_registry_interpreter import ComfyRegistryInterpreterError
 from .comfy_registry_lifecycle import (
     ComfyRegistryLifecycleError,
     ComfyRegistryPreparation,
@@ -123,6 +124,10 @@ async def prepare_workflow_package(
         marker_environment, supported_tags = await interpreter_probe(context.python_executable)
     except WorkflowPackagePreparationError:
         raise
+    except ComfyRegistryInterpreterError as exc:
+        # The probe's refusals are typed; converting them to one generic code
+        # would erase exactly the distinction the caller needs.
+        raise WorkflowPackagePreparationError(exc.code, str(exc)) from exc
     except Exception as exc:
         raise WorkflowPackagePreparationError(
             "interpreter_probe_failed",

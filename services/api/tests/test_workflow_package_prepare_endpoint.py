@@ -76,3 +76,68 @@ async def test_a_configured_runtime_queues_and_fails_closed_on_the_probe(
     assert job["status"] == "failed"
     assert job["payload_json"]["error_code"] == "interpreter_probe_unavailable"
     assert job["error"]
+
+
+async def test_cancel_stops_a_blocking_preparation_for_good(
+    client: AsyncClient,
+    app: FastAPI,
+    settings: Settings,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path,
+) -> None:
+    """Cancellation reaches the live task, and nothing overwrites CANCELLED.
+
+    The fake preparation blocks indefinitely unless cancelled; if the task
+    survived the endpoint call, the completion write below the block would
+    turn the cancelled row COMPLETE - the exact overwrite this forbids.
+    """
+
+    import asyncio
+
+    executable = tmp_path / "python.exe"
+    executable.write_bytes(b"")
+    monkeypatch.setattr(settings, "comfy_executable", executable)
+    monkeypatch.setattr(settings, "comfy_directory", tmp_path / "ComfyUI")
+
+    from types import SimpleNamespace
+
+    from local_lm import api as api_module
+
+    entered = asyncio.Event()
+    resumed = asyncio.Event()
+
+    async def blocking_preparation(*args: object, **kwargs: object) -> object:
+        entered.set()
+        await asyncio.sleep(3600)
+        resumed.set()
+        return SimpleNamespace(
+            install_id="never",
+            installed_path="never",
+            wheel_environment_path="never",
+            archive_sha256="never",
+            manifest_sha256="never",
+            wheel_closure_sha256="never",
+            wheel_environment_sha256="never",
+            reused_wheel_environment=False,
+        )
+
+    monkeypatch.setattr(api_module, "prepare_workflow_package", blocking_preparation)
+
+    queued = await client.post(
+        "/api/workflows/packages/prepare",
+        json={"package_id": "example-pack", "version": "1.2.3"},
+    )
+    assert queued.status_code == 202
+    job_id = queued.json()["id"]
+    await asyncio.wait_for(entered.wait(), timeout=5)
+
+    cancelled = await client.post(f"/api/jobs/{job_id}/cancel")
+    assert cancelled.status_code == 200
+    assert cancelled.json()["status"] == "cancelled"
+
+    # The task never resumes past its block, and the row stays cancelled.
+    await asyncio.sleep(0.2)
+    assert not resumed.is_set()
+    jobs = (await client.get("/api/jobs")).json()
+    job = next(item for item in jobs if item["id"] == job_id)
+    assert job["status"] == "cancelled"

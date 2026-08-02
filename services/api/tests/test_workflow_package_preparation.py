@@ -269,3 +269,25 @@ async def test_another_writer_progresses_while_preparation_awaits(
     assert result.install_id == "install_concurrent"
     with SessionLocal() as reader:
         assert reader.query(EditTemplate).filter_by(name="Written mid-preparation").count() == 1
+
+
+async def test_the_probes_typed_refusals_keep_their_codes() -> None:
+    """A probe timeout must not be laundered into a generic failure."""
+
+    from local_lm.comfy_registry_interpreter import ComfyRegistryInterpreterError
+
+    async def timing_out_probe(_python: Path) -> tuple[dict[str, str], tuple[str, ...]]:
+        raise ComfyRegistryInterpreterError("interpreter_timeout", "took too long")
+
+    with pytest.raises(WorkflowPackagePreparationError) as refused:
+        await prepare_workflow_package(
+            _NullSessionFactory(),
+            package_id="example-pack",
+            version="1.2.3",
+            context=_CONTEXT,
+            media_worker_stopped=True,
+            interpreter_probe=timing_out_probe,
+            registry_client=_Registry(_resolution()),  # type: ignore[arg-type]
+            **_clients(),
+        )
+    assert refused.value.code == "interpreter_timeout"
