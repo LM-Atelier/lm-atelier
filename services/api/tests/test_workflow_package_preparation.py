@@ -7,6 +7,7 @@ from types import SimpleNamespace
 from typing import Any
 
 import pytest
+from httpx2 import AsyncClient
 
 from local_lm import workflow_package_preparation as composition
 from local_lm.comfy_registry import ComfyNodeResolution, ComfyRegistryResolution
@@ -62,6 +63,17 @@ def _clients() -> dict[str, Any]:
     }
 
 
+class _NullSessionFactory:
+    def __call__(self) -> _NullSessionFactory:
+        return self
+
+    def __enter__(self) -> object:
+        return object()
+
+    def __exit__(self, *args: object) -> None:
+        return None
+
+
 async def test_composes_resolve_close_prepare_in_order(monkeypatch: pytest.MonkeyPatch) -> None:
     order: list[str] = []
     phases: list[str] = []
@@ -89,8 +101,9 @@ async def test_composes_resolve_close_prepare_in_order(monkeypatch: pytest.Monke
     monkeypatch.setattr(composition, "prepare_comfy_registry_install", fake_prepare)
 
     registry = _Registry(_resolution())
+
     result = await prepare_workflow_package(
-        object(),  # session is passed through untouched
+        _NullSessionFactory(),  # opened only around the prepare step
         package_id="example-pack",
         version="1.2.3",
         context=_CONTEXT,
@@ -119,7 +132,7 @@ async def test_each_stage_refuses_with_its_own_code(monkeypatch: pytest.MonkeyPa
     registry = _Registry(_resolution(error_code="registry_record_missing"))
     with pytest.raises(WorkflowPackagePreparationError) as resolved:
         await prepare_workflow_package(
-            object(),
+            _NullSessionFactory(),
             package_id="example-pack",
             version=None,
             context=_CONTEXT,
@@ -137,7 +150,7 @@ async def test_each_stage_refuses_with_its_own_code(monkeypatch: pytest.MonkeyPa
     monkeypatch.setattr(composition, "drive_comfy_registry_wheel_closure", failing_drive)
     with pytest.raises(WorkflowPackagePreparationError) as driven:
         await prepare_workflow_package(
-            object(),
+            _NullSessionFactory(),
             package_id="example-pack",
             version=None,
             context=_CONTEXT,
@@ -159,7 +172,7 @@ async def test_each_stage_refuses_with_its_own_code(monkeypatch: pytest.MonkeyPa
     monkeypatch.setattr(composition, "prepare_comfy_registry_install", failing_prepare)
     with pytest.raises(WorkflowPackagePreparationError) as prepared:
         await prepare_workflow_package(
-            object(),
+            _NullSessionFactory(),
             package_id="example-pack",
             version=None,
             context=_CONTEXT,
@@ -191,3 +204,68 @@ async def test_context_requires_a_configured_managed_runtime(tmp_path: Path) -> 
     context = PreparationContext.from_settings(configured)
     assert context.custom_node_root == tmp_path / "ComfyUI" / "custom_nodes"
     assert context.state_root == tmp_path / "registry"
+
+
+async def test_another_writer_progresses_while_preparation_awaits(
+    client: AsyncClient,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The audited await holds no lock: a concurrent writer commits mid-prepare.
+
+    This is the regression the async-boundary registry requires. The fake
+    lifecycle blocks inside the awaited call while a second session inserts
+    and commits; if the preparation session entered the await holding a
+    SQLite write lock, that insert would deadlock or fail.
+    """
+
+    import asyncio
+
+    from local_lm.db import SessionLocal
+    from local_lm.models import EditTemplate
+
+    entered = asyncio.Event()
+    release = asyncio.Event()
+
+    async def blocking_prepare(session: Any, **kwargs: Any) -> Any:
+        entered.set()
+        await asyncio.wait_for(release.wait(), timeout=5)
+        return SimpleNamespace(install_id="install_concurrent")
+
+    async def ok_drive(*args: Any, **kwargs: Any) -> Any:
+        return SimpleNamespace(closure="closure-object")
+
+    monkeypatch.setattr(composition, "drive_comfy_registry_wheel_closure", ok_drive)
+    monkeypatch.setattr(composition, "prepare_comfy_registry_install", blocking_prepare)
+
+    preparation = asyncio.create_task(
+        prepare_workflow_package(
+            SessionLocal,
+            package_id="example-pack",
+            version="1.2.3",
+            context=_CONTEXT,
+            media_worker_stopped=True,
+            interpreter_probe=_probe,
+            registry_client=_Registry(_resolution()),  # type: ignore[arg-type]
+            **_clients(),
+        )
+    )
+    await asyncio.wait_for(entered.wait(), timeout=5)
+
+    def concurrent_write() -> None:
+        with SessionLocal() as writer:
+            writer.add(
+                EditTemplate(
+                    name="Written mid-preparation",
+                    instruction="Prove the lock is free.",
+                    operation="image_to_image",
+                )
+            )
+            writer.commit()
+
+    await asyncio.wait_for(asyncio.to_thread(concurrent_write), timeout=5)
+
+    release.set()
+    result = await asyncio.wait_for(preparation, timeout=5)
+    assert result.install_id == "install_concurrent"
+    with SessionLocal() as reader:
+        assert reader.query(EditTemplate).filter_by(name="Written mid-preparation").count() == 1

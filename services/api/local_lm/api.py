@@ -5181,21 +5181,23 @@ async def _run_workflow_package_preparation(
                 None,
             )
             media_stopped = media is None or (not media.running and media.state != "starting")
+            # The composition opens its session only around the atomic
+            # prepare step; resolution and closure run session-free.
+            preparation = await prepare_workflow_package(
+                SessionLocal,
+                package_id=package_id,
+                version=version,
+                context=PreparationContext.from_settings(services.settings),
+                media_worker_stopped=media_stopped,
+                interpreter_probe=refuse_interpreter_probe,
+                registry_client=ComfyRegistryClient(),
+                project_client=ComfyRegistryWheelProjectClient(),
+                metadata_client=ComfyRegistryWheelMetadataClient(),
+                archive_downloader=ComfyRegistryArchiveDownloader(),
+                wheel_downloader=ComfyRegistryWheelDownloader(),
+                phase=report,
+            )
             with SessionLocal() as session:
-                preparation = await prepare_workflow_package(
-                    session,
-                    package_id=package_id,
-                    version=version,
-                    context=PreparationContext.from_settings(services.settings),
-                    media_worker_stopped=media_stopped,
-                    interpreter_probe=refuse_interpreter_probe,
-                    registry_client=ComfyRegistryClient(),
-                    project_client=ComfyRegistryWheelProjectClient(),
-                    metadata_client=ComfyRegistryWheelMetadataClient(),
-                    archive_downloader=ComfyRegistryArchiveDownloader(),
-                    wheel_downloader=ComfyRegistryWheelDownloader(),
-                    phase=report,
-                )
                 job = session.get(Job, job_id)
                 if job:
                     job.status = JobStatus.COMPLETE.value

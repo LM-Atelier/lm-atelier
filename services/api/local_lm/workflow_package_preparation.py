@@ -72,7 +72,7 @@ class PreparationContext:
 
 
 async def prepare_workflow_package(
-    session: Session,
+    session_factory: Callable[[], Session],
     *,
     package_id: str,
     version: str | None,
@@ -89,7 +89,9 @@ async def prepare_workflow_package(
     """Resolve, close, and prepare one package; refuse with the source's code.
 
     The caller holds the media scheduler lease and reports the worker state
-    truthfully; the lifecycle re-checks it before any mutation.
+    truthfully; the lifecycle re-checks it before any mutation. Resolution,
+    probing, and closure run without any database session; one opens only
+    around the atomic prepare step, freshly, so it enters holding no lock.
     """
 
     def _phase(name: str, done: int | None = None, total: int | None = None) -> None:
@@ -149,19 +151,24 @@ async def prepare_workflow_package(
         _phase(f"Downloading {filename}", downloaded, total)
 
     try:
-        return await prepare_comfy_registry_install(
-            session,
-            resolution=resolution,
-            closure=closure_result.closure,
-            archive_downloader=archive_downloader,
-            wheel_downloader=wheel_downloader,
-            python_executable=context.python_executable,
-            custom_node_root=context.custom_node_root,
-            state_root=context.state_root,
-            media_worker_stopped=media_worker_stopped,
-            archive_progress=_archive_progress,
-            wheel_progress=_wheel_progress,
-        )
+        with session_factory() as session:
+            # Audited await: the session is opened fresh with no prior writes,
+            # so it holds no SQLite lock while the lifecycle downloads and
+            # assembles; the concurrency regression beside this proves another
+            # writer makes progress mid-preparation.
+            return await prepare_comfy_registry_install(
+                session,
+                resolution=resolution,
+                closure=closure_result.closure,
+                archive_downloader=archive_downloader,
+                wheel_downloader=wheel_downloader,
+                python_executable=context.python_executable,
+                custom_node_root=context.custom_node_root,
+                state_root=context.state_root,
+                media_worker_stopped=media_worker_stopped,
+                archive_progress=_archive_progress,
+                wheel_progress=_wheel_progress,
+            )
     except ComfyRegistryLifecycleError as exc:
         raise WorkflowPackagePreparationError(exc.code, str(exc)) from exc
 
