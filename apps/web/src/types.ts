@@ -532,6 +532,18 @@ export interface CatalogModel {
 
 export type ContentRating = "general" | "mature" | "unknown";
 
+export interface ExchangeDeletion {
+  chat_id: string;
+  user_message_id: string;
+  message_ids: string[];
+  run_ids: string[];
+  job_ids: string[];
+  work_plan_ids: string[];
+  released_artifact_ids: string[];
+  retained_artifact_ids: string[];
+  new_head_message_id: string | null;
+}
+
 export interface CatalogPage {
   items: CatalogModel[];
   next_cursor: string | null;
