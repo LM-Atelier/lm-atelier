@@ -21,6 +21,7 @@ from sqlalchemy.orm import Session, selectinload
 from starlette.responses import FileResponse
 
 from . import __version__
+from .api_errors import api_error
 from .auxiliary_assets import COMFY_AUXILIARY_FOLDERS, validate_lora_workflow_contract
 from .capability_evidence import current_capability_evidence, evidence_input_modalities
 from .capability_probe import probe_structured_tools
@@ -825,11 +826,13 @@ def _ensure_worker_idle(session: Session, name: str) -> None:
         or 0
     )
     if busy_jobs:
-        raise HTTPException(
+        raise api_error(
             409,
+            "worker-busy",
             f"the {name} worker has {busy_jobs} active or queued "
             f"{'job' if busy_jobs == 1 else 'jobs'}; cancel or wait for them before "
             "changing the worker",
+            busy_jobs=busy_jobs,
         )
 
 
@@ -910,7 +913,7 @@ async def start_media_worker(request: Request, session: SessionDep) -> WorkerSta
 @router.post("/workers/{name}/stop", response_model=WorkerStatus)
 async def stop_worker(name: str, request: Request, session: SessionDep) -> WorkerStatus:
     if name not in {"chat", "media"}:
-        raise HTTPException(422, "worker must be chat or media")
+        raise api_error(422, "worker-unknown", "worker must be chat or media")
     services = _services(request)
     _ensure_worker_idle(session, name)
     async with services.scheduler.lease("primary"):
@@ -925,7 +928,7 @@ async def stop_worker(name: str, request: Request, session: SessionDep) -> Worke
 @router.post("/workers/{name}/restart", response_model=WorkerStatus)
 async def restart_worker(name: str, request: Request, session: SessionDep) -> WorkerStatus:
     if name not in {"chat", "media"}:
-        raise HTTPException(422, "worker must be chat or media")
+        raise api_error(422, "worker-unknown", "worker must be chat or media")
     services = _services(request)
     _ensure_worker_idle(session, name)
     async with services.scheduler.lease("primary"):
@@ -962,7 +965,7 @@ async def reset_worker(name: str, request: Request, session: SessionDep) -> Work
     """
 
     if name not in {"chat", "media"}:
-        raise HTTPException(422, "worker must be chat or media")
+        raise api_error(422, "worker-unknown", "worker must be chat or media")
     services = _services(request)
     job_ids = list(
         session.scalars(
@@ -1003,7 +1006,7 @@ def worker_log_tail(name: str, request: Request) -> WorkerLogTail:
     # Deliberately synchronous: this reads a file, so the framework runs it in
     # a worker thread rather than on the event loop.
     if name not in {"chat", "media"}:
-        raise HTTPException(422, "worker must be chat or media")
+        raise api_error(422, "worker-unknown", "worker must be chat or media")
     path = _services(request).settings.log_dir / f"{name}-worker.log"
     try:
         size = path.stat().st_size
