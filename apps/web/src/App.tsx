@@ -3803,7 +3803,9 @@ function SetupWizard({
     mutationFn: (engine: RuntimeStatus["engine"]) => api.installRuntime(engine),
     onSuccess: refresh,
   });
-  const restartWorker = useMutation({
+  // Serves both repair and preparation: restarting a failed worker and loading
+  // a working one ahead of the first request are the same call.
+  const startWorker = useMutation({
     mutationFn: (role: SetupRoleReadiness) => {
       if (role.role === "chat" && role.profile_id) return api.loadChatWorker(role.profile_id);
       if (role.role !== "chat") return api.startMediaWorker();
@@ -3846,7 +3848,7 @@ function SetupWizard({
       return;
     }
     if (role.next_action === "restart_worker") {
-      restartWorker.mutate(role);
+      startWorker.mutate(role);
       return;
     }
     if (["repair_workflow", "review_workflow"].includes(role.next_action ?? "")) {
@@ -3867,8 +3869,8 @@ function SetupWizard({
     }
     return `Choose ${role.role} model`;
   };
-  const pendingRole = restartWorker.variables?.role;
-  const error = installRecipe.error || retryInstall.error || installRuntime.error || restartWorker.error || verifyRole.error || activateModel.error;
+  const pendingRole = startWorker.variables?.role;
+  const error = installRecipe.error || retryInstall.error || installRuntime.error || startWorker.error || verifyRole.error || activateModel.error;
 
   return (
     <AccessibleDialog
@@ -3883,7 +3885,11 @@ function SetupWizard({
       </p>
       <div className="setup-role-grid" aria-live="polite">
         {report.roles.map((role) => {
+          // A ready role that has not loaded its model still has something to
+          // say, so the preparation note outranks the last passing check.
+          const preparation = role.checks.find((check) => check.action === "prepare_worker");
           const issue = role.checks.find((check) => check.status !== "pass")
+            ?? preparation
             ?? role.checks.at(-1);
           const job = jobs.data?.find((candidate) => candidate.id === role.job_id);
           const recipe = role.next_action === "select_model"
@@ -3893,7 +3899,7 @@ function SetupWizard({
             (retryInstall.isPending && retryInstall.variables === role.job_id)
             || (activateModel.isPending && activateModel.variables === role.install_id)
             || (installRuntime.isPending && installRuntime.variables === role.engine)
-            || (restartWorker.isPending && pendingRole === role.role)
+            || (startWorker.isPending && pendingRole === role.role)
             || (verifyRole.isPending && verifyRole.variables === role.role)
           );
           return (
@@ -3951,6 +3957,18 @@ function SetupWizard({
                     </button>
                   )}
                   {recipe && <small>Reference candidate · {formatBytes(recipe.total_size_bytes)}</small>}
+                </div>
+              )}
+              {preparation && role.state !== "action_required" && (
+                <div className="setup-actions">
+                  <button
+                    className="secondary compact-button"
+                    disabled={actionPending}
+                    onClick={() => startWorker.mutate(role)}
+                  >
+                    {actionPending ? "Preparing…" : "Prepare now"}
+                  </button>
+                  <small>Or skip: the first request loads it instead.</small>
                 </div>
               )}
             </article>

@@ -435,7 +435,14 @@ async def test_ready_roles_surface_worker_failure_without_requiring_residency(
     assert ready["state"] == "ready"
     assert {role["state"] for role in ready["roles"]} == {"ready"}
     chat_ready = next(role for role in ready["roles"] if role["role"] == "chat")
-    assert any(check["code"] == "worker_on_demand" for check in chat_ready["checks"])
+    not_loaded = next(
+        check for check in chat_ready["checks"] if check["code"] == "worker_not_loaded"
+    )
+    # Ready, because it will work - but the wait is named rather than hidden,
+    # and it is offered as something the user may do now instead of later.
+    assert not_loaded["status"] == "pass"
+    assert not_loaded["action"] == "prepare_worker"
+    assert chat_ready["next_action"] is None
     assert chat_ready["checks"][-1]["code"] == "generation_verified"
 
     mismatched_workers = _workers()
@@ -444,7 +451,15 @@ async def test_ready_roles_surface_worker_failure_without_requiring_residency(
     mismatched = (await client.get("/api/setup/readiness")).json()
     mismatched_chat = next(role for role in mismatched["roles"] if role["role"] == "chat")
     assert mismatched_chat["state"] == "ready"
-    assert any(check["code"] == "worker_on_demand" for check in mismatched_chat["checks"])
+    assert any(check["code"] == "worker_not_loaded" for check in mismatched_chat["checks"])
+
+    loaded = _workers()
+    _set_runtime_and_worker_state(app, monkeypatch, workers=loaded)
+    resident = (await client.get("/api/setup/readiness")).json()
+    resident_chat = next(role for role in resident["roles"] if role["role"] == "chat")
+    # Nothing is left to prepare once the model is resident, so nothing is offered.
+    assert any(check["code"] == "worker_ready" for check in resident_chat["checks"])
+    assert all(check["action"] != "prepare_worker" for check in resident_chat["checks"])
 
 
 def response_text(payload: object) -> str:

@@ -512,10 +512,18 @@ def _worker_check(
         and (not expected_profile_id or worker.profile_id == expected_profile_id)
     ):
         return _check("worker_ready", "pass", "The managed worker is ready.")
+    # Loading on demand is not a defect - the model does work when it is asked
+    # for. What it is not is instant, and reporting it as a plain pass told the
+    # user the opposite: the wizard said Ready and the first real request then
+    # spent minutes loading. So the role stays ready and the check keeps its
+    # pass, but it says what remains and offers to do it now. Declining is the
+    # skip, and it needs no stored answer because nothing here claims the cost
+    # went away.
     return _check(
-        "worker_on_demand",
+        "worker_not_loaded",
         "pass",
-        "The managed worker will load this model automatically when used.",
+        "This model is not loaded yet. The first request will wait while it loads.",
+        "prepare_worker",
     )
 
 
