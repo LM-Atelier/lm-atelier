@@ -3757,6 +3757,9 @@ describe("App", () => {
     expect(await screen.findByRole("dialog", { name: "Prompt workshop" })).toBeVisible();
     const adopt = await screen.findByRole("button", { name: "Use latest response as draft" });
     await waitFor(() => expect(adopt).toBeEnabled());
+    // The opening instruction is plumbing; the refined prompt just appears.
+    expect(screen.getByText("A cobalt ceramic cup in soft window light")).toBeInTheDocument();
+    expect(screen.queryByText("Improve the current draft")).not.toBeInTheDocument();
     fireEvent.click(adopt);
     expect(screen.getByRole("textbox", { name: "Draft prompt" })).toHaveValue(
       "A cobalt ceramic cup in soft window light",

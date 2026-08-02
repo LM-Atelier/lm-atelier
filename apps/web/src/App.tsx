@@ -85,6 +85,7 @@ import { ErrorCallout } from "./ErrorCallout";
 import { SetupWizard } from "./SetupWizard";
 import { JobsPanel } from "./JobsPanel";
 import { progressSampleIsFresh } from "./jobProgress";
+import { editVisionNote, workshopTranscript } from "./promptWorkshop";
 import { WorkerLogFolderButton, WorkerStartupLimit } from "./WorkerStartupLimit";
 import { WorkerStatusCard } from "./WorkerStatusCard";
 import { useComposerUploads } from "./useComposerUploads";
@@ -1264,23 +1265,13 @@ function PromptHelperDialog({
   }, [editSourceArtifactIds, initialDraft, refresh, sourceChat.id]);
 
   const helperMessages = helper.data ? activeBranchMessages(helper.data) : [];
+  const transcript = workshopTranscript(helperMessages);
   const pending = helperMessages.some((message) => message.status === "pending");
   const latestAssistant = [...helperMessages].reverse().find(
     (message) => message.role === "assistant" && message.status === "complete",
   );
   const latestAssistantText = latestAssistant ? promptHelperMessageText(latestAssistant) : "";
-  // Say which kind of help this was: a rewrite grounded in the actual image,
-  // or a text-only one because the helper model cannot see. Silence would let
-  // the grounded case and the blind case read identically.
-  const latestVision = latestAssistant?.parts
-    .find((part) => part.type === "generation_metadata")
-    ?.metadata_json?.context as Record<string, unknown> | undefined;
-  const visionInspection = latestVision?.vision as Record<string, unknown> | undefined;
-  const editVisionNote = !editSourceArtifactIds?.length || !latestAssistant
-    ? null
-    : visionInspection?.visual_contents_inspected
-      ? "Grounded in your source image."
-      : "The helper model could not view the image, so this suggestion is text-only.";
+  const visionNote = editVisionNote(latestAssistant, Boolean(editSourceArtifactIds?.length));
 
   const send = async (mode: "text" | "image" | "video", text: string) => {
     if (!helperId || !draft.trim() || !text.trim()) return;
@@ -1346,12 +1337,12 @@ function PromptHelperDialog({
           />
         </label>
         <div className="prompt-helper-conversation" aria-live="polite">
-          {helperMessages.length === 0 && !error && (
+          {transcript.length === 0 && !error && (
             <div className="submission-progress"><LoaderCircle size={17} /><span>Starting workshop…</span></div>
           )}
-          {helperMessages.map((message) => <MessageBubble key={message.id} message={message} />)}
+          {transcript.map((message) => <MessageBubble key={message.id} message={message} />)}
         </div>
-        {editVisionNote && <small className="prompt-helper-vision-note">{editVisionNote}</small>}
+        {visionNote && <small className="prompt-helper-vision-note">{visionNote}</small>}
         {latestAssistant && latestAssistantText && adoptedAssistantId !== latestAssistant.id && (
           <button
             type="button"
