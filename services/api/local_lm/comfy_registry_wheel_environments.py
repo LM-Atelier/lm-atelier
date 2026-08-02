@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
+import hmac
 import json
 import os
 import shutil
@@ -30,11 +31,13 @@ from .subprocess_env import subprocess_environment
 MAX_REGISTRY_WHEEL_ENVIRONMENT_FILES = 100_000
 MAX_REGISTRY_WHEEL_ENVIRONMENT_BYTES = 32 * 1024 * 1024 * 1024
 MAX_REGISTRY_WHEEL_METADATA_FILE_BYTES = 1024 * 1024
+MAX_REGISTRY_WHEEL_ENVIRONMENT_MANIFEST_BYTES = 16 * 1024 * 1024
 MAX_REGISTRY_WHEEL_ARCHIVE_PATH_CHARACTERS = 1_000
 MAX_REGISTRY_WHEEL_EXPANSION_RATIO = 200
 WHEEL_HASH_CHUNK_BYTES = 1024 * 1024
 WHEEL_INSTALL_TIMEOUT_SECONDS = 600
 _REPARSE_POINT = getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0x400)
+_DIGEST_CHARACTERS = frozenset("0123456789abcdefABCDEF")
 
 
 class ComfyRegistryWheelEnvironmentError(ValueError):
@@ -121,6 +124,93 @@ async def assemble_comfy_registry_wheel_environment(
             shutil.rmtree(staging, ignore_errors=True)
         os.close(lock_descriptor)
         lock.unlink(missing_ok=True)
+
+
+def verify_comfy_registry_wheel_environment(
+    destination: Path,
+    *,
+    expected_closure_sha256: str,
+    expected_environment_sha256: str,
+) -> ComfyRegistryWheelEnvironmentReport:
+    """Revalidate a published inert overlay without importing from it."""
+    closure_sha256 = _digest(expected_closure_sha256, "closure")
+    environment_sha256 = _digest(expected_environment_sha256, "environment")
+    expected_name = f"registry-wheels-{closure_sha256}"
+    if (
+        not isinstance(destination, Path)
+        or destination.name != expected_name
+        or _is_link_or_reparse(destination)
+        or not destination.is_dir()
+    ):
+        raise ComfyRegistryWheelEnvironmentError(
+            "invalid_environment", "Wheel environment path is invalid"
+        )
+    manifest_path = destination / "environment-manifest.json"
+    site_packages = destination / "site-packages"
+    children = {path.name for path in destination.iterdir()}
+    if children != {manifest_path.name, site_packages.name} or _is_link_or_reparse(site_packages):
+        raise ComfyRegistryWheelEnvironmentError(
+            "invalid_environment", "Wheel environment layout is invalid"
+        )
+    try:
+        if manifest_path.stat().st_size > MAX_REGISTRY_WHEEL_ENVIRONMENT_MANIFEST_BYTES:
+            raise ComfyRegistryWheelEnvironmentError(
+                "invalid_environment_manifest", "Wheel environment manifest is too large"
+            )
+        encoded = manifest_path.read_bytes()
+    except OSError as exc:
+        raise ComfyRegistryWheelEnvironmentError(
+            "invalid_environment_manifest", "Wheel environment manifest is unreadable"
+        ) from exc
+    if not hmac.compare_digest(hashlib.sha256(encoded).hexdigest(), environment_sha256):
+        raise ComfyRegistryWheelEnvironmentError(
+            "environment_hash_mismatch", "Wheel environment manifest has changed"
+        )
+    try:
+        payload = json.loads(encoded, object_pairs_hook=_unique_object)
+    except (UnicodeDecodeError, json.JSONDecodeError, ValueError) as exc:
+        raise ComfyRegistryWheelEnvironmentError(
+            "invalid_environment_manifest", "Wheel environment manifest is invalid"
+        ) from exc
+    if not isinstance(payload, dict) or set(payload) != {
+        "version",
+        "closure_sha256",
+        "artifact_count",
+        "file_count",
+        "total_bytes",
+        "distributions",
+        "inventory",
+    }:
+        raise ComfyRegistryWheelEnvironmentError(
+            "invalid_environment_manifest", "Wheel environment manifest shape is invalid"
+        )
+    artifact_count = _count(payload["artifact_count"], "artifact")
+    if payload["version"] != 1 or payload["closure_sha256"] != closure_sha256:
+        raise ComfyRegistryWheelEnvironmentError(
+            "invalid_environment_manifest", "Wheel environment manifest identity is invalid"
+        )
+    inventory, file_count, total_bytes, distributions = _scan_environment(site_packages)
+    verified_payload = _environment_payload(
+        closure_sha256,
+        artifact_count,
+        file_count,
+        total_bytes,
+        distributions,
+        inventory,
+    )
+    canonical = _encode_environment_payload(verified_payload)
+    if not hmac.compare_digest(canonical, encoded):
+        raise ComfyRegistryWheelEnvironmentError(
+            "environment_inventory_mismatch", "Wheel environment contents have changed"
+        )
+    return ComfyRegistryWheelEnvironmentReport(
+        closure_sha256,
+        environment_sha256,
+        artifact_count,
+        file_count,
+        total_bytes,
+        distributions,
+    )
 
 
 def _python_executable(value: Path) -> Path:
@@ -404,6 +494,44 @@ def _audit_environment(
     site_packages: Path,
 ) -> tuple[ComfyRegistryWheelEnvironmentReport, bytes]:
     expected = {(artifact.name, artifact.version) for artifact in artifacts}
+    inventory, file_count, total_bytes, resolved = _scan_environment(site_packages)
+    actual = {(item.name, item.version) for item in resolved}
+    if actual != expected or len(resolved) != len(expected):
+        raise ComfyRegistryWheelEnvironmentError(
+            "distribution_set_mismatch",
+            "Wheel environment distributions do not match the closed artifacts",
+        )
+    payload = _environment_payload(
+        closure.closure_sha256,
+        len(artifacts),
+        file_count,
+        total_bytes,
+        resolved,
+        inventory,
+    )
+    encoded = _encode_environment_payload(payload)
+    environment_sha256 = hashlib.sha256(encoded).hexdigest()
+    return (
+        ComfyRegistryWheelEnvironmentReport(
+            closure.closure_sha256,
+            environment_sha256,
+            len(artifacts),
+            file_count,
+            total_bytes,
+            resolved,
+        ),
+        encoded,
+    )
+
+
+def _scan_environment(
+    site_packages: Path,
+) -> tuple[
+    list[dict[str, object]],
+    int,
+    int,
+    tuple[ComfyRegistryWheelEnvironmentDistribution, ...],
+]:
     distributions: list[ComfyRegistryWheelEnvironmentDistribution] = []
     inventory: list[dict[str, object]] = []
     file_count = 0
@@ -478,43 +606,72 @@ def _audit_environment(
             ComfyRegistryWheelEnvironmentDistribution(name, version, directory.name)
         )
     resolved = tuple(sorted(distributions, key=lambda item: (item.name, item.version)))
-    actual = {(item.name, item.version) for item in resolved}
-    if actual != expected or len(resolved) != len(expected):
+    if len(resolved) != len({item.name for item in resolved}):
         raise ComfyRegistryWheelEnvironmentError(
-            "distribution_set_mismatch",
-            "Wheel environment distributions do not match the closed artifacts",
+            "invalid_distribution_metadata", "Wheel distributions contain duplicate names"
         )
-    payload = {
+    return inventory, file_count, total_bytes, resolved
+
+
+def _environment_payload(
+    closure_sha256: str,
+    artifact_count: int,
+    file_count: int,
+    total_bytes: int,
+    distributions: Sequence[ComfyRegistryWheelEnvironmentDistribution],
+    inventory: Sequence[dict[str, object]],
+) -> dict[str, object]:
+    return {
         "version": 1,
-        "closure_sha256": closure.closure_sha256,
-        "artifact_count": len(artifacts),
+        "closure_sha256": closure_sha256,
+        "artifact_count": artifact_count,
         "file_count": file_count,
         "total_bytes": total_bytes,
         "distributions": [
             {"name": item.name, "version": item.version, "dist_info": item.dist_info}
-            for item in resolved
+            for item in distributions
         ],
-        "inventory": inventory,
+        "inventory": list(inventory),
     }
-    encoded = json.dumps(
+
+
+def _encode_environment_payload(payload: object) -> bytes:
+    return json.dumps(
         payload,
         sort_keys=True,
         separators=(",", ":"),
         ensure_ascii=False,
         allow_nan=False,
     ).encode("utf-8")
-    environment_sha256 = hashlib.sha256(encoded).hexdigest()
-    return (
-        ComfyRegistryWheelEnvironmentReport(
-            closure.closure_sha256,
-            environment_sha256,
-            len(artifacts),
-            file_count,
-            total_bytes,
-            resolved,
-        ),
-        encoded,
-    )
+
+
+def _unique_object(pairs: list[tuple[str, object]]) -> dict[str, object]:
+    result: dict[str, object] = {}
+    for key, value in pairs:
+        if key in result:
+            raise ValueError("duplicate environment manifest field")
+        result[key] = value
+    return result
+
+
+def _digest(value: object, label: str) -> str:
+    if (
+        not isinstance(value, str)
+        or len(value) != 64
+        or any(character not in _DIGEST_CHARACTERS for character in value)
+    ):
+        raise ComfyRegistryWheelEnvironmentError(
+            "invalid_environment_identity", f"Wheel environment {label} hash is invalid"
+        )
+    return value.lower()
+
+
+def _count(value: object, label: str) -> int:
+    if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+        raise ComfyRegistryWheelEnvironmentError(
+            "invalid_environment_manifest", f"Wheel environment {label} count is invalid"
+        )
+    return value
 
 
 def _file_identity(path: Path) -> tuple[int, str]:

@@ -11,7 +11,7 @@ import socket
 import sys
 import threading
 import time
-from collections.abc import Awaitable, Callable
+from collections.abc import Awaitable, Callable, Mapping
 from dataclasses import dataclass, field
 from pathlib import Path, PurePosixPath
 from typing import TYPE_CHECKING, Any, Literal
@@ -30,6 +30,7 @@ from .subprocess_env import subprocess_environment
 from .worker_failures import WorkerFailure, WorkerFailureCode, classify_worker_failure
 
 if TYPE_CHECKING:
+    from .comfy_registry_installs import ComfyRegistryLaunchContract
     from .runtime_provisioning import RuntimeProvisioner
 
 logger = logging.getLogger(__name__)
@@ -52,6 +53,7 @@ WORKER_HEALTH_INITIAL_DELAY_SECONDS = 0.25
 WORKER_HEALTH_MAX_DELAY_SECONDS = 2.0
 WORKER_LIVENESS_INTERVAL_SECONDS = 5.0
 WORKER_LIVENESS_FAILURE_THRESHOLD = 3
+COMFY_OBJECT_INFO_MAX_BYTES = 64 * 1024 * 1024
 WINDOWS_CREATE_NO_WINDOW = 0x08000000
 WINDOWS_SO_EXCLUSIVEADDRUSE = int(getattr(socket, "SO_EXCLUSIVEADDRUSE", -5))
 
@@ -462,6 +464,10 @@ class ProcessSupervisor:
         parsed = urlparse(self.settings.comfy_url)
         await report_phase("Validating media dependencies")
         trusted_custom_nodes = await self._trusted_comfy_node_folders()
+        registry_contract = await asyncio.to_thread(self._trusted_comfy_registry_contract)
+        trusted_custom_nodes = sorted(
+            {*trusted_custom_nodes, *registry_contract.custom_node_folders}
+        )
         output_directory = self.settings.comfy_output_dir.resolve()
         output_directory.mkdir(parents=True, exist_ok=True)
         model_paths_config = (
@@ -487,8 +493,62 @@ class ProcessSupervisor:
         if trusted_custom_nodes:
             command.extend(["--whitelist-custom-nodes", *trusted_custom_nodes])
         await report_phase("Starting media runtime")
-        await self._replace("media", command, self.settings.comfy_url + "/system_stats")
+        if registry_contract.site_packages:
+            await self._replace(
+                "media",
+                command,
+                self.settings.comfy_url + "/system_stats",
+                environment_overrides={
+                    "PYTHONPATH": os.pathsep.join(
+                        str(path) for path in registry_contract.site_packages
+                    )
+                },
+                ready_check=lambda: self._verify_comfy_node_types(registry_contract.node_types),
+            )
+        else:
+            await self._replace("media", command, self.settings.comfy_url + "/system_stats")
         return self.statuses()[1]
+
+    def _trusted_comfy_registry_contract(self) -> ComfyRegistryLaunchContract:
+        from .comfy_registry_installs import trusted_comfy_registry_launch_contract
+        from .db import SessionLocal
+
+        with SessionLocal() as session:
+            return trusted_comfy_registry_launch_contract(
+                session,
+                custom_node_root=self.settings.custom_node_dir,
+                environment_root=self.settings.state_dir / "registry-wheel-environments",
+            )
+
+    async def _verify_comfy_node_types(self, expected: tuple[str, ...]) -> None:
+        if not expected:
+            return
+        payload = bytearray()
+        async with (
+            httpx.AsyncClient(
+                trust_env=False,
+                verify=shared_tls_context(trust_environment=False),
+            ) as client,
+            client.stream(
+                "GET",
+                self.settings.comfy_url + "/object_info",
+                timeout=WORKER_HEALTH_REQUEST_TIMEOUT_SECONDS,
+            ) as response,
+        ):
+            response.raise_for_status()
+            async for chunk in response.aiter_bytes():
+                payload.extend(chunk)
+                if len(payload) > COMFY_OBJECT_INFO_MAX_BYTES:
+                    raise RuntimeError("ComfyUI node inventory exceeds the response limit")
+        try:
+            inventory = json.loads(payload)
+        except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+            raise RuntimeError("ComfyUI returned an invalid node inventory") from exc
+        if not isinstance(inventory, dict):
+            raise RuntimeError("ComfyUI returned an invalid node inventory")
+        missing = sorted(set(expected) - set(inventory))
+        if missing:
+            raise RuntimeError(f"ComfyUI did not load required node type {missing[0]}")
 
     async def _trusted_comfy_node_folders(self) -> list[str]:
         from sqlalchemy import select
@@ -627,6 +687,8 @@ class ProcessSupervisor:
         health_url: str,
         profile_id: str | None = None,
         estimated_memory_bytes: int | None = None,
+        environment_overrides: Mapping[str, str] | None = None,
+        ready_check: Callable[[], Awaitable[None]] | None = None,
     ) -> None:
         async with self._locks[name]:
             await self._stop_unlocked(name)
@@ -635,7 +697,7 @@ class ProcessSupervisor:
             log_path = self.settings.log_dir / f"{name}-worker.log"
             worker_log = _RotatingWorkerLog(log_path)
             try:
-                environment = subprocess_environment()
+                environment = subprocess_environment(overrides=environment_overrides)
                 if os.name == "nt":
                     process = await asyncio.create_subprocess_exec(
                         *command,
@@ -675,6 +737,8 @@ class ProcessSupervisor:
                 if process.returncode is None:
                     self._record_worker_process_tree(name, process.pid)
                 await self._wait_healthy(record, health_url)
+                if ready_check is not None:
+                    await ready_check()
                 record.startup_duration_ms = round(
                     (time.perf_counter() - startup_started_at) * 1_000
                 )
