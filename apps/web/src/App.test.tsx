@@ -575,6 +575,8 @@ describe("App", () => {
       error: null,
       attempt: 0,
       cancellable: true,
+      started_at: null,
+      completed_at: null,
       created_at: "2026-07-28T00:00:00Z",
       updated_at: "2026-07-28T00:00:00Z",
     }]);
@@ -633,6 +635,8 @@ describe("App", () => {
       error: null,
       attempt: 0,
       cancellable: true,
+      started_at: null,
+      completed_at: null,
       created_at: stamp,
       updated_at: stamp,
     };
@@ -1397,6 +1401,8 @@ describe("App", () => {
       error: null,
       attempt: 1,
       cancellable: true,
+      started_at: null,
+      completed_at: null,
       created_at: stamp,
       updated_at: stamp,
     };
@@ -1454,6 +1460,8 @@ describe("App", () => {
         error: null,
         attempt: 1,
         cancellable: true,
+        started_at: null,
+        completed_at: null,
         created_at: stamp,
         updated_at: stamp,
       },
@@ -1489,6 +1497,8 @@ describe("App", () => {
         error: null,
         attempt: 0,
         cancellable: true,
+        started_at: null,
+        completed_at: null,
         created_at: stamp,
         updated_at: stamp,
       },
@@ -1544,6 +1554,8 @@ describe("App", () => {
       error: null,
       attempt: 1,
       cancellable: true,
+      started_at: null,
+      completed_at: null,
       created_at: stamp,
       updated_at: stamp,
     }]);
@@ -1571,6 +1583,8 @@ describe("App", () => {
       error: `loader ${index + 1} crashed`,
       attempt: 1,
       cancellable: false,
+      started_at: null,
+      completed_at: null,
       created_at: `2026-07-2${index + 1}T00:00:00Z`,
       updated_at: `2026-07-2${index + 1}T00:00:00Z`,
     }));
@@ -1608,6 +1622,8 @@ describe("App", () => {
       error: "old loader failure",
       attempt: 1,
       cancellable: false,
+      started_at: null,
+      completed_at: null,
       created_at: "2026-07-24T00:00:00Z",
       updated_at: "2026-07-24T00:00:00Z",
     };
@@ -4150,6 +4166,10 @@ describe("App", () => {
         provenance_json: {},
         error: null,
         created_at: stamp,
+        updated_at: stamp,
+        started_at: null,
+        completed_at: null,
+        duration_ms: null,
       },
       user_message: {
         id: "user-origin",
