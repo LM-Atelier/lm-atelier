@@ -1,0 +1,369 @@
+from __future__ import annotations
+
+import asyncio
+from collections.abc import Generator
+from pathlib import Path
+
+import pytest
+from sqlalchemy import create_engine
+from sqlalchemy.orm import Session
+
+import local_lm.comfy_registry_activation as activation_module
+from local_lm.comfy_registry_activation import (
+    ComfyRegistryActivationError,
+    activate_comfy_registry_install,
+    deactivate_comfy_registry_install,
+    review_comfy_registry_install,
+)
+from local_lm.comfy_registry_installs import ComfyRegistryLaunchContract
+from local_lm.db import Base
+from local_lm.models import ComfyRegistryInstall
+
+
+@pytest.fixture
+def session() -> Generator[Session]:
+    engine = create_engine("sqlite://")
+    Base.metadata.create_all(engine)
+    with Session(engine) as value:
+        yield value
+
+
+def _install(session: Session, *, trusted: bool = False, active: bool = False) -> str:
+    install = ComfyRegistryInstall(
+        package_id="comfyui-example-node",
+        package_version="1.2.3",
+        registry_record_id="record-123",
+        repository_url="https://github.com/example/comfyui-example-node.git",
+        download_url="https://cdn.comfy.org/example/1.2.3.zip",
+        archive_sha256="a" * 64,
+        manifest_sha256="b" * 64,
+        installed_path="lm-atelier-registry_example",
+        node_types_json=["ExampleNode"],
+        pip_dependencies_json=[],
+        review_json={"review_required": True},
+        wheel_closure_sha256="c" * 64,
+        wheel_environment_sha256="d" * 64,
+        wheel_environment_path=f"registry-wheels-{'c' * 64}",
+        trusted=trusted,
+        active=active,
+    )
+    session.add(install)
+    session.commit()
+    return install.id
+
+
+def _verified_contract(session: Session, install_id: str) -> ComfyRegistryLaunchContract:
+    install = session.get(ComfyRegistryInstall, install_id)
+    assert install is not None
+    assert install.trusted is True
+    assert install.active is True
+    return ComfyRegistryLaunchContract((install.installed_path,), (), ("ExampleNode",))
+
+
+def test_explicit_trust_revalidates_with_temporary_activation_and_stays_inactive(
+    session: Session,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    install_id = _install(session)
+    monkeypatch.setattr(
+        activation_module,
+        "trusted_comfy_registry_launch_contract",
+        lambda current, **_kwargs: _verified_contract(current, install_id),
+    )
+
+    state = review_comfy_registry_install(
+        session,
+        install_id=install_id,
+        trusted=True,
+        custom_node_root=tmp_path,
+        environment_root=tmp_path,
+        media_worker_stopped=True,
+    )
+
+    assert state.trusted is True
+    assert state.active is False
+    assert state.reviewed_at
+    stored = session.get(ComfyRegistryInstall, install_id)
+    assert stored is not None
+    assert stored.review_json["trusted_by_local_user"] is True
+
+
+def test_failed_review_rolls_back_without_trust(
+    session: Session,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    install_id = _install(session)
+
+    def fail(*_args: object, **_kwargs: object) -> ComfyRegistryLaunchContract:
+        raise ValueError("changed")
+
+    monkeypatch.setattr(activation_module, "trusted_comfy_registry_launch_contract", fail)
+
+    with pytest.raises(ComfyRegistryActivationError) as raised:
+        review_comfy_registry_install(
+            session,
+            install_id=install_id,
+            trusted=True,
+            custom_node_root=tmp_path,
+            environment_root=tmp_path,
+            media_worker_stopped=True,
+        )
+
+    assert raised.value.code == "registry_install_verification_failed"
+    stored = session.get(ComfyRegistryInstall, install_id)
+    assert stored is not None
+    assert stored.trusted is False
+    assert stored.active is False
+
+
+def test_revoking_trust_also_deactivates(session: Session, tmp_path: Path) -> None:
+    install_id = _install(session, trusted=True, active=True)
+
+    state = review_comfy_registry_install(
+        session,
+        install_id=install_id,
+        trusted=False,
+        custom_node_root=tmp_path,
+        environment_root=tmp_path,
+        media_worker_stopped=True,
+    )
+
+    assert state.trusted is False
+    assert state.active is False
+    stored = session.get(ComfyRegistryInstall, install_id)
+    assert stored is not None
+    assert stored.review_json["trusted_by_local_user"] is False
+
+
+async def test_activation_starts_media_only_after_verified_state_is_committed(
+    session: Session,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    install_id = _install(session, trusted=True)
+    monkeypatch.setattr(
+        activation_module,
+        "trusted_comfy_registry_launch_contract",
+        lambda current, **_kwargs: _verified_contract(current, install_id),
+    )
+    starts = 0
+
+    async def start_media() -> object:
+        nonlocal starts
+        starts += 1
+        stored = session.get(ComfyRegistryInstall, install_id)
+        assert stored is not None and stored.active is True
+        return object()
+
+    state = await activate_comfy_registry_install(
+        session,
+        install_id=install_id,
+        custom_node_root=tmp_path,
+        environment_root=tmp_path,
+        media_worker_stopped=True,
+        start_media=start_media,
+    )
+
+    assert starts == 1
+    assert state.trusted is True
+    assert state.active is True
+    assert state.activated_at
+
+
+async def test_untrusted_install_cannot_start_or_reach_runtime_verification(
+    session: Session,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    install_id = _install(session)
+
+    def unexpected(*_args: object, **_kwargs: object) -> ComfyRegistryLaunchContract:
+        raise AssertionError("untrusted activation must not reach verification")
+
+    monkeypatch.setattr(
+        activation_module,
+        "trusted_comfy_registry_launch_contract",
+        unexpected,
+    )
+
+    async def start_media() -> object:
+        raise AssertionError("untrusted activation must not start media")
+
+    with pytest.raises(ComfyRegistryActivationError) as raised:
+        await activate_comfy_registry_install(
+            session,
+            install_id=install_id,
+            custom_node_root=tmp_path,
+            environment_root=tmp_path,
+            media_worker_stopped=True,
+            start_media=start_media,
+        )
+
+    assert raised.value.code == "registry_install_untrusted"
+    stored = session.get(ComfyRegistryInstall, install_id)
+    assert stored is not None and stored.active is False
+
+
+async def test_failed_activation_restores_runtime_with_package_inactive(
+    session: Session,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    install_id = _install(session, trusted=True)
+    monkeypatch.setattr(
+        activation_module,
+        "trusted_comfy_registry_launch_contract",
+        lambda current, **_kwargs: _verified_contract(current, install_id),
+    )
+    observed: list[bool] = []
+
+    async def start_media() -> object:
+        stored = session.get(ComfyRegistryInstall, install_id)
+        assert stored is not None
+        observed.append(stored.active)
+        if len(observed) == 1:
+            raise RuntimeError("node failed")
+        return object()
+
+    with pytest.raises(ComfyRegistryActivationError) as raised:
+        await activate_comfy_registry_install(
+            session,
+            install_id=install_id,
+            custom_node_root=tmp_path,
+            environment_root=tmp_path,
+            media_worker_stopped=True,
+            start_media=start_media,
+        )
+
+    assert raised.value.code == "activation_start_failed"
+    assert observed == [True, False]
+    stored = session.get(ComfyRegistryInstall, install_id)
+    assert stored is not None
+    assert stored.active is False
+    assert stored.review_json["activation_failure_code"] == "activation_start_failed"
+
+
+async def test_failed_activation_and_failed_restore_remain_inactive(
+    session: Session,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    install_id = _install(session, trusted=True)
+    monkeypatch.setattr(
+        activation_module,
+        "trusted_comfy_registry_launch_contract",
+        lambda current, **_kwargs: _verified_contract(current, install_id),
+    )
+
+    async def fail() -> object:
+        raise RuntimeError("failed")
+
+    with pytest.raises(ComfyRegistryActivationError) as raised:
+        await activate_comfy_registry_install(
+            session,
+            install_id=install_id,
+            custom_node_root=tmp_path,
+            environment_root=tmp_path,
+            media_worker_stopped=True,
+            start_media=fail,
+        )
+
+    assert raised.value.code == "activation_restore_failed"
+    stored = session.get(ComfyRegistryInstall, install_id)
+    assert stored is not None and stored.active is False
+
+
+async def test_cancelled_activation_restores_runtime_then_propagates_cancel(
+    session: Session,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    install_id = _install(session, trusted=True)
+    monkeypatch.setattr(
+        activation_module,
+        "trusted_comfy_registry_launch_contract",
+        lambda current, **_kwargs: _verified_contract(current, install_id),
+    )
+    observed: list[bool] = []
+
+    async def start_media() -> object:
+        stored = session.get(ComfyRegistryInstall, install_id)
+        assert stored is not None
+        observed.append(stored.active)
+        if len(observed) == 1:
+            raise asyncio.CancelledError
+        return object()
+
+    with pytest.raises(asyncio.CancelledError):
+        await activate_comfy_registry_install(
+            session,
+            install_id=install_id,
+            custom_node_root=tmp_path,
+            environment_root=tmp_path,
+            media_worker_stopped=True,
+            start_media=start_media,
+        )
+
+    assert observed == [True, False]
+    stored = session.get(ComfyRegistryInstall, install_id)
+    assert stored is not None and stored.active is False
+
+
+async def test_deactivation_stays_safe_when_media_restart_fails(session: Session) -> None:
+    install_id = _install(session, trusted=True, active=True)
+
+    async def fail() -> object:
+        raise RuntimeError("failed")
+
+    with pytest.raises(ComfyRegistryActivationError) as raised:
+        await deactivate_comfy_registry_install(
+            session,
+            install_id=install_id,
+            media_worker_stopped=True,
+            start_media=fail,
+        )
+
+    assert raised.value.code == "deactivation_restart_failed"
+    stored = session.get(ComfyRegistryInstall, install_id)
+    assert stored is not None and stored.active is False
+
+
+@pytest.mark.parametrize("operation", ["review", "activate", "deactivate"])
+async def test_worker_must_be_stopped_before_install_lookup(
+    session: Session,
+    tmp_path: Path,
+    operation: str,
+) -> None:
+    async def start_media() -> object:
+        raise AssertionError("worker state refusal must not start media")
+
+    with pytest.raises(ComfyRegistryActivationError) as raised:
+        if operation == "review":
+            review_comfy_registry_install(
+                session,
+                install_id="missing",
+                trusted=True,
+                custom_node_root=tmp_path,
+                environment_root=tmp_path,
+                media_worker_stopped=False,
+            )
+        elif operation == "activate":
+            await activate_comfy_registry_install(
+                session,
+                install_id="missing",
+                custom_node_root=tmp_path,
+                environment_root=tmp_path,
+                media_worker_stopped=False,
+                start_media=start_media,
+            )
+        else:
+            await deactivate_comfy_registry_install(
+                session,
+                install_id="missing",
+                media_worker_stopped=False,
+                start_media=start_media,
+            )
+
+    assert raised.value.code == "media_worker_running"
