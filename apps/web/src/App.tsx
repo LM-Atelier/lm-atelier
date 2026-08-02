@@ -136,7 +136,10 @@ type Visibility = "basic" | "advanced" | "expert";
 type PendingTurn = { id: string; text: string; mode: RoutingMode };
 type VisualTarget = {
   attachment: ComposerAttachment;
-  mode: "image" | "video";
+  // null means "attach only", used by Reference: quoting a picture says what
+  // the next turn is about; it must not silently change the generation mode
+  // the user chose, the way Edit and Animate deliberately do.
+  mode: "image" | "video" | null;
   requestId: number;
 };
 type SendTurnVariables = PendingTurn & {
@@ -223,11 +226,13 @@ function ArtifactPart({
   origin,
   onEditImage,
   onAnimateImage,
+  onReferenceMedia,
 }: {
   part: MessagePart;
   origin: MediaOrigin | null;
   onEditImage?: (part: MessagePart, origin: MediaOrigin) => void;
   onAnimateImage?: (part: MessagePart, origin: MediaOrigin) => void;
+  onReferenceMedia?: (part: MessagePart, origin: MediaOrigin) => void;
 }) {
   const proxyId = typeof part.metadata_json.browser_proxy_artifact_id === "string" ? part.metadata_json.browser_proxy_artifact_id : null;
   const posterId = typeof part.metadata_json.poster_artifact_id === "string"
@@ -259,6 +264,7 @@ function ArtifactPart({
           <ImageIcon size={14} /> {label}
           {!preview && onEditImage && <button type="button" onClick={() => onEditImage(part, callbackOrigin)}>Edit</button>}
           {!preview && onAnimateImage && <button type="button" onClick={() => onAnimateImage(part, callbackOrigin)}>Animate</button>}
+          {!preview && onReferenceMedia && <button type="button" onClick={() => onReferenceMedia(part, callbackOrigin)}>Reference</button>}
           {!preview && <a href={source} download>Download</a>}
         </figcaption>
       </figure>
@@ -466,6 +472,7 @@ function PartView({
   origin,
   onEditImage,
   onAnimateImage,
+  onReferenceMedia,
 }: {
   part: MessagePart;
   liveText?: string;
@@ -473,13 +480,14 @@ function PartView({
   origin: MediaOrigin | null;
   onEditImage?: (part: MessagePart, origin: MediaOrigin) => void;
   onAnimateImage?: (part: MessagePart, origin: MediaOrigin) => void;
+  onReferenceMedia?: (part: MessagePart, origin: MediaOrigin) => void;
 }) {
   if (part.type === "text") {
     const text = liveText || part.text || "";
     return markdown ? <MarkdownText text={text} /> : <div className="message-text">{text}</div>;
   }
   if (part.type === "image" || part.type === "video" || part.type === "attachment") {
-    return <ArtifactPart part={part} origin={origin} onEditImage={onEditImage} onAnimateImage={onAnimateImage} />;
+    return <ArtifactPart part={part} origin={origin} onEditImage={onEditImage} onAnimateImage={onAnimateImage} onReferenceMedia={onReferenceMedia} />;
   }
   if (part.type === "progress") {
     const progress = Number(part.metadata_json.progress ?? 0);
@@ -513,6 +521,7 @@ function MessageBubble({
   onCancelQueued,
   onEditImage,
   onAnimateImage,
+  onReferenceMedia,
   onQuote,
   onDeleteExchange,
 }: {
@@ -525,6 +534,7 @@ function MessageBubble({
   onCancelQueued?: () => void;
   onEditImage?: (part: MessagePart, origin: MediaOrigin) => void;
   onAnimateImage?: (part: MessagePart, origin: MediaOrigin) => void;
+  onReferenceMedia?: (part: MessagePart, origin: MediaOrigin) => void;
   onQuote?: (text: string) => void;
   onDeleteExchange?: (messageId: string) => void;
 }) {
@@ -604,7 +614,7 @@ function MessageBubble({
     <article className={`message ${message.role}`}>
       <div className="avatar">{message.role === "user" ? "You" : <Bot size={19} />}</div>
       <div className="message-content">
-        {editing ? <div className="message-edit"><textarea aria-label="Edit message" rows={4} value={draft} onChange={(event) => setDraft(event.target.value)} /><div><button onClick={() => { setDraft(userText); setEditing(false); }}>Cancel</button><button className="primary" disabled={!draft.trim()} onClick={() => { onEdit?.(message.id, draft.trim()); setEditing(false); }}>Send edited message</button></div></div> : renderedParts.map((part) => <PartView key={part.id} part={part} liveText={liveText} markdown={message.role === "assistant"} origin={mediaOriginForPart(part, operation, message.role === "assistant" ? "generated" : null)} onEditImage={onEditImage} onAnimateImage={onAnimateImage} />)}
+        {editing ? <div className="message-edit"><textarea aria-label="Edit message" rows={4} value={draft} onChange={(event) => setDraft(event.target.value)} /><div><button onClick={() => { setDraft(userText); setEditing(false); }}>Cancel</button><button className="primary" disabled={!draft.trim()} onClick={() => { onEdit?.(message.id, draft.trim()); setEditing(false); }}>Send edited message</button></div></div> : renderedParts.map((part) => <PartView key={part.id} part={part} liveText={liveText} markdown={message.role === "assistant"} origin={mediaOriginForPart(part, operation, message.role === "assistant" ? "generated" : null)} onEditImage={onEditImage} onAnimateImage={onAnimateImage} onReferenceMedia={onReferenceMedia} />)}
         {liveText && !visibleParts.some((part) => part.type === "text") && (
           <MarkdownText text={liveText} />
         )}
@@ -1465,7 +1475,7 @@ function Composer({
         ? current
         : [...current, visualTarget.attachment]
     ));
-    changeMode(visualTarget.mode);
+    if (visualTarget.mode) changeMode(visualTarget.mode);
     if (visualTarget.mode === "video") {
       window.setTimeout(() => {
         setText((current) => current.trim() ? current : "Animate this image");
@@ -2029,6 +2039,16 @@ function ChatView({
                     origin,
                   },
                   mode: "video",
+                  requestId: Date.now(),
+                })}
+                onReferenceMedia={busy ? undefined : (part, origin) => setVisualTarget({
+                  attachment: {
+                    id: part.artifact_id!,
+                    kind: part.type === "video" ? "video" : "image",
+                    artifact: part.artifact,
+                    origin,
+                  },
+                  mode: null,
                   requestId: Date.now(),
                 })}
                 onQuote={(text) => setQuoteTarget({ text, requestId: Date.now() })}

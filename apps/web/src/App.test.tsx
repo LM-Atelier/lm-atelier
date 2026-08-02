@@ -4754,6 +4754,14 @@ describe("App", () => {
     expect(screen.getAllByText("Generated image")).toHaveLength(2);
     expect(screen.getByRole("combobox", { name: "Generation mode" })).toHaveValue("video");
 
+    // Reference attaches the same artifact without touching the mode - the
+    // distinction from Edit and Animate, which deliberately do change it.
+    vi.mocked(api.updateChat).mockClear();
+    fireEvent.click(screen.getByRole("button", { name: "Reference" }));
+    expect(screen.getByRole("combobox", { name: "Generation mode" })).toHaveValue("video");
+    expect(api.updateChat).not.toHaveBeenCalled();
+    expect(screen.getByRole("link", { name: "Preview sha256:animate-source" })).toBeVisible();
+
     fireEvent.click(screen.getByRole("button", { name: "Turn settings" }));
     expect(await screen.findByRole("spinbutton", { name: /Image motion frames/ })).toBeInTheDocument();
     expect(screen.queryByRole("spinbutton", { name: /Text video frames/ })).not.toBeInTheDocument();
