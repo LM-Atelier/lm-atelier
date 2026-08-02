@@ -2109,14 +2109,22 @@ async def test_a_slow_large_transfer_still_reports_its_speed(
         )
 
     task = asyncio.create_task(run_monitor())
-    await asyncio.sleep(0.2)
-    stop.set()
-    await task
+    # Poll for the rate instead of granting one fixed slice of wall clock: a
+    # loaded runner can starve the monitor past any single sleep, and the
+    # regression being pinned is "the speed appears", not "it appears fast".
+    progress: dict[str, Any] = {}
+    try:
+        for _ in range(100):
+            await asyncio.sleep(0.05)
+            with SessionLocal() as session:
+                job = session.get(Job, "job_slow_transfer")
+                progress = job.progress_json if job else {}
+            if progress.get("rate_bytes_per_second"):
+                break
+    finally:
+        stop.set()
+        await task
 
-    with SessionLocal() as session:
-        job = session.get(Job, "job_slow_transfer")
-        assert job is not None
-        progress = job.progress_json
     assert progress["unit"] == "bytes"
     assert progress["completed_units"] > 0
     assert progress["rate_bytes_per_second"], "a moving transfer must report its speed"
