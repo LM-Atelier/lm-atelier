@@ -3307,7 +3307,7 @@ async def delete_edit_template(template_id: str, session: SessionDep) -> Respons
 
     template = session.get(EditTemplate, template_id)
     if not template:
-        raise HTTPException(404, "edit template not found")
+        raise api_error(404, "edit-template-not-found", "edit template not found")
     if template.builtin:
         template.enabled = False
     else:
