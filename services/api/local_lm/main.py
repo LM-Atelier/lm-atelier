@@ -202,8 +202,14 @@ class Services:
 
 
 def build_services(settings: Settings) -> Services:
-    credentials = CredentialStore(settings.hf_token)
-    settings.hf_token = credentials.token()
+    credentials = CredentialStore(
+        environment_tokens={
+            "huggingface": settings.hf_token,
+            "civitai": settings.civitai_token,
+        }
+    )
+    settings.hf_token = credentials.token("huggingface")
+    settings.civitai_token = credentials.token("civitai")
     events = EventBroker(settings.event_history_size)
     artifacts = ArtifactStore(settings)
     runtimes = RuntimeProvisioner(settings)

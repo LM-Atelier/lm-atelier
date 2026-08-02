@@ -258,11 +258,11 @@ async def test_external_adapter_factory_does_not_receive_download_credentials(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
-    received_token = "not-called"
+    received_tokens = ("not-called", "not-called")
 
     def factory(settings: Settings) -> MockChatAdapter:
-        nonlocal received_token
-        received_token = settings.hf_token or ""
+        nonlocal received_tokens
+        received_tokens = (settings.hf_token or "", settings.civitai_token or "")
         return MockChatAdapter()
 
     factory.lm_atelier_contract_version = 1  # type: ignore[attr-defined]
@@ -274,11 +274,13 @@ async def test_external_adapter_factory_does_not_receive_download_credentials(
         data_dir=tmp_path,
         chat_engine="credential-safe",
         hf_token="hf_private_value",
+        civitai_token="civitai_private_value",
     )
     adapter = load_external_adapter("chat", "credential-safe", settings)
     try:
-        assert received_token == ""
+        assert received_tokens == ("", "")
         assert settings.hf_token == "hf_private_value"
+        assert settings.civitai_token == "civitai_private_value"
     finally:
         await adapter.close()
 

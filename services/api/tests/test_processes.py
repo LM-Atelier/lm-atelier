@@ -266,8 +266,13 @@ async def test_startup_exit_retains_redacted_stderr_and_actionable_status(
 ) -> None:  # type: ignore[no-untyped-def]
     settings.prepare()
     settings.hf_token = "hf_private_worker_token"
+    settings.civitai_token = "civitai_private_worker_token"
     private_model_path = settings.model_dir / "private-model.gguf"
-    stderr = f"Authorization: Bearer hf_private_worker_token\nfailed to open {private_model_path}\n"
+    stderr = (
+        "Authorization: Bearer hf_private_worker_token\n"
+        "CivitAI token: civitai_private_worker_token\n"
+        f"failed to open {private_model_path}\n"
+    )
     supervisor = ProcessSupervisor(settings)
     monkeypatch.setattr(supervisor, "_ensure_port_available", AsyncMock())
 
@@ -293,6 +298,7 @@ async def test_startup_exit_retains_redacted_stderr_and_actionable_status(
     assert "[data folder]" in status.stderr_tail
     assert status.log_path == "logs/chat-worker.log"
     assert settings.hf_token not in surfaced
+    assert settings.civitai_token not in surfaced
     assert str(settings.data_dir.resolve()) not in surfaced
     assert all(str(settings.data_dir.resolve()) not in argument for argument in status.command)
     await supervisor.close()

@@ -699,8 +699,10 @@ export interface ApplicationInfo {
   log_directory: string;
 }
 
+export type CredentialProvider = "huggingface" | "civitai";
+
 export interface CredentialStatus {
-  provider: "huggingface";
+  provider: CredentialProvider;
   configured: boolean;
   source: "none" | "environment" | "credential_vault";
   vault_available: boolean;
