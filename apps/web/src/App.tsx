@@ -87,6 +87,7 @@ import { EditingStudio } from "./EditingStudio";
 import { MessageTimestamp } from "./MessageTimestamp";
 import { PendingResponseStatus } from "./PendingResponseStatus";
 import { MarkdownText } from "./MarkdownText";
+import { focusMainContent, roleForMode } from "./viewHelpers";
 import { CompareButton } from "./CompareButton";
 import { FirstRunSetup, SetupWizard } from "./SetupWizard";
 import { WorkflowPackageReview } from "./WorkflowPackageReview";
@@ -160,16 +161,6 @@ const visibilityRank: Record<Visibility, number> = { basic: 0, advanced: 1, expe
 const AUTO_PROFILE_ID = "__auto__";
 const SETUP_DISMISSED_KEY = "lm-atelier-setup-dismissed";
 const CURRENT_CHAT_KEY = "local-lm-chat";
-
-function focusMainContent() {
-  window.setTimeout(() => document.getElementById("main-content")?.focus(), 0);
-}
-
-function roleForMode(mode: RoutingMode): EngineRole {
-  if (mode === "video") return "video";
-  if (mode === "image") return "image";
-  return "chat";
-}
 
 function formatTechnicalDetails(
   application: ApplicationInfo,
@@ -1652,7 +1643,16 @@ function Composer({
           </div>
         </div>
       </div>
-      {studioOpen && <EditingStudio currentInstruction={text} onClose={() => setStudioOpen(false)} onPick={(instruction, template) => { setText(instruction); setTemplateSettings(Object.keys(template.settings_json).length ? { name: template.name, settings: template.settings_json } : null); setStudioOpen(false); window.setTimeout(() => textInput.current?.focus(), 0); }} />}
+      {studioOpen && <EditingStudio currentInstruction={text} onClose={() => setStudioOpen(false)} onPick={(instruction, template) => { setText(instruction); setTemplateSettings(Object.keys(template.settings_json).length ? { name: template.name, settings: template.settings_json } : null); setStudioOpen(false); window.setTimeout(() => textInput.current?.focus(), 0); }} imageCount={attachments.filter((item) => item.kind === "image").length} onApplyToEach={(instruction, template) => {
+        const role = roleForMode("image");
+        const engine = engines.find((item) => item.roles.includes(role));
+        const fields = resolveWorkflowSettings(resolveCapabilitySettings(engine, role), workflowSchema);
+        const merged = normalizeSettingsForFields({ ...settings, ...template.settings_json }, fields);
+        // One ordinary edit turn per image: each queues, verifies, and retries
+        // alone; the pending-work bound errs clearly rather than truncating.
+        for (const item of attachments.filter((entry) => entry.kind === "image")) onSend(instruction, "image", [item.id], merged);
+        setAttachments([]); setText(""); setTemplateSettings(null); setStudioOpen(false);
+      }} />}
       {promptHelperDraft !== null && (
         <PromptHelperDialog
           sourceChat={chat}

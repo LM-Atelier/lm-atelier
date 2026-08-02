@@ -14,10 +14,16 @@ import type { EditTemplate } from "./types";
  */
 export function EditingStudio({
   onPick,
+  onApplyToEach,
+  imageCount = 0,
   onClose,
   currentInstruction = "",
 }: {
   onPick: (instruction: string, template: EditTemplate) => void;
+  // Send one edit turn per attached image; each runs, verifies, and can be
+  // retried on its own.
+  onApplyToEach?: (instruction: string, template: EditTemplate) => void;
+  imageCount?: number;
   onClose: () => void;
   // The composer's draft, offered for saving as a personal template.
   currentInstruction?: string;
@@ -97,6 +103,15 @@ export function EditingStudio({
       )}
       <footer>
         <button className="secondary" onClick={onClose}>Cancel</button>
+        {onApplyToEach && imageCount > 1 && (
+          <button
+            className="secondary"
+            disabled={!selected}
+            onClick={() => selected && onApplyToEach(renderTemplateInstruction(selected, subject), selected)}
+          >
+            Apply to each of {imageCount} images
+          </button>
+        )}
         <button
           className="primary"
           disabled={!selected}
