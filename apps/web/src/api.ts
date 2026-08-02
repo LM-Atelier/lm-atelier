@@ -33,6 +33,7 @@ import type {
   PromptHelperDetail,
   Project,
   ReferenceRecipe,
+  RegistryInstall,
   RoutingMode,
   RuntimeStatus,
   SetupReadinessReport,
@@ -69,6 +70,7 @@ export class ApiError extends Error {
     public readonly status: number,
     public readonly detail: unknown,
     message: string,
+    public readonly code?: string,
   ) {
     super(message);
     this.name = "ApiError";
@@ -141,15 +143,17 @@ async function request<T>(
   if (!response.ok) {
     let message = `${response.status} ${response.statusText}`;
     let detail: unknown;
+    let code: string | undefined;
     try {
-      const payload = (await response.json()) as { detail?: unknown };
+      const payload = (await response.json()) as { detail?: unknown; code?: unknown };
       detail = payload.detail;
+      if (typeof payload.code === "string") code = payload.code;
       if (typeof detail === "string") message = detail;
       else if (detail && typeof detail === "object" && "message" in detail && typeof detail.message === "string") message = detail.message;
     } catch {
       // Preserve the HTTP status text.
     }
-    throw new ApiError(response.status, detail, message);
+    throw new ApiError(response.status, detail, message, code);
   }
   if (response.status === 204) return undefined as T;
   return (await response.json()) as T;
@@ -605,6 +609,20 @@ export const api = {
     request<Job>("/api/workflows/packages/prepare", {
       method: "POST",
       body: JSON.stringify({ package_id: packageId, version }),
+    }),
+  registryInstalls: () => request<RegistryInstall[]>("/api/workflows/packages/installs"),
+  reviewRegistryInstall: (installId: string, trusted: boolean) =>
+    request<RegistryInstall>(`/api/workflows/packages/installs/${installId}/review`, {
+      method: "POST",
+      body: JSON.stringify({ trusted }),
+    }),
+  activateRegistryInstall: (installId: string) =>
+    request<RegistryInstall>(`/api/workflows/packages/installs/${installId}/activate`, {
+      method: "POST",
+    }),
+  deactivateRegistryInstall: (installId: string) =>
+    request<RegistryInstall>(`/api/workflows/packages/installs/${installId}/deactivate`, {
+      method: "POST",
     }),
   analyzeWorkflowPackage: (uiGraph: Record<string, unknown>) =>
     request<WorkflowPackageAnalysis>("/api/workflows/packages/analyze", {

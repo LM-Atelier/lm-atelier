@@ -52,6 +52,7 @@ CHECKED_CONTRACTS = {
     "MessagePart": "MessagePartOut",
     "ModelStorageInfo": "ModelStorageInfo",
     "PlatformMatrixEntry": "PlatformMatrixEntry",
+    "RegistryInstall": "RegistryInstallOut",
     "ResponseRevision": "ResponseRevisionOut",
     "Run": "RunOut",
     "RuntimeStatus": "RuntimeStatus",

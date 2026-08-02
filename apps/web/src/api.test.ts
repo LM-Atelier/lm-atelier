@@ -727,3 +727,29 @@ it("does not retry a 403 that is a genuine refusal", async () => {
   // Session, then the request. No retry, no second session fetch.
   expect(fetchMock).toHaveBeenCalledTimes(2);
 });
+
+it("surfaces the stable error code beside the human-readable detail", async () => {
+  const fetchMock = vi.fn()
+    .mockResolvedValueOnce(
+      new Response(JSON.stringify({ csrf_token: "csrf" }), {
+        status: 200,
+        headers: { "content-type": "application/json" },
+      }),
+    )
+    .mockResolvedValueOnce(
+      new Response(
+        JSON.stringify({ detail: "Stop the media worker first", code: "media_worker_running" }),
+        { status: 409, headers: { "content-type": "application/json" } },
+      ),
+    );
+  vi.stubGlobal("fetch", fetchMock);
+
+  const { api, ApiError } = await import("./api");
+  const failure = await api.reviewRegistryInstall("install-1", true).then(
+    () => null,
+    (error: unknown) => error,
+  );
+  expect(failure).toBeInstanceOf(ApiError);
+  expect((failure as InstanceType<typeof ApiError>).code).toBe("media_worker_running");
+  expect((failure as Error).message).toBe("Stop the media worker first");
+});
