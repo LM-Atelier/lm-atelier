@@ -1,8 +1,11 @@
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import io
 import json
+import threading
+import time
 import zipfile
 from pathlib import Path
 
@@ -11,7 +14,11 @@ import pytest
 
 import local_lm.runtime_provisioning as runtime_provisioning
 from local_lm.runtime_config import runtime_config_path
-from local_lm.runtime_provisioning import RuntimeProvisioner, RuntimeProvisioningError
+from local_lm.runtime_provisioning import (
+    RuntimeProvisioner,
+    RuntimeProvisioningError,
+    RuntimeVerificationCancelled,
+)
 
 
 def _zip_bytes(files: dict[str, bytes]) -> bytes:
@@ -604,6 +611,10 @@ async def test_managed_runtime_integrity_change_is_not_reported_ready(
             platform_key="test-platform",
             allowed_download_hosts={"runtime.test"},
         )
+        assert restarted.status("llama.cpp").state == "installing"
+        restore = restarted.start_restore()
+        assert restore is not None
+        await restore
         assert restarted.status("llama.cpp").state == "missing"
         await restarted.close()
 
@@ -648,6 +659,9 @@ async def test_same_release_asset_correction_replaces_only_the_owned_runtime(
             platform_key="test-platform",
             allowed_download_hosts={"runtime.test"},
         )
+        restore = second.start_restore()
+        assert restore is not None
+        await restore
         assert second.status("llama.cpp").state == "missing"
         status = await second.ensure("llama.cpp")
         await second.close()
@@ -656,6 +670,120 @@ async def test_same_release_asset_correction_replaces_only_the_owned_runtime(
     assert status.state == "ready"
     assert settings.llama_executable
     assert settings.llama_executable.read_bytes() == b"corrected executable"
+
+
+async def test_managed_runtime_verification_starts_in_background(
+    settings,
+    tmp_path: Path,
+    monkeypatch,
+) -> None:  # type: ignore[no-untyped-def]
+    content = _zip_bytes({"llama-server.exe": b"verified executable"})
+    manifest = tmp_path / "engines.json"
+    _write_manifest(manifest, llama_content=content)
+    settings.prepare()
+
+    def handler(_request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, content=content)
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        first = RuntimeProvisioner(
+            settings,
+            manifest_path=manifest,
+            client=client,
+            environment={},
+            platform_key="test-platform",
+            allowed_download_hosts={"runtime.test"},
+        )
+        assert (await first.ensure("llama.cpp")).state == "ready"
+        await first.close()
+
+        started = threading.Event()
+        release = threading.Event()
+        original = RuntimeProvisioner._managed_marker_matches
+
+        def delayed_verification(*args, **kwargs):  # type: ignore[no-untyped-def]
+            started.set()
+            assert release.wait(timeout=5)
+            return original(*args, **kwargs)
+
+        monkeypatch.setattr(RuntimeProvisioner, "_managed_marker_matches", delayed_verification)
+        restarted = RuntimeProvisioner(
+            settings,
+            manifest_path=manifest,
+            client=client,
+            environment={},
+            platform_key="test-platform",
+            allowed_download_hosts={"runtime.test"},
+        )
+
+        assert not started.is_set()
+        assert restarted.status("llama.cpp").state == "installing"
+        restore = restarted.start_restore()
+        assert restore is not None
+        assert await asyncio.to_thread(started.wait, 1)
+        assert restarted.status("llama.cpp").state == "installing"
+
+        ensure = asyncio.create_task(restarted.ensure("llama.cpp"))
+        await asyncio.sleep(0)
+        assert not ensure.done()
+        release.set()
+        assert (await ensure).state == "ready"
+        await restore
+        await restarted.close()
+
+
+async def test_managed_runtime_verification_stops_cleanly_on_close(
+    settings,
+    tmp_path: Path,
+    monkeypatch,
+) -> None:  # type: ignore[no-untyped-def]
+    content = _zip_bytes({"llama-server.exe": b"verified executable"})
+    manifest = tmp_path / "engines.json"
+    _write_manifest(manifest, llama_content=content)
+    settings.prepare()
+
+    async with httpx.AsyncClient(
+        transport=httpx.MockTransport(lambda _request: httpx.Response(200, content=content))
+    ) as client:
+        first = RuntimeProvisioner(
+            settings,
+            manifest_path=manifest,
+            client=client,
+            environment={},
+            platform_key="test-platform",
+            allowed_download_hosts={"runtime.test"},
+        )
+        await first.ensure("llama.cpp")
+        await first.close()
+
+        started = threading.Event()
+
+        def cancellable_verification(*_args, **kwargs):  # type: ignore[no-untyped-def]
+            cancel_requested = kwargs["cancel_requested"]
+            started.set()
+            while not cancel_requested():
+                time.sleep(0.01)
+            raise RuntimeVerificationCancelled
+
+        monkeypatch.setattr(
+            RuntimeProvisioner,
+            "_managed_marker_matches",
+            cancellable_verification,
+        )
+        restarted = RuntimeProvisioner(
+            settings,
+            manifest_path=manifest,
+            client=client,
+            environment={},
+            platform_key="test-platform",
+            allowed_download_hosts={"runtime.test"},
+        )
+        restore = restarted.start_restore()
+        assert restore is not None
+        assert await asyncio.to_thread(started.wait, 1)
+
+        await asyncio.wait_for(restarted.close(), timeout=1)
+        assert restore.done()
 
 
 def test_platform_selection_gates_nvidia_runtime_generations(monkeypatch) -> None:  # type: ignore[no-untyped-def]

@@ -12,6 +12,7 @@ import stat
 import subprocess
 import sys
 import tarfile
+import threading
 import time
 import zipfile
 from collections.abc import Callable, Mapping, MutableMapping
@@ -50,6 +51,10 @@ _MUTABLE_RUNTIME_DIRECTORIES = {
 
 
 class RuntimeProvisioningError(RuntimeError):
+    pass
+
+
+class RuntimeVerificationCancelled(RuntimeError):
     pass
 
 
@@ -101,6 +106,8 @@ class RuntimeProvisioner:
         self._owns_client = client is None
         self._locks = {name: asyncio.Lock() for name in RUNTIME_NAMES}
         self._tasks: dict[RuntimeName, asyncio.Task[RuntimeStatus]] = {}
+        self._restore_task: asyncio.Task[None] | None = None
+        self._restore_cancel = threading.Event()
         self._states: dict[RuntimeName, RuntimeStatus] = {}
         self._integrity_cache: dict[
             Path,
@@ -108,8 +115,34 @@ class RuntimeProvisioner:
         ] = {}
         self.runtime_root.mkdir(parents=True, exist_ok=True)
         self.archive_root.mkdir(parents=True, exist_ok=True)
-        self._restore_managed_installations()
+        self._restore_candidates = self._managed_restoration_candidates()
+        for engine in self._restore_candidates:
+            definition = self._definition(engine)
+            asset = self._asset(engine, definition)
+            self._states[engine] = self._status(
+                engine,
+                definition,
+                state="installing",
+                supported=True,
+                managed=True,
+                size_bytes=int(asset["size_bytes"]) if asset else None,
+                message="Checking managed runtime integrity.",
+                asset=asset,
+            )
         self._cleanup_completed_archives()
+
+    def start_restore(self) -> asyncio.Task[None] | None:
+        """Verify managed runtimes without delaying the API serving boundary."""
+
+        if not self._restore_candidates:
+            return None
+        if self._restore_task is None:
+            self._restore_cancel.clear()
+            self._restore_task = asyncio.create_task(
+                self._restore_managed_installations(),
+                name="verify-managed-runtimes",
+            )
+        return self._restore_task
 
     @property
     def runtime_root(self) -> Path:
@@ -224,6 +257,9 @@ class RuntimeProvisioner:
 
     async def ensure(self, engine: RuntimeName) -> RuntimeStatus:
         current = self.status(engine)
+        if current.state == "installing" and self._restore_task is not None:
+            await asyncio.shield(self._restore_task)
+            current = self.status(engine)
         if current.state == "ready":
             return current
         existing = self._tasks.get(engine)
@@ -337,6 +373,10 @@ class RuntimeProvisioner:
                 raise RuntimeProvisioningError(detail) from exc
 
     async def close(self) -> None:
+        if self._restore_task is not None:
+            if not self._restore_task.done():
+                self._restore_cancel.set()
+            await asyncio.gather(self._restore_task, return_exceptions=True)
         tasks = tuple(self._tasks.values())
         for task in tasks:
             task.cancel()
@@ -768,20 +808,56 @@ class RuntimeProvisioner:
             if total_size > max_uncompressed_bytes:
                 raise RuntimeProvisioningError("The extracted runtime exceeds its allowed size.")
 
-    def _restore_managed_installations(self) -> None:
+    def _managed_restoration_candidates(self) -> tuple[RuntimeName, ...]:
+        candidates: list[RuntimeName] = []
         for engine in RUNTIME_NAMES:
             definition = self._definition(engine)
-            configured = self._configured_status(engine, definition)
-            if configured:
-                self._states[engine] = configured
-                continue
             asset = self._asset(engine, definition)
             if not asset or self._security_blocked(definition, asset):
                 continue
+            ready, paths = self._configured_paths(engine)
+            configured_managed = ready and any(
+                self._is_inside_runtime_root(path.expanduser()) for path in paths
+            )
             final = self._installation_path(engine, definition)
-            if not self._managed_marker_matches(final, engine, definition, asset):
+            if not configured_managed and not self._managed_marker_owned(final, engine, definition):
+                continue
+            candidates.append(engine)
+        return tuple(candidates)
+
+    async def _restore_managed_installations(self) -> None:
+        for engine in self._restore_candidates:
+            if self._restore_cancel.is_set():
+                return
+            definition = self._definition(engine)
+            asset = self._asset(engine, definition)
+            if not asset:
                 continue
             try:
+                final = self._installation_path(engine, definition)
+                matched = await asyncio.to_thread(
+                    self._managed_marker_matches,
+                    final,
+                    engine,
+                    definition,
+                    asset,
+                    cancel_requested=self._restore_cancel.is_set,
+                )
+                if not matched:
+                    self._states[engine] = self._status(
+                        engine,
+                        definition,
+                        state="missing",
+                        supported=True,
+                        size_bytes=int(asset["size_bytes"]),
+                        message="Managed runtime verification failed; reinstall it to repair.",
+                        asset=asset,
+                    )
+                    logger.warning(
+                        "Managed %s runtime failed startup integrity verification",
+                        engine,
+                    )
+                    continue
                 installed = self._resolve_installed_paths(final, asset)
                 self._apply_configuration(engine, installed, persist=True)
                 self._states[engine] = self._status(
@@ -794,7 +870,21 @@ class RuntimeProvisioner:
                     message="Ready.",
                     asset=asset,
                 )
+                self._remove_completed_archive(self._archive_path(engine, definition, asset))
+                for overlay in self._security_overlays(asset):
+                    self._remove_completed_archive(self._archive_path(engine, definition, overlay))
+            except RuntimeVerificationCancelled:
+                return
             except (OSError, RuntimeProvisioningError):
+                self._states[engine] = self._status(
+                    engine,
+                    definition,
+                    state="missing",
+                    supported=True,
+                    size_bytes=int(asset["size_bytes"]),
+                    message="Managed runtime verification failed; reinstall it to repair.",
+                    asset=asset,
+                )
                 logger.warning("Ignored incomplete managed %s runtime at %s", engine, final)
 
     def _cleanup_completed_archives(self) -> None:
@@ -872,25 +962,7 @@ class RuntimeProvisioner:
         engine: RuntimeName,
         definition: dict[str, Any],
     ) -> RuntimeStatus | None:
-        if engine == "llama.cpp":
-            executable = self.settings.llama_executable
-            ready = bool(executable and executable.expanduser().is_file())
-            paths = [executable] if executable else []
-        elif engine == "vllm":
-            executable = self.settings.vllm_executable
-            ready = bool(executable and executable.expanduser().is_file())
-            paths = [executable] if executable else []
-        else:
-            executable = self.settings.comfy_executable
-            directory = self.settings.comfy_directory
-            ready = bool(
-                executable
-                and executable.expanduser().is_file()
-                and directory
-                and directory.expanduser().is_dir()
-                and (directory.expanduser() / "main.py").is_file()
-            )
-            paths = [item for item in (executable, directory) if item]
+        ready, paths = self._configured_paths(engine)
         if not ready:
             return None
         managed = any(self._is_inside_runtime_root(item.expanduser()) for item in paths)
@@ -916,6 +988,28 @@ class RuntimeProvisioner:
             message="Ready.",
             asset=asset if managed else None,
         )
+
+    def _configured_paths(self, engine: RuntimeName) -> tuple[bool, list[Path]]:
+        if engine == "llama.cpp":
+            executable = self.settings.llama_executable
+            ready = bool(executable and executable.expanduser().is_file())
+            paths = [executable] if executable else []
+        elif engine == "vllm":
+            executable = self.settings.vllm_executable
+            ready = bool(executable and executable.expanduser().is_file())
+            paths = [executable] if executable else []
+        else:
+            executable = self.settings.comfy_executable
+            directory = self.settings.comfy_directory
+            ready = bool(
+                executable
+                and executable.expanduser().is_file()
+                and directory
+                and directory.expanduser().is_dir()
+                and (directory.expanduser() / "main.py").is_file()
+            )
+            paths = [item for item in (executable, directory) if item]
+        return ready, paths
 
     def _asset(
         self,
@@ -1264,12 +1358,24 @@ class RuntimeProvisioner:
         root because there is nothing to follow.
         """
 
+        return self._integrity_file_map_cancellable(root)
+
+    def _integrity_file_map_cancellable(
+        self,
+        root: Path,
+        *,
+        cancel_requested: Callable[[], bool] | None = None,
+    ) -> dict[str, Path]:
         files: dict[str, Path] = {}
         total_size = 0
         stack = [root]
         while stack:
+            if cancel_requested and cancel_requested():
+                raise RuntimeVerificationCancelled
             with os.scandir(stack.pop()) as entries:
                 for entry in entries:
+                    if cancel_requested and cancel_requested():
+                        raise RuntimeVerificationCancelled
                     candidate = Path(entry.path)
                     relative = candidate.relative_to(root)
                     relative_posix = str(relative).replace("\\", "/")
@@ -1378,6 +1484,8 @@ class RuntimeProvisioner:
         engine: RuntimeName,
         definition: Mapping[str, Any],
         asset: Mapping[str, Any],
+        *,
+        cancel_requested: Callable[[], bool] | None = None,
     ) -> bool:
         try:
             marker_text = (root / _MANAGED_MARKER).read_text(encoding="utf-8")
@@ -1402,13 +1510,18 @@ class RuntimeProvisioner:
         if not expected_files.issubset(files):
             return False
         try:
-            installed_files = self._integrity_file_map(root)
+            installed_files = self._integrity_file_map_cancellable(
+                root,
+                cancel_requested=cancel_requested,
+            )
         except (OSError, RuntimeProvisioningError):
             return False
         if set(files) != set(installed_files):
             return False
         signatures: list[tuple[str, int, int, int, int]] = []
         for relative_value, expected_hash in sorted(files.items()):
+            if cancel_requested and cancel_requested():
+                raise RuntimeVerificationCancelled
             if not isinstance(relative_value, str) or not _SHA256.fullmatch(str(expected_hash)):
                 return False
             candidate = installed_files[relative_value]
@@ -1430,7 +1543,13 @@ class RuntimeProvisioner:
         if self._integrity_cache.get(root) == cache_value:
             return True
         for relative_value, expected_hash in files.items():
-            if self._sha256_file(installed_files[relative_value]) != expected_hash:
+            if (
+                self._sha256_file(
+                    installed_files[relative_value],
+                    cancel_requested=cancel_requested,
+                )
+                != expected_hash
+            ):
                 return False
         self._integrity_cache[root] = cache_value
         return True
@@ -1967,9 +2086,15 @@ class RuntimeProvisioner:
         return cleaned
 
     @staticmethod
-    def _sha256_file(path: Path) -> str:
+    def _sha256_file(
+        path: Path,
+        *,
+        cancel_requested: Callable[[], bool] | None = None,
+    ) -> str:
         digest = hashlib.sha256()
         with path.open("rb") as source:
             for chunk in iter(lambda: source.read(1024 * 1024), b""):
+                if cancel_requested and cancel_requested():
+                    raise RuntimeVerificationCancelled
                 digest.update(chunk)
         return digest.hexdigest()
