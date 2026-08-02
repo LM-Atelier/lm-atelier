@@ -74,6 +74,10 @@ class DiagnosticBundleBuilder:
                 "operation_counts": dict(workflow_engines),
             },
             "jobs": {"status_counts": dict(job_statuses)},
+            # Where each job kind actually spends its time, from the stage
+            # timings every job already records. Stage names are application
+            # strings; no prompts, paths, or content ride along.
+            "job_stages": _stage_duration_summary(session),
             # statuses() sanitizes before it returns: commands and tails have
             # local paths replaced, so nothing here weakens the privacy notes.
             "workers": [
@@ -131,3 +135,48 @@ class DiagnosticBundleBuilder:
             )
         finally:
             temporary.unlink(missing_ok=True)
+
+
+_STAGE_SUMMARY_JOB_LIMIT = 200
+
+
+def _stage_duration_summary(session: Session) -> dict[str, dict[str, dict[str, int]]]:
+    """Total and mean per-stage wall-clock, by job kind, over recent jobs.
+
+    The stage timings come from each job's recorded progress; nothing new is
+    measured here. Reading this beside the queue design answers the question
+    that matters before any parallelism change: how much of a job's life is
+    accelerator work, and how much is tail that holds the compute lease for
+    no reason.
+    """
+
+    recent = session.scalars(
+        select(Job)
+        .where(Job.status.in_(("complete", "failed", "cancelled", "interrupted")))
+        .order_by(Job.updated_at.desc())
+        .limit(_STAGE_SUMMARY_JOB_LIMIT)
+    ).all()
+    summary: dict[str, dict[str, dict[str, int]]] = {}
+    for job in recent:
+        progress = job.progress_json if isinstance(job.progress_json, dict) else {}
+        stages = list(progress.get("completed_stages") or [])
+        final_stage = progress.get("stage")
+        final_elapsed = progress.get("stage_elapsed_ms")
+        if isinstance(final_stage, str) and isinstance(final_elapsed, int):
+            stages.append({"stage": final_stage, "duration_ms": final_elapsed})
+        for entry in stages:
+            if not isinstance(entry, dict):
+                continue
+            stage = entry.get("stage")
+            duration = entry.get("duration_ms")
+            if not isinstance(stage, str) or not isinstance(duration, int) or duration < 0:
+                continue
+            bucket = summary.setdefault(job.kind, {}).setdefault(
+                stage, {"jobs": 0, "total_ms": 0, "mean_ms": 0}
+            )
+            bucket["jobs"] += 1
+            bucket["total_ms"] += duration
+    for stages_by_name in summary.values():
+        for bucket in stages_by_name.values():
+            bucket["mean_ms"] = round(bucket["total_ms"] / bucket["jobs"])
+    return summary
