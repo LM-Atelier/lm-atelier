@@ -321,6 +321,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 active_settings.host,
                 active_settings.port,
             )
+            services.runtimes.start_restore()
             worker_restore = asyncio.create_task(
                 restore_configured_workers(services),
                 name="restore-configured-workers",
