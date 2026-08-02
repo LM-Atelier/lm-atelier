@@ -176,7 +176,8 @@ echo "LM Atelier $version installed at $install_root"
 echo "Run $launcher_path or open LM Atelier from your application menu."
 echo "Linux image/video require an externally configured compatible media engine and are not certified."
 if [[ "$launch" == true ]]; then
-  exec "$install_root/lm-atelier"
+  # First launch after install lands in setup, mirroring the Windows installer.
+  exec "$install_root/lm-atelier" --first-run-setup
 fi
 exit 0
 

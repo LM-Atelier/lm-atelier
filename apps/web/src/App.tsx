@@ -82,7 +82,8 @@ import { useLiveEvents } from "./useLiveEvents";
 import { DownloadDiagnosticsButton } from "./DownloadDiagnosticsButton";
 import { StatusDot } from "./StatusDot";
 import { ErrorCallout } from "./ErrorCallout";
-import { SetupWizard } from "./SetupWizard";
+import { EmptyState } from "./EmptyState";
+import { FirstRunSetup, SetupWizard } from "./SetupWizard";
 import { WorkflowPackageReview } from "./WorkflowPackageReview";
 import { useWorkflowPackageImport } from "./useWorkflowPackageImport";
 import { JobsPanel } from "./JobsPanel";
@@ -93,6 +94,7 @@ import { WorkerStatusCard } from "./WorkerStatusCard";
 import { useComposerUploads } from "./useComposerUploads";
 import type { ComposerAttachment } from "./useComposerUploads";
 import { useDraftClassification } from "./useDraftClassification";
+import { useFirstRunSetup } from "./useFirstRunSetup";
 import { useGenerationModeSelection } from "./useGenerationModeSelection";
 import { useMessageActions } from "./useMessageActions";
 import {
@@ -198,16 +200,6 @@ function formatTechnicalDetails(
     ...devices,
     ...runtimes,
   ].join("\n");
-}
-
-function EmptyState({ icon, title, body }: { icon: React.ReactNode; title: string; body: string }) {
-  return (
-    <div className="empty-state">
-      <div className="empty-icon">{icon}</div>
-      <h2>{title}</h2>
-      <p>{body}</p>
-    </div>
-  );
 }
 
 function AtelierMark() {
@@ -3677,11 +3669,8 @@ export default function App() {
     queryFn: api.setupReadiness,
     refetchInterval: (query) => query.state.data?.state === "ready" ? false : 3_000,
   });
-  const setupVisible = setupOpen ?? Boolean(
-    setupReadiness.data
-    && setupReadiness.data.state !== "ready"
-    && sessionStorage.getItem(SETUP_DISMISSED_KEY) !== "1",
-  );
+  const setupVisible = setupOpen ?? Boolean(setupReadiness.data && setupReadiness.data.state !== "ready" && sessionStorage.getItem(SETUP_DISMISSED_KEY) !== "1");
+  const [firstRunSetup, exitFirstRunSetup] = useFirstRunSetup();
   const projects = useQuery({
     queryKey: ["projects"],
     queryFn: () => api.projects(true),
@@ -4030,6 +4019,9 @@ export default function App() {
     }} />;
   }, [view, modelLibraryRole, engines.data, profiles.data, presets.data, workflows.data, allProjects, chat.data, chatDrafts, liveText, pendingTurns, workPlans.data, send, regenerate, selectResponseRevision, branch, stop, cancelWorkPlan, cancelWorkStep, retryWorkStep, updateChat, deleteExchange, forkThread, client]);
 
+  if (firstRunSetup && setupReadiness.data) {
+    return <FirstRunSetup report={setupReadiness.data} onExit={exitFirstRunSetup} onOpenModels={(role) => { exitFirstRunSetup(); setModelLibraryRole(role); setView("models"); }} onOpenWorkflows={() => { exitFirstRunSetup(); setView("workflows"); }} />;
+  }
   return (
     <div className="app-shell">
       <a className="skip-link" href="#main-content">Skip to main content</a>

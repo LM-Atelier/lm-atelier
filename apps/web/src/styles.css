@@ -625,3 +625,4 @@ h1, h2, h3 { margin: 0; }
 .install-confirm .install-facts dd small { color: #818a98; font-size: 12px; }
 .install-confirm .install-warning { color: #e7c86b; line-height: 1.5; margin: 0 0 12px; }
 .install-confirm footer { display: flex; justify-content: flex-end; gap: 10px; margin-top: 20px; }
+.first-run-shell { min-height: 100vh; display: grid; place-items: center; background: var(--bg); }

@@ -1,3 +1,4 @@
+import { useEffect, useRef } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { Activity, Bot, Check, Film, Image as ImageIcon, LoaderCircle } from "lucide-react";
 import { AccessibleDialog } from "./AccessibleDialog";
@@ -33,11 +34,15 @@ export function SetupWizard({
   onClose,
   onOpenModels,
   onOpenWorkflows,
+  autoPrepare = false,
 }: {
   report: SetupReadinessReport;
   onClose: () => void;
   onOpenModels: (role: SetupRoleReadiness["role"]) => void;
   onOpenWorkflows: () => void;
+  // First-run installs prepare workers without being asked: the whole point
+  // of installer-time setup is that the first real request pays nothing.
+  autoPrepare?: boolean;
 }) {
   const client = useQueryClient();
   const recipes = useQuery({ queryKey: ["recipes"], queryFn: api.recipes });
@@ -140,6 +145,20 @@ export function SetupWizard({
     return `Choose ${role.role} model`;
   };
   const pendingRole = startWorker.variables?.role;
+  // One role at a time, one attempt per role: a load failure surfaces in the
+  // error callout rather than looping, and the user can still prepare by hand.
+  const autoPrepared = useRef<Set<string>>(new Set());
+  useEffect(() => {
+    if (!autoPrepare || startWorker.isPending) return;
+    const preparable = report.roles.find(
+      (role) =>
+        role.checks.some((check) => check.action === "prepare_worker")
+        && !autoPrepared.current.has(role.role),
+    );
+    if (!preparable) return;
+    autoPrepared.current.add(preparable.role);
+    startWorker.mutate(preparable);
+  }, [autoPrepare, report, startWorker]);
   const error = installRecipe.error || retryInstall.error || installRuntime.error || startWorker.error || verifyRole.error || activateModel.error;
 
   return (
@@ -253,5 +272,36 @@ export function SetupWizard({
         </button>
       </footer>
     </AccessibleDialog>
+  );
+}
+
+/** The installer's hand-off surface: setup before the workspace exists.
+ *
+ * Reached only via the installer's --first-run-setup launch. The workspace
+ * is deliberately not rendered behind the dialog - the application becomes
+ * available when setup finishes or the person explicitly skips, and both
+ * exits run through onExit so the query flag is cleared exactly once.
+ */
+export function FirstRunSetup({
+  report,
+  onExit,
+  onOpenModels,
+  onOpenWorkflows,
+}: {
+  report: SetupReadinessReport;
+  onExit: () => void;
+  onOpenModels: (role: SetupRoleReadiness["role"]) => void;
+  onOpenWorkflows: () => void;
+}) {
+  return (
+    <div className="first-run-shell">
+      <SetupWizard
+        report={report}
+        autoPrepare
+        onClose={onExit}
+        onOpenModels={onOpenModels}
+        onOpenWorkflows={onOpenWorkflows}
+      />
+    </div>
   );
 }
