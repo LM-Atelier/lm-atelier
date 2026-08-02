@@ -7024,6 +7024,7 @@ async def test_workflow_catalog_preserves_exact_variants_and_preflights_the_chos
                 "formats": ["safetensors"],
                 "compatibility": "likely",
                 "compatibility_reasons": ["image pipeline metadata detected"],
+                "content_rating": "general",
             },
             "revision": "a" * 40,
             "files": [{"filename": "model.safetensors", "size": 2_048, "sha256": "d" * 64}],
@@ -7047,6 +7048,8 @@ async def test_workflow_catalog_preserves_exact_variants_and_preflights_the_chos
     )
     assert fallback.status_code == 200
     assert fallback.json()["workflow_template_id"] == "image_shared_base"
+    # The provider-declared rating is copied server-side, never client-sent.
+    assert fallback.json()["content_rating"] == "general"
 
     # Choosing the variant that ranking would not pick preflights exactly it.
     chosen = await client.post(

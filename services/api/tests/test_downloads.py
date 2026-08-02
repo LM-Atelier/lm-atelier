@@ -613,6 +613,7 @@ async def test_chat_plan_downloads_a_pinned_projector_from_a_companion_repo(
             revision=plan.revision,
             role="chat",
             engine=plan.engine,
+            content_rating="general",
             allow_patterns=[model_name, projector_name],
             expected_sha256={
                 model_name: model_digest,
@@ -729,6 +730,8 @@ async def test_chat_plan_downloads_a_pinned_projector_from_a_companion_repo(
         assert job and job.status == JobStatus.COMPLETE.value, job.error if job else None
         assert install.active is True
         assert install.manifest_json["file_sources"][projector_name]["remote_id"] == "author/model"
+        # The declared rating travels into the manifest so provenance is honest.
+        assert install.manifest_json["content_rating"] == "general"
         components = {
             component.relative_path for component in session.query(ModelComponentManifest)
         }
@@ -889,6 +892,8 @@ async def test_lora_plan_installs_as_a_verified_auxiliary_asset(
         assert asset.kind == "lora"
         assert asset.manifest_json["sha256"] == digest
         assert asset.manifest_json["comfy_name"] == "adapter.safetensors"
+        # A request that declares no rating stores the explicit unknown.
+        assert asset.manifest_json["content_rating"] == "unknown"
         assert stored_plan and stored_plan.status == "activated"
     assert processes.started[0][1] == {"loras": "."}
     assert processes.stopped == ["media"]

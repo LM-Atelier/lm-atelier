@@ -463,6 +463,7 @@ def assess_catalog_install(
         can_install=not any(check.status == "block" for check in checks),
         checks=checks,
         auxiliary_kind=request.auxiliary_kind,
+        content_rating=detail.model.content_rating,
     )
 
 

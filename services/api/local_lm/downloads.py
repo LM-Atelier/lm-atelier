@@ -1464,6 +1464,7 @@ class DownloadManager:
                                 "comfy_name": component.path,
                                 "metadata": component.metadata,
                                 "comfy_paths": request.comfy_paths,
+                                "content_rating": request.content_rating,
                             },
                             active=False,
                         )
@@ -1582,6 +1583,7 @@ class DownloadManager:
                             "workflow_path": request.workflow_path,
                             "workflow_template_id": request.workflow_template_id,
                             "workflow_template_sha256": request.workflow_template_sha256,
+                            "content_rating": request.content_rating,
                             "default_settings": default_settings,
                             "family": inspection.family if inspection else None,
                         },

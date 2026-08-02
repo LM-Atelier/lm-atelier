@@ -527,7 +527,10 @@ export interface CatalogModel {
   required_runtime?: string | null;
   workflow_template_id?: string | null;
   operation?: string | null;
+  content_rating?: ContentRating;
 }
+
+export type ContentRating = "general" | "mature" | "unknown";
 
 export interface CatalogPage {
   items: CatalogModel[];
@@ -563,6 +566,7 @@ export interface CatalogPreflight {
   estimated_vram_bytes: number | null;
   can_install: boolean;
   auxiliary_kind?: string | null;
+  content_rating?: ContentRating;
   install_plan: {
     id: string;
     plan_hash: string;
