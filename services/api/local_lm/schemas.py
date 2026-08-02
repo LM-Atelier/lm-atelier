@@ -805,6 +805,27 @@ class EditTemplateOut(ApiModel):
     enabled: bool
 
 
+class RegistryInstallOut(ApiModel):
+    """One prepared package and the two explicit decisions it is waiting for."""
+
+    id: str
+    package_id: str
+    package_version: str
+    node_types: list[str]
+    archive_sha256: str
+    manifest_sha256: str
+    wheel_closure_sha256: str | None
+    wheel_environment_sha256: str | None
+    trusted: bool
+    active: bool
+    reviewed_at: str | None
+    activated_at: str | None
+
+
+class RegistryInstallReviewRequest(ApiModel):
+    trusted: bool
+
+
 class WorkflowPackagePrepareRequest(ApiModel):
     # Preparation binds to one exact identity; an unpinned request has nothing
     # to verify against and the resolver refuses it anyway.

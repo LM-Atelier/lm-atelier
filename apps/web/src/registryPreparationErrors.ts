@@ -19,3 +19,19 @@ export const PREPARATION_ERROR_DESCRIPTIONS: Record<string, string> = {
 export function preparationErrorDescription(code: string): string {
   return PREPARATION_ERROR_DESCRIPTIONS[code] ?? code.replaceAll("_", " ");
 }
+
+/** Plain words for the trust and activation refusal codes. */
+export const ACTIVATION_ERROR_DESCRIPTIONS: Record<string, string> = {
+  media_worker_running: "Stop the media worker before changing package trust or activation",
+  registry_install_not_found: "This prepared package no longer exists",
+  registry_install_untrusted: "Trust the package before activating it",
+  registry_install_verification_failed: "The package's files or dependencies failed verification",
+  activation_start_failed: "The package broke media startup; the prior runtime was restored",
+  activation_restore_failed: "Activation failed and the prior runtime did not restart; check the logs",
+  activation_cancelled: "Activation was cancelled before the runtime came up",
+  deactivation_restart_failed: "The package is inactive but the runtime did not restart; check the logs",
+};
+
+export function activationErrorDescription(error: { code?: string; message: string }): string {
+  return (error.code && ACTIVATION_ERROR_DESCRIPTIONS[error.code]) || error.message;
+}

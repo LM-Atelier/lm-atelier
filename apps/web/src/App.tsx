@@ -90,6 +90,8 @@ import { MarkdownText } from "./MarkdownText";
 import { focusMainContent, roleForMode } from "./viewHelpers";
 import { CompareButton } from "./CompareButton";
 import { FirstRunSetup, SetupWizard } from "./SetupWizard";
+import { CustomNodesPanel } from "./CustomNodesPanel";
+import { RegistryInstallsPanel } from "./RegistryInstallsPanel";
 import { WorkflowPackageReview } from "./WorkflowPackageReview";
 import { useWorkflowPackageImport } from "./useWorkflowPackageImport";
 import { JobsPanel } from "./JobsPanel";
@@ -2686,22 +2688,6 @@ function WorkflowControls({ schema }: { schema: Record<string, unknown> }) {
   );
 }
 
-function CustomNodesPanel() {
-  const client = useQueryClient();
-  const nodes = useQuery({ queryKey: ["custom-nodes"], queryFn: api.customNodes });
-  const [name, setName] = useState("");
-  const [sourceUrl, setSourceUrl] = useState("");
-  const [revision, setRevision] = useState("");
-  const refresh = () => void client.invalidateQueries({ queryKey: ["custom-nodes"] });
-  const install = useMutation({ mutationFn: () => api.installCustomNode({ name: name.trim(), source_url: sourceUrl.trim(), revision: revision.trim() }), onSuccess: () => { setName(""); setSourceUrl(""); setRevision(""); refresh(); } });
-  const trust = useMutation({ mutationFn: ({ id, trusted }: { id: string; trusted: boolean }) => api.trustCustomNode(id, trusted), onSuccess: refresh });
-  const update = useMutation({ mutationFn: ({ id, revision: next }: { id: string; revision: string }) => api.updateCustomNode(id, next), onSuccess: refresh });
-  const rollback = useMutation({ mutationFn: api.rollbackCustomNode, onSuccess: refresh });
-  const remove = useMutation({ mutationFn: api.removeCustomNode, onSuccess: refresh });
-  const error = install.error || trust.error || update.error || rollback.error || remove.error;
-  return <section className="custom-nodes"><div className="detail-title"><div><h2>Custom nodes</h2><p>Pinned sources stay disabled until you review and trust the exact revision. Stop ComfyUI before changing nodes.</p></div></div><div className="custom-node-install"><input aria-label="Custom node name" placeholder="Node name" value={name} onChange={(event) => setName(event.target.value)} /><input aria-label="Custom node source" placeholder="https://github.com/owner/repository" value={sourceUrl} onChange={(event) => setSourceUrl(event.target.value)} /><input aria-label="Custom node commit" placeholder="Full 40-character commit SHA" value={revision} onChange={(event) => setRevision(event.target.value)} /><button className="primary" disabled={!name.trim() || !sourceUrl.trim() || revision.trim().length !== 40 || install.isPending} onClick={() => { if (window.confirm("Download this pinned repository for review? Its code will remain untrusted.")) install.mutate(); }}>Install pinned source</button></div>{error && <ErrorCallout message={error.message} />}<div className="profile-table custom-node-list">{nodes.data?.map((node) => <div key={node.id}><span className={`badge ${node.trusted ? "likely" : "advanced_import"}`}>{node.trusted ? "Trusted" : "Review required"}</span><span><strong>{node.name}</strong><small>{node.source_url}<br />{node.revision}</small></span><details><summary>Security</summary><pre>{JSON.stringify(node.security_json, null, 2)}</pre></details><span className="row-actions"><button className="secondary compact-button" onClick={() => { const next = window.prompt("Full pinned commit SHA", node.revision); if (next?.trim() && next.trim() !== node.revision) update.mutate({ id: node.id, revision: next.trim() }); }}>Update</button>{node.previous_revision && <button className="secondary compact-button" onClick={() => rollback.mutate(node.id)}>Rollback</button>}<button className="secondary compact-button" onClick={() => node.trusted ? trust.mutate({ id: node.id, trusted: false }) : window.confirm("I reviewed this exact pinned revision and trust its code to run in ComfyUI.") && trust.mutate({ id: node.id, trusted: true })}>{node.trusted ? "Revoke trust" : "Trust revision"}</button><button className="secondary compact-button danger" onClick={() => window.confirm(`Remove ${node.name}?`) && remove.mutate(node.id)}>Remove</button></span></div>)}</div></section>;
-}
-
 function WorkflowsView() {
   const client = useQueryClient();
   const workflows = useQuery({ queryKey: ["workflows"], queryFn: api.workflows });
@@ -2756,6 +2742,7 @@ function WorkflowsView() {
         <div className="workflow-list">{workflows.data?.map((workflow) => <button key={workflow.id} className={selected?.id === workflow.id ? "selected" : ""} onClick={() => { setSelectedId(workflow.id); setSelectedRevisionId(workflow.current_revision_id); }}><WorkflowIcon size={18} /><span><strong>{workflow.name}</strong><small>{workflow.operation} · {workflow.revisions.length} revision{workflow.revisions.length === 1 ? "" : "s"}</small></span></button>)}</div>
         <div className="workflow-detail">{selected && selectedRevision ? <><div className="detail-title"><div><small>{selected.operation}</small><h2>{selected.name}</h2><p>{selected.description}</p></div><div className="row-actions"><button className="secondary compact-button" onClick={openEdit}>New revision</button><button className="secondary compact-button" onClick={() => clone.mutate(selected.id)}>Duplicate</button><button className="secondary compact-button" onClick={() => exportBundle.mutate(selected.id)}>Export</button><button className="secondary compact-button" onClick={() => validate.mutate(selected.id)}>Validate</button></div></div><div className="workflow-revision-bar"><label>Revision<select value={selectedRevision.id} onChange={(event) => setSelectedRevisionId(event.target.value)}>{[...selected.revisions].sort((a, b) => b.version - a.version).map((revision) => <option key={revision.id} value={revision.id}>v{revision.version}{revision.id === selected.current_revision_id ? " · current" : ""}</option>)}</select></label>{selectedRevision.id !== selected.current_revision_id && <button className="secondary compact-button" onClick={() => restore.mutate({ id: selected.id, revisionId: selectedRevision.id })}>Restore as new revision</button>}<span className={`badge ${selectedRevision.trusted ? "likely" : "advanced_import"}`}>{selectedRevision.trusted ? "Trusted" : "Untrusted"}</span></div><section className="workflow-input-section"><h3>Declared controls</h3><WorkflowControls schema={selectedRevision.input_schema_json} /></section><details open><summary>Executable graph</summary><pre>{JSON.stringify(selectedRevision.api_graph_json, null, 2)}</pre></details><details><summary>Dependencies</summary><pre>{JSON.stringify(selectedRevision.dependencies_json, null, 2)}</pre></details>{currentRevision && currentRevision.id !== selectedRevision.id && <details><summary>Compare with current revision</summary><div className="workflow-compare"><pre>{JSON.stringify(selectedRevision.api_graph_json, null, 2)}</pre><pre>{JSON.stringify(currentRevision.api_graph_json, null, 2)}</pre></div></details>}{validate.data && <div className={`callout ${validate.data.valid ? "success" : "error"}`} role={validate.data.valid ? "status" : "alert"}>{validate.data.valid ? "Workflow and declared dependencies are valid for the active media engine." : validate.data.errors.join("\n")}{validate.data.warnings.map((warning) => `\nWarning: ${warning}`)}</div>}</> : <EmptyState icon={<WorkflowIcon />} title="Select a workflow" body="Review its revision, inputs, dependencies, and validation." />}</div>
       </div>
+      <RegistryInstallsPanel />
       <CustomNodesPanel />
       {newOpen && (
         <AccessibleDialog

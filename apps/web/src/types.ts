@@ -853,3 +853,19 @@ export interface WorkflowPackagePreparation {
   wheel_environment_sha256: string;
   reused_wheel_environment: boolean;
 }
+
+/** One prepared package and the two explicit decisions it is waiting for. */
+export interface RegistryInstall {
+  id: string;
+  package_id: string;
+  package_version: string;
+  node_types: string[];
+  archive_sha256: string;
+  manifest_sha256: string;
+  wheel_closure_sha256: string | null;
+  wheel_environment_sha256: string | null;
+  trusted: boolean;
+  active: boolean;
+  reviewed_at: string | null;
+  activated_at: string | null;
+}
