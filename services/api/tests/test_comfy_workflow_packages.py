@@ -94,8 +94,15 @@ def test_analyzer_separates_frontend_subgraph_and_runtime_nodes() -> None:
         "Power Lora Loader",
     )
     assert analysis.missing_node_types == ("Power Lora Loader",)
+    assert analysis.missing_nodes[0].node_type == "Power Lora Loader"
+    assert analysis.missing_nodes[0].count == 1
+    assert analysis.missing_nodes[0].package_id == "rgthree-comfy"
     assert analysis.custom_packages[0].package_id == "rgthree-comfy"
     assert analysis.custom_packages[0].versions == ("1.2.3",)
+    assert not analysis.custom_packages[0].locally_resolved
+    assert analysis.operation_guess == "image"
+    assert not analysis.truncated
+    assert not analysis.ready
     assert not analysis.dependencies_resolved
 
 
@@ -113,7 +120,9 @@ def test_all_available_dependencies_are_resolved() -> None:
     assert analysis.dependencies_resolved
     assert analysis.custom_packages[0].package_id == "example-pack"
     assert analysis.custom_packages[0].versions == ("a" * 40,)
+    assert analysis.custom_packages[0].locally_resolved
     assert analysis.issues == ()
+    assert analysis.ready
 
 
 def test_asset_inventory_is_data_only_and_never_keeps_remote_urls() -> None:
@@ -135,12 +144,19 @@ def test_asset_inventory_is_data_only_and_never_keeps_remote_urls() -> None:
             )
         ]
     )
-    analysis = analyze_comfyui_workflow_package(value, available_node_types={"Loader"})
+    analysis = analyze_comfyui_workflow_package(
+        value,
+        available_node_types={"Loader"},
+        available_asset_filenames={"models/portrait.safetensors"},
+    )
     assert [(item.filename, item.policy) for item in analysis.asset_references] == [
         ("models/portrait.safetensors", "supported"),
         ("unsafe.ckpt", "blocked"),
         ("weights/model.onnx", "unsupported"),
     ]
+    assert analysis.asset_references[0].kind == "checkpoint"
+    assert analysis.asset_references[0].source_url is None
+    assert analysis.asset_references[0].present_locally
     assert {issue.code: issue.count for issue in analysis.issues} == {
         "blocked_asset_format": 1,
         "remote_url_reference": 1,
@@ -177,6 +193,26 @@ def test_frontend_notes_do_not_create_executable_asset_dependencies() -> None:
     )
     assert analysis.asset_references == ()
     assert analysis.issues == ()
+
+
+def test_missing_supported_asset_blocks_readiness() -> None:
+    analysis = analyze_comfyui_workflow_package(
+        workflow(
+            nodes=[
+                node(
+                    1,
+                    "LoraLoader",
+                    package="comfy-core",
+                    widgets=["styles/detail.safetensors"],
+                )
+            ]
+        ),
+        available_node_types={"LoraLoader"},
+    )
+    assert analysis.asset_references[0].kind == "lora"
+    assert not analysis.asset_references[0].present_locally
+    assert analysis.issues == (WorkflowPackageIssue("missing_asset", 1),)
+    assert not analysis.ready
 
 
 def test_unversioned_custom_package_is_reported() -> None:
@@ -259,8 +295,18 @@ def test_dangling_ui_links_are_inert_and_reported() -> None:
         value,
         available_node_types={"KSampler"},
     )
-    assert analysis.issues == (WorkflowPackageIssue("dangling_link", 1),)
+    assert analysis.issues == (WorkflowPackageIssue("dangling_link", 1, severity="advisory"),)
     assert analysis.dependencies_resolved
+    assert analysis.ready
+
+
+def test_operation_guess_is_display_only() -> None:
+    analysis = analyze_comfyui_workflow_package(
+        workflow(nodes=[node(1, "VHS_VideoCombine")]),
+        available_node_types={"VHS_VideoCombine"},
+    )
+    assert analysis.operation_guess == "video"
+    assert analysis.ready
 
 
 def test_node_bound_is_enforced() -> None:

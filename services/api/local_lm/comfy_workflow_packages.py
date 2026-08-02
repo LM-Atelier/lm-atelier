@@ -26,6 +26,16 @@ KNOWN_MODEL_SUFFIXES = SUPPORTED_MODEL_SUFFIXES | BLOCKED_MODEL_SUFFIXES | froze
 FRONTEND_SYSTEM_NODE_TYPES = frozenset({"MarkdownNote", "Note", "PrimitiveNode", "Reroute"})
 
 AssetPolicy = Literal["supported", "blocked", "unsupported"]
+AssetKind = Literal[
+    "checkpoint",
+    "configuration",
+    "embedding",
+    "lora",
+    "upscaler",
+    "vae",
+]
+IssueSeverity = Literal["advisory", "blocking"]
+OperationGuess = Literal["image", "unknown", "video"]
 
 
 class WorkflowPackageError(ValueError):
@@ -39,6 +49,7 @@ class WorkflowPackageRequirement:
     package_id: str
     versions: tuple[str, ...]
     node_types: tuple[str, ...]
+    locally_resolved: bool = False
 
 
 @dataclass(frozen=True)
@@ -46,6 +57,9 @@ class WorkflowAssetReference:
     filename: str
     suffix: str
     policy: AssetPolicy
+    kind: AssetKind = "checkpoint"
+    source_url: str | None = None
+    present_locally: bool = False
 
 
 @dataclass(frozen=True)
@@ -53,6 +67,14 @@ class WorkflowPackageIssue:
     code: str
     count: int
     node_types: tuple[str, ...] = ()
+    severity: IssueSeverity = "blocking"
+
+
+@dataclass(frozen=True)
+class WorkflowMissingNode:
+    node_type: str
+    count: int
+    package_id: str | None
 
 
 @dataclass(frozen=True)
@@ -68,6 +90,9 @@ class ComfyWorkflowPackageAnalysis:
     custom_packages: tuple[WorkflowPackageRequirement, ...]
     asset_references: tuple[WorkflowAssetReference, ...]
     issues: tuple[WorkflowPackageIssue, ...]
+    missing_nodes: tuple[WorkflowMissingNode, ...]
+    operation_guess: OperationGuess
+    truncated: bool
 
     @property
     def runtime_nodes_available(self) -> bool:
@@ -78,6 +103,7 @@ class ComfyWorkflowPackageAnalysis:
         blocking = {
             "blocked_asset_format",
             "conflicting_custom_node_versions",
+            "missing_asset",
             "remote_url_reference",
             "unsafe_asset_reference",
             "unsupported_asset_format",
@@ -87,6 +113,10 @@ class ComfyWorkflowPackageAnalysis:
         return self.runtime_nodes_available and not any(
             issue.code in blocking for issue in self.issues
         )
+
+    @property
+    def ready(self) -> bool:
+        return self.dependencies_resolved
 
 
 @dataclass(frozen=True)
@@ -109,6 +139,7 @@ def analyze_comfyui_workflow_package(
     workflow: Mapping[str, object],
     *,
     available_node_types: Collection[str] = (),
+    available_asset_filenames: Collection[str] = (),
 ) -> ComfyWorkflowPackageAnalysis:
     """Inspect a ComfyUI v0.4 UI workflow without executing or persisting it."""
     _validate_bounded_json(workflow)
@@ -128,7 +159,15 @@ def analyze_comfyui_workflow_package(
     if link_count > MAX_UI_GRAPH_LINKS:
         raise WorkflowPackageError("too_many_links", "workflow has too many links")
     structural_issues = (
-        (WorkflowPackageIssue("dangling_link", dangling_links),) if dangling_links else ()
+        (
+            WorkflowPackageIssue(
+                "dangling_link",
+                dangling_links,
+                severity="advisory",
+            ),
+        )
+        if dangling_links
+        else ()
     )
     return _analysis(
         workflow,
@@ -137,6 +176,7 @@ def analyze_comfyui_workflow_package(
         subgraph_ids,
         link_count,
         available_node_types,
+        available_asset_filenames,
         structural_issues,
     )
 
@@ -148,14 +188,21 @@ def _analysis(
     subgraph_ids: frozenset[str],
     link_count: int,
     available_node_types: Collection[str],
+    available_asset_filenames: Collection[str],
     structural_issues: tuple[WorkflowPackageIssue, ...],
 ) -> ComfyWorkflowPackageAnalysis:
     all_types = {record.node_type for record in records}
     frontend = all_types & (FRONTEND_SYSTEM_NODE_TYPES | subgraph_ids)
     required = all_types - FRONTEND_SYSTEM_NODE_TYPES - subgraph_ids
-    missing = required - {str(value) for value in available_node_types}
-    packages, package_issues = _package_requirements(records, required, missing)
-    assets, asset_issues = _asset_references(records)
+    available = {str(value) for value in available_node_types}
+    missing = required - available
+    packages, package_issues = _package_requirements(
+        records,
+        required,
+        missing,
+        available,
+    )
+    assets, asset_issues = _asset_references(records, available_asset_filenames)
     return ComfyWorkflowPackageAnalysis(
         version,
         _frontend_version(workflow),
@@ -173,6 +220,9 @@ def _analysis(
                 key=lambda item: item.code,
             )
         ),
+        _missing_node_requirements(records, missing),
+        _operation_guess(required),
+        False,
     )
 
 
@@ -383,6 +433,7 @@ def _package_requirements(
     records: Sequence[_NodeRecord],
     required_types: set[str],
     missing_types: set[str],
+    available_types: set[str],
 ) -> tuple[tuple[WorkflowPackageRequirement, ...], tuple[WorkflowPackageIssue, ...]]:
     packages: dict[str, dict[str, set[str]]] = defaultdict(lambda: defaultdict(set))
     unidentified: set[str] = set()
@@ -409,6 +460,8 @@ def _package_requirements(
                     key=str.casefold,
                 )
             ),
+            {node_type for node_types in versions.values() for node_type in node_types}
+            <= available_types,
         )
         for package_id, versions in sorted(packages.items(), key=lambda item: item[0].casefold())
     )
@@ -447,11 +500,40 @@ def _package_requirements(
     return requirements, tuple(issues)
 
 
+def _missing_node_requirements(
+    records: Sequence[_NodeRecord],
+    missing_types: set[str],
+) -> tuple[WorkflowMissingNode, ...]:
+    counts: dict[str, int] = defaultdict(int)
+    packages: dict[str, set[str]] = defaultdict(set)
+    for record in records:
+        if record.node_type not in missing_types:
+            continue
+        counts[record.node_type] += 1
+        if record.package_id and record.package_id != "comfy-core":
+            packages[record.node_type].add(record.package_id)
+    return tuple(
+        WorkflowMissingNode(
+            node_type,
+            counts[node_type],
+            next(iter(packages[node_type])) if len(packages[node_type]) == 1 else None,
+        )
+        for node_type in sorted(counts, key=str.casefold)
+    )
+
+
 def _asset_references(
     records: Sequence[_NodeRecord],
+    available_asset_filenames: Collection[str],
 ) -> tuple[tuple[WorkflowAssetReference, ...], tuple[WorkflowPackageIssue, ...]]:
     references: dict[str, WorkflowAssetReference] = {}
     issue_counts: dict[str, int] = defaultdict(int)
+    available = {
+        value.replace("\\", "/").casefold()
+        for value in available_asset_filenames
+        if isinstance(value, str)
+    }
+    missing_assets: set[str] = set()
     for record in records:
         if record.node_type in {"MarkdownNote", "Note"}:
             continue
@@ -478,7 +560,19 @@ def _asset_references(
             else:
                 policy = "unsupported"
                 issue_counts["unsupported_asset_format"] += 1
-            references[candidate.casefold()] = WorkflowAssetReference(candidate, suffix, policy)
+            normalized = candidate.casefold()
+            present = normalized in available
+            references[normalized] = WorkflowAssetReference(
+                candidate,
+                suffix,
+                policy,
+                _asset_kind(record.node_type, suffix),
+                present_locally=present,
+            )
+            if policy == "supported" and not present:
+                missing_assets.add(normalized)
+    if missing_assets:
+        issue_counts["missing_asset"] = len(missing_assets)
     issues = tuple(
         WorkflowPackageIssue(code, count) for code, count in sorted(issue_counts.items())
     )
@@ -486,6 +580,32 @@ def _asset_references(
         tuple(sorted(references.values(), key=lambda item: item.filename.casefold())),
         issues,
     )
+
+
+def _asset_kind(node_type: str, suffix: str) -> AssetKind:
+    lowered = node_type.casefold()
+    if "lora" in lowered:
+        return "lora"
+    if "vae" in lowered:
+        return "vae"
+    if "upscale" in lowered:
+        return "upscaler"
+    if "embedding" in lowered:
+        return "embedding"
+    if suffix == ".json":
+        return "configuration"
+    return "checkpoint"
+
+
+def _operation_guess(node_types: Collection[str]) -> OperationGuess:
+    lowered = {node_type.casefold() for node_type in node_types}
+    video_markers = ("video", "vhs", "wan", "ltx", "hunyuan")
+    if any(any(marker in node_type for marker in video_markers) for node_type in lowered):
+        return "video"
+    image_markers = ("image", "ksampler", "vae", "checkpoint", "unet", "cliptextencode")
+    if any(any(marker in node_type for marker in image_markers) for node_type in lowered):
+        return "image"
+    return "unknown"
 
 
 def _strings(value: object) -> list[str]:
