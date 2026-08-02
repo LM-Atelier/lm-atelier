@@ -840,3 +840,16 @@ export interface EditTemplate {
   builtin: boolean;
   enabled: boolean;
 }
+
+/** The identities a completed preparation is bound to; trusting and
+ * activating what they describe are separate explicit steps. */
+export interface WorkflowPackagePreparation {
+  install_id: string;
+  installed_path: string;
+  wheel_environment_path: string;
+  archive_sha256: string;
+  manifest_sha256: string;
+  wheel_closure_sha256: string;
+  wheel_environment_sha256: string;
+  reused_wheel_environment: boolean;
+}

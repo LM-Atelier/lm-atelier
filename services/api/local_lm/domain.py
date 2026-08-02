@@ -82,6 +82,7 @@ class JobKind(StrEnum):
     EDIT_VERIFY = "edit_verify"
     ACTIVATE = "activate"
     DOWNLOAD = "download"
+    REGISTRY_PREPARE = "registry_prepare"
     EXPORT = "export"
 
 

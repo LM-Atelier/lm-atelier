@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import math
+import re
 from collections import defaultdict
 from collections.abc import Collection, Mapping, Sequence
 from dataclasses import dataclass
@@ -619,14 +620,33 @@ def _asset_kind(node_type: str, suffix: str) -> AssetKind:
 
 
 def _operation_guess(node_types: Collection[str]) -> OperationGuess:
-    lowered = {node_type.casefold() for node_type in node_types}
-    video_markers = ("video", "vhs", "wan", "ltx", "hunyuan")
-    if any(any(marker in node_type for marker in video_markers) for node_type in lowered):
+    tokens = {token for node_type in node_types for token in _node_type_tokens(node_type)}
+    if tokens & {"video", "vhs"} or any(_is_video_family_token(token) for token in tokens):
         return "video"
-    image_markers = ("image", "ksampler", "vae", "checkpoint", "unet", "cliptextencode")
-    if any(any(marker in node_type for marker in image_markers) for node_type in lowered):
+    if tokens & {"image", "ksampler", "vae", "checkpoint", "unet", "cliptextencode"}:
         return "image"
     return "unknown"
+
+
+def _node_type_tokens(value: str) -> frozenset[str]:
+    tokens: set[str] = set()
+    for chunk in re.findall(r"[A-Za-z0-9]+", value):
+        tokens.add(chunk.casefold())
+        separated = re.sub(
+            r"(?<=[a-z0-9])(?=[A-Z])|(?<=[A-Z])(?=[A-Z][a-z])",
+            " ",
+            chunk,
+        )
+        tokens.update(part.casefold() for part in separated.split())
+    return frozenset(tokens)
+
+
+def _is_video_family_token(value: str) -> bool:
+    if value in {"wan", "ltx", "ltxv", "hunyuan"}:
+        return True
+    if value.startswith("hunyuan"):
+        return True
+    return bool(re.fullmatch(r"(?:wan|ltx|ltxv)\d+[a-z0-9]*", value))
 
 
 def _strings(value: object) -> list[str]:

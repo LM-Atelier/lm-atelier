@@ -8,7 +8,9 @@ const RECENT_UNSUCCESSFUL_JOB_LIMIT = 3;
 const DISMISSED_JOB_ISSUES_KEY = "lm-atelier-dismissed-job-issues-before";
 
 function jobDisplayName(kind: string): string {
-  return kind === "edit_verify" ? "Image edit check" : kind;
+  if (kind === "edit_verify") return "Image edit check";
+  if (kind === "registry_prepare") return "Package preparation";
+  return kind;
 }
 
 export function JobsPanel() {

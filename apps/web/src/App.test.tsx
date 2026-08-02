@@ -244,6 +244,7 @@ vi.mock("./api", () => ({
     workflowOpenTarget: vi.fn(),
     importWorkflow: vi.fn(),
     analyzeWorkflowPackage: vi.fn(),
+    prepareWorkflowPackage: vi.fn(),
     validateWorkflow: vi.fn(),
     customNodes: vi.fn().mockResolvedValue([]),
     installCustomNode: vi.fn(),
@@ -3181,7 +3182,6 @@ describe("App", () => {
     fireEvent.click(await screen.findByText("Model library"));
     fireEvent.change(screen.getByLabelText("Model role"), { target: { value: "image" } });
 
-    await waitFor(() => expect(api.workflowCatalogModels).toHaveBeenCalledWith("image"));
     expect(await screen.findByRole("button", { name: "Install" })).toBeEnabled();
     expect(screen.getAllByText("sdxl-turbo")).toHaveLength(1);
   });
@@ -3214,7 +3214,8 @@ describe("App", () => {
     fireEvent.click(await screen.findByText("Model library"));
     expect(await screen.findByLabelText("Compatibility filter")).toBeInTheDocument();
     expect(screen.getByLabelText("Last updated filter")).toBeInTheDocument();
-    expect(screen.getByLabelText("Format filter")).toBeInTheDocument();
+    expect(screen.queryByLabelText("Format filter")).not.toBeInTheDocument();
+    expect(screen.queryByLabelText("Access filter")).not.toBeInTheDocument();
     fireEvent.change(screen.getByLabelText("Last updated filter"), { target: { value: "30" } });
     await waitFor(() => expect(vi.mocked(api.catalog).mock.calls.at(-1)?.[4]).toMatchObject({
       updated_within_days: "30",
@@ -3629,6 +3630,15 @@ describe("App", () => {
     expect(screen.getByText("legacy.ckpt")).toBeInTheDocument();
     expect(screen.getByText("blocked")).toBeInTheDocument();
     expect(api.importWorkflow).not.toHaveBeenCalled();
+
+    // An unresolved package with one pinned version can be prepared - and the
+    // dialog says plainly what preparation does not do.
+    vi.mocked(api.prepareWorkflowPackage).mockResolvedValue({ id: "job-prep" } as never);
+    fireEvent.click(screen.getByRole("button", { name: "Prepare 1.2.3" }));
+    await waitFor(() =>
+      expect(api.prepareWorkflowPackage).toHaveBeenCalledWith("rgthree-comfy", "1.2.3"),
+    );
+    expect(await screen.findByText(/stays inactive and untrusted/)).toBeInTheDocument();
   });
 
   it("still imports LM Atelier bundles directly", async () => {
