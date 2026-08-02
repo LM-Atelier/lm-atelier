@@ -2298,8 +2298,6 @@ function ModelsView({ initialRole }: { initialRole: EngineRole }) {
   const [role, setRole] = useState<string>(initialRole);
   const [sort, setSort] = useState("trending");
   const [compatibility, setCompatibility] = useState("");
-  const [fileFormat, setFileFormat] = useState("");
-  const [gated, setGated] = useState("");
   const [quantization, setQuantization] = useState("");
   const [maxSizeGb, setMaxSizeGb] = useState("");
   const [updatedWithinDays, setUpdatedWithinDays] = useState("");
@@ -2311,8 +2309,6 @@ function ModelsView({ initialRole }: { initialRole: EngineRole }) {
   const [importEngine, setImportEngine] = useState("llama.cpp");
   const catalogFilters = {
     compatibility,
-    file_format: fileFormat,
-    gated,
     quantization,
     max_size_bytes: maxSizeGb ? String(Number(maxSizeGb) * 1024 ** 3) : "",
     updated_within_days: updatedWithinDays,
@@ -2324,27 +2320,7 @@ function ModelsView({ initialRole }: { initialRole: EngineRole }) {
     getNextPageParam: (page) => page.next_cursor ?? undefined,
   });
   const rawCatalogItems = useMemo(() => catalog.data?.pages.flatMap((page) => page.items) ?? [], [catalog.data]);
-  const workflowModels = useQuery({
-    queryKey: ["workflow-catalog-models", role],
-    queryFn: () => api.workflowCatalogModels(role),
-    enabled: role === "image" || role === "video",
-  });
-  const readyModels = useMemo(() => {
-    const normalized = submitted.trim().toLowerCase();
-    return (workflowModels.data ?? []).filter((model) =>
-      !normalized
-      || model.remote_id.toLowerCase().includes(normalized)
-      || model.name.toLowerCase().includes(normalized)
-    );
-  }, [submitted, workflowModels.data]);
-  const readyRemoteIds = useMemo(
-    () => new Set((workflowModels.data ?? []).map((model) => model.remote_id)),
-    [workflowModels.data],
-  );
-  const catalogItems = useMemo(
-    () => rawCatalogItems.filter((model) => !readyRemoteIds.has(model.remote_id)),
-    [rawCatalogItems, readyRemoteIds],
-  );
+  const catalogItems = rawCatalogItems;
   const catalogIsStale = catalog.data?.pages.some((page) => page.stale) ?? false;
   const recipes = useQuery({ queryKey: ["recipes"], queryFn: api.recipes });
   const installed = useQuery({ queryKey: ["models"], queryFn: api.models });
@@ -2562,13 +2538,12 @@ function ModelsView({ initialRole }: { initialRole: EngineRole }) {
         {installRecipe.error && <ErrorCallout message={installRecipe.error.message} />}
         <div className="recipe-grid">{recipes.data?.map((recipe) => <RecipeCard key={recipe.id} recipe={recipe} pending={installRecipe.isPending && installRecipe.variables === recipe.id} onInstall={() => installRecipe.mutate(recipe.id)} />)}</div>
       </section>
-      {(role === "image" || role === "video") && readyModels.length > 0 && <section className="workflow-ready-models"><div className="section-heading"><div><small>Declarative workflow available</small><h2>Automatic setup candidates</h2></div></div><div className="model-grid">{readyModels.map((model) => <ModelCard key={model.workflow_template_id ?? model.remote_id} model={model} role={role} runtime={runtimeFor(model)} status={statusFor(model)} onDownload={() => download.mutate({ model, selectedRole: role })} />)}</div></section>}
       <div className="toolbar">
         <form className="search-box" onSubmit={(event) => { event.preventDefault(); setSubmitted(query); }}><Search size={18} /><input value={query} onChange={(event) => setQuery(event.target.value)} placeholder="Search models" /></form>
         <select aria-label="Model role" value={role} onChange={(event) => setRole(event.target.value)}><option value="chat">Chat</option><option value="image">Image</option><option value="video">Video</option><option value="lora">LoRA</option></select>
-        <select aria-label="Model order" value={sort} onChange={(event) => setSort(event.target.value)}><option value="trending">Trending on Hugging Face</option><option value="downloads">Downloads</option><option value="likes">Likes</option><option value="newest">Newest</option><option value="updated">Recently updated</option><option value="compatible">Compatible first</option></select>
+        <select aria-label="Model order" value={sort} onChange={(event) => setSort(event.target.value)}><option value="trending">Trending</option><option value="downloads">Downloads</option><option value="likes">Likes</option><option value="newest">Newest</option><option value="updated">Recently updated</option><option value="compatible">Compatible first</option></select>
       </div>
-      <div className="catalog-filters"><select aria-label="Compatibility filter" value={compatibility} onChange={(event) => setCompatibility(event.target.value)}><option value="">All compatibility</option><option value="likely">Automatic test available</option><option value="advanced_import">Advanced import</option><option value="unsupported">Unsupported</option></select><select aria-label="Last updated filter" value={updatedWithinDays} onChange={(event) => setUpdatedWithinDays(event.target.value)}><option value="">Updated any time</option><option value="7">Updated this week</option><option value="30">Updated this month</option><option value="90">Updated in 3 months</option><option value="365">Updated this year</option></select><select aria-label="Format filter" value={fileFormat} onChange={(event) => setFileFormat(event.target.value)}><option value="">All formats</option><option value="gguf">GGUF</option><option value="safetensors">safetensors</option></select><select aria-label="Access filter" value={gated} onChange={(event) => setGated(event.target.value)}><option value="">All access</option><option value="open">Open</option><option value="gated">Gated</option></select><input aria-label="Quantization filter" placeholder="Quantization (Q4_K_M, FP8…)" value={quantization} onChange={(event) => setQuantization(event.target.value)} /><input aria-label="Maximum download size" type="number" min="0" placeholder="Max download (GB)" value={maxSizeGb} onChange={(event) => setMaxSizeGb(event.target.value)} /></div>
+      <div className="catalog-filters"><select aria-label="Compatibility filter" value={compatibility} onChange={(event) => setCompatibility(event.target.value)}><option value="">All compatibility</option><option value="likely">Automatic test available</option><option value="advanced_import">Advanced import</option><option value="unsupported">Unsupported</option></select><select aria-label="Last updated filter" value={updatedWithinDays} onChange={(event) => setUpdatedWithinDays(event.target.value)}><option value="">Updated any time</option><option value="7">Updated this week</option><option value="30">Updated this month</option><option value="90">Updated in 3 months</option><option value="365">Updated this year</option></select><input aria-label="Quantization filter" placeholder="Quantization (Q4_K_M, FP8…)" value={quantization} onChange={(event) => setQuantization(event.target.value)} /><input aria-label="Maximum download size" type="number" min="0" placeholder="Max download (GB)" value={maxSizeGb} onChange={(event) => setMaxSizeGb(event.target.value)} /></div>
       {(installed.data?.length ?? 0) > 0 && <section>
         <div className="section-heading">
           <h2>Installed models</h2>
