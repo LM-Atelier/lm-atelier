@@ -819,7 +819,7 @@ class WorkflowMissingNodeOut(ApiModel):
 
 
 class WorkflowPackageAnalysisOut(ApiModel):
-    """The analyzer report, field names frozen with the analyzer (R152).
+    """The analyzer report, field names frozen with the analyzer.
 
     `ready` is the one trust/activation gate the browser obeys; it is computed
     by the analyzer, never re-derived client-side from list emptiness.
@@ -906,7 +906,7 @@ class CatalogModel(ApiModel):
     operation: str | None = None
     # Neutral provider-declared rating. The public app renders nothing from
     # it (general-only source); it exists so install provenance is honest and
-    # the private overlay inherits one labeling mechanism (R125).
+    # downstream consumers inherit one labeling mechanism.
     content_rating: ContentRating = "unknown"
 
 

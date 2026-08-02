@@ -188,7 +188,7 @@ async def test_a_pin_without_matching_install_evidence_stays_unresolved(
     app: FastAPI,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """A registry-version pin cannot be vouched for by a different revision (R153)."""
+    """A registry-version pin cannot be vouched for by a different revision."""
 
     async def object_info() -> dict[str, Any]:
         return {"Power Lora Loader": {}}
