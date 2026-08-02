@@ -4,6 +4,7 @@ import { Wand2 } from "lucide-react";
 import { AccessibleDialog } from "./AccessibleDialog";
 import { api } from "./api";
 import { MAX_SUBJECT_CHARACTERS, renderTemplateInstruction } from "./editTemplateInstruction";
+import type { EditTemplate } from "./types";
 
 /** Pick a one-click edit for the attached image.
  *
@@ -16,7 +17,7 @@ export function EditingStudio({
   onClose,
   currentInstruction = "",
 }: {
-  onPick: (instruction: string) => void;
+  onPick: (instruction: string, template: EditTemplate) => void;
   onClose: () => void;
   // The composer's draft, offered for saving as a personal template.
   currentInstruction?: string;
@@ -99,7 +100,7 @@ export function EditingStudio({
         <button
           className="primary"
           disabled={!selected}
-          onClick={() => selected && onPick(renderTemplateInstruction(selected, subject))}
+          onClick={() => selected && onPick(renderTemplateInstruction(selected, subject), selected)}
         >
           Use this edit
         </button>

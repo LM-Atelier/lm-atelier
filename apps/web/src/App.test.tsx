@@ -4021,6 +4021,10 @@ describe("App", () => {
       "Transform this image into a watercolor painting. Keep the composition exactly as it is. Focus on the harbor.",
     );
     expect(screen.queryByRole("dialog", { name: "Editing studio" })).not.toBeInTheDocument();
+    // The template's settings ride the next send, visibly and removably.
+    expect(screen.getByText("Watercolor painting settings apply to this send")).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "Remove template settings" }));
+    expect(screen.queryByText("Watercolor painting settings apply to this send")).not.toBeInTheDocument();
 
     // Reopening with a drafted instruction offers to keep it as a template.
     vi.mocked(api.createEditTemplate).mockResolvedValue({ id: "tpl-mine" } as never);
