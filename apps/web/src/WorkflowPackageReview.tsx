@@ -1,5 +1,9 @@
+import { useState } from "react";
+import { useMutation } from "@tanstack/react-query";
 import { CircleAlert, CircleCheck, PackageSearch } from "lucide-react";
 import { AccessibleDialog } from "./AccessibleDialog";
+import { api } from "./api";
+import { preparationErrorDescription } from "./registryPreparationErrors";
 import type { WorkflowPackageAnalysis } from "./types";
 
 const ISSUE_DESCRIPTIONS: Record<string, string> = {
@@ -35,6 +39,14 @@ export function WorkflowPackageReview({
   onClose: () => void;
 }) {
   const missingKnown = analysis.node_inventory_available;
+  const [queuedPackages, setQueuedPackages] = useState<string[]>([]);
+  const prepare = useMutation({
+    mutationFn: ({ packageId, version }: { packageId: string; version: string }) =>
+      api.prepareWorkflowPackage(packageId, version),
+    onSuccess: (_job, variables) =>
+      setQueuedPackages((current) => [...current, variables.packageId]),
+  });
+  const prepareError = prepare.error as (Error & { code?: string }) | null;
   return (
     <AccessibleDialog
       title="Review workflow package"
@@ -99,6 +111,20 @@ export function WorkflowPackageReview({
                 <span className={`badge ${pkg.locally_resolved ? "likely" : "advanced_import"}`}>
                   {pkg.locally_resolved ? "installed" : "not installed"}
                 </span>
+                {!pkg.locally_resolved && pkg.versions.length === 1 && (
+                  queuedPackages.includes(pkg.package_id)
+                    ? <small>Preparation queued - progress shows in the jobs panel. The result stays inactive and untrusted until reviewed.</small>
+                    : (
+                      <button
+                        type="button"
+                        className="secondary compact-button"
+                        disabled={prepare.isPending}
+                        onClick={() => prepare.mutate({ packageId: pkg.package_id, version: pkg.versions[0] })}
+                      >
+                        Prepare {pkg.versions[0]}
+                      </button>
+                    )
+                )}
               </li>
             ))}
           </ul>
@@ -138,6 +164,11 @@ export function WorkflowPackageReview({
             ))}
           </ul>
         </section>
+      )}
+      {prepareError && (
+        <p role="alert" className="package-review-note">
+          {prepareError.code ? preparationErrorDescription(prepareError.code) : prepareError.message}
+        </p>
       )}
       <footer>
         <button className="secondary" onClick={onClose}>Close</button>
