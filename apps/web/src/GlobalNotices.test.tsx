@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it } from "vitest";
-import { cleanup, render, screen } from "@testing-library/react";
+import { cleanup, fireEvent, render, screen } from "@testing-library/react";
 import { GlobalNotices } from "./GlobalNotices";
 
 const ok = { error: null };
@@ -49,6 +49,22 @@ describe("GlobalNotices", () => {
     render(<GlobalNotices connected={false} mutations={[failed("Send failed")]} />);
 
     expect(screen.getByRole("status")).toBeInTheDocument();
+    expect(screen.getByRole("alert")).toHaveTextContent("Send failed");
+  });
+
+  it("dismisses a read failure and returns for a new one", () => {
+    const first = failed("Send failed");
+    const { rerender } = render(<GlobalNotices connected mutations={[first]} />);
+
+    fireEvent.click(screen.getByRole("button", { name: "Dismiss error" }));
+    expect(screen.queryByRole("alert")).not.toBeInTheDocument();
+
+    // The same error instance stays dismissed across rerenders...
+    rerender(<GlobalNotices connected mutations={[first]} />);
+    expect(screen.queryByRole("alert")).not.toBeInTheDocument();
+
+    // ...but a retried action that fails again is a new Error and must show.
+    rerender(<GlobalNotices connected mutations={[failed("Send failed")]} />);
     expect(screen.getByRole("alert")).toHaveTextContent("Send failed");
   });
 });
