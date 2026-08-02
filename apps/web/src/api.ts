@@ -294,6 +294,8 @@ export const api = {
       method: "POST",
       body: JSON.stringify({ settings }),
     }),
+  forkThread: (messageId: string) =>
+    request<Chat>(`/api/messages/${messageId}/fork`, { method: "POST" }),
   deleteExchange: (messageId: string) =>
     request<ExchangeDeletion>(`/api/messages/${messageId}/exchange`, { method: "DELETE" }),
   selectResponseRevision: (messageId: string, revisionId: string) =>

@@ -11,7 +11,6 @@ import { useInfiniteQuery, useMutation, useQuery, useQueryClient } from "@tansta
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 import {
-  Activity,
   ArrowDown,
   ArrowUp,
   Bot,
@@ -25,6 +24,7 @@ import {
   Film,
   Folder,
   Gauge,
+  GitBranch,
   HardDrive,
   Image as ImageIcon,
   Library,
@@ -33,9 +33,7 @@ import {
   MessageSquare,
   MoreHorizontal,
   Paperclip,
-  Pause,
   Pencil,
-  Play,
   Plus,
   Quote,
   RotateCcw,
@@ -60,7 +58,6 @@ import {
   formatBytes,
   formatDate,
   formatEta,
-  formatStageElapsed,
   formatTransferRate,
 } from "./format";
 import {
@@ -84,13 +81,17 @@ import {
 import { useLiveEvents } from "./useLiveEvents";
 import { DownloadDiagnosticsButton } from "./DownloadDiagnosticsButton";
 import { StatusDot } from "./StatusDot";
+import { ErrorCallout } from "./ErrorCallout";
+import { SetupWizard } from "./SetupWizard";
+import { JobsPanel } from "./JobsPanel";
+import { progressSampleIsFresh } from "./jobProgress";
 import { WorkerLogFolderButton, WorkerStartupLimit } from "./WorkerStartupLimit";
 import { WorkerStatusCard } from "./WorkerStatusCard";
 import { useComposerUploads } from "./useComposerUploads";
 import type { ComposerAttachment } from "./useComposerUploads";
 import { useDraftClassification } from "./useDraftClassification";
-import { useExchangeDeletion } from "./useExchangeDeletion";
 import { useGenerationModeSelection } from "./useGenerationModeSelection";
+import { useMessageActions } from "./useMessageActions";
 import {
   normalizeSettingsForFields,
   promptPreviewSettings,
@@ -109,20 +110,17 @@ import type {
   EngineRole,
   GenerationPreset,
   GenerationPresetBundle,
-  Job,
   Message,
   MessagePart,
   ModelAssetInstall,
   ModelInstall,
   ModelProfile,
   ModelProfileBundle,
-  ProgressV2,
   Project,
   ReferenceRecipe,
   RoutingMode,
   RuntimeStatus,
   SetupReadinessReport,
-  SetupRoleReadiness,
   SettingField,
   SystemInfo,
   TurnAccepted,
@@ -151,8 +149,6 @@ type SendTurnVariables = PendingTurn & {
 
 const visibilityRank: Record<Visibility, number> = { basic: 0, advanced: 1, expert: 2 };
 const AUTO_PROFILE_ID = "__auto__";
-const RECENT_UNSUCCESSFUL_JOB_LIMIT = 3;
-const DISMISSED_JOB_ISSUES_KEY = "lm-atelier-dismissed-job-issues-before";
 const SETUP_DISMISSED_KEY = "lm-atelier-setup-dismissed";
 const CURRENT_CHAT_KEY = "local-lm-chat";
 
@@ -357,31 +353,6 @@ function MediaLibraryView() {
   );
 }
 
-function ErrorCallout({
-  message,
-  action,
-}: {
-  message?: string | null;
-  action?: ReactNode;
-}) {
-  const [dismissed, setDismissed] = useState<string | null>(null);
-  if (!message || dismissed === message) return null;
-  return (
-    <div className={`callout error${action ? " action-callout" : ""}`} role="alert">
-      <span>{message}</span>
-      {action}
-      <button
-        type="button"
-        className="callout-dismiss"
-        aria-label="Dismiss error"
-        onClick={() => setDismissed(message)}
-      >
-        <X size={13} />
-      </button>
-    </div>
-  );
-}
-
 function MessageTimestamp({ at }: { at: string }) {
   const date = new Date(at);
   if (Number.isNaN(date.getTime())) return null;
@@ -524,6 +495,7 @@ function MessageBubble({
   onReferenceMedia,
   onQuote,
   onDeleteExchange,
+  onForkThread,
 }: {
   message: Message;
   liveText?: string;
@@ -537,6 +509,7 @@ function MessageBubble({
   onReferenceMedia?: (part: MessagePart, origin: MediaOrigin) => void;
   onQuote?: (text: string) => void;
   onDeleteExchange?: (messageId: string) => void;
+  onForkThread?: (messageId: string) => void;
 }) {
   const visibleParts = messagePartsForTranscript(message, hiddenInputArtifactIds);
   const userText = visibleParts.filter((part) => part.type === "text").map((part) => part.text || "").join("\n");
@@ -696,6 +669,11 @@ function MessageBubble({
               {onRegenerate && (
                 <button onClick={() => onRegenerate(message.id)} aria-label="Regenerate response" title="Regenerate">
                   <RotateCcw size={14} />
+                </button>
+              )}
+              {onForkThread && (
+                <button onClick={() => onForkThread(message.id)} aria-label="Start a new thread here" title="New thread from here">
+                  <GitBranch size={14} />
                 </button>
               )}
             </span>
@@ -1215,6 +1193,7 @@ function PromptHelperDialog({
   initialDraft,
   engines,
   workflows,
+  editSourceArtifactIds,
   onAccept,
   onClose,
 }: {
@@ -1222,6 +1201,9 @@ function PromptHelperDialog({
   initialDraft: string;
   engines: EngineCapabilities[];
   workflows: Workflow[];
+  // When improving an image-edit instruction, the source image rides along so
+  // a vision-capable helper grounds its rewrite in what the picture shows.
+  editSourceArtifactIds?: string[];
   onAccept: (draft: string) => void;
   onClose: () => void;
 }) {
@@ -1260,9 +1242,13 @@ function PromptHelperDialog({
         setHelperId(created.id);
         await api.sendTurn(
           created.id,
-          "Improve the current draft. Return the complete revised prompt only.",
+          editSourceArtifactIds?.length
+            ? "Improve the current draft as an editing instruction for the attached source image. "
+              + "Ground it in what the image actually shows and preserve everything it does not ask to change. "
+              + "Return the complete revised prompt only."
+            : "Improve the current draft. Return the complete revised prompt only.",
           "text",
-          [],
+          editSourceArtifactIds ?? [],
           {},
         );
         if (active) refresh(created.id);
@@ -1275,7 +1261,7 @@ function PromptHelperDialog({
     return () => {
       active = false;
     };
-  }, [initialDraft, refresh, sourceChat.id]);
+  }, [editSourceArtifactIds, initialDraft, refresh, sourceChat.id]);
 
   const helperMessages = helper.data ? activeBranchMessages(helper.data) : [];
   const pending = helperMessages.some((message) => message.status === "pending");
@@ -1283,6 +1269,18 @@ function PromptHelperDialog({
     (message) => message.role === "assistant" && message.status === "complete",
   );
   const latestAssistantText = latestAssistant ? promptHelperMessageText(latestAssistant) : "";
+  // Say which kind of help this was: a rewrite grounded in the actual image,
+  // or a text-only one because the helper model cannot see. Silence would let
+  // the grounded case and the blind case read identically.
+  const latestVision = latestAssistant?.parts
+    .find((part) => part.type === "generation_metadata")
+    ?.metadata_json?.context as Record<string, unknown> | undefined;
+  const visionInspection = latestVision?.vision as Record<string, unknown> | undefined;
+  const editVisionNote = !editSourceArtifactIds?.length || !latestAssistant
+    ? null
+    : visionInspection?.visual_contents_inspected
+      ? "Grounded in your source image."
+      : "The helper model could not view the image, so this suggestion is text-only.";
 
   const send = async (mode: "text" | "image" | "video", text: string) => {
     if (!helperId || !draft.trim() || !text.trim()) return;
@@ -1353,6 +1351,7 @@ function PromptHelperDialog({
           )}
           {helperMessages.map((message) => <MessageBubble key={message.id} message={message} />)}
         </div>
+        {editVisionNote && <small className="prompt-helper-vision-note">{editVisionNote}</small>}
         {latestAssistant && latestAssistantText && adoptedAssistantId !== latestAssistant.id && (
           <button
             type="button"
@@ -1734,6 +1733,11 @@ function Composer({
           initialDraft={promptHelperDraft}
           engines={engines}
           workflows={workflows}
+          // Only explicit attachments ground the workshop: the helper chat has
+          // no lineage, so a prior-image reference has nothing to resolve to.
+          editSourceArtifactIds={imageEdit
+            ? attachments.filter((item) => item.kind === "image").map((item) => item.id)
+            : undefined}
           onAccept={(nextDraft) => {
             setText(nextDraft);
             setPromptHelperDraft(null);
@@ -1897,6 +1901,7 @@ function ChatView({
   onCancelStep,
   onRetryStep,
   onDeleteExchange,
+  onForkThread,
 }: {
   chat?: ChatDetail;
   engines: EngineCapabilities[];
@@ -1933,6 +1938,7 @@ function ChatView({
   onCancelStep: (stepId: string) => void;
   onRetryStep: (stepId: string) => void;
   onDeleteExchange: (messageId: string) => void;
+  onForkThread: (messageId: string) => void;
 }) {
   const endRef = useRef<HTMLDivElement>(null);
   const messagesRef = useRef<HTMLDivElement>(null);
@@ -2070,6 +2076,7 @@ function ChatView({
                 })}
                 onQuote={(text) => setQuoteTarget({ text, requestId: Date.now() })}
                 onDeleteExchange={busy ? undefined : onDeleteExchange}
+                onForkThread={busy ? undefined : onForkThread}
               />
             </Fragment>
           );
@@ -3675,420 +3682,6 @@ function Sidebar({
   );
 }
 
-function jobProgressFraction(job: Job): number | null {
-  const progress = job.progress_json;
-  if (progress?.indeterminate) return null;
-  const structured = progress?.overall_progress ?? progress?.stage_progress;
-  if (job.status === "queued" && (structured === null || structured === undefined)) {
-    return null;
-  }
-  const legacy = Number.isFinite(job.progress) ? job.progress : null;
-  const value = structured === null || structured === undefined
-    ? legacy
-    : legacy === null
-      ? structured
-      : Math.max(structured, legacy);
-  if (typeof value === "number" && Number.isFinite(value)) {
-    return Math.min(1, Math.max(0, value));
-  }
-  if (job.status === "queued") return null;
-  return Number.isFinite(job.progress) ? Math.min(1, Math.max(0, job.progress)) : null;
-}
-
-function progressSampleIsFresh(progress: ProgressV2): boolean {
-  const updatedAt = Date.parse(progress.updated_at);
-  return Number.isFinite(updatedAt) && Math.abs(Date.now() - updatedAt) <= 5_000;
-}
-
-function jobDisplayName(kind: string): string {
-  return kind === "edit_verify" ? "Image edit check" : kind;
-}
-
-function jobProgressText(job: Job): string {
-  const progress = job.progress_json;
-  const pieces = [progress?.stage || job.phase];
-  if (
-    ["queued", "running"].includes(job.status)
-    && typeof progress?.stage_elapsed_ms === "number"
-    && Number.isFinite(progress.stage_elapsed_ms)
-  ) {
-    const startedAt = progress.stage_started_at ? Date.parse(progress.stage_started_at) : NaN;
-    const elapsed = Number.isFinite(startedAt)
-      ? Math.max(progress.stage_elapsed_ms, Date.now() - startedAt)
-      : progress.stage_elapsed_ms;
-    pieces.push(formatStageElapsed(elapsed));
-  }
-  const fraction = jobProgressFraction(job);
-  if (fraction !== null) pieces.push(`${Math.round(fraction * 100)}%`);
-  if (job.status === "queued" && typeof progress?.queue_position === "number") {
-    pieces.push(progress.queue_position > 0 ? `${progress.queue_position} ahead` : "Next");
-  }
-  const freshSample = progress ? progressSampleIsFresh(progress) : false;
-  if (freshSample && typeof progress?.rate_bytes_per_second === "number") {
-    pieces.push(formatTransferRate(progress.rate_bytes_per_second));
-  }
-  if (freshSample && typeof progress?.eta_seconds === "number") {
-    pieces.push(formatEta(progress.eta_seconds));
-  }
-  return pieces.filter(Boolean).join(" · ");
-}
-
-function setupRoleName(role: SetupRoleReadiness["role"]): string {
-  return role === "chat" ? "Chat" : role === "image" ? "Image" : "Video";
-}
-
-function recipeFitsSystem(recipe: ReferenceRecipe, system: SystemInfo): boolean {
-  if (system.memory_total_bytes < recipe.hardware.minimum_ram_gb * 1024 ** 3) return false;
-  if (recipe.total_size_bytes != null && system.disk_free_bytes < recipe.total_size_bytes) return false;
-  if (recipe.hardware.minimum_vram_gb == null) return true;
-  return system.devices.some(
-    (device) =>
-      device.total_memory_bytes != null
-      && device.total_memory_bytes >= recipe.hardware.minimum_vram_gb! * 1024 ** 3,
-  );
-}
-
-function SetupWizard({
-  report,
-  onClose,
-  onOpenModels,
-  onOpenWorkflows,
-}: {
-  report: SetupReadinessReport;
-  onClose: () => void;
-  onOpenModels: (role: SetupRoleReadiness["role"]) => void;
-  onOpenWorkflows: () => void;
-}) {
-  const client = useQueryClient();
-  const recipes = useQuery({ queryKey: ["recipes"], queryFn: api.recipes });
-  const system = useQuery({ queryKey: ["system"], queryFn: api.system });
-  const jobs = useQuery({
-    queryKey: ["jobs"],
-    queryFn: api.jobs,
-    refetchInterval: report.state === "ready" ? false : 3_000,
-  });
-  const refresh = () => {
-    void client.invalidateQueries({ queryKey: ["setup-readiness"] });
-    void client.invalidateQueries({ queryKey: ["jobs"] });
-    void client.invalidateQueries({ queryKey: ["models"] });
-    void client.invalidateQueries({ queryKey: ["profiles"] });
-    void client.invalidateQueries({ queryKey: ["runtimes"] });
-    void client.invalidateQueries({ queryKey: ["workers"] });
-    void client.invalidateQueries({ queryKey: ["workflows"] });
-  };
-  const installRecipe = useMutation({
-    mutationFn: (recipeId: string) => api.installRecipe(recipeId),
-    onSuccess: refresh,
-  });
-  const retryInstall = useMutation({
-    mutationFn: (jobId: string) => api.resumeDownload(jobId),
-    onSuccess: refresh,
-  });
-  const activateModel = useMutation({
-    mutationFn: (installId: string) => api.activateModel(installId),
-    onSuccess: refresh,
-  });
-  const installRuntime = useMutation({
-    mutationFn: (engine: RuntimeStatus["engine"]) => api.installRuntime(engine),
-    onSuccess: refresh,
-  });
-  const restartWorker = useMutation({
-    mutationFn: (role: SetupRoleReadiness) => {
-      if (role.role === "chat" && role.profile_id) return api.loadChatWorker(role.profile_id);
-      if (role.role !== "chat") return api.startMediaWorker();
-      throw new Error("Choose a chat model before starting its worker.");
-    },
-    onSuccess: refresh,
-  });  const verifyRole = useMutation({
-    mutationFn: (role: SetupRoleReadiness["role"]) => api.verifySetupRole(role),
-    onSuccess: refresh,
-  });
-  const suitableRecipes = (role: SetupRoleReadiness["role"]) => (
-    !system.data
-      ? []
-      : (recipes.data ?? [])
-        .filter((recipe) => recipe.role === role && recipeFitsSystem(recipe, system.data))
-        .sort((left, right) => (
-          Number(right.certified) - Number(left.certified)
-          || (left.total_size_bytes ?? Number.MAX_SAFE_INTEGER)
-            - (right.total_size_bytes ?? Number.MAX_SAFE_INTEGER)
-        ))
-  );
-  const performAction = (role: SetupRoleReadiness) => {
-    if (role.next_action === "verify_generation") {
-      verifyRole.mutate(role.role);
-      return;
-    }
-    if (role.next_action === "retry_install" && role.job_id) {
-      retryInstall.mutate(role.job_id);
-      return;
-    }
-    if (role.next_action === "activate_model" && role.install_id) {
-      activateModel.mutate(role.install_id);
-      return;
-    }
-    if (
-      ["install_runtime", "retry_runtime"].includes(role.next_action ?? "")
-      && ["llama.cpp", "vllm", "comfyui"].includes(role.engine ?? "")
-    ) {
-      installRuntime.mutate(role.engine as RuntimeStatus["engine"]);
-      return;
-    }
-    if (role.next_action === "restart_worker") {
-      restartWorker.mutate(role);
-      return;
-    }
-    if (["repair_workflow", "review_workflow"].includes(role.next_action ?? "")) {
-      onOpenWorkflows();
-      return;
-    }
-    onOpenModels(role.role);
-  };
-  const actionLabel = (role: SetupRoleReadiness): string => {
-    if (role.next_action === "verify_generation") return "Run quick test";
-    if (role.next_action === "retry_install") return "Retry install";
-    if (role.next_action === "activate_model") return "Re-check model";
-    if (role.next_action === "install_runtime") return "Install runtime";
-    if (role.next_action === "retry_runtime") return "Retry runtime";
-    if (role.next_action === "restart_worker") return "Restart worker";
-    if (["repair_workflow", "review_workflow"].includes(role.next_action ?? "")) {
-      return "Review workflows";
-    }
-    return `Choose ${role.role} model`;
-  };
-  const pendingRole = restartWorker.variables?.role;
-  const error = installRecipe.error || retryInstall.error || installRuntime.error || restartWorker.error || verifyRole.error || activateModel.error;
-
-  return (
-    <AccessibleDialog
-      title={report.state === "ready" ? "Setup complete" : "Set up LM Atelier"}
-      eyebrow="Local models"
-      closeLabel="Close setup"
-      onClose={onClose}
-      className="setup-wizard"
-    >
-      <p className="setup-intro">
-        Install each model with one click. Ready means activation passed and a quick local generation completed.
-      </p>
-      <div className="setup-role-grid" aria-live="polite">
-        {report.roles.map((role) => {
-          const issue = role.checks.find((check) => check.status !== "pass")
-            ?? role.checks.at(-1);
-          const job = jobs.data?.find((candidate) => candidate.id === role.job_id);
-          const recipe = role.next_action === "select_model"
-            ? suitableRecipes(role.role)[0]
-            : undefined;
-          const actionPending = (
-            (retryInstall.isPending && retryInstall.variables === role.job_id)
-            || (activateModel.isPending && activateModel.variables === role.install_id)
-            || (installRuntime.isPending && installRuntime.variables === role.engine)
-            || (restartWorker.isPending && pendingRole === role.role)
-            || (verifyRole.isPending && verifyRole.variables === role.role)
-          );
-          return (
-            <article className={`setup-role ${role.state}`} key={role.role}>
-              <header>
-                <span className="setup-role-icon">
-                  {role.role === "chat" ? <Bot /> : role.role === "image" ? <ImageIcon /> : <Film />}
-                </span>
-                <span><strong>{setupRoleName(role.role)}</strong><small>{role.state === "ready" ? "Ready" : role.state === "in_progress" ? "In progress" : "Action needed"}</small></span>
-                {role.state === "ready" ? <Check aria-hidden="true" /> : role.state === "in_progress" ? <LoaderCircle className="spin" aria-hidden="true" /> : <Activity aria-hidden="true" />}
-              </header>
-              <p>{issue?.message ?? "Setup status is unavailable."}</p>
-              {job && (
-                <div className="setup-job">
-                  <small>{jobProgressText(job)}</small>
-                  <div
-                    className="progress-track"
-                    role="progressbar"
-                    aria-label={`${setupRoleName(role.role)} setup progress`}
-                    aria-valuemin={0}
-                    aria-valuemax={100}
-                    aria-valuenow={jobProgressFraction(job) === null
-                      ? undefined
-                      : Math.round(jobProgressFraction(job)! * 100)}
-                  >
-                    <div
-                      className={jobProgressFraction(job) === null ? "indeterminate" : undefined}
-                      style={jobProgressFraction(job) === null
-                        ? undefined
-                        : { width: `${jobProgressFraction(job)! * 100}%` }}
-                    />
-                  </div>
-                </div>
-              )}
-              {role.state === "action_required" && (
-                <div className="setup-actions">
-                  {recipe && (
-                    <button
-                      className="primary compact-button"
-                      disabled={installRecipe.isPending}
-                      onClick={() => installRecipe.mutate(recipe.id)}
-                    >
-                      {installRecipe.isPending && installRecipe.variables === recipe.id
-                        ? "Starting…"
-                        : `Install ${recipe.name}`}
-                    </button>
-                  )}
-                  {role.next_action && (
-                    <button
-                      className={recipe ? "secondary compact-button" : "primary compact-button"}
-                      disabled={actionPending}
-                      onClick={() => performAction(role)}
-                    >
-                      {actionPending ? "Working…" : actionLabel(role)}
-                    </button>
-                  )}
-                  {recipe && <small>Reference candidate · {formatBytes(recipe.total_size_bytes)}</small>}
-                </div>
-              )}
-            </article>
-          );
-        })}
-      </div>
-      {error && <ErrorCallout message={error.message} />}
-      {recipes.error && <ErrorCallout message="Reference choices are temporarily unavailable. You can still browse the model library." />}
-      <footer>
-        <button className={report.state === "ready" ? "primary" : "secondary"} onClick={onClose}>
-          {report.state === "ready" ? "Done" : "Not now"}
-        </button>
-      </footer>
-    </AccessibleDialog>
-  );
-}
-
-function JobsPanel() {
-  const client = useQueryClient();
-  const [dismissedBefore, setDismissedBefore] = useState(() => {
-    const saved = Number(localStorage.getItem(DISMISSED_JOB_ISSUES_KEY));
-    return Number.isFinite(saved) && saved > 0 ? saved : 0;
-  });
-  const jobs = useQuery({ queryKey: ["jobs"], queryFn: api.jobs, refetchInterval: 3_000 });
-  const refresh = () => void client.invalidateQueries({ queryKey: ["jobs"] });
-  const cancel = useMutation({ mutationFn: api.cancelJob, onSuccess: refresh });
-  const pause = useMutation({ mutationFn: api.pauseDownload, onSuccess: refresh });
-  const resume = useMutation({ mutationFn: api.resumeDownload, onSuccess: refresh });
-  const retry = useMutation({ mutationFn: api.retryJob, onSuccess: refresh });
-  const active = jobs.data?.filter((job) => ["queued", "running", "paused"].includes(job.status)) ?? [];
-  const recentUnsuccessful = (jobs.data ?? [])
-    .filter((job) => ["failed", "cancelled", "interrupted"].includes(job.status))
-    .filter((job) => job.kind !== "edit_verify" || job.status === "failed")
-    .filter((job) => Date.parse(job.updated_at) > dismissedBefore)
-    .sort((left, right) => Date.parse(right.updated_at) - Date.parse(left.updated_at))
-    .slice(0, RECENT_UNSUCCESSFUL_JOB_LIMIT);
-  const clearRecentIssues = () => {
-    const newestIssue = Math.max(
-      dismissedBefore,
-      ...recentUnsuccessful
-        .map((job) => Date.parse(job.updated_at))
-        .filter((updatedAt) => Number.isFinite(updatedAt)),
-    );
-    const cutoff = newestIssue > 0 ? newestIssue : Date.now();
-    localStorage.setItem(DISMISSED_JOB_ISSUES_KEY, String(cutoff));
-    setDismissedBefore(cutoff);
-  };
-  if (!active.length && !recentUnsuccessful.length) return null;
-  return (
-    <aside className="jobs-panel" aria-label="Jobs">
-      <header>
-        <Activity size={16} />
-        <span>
-          {active.length
-            ? `${active.length} active job${active.length === 1 ? "" : "s"}`
-            : "Recent job issues"}
-        </span>
-        {recentUnsuccessful.length > 0 && (
-          <button
-            className="jobs-clear"
-            aria-label="Clear recent job issues"
-            onClick={clearRecentIssues}
-          >
-            Clear
-          </button>
-        )}
-      </header>
-      {active.map((job) => (
-        <div className="job-row" key={job.id}>
-          <div>
-            <strong>{jobDisplayName(job.kind)}</strong>
-            <small>{jobProgressText(job)}</small>
-            <div
-              className="progress-track"
-              role="progressbar"
-              aria-label={`${jobDisplayName(job.kind)} progress`}
-              aria-valuemin={0}
-              aria-valuemax={100}
-              aria-valuenow={jobProgressFraction(job) === null
-                ? undefined
-                : Math.round(jobProgressFraction(job)! * 100)}
-            >
-              <div
-                className={jobProgressFraction(job) === null ? "indeterminate" : undefined}
-                style={jobProgressFraction(job) === null
-                  ? undefined
-                  : { width: `${jobProgressFraction(job)! * 100}%` }}
-              />
-            </div>
-          </div>
-          <span className="job-actions">
-            {job.kind === "download" && (job.status === "paused" ? (
-              <button
-                className="icon-button"
-                aria-label="Resume download"
-                disabled={resume.isPending && resume.variables === job.id}
-                onClick={() => resume.mutate(job.id)}
-              >
-                <Play size={16} />
-              </button>
-            ) : (
-              <button
-                className="icon-button"
-                aria-label="Pause download"
-                disabled={pause.isPending && pause.variables === job.id}
-                onClick={() => pause.mutate(job.id)}
-              >
-                <Pause size={16} />
-              </button>
-            ))}
-            {job.cancellable && (
-              <button
-                className="icon-button"
-                aria-label="Cancel job"
-                disabled={cancel.isPending && cancel.variables === job.id}
-                onClick={() => cancel.mutate(job.id)}
-              >
-                <CircleStop size={17} />
-              </button>
-            )}
-          </span>
-        </div>
-      ))}
-      {active.length > 0 && recentUnsuccessful.length > 0 && (
-        <div className="jobs-subheading">Recent issues</div>
-      )}
-      {recentUnsuccessful.map((job) => (
-        <div className="job-row unsuccessful" key={job.id}>
-          <div>
-            <strong>{jobDisplayName(job.kind)} · {job.status}</strong>
-            <small>{job.phase || "Stopped"}</small>
-            {job.error && <small className="job-error" title={job.error}>{job.error}</small>}
-          </div>
-          <span className="job-actions">
-            <button
-              className="icon-button"
-              aria-label={`Retry ${job.kind} job`}
-              disabled={retry.isPending && retry.variables === job.id}
-              onClick={() => retry.mutate(job.id)}
-            >
-              <RotateCcw size={16} />
-            </button>
-          </span>
-        </div>
-      ))}
-      {retry.error && <div className="jobs-error" role="alert">{retry.error.message}</div>}
-    </aside>
-  );
-}
 
 export default function App() {
   const client = useQueryClient();
@@ -4190,7 +3783,7 @@ export default function App() {
       void client.invalidateQueries({ queryKey: ["jobs"] });
     },
   });
-  const deleteExchange = useExchangeDeletion();
+  const { deleteExchange, forkThread } = useMessageActions(setCurrentChatId, setView);
   const refreshWorkStep = () => {
     void client.invalidateQueries({ queryKey: ["chat", activeChatId] });
     void client.invalidateQueries({ queryKey: ["work-plans", activeChatId] });
@@ -4437,7 +4030,7 @@ export default function App() {
           stopCurrent: true,
         });
       }
-    }} onDeleteExchange={deleteExchange.mutate} onCancelPlan={(planId) => {
+    }} onDeleteExchange={deleteExchange.mutate} onForkThread={forkThread.mutate} onCancelPlan={(planId) => {
       cancelWorkPlan.mutate(planId);
     }} onCancelStep={(stepId) => {
       cancelWorkStep.mutate(stepId);
@@ -4455,7 +4048,7 @@ export default function App() {
         });
       }
     }} />;
-  }, [view, modelLibraryRole, engines.data, profiles.data, presets.data, workflows.data, allProjects, chat.data, chatDrafts, liveText, pendingTurns, workPlans.data, send, regenerate, selectResponseRevision, branch, stop, cancelWorkPlan, cancelWorkStep, retryWorkStep, updateChat, deleteExchange, client]);
+  }, [view, modelLibraryRole, engines.data, profiles.data, presets.data, workflows.data, allProjects, chat.data, chatDrafts, liveText, pendingTurns, workPlans.data, send, regenerate, selectResponseRevision, branch, stop, cancelWorkPlan, cancelWorkStep, retryWorkStep, updateChat, deleteExchange, forkThread, client]);
 
   return (
     <div className="app-shell">

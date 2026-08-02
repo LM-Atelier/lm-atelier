@@ -115,6 +115,7 @@ vi.mock("./api", () => ({
     regenerateMessage: vi.fn(),
     selectResponseRevision: vi.fn(),
     deleteExchange: vi.fn(),
+    forkThread: vi.fn(),
     branchMessage: vi.fn(),
     cancelChat: vi.fn(),
     jobs: vi.fn().mockResolvedValue([]),
@@ -473,6 +474,76 @@ describe("App", () => {
     fireEvent.click(screen.getByRole("button", { name: "Run quick test" }));
     await waitFor(() => expect(api.verifySetupRole).toHaveBeenCalledWith("image"));
   });
+  it("names the load a ready role has not paid yet and offers to pay it now", async () => {
+    vi.mocked(api.setupReadiness).mockResolvedValue(setupReport(
+      setupRole("chat", "ready", null, {
+        checks: [
+          {
+            code: "worker_not_loaded",
+            status: "pass",
+            message: "This model is not loaded yet. The first request will wait while it loads.",
+            action: "prepare_worker",
+          },
+          {
+            code: "generation_verified",
+            status: "pass",
+            message: "A local generation completed with this setup.",
+            action: null,
+          },
+        ],
+      }),
+      // Keeps the wizard open; a fully ready report never opens it on its own.
+      setupRole("image", "action_required", "select_model"),
+      setupRole("video"),
+    ));
+    vi.mocked(api.loadChatWorker).mockResolvedValue({ name: "chat", state: "ready" } as never);
+    const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+    render(
+      <QueryClientProvider client={client}>
+        <App />
+      </QueryClientProvider>,
+    );
+
+    // The wait is stated on a card that still reads Ready, because the role is
+    // ready - the old copy said only that the model would load "when used".
+    expect(await screen.findByText(
+      "This model is not loaded yet. The first request will wait while it loads.",
+    )).toBeInTheDocument();
+    expect(screen.getByText("Or skip: the first request loads it instead.")).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "Prepare now" }));
+    await waitFor(() => expect(api.loadChatWorker).toHaveBeenCalledWith("profile-chat"));
+  });
+
+  it("offers nothing to prepare once the model is already loaded", async () => {
+    vi.mocked(api.setupReadiness).mockResolvedValue(setupReport(
+      setupRole("chat", "ready", null, {
+        checks: [
+          { code: "worker_ready", status: "pass", message: "The managed worker is ready.", action: null },
+          {
+            code: "generation_verified",
+            status: "pass",
+            message: "A local generation completed with this setup.",
+            action: null,
+          },
+        ],
+      }),
+      // Keeps the wizard open; a fully ready report closes it and proves nothing.
+      setupRole("image", "action_required", "select_model"),
+      setupRole("video"),
+    ));
+    const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+    render(
+      <QueryClientProvider client={client}>
+        <App />
+      </QueryClientProvider>,
+    );
+
+    expect(await screen.findByRole("dialog", { name: "Set up LM Atelier" })).toBeInTheDocument();
+    expect(screen.getAllByText("A local generation completed with this setup.").length)
+      .toBeGreaterThan(0);
+    expect(screen.queryByRole("button", { name: "Prepare now" })).not.toBeInTheDocument();
+  });
+
   it("offers only a hardware-eligible one-click reference recipe", async () => {
     vi.mocked(api.setupReadiness).mockResolvedValue(setupReport(
       setupRole("chat", "action_required", "select_model"),
@@ -3698,6 +3769,184 @@ describe("App", () => {
       "A cobalt ceramic cup in soft window light",
     );
     expect(screen.queryByRole("dialog", { name: "Prompt workshop" })).not.toBeInTheDocument();
+  });
+
+  it("grounds an image-edit improvement in the source image and says so", async () => {
+    const stamp = "2026-07-28T00:00:00Z";
+    const chat: Chat = {
+      id: "chat-edit-workshop",
+      project_id: null,
+      title: "Edit workshop source",
+      archived: false,
+      routing_mode: "image",
+      confirm_uncertain_media: false,
+      active_chat_profile_id: null,
+      active_image_profile_id: null,
+      active_video_profile_id: null,
+      active_head_message_id: null,
+      created_at: stamp,
+      updated_at: stamp,
+    };
+    const helper = {
+      ...chat,
+      id: "chat-edit-helper",
+      title: "Prompt workshop",
+      archived: true,
+      routing_mode: "text" as const,
+      draft_prompt: "Make the mug burgundy",
+      active_head_message_id: "helper-grounded-assistant",
+      messages: [
+        {
+          id: "helper-grounded-user",
+          chat_id: "chat-edit-helper",
+          parent_id: null,
+          role: "user" as const,
+          status: "complete" as const,
+          parts: [{ id: "helper-grounded-ask", position: 0, type: "text" as const, text: "Improve the current draft as an editing instruction", artifact_id: null, metadata_json: {} }],
+          created_at: stamp,
+          updated_at: stamp,
+        },
+        {
+          id: "helper-grounded-assistant",
+          chat_id: "chat-edit-helper",
+          parent_id: "helper-grounded-user",
+          role: "assistant" as const,
+          status: "complete" as const,
+          parts: [
+            { id: "helper-grounded-answer", position: 0, type: "text" as const, text: "Recolor the blue ceramic mug on the desk to deep burgundy, keeping the steam and lighting unchanged", artifact_id: null, metadata_json: {} },
+            { id: "helper-grounded-metadata", position: 1, type: "generation_metadata" as const, text: null, artifact_id: null, metadata_json: { context: { vision: { visual_contents_inspected: true, images_included: 1 } } } },
+          ],
+          created_at: stamp,
+          updated_at: stamp,
+        },
+      ],
+    };
+    localStorage.setItem("local-lm-chat", chat.id);
+    vi.mocked(api.chats).mockResolvedValue([chat]);
+    vi.mocked(api.chat).mockResolvedValue({ ...chat, messages: [] });
+    vi.mocked(api.upload).mockResolvedValue({
+      id: "artifact-edit-source",
+      media_type: "image/png",
+      size_bytes: 512,
+      metadata_json: {},
+      created_at: stamp,
+    } as never);
+    vi.mocked(api.createPromptHelper).mockResolvedValue({ ...helper, messages: [] });
+    vi.mocked(api.promptHelper).mockResolvedValue(helper);
+    vi.mocked(api.updatePromptHelper).mockResolvedValue(helper);
+    vi.mocked(api.deletePromptHelper).mockResolvedValue(undefined);
+    vi.mocked(api.sendTurn).mockResolvedValue({} as TurnAccepted);
+    const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+    const { container } = render(
+      <QueryClientProvider client={client}>
+        <App />
+      </QueryClientProvider>,
+    );
+
+    const composer = await screen.findByRole("textbox", { name: "Message" });
+    const upload = container.querySelector<HTMLInputElement>('input[accept="image/*,video/*"]');
+    fireEvent.change(upload!, {
+      target: { files: [new File(["png"], "mug.png", { type: "image/png" })] },
+    });
+    await waitFor(() => expect(api.upload).toHaveBeenCalled());
+    fireEvent.change(composer, { target: { value: "Make the mug burgundy" } });
+    fireEvent.click(screen.getByRole("button", { name: "Open prompt workshop" }));
+
+    // The source image travels with the request so a vision-capable helper
+    // rewrites from what the picture shows, not from the words alone.
+    await waitFor(() => expect(api.sendTurn).toHaveBeenCalled());
+    const [, instruction, sendMode, artifacts] = vi.mocked(api.sendTurn).mock.calls[0];
+    expect(instruction).toContain("editing instruction for the attached source image");
+    expect(sendMode).toBe("text");
+    expect(artifacts).toEqual(["artifact-edit-source"]);
+    expect(await screen.findByText("Grounded in your source image.")).toBeInTheDocument();
+  });
+
+  it("admits when the helper could not view the edit source image", async () => {
+    const stamp = "2026-07-28T00:00:00Z";
+    const chat: Chat = {
+      id: "chat-blind-workshop",
+      project_id: null,
+      title: "Blind workshop source",
+      archived: false,
+      routing_mode: "image",
+      confirm_uncertain_media: false,
+      active_chat_profile_id: null,
+      active_image_profile_id: null,
+      active_video_profile_id: null,
+      active_head_message_id: null,
+      created_at: stamp,
+      updated_at: stamp,
+    };
+    const helper = {
+      ...chat,
+      id: "chat-blind-helper",
+      title: "Prompt workshop",
+      archived: true,
+      routing_mode: "text" as const,
+      draft_prompt: "Make the mug burgundy",
+      active_head_message_id: "helper-blind-assistant",
+      messages: [
+        {
+          id: "helper-blind-user",
+          chat_id: "chat-blind-helper",
+          parent_id: null,
+          role: "user" as const,
+          status: "complete" as const,
+          parts: [{ id: "helper-blind-ask", position: 0, type: "text" as const, text: "Improve the current draft as an editing instruction", artifact_id: null, metadata_json: {} }],
+          created_at: stamp,
+          updated_at: stamp,
+        },
+        {
+          id: "helper-blind-assistant",
+          chat_id: "chat-blind-helper",
+          parent_id: "helper-blind-user",
+          role: "assistant" as const,
+          status: "complete" as const,
+          parts: [
+            { id: "helper-blind-answer", position: 0, type: "text" as const, text: "Change the mug to burgundy", artifact_id: null, metadata_json: {} },
+            { id: "helper-blind-metadata", position: 1, type: "generation_metadata" as const, text: null, artifact_id: null, metadata_json: { context: { vision: { available: false, visual_contents_inspected: false } } } },
+          ],
+          created_at: stamp,
+          updated_at: stamp,
+        },
+      ],
+    };
+    localStorage.setItem("local-lm-chat", chat.id);
+    vi.mocked(api.chats).mockResolvedValue([chat]);
+    vi.mocked(api.chat).mockResolvedValue({ ...chat, messages: [] });
+    vi.mocked(api.upload).mockResolvedValue({
+      id: "artifact-blind-source",
+      media_type: "image/png",
+      size_bytes: 512,
+      metadata_json: {},
+      created_at: stamp,
+    } as never);
+    vi.mocked(api.createPromptHelper).mockResolvedValue({ ...helper, messages: [] });
+    vi.mocked(api.promptHelper).mockResolvedValue(helper);
+    vi.mocked(api.updatePromptHelper).mockResolvedValue(helper);
+    vi.mocked(api.deletePromptHelper).mockResolvedValue(undefined);
+    vi.mocked(api.sendTurn).mockResolvedValue({} as TurnAccepted);
+    const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+    const { container } = render(
+      <QueryClientProvider client={client}>
+        <App />
+      </QueryClientProvider>,
+    );
+
+    const composer = await screen.findByRole("textbox", { name: "Message" });
+    const upload = container.querySelector<HTMLInputElement>('input[accept="image/*,video/*"]');
+    fireEvent.change(upload!, {
+      target: { files: [new File(["png"], "mug.png", { type: "image/png" })] },
+    });
+    await waitFor(() => expect(api.upload).toHaveBeenCalled());
+    fireEvent.change(composer, { target: { value: "Make the mug burgundy" } });
+    fireEvent.click(screen.getByRole("button", { name: "Open prompt workshop" }));
+
+    // A blind rewrite and a grounded one must not read identically.
+    expect(await screen.findByText(
+      "The helper model could not view the image, so this suggestion is text-only.",
+    )).toBeInTheDocument();
   });
 
   it("queues prompt previews with capability-derived low-cost settings", async () => {
