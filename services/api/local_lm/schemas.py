@@ -11,7 +11,10 @@ from .worker_failures import WorkerFailureCode
 
 
 class ApiModel(BaseModel):
-    model_config = ConfigDict(from_attributes=True)
+    # extra="forbid": a client typo in a request field must be a 422, not a
+    # silently applied default. Response construction is unaffected - servers
+    # build these from exact attributes.
+    model_config = ConfigDict(from_attributes=True, extra="forbid")
 
 
 ContentRating = Literal["general", "mature", "unknown"]

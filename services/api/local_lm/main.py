@@ -21,6 +21,7 @@ from starlette.types import ASGIApp, Receive, Scope, Send
 from . import __version__
 from .adapters.comfyui import ComfyUIAdapter
 from .api import recover_model_delete_quarantines, router
+from .api_errors import register_api_error_handler
 from .artifacts import ArtifactStore
 from .backups import BackupManager
 from .catalog import HuggingFaceCatalog
@@ -393,6 +394,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
 
     # Register this last so it wraps host, session, and body-limit rejections too.
     app.add_middleware(SecurityHeadersMiddleware)
+    register_api_error_handler(app)
     app.include_router(router)
 
     @app.websocket("/api/events")
