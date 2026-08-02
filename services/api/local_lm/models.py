@@ -668,6 +668,34 @@ class CustomNodeInstall(TimestampMixin, Base):
     security_json: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
 
 
+class ComfyRegistryInstall(TimestampMixin, Base):
+    __tablename__ = "comfy_registry_installs"
+    __table_args__ = (
+        UniqueConstraint(
+            "package_id",
+            "package_version",
+            name="uq_comfy_registry_install_package_version",
+        ),
+    )
+
+    id: Mapped[str] = mapped_column(
+        String(40), primary_key=True, default=lambda: new_id("registry")
+    )
+    package_id: Mapped[str] = mapped_column(String(100), index=True)
+    package_version: Mapped[str] = mapped_column(String(100))
+    registry_record_id: Mapped[str] = mapped_column(String(1000), unique=True)
+    repository_url: Mapped[str] = mapped_column(String(1000))
+    download_url: Mapped[str] = mapped_column(String(1000))
+    archive_sha256: Mapped[str] = mapped_column(String(64))
+    manifest_sha256: Mapped[str] = mapped_column(String(64))
+    installed_path: Mapped[str] = mapped_column(Text, unique=True)
+    node_types_json: Mapped[list[str]] = mapped_column(JSON, default=list)
+    pip_dependencies_json: Mapped[list[str]] = mapped_column(JSON, default=list)
+    review_json: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
+    trusted: Mapped[bool] = mapped_column(Boolean, default=False, index=True)
+    active: Mapped[bool] = mapped_column(Boolean, default=False, index=True)
+
+
 class Job(TimestampMixin, Base):
     __tablename__ = "jobs"
 
