@@ -28,6 +28,7 @@ _RESERVED_WINDOWS_NAMES = {
     *(f"LPT{number}" for number in range(1, 10)),
 }
 _SUPPORTED_COMPRESSION = {zipfile.ZIP_STORED, zipfile.ZIP_DEFLATED}
+_REPARSE_POINT = getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0x400)
 
 
 class ComfyRegistryArchiveError(ValueError):
@@ -95,6 +96,59 @@ def stage_comfy_registry_archive(
         shutil.rmtree(destination, ignore_errors=True)
         raise ComfyRegistryArchiveError("invalid Comfy Registry archive") from exc
     return report
+
+
+def verify_staged_comfy_registry_archive(
+    destination: Path,
+    *,
+    expected_manifest_sha256: str,
+    expected_file_count: int,
+    expected_expanded_bytes: int,
+) -> None:
+    """Re-hash inert staged node code before it is allowed into a launch."""
+    if (
+        not _ARCHIVE_HASH.fullmatch(expected_manifest_sha256)
+        or isinstance(expected_file_count, bool)
+        or not isinstance(expected_file_count, int)
+        or expected_file_count < 0
+        or isinstance(expected_expanded_bytes, bool)
+        or not isinstance(expected_expanded_bytes, int)
+        or expected_expanded_bytes < 0
+    ):
+        raise ComfyRegistryArchiveError("invalid staged Registry archive identity")
+    if _is_link_or_reparse(destination) or not destination.is_dir():
+        raise ComfyRegistryArchiveError("staged Registry archive is missing or unsafe")
+    files: list[tuple[str, int, str]] = []
+    expanded_bytes = 0
+    try:
+        for path in sorted(destination.rglob("*")):
+            if _is_link_or_reparse(path):
+                raise ComfyRegistryArchiveError("staged Registry archive contains a link")
+            if path.is_dir():
+                continue
+            if not path.is_file():
+                raise ComfyRegistryArchiveError("staged Registry archive contains a special file")
+            relative = path.relative_to(destination).as_posix()
+            size = path.stat().st_size
+            expanded_bytes += size
+            if len(files) >= MAX_ARCHIVE_ENTRIES or expanded_bytes > MAX_ARCHIVE_EXPANDED_BYTES:
+                raise ComfyRegistryArchiveError("staged Registry archive exceeds its limits")
+            digest = hashlib.sha256()
+            with path.open("rb") as source:
+                while chunk := source.read(1024 * 1024):
+                    digest.update(chunk)
+            files.append((relative, size, digest.hexdigest()))
+    except OSError as exc:
+        raise ComfyRegistryArchiveError("could not verify staged Registry archive") from exc
+    manifest = "".join(
+        f"{path}{chr(0)}{size}{chr(0)}{digest}{chr(10)}" for path, size, digest in sorted(files)
+    )
+    if (
+        len(files) != expected_file_count
+        or expanded_bytes != expected_expanded_bytes
+        or hashlib.sha256(manifest.encode()).hexdigest() != expected_manifest_sha256.lower()
+    ):
+        raise ComfyRegistryArchiveError("staged Registry archive contents have changed")
 
 
 def _read_bounded_archive(path: Path) -> bytes:
@@ -258,3 +312,11 @@ def _extract_entries(
         native_files=tuple(sorted(native_files)),
         top_level_entries=tuple(sorted({entry.path.parts[0] for entry in entries})),
     )
+
+
+def _is_link_or_reparse(path: Path) -> bool:
+    try:
+        info = path.lstat()
+    except OSError:
+        return True
+    return path.is_symlink() or bool(getattr(info, "st_file_attributes", 0) & _REPARSE_POINT)

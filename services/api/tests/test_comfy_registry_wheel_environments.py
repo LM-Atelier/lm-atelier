@@ -23,6 +23,7 @@ from local_lm.comfy_registry_wheel_closure import (
 from local_lm.comfy_registry_wheel_environments import (
     ComfyRegistryWheelEnvironmentError,
     assemble_comfy_registry_wheel_environment,
+    verify_comfy_registry_wheel_environment,
 )
 
 _TAG = "py3-none-any"
@@ -180,6 +181,25 @@ async def test_assembly_stages_verified_wheels_and_publishes_audited_overlay(
         report.environment_sha256
         == hashlib.sha256((destination / "environment-manifest.json").read_bytes()).hexdigest()
     )
+    assert (
+        verify_comfy_registry_wheel_environment(
+            destination,
+            expected_closure_sha256=closure.closure_sha256,
+            expected_environment_sha256=report.environment_sha256,
+        )
+        == report
+    )
+
+    (destination / "site-packages" / "alpha" / "__init__.py").write_text(
+        "VALUE = 2" + chr(10), encoding="utf-8"
+    )
+    with pytest.raises(ComfyRegistryWheelEnvironmentError) as raised:
+        verify_comfy_registry_wheel_environment(
+            destination,
+            expected_closure_sha256=closure.closure_sha256,
+            expected_environment_sha256=report.environment_sha256,
+        )
+    assert raised.value.code == "environment_inventory_mismatch"
 
 
 async def test_worker_must_be_stopped_before_any_other_validation(tmp_path: Path) -> None:

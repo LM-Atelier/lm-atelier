@@ -17,6 +17,7 @@ import psutil
 import pytest
 from sqlalchemy.orm import object_session
 
+from local_lm.comfy_registry_installs import ComfyRegistryLaunchContract
 from local_lm.custom_nodes import CustomNodeManager
 from local_lm.db import SessionLocal
 from local_lm.events import EventBroker
@@ -1444,6 +1445,119 @@ async def test_media_start_disables_unapproved_custom_nodes(
     assert command[command.index("--preview-method") + 1] == "latent2rgb"
     assert "--disable-all-custom-nodes" in command
     assert command[command.index("--whitelist-custom-nodes") + 1 :] == ["lm-atelier-node_reviewed"]
+
+
+async def test_media_start_uses_only_verified_registry_overlay_contract(
+    settings,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,  # type: ignore[no-untyped-def]
+) -> None:
+    runtime = tmp_path / "comfyui"
+    runtime.mkdir()
+    (runtime / "main.py").touch()
+    executable = tmp_path / "python.exe"
+    executable.touch()
+    model_paths = tmp_path / "extra-model-paths.yaml"
+    model_paths.touch()
+    site_packages = tmp_path / "registry-environment" / "site-packages"
+    site_packages.mkdir(parents=True)
+    settings.comfy_directory = runtime
+    settings.comfy_executable = executable
+    supervisor = ProcessSupervisor(settings)
+    captured: dict[str, object] = {}
+
+    async def trusted_nodes() -> list[str]:
+        return ["lm-atelier-node_reviewed"]
+
+    async def replace(
+        name: str,
+        command: list[str],
+        _health_url: str,
+        _profile_id: str | None = None,
+        _estimated_memory_bytes: int | None = None,
+        *,
+        environment_overrides: dict[str, str] | None = None,
+        ready_check=None,  # type: ignore[no-untyped-def]
+    ) -> None:
+        captured.update(
+            name=name,
+            command=command,
+            environment_overrides=environment_overrides,
+            ready_check=ready_check,
+        )
+
+    monkeypatch.setattr(supervisor, "_trusted_comfy_node_folders", trusted_nodes)
+    monkeypatch.setattr(
+        supervisor,
+        "_trusted_comfy_registry_contract",
+        lambda: ComfyRegistryLaunchContract(
+            ("lm-atelier-registry_example",),
+            (site_packages,),
+            ("ExampleLoader",),
+        ),
+    )
+    monkeypatch.setattr(supervisor, "_write_comfy_model_paths", lambda: model_paths)
+    monkeypatch.setattr(supervisor, "_replace", replace)
+
+    await supervisor.start_media()
+
+    assert captured["name"] == "media"
+    command = captured["command"]
+    assert isinstance(command, list)
+    assert command[command.index("--whitelist-custom-nodes") + 1 :] == [
+        "lm-atelier-node_reviewed",
+        "lm-atelier-registry_example",
+    ]
+    assert captured["environment_overrides"] == {"PYTHONPATH": str(site_packages)}
+    assert callable(captured["ready_check"])
+
+
+@pytest.mark.parametrize(("inventory", "missing"), [({"ExampleLoader": {}}, False), ({}, True)])
+async def test_registry_node_inventory_is_verified_before_ready(
+    settings,
+    monkeypatch: pytest.MonkeyPatch,
+    inventory: dict[str, object],
+    missing: bool,
+) -> None:  # type: ignore[no-untyped-def]
+    settings.prepare()
+    supervisor = ProcessSupervisor(settings)
+
+    class FakeResponse:
+        async def __aenter__(self) -> FakeResponse:
+            return self
+
+        async def __aexit__(self, *_args: object) -> None:
+            return None
+
+        def raise_for_status(self) -> None:
+            return None
+
+        async def aiter_bytes(self):  # type: ignore[no-untyped-def]
+            yield json.dumps(inventory).encode()
+
+    class FakeClient:
+        def __init__(self, **kwargs: object) -> None:
+            assert kwargs["trust_env"] is False
+
+        async def __aenter__(self) -> FakeClient:
+            return self
+
+        async def __aexit__(self, *_args: object) -> None:
+            return None
+
+        def stream(self, method: str, url: str, *, timeout: float) -> FakeResponse:
+            assert method == "GET"
+            assert url.endswith("/object_info")
+            assert timeout == 5.0
+            return FakeResponse()
+
+    monkeypatch.setattr("local_lm.processes.httpx.AsyncClient", FakeClient)
+
+    if missing:
+        with pytest.raises(RuntimeError, match="did not load required node type"):
+            await supervisor._verify_comfy_node_types(("ExampleLoader",))
+    else:
+        await supervisor._verify_comfy_node_types(("ExampleLoader",))
 
 
 async def test_media_whitelist_contains_only_active_verified_trusted_installs(

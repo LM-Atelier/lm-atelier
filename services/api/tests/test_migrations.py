@@ -137,6 +137,9 @@ def test_migrations_round_trip(tmp_path) -> None:  # type: ignore[no-untyped-def
         "node_types_json",
         "pip_dependencies_json",
         "review_json",
+        "wheel_closure_sha256",
+        "wheel_environment_sha256",
+        "wheel_environment_path",
         "trusted",
         "active",
     } <= registry_install_columns
