@@ -108,6 +108,7 @@ class ComfyWorkflowPackageAnalysis:
             "unsafe_asset_reference",
             "unsupported_asset_format",
             "unidentified_custom_node_package",
+            "unresolved_custom_node_package",
             "unversioned_custom_node_package",
         }
         return self.runtime_nodes_available and not any(
@@ -140,6 +141,7 @@ def analyze_comfyui_workflow_package(
     *,
     available_node_types: Collection[str] = (),
     available_asset_filenames: Collection[str] = (),
+    installed_package_versions: Mapping[str, Collection[str]] | None = None,
 ) -> ComfyWorkflowPackageAnalysis:
     """Inspect a ComfyUI v0.4 UI workflow without executing or persisting it."""
     _validate_bounded_json(workflow)
@@ -177,6 +179,7 @@ def analyze_comfyui_workflow_package(
         link_count,
         available_node_types,
         available_asset_filenames,
+        installed_package_versions,
         structural_issues,
     )
 
@@ -189,6 +192,7 @@ def _analysis(
     link_count: int,
     available_node_types: Collection[str],
     available_asset_filenames: Collection[str],
+    installed_package_versions: Mapping[str, Collection[str]] | None,
     structural_issues: tuple[WorkflowPackageIssue, ...],
 ) -> ComfyWorkflowPackageAnalysis:
     all_types = {record.node_type for record in records}
@@ -201,6 +205,7 @@ def _analysis(
         required,
         missing,
         available,
+        installed_package_versions or {},
     )
     assets, asset_issues = _asset_references(records, available_asset_filenames)
     return ComfyWorkflowPackageAnalysis(
@@ -434,6 +439,7 @@ def _package_requirements(
     required_types: set[str],
     missing_types: set[str],
     available_types: set[str],
+    installed_package_versions: Mapping[str, Collection[str]],
 ) -> tuple[tuple[WorkflowPackageRequirement, ...], tuple[WorkflowPackageIssue, ...]]:
     packages: dict[str, dict[str, set[str]]] = defaultdict(lambda: defaultdict(set))
     unidentified: set[str] = set()
@@ -461,7 +467,10 @@ def _package_requirements(
                 )
             ),
             {node_type for node_types in versions.values() for node_type in node_types}
-            <= available_types,
+            <= available_types
+            and bool({version for version in versions if version})
+            and {version for version in versions if version}
+            <= {str(version) for version in installed_package_versions.get(package_id, ())},
         )
         for package_id, versions in sorted(packages.items(), key=lambda item: item[0].casefold())
     )
@@ -495,6 +504,18 @@ def _package_requirements(
                 "conflicting_custom_node_versions",
                 len(conflicting),
                 tuple(sorted(conflicting, key=str.casefold)),
+            )
+        )
+    unresolved = [requirement for requirement in requirements if not requirement.locally_resolved]
+    if unresolved:
+        node_types = {
+            node_type for requirement in unresolved for node_type in requirement.node_types
+        }
+        issues.append(
+            WorkflowPackageIssue(
+                "unresolved_custom_node_package",
+                len(unresolved),
+                tuple(sorted(node_types, key=str.casefold)),
             )
         )
     return requirements, tuple(issues)

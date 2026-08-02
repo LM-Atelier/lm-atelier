@@ -114,7 +114,9 @@ def test_all_available_dependencies_are_resolved() -> None:
         ]
     )
     analysis = analyze_comfyui_workflow_package(
-        value, available_node_types={"KSampler", "CustomNode"}
+        value,
+        available_node_types={"KSampler", "CustomNode"},
+        installed_package_versions={"example-pack": {"a" * 40}},
     )
     assert analysis.runtime_nodes_available
     assert analysis.dependencies_resolved
@@ -221,7 +223,10 @@ def test_unversioned_custom_package_is_reported() -> None:
         available_node_types=set(),
     )
     assert analysis.custom_packages[0].versions == ()
-    assert analysis.issues[0].code == "unversioned_custom_node_package"
+    assert {issue.code for issue in analysis.issues} == {
+        "unresolved_custom_node_package",
+        "unversioned_custom_node_package",
+    }
 
 
 def test_conflicting_custom_package_versions_are_reported() -> None:
@@ -235,12 +240,17 @@ def test_conflicting_custom_package_versions_are_reported() -> None:
         available_node_types={"FirstCustomNode", "SecondCustomNode"},
     )
     assert analysis.custom_packages[0].versions == ("1.0.0", "2.0.0")
-    assert analysis.issues == (
-        WorkflowPackageIssue(
-            "conflicting_custom_node_versions",
-            2,
-            ("FirstCustomNode", "SecondCustomNode"),
-        ),
+    assert {issue.code for issue in analysis.issues} == {
+        "conflicting_custom_node_versions",
+        "unresolved_custom_node_package",
+    }
+    conflict = next(
+        issue for issue in analysis.issues if issue.code == "conflicting_custom_node_versions"
+    )
+    assert conflict == WorkflowPackageIssue(
+        "conflicting_custom_node_versions",
+        2,
+        ("FirstCustomNode", "SecondCustomNode"),
     )
     assert not analysis.dependencies_resolved
 
