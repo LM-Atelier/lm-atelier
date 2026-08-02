@@ -1368,6 +1368,12 @@ describe("App", () => {
     fireEvent.click(screen.getByRole("button", { name: "advanced" }));
     const addLora = await screen.findByRole("button", { name: "Add LoRA" });
     await waitFor(() => expect(addLora).toBeEnabled());
+
+    // LoRAs live in their own section rather than inline among the numeric
+    // settings, so choosing one is deliberate instead of scrolled past.
+    const loraSection = screen.getByRole("region", { name: "LoRAs" });
+    expect(loraSection).toContainElement(addLora);
+
     fireEvent.click(addLora);
 
     expect(screen.getByRole("combobox", { name: "LoRA 1" })).toHaveDisplayValue("Atelier Ink");

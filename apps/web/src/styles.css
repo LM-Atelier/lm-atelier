@@ -217,7 +217,12 @@ h1, h2, h3 { margin: 0; }
 .segmented button { flex: 1; border: 0; background: transparent; color: #7f8794; border-radius: 7px; padding: 7px; text-transform: capitalize; cursor: pointer; }
 .segmented button.active { background: var(--panel-3); color: var(--cream); }
 .settings-list { overflow-y: auto; padding: 12px 22px 25px; }
-.generation-settings-panel { min-height: 0; display: grid; grid-template-rows: auto minmax(0, 1fr) auto; }
+/* Rows: visibility segmented, scrolling settings, optional LoRA section, actions. */
+.generation-settings-panel { min-height: 0; display: grid; grid-template-rows: auto minmax(0, 1fr) auto auto; }
+.settings-section { border-top: 1px solid var(--border); }
+.settings-section > h4 { margin: 0; padding: 12px 22px 0; color: var(--muted); font-size: 11px; font-weight: 700; letter-spacing: .09em; text-transform: uppercase; }
+.settings-section .settings-list { padding-top: 4px; }
+.settings-section .setting-row:last-child { border-bottom: 0; }
 .generation-settings-panel .setting-row { margin: 0; }
 .generation-settings-actions { display: flex; justify-content: flex-end; padding: 15px 22px; border-top: 1px solid var(--border); }
 .setting-row { display: grid; grid-template-columns: 1fr 105px; align-items: center; gap: 14px; padding: 13px 0; border-bottom: 1px solid var(--border); }
