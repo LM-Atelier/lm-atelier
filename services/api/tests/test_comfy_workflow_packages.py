@@ -319,6 +319,30 @@ def test_operation_guess_is_display_only() -> None:
     assert analysis.ready
 
 
+@pytest.mark.parametrize(
+    ("node_types", "expected"),
+    [
+        (("PreviewAny",), "unknown"),
+        (("PreviewAny", "KSampler"), "image"),
+        (("WanVideoModelLoader",), "video"),
+        (("LTXVLoader",), "video"),
+        (("HunyuanVideoSampler",), "video"),
+    ],
+)
+def test_operation_guess_matches_node_tokens(
+    node_types: tuple[str, ...],
+    expected: str,
+) -> None:
+    analysis = analyze_comfyui_workflow_package(
+        workflow(
+            nodes=[node(index, node_type) for index, node_type in enumerate(node_types, start=1)]
+        ),
+        available_node_types=set(node_types),
+    )
+
+    assert analysis.operation_guess == expected
+
+
 def test_node_bound_is_enforced() -> None:
     value = workflow(nodes=[node(index, "KSampler") for index in range(MAX_UI_GRAPH_NODES + 1)])
     with pytest.raises(WorkflowPackageError) as captured:
