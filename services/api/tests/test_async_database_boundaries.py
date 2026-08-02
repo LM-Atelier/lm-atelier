@@ -12,6 +12,16 @@ AUDITED_AWAITS = {
     ("orchestrator.py", "_execute_chat", "self._prepare_chat_context"),
     ("orchestrator.py", "_execute_media", "self.artifacts.browser_video_proxy"),
     ("orchestrator.py", "_execute_media", "self.artifacts.video_poster"),
+    # The preparation lifecycle owns commit/rollback on a session that must
+    # span its downloads and assembly. The session opens fresh with no prior
+    # writes, so it enters the await holding no SQLite lock; the concurrency
+    # regression in test_workflow_package_preparation.py proves another
+    # writer makes progress mid-preparation.
+    (
+        "workflow_package_preparation.py",
+        "prepare_workflow_package",
+        "prepare_comfy_registry_install",
+    ),
 }
 
 

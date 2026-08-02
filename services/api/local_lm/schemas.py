@@ -805,6 +805,13 @@ class EditTemplateOut(ApiModel):
     enabled: bool
 
 
+class WorkflowPackagePrepareRequest(ApiModel):
+    # Preparation binds to one exact identity; an unpinned request has nothing
+    # to verify against and the resolver refuses it anyway.
+    package_id: str = Field(min_length=1, max_length=200)
+    version: str = Field(min_length=1, max_length=200)
+
+
 class WorkflowPackageAnalyzeRequest(ApiModel):
     ui_graph: dict[str, Any]
 

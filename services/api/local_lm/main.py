@@ -20,7 +20,11 @@ from starlette.types import ASGIApp, Receive, Scope, Send
 
 from . import __version__
 from .adapters.comfyui import ComfyUIAdapter
-from .api import recover_model_delete_quarantines, router
+from .api import (
+    recover_model_delete_quarantines,
+    router,
+    shutdown_registry_preparations,
+)
 from .api_errors import register_api_error_handler
 from .artifacts import ArtifactStore
 from .backups import BackupManager
@@ -339,6 +343,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 for task in (worker_restore, backup_maintenance):
                     with suppress(asyncio.CancelledError):
                         await task
+                await shutdown_registry_preparations()
                 await services.downloads.close()
                 await services.orchestrator.close()
                 await services.runtimes.close()
