@@ -602,6 +602,29 @@ class ModelInstallOut(ApiModel):
     updated_at: datetime
 
 
+class ModelUpdateOut(ApiModel):
+    """One installed asset's staleness verdict against its provider.
+
+    `state` is "update_available", "current", or "unknown" - unknown means the
+    provider could not answer, never a guess. Update fields are set only with
+    "update_available"; installing the candidate goes through the normal
+    verified catalog flow for its version id.
+    """
+
+    install_id: str
+    name: str
+    kind: str
+    model_id: str
+    installed_version_id: str
+    installed_version_name: str | None
+    state: Literal["update_available", "current", "unknown"]
+    update_version_id: str | None = None
+    update_version_name: str | None = None
+    update_published_at: str | None = None
+    update_base_model: str | None = None
+    update_changelog: str | None = None
+
+
 class ModelStorageInfo(ApiModel):
     installed_bytes: int
     partial_download_bytes: int
@@ -803,6 +826,27 @@ class EditTemplateOut(ApiModel):
     content_rating: ContentRating
     builtin: bool
     enabled: bool
+
+
+class RegistryInstallOut(ApiModel):
+    """One prepared package and the two explicit decisions it is waiting for."""
+
+    id: str
+    package_id: str
+    package_version: str
+    node_types: list[str]
+    archive_sha256: str
+    manifest_sha256: str
+    wheel_closure_sha256: str | None
+    wheel_environment_sha256: str | None
+    trusted: bool
+    active: bool
+    reviewed_at: str | None
+    activated_at: str | None
+
+
+class RegistryInstallReviewRequest(ApiModel):
+    trusted: bool
 
 
 class WorkflowPackagePrepareRequest(ApiModel):

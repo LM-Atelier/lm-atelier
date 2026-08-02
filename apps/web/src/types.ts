@@ -853,3 +853,36 @@ export interface WorkflowPackagePreparation {
   wheel_environment_sha256: string;
   reused_wheel_environment: boolean;
 }
+
+/** One prepared package and the two explicit decisions it is waiting for. */
+/** One installed asset's staleness verdict; "unknown" means the provider
+ * could not answer, never a guess. */
+export interface ModelUpdate {
+  install_id: string;
+  name: string;
+  kind: string;
+  model_id: string;
+  installed_version_id: string;
+  installed_version_name: string | null;
+  state: "update_available" | "current" | "unknown";
+  update_version_id: string | null;
+  update_version_name: string | null;
+  update_published_at: string | null;
+  update_base_model: string | null;
+  update_changelog: string | null;
+}
+
+export interface RegistryInstall {
+  id: string;
+  package_id: string;
+  package_version: string;
+  node_types: string[];
+  archive_sha256: string;
+  manifest_sha256: string;
+  wheel_closure_sha256: string | null;
+  wheel_environment_sha256: string | null;
+  trusted: boolean;
+  active: boolean;
+  reviewed_at: string | null;
+  activated_at: string | null;
+}

@@ -247,6 +247,7 @@ vi.mock("./api", () => ({
     prepareWorkflowPackage: vi.fn(),
     validateWorkflow: vi.fn(),
     customNodes: vi.fn().mockResolvedValue([]),
+    registryInstalls: vi.fn().mockResolvedValue([]),
     installCustomNode: vi.fn(),
     updateCustomNode: vi.fn(),
     trustCustomNode: vi.fn(),
@@ -5366,7 +5367,8 @@ describe("App", () => {
     fireEvent.click(await screen.findByRole("button", { name: "Animate" }));
     await waitFor(() => expect(api.updateChat).toHaveBeenCalledWith(chat.id, { routing_mode: "video" }));
     const composer = screen.getByRole("textbox", { name: "Message" });
-    expect(composer).toHaveValue("Animate this image");
+    // The prefill lands after the routing mutation settles, not with it.
+    await waitFor(() => expect(composer).toHaveValue("Animate this image"));
     expect(composer).toHaveFocus();
     expect(screen.getByRole("link", { name: "Preview sha256:animate-source" })).toBeVisible();
     expect(screen.getAllByText("Generated image")).toHaveLength(2);
@@ -5968,7 +5970,8 @@ describe("App", () => {
     expect(screen.getByRole("alert")).toHaveTextContent("Only images and videos can be attached.");
     fireEvent.click(screen.getByRole("button", { name: "Animate attached image" }));
     await waitFor(() => expect(api.updateChat).toHaveBeenCalledWith("chat-drop", { routing_mode: "video" }));
-    expect(textarea).toHaveValue("Animate this image");
+    // The prefill lands after the routing mutation settles, not with it.
+    await waitFor(() => expect(textarea).toHaveValue("Animate this image"));
     expect(textarea).toHaveFocus();
 
     // Selecting several files attaches all of them, and one refusal does not

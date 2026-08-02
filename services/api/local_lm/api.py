@@ -33,7 +33,14 @@ from .chat_deletion import (
     delete_exchange,
 )
 from .chat_forking import ForkSourceNotFound, fork_chat_from_message
+from .civitai_catalog import CivitaiCatalog
 from .comfy_registry import ComfyRegistryClient
+from .comfy_registry_activation import (
+    ComfyRegistryActivationError,
+    activate_comfy_registry_install,
+    deactivate_comfy_registry_install,
+    review_comfy_registry_install,
+)
 from .comfy_registry_closure_driver import ComfyRegistryWheelMetadataClient
 from .comfy_registry_downloads import ComfyRegistryArchiveDownloader
 from .comfy_registry_installs import installed_comfy_registry_versions
@@ -96,10 +103,12 @@ from .model_planner import (
     resolve_install_plan,
     workflow_artifact_contract,
 )
+from .model_updates import installed_civitai_identities, newer_version
 from .models import (
     AppSetting,
     Artifact,
     Chat,
+    ComfyRegistryInstall,
     CustomNodeInstall,
     EditTemplate,
     GenerationPreset,
@@ -190,6 +199,7 @@ from .schemas import (
     ModelProfileOut,
     ModelProfileUpdate,
     ModelStorageInfo,
+    ModelUpdateOut,
     PlatformMatrixEntry,
     PresetBundle,
     PresetClone,
@@ -204,6 +214,8 @@ from .schemas import (
     PromptHelperUpdate,
     ReferenceRecipe,
     RegenerateRequest,
+    RegistryInstallOut,
+    RegistryInstallReviewRequest,
     ResolvedSetup,
     RunOut,
     RuntimeStatus,
@@ -3720,6 +3732,59 @@ async def model_storage(request: Request, session: SessionDep) -> ModelStorageIn
     )
 
 
+@router.get("/models/updates", response_model=list[ModelUpdateOut])
+async def check_model_updates(request: Request, session: SessionDep) -> list[ModelUpdateOut]:
+    """Compare installed provider versions on demand; the request is the consent.
+
+    Nothing polls in the background - this asks the provider only when the
+    user asks, and only about models whose install manifests name an exact
+    version. A provider that cannot answer yields "unknown", never a guess.
+    """
+
+    services = _services(request)
+    identities = installed_civitai_identities(session)
+    summaries: dict[str, dict[str, Any] | None] = {}
+    if identities:
+        # Per-request construction, like the Registry preparation clients: the
+        # source registry only carries browse providers, and the disk cache
+        # makes a fresh adapter as warm as a held one.
+        source = CivitaiCatalog(services.settings, token=services.settings.civitai_token)
+        try:
+            for identity in identities:
+                if identity.model_id in summaries:
+                    continue
+                try:
+                    summaries[identity.model_id] = await source.versions(identity.model_id)
+                except Exception:  # noqa: BLE001 - one model must not hide the rest
+                    summaries[identity.model_id] = None
+        finally:
+            await source.close()
+    report: list[ModelUpdateOut] = []
+    for identity in identities:
+        summary = summaries.get(identity.model_id)
+        candidate = newer_version(identity, summary) if summary is not None else None
+        state: Literal["update_available", "current", "unknown"] = (
+            "unknown" if summary is None else "current" if candidate is None else "update_available"
+        )
+        report.append(
+            ModelUpdateOut(
+                install_id=identity.install_id,
+                name=identity.name,
+                kind=identity.kind,
+                model_id=identity.model_id,
+                installed_version_id=identity.version_id,
+                installed_version_name=identity.version_name,
+                state=state,
+                update_version_id=candidate.version_id if candidate else None,
+                update_version_name=candidate.version_name if candidate else None,
+                update_published_at=candidate.published_at if candidate else None,
+                update_base_model=candidate.base_model if candidate else None,
+                update_changelog=candidate.changelog if candidate else None,
+            )
+        )
+    return report
+
+
 @router.post("/models/import", response_model=ModelInstallOut, status_code=201)
 async def import_model(payload: ModelImport, session: SessionDep) -> ModelInstall:
     path = Path(payload.local_path).expanduser().resolve(strict=True)
@@ -5216,11 +5281,7 @@ async def _run_workflow_package_preparation(
 
     try:
         async with services.scheduler.job_lease(job_id, resource="media_compute", group="primary"):
-            media = next(
-                (status for status in services.processes.statuses() if status.name == "media"),
-                None,
-            )
-            media_stopped = media is None or (not media.running and media.state != "starting")
+            media_stopped = _media_worker_truly_stopped(services)
             # The composition opens its session only around the atomic
             # prepare step; resolution and closure run session-free.
             preparation = await prepare_workflow_package(
@@ -5310,6 +5371,154 @@ async def prepare_workflow_package_endpoint(
 
     task.add_done_callback(_discard)
     return job
+
+
+_REGISTRY_ACTIVATION_STATUS: dict[str, int] = {
+    "registry_install_not_found": 404,
+    "media_worker_running": 409,
+    "registry_install_untrusted": 409,
+    "registry_install_verification_failed": 409,
+}
+
+
+def _registry_activation_failure(exc: ComfyRegistryActivationError) -> Exception:
+    return api_error(_REGISTRY_ACTIVATION_STATUS.get(exc.code, 500), exc.code, str(exc))
+
+
+def _registry_install_out(install: ComfyRegistryInstall) -> RegistryInstallOut:
+    review = install.review_json if isinstance(install.review_json, dict) else {}
+    reviewed_at = review.get("reviewed_at")
+    activated_at = review.get("activated_at")
+    return RegistryInstallOut(
+        id=install.id,
+        package_id=install.package_id,
+        package_version=install.package_version,
+        node_types=[str(node_type) for node_type in install.node_types_json],
+        archive_sha256=install.archive_sha256,
+        manifest_sha256=install.manifest_sha256,
+        wheel_closure_sha256=install.wheel_closure_sha256,
+        wheel_environment_sha256=install.wheel_environment_sha256,
+        trusted=install.trusted,
+        active=install.active,
+        reviewed_at=reviewed_at if isinstance(reviewed_at, str) else None,
+        activated_at=activated_at if isinstance(activated_at, str) else None,
+    )
+
+
+def _loaded_registry_install(session: Session, install_id: str) -> ComfyRegistryInstall:
+    install = session.get(ComfyRegistryInstall, install_id)
+    if install is None:  # pragma: no cover - the activation call guarantees the row
+        raise _registry_activation_failure(
+            ComfyRegistryActivationError(
+                "registry_install_not_found", "Registry package install was not found"
+            )
+        )
+    return install
+
+
+def _media_worker_truly_stopped(services: Services) -> bool:
+    media = next(
+        (status for status in services.processes.statuses() if status.name == "media"),
+        None,
+    )
+    return media is None or (not media.running and media.state != "starting")
+
+
+def _registry_activation_context(services: Services) -> PreparationContext:
+    try:
+        return PreparationContext.from_settings(services.settings)
+    except WorkflowPackagePreparationError as exc:
+        raise api_error(422, exc.code, str(exc)) from exc
+
+
+@router.get("/workflows/packages/installs", response_model=list[RegistryInstallOut])
+async def list_registry_installs(session: SessionDep) -> list[RegistryInstallOut]:
+    """List every prepared package with its trust and activation state."""
+
+    installs = session.scalars(
+        select(ComfyRegistryInstall).order_by(
+            ComfyRegistryInstall.package_id, ComfyRegistryInstall.package_version
+        )
+    ).all()
+    return [_registry_install_out(install) for install in installs]
+
+
+@router.post(
+    "/workflows/packages/installs/{install_id}/review",
+    response_model=RegistryInstallOut,
+)
+async def review_registry_install(
+    install_id: str,
+    payload: RegistryInstallReviewRequest,
+    request: Request,
+    session: SessionDep,
+) -> RegistryInstallOut:
+    """Record the explicit local trust decision; revoking also deactivates."""
+
+    services = _services(request)
+    context = _registry_activation_context(services)
+    async with services.scheduler.lease("primary"):
+        try:
+            review_comfy_registry_install(
+                session,
+                install_id=install_id,
+                trusted=payload.trusted,
+                custom_node_root=context.custom_node_root,
+                environment_root=context.state_root / "registry-wheel-environments",
+                media_worker_stopped=_media_worker_truly_stopped(services),
+            )
+        except ComfyRegistryActivationError as exc:
+            raise _registry_activation_failure(exc) from exc
+    return _registry_install_out(_loaded_registry_install(session, install_id))
+
+
+@router.post(
+    "/workflows/packages/installs/{install_id}/activate",
+    response_model=RegistryInstallOut,
+)
+async def activate_registry_install(
+    install_id: str, request: Request, session: SessionDep
+) -> RegistryInstallOut:
+    """Activate one trusted package; startup failure restores the prior runtime."""
+
+    services = _services(request)
+    context = _registry_activation_context(services)
+    async with services.scheduler.lease("primary"):
+        try:
+            await activate_comfy_registry_install(
+                session,
+                install_id=install_id,
+                custom_node_root=context.custom_node_root,
+                environment_root=context.state_root / "registry-wheel-environments",
+                media_worker_stopped=_media_worker_truly_stopped(services),
+                start_media=services.processes.start_media,
+            )
+        except ComfyRegistryActivationError as exc:
+            raise _registry_activation_failure(exc) from exc
+    return _registry_install_out(_loaded_registry_install(session, install_id))
+
+
+@router.post(
+    "/workflows/packages/installs/{install_id}/deactivate",
+    response_model=RegistryInstallOut,
+)
+async def deactivate_registry_install(
+    install_id: str, request: Request, session: SessionDep
+) -> RegistryInstallOut:
+    """Deactivate one package and restart the media runtime without it."""
+
+    services = _services(request)
+    async with services.scheduler.lease("primary"):
+        try:
+            await deactivate_comfy_registry_install(
+                session,
+                install_id=install_id,
+                media_worker_stopped=_media_worker_truly_stopped(services),
+                start_media=services.processes.start_media,
+            )
+        except ComfyRegistryActivationError as exc:
+            raise _registry_activation_failure(exc) from exc
+    return _registry_install_out(_loaded_registry_install(session, install_id))
 
 
 @router.post("/workflows/packages/analyze", response_model=WorkflowPackageAnalysisOut)
