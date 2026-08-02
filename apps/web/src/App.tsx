@@ -11,7 +11,6 @@ import { useInfiniteQuery, useMutation, useQuery, useQueryClient } from "@tansta
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 import {
-  Activity,
   ArrowDown,
   ArrowUp,
   Bot,
@@ -34,9 +33,7 @@ import {
   MessageSquare,
   MoreHorizontal,
   Paperclip,
-  Pause,
   Pencil,
-  Play,
   Plus,
   Quote,
   RotateCcw,
@@ -86,7 +83,8 @@ import { DownloadDiagnosticsButton } from "./DownloadDiagnosticsButton";
 import { StatusDot } from "./StatusDot";
 import { ErrorCallout } from "./ErrorCallout";
 import { SetupWizard } from "./SetupWizard";
-import { jobProgressFraction, jobProgressText, progressSampleIsFresh } from "./jobProgress";
+import { JobsPanel } from "./JobsPanel";
+import { progressSampleIsFresh } from "./jobProgress";
 import { WorkerLogFolderButton, WorkerStartupLimit } from "./WorkerStartupLimit";
 import { WorkerStatusCard } from "./WorkerStatusCard";
 import { useComposerUploads } from "./useComposerUploads";
@@ -151,8 +149,6 @@ type SendTurnVariables = PendingTurn & {
 
 const visibilityRank: Record<Visibility, number> = { basic: 0, advanced: 1, expert: 2 };
 const AUTO_PROFILE_ID = "__auto__";
-const RECENT_UNSUCCESSFUL_JOB_LIMIT = 3;
-const DISMISSED_JOB_ISSUES_KEY = "lm-atelier-dismissed-job-issues-before";
 const SETUP_DISMISSED_KEY = "lm-atelier-setup-dismissed";
 const CURRENT_CHAT_KEY = "local-lm-chat";
 
@@ -1197,6 +1193,7 @@ function PromptHelperDialog({
   initialDraft,
   engines,
   workflows,
+  editSourceArtifactIds,
   onAccept,
   onClose,
 }: {
@@ -1204,6 +1201,9 @@ function PromptHelperDialog({
   initialDraft: string;
   engines: EngineCapabilities[];
   workflows: Workflow[];
+  // When improving an image-edit instruction, the source image rides along so
+  // a vision-capable helper grounds its rewrite in what the picture shows.
+  editSourceArtifactIds?: string[];
   onAccept: (draft: string) => void;
   onClose: () => void;
 }) {
@@ -1242,9 +1242,13 @@ function PromptHelperDialog({
         setHelperId(created.id);
         await api.sendTurn(
           created.id,
-          "Improve the current draft. Return the complete revised prompt only.",
+          editSourceArtifactIds?.length
+            ? "Improve the current draft as an editing instruction for the attached source image. "
+              + "Ground it in what the image actually shows and preserve everything it does not ask to change. "
+              + "Return the complete revised prompt only."
+            : "Improve the current draft. Return the complete revised prompt only.",
           "text",
-          [],
+          editSourceArtifactIds ?? [],
           {},
         );
         if (active) refresh(created.id);
@@ -1257,7 +1261,7 @@ function PromptHelperDialog({
     return () => {
       active = false;
     };
-  }, [initialDraft, refresh, sourceChat.id]);
+  }, [editSourceArtifactIds, initialDraft, refresh, sourceChat.id]);
 
   const helperMessages = helper.data ? activeBranchMessages(helper.data) : [];
   const pending = helperMessages.some((message) => message.status === "pending");
@@ -1265,6 +1269,18 @@ function PromptHelperDialog({
     (message) => message.role === "assistant" && message.status === "complete",
   );
   const latestAssistantText = latestAssistant ? promptHelperMessageText(latestAssistant) : "";
+  // Say which kind of help this was: a rewrite grounded in the actual image,
+  // or a text-only one because the helper model cannot see. Silence would let
+  // the grounded case and the blind case read identically.
+  const latestVision = latestAssistant?.parts
+    .find((part) => part.type === "generation_metadata")
+    ?.metadata_json?.context as Record<string, unknown> | undefined;
+  const visionInspection = latestVision?.vision as Record<string, unknown> | undefined;
+  const editVisionNote = !editSourceArtifactIds?.length || !latestAssistant
+    ? null
+    : visionInspection?.visual_contents_inspected
+      ? "Grounded in your source image."
+      : "The helper model could not view the image, so this suggestion is text-only.";
 
   const send = async (mode: "text" | "image" | "video", text: string) => {
     if (!helperId || !draft.trim() || !text.trim()) return;
@@ -1335,6 +1351,7 @@ function PromptHelperDialog({
           )}
           {helperMessages.map((message) => <MessageBubble key={message.id} message={message} />)}
         </div>
+        {editVisionNote && <small className="prompt-helper-vision-note">{editVisionNote}</small>}
         {latestAssistant && latestAssistantText && adoptedAssistantId !== latestAssistant.id && (
           <button
             type="button"
@@ -1716,6 +1733,11 @@ function Composer({
           initialDraft={promptHelperDraft}
           engines={engines}
           workflows={workflows}
+          // Only explicit attachments ground the workshop: the helper chat has
+          // no lineage, so a prior-image reference has nothing to resolve to.
+          editSourceArtifactIds={imageEdit
+            ? attachments.filter((item) => item.kind === "image").map((item) => item.id)
+            : undefined}
           onAccept={(nextDraft) => {
             setText(nextDraft);
             setPromptHelperDraft(null);
@@ -3660,142 +3682,6 @@ function Sidebar({
   );
 }
 
-function jobDisplayName(kind: string): string {
-  return kind === "edit_verify" ? "Image edit check" : kind;
-}
-
-function JobsPanel() {
-  const client = useQueryClient();
-  const [dismissedBefore, setDismissedBefore] = useState(() => {
-    const saved = Number(localStorage.getItem(DISMISSED_JOB_ISSUES_KEY));
-    return Number.isFinite(saved) && saved > 0 ? saved : 0;
-  });
-  const jobs = useQuery({ queryKey: ["jobs"], queryFn: api.jobs, refetchInterval: 3_000 });
-  const refresh = () => void client.invalidateQueries({ queryKey: ["jobs"] });
-  const cancel = useMutation({ mutationFn: api.cancelJob, onSuccess: refresh });
-  const pause = useMutation({ mutationFn: api.pauseDownload, onSuccess: refresh });
-  const resume = useMutation({ mutationFn: api.resumeDownload, onSuccess: refresh });
-  const retry = useMutation({ mutationFn: api.retryJob, onSuccess: refresh });
-  const active = jobs.data?.filter((job) => ["queued", "running", "paused"].includes(job.status)) ?? [];
-  const recentUnsuccessful = (jobs.data ?? [])
-    .filter((job) => ["failed", "cancelled", "interrupted"].includes(job.status))
-    .filter((job) => job.kind !== "edit_verify" || job.status === "failed")
-    .filter((job) => Date.parse(job.updated_at) > dismissedBefore)
-    .sort((left, right) => Date.parse(right.updated_at) - Date.parse(left.updated_at))
-    .slice(0, RECENT_UNSUCCESSFUL_JOB_LIMIT);
-  const clearRecentIssues = () => {
-    const newestIssue = Math.max(
-      dismissedBefore,
-      ...recentUnsuccessful
-        .map((job) => Date.parse(job.updated_at))
-        .filter((updatedAt) => Number.isFinite(updatedAt)),
-    );
-    const cutoff = newestIssue > 0 ? newestIssue : Date.now();
-    localStorage.setItem(DISMISSED_JOB_ISSUES_KEY, String(cutoff));
-    setDismissedBefore(cutoff);
-  };
-  if (!active.length && !recentUnsuccessful.length) return null;
-  return (
-    <aside className="jobs-panel" aria-label="Jobs">
-      <header>
-        <Activity size={16} />
-        <span>
-          {active.length
-            ? `${active.length} active job${active.length === 1 ? "" : "s"}`
-            : "Recent job issues"}
-        </span>
-        {recentUnsuccessful.length > 0 && (
-          <button
-            className="jobs-clear"
-            aria-label="Clear recent job issues"
-            onClick={clearRecentIssues}
-          >
-            Clear
-          </button>
-        )}
-      </header>
-      {active.map((job) => (
-        <div className="job-row" key={job.id}>
-          <div>
-            <strong>{jobDisplayName(job.kind)}</strong>
-            <small>{jobProgressText(job)}</small>
-            <div
-              className="progress-track"
-              role="progressbar"
-              aria-label={`${jobDisplayName(job.kind)} progress`}
-              aria-valuemin={0}
-              aria-valuemax={100}
-              aria-valuenow={jobProgressFraction(job) === null
-                ? undefined
-                : Math.round(jobProgressFraction(job)! * 100)}
-            >
-              <div
-                className={jobProgressFraction(job) === null ? "indeterminate" : undefined}
-                style={jobProgressFraction(job) === null
-                  ? undefined
-                  : { width: `${jobProgressFraction(job)! * 100}%` }}
-              />
-            </div>
-          </div>
-          <span className="job-actions">
-            {job.kind === "download" && (job.status === "paused" ? (
-              <button
-                className="icon-button"
-                aria-label="Resume download"
-                disabled={resume.isPending && resume.variables === job.id}
-                onClick={() => resume.mutate(job.id)}
-              >
-                <Play size={16} />
-              </button>
-            ) : (
-              <button
-                className="icon-button"
-                aria-label="Pause download"
-                disabled={pause.isPending && pause.variables === job.id}
-                onClick={() => pause.mutate(job.id)}
-              >
-                <Pause size={16} />
-              </button>
-            ))}
-            {job.cancellable && (
-              <button
-                className="icon-button"
-                aria-label="Cancel job"
-                disabled={cancel.isPending && cancel.variables === job.id}
-                onClick={() => cancel.mutate(job.id)}
-              >
-                <CircleStop size={17} />
-              </button>
-            )}
-          </span>
-        </div>
-      ))}
-      {active.length > 0 && recentUnsuccessful.length > 0 && (
-        <div className="jobs-subheading">Recent issues</div>
-      )}
-      {recentUnsuccessful.map((job) => (
-        <div className="job-row unsuccessful" key={job.id}>
-          <div>
-            <strong>{jobDisplayName(job.kind)} · {job.status}</strong>
-            <small>{job.phase || "Stopped"}</small>
-            {job.error && <small className="job-error" title={job.error}>{job.error}</small>}
-          </div>
-          <span className="job-actions">
-            <button
-              className="icon-button"
-              aria-label={`Retry ${job.kind} job`}
-              disabled={retry.isPending && retry.variables === job.id}
-              onClick={() => retry.mutate(job.id)}
-            >
-              <RotateCcw size={16} />
-            </button>
-          </span>
-        </div>
-      ))}
-      {retry.error && <div className="jobs-error" role="alert">{retry.error.message}</div>}
-    </aside>
-  );
-}
 
 export default function App() {
   const client = useQueryClient();
