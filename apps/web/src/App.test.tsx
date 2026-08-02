@@ -511,6 +511,61 @@ describe("App", () => {
     expect(window.location.search).toBe("");
   });
 
+  it("totals live downloads into one figure with an honest optional eta", async () => {
+    const stamp = new Date().toISOString();
+    vi.mocked(api.setupReadiness).mockResolvedValue(setupReport(
+      setupRole("chat", "in_progress", "wait_for_install", { job_id: "job-chat-dl" }),
+      setupRole("image", "in_progress", "wait_for_install", { job_id: "job-image-dl" }),
+      setupRole("video", "action_required", "select_model"),
+    ));
+    const download = (id: string, total: number, done: number, rate: number | null) => ({
+      id,
+      kind: "download",
+      status: "running",
+      phase: "downloading",
+      progress: done / total,
+      cancellable: true,
+      error: null,
+      created_at: stamp,
+      updated_at: stamp,
+      progress_json: {
+        version: 2 as const,
+        stage: "downloading",
+        stage_progress: null,
+        overall_progress: done / total,
+        completed_units: done,
+        total_units: total,
+        unit: "bytes",
+        bytes_reused: 0,
+        rate_bytes_per_second: rate,
+        eta_seconds: null,
+        file_index: null,
+        file_count: null,
+        queue_resource: null,
+        queue_position: null,
+        queue_length: null,
+        blocked_by: [],
+        indeterminate: false,
+        updated_at: stamp,
+      },
+    });
+    vi.mocked(api.jobs).mockResolvedValue([
+      download("job-chat-dl", 8 * 1024 ** 3, 2 * 1024 ** 3, 50 * 1024 ** 2),
+      download("job-image-dl", 12 * 1024 ** 3, 4 * 1024 ** 3, 50 * 1024 ** 2),
+    ] as never);
+    const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+    render(
+      <QueryClientProvider client={client}>
+        <App />
+      </QueryClientProvider>,
+    );
+
+    // 6 GB + 8 GB remaining at a combined 100 MB/s: one figure to plan around.
+    expect(await screen.findByRole("status")).toHaveTextContent(
+      "14 GB left to download · about 2 min at the current speed",
+    );
+  });
+
   it("names the load a ready role has not paid yet and offers to pay it now", async () => {
     vi.mocked(api.setupReadiness).mockResolvedValue(setupReport(
       setupRole("chat", "ready", null, {
