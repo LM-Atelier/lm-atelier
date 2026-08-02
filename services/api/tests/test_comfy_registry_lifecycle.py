@@ -14,6 +14,7 @@ from packaging.markers import default_environment
 from sqlalchemy import create_engine, func, select
 from sqlalchemy.orm import Session
 
+import local_lm.comfy_registry_lifecycle as lifecycle_module
 import local_lm.comfy_registry_wheel_environments as environment_module
 from local_lm.comfy_registry import ComfyNodeResolution
 from local_lm.comfy_registry_archives import ComfyRegistryArchiveReport
@@ -33,12 +34,16 @@ from local_lm.comfy_registry_wheel_artifacts import (
 )
 from local_lm.comfy_registry_wheel_closure import (
     ComfyRegistryWheelClosure,
+    advance_comfy_registry_wheel_closure,
     plan_comfy_registry_wheel_closure,
 )
 from local_lm.comfy_registry_wheel_downloads import (
     ComfyRegistryStagedWheel,
     ComfyRegistryWheelStageReport,
     WheelDownloadProgress,
+)
+from local_lm.comfy_registry_wheel_selection import (
+    select_comfy_registry_wheel_versions,
 )
 from local_lm.db import Base
 from local_lm.models import ComfyRegistryInstall
@@ -213,6 +218,75 @@ def _populated_closure(content: bytes) -> ComfyRegistryWheelClosure:
     return plan_comfy_registry_wheel_closure(
         manifest,
         {filename: metadata},
+        marker_environment=marker_environment,
+    )
+
+
+def _transitive_closure(
+    resolution: ComfyNodeResolution,
+) -> ComfyRegistryWheelClosure:
+    marker_environment = {key: str(value) for key, value in default_environment().items()}
+    marker_environment["extra"] = ""
+    alpha_metadata = b"Metadata-Version: 2.4\nName: alpha\nVersion: 1.0\nRequires-Dist: beta>=2\n\n"
+    alpha_filename = "alpha-1.0-py3-none-any.whl"
+    manifest = resolve_comfy_registry_wheel_artifacts(
+        plan_comfy_registry_dependencies(resolution.pip_dependencies),
+        {
+            "alpha": {
+                "meta": {"api-version": "1.4"},
+                "name": "alpha",
+                "files": [
+                    {
+                        "filename": alpha_filename,
+                        "url": f"https://files.pythonhosted.org/packages/aa/{alpha_filename}",
+                        "hashes": {"sha256": "a" * 64},
+                        "requires-python": ">=3.12",
+                        "yanked": False,
+                        "size": 100,
+                        "core-metadata": {"sha256": hashlib.sha256(alpha_metadata).hexdigest()},
+                    }
+                ],
+            }
+        },
+        marker_environment=marker_environment,
+        supported_tags=("py3-none-any",),
+    )
+    first = plan_comfy_registry_wheel_closure(
+        manifest,
+        {alpha_filename: alpha_metadata},
+        marker_environment=marker_environment,
+    )
+    beta_metadata = b"Metadata-Version: 2.4\nName: beta\nVersion: 2.0\n\n"
+    beta_filename = "beta-2.0-py3-none-any.whl"
+    selection = select_comfy_registry_wheel_versions(
+        first.metadata_plan,
+        {
+            "beta": {
+                "meta": {"api-version": "1.4"},
+                "name": "beta",
+                "files": [
+                    {
+                        "filename": beta_filename,
+                        "url": f"https://files.pythonhosted.org/packages/bb/{beta_filename}",
+                        "hashes": {"sha256": "b" * 64},
+                        "requires-python": ">=3.12",
+                        "yanked": False,
+                        "size": 100,
+                        "core-metadata": {"sha256": hashlib.sha256(beta_metadata).hexdigest()},
+                    }
+                ],
+            }
+        },
+        marker_environment=marker_environment,
+        supported_tags=("py3-none-any",),
+    )
+    return advance_comfy_registry_wheel_closure(
+        first,
+        selection,
+        {
+            alpha_filename: alpha_metadata,
+            beta_filename: beta_metadata,
+        },
         marker_environment=marker_environment,
     )
 
@@ -477,6 +551,17 @@ async def test_dependency_mismatch_rejects_before_download_or_storage_creation(
     assert archive.calls == 0
     assert not (state / "registry-wheel-environments").exists()
     assert not (state / "registry-wheel-staging").exists()
+
+
+def test_transitive_closure_keeps_root_identity_at_lifecycle_boundary() -> None:
+    resolution = _resolution(pip_dependencies=("alpha==1.0",))
+
+    artifacts = lifecycle_module._complete_closure(
+        _transitive_closure(resolution),
+        resolution,
+    )
+
+    assert [artifact.name for artifact in artifacts] == ["alpha", "beta"]
 
 
 async def test_partial_archive_failure_is_cleaned_and_database_stays_empty(

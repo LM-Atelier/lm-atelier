@@ -108,7 +108,7 @@ def advance_comfy_registry_wheel_closure(
         )
     try:
         manifest = build_comfy_registry_wheel_artifact_manifest(
-            selection.selection_sha256,
+            closure.manifest.declaration_sha256,
             closure.manifest.target_sha256,
             tuple(sorted((*current, *selected), key=lambda item: (item.name, item.requirement))),
         )
