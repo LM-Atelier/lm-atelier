@@ -136,3 +136,17 @@ describe("elevation", () => {
     expect(contrast(ladder[3], ladder[0])).toBeGreaterThan(1.35);
   });
 });
+
+describe("the token layer", () => {
+  it("does not grow the pile of one-off colours", () => {
+    const css = readFileSync(STYLESHEET, "utf8");
+    const body = css.slice(css.indexOf("}") + 1);
+    const literals = body.match(/#[0-9a-fA-F]{3,8}\b/g) ?? [];
+
+    // A ceiling, not a target. It ratchets down as values earn names; a
+    // change needing a new one-off colour is a change needing a token. The
+    // palette cannot be reasoned about - or replaced - while most of it is
+    // spelled out across the rules.
+    expect(literals.length).toBeLessThanOrEqual(155);
+  });
+});
