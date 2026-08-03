@@ -166,6 +166,9 @@ def test_migrations_round_trip(tmp_path) -> None:  # type: ignore[no-untyped-def
         "turn_creation_claims",
         "workflow_families",
         "workflow_preferences",
+        "workflow_dependency_slots",
+        "workflow_activations",
+        "workflow_dependency_bindings",
     } <= tables
     assert {
         "active_head_message_id",
@@ -209,7 +212,7 @@ def test_migrations_round_trip(tmp_path) -> None:  # type: ignore[no-untyped-def
         "active",
     } <= registry_install_columns
     assert {"family_id", "variant_key"} <= workflow_definition_columns
-    assert "capabilities_json" in workflow_revision_columns
+    assert {"capabilities_json", "dependency_contract_sha256"} <= workflow_revision_columns
     assert {
         "id",
         "name",
