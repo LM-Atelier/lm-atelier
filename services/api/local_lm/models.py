@@ -10,6 +10,7 @@ from sqlalchemy import (
     DateTime,
     Float,
     ForeignKey,
+    ForeignKeyConstraint,
     Index,
     Integer,
     String,
@@ -35,6 +36,13 @@ from .domain import (
     new_id,
     utcnow,
 )
+
+
+def _lowercase_sha256_check(column: str) -> str:
+    remainder = column
+    for character in "0123456789abcdef":
+        remainder = f"replace({remainder}, '{character}', '')"
+    return f"length({column}) = 64 AND lower({column}) = {column} AND {remainder} = ''"
 
 
 class TimestampMixin:
@@ -766,7 +774,15 @@ class WorkflowPreference(TimestampMixin, Base):
 
 class WorkflowRevision(TimestampMixin, Base):
     __tablename__ = "workflow_revisions"
-    __table_args__ = (UniqueConstraint("workflow_id", "version", name="uq_workflow_version"),)
+    __table_args__ = (
+        UniqueConstraint("workflow_id", "version", name="uq_workflow_version"),
+        CheckConstraint(
+            "dependency_contract_sha256 IS NULL OR ("
+            + _lowercase_sha256_check("dependency_contract_sha256")
+            + ")",
+            name="ck_workflow_revision_dependency_contract_sha256",
+        ),
+    )
 
     id: Mapped[str] = mapped_column(String(40), primary_key=True, default=lambda: new_id("wfrev"))
     workflow_id: Mapped[str] = mapped_column(
@@ -780,6 +796,7 @@ class WorkflowRevision(TimestampMixin, Base):
     input_schema_json: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
     capabilities_json: Mapped[list[str]] = mapped_column(JSON, default=list)
     dependencies_json: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
+    dependency_contract_sha256: Mapped[str | None] = mapped_column(String(64), nullable=True)
     # Identifies what this revision executes, so capability evidence survives a
     # compiler change that does not alter the compiled output.
     artifact_sha256: Mapped[str | None] = mapped_column(String(64), nullable=True, index=True)
@@ -787,6 +804,15 @@ class WorkflowRevision(TimestampMixin, Base):
 
     definition: Mapped[WorkflowDefinition] = relationship(
         back_populates="revisions", foreign_keys=[workflow_id]
+    )
+    dependency_slots: Mapped[list[WorkflowDependencySlot]] = relationship(
+        back_populates="revision",
+        passive_deletes="all",
+        order_by="WorkflowDependencySlot.ordinal",
+    )
+    activations: Mapped[list[WorkflowActivation]] = relationship(
+        back_populates="revision",
+        passive_deletes="all",
     )
 
 
@@ -834,6 +860,246 @@ class ComfyRegistryInstall(TimestampMixin, Base):
     wheel_environment_path: Mapped[str | None] = mapped_column(Text, nullable=True)
     trusted: Mapped[bool] = mapped_column(Boolean, default=False, index=True)
     active: Mapped[bool] = mapped_column(Boolean, default=False, index=True)
+
+
+class WorkflowDependencySlot(TimestampMixin, Base):
+    __tablename__ = "workflow_dependency_slots"
+    __table_args__ = (
+        UniqueConstraint(
+            "workflow_revision_id",
+            "name",
+            name="uq_workflow_dependency_slot_revision_name",
+        ),
+        UniqueConstraint(
+            "workflow_revision_id",
+            "ordinal",
+            name="uq_workflow_dependency_slot_revision_ordinal",
+        ),
+        UniqueConstraint(
+            "id",
+            "workflow_revision_id",
+            name="uq_workflow_dependency_slot_id_revision",
+        ),
+        CheckConstraint(
+            "length(trim(name)) > 0",
+            name="ck_workflow_dependency_slot_name_nonempty",
+        ),
+        CheckConstraint(
+            "resource_kind IN ('model_profile', 'model_install', 'model_asset', "
+            "'custom_node', 'registry_package', 'runtime')",
+            name="ck_workflow_dependency_slot_resource_kind",
+        ),
+        CheckConstraint(
+            "satisfaction IN ('all_of', 'any_of')",
+            name="ck_workflow_dependency_slot_satisfaction",
+        ),
+        CheckConstraint(
+            "required IN (false, true)",
+            name="ck_workflow_dependency_slot_required",
+        ),
+        CheckConstraint("ordinal >= 0", name="ck_workflow_dependency_slot_ordinal"),
+        CheckConstraint(
+            _lowercase_sha256_check("contract_sha256"),
+            name="ck_workflow_dependency_slot_contract_sha256",
+        ),
+    )
+
+    id: Mapped[str] = mapped_column(String(40), primary_key=True, default=lambda: new_id("wfslot"))
+    workflow_revision_id: Mapped[str] = mapped_column(
+        ForeignKey("workflow_revisions.id", ondelete="CASCADE"), index=True
+    )
+    name: Mapped[str] = mapped_column(String(100))
+    resource_kind: Mapped[str] = mapped_column(String(32))
+    required: Mapped[bool] = mapped_column(Boolean, default=True, server_default=text("true"))
+    satisfaction: Mapped[str] = mapped_column(
+        String(16), default="all_of", server_default=text("'all_of'")
+    )
+    requirements_json: Mapped[list[dict[str, Any]]] = mapped_column(
+        JSON, default=list, server_default=text("'[]'")
+    )
+    contract_sha256: Mapped[str] = mapped_column(String(64))
+    ordinal: Mapped[int] = mapped_column(Integer)
+
+    revision: Mapped[WorkflowRevision] = relationship(
+        back_populates="dependency_slots", foreign_keys=[workflow_revision_id]
+    )
+    bindings: Mapped[list[WorkflowDependencyBinding]] = relationship(
+        back_populates="slot",
+        foreign_keys=(
+            "[WorkflowDependencyBinding.workflow_dependency_slot_id, "
+            "WorkflowDependencyBinding.workflow_revision_id]"
+        ),
+        viewonly=True,
+    )
+
+
+class WorkflowActivation(TimestampMixin, Base):
+    __tablename__ = "workflow_activations"
+    __table_args__ = (
+        UniqueConstraint(
+            "workflow_revision_id",
+            "binding_sha256",
+            name="uq_workflow_activation_revision_binding",
+        ),
+        UniqueConstraint(
+            "id",
+            "workflow_revision_id",
+            name="uq_workflow_activation_id_revision",
+        ),
+        CheckConstraint(
+            "state IN ('ready', 'stale', 'disabled')",
+            name="ck_workflow_activation_state",
+        ),
+        CheckConstraint(
+            _lowercase_sha256_check("dependency_contract_sha256"),
+            name="ck_workflow_activation_contract_sha256",
+        ),
+        CheckConstraint(
+            _lowercase_sha256_check("binding_sha256"),
+            name="ck_workflow_activation_binding_sha256",
+        ),
+        CheckConstraint(
+            "NOT is_active OR (state = 'ready' AND invalidated_at IS NULL)",
+            name="ck_workflow_activation_active_ready",
+        ),
+        CheckConstraint(
+            "is_active IN (false, true)",
+            name="ck_workflow_activation_is_active",
+        ),
+        Index(
+            "uq_workflow_activation_active_revision",
+            "workflow_revision_id",
+            unique=True,
+            sqlite_where=text("is_active = 1"),
+            postgresql_where=text("is_active IS TRUE"),
+        ),
+    )
+
+    id: Mapped[str] = mapped_column(String(40), primary_key=True, default=lambda: new_id("wfact"))
+    workflow_revision_id: Mapped[str] = mapped_column(
+        ForeignKey("workflow_revisions.id", ondelete="CASCADE"), index=True
+    )
+    resolver_version: Mapped[str] = mapped_column(String(40))
+    dependency_contract_sha256: Mapped[str] = mapped_column(String(64))
+    binding_sha256: Mapped[str] = mapped_column(String(64))
+    state: Mapped[str] = mapped_column(
+        String(16), default="ready", server_default=text("'ready'"), index=True
+    )
+    is_active: Mapped[bool] = mapped_column(
+        Boolean, default=False, server_default=text("false"), index=True
+    )
+    last_validated_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    invalidated_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    invalidation_code: Mapped[str | None] = mapped_column(String(80), nullable=True)
+    invalidation_reason: Mapped[str | None] = mapped_column(Text, nullable=True)
+    details_json: Mapped[dict[str, Any]] = mapped_column(
+        JSON, default=dict, server_default=text("'{}'")
+    )
+
+    revision: Mapped[WorkflowRevision] = relationship(
+        back_populates="activations", foreign_keys=[workflow_revision_id]
+    )
+    bindings: Mapped[list[WorkflowDependencyBinding]] = relationship(
+        back_populates="activation",
+        cascade="all, delete-orphan",
+        passive_deletes=True,
+        foreign_keys=(
+            "[WorkflowDependencyBinding.workflow_activation_id, "
+            "WorkflowDependencyBinding.workflow_revision_id]"
+        ),
+    )
+
+
+class WorkflowDependencyBinding(TimestampMixin, Base):
+    __tablename__ = "workflow_dependency_bindings"
+    __table_args__ = (
+        ForeignKeyConstraint(
+            ["workflow_activation_id", "workflow_revision_id"],
+            ["workflow_activations.id", "workflow_activations.workflow_revision_id"],
+            name="fk_workflow_dependency_binding_activation_revision",
+            ondelete="CASCADE",
+        ),
+        ForeignKeyConstraint(
+            ["workflow_dependency_slot_id", "workflow_revision_id"],
+            ["workflow_dependency_slots.id", "workflow_dependency_slots.workflow_revision_id"],
+            name="fk_workflow_dependency_binding_slot_revision",
+        ),
+        UniqueConstraint(
+            "workflow_activation_id",
+            "workflow_dependency_slot_id",
+            "requirement_key",
+            name="uq_workflow_dependency_binding_assignment",
+        ),
+        CheckConstraint(
+            "length(trim(requirement_key)) > 0",
+            name="ck_workflow_dependency_binding_requirement_nonempty",
+        ),
+        CheckConstraint(
+            _lowercase_sha256_check("resource_identity_sha256"),
+            name="ck_workflow_dependency_binding_identity_sha256",
+        ),
+        CheckConstraint(
+            "(CASE WHEN model_profile_id IS NOT NULL THEN 1 ELSE 0 END + "
+            "CASE WHEN model_install_id IS NOT NULL THEN 1 ELSE 0 END + "
+            "CASE WHEN model_asset_install_id IS NOT NULL THEN 1 ELSE 0 END + "
+            "CASE WHEN custom_node_install_id IS NOT NULL THEN 1 ELSE 0 END + "
+            "CASE WHEN comfy_registry_install_id IS NOT NULL THEN 1 ELSE 0 END + "
+            "CASE WHEN runtime_key IS NOT NULL THEN 1 ELSE 0 END) = 1",
+            name="ck_workflow_dependency_binding_one_locator",
+        ),
+    )
+
+    id: Mapped[str] = mapped_column(String(40), primary_key=True, default=lambda: new_id("wfbind"))
+    workflow_revision_id: Mapped[str] = mapped_column(String(40), index=True)
+    workflow_activation_id: Mapped[str] = mapped_column(String(40), index=True)
+    workflow_dependency_slot_id: Mapped[str] = mapped_column(String(40), index=True)
+    requirement_key: Mapped[str] = mapped_column(String(100))
+    model_profile_id: Mapped[str | None] = mapped_column(
+        ForeignKey("model_profiles.id", ondelete="RESTRICT"), nullable=True, index=True
+    )
+    model_install_id: Mapped[str | None] = mapped_column(
+        ForeignKey("model_installs.id", ondelete="RESTRICT"), nullable=True, index=True
+    )
+    model_asset_install_id: Mapped[str | None] = mapped_column(
+        ForeignKey("model_asset_installs.id", ondelete="RESTRICT"), nullable=True, index=True
+    )
+    custom_node_install_id: Mapped[str | None] = mapped_column(
+        ForeignKey("custom_node_installs.id", ondelete="RESTRICT"), nullable=True, index=True
+    )
+    comfy_registry_install_id: Mapped[str | None] = mapped_column(
+        ForeignKey("comfy_registry_installs.id", ondelete="RESTRICT"), nullable=True, index=True
+    )
+    runtime_key: Mapped[str | None] = mapped_column(String(100), nullable=True)
+    mount_json: Mapped[dict[str, Any]] = mapped_column(
+        JSON, default=dict, server_default=text("'{}'")
+    )
+    resource_identity_json: Mapped[dict[str, Any]] = mapped_column(
+        JSON, default=dict, server_default=text("'{}'")
+    )
+    resource_identity_sha256: Mapped[str] = mapped_column(String(64))
+
+    activation: Mapped[WorkflowActivation] = relationship(
+        back_populates="bindings",
+        foreign_keys=[workflow_activation_id, workflow_revision_id],
+    )
+    slot: Mapped[WorkflowDependencySlot] = relationship(
+        back_populates="bindings",
+        foreign_keys=[workflow_dependency_slot_id, workflow_revision_id],
+        viewonly=True,
+    )
+    model_profile: Mapped[ModelProfile | None] = relationship(foreign_keys=[model_profile_id])
+    model_install: Mapped[ModelInstall | None] = relationship(foreign_keys=[model_install_id])
+    model_asset_install: Mapped[ModelAssetInstall | None] = relationship(
+        foreign_keys=[model_asset_install_id]
+    )
+    custom_node_install: Mapped[CustomNodeInstall | None] = relationship(
+        foreign_keys=[custom_node_install_id]
+    )
+    comfy_registry_install: Mapped[ComfyRegistryInstall | None] = relationship(
+        foreign_keys=[comfy_registry_install_id]
+    )
 
 
 class Job(TimestampMixin, Base):
