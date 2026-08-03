@@ -148,9 +148,10 @@ async def test_compilation_refusals_keep_their_stable_codes(
 ) -> None:
     _wire_runtime(app, monkeypatch)
     graph = _ui_graph()
-    # A subgraph the compiler cannot translate without the ComfyUI frontend.
-    # Its inner node types are all available, so the package is still ready -
-    # the refusal must come from compilation, with compilation's code.
+    # A subgraph whose declared input nothing feeds. Its inner node types are
+    # all available, so the package is still ready - the refusal has to come
+    # from compilation, carrying compilation's code rather than the
+    # analyzer's verdict on readiness.
     subgraph_id = "9bc44576-7290-4701-bda4-032ca796efbc"
     graph["nodes"].append({"id": 3, "type": subgraph_id, "mode": 0, "inputs": [], "outputs": []})
     graph["definitions"] = {
@@ -158,7 +159,7 @@ async def test_compilation_refusals_keep_their_stable_codes(
             {
                 "id": subgraph_id,
                 "nodes": [{"id": 10, "type": "Source", "mode": 0, "inputs": [], "outputs": []}],
-                "links": [],
+                "links": [[100, "-10", 0, 10, 0, "IMAGE"]],
             }
         ]
     }
@@ -169,4 +170,64 @@ async def test_compilation_refusals_keep_their_stable_codes(
     )
 
     assert response.status_code == 422
-    assert response.json()["code"] == "unsupported_subgraphs"
+    assert response.json()["code"] == "unconnected_subgraph_input"
+
+
+async def test_a_subgraph_package_imports_now_that_it_can_be_expanded(
+    client: AsyncClient, app: FastAPI, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The point of expansion: authored graphs become runnable.
+
+    Both workflows this project was asked to set up are built out of
+    subgraphs, so every asset they needed could be installed and they would
+    still refuse to compile.
+    """
+
+    _wire_runtime(app, monkeypatch)
+    graph = _ui_graph()
+    subgraph_id = "5f0b1f4c-1f3a-4b8e-9d21-6f0a2f5c7a10"
+    # The Save node moves inside a subgraph; the instance takes the image and
+    # hands it to the node that was there before.
+    graph["nodes"] = [
+        graph["nodes"][0],
+        {
+            "id": 3,
+            "type": subgraph_id,
+            "mode": 0,
+            "inputs": [{"name": "images", "type": "IMAGE", "link": 7}],
+            "outputs": [],
+        },
+    ]
+    graph["links"] = [[7, 1, 0, 3, 0, "IMAGE"]]
+    graph["definitions"] = {
+        "subgraphs": [
+            {
+                "id": subgraph_id,
+                "nodes": [
+                    {
+                        "id": 10,
+                        "type": "Save",
+                        "mode": 0,
+                        "inputs": [
+                            {"name": "images", "type": "IMAGE", "link": 100},
+                            {
+                                "name": "filename_prefix",
+                                "type": "STRING",
+                                "widget": {"name": "filename_prefix"},
+                            },
+                        ],
+                        "outputs": [],
+                        "widgets_values": ["result"],
+                    }
+                ],
+                "links": [[100, "-10", 0, 10, 0, "IMAGE"]],
+            }
+        ]
+    }
+
+    response = await client.post(
+        "/api/workflows/packages/import",
+        json={"ui_graph": graph, "name": "Expanded", "operation": "text_to_image"},
+    )
+
+    assert response.status_code == 201, response.json()
