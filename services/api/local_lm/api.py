@@ -1371,9 +1371,7 @@ async def set_response_feedback(
     if payload.response_revision_id is not None:
         revision = session.get(ResponseRevision, payload.response_revision_id)
         if not revision or revision.message_id != message.id:
-            raise api_error(
-                404, "revision-not-found", "This response revision no longer exists"
-            )
+            raise api_error(404, "revision-not-found", "This response revision no longer exists")
     existing = session.scalar(
         select(ResponseFeedback).where(
             ResponseFeedback.message_id == message.id,

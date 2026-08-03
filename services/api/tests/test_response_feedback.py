@@ -37,15 +37,11 @@ def _seed_exchange() -> tuple[str, str, str]:
 async def test_a_verdict_sets_changes_and_clears(client: AsyncClient) -> None:
     chat_id, message_id, revision_id = _seed_exchange()
 
-    liked = await client.put(
-        f"/api/messages/{message_id}/feedback", json={"rating": "up"}
-    )
+    liked = await client.put(f"/api/messages/{message_id}/feedback", json={"rating": "up"})
     assert liked.status_code == 200
     assert liked.json()["rating"] == "up"
 
-    changed = await client.put(
-        f"/api/messages/{message_id}/feedback", json={"rating": "down"}
-    )
+    changed = await client.put(f"/api/messages/{message_id}/feedback", json={"rating": "down"})
     assert changed.json()["rating"] == "down"
 
     detail = await client.get(f"/api/chats/{chat_id}")
@@ -64,9 +60,7 @@ async def test_a_verdict_sets_changes_and_clears(client: AsyncClient) -> None:
     assert message["feedback"] == "down"
     assert message["response_revisions"][0]["feedback"] == "up"
 
-    cleared = await client.put(
-        f"/api/messages/{message_id}/feedback", json={"rating": None}
-    )
+    cleared = await client.put(f"/api/messages/{message_id}/feedback", json={"rating": None})
     assert cleared.json()["rating"] is None
     detail = await client.get(f"/api/chats/{chat_id}")
     message = next(item for item in detail.json()["messages"] if item["id"] == message_id)

@@ -111,6 +111,7 @@ vi.mock("./api", () => ({
     cleanupArtifacts: vi.fn(),
     deleteArtifact: vi.fn(),
     favoriteArtifact: vi.fn(),
+    setResponseFeedback: vi.fn(),
     sendTurn: vi.fn(),
     stopAndSendTurn: vi.fn(),
     regenerateMessage: vi.fn(),
@@ -3850,6 +3851,75 @@ describe("App", () => {
     expect(screen.getByRole("link", { name: "Preview one.png" })).toBeVisible();
     expect(screen.getByRole("link", { name: "Preview two.png" })).toBeVisible();
     expect(screen.getByRole("button", { name: "Apply to each of 2 images" })).toBeInTheDocument();
+  });
+
+  it("records a preference verdict and clears it on the second click", async () => {
+    const stamp = "2026-07-22T00:00:00Z";
+    const chat: Chat = {
+      id: "chat-feedback",
+      project_id: null,
+      title: "Feedback",
+      archived: false,
+      routing_mode: "text",
+      confirm_uncertain_media: false,
+      active_chat_profile_id: null,
+      active_image_profile_id: null,
+      active_video_profile_id: null,
+      active_head_message_id: null,
+      created_at: stamp,
+      updated_at: stamp,
+    };
+    localStorage.setItem("local-lm-chat", chat.id);
+    vi.mocked(api.chats).mockResolvedValue([chat]);
+    let verdict: "up" | "down" | null = null;
+    vi.mocked(api.chat).mockImplementation(async () => ({
+      ...chat,
+      messages: [
+        {
+          id: "msg-user",
+          chat_id: chat.id,
+          parent_id: null,
+          role: "user",
+          status: "complete",
+          parts: [{ id: "p1", position: 0, type: "text", text: "hello", artifact_id: null, metadata_json: {} }],
+          created_at: stamp,
+          updated_at: stamp,
+        },
+        {
+          id: "msg-answer",
+          chat_id: chat.id,
+          parent_id: "msg-user",
+          role: "assistant",
+          status: "complete",
+          feedback: verdict,
+          parts: [{ id: "p2", position: 0, type: "text", text: "hi there", artifact_id: null, metadata_json: {} }],
+          created_at: stamp,
+          updated_at: stamp,
+        },
+      ],
+    }));
+    vi.mocked(api.setResponseFeedback).mockImplementation(async (_id, rating) => {
+      verdict = rating;
+      return { message_id: "msg-answer", response_revision_id: null, rating };
+    });
+    const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+    render(
+      <QueryClientProvider client={client}>
+        <App />
+      </QueryClientProvider>,
+    );
+
+    const thumbsUp = await screen.findByRole("button", { name: "Good response" });
+    expect(thumbsUp).toHaveAttribute("aria-pressed", "false");
+    fireEvent.click(thumbsUp);
+    await waitFor(() =>
+      expect(api.setResponseFeedback).toHaveBeenCalledWith("msg-answer", "up", null));
+    // The refetched verdict shows as pressed; a second click clears it.
+    await waitFor(() =>
+      expect(screen.getByRole("button", { name: "Good response" })).toHaveAttribute("aria-pressed", "true"));
+    fireEvent.click(screen.getByRole("button", { name: "Good response" }));
+    await waitFor(() =>
+      expect(api.setResponseFeedback).toHaveBeenLastCalledWith("msg-answer", null, null));
   });
 
   it("favorites a library item and filters down to favorites", async () => {

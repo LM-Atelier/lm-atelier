@@ -131,9 +131,7 @@ class Message(TimestampMixin, Base):
     @property
     def feedback(self) -> str | None:
         """The base response's verdict; revisions carry their own."""
-        row = next(
-            (item for item in self.feedback_rows if item.response_revision_id is None), None
-        )
+        row = next((item for item in self.feedback_rows if item.response_revision_id is None), None)
         return row.rating if row else None
 
 
@@ -296,14 +294,10 @@ class ResponseFeedback(TimestampMixin, Base):
 
     __tablename__ = "response_feedback"
     __table_args__ = (
-        UniqueConstraint(
-            "message_id", "response_revision_id", name="uq_response_feedback_target"
-        ),
+        UniqueConstraint("message_id", "response_revision_id", name="uq_response_feedback_target"),
     )
 
-    id: Mapped[str] = mapped_column(
-        String(40), primary_key=True, default=lambda: new_id("fb")
-    )
+    id: Mapped[str] = mapped_column(String(40), primary_key=True, default=lambda: new_id("fb"))
     message_id: Mapped[str] = mapped_column(
         ForeignKey("messages.id", ondelete="CASCADE"), index=True
     )

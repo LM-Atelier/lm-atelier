@@ -206,6 +206,14 @@ export const api = {
       method: "PATCH",
       body: JSON.stringify({ draft_prompt: draftPrompt }),
     }),
+  setResponseFeedback: (messageId: string, rating: "up" | "down" | null, revisionId: string | null = null) =>
+    request<{ message_id: string; response_revision_id: string | null; rating: "up" | "down" | null }>(
+      `/api/messages/${messageId}/feedback`,
+      {
+        method: "PUT",
+        body: JSON.stringify({ rating, response_revision_id: revisionId }),
+      },
+    ),
   deletePromptHelper: (id: string) =>
     request<void>(`/api/prompt-helpers/${id}`, { method: "DELETE" }),
   sendTurn: async (
