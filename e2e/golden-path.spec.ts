@@ -136,11 +136,11 @@ test("persists a streamed text and contextual image golden path", async ({
   const newProject = page.getByRole("button", { name: "New project" });
   await expect(newProject).toHaveAccessibleName("New project");
   await newProject.focus();
-  page.once("dialog", async (dialog) => {
-    expect(dialog.type()).toBe("prompt");
-    await dialog.accept(PROJECT_NAME);
-  });
   await page.keyboard.press("Enter");
+  // Naming a project happens in the app now, so the whole exchange stays
+  // reachable from the keyboard instead of handing off to OS chrome.
+  await page.getByRole("textbox", { name: "Project name" }).fill(PROJECT_NAME);
+  await page.getByRole("button", { name: "Create project" }).click();
   await expect(page.getByText(PROJECT_NAME, { exact: true })).toBeVisible();
 
   const newChat = page.getByRole("button", { name: `New chat in ${PROJECT_NAME}` });

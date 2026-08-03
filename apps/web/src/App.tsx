@@ -87,9 +87,12 @@ import { MessageTimestamp } from "./MessageTimestamp";
 import { PendingResponseStatus } from "./PendingResponseStatus";
 import { MarkdownText } from "./MarkdownText";
 import { MessageField } from "./MessageField";
+import { useConfirm } from "./useConfirm";
 import { focusMainContent, roleForMode } from "./viewHelpers";
 import { ArtifactPart } from "./ArtifactPart";
 import { FirstRunSetup, SetupWizard } from "./SetupWizard";
+import { ChatManager } from "./ChatManager";
+import { PromptDialog } from "./ConfirmDialog";
 import { CustomNodesPanel } from "./CustomNodesPanel";
 import { LoraStackControl } from "./LoraStackControl";
 import { MediaLibraryView } from "./MediaLibraryView";
@@ -2023,6 +2026,7 @@ interface PendingInstall {
 }
 
 function ModelsView({ initialRole }: { initialRole: EngineRole }) {
+  const [confirmDialog, confirm] = useConfirm();
   const client = useQueryClient();
   const [query, setQuery] = useState("");
   const [submitted, setSubmitted] = useState("");
@@ -2308,7 +2312,7 @@ function ModelsView({ initialRole }: { initialRole: EngineRole }) {
           saving={updateUseCase.isPending && updateUseCase.variables?.profileId === profile?.id}
           defaulting={setDefaultModel.isPending && setDefaultModel.variables?.model.id === model.id}
           onCreate={() => createProfile.mutate(model)}
-          onDelete={() => { if (window.confirm(`Delete ${model.name} and its model settings from local storage?`)) deleteModel.mutate(model.id); }}
+          onDelete={() => void confirm({ title: `Delete ${model.name}?`, question: "This removes the model file and its saved settings from local storage. Downloading it again is the only way back.", confirmLabel: "Delete model" }).then((ok) => ok && deleteModel.mutate(model.id))}
           onSaveUseCase={async (value) => {
             if (!profile) return false;
             try {
@@ -2339,7 +2343,7 @@ function ModelsView({ initialRole }: { initialRole: EngineRole }) {
                   return false;
                 }
               }}
-              onDelete={() => window.confirm(`Delete ${asset.name}?`) && deleteModelAsset.mutate(asset.id)}
+              onDelete={() => void confirm({ title: `Delete ${asset.name}?`, question: "This removes the file from local storage.", confirmLabel: "Delete" }).then((ok) => ok && deleteModelAsset.mutate(asset.id))}
             />
           ))}
         </div>
@@ -2376,6 +2380,7 @@ function ModelsView({ initialRole }: { initialRole: EngineRole }) {
           <footer><button className="secondary" onClick={() => setImportOpen(false)}>Cancel</button><button className="primary" disabled={!importName.trim() || !importPath.trim() || importModel.isPending} onClick={() => importModel.mutate()}>{importModel.isPending ? "Importing…" : "Import model"}</button></footer>
         </AccessibleDialog>
       )}
+      {confirmDialog}
     </div>
   );
 }
@@ -2628,6 +2633,7 @@ function PresetEditor({
 }
 
 function SettingsView({ engines }: { engines: EngineCapabilities[] }) {
+  const [confirmDialog, confirm] = useConfirm();
   const client = useQueryClient();
   const [selectedProfile, setSelectedProfile] = useState<ModelProfile | null>(null);
   const [selectedPreset, setSelectedPreset] = useState<GenerationPreset | null>(null);
@@ -2872,11 +2878,7 @@ function SettingsView({ engines }: { engines: EngineCapabilities[] }) {
                       className="secondary compact-button"
                       aria-label={`Restore backup ${backup.name} on restart`}
                       disabled={backup.restore_pending || verifying || restoring || deleting}
-                      onClick={() => {
-                        if (window.confirm("Restore this backup the next time LM Atelier starts?")) {
-                          restoreBackup.mutate(backup.name);
-                        }
-                      }}
+                      onClick={() => void confirm({ title: "Restore this backup on restart?", question: "The next time LM Atelier starts it will replace the current data with this backup. Anything created since the backup was taken is lost.", confirmLabel: "Restore on restart" }).then((ok) => ok && restoreBackup.mutate(backup.name))}
                     >
                       {restoring ? "Scheduling…" : backup.restore_pending ? "Restore scheduled" : "Restore on restart"}
                     </button>
@@ -2884,11 +2886,7 @@ function SettingsView({ engines }: { engines: EngineCapabilities[] }) {
                       className="secondary compact-button danger"
                       aria-label={`Delete backup ${backup.name}`}
                       disabled={backup.restore_pending || verifying || restoring || deleting}
-                      onClick={() => {
-                        if (window.confirm("Delete this recovery backup? This cannot be undone.")) {
-                          deleteBackup.mutate(backup.name);
-                        }
-                      }}
+                      onClick={() => void confirm({ title: `Delete backup ${backup.name}?`, question: "This is a recovery point. Deleting it cannot be undone and it cannot be recreated from the current data.", confirmLabel: "Delete backup" }).then((ok) => ok && deleteBackup.mutate(backup.name))}
                     >
                       {deleting ? "Deleting…" : "Delete"}
                     </button>
@@ -2933,54 +2931,8 @@ function SettingsView({ engines }: { engines: EngineCapabilities[] }) {
       </section>
       {selectedProfile && <ProfileEditor profile={selectedProfile} engines={engines} onClose={() => setSelectedProfile(null)} />}
       {selectedPreset && <PresetEditor preset={selectedPreset} engines={engines} onClose={() => setSelectedPreset(null)} />}
+      {confirmDialog}
     </div>
-  );
-}
-
-function ChatManager({
-  chat,
-  projects,
-  onClose,
-  onSave,
-  onDelete,
-}: {
-  chat: Chat;
-  projects: Project[];
-  onClose: () => void;
-  onSave: (values: Partial<Chat>) => void;
-  onDelete: (deleteGeneratedMedia: boolean) => void;
-}) {
-  const [title, setTitle] = useState(chat.title);
-  const [projectId, setProjectId] = useState(chat.project_id ?? "");
-  const [archived, setArchived] = useState(chat.archived);
-  const [confirmUncertainMedia, setConfirmUncertainMedia] = useState(chat.confirm_uncertain_media);
-  const [verifyImageEdits, setVerifyImageEdits] = useState(
-    chat.vision_settings_json?.verify_image_edits === true,
-  );
-  const [compileVisualPrompts, setCompileVisualPrompts] = useState(
-    chat.vision_settings_json?.compile_visual_prompts !== false,
-  );
-  const [deleteGeneratedMedia, setDeleteGeneratedMedia] = useState(false);
-  const deletePrompt = deleteGeneratedMedia
-    ? `Delete ${chat.title}, its history, and generated media used only by this chat?`
-    : `Delete ${chat.title} and its history?`;
-  return (
-    <AccessibleDialog
-      title="Manage chat"
-      eyebrow="Conversation"
-      closeLabel="Close chat manager"
-      onClose={onClose}
-      className="workspace-editor"
-    >
-      <label>Title<input value={title} onChange={(event) => setTitle(event.target.value)} /></label>
-      <label>Project<select value={projectId} onChange={(event) => setProjectId(event.target.value)}><option value="">Unfiled</option>{projects.filter((project) => !project.archived).map((project) => <option key={project.id} value={project.id}>{project.name}</option>)}</select></label>
-      <label className="toggle-row"><span className="toggle-copy"><strong>Confirm uncertain media</strong><small>Ask before Auto mode starts an image or video when the planner is unsure.</small></span><input type="checkbox" checked={confirmUncertainMedia} onChange={(event) => setConfirmUncertainMedia(event.target.checked)} /></label>
-      <label className="toggle-row"><span className="toggle-copy"><strong>Review image edits</strong><small>Check the result locally and retry once when the requested change is missing.</small></span><input type="checkbox" checked={verifyImageEdits} onChange={(event) => setVerifyImageEdits(event.target.checked)} /></label>
-      <label className="toggle-row"><span className="toggle-copy"><strong>Compose visual prompts</strong><small>When a request asks to picture something written earlier, rewrite that passage as one scene description before generating.</small></span><input type="checkbox" checked={compileVisualPrompts} onChange={(event) => setCompileVisualPrompts(event.target.checked)} /></label>
-      <label className="toggle-row"><span className="toggle-copy"><strong>Archived</strong><small>Hide this chat from the active workspace without deleting its history.</small></span><input type="checkbox" checked={archived} onChange={(event) => setArchived(event.target.checked)} /></label>
-      <label className="toggle-row delete-media-option"><span className="toggle-copy"><strong>Delete generated media with chat</strong><small>Permanently delete image and video outputs used only by this chat. Shared media is kept.</small></span><input type="checkbox" checked={deleteGeneratedMedia} onChange={(event) => setDeleteGeneratedMedia(event.target.checked)} /></label>
-      <footer className="editor-actions"><button className="secondary danger" onClick={() => { if (window.confirm(deletePrompt)) onDelete(deleteGeneratedMedia); }}>Delete chat</button><button className="secondary" onClick={onClose}>Cancel</button><button className="primary" disabled={!title.trim()} onClick={() => onSave({ title: title.trim(), project_id: projectId || null, archived, confirm_uncertain_media: confirmUncertainMedia, vision_settings_json: { ...(chat.vision_settings_json ?? {}), verify_image_edits: verifyImageEdits, compile_visual_prompts: compileVisualPrompts } })}>Save chat</button></footer>
-    </AccessibleDialog>
   );
 }
 
@@ -3003,6 +2955,7 @@ function ProjectManager({
   onDelete: () => void;
   onExport: (includeMedia: boolean) => void;
 }) {
+  const [confirmDialog, confirm] = useConfirm();
   const [name, setName] = useState(project.name);
   const [description, setDescription] = useState(project.description);
   const [instructions, setInstructions] = useState(project.instructions);
@@ -3103,7 +3056,7 @@ function ProjectManager({
       <label className="toggle-row"><span><strong>Archived</strong><small>Hide this project while preserving its chats and media.</small></span><input type="checkbox" checked={archived} onChange={(event) => setArchived(event.target.checked)} /></label>
       <div className="project-export-actions"><button className="secondary" onClick={() => onExport(false)}>Export metadata only</button><button className="secondary" onClick={() => onExport(true)}>Export with media</button></div>
       <footer className="editor-actions">
-        <button className="secondary danger" onClick={() => { if (window.confirm(`Delete ${project.name}? Its chats will become unfiled.`)) onDelete(); }}>Delete project</button>
+        <button className="secondary danger" onClick={() => void confirm({ title: `Delete ${project.name}?`, question: "The chats inside it are kept, but become unfiled.", confirmLabel: "Delete project" }).then((ok) => ok && onDelete())}>Delete project</button>
         <button className="secondary" onClick={onClose}>Cancel</button>
         <button
           className="primary"
@@ -3122,6 +3075,7 @@ function ProjectManager({
           Save project
         </button>
       </footer>
+      {confirmDialog}
     </AccessibleDialog>
   );
 }
@@ -3237,6 +3191,7 @@ function Sidebar({
 export default function App() {
   const client = useQueryClient();
   const [view, setView] = useState<View>("chat");
+  const [namingProject, setNamingProject] = useState(false);
   const [libraryEdit, setLibraryEdit] = useState<VisualTarget | null>(null);
   const [studioSource, setStudioSource] = useState<{ artifactId: string; chatId: string | null } | null>(null);
   const [modelLibraryRole, setModelLibraryRole] = useState<EngineRole>("chat");
@@ -3602,7 +3557,8 @@ export default function App() {
   return (
     <div className="app-shell">
       <a className="skip-link" href="#main-content">Skip to main content</a>
-      <Sidebar projects={allProjects} chats={allChats} engines={engines.data ?? []} presets={presets.data ?? []} workflows={workflows.data ?? []} currentChatId={activeChatId} view={view} setupState={setupReadiness.data?.state} onSetup={() => setSetupOpen(true)} onChat={(id) => { setCurrentChatId(id); localStorage.setItem(CURRENT_CHAT_KEY, id); setView("chat"); focusMainContent(); }} onView={(nextView) => { setView(nextView); focusMainContent(); }} onNewChat={(projectId) => createChat.mutate(projectId)} onNewProject={() => { const name = window.prompt("Project name"); if (name?.trim()) createProject.mutate(name.trim()); }} onExportProject={(id, includeMedia) => exportProject.mutate({ id, includeMedia })} onImportProject={(file) => importProject.mutate(file)} onUpdateChat={(id, values) => manageChat.mutate({ id, values })} onDeleteChat={(id, deleteGeneratedMedia) => deleteChat.mutate({ id, deleteGeneratedMedia })} onUpdateProject={(id, values) => updateProject.mutate({ id, values })} onDeleteProject={(id) => deleteProject.mutate(id)} />
+      <Sidebar projects={allProjects} chats={allChats} engines={engines.data ?? []} presets={presets.data ?? []} workflows={workflows.data ?? []} currentChatId={activeChatId} view={view} setupState={setupReadiness.data?.state} onSetup={() => setSetupOpen(true)} onChat={(id) => { setCurrentChatId(id); localStorage.setItem(CURRENT_CHAT_KEY, id); setView("chat"); focusMainContent(); }} onView={(nextView) => { setView(nextView); focusMainContent(); }} onNewChat={(projectId) => createChat.mutate(projectId)} onNewProject={() => setNamingProject(true)} onExportProject={(id, includeMedia) => exportProject.mutate({ id, includeMedia })} onImportProject={(file) => importProject.mutate(file)} onUpdateChat={(id, values) => manageChat.mutate({ id, values })} onDeleteChat={(id, deleteGeneratedMedia) => deleteChat.mutate({ id, deleteGeneratedMedia })} onUpdateProject={(id, values) => updateProject.mutate({ id, values })} onDeleteProject={(id) => deleteProject.mutate(id)} />
+      {namingProject && <PromptDialog title="New project" label="Project name" confirmLabel="Create project" placeholder="Portrait studies" onCancel={() => setNamingProject(false)} onConfirm={(name) => { setNamingProject(false); createProject.mutate(name); }} />}
       <main id="main-content" tabIndex={-1}>{activeContent}</main>
       {setupOpen === true && !setupReadiness.data && (
         <AccessibleDialog
