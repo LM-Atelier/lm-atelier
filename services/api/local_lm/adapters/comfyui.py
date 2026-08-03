@@ -267,13 +267,38 @@ class ComfyUIAdapter:
             return ".tiff", "image/tiff"
         raise ValueError("ComfyUI conditioning inputs must be supported raster images")
 
+    async def _upload_mask(self, request: MediaRequest) -> str | None:
+        """Upload the studio selection, if this turn carries one.
+
+        A mask rides in the parameters rather than the input paths because it
+        is instruction, not content: it must never be treated as another
+        conditioning image or appear in the transcript.
+        """
+        setting = request.parameters.get("mask")
+        if not isinstance(setting, dict):
+            return None
+        raw_path = setting.get("path")
+        if not isinstance(raw_path, str) or not raw_path:
+            raise ValueError("The selection for this edit has no resolved file")
+        return (await self._upload_files(request, [Path(raw_path)], label="mask"))[0]
+
     async def _upload_inputs(self, request: MediaRequest) -> list[str]:
+        return await self._upload_files(request, request.input_paths, label="")
+
+    async def _upload_files(
+        self,
+        request: MediaRequest,
+        paths: list[Path],
+        *,
+        label: str,
+    ) -> list[str]:
         uploaded: list[str] = []
         upload_subfolder = "lm-atelier"
-        for index, path in enumerate(request.input_paths):
+        for index, path in enumerate(paths):
             content = await asyncio.to_thread(path.read_bytes)
             extension, media_type = self._image_format(content)
-            filename = f"lm-atelier-{request.run_id}-{index}{extension}"
+            suffix = f"{label}-{index}" if label else str(index)
+            filename = f"lm-atelier-{request.run_id}-{suffix}{extension}"
             response = await self._client.post(
                 "/upload/image",
                 data={
@@ -329,6 +354,11 @@ class ComfyUIAdapter:
             "negative_prompt": request.negative_prompt or "",
             **request.parameters,
         }
+        mask_reference = await self._upload_mask(request)
+        if mask_reference:
+            # The workflow's declared mask input receives the uploaded name;
+            # the resolved local path never leaves this adapter.
+            parameters["mask"] = mask_reference
         uploaded = await self._upload_inputs(request)
         if uploaded:
             parameters["input_image"] = uploaded[0]

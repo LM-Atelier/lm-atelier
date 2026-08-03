@@ -983,3 +983,69 @@ def test_managed_output_cleanup_rejects_external_temporary_and_unsafe_paths(
     finally:
         asyncio.run(managed.close())
         asyncio.run(external.close())
+
+
+async def test_a_selection_uploads_as_a_mask_not_as_another_image(tmp_path: Path) -> None:
+    """A mask is instruction, not content.
+
+    It must reach the workflow's mask input without ever becoming an
+    additional conditioning image - otherwise the edit would silently treat
+    the selection as picture data.
+    """
+
+    source = tmp_path / "source-artifact"
+    source.write_bytes(b"\x89PNG\r\n\x1a\n" + b"source")
+    mask = tmp_path / "mask-artifact"
+    mask.write_bytes(b"\x89PNG\r\n\x1a\n" + b"mask")
+    uploaded_names: list[str] = []
+
+    async def upload(request: httpx.Request) -> httpx.Response:
+        body = (await request.aread()).decode("latin-1")
+        marker = 'filename="'
+        start = body.index(marker) + len(marker)
+        uploaded_names.append(body[start : body.index('"', start)])
+        return httpx.Response(
+            200,
+            json={
+                "name": uploaded_names[-1],
+                "subfolder": "lm-atelier",
+                "type": "temp",
+            },
+        )
+
+    adapter = ComfyUIAdapter("http://comfy.test")
+    await adapter._client.aclose()
+    adapter._client = httpx.AsyncClient(
+        base_url="http://comfy.test",
+        transport=httpx.MockTransport(upload),
+    )
+    request = media_request(source)
+    request.parameters["mask"] = {"artifact_id": f"sha256:{'a' * 64}", "path": str(mask)}
+    try:
+        parameters = await adapter._request_parameters(request)
+    finally:
+        await adapter.close()
+
+    # The mask has its own reference and its own upload name.
+    assert parameters["mask"].endswith("[temp]")
+    assert "mask" in parameters["mask"]
+    # It is not among the conditioning images the workflow can bind.
+    assert parameters["mask"] not in parameters["input_images"]
+    assert len(parameters["input_images"]) == 1
+    # Distinct upload names: both go to one subfolder with overwrite, so a
+    # shared index would have the mask clobber the first conditioning image.
+    assert len(set(uploaded_names)) == 2
+    assert any("-mask-" in name for name in uploaded_names)
+
+
+async def test_a_selection_without_a_resolved_file_refuses(tmp_path: Path) -> None:
+    source = tmp_path / "source-artifact"
+    source.write_bytes(b"\x89PNG\r\n\x1a\n" + b"source")
+    adapter = ComfyUIAdapter("http://comfy.test")
+    request = media_request(source)
+    request.parameters["mask"] = {"artifact_id": f"sha256:{'a' * 64}"}
+    try:
+        with pytest.raises(ValueError, match="no resolved file"):
+            await adapter._request_parameters(request)
+    finally:
+        await adapter.close()
