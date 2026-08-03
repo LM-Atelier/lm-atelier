@@ -250,6 +250,15 @@ class ExchangeDeletionOut(ApiModel):
     new_head_message_id: str | None = None
 
 
+class StudioSessionCreate(ApiModel):
+    """Open the studio over one image; the session is found or created."""
+
+    source_artifact_id: str = Field(min_length=1, max_length=80)
+    # When the studio is entered from a chat, its profile and settings
+    # snapshot carry over so applies run with the same models.
+    source_chat_id: str | None = Field(default=None, max_length=40)
+
+
 class PromptHelperCreate(ApiModel):
     source_chat_id: str = Field(min_length=1, max_length=40)
     draft_prompt: Annotated[

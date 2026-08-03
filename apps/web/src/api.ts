@@ -195,7 +195,17 @@ export const api = {
       delete_generated_media: String(deleteGeneratedMedia),
     });
     return request<void>(`/api/chats/${id}?${parameters}`, { method: "DELETE" });
-  },  createPromptHelper: (sourceChatId: string, draftPrompt: string) =>
+  },  openStudioSession: (sourceArtifactId: string, sourceChatId: string | null = null) =>
+    request<ChatDetail>("/api/studio/sessions", {
+      method: "POST",
+      body: JSON.stringify({
+        source_artifact_id: sourceArtifactId,
+        source_chat_id: sourceChatId,
+      }),
+    }),
+  studioSession: (sessionId: string) =>
+    request<ChatDetail>(`/api/studio/sessions/${encodeURIComponent(sessionId)}`),
+  createPromptHelper: (sourceChatId: string, draftPrompt: string) =>
     request<PromptHelperDetail>("/api/prompt-helpers", {
       method: "POST",
       body: JSON.stringify({ source_chat_id: sourceChatId, draft_prompt: draftPrompt }),
