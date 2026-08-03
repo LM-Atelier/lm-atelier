@@ -4,6 +4,7 @@ from collections import deque
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 
+from .comfy_subgraphs import SubgraphExpansionError, expand_workflow
 from .comfy_workflow_packages import (
     WorkflowPackageError,
     analyze_comfyui_workflow_package,
@@ -49,6 +50,16 @@ def compile_comfyui_ui_graph(
         raise WorkflowCompilationError(
             "invalid_object_info", "ComfyUI node definitions must be an object"
         )
+    # A subgraph is a frontend construct the runtime has never seen, but the
+    # file carries everything needed to rewrite it away: the definition, its
+    # boundary slots, the instances, and the links. Expansion is exact or it
+    # raises, and the refusal below still stands for anything it could not
+    # rewrite - an approximation would compile, run, and produce a picture
+    # that is quietly not the one the author drew.
+    try:
+        workflow = expand_workflow(workflow)
+    except SubgraphExpansionError as exc:
+        raise WorkflowCompilationError(exc.code, str(exc)) from exc
     analysis = analyze_comfyui_workflow_package(
         workflow,
         available_node_types=object_info.keys(),
