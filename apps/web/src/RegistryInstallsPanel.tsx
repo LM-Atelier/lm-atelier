@@ -1,5 +1,7 @@
+import { useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { api } from "./api";
+import { ConfirmDialog } from "./ConfirmDialog";
 import { ErrorCallout } from "./ErrorCallout";
 import { activationErrorDescription } from "./registryPreparationErrors";
 import type { RegistryInstall } from "./types";
@@ -15,6 +17,7 @@ export function RegistryInstallsPanel() {
   const client = useQueryClient();
   const installs = useQuery({ queryKey: ["registry-installs"], queryFn: api.registryInstalls });
   const refresh = () => void client.invalidateQueries({ queryKey: ["registry-installs"] });
+  const [trusting, setTrusting] = useState<RegistryInstall | null>(null);
   const review = useMutation({
     mutationFn: ({ id, trusted }: { id: string; trusted: boolean }) =>
       api.reviewRegistryInstall(id, trusted),
@@ -70,9 +73,7 @@ export function RegistryInstallsPanel() {
                 onClick={() =>
                   install.trusted
                     ? review.mutate({ id: install.id, trusted: false })
-                    : window.confirm(
-                        "I reviewed this exact package and trust its code to run in ComfyUI.",
-                      ) && review.mutate({ id: install.id, trusted: true })
+                    : setTrusting(install)
                 }
               >
                 {install.trusted ? "Revoke trust" : "Trust package"}
@@ -97,6 +98,38 @@ export function RegistryInstallsPanel() {
           </div>
         ))}
       </div>
+      {trusting && (
+        <ConfirmDialog
+          title={`Trust ${trusting.package_id}?`}
+          question="Trusting this package lets its code run inside ComfyUI on this machine. Confirm only if you have reviewed this exact prepared package."
+          detail={
+            <dl className="confirm-facts">
+              <div>
+                <dt>Package</dt>
+                <dd>{trusting.package_id}</dd>
+              </div>
+              <div>
+                <dt>Version</dt>
+                <dd>{trusting.package_version}</dd>
+              </div>
+              <div>
+                <dt>Archive digest</dt>
+                <dd>
+                  <code>{trusting.archive_sha256}</code>
+                </dd>
+              </div>
+            </dl>
+          }
+          confirmLabel="I reviewed this package - trust it"
+          tone="trust"
+          onCancel={() => setTrusting(null)}
+          onConfirm={() => {
+            const chosen = trusting;
+            setTrusting(null);
+            review.mutate({ id: chosen.id, trusted: true });
+          }}
+        />
+      )}
     </section>
   );
 }

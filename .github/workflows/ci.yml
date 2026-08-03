@@ -181,7 +181,20 @@ jobs:
           uv sync --project services/api --locked --python 3.12 --extra dev --extra package
           npm.cmd ci
       - name: Install ffmpeg for media pipeline tests
-        run: choco install ffmpeg --version 8.1.2 --yes --no-progress
+        shell: pwsh
+        run: |
+          # The community feed returns 503 and 504 often enough to fail runs
+          # on its own. The pinned version is what matters; how many attempts
+          # it took to fetch it does not.
+          $attempt = 0
+          while ($true) {
+            $attempt++
+            choco install ffmpeg --version 8.1.2 --yes --no-progress
+            if ($LASTEXITCODE -eq 0) { break }
+            if ($attempt -ge 4) { throw "choco install ffmpeg failed after $attempt attempts." }
+            Write-Host "Attempt $attempt failed; retrying in $(15 * $attempt)s."
+            Start-Sleep -Seconds (15 * $attempt)
+          }
       - name: Run repository verification
         run: .\scripts\verify.ps1
 

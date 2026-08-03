@@ -739,3 +739,17 @@ h1, h2, h3 { margin: 0; }
 /* Only .toast.error supplied a background, so the disconnect notice was
    transparent text floating over the page. */
 .toast { border: 1px solid var(--border); background: var(--panel-3); color: var(--cream); }
+
+/* Confirmations asked in the app rather than in OS chrome, so they can
+   name what is at stake and look different for a trust decision than for
+   a deletion. */
+.confirm-dialog { width: min(520px, 96vw); }
+.confirm-dialog p { color: var(--muted); line-height: 1.55; }
+.confirm-dialog footer { margin-top: 14px; }
+.confirm-facts { display: grid; gap: 7px; border: 1px solid var(--border); border-radius: 10px; background: var(--panel-2); padding: 11px; margin: 12px 0; }
+.confirm-facts > div { display: grid; grid-template-columns: 120px minmax(0, 1fr); gap: 9px; }
+.confirm-facts dt { color: var(--muted); font-size: 11px; }
+.confirm-facts dd { margin: 0; overflow-wrap: anywhere; font-size: 12px; }
+.prompt-field { display: grid; gap: 5px; margin: 12px 0 0; color: var(--muted); font-size: 11px; }
+.prompt-field input { border: 1px solid var(--line-control); border-radius: 8px; background: var(--panel-2); color: var(--cream); padding: 8px 10px; font-size: 13px; }
+.prompt-problem { color: #ffadb5; font-size: 12px; margin: 7px 0 0; }

@@ -59,35 +59,37 @@ describe("RegistryInstallsPanel", () => {
   });
 
   it("presents granting trust as a deliberate confirmed decision", async () => {
-    const confirm = vi.spyOn(window, "confirm").mockReturnValue(true);
     renderPanel();
 
     fireEvent.click(await screen.findByRole("button", { name: "Trust package" }));
 
-    expect(confirm).toHaveBeenCalledWith(
-      "I reviewed this exact package and trust its code to run in ComfyUI.",
-    );
+    // The question names what is being trusted and what trusting permits -
+    // none of which an OS confirmation could carry.
+    expect(screen.getByText(/run inside ComfyUI on this machine/)).toBeInTheDocument();
+    expect(screen.getByText("a".repeat(64))).toBeInTheDocument();
+    expect(api.reviewRegistryInstall).not.toHaveBeenCalled();
+
+    fireEvent.click(screen.getByRole("button", { name: "I reviewed this package - trust it" }));
     await waitFor(() => expect(api.reviewRegistryInstall).toHaveBeenCalledWith("install-1", true));
   });
 
   it("does nothing when the trust confirmation is declined", async () => {
-    vi.spyOn(window, "confirm").mockReturnValue(false);
     renderPanel();
 
     fireEvent.click(await screen.findByRole("button", { name: "Trust package" }));
+    fireEvent.click(screen.getByRole("button", { name: "Cancel" }));
 
     expect(api.reviewRegistryInstall).not.toHaveBeenCalled();
   });
 
   it("revokes trust without a confirmation gate", async () => {
     vi.mocked(api.registryInstalls).mockResolvedValue([install({ trusted: true })]);
-    const confirm = vi.spyOn(window, "confirm");
     renderPanel();
 
     fireEvent.click(await screen.findByRole("button", { name: "Revoke trust" }));
 
+    // Withdrawing permission is not the dangerous direction, so it is not gated.
     await waitFor(() => expect(api.reviewRegistryInstall).toHaveBeenCalledWith("install-1", false));
-    expect(confirm).not.toHaveBeenCalled();
   });
 
   it("offers activation only after trust, and deactivation only while active", async () => {
@@ -110,13 +112,13 @@ describe("RegistryInstallsPanel", () => {
   });
 
   it("speaks the server's stable refusal codes in plain words", async () => {
-    vi.spyOn(window, "confirm").mockReturnValue(true);
     vi.mocked(api.reviewRegistryInstall).mockRejectedValue(
       Object.assign(new Error("409 Conflict"), { code: "media_worker_running" }),
     );
     renderPanel();
 
     fireEvent.click(await screen.findByRole("button", { name: "Trust package" }));
+    fireEvent.click(screen.getByRole("button", { name: "I reviewed this package - trust it" }));
 
     expect(await screen.findByRole("alert")).toHaveTextContent(
       "Stop the media worker before changing package trust or activation",
