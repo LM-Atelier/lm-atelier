@@ -8,6 +8,7 @@ import runpy
 import shutil
 import subprocess
 import sys
+import tomllib
 from datetime import UTC, datetime
 from pathlib import Path
 
@@ -1157,18 +1158,53 @@ def test_release_metadata_contains_licenses_and_sbom() -> None:
         shutil.rmtree(output, ignore_errors=True)
 
 
-def test_the_strict_mypy_gate_names_the_config_it_claims_to_enforce() -> None:
+def test_strict_mypy_gates_load_the_strict_api_config() -> None:
     """A check that promises more than it enforces is worse than one that
     promises less.
 
     Without an explicit config, mypy does not discover the nested API
-    pyproject from the repository root. The step ran across all 142 source
-    files with default settings while being labelled "Strict mypy", so
-    every change had been passing a weaker check than its name.
+    pyproject from the repository root. Both platform gates must name that
+    file, and the named configuration must continue to enable strict mode.
     """
+
+    config = tomllib.loads(
+        (ROOT / "services" / "api" / "pyproject.toml").read_text(encoding="utf-8")
+    )
+    assert config["tool"]["mypy"]["strict"] is True
 
     script = (ROOT / "scripts" / "verify.ps1").read_text(encoding="utf-8")
     step = re.search(r'Invoke-Checked "Strict mypy".*?\)', script, re.S)
     assert step is not None
     assert "--config-file" in step.group(0)
     assert "services/api/pyproject.toml" in step.group(0)
+
+    linux = (ROOT / "scripts" / "verify.sh").read_text(encoding="utf-8")
+    linux_step = linux.split('run_checked "Strict mypy"', 1)[1].split(
+        'run_checked "Bandit high-severity scan"', 1
+    )[0]
+    assert "--config-file services/api/pyproject.toml" in linux_step
+
+
+def test_api_mypy_config_rejects_a_strict_only_fixture(tmp_path: Path) -> None:
+    fixture = tmp_path / "strict_only_fixture.py"
+    fixture.write_text(
+        "def missing_annotations(value):" + chr(10) + "    return value" + chr(10),
+        encoding="utf-8",
+    )
+
+    result = subprocess.run(
+        [
+            sys.executable,
+            "-m",
+            "mypy",
+            "--config-file",
+            str(ROOT / "services" / "api" / "pyproject.toml"),
+            str(fixture),
+        ],
+        cwd=ROOT,
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+
+    assert result.returncode != 0, result.stdout + result.stderr
