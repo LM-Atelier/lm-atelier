@@ -52,6 +52,7 @@ from .comfy_templates import (
     ComfyTemplate,
     ComfyTemplateRegistry,
 )
+from .comfy_workflow_compiler import WorkflowCompilationError, compile_comfyui_ui_graph
 from .comfy_workflow_packages import (
     WorkflowPackageError,
     analyze_comfyui_workflow_package,
@@ -243,6 +244,7 @@ from .schemas import (
     WorkflowOut,
     WorkflowPackageAnalysisOut,
     WorkflowPackageAnalyzeRequest,
+    WorkflowPackageImportRequest,
     WorkflowPackageIssueOut,
     WorkflowPackagePrepareRequest,
     WorkflowPackageRequirementOut,
@@ -5519,6 +5521,63 @@ async def deactivate_registry_install(
         except ComfyRegistryActivationError as exc:
             raise _registry_activation_failure(exc) from exc
     return _registry_install_out(_loaded_registry_install(session, install_id))
+
+
+@router.post("/workflows/packages/import", response_model=WorkflowOut, status_code=201)
+async def import_workflow_package(
+    payload: WorkflowPackageImportRequest, request: Request, session: SessionDep
+) -> WorkflowDefinition:
+    """Compile a fully resolved ComfyUI package into an untrusted workflow.
+
+    The one gate is the analyzer's own `ready`, re-computed here rather than
+    trusted from the browser, and compilation needs the live runtime's node
+    definitions - a graph compiled against guessed definitions could change
+    behavior silently.
+    """
+
+    services = _services(request)
+    describe_nodes = getattr(services.engines.media, "object_info", None)
+    if not callable(describe_nodes):
+        raise api_error(
+            503, "media-runtime-unavailable", "Start the media worker to compile workflows"
+        )
+    try:
+        object_info = await describe_nodes()
+    except Exception as exc:  # noqa: BLE001 - any runtime failure means "not up"
+        raise api_error(
+            503, "media-runtime-unavailable", "Start the media worker to compile workflows"
+        ) from exc
+    try:
+        analysis = analyze_comfyui_workflow_package(
+            payload.ui_graph,
+            available_node_types={str(node_type) for node_type in object_info},
+            available_asset_filenames=_local_asset_filenames(session),
+            installed_package_versions=_installed_package_versions(session),
+        )
+    except WorkflowPackageError as exc:
+        raise api_error(422, exc.code, str(exc)) from exc
+    if not analysis.ready:
+        raise api_error(
+            422,
+            "package-not-resolved",
+            "Resolve everything in the package review before importing",
+        )
+    try:
+        compilation = compile_comfyui_ui_graph(payload.ui_graph, object_info)
+    except WorkflowCompilationError as exc:
+        raise api_error(422, exc.code, str(exc)) from exc
+    return await create_workflow(
+        WorkflowCreate(
+            name=payload.name,
+            operation=payload.operation,
+            description=payload.description,
+            engine="comfyui",
+            ui_graph=payload.ui_graph,
+            api_graph={key: dict(value) for key, value in compilation.api_graph.items()},
+            trusted=False,
+        ),
+        session,
+    )
 
 
 @router.post("/workflows/packages/analyze", response_model=WorkflowPackageAnalysisOut)
