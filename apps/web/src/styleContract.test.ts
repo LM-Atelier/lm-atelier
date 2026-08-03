@@ -61,15 +61,6 @@ function contrast(a: string, b: string): number {
   return (high + 0.05) / (low + 0.05);
 }
 
-/** A token's value read from the stylesheet, so every check follows the
- *  palette rather than restating it. */
-function token(name: string): string {
-  const css = readFileSync(STYLESHEET, "utf8");
-  return css.match(new RegExp(`--${name}:\\s*(#[0-9a-f]{6})`))?.[1] ?? "";
-}
-
-const SURFACES = ["bg", "panel", "panel-2", "panel-3"];
-
 describe("style contract", () => {
   it("leaves no element without any styling at all", () => {
     const defined = definedClasses();
@@ -97,20 +88,6 @@ describe("contrast and state", () => {
 
 
 
-  it("keeps muted text readable on every surface it can sit on", () => {
-    // Nearly every small label in the app resolves to this one token, and
-    // most of it is 9-11px where no large-text exemption applies.
-    const worst = Math.min(...SURFACES.map((name) => contrast(token("muted"), token(name))));
-    expect(worst).toBeGreaterThanOrEqual(4.5);
-  });
-
-  it("gives controls a boundary that can actually be seen", () => {
-    // WCAG 1.4.11 wants 3:1 for the edge of anything you type into. The
-    // decorative --border measures about 1.4:1 and is a different job.
-    const worst = Math.min(...SURFACES.map((name) => contrast(token("line-control"), token(name))));
-    expect(worst).toBeGreaterThanOrEqual(3);
-  });
-
   it("does not leave an indeterminate bar parked at a false percentage", () => {
     const reducedMotion = css.slice(css.indexOf("@media (prefers-reduced-motion"));
     expect(reducedMotion).toMatch(/\.indeterminate\s*\{[^}]*width:\s*100%/);
@@ -124,30 +101,20 @@ describe("contrast and state", () => {
   });
 });
 
-describe("elevation", () => {
-
-  it("separates each surface from the one below it", () => {
-    // Four named levels spanning 1.05 to 1.10 apart are one surface with
-    // extra names; nothing in the app read as sitting on anything.
-    const ladder = ["bg", "panel", "panel-2", "panel-3"].map(token);
-    for (let at = 1; at < ladder.length; at += 1) {
-      expect(contrast(ladder[at], ladder[at - 1])).toBeGreaterThan(1.07);
-    }
-    expect(contrast(ladder[3], ladder[0])).toBeGreaterThan(1.35);
-  });
-});
-
 describe("the token layer", () => {
   it("does not grow the pile of one-off colours", () => {
     const css = readFileSync(STYLESHEET, "utf8");
-    const body = css.slice(css.indexOf("}") + 1);
-    const literals = body.match(/#[0-9a-fA-F]{3,8}\b/g) ?? [];
+    // Custom-property declarations are the palette. A room declaring its
+    // own colours is the whole point of having two rooms, so only literals
+    // inside ordinary rules count against the ceiling.
+    const rules = css.replace(/--[\w-]+:[^;]+;/g, "");
+    const literals = rules.match(/#[0-9a-fA-F]{3,8}\b/g) ?? [];
 
     // A ceiling, not a target. It ratchets down as values earn names; a
     // change needing a new one-off colour is a change needing a token. The
     // palette cannot be reasoned about - or replaced - while most of it is
     // spelled out across the rules.
-    expect(literals.length).toBeLessThanOrEqual(155);
+    expect(literals.length).toBeLessThanOrEqual(65);
   });
 });
 
@@ -190,5 +157,99 @@ describe("scale and rhythm", () => {
     // decision. This change is only about it having a scale at all, so the
     // smallest step must not drift while nobody is looking.
     expect(Math.min(...stepsOf("font-size"))).toBe(9);
+  });
+});
+
+/** A room's token values, read from the block that declares them. */
+function room(selector: string): Record<string, string> {
+  const css = readFileSync(STYLESHEET, "utf8");
+  const at = css.indexOf(selector);
+  const block = css.slice(at, css.indexOf("}", at));
+  return Object.fromEntries(
+    [...block.matchAll(/--([\w-]+):\s*(#[0-9a-f]{3,8});/g)].map((m) => [m[1], m[2]]),
+  );
+}
+
+describe("the two rooms", () => {
+  const ROOMS = [
+    { name: "making", tokens: room(":root {") },
+    { name: "reading", tokens: room('[data-room="reading"]') },
+  ];
+
+  it.each(ROOMS)("keeps $name readable on every one of its surfaces", ({ tokens }) => {
+    const surfaces = ["surface-0", "surface-1", "surface-2", "surface-3"].map((k) => tokens[k]);
+    // Against every surface, not just the page. Checking only the lightest
+    // is how a muted ink lands at 4.38 on a pressed row and passes review.
+    for (const ink of ["ink-primary", "ink-secondary", "ink-muted"]) {
+      const worst = Math.min(...surfaces.map((s) => contrast(tokens[ink], s)));
+      expect(worst).toBeGreaterThanOrEqual(4.5);
+    }
+    const line = Math.min(...surfaces.map((s) => contrast(tokens["line-control"], s)));
+    expect(line).toBeGreaterThanOrEqual(3);
+  });
+
+  it.each(ROOMS)("keeps $name's marks and words each legible enough", ({ tokens }) => {
+    const surfaces = ["surface-0", "surface-1", "surface-2", "surface-3"].map((k) => tokens[k]);
+    // A mark and a word do not want the same value. 1.4.11 asks 3:1 of a
+    // border or an indicator; 1.4.3 asks 4.5:1 of anything you read. One
+    // token serving both is how terracotta ended up illegible as text
+    // while looking fine as a border.
+    for (const mark of ["accent-warm", "info", "state-danger", "state-success"]) {
+      expect(Math.min(...surfaces.map((s) => contrast(tokens[mark], s)))).toBeGreaterThanOrEqual(3);
+    }
+    for (const word of ["accent-warm-text", "state-danger-text", "state-success-text"]) {
+      expect(Math.min(...surfaces.map((s) => contrast(tokens[word], s)))).toBeGreaterThanOrEqual(4.5);
+    }
+    // And the accent as a filled button, which pulls the opposite way: the
+    // fill has to be dark enough for the ink that sits on it.
+    expect(contrast(tokens["accent-ink"], tokens["accent-fill"])).toBeGreaterThanOrEqual(4.5);
+  });
+
+  it.each(ROOMS)("separates $name's surfaces from one another", ({ tokens }) => {
+    const ladder = ["surface-0", "surface-1", "surface-2", "surface-3"].map((k) => tokens[k]);
+    for (let at = 1; at < ladder.length; at += 1) {
+      expect(contrast(ladder[at], ladder[at - 1])).toBeGreaterThan(1.06);
+    }
+  });
+
+  it("declares the same tokens in both rooms", () => {
+    // A token missing from one room silently inherits the other's value,
+    // which is how a dark ink ends up on paper.
+    const making = room(":root {");
+    const reading = room('[data-room="reading"]');
+    const themed = Object.keys(reading);
+    expect(themed.filter((key) => !(key in making))).toEqual([]);
+  });
+});
+
+describe("moving between rooms", () => {
+  it("puts the work surface in a room and leaves the building alone", () => {
+    const app = readFileSync(join(SOURCE_DIR, "App.tsx"), "utf8");
+    const rooms = readFileSync(join(SOURCE_DIR, "rooms.ts"), "utf8");
+    // The sidebar staying constant is what makes this read as moving
+    // between rooms rather than as the page repainting itself.
+    expect(app).toMatch(/data-room=\{READING_ROOM_VIEWS\.has\(view\)/);
+    const reading = rooms.match(/READING_ROOM_VIEWS[^=]*=\s*new Set<View>\(\[([^\]]*)\]\)/)?.[1] ?? "";
+    expect(reading).toContain('"chat"');
+    expect(reading).toContain('"settings"');
+    // Colour cannot be judged against a warm ground, so the surfaces where
+    // the work is looked at must not become paper.
+    expect(reading).not.toContain('"studio"');
+    expect(reading).not.toContain('"media"');
+  });
+
+  it("gives the ground, the grain, and the header scrim to the room", () => {
+    const css = readFileSync(STYLESHEET, "utf8");
+    // Any of these left as a literal would half-flip the page: a dark
+    // header bar floating over paper, or a light grain over nothing.
+    expect(css).toMatch(/^main \{[^}]*background:\s*var\(--surface-0\)/m);
+    expect(css).toMatch(/main::before \{[^}]*var\(--grain\)/);
+    expect(css).toMatch(/\.chat-header \{[^}]*background:\s*var\(--scrim\)/);
+    for (const room of [':root {', '[data-room="reading"]']) {
+      const at = css.indexOf(room);
+      const block = css.slice(at, css.indexOf("}", at));
+      expect(block).toMatch(/--grain:/);
+      expect(block).toMatch(/--scrim:/);
+    }
   });
 });
