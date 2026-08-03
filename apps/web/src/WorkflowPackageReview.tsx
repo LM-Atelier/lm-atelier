@@ -4,6 +4,7 @@ import { CircleAlert, CircleCheck, PackageSearch } from "lucide-react";
 import { AccessibleDialog } from "./AccessibleDialog";
 import { api } from "./api";
 import { preparationErrorDescription } from "./registryPreparationErrors";
+import { WorkflowAssetInstaller } from "./WorkflowAssetInstaller";
 import type { WorkflowPackageAnalysis } from "./types";
 
 const ISSUE_DESCRIPTIONS: Record<string, string> = {
@@ -17,6 +18,12 @@ const ISSUE_DESCRIPTIONS: Record<string, string> = {
   unresolved_custom_node_package: "Needs a package version this machine does not have installed",
   unversioned_custom_node_package: "Uses a package without a pinned version",
 };
+
+function installableAssets(analysis: WorkflowPackageAnalysis) {
+  return analysis.asset_references.filter(
+    (asset) => !asset.present_locally && asset.policy === "supported",
+  );
+}
 
 function issueDescription(code: string): string {
   return ISSUE_DESCRIPTIONS[code] ?? code.replaceAll("_", " ");
@@ -151,6 +158,11 @@ export function WorkflowPackageReview({
             ))}
           </ul>
         </section>
+      )}
+      {/* Only supported formats are offered: a blocked or unverifiable
+          format is a refusal, not something to go fetch. */}
+      {uiGraph && installableAssets(analysis).length > 0 && (
+        <WorkflowAssetInstaller uiGraph={uiGraph} missing={installableAssets(analysis)} />
       )}
       {analysis.asset_references.length > 0 && (
         <section>
