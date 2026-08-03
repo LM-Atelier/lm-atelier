@@ -935,3 +935,77 @@ export interface RegistryInstall {
   reviewed_at: string | null;
   activated_at: string | null;
 }
+
+export type WorkflowSelectorCapability = "chat" | "vision" | "image" | "video";
+
+/** Whether a variant can actually run right now, and why not when it cannot. */
+export type WorkflowVariantReadiness = "ready" | "setup_required" | "unavailable";
+
+export type WorkflowSelectionMode =
+  | "default"
+  | "inherit"
+  | "automatic"
+  | "family"
+  | "revision"
+  | "legacy";
+
+export interface WorkflowFamilyVariant {
+  id: string;
+  variant_key: string;
+  name: string;
+  operation: string;
+  current_revision_id: string | null;
+  current_revision_version: number | null;
+  engine: string | null;
+  capabilities: string[];
+  trusted: boolean;
+  readiness: WorkflowVariantReadiness;
+  readiness_reason: string | null;
+}
+
+export interface WorkflowFamilyPreference {
+  selector_capability: WorkflowSelectorCapability;
+  enabled: boolean;
+  is_default: boolean;
+  sort_order: number;
+}
+
+/** A family and the operation variants it resolves to.
+ *
+ * `compatibility` marks a family generated from a legacy profile rather than
+ * authored as one, which is worth saying out loud rather than hiding: those
+ * resolve to their original profile and behave exactly as they did.
+ */
+export interface WorkflowFamily {
+  id: string;
+  name: string;
+  description: string;
+  use_case: string;
+  tags: string[];
+  enabled: boolean;
+  archived: boolean;
+  compatibility: boolean;
+  variants: WorkflowFamilyVariant[];
+  preferences: WorkflowFamilyPreference[];
+  created_at: string;
+  updated_at: string;
+}
+
+export interface WorkflowSelection {
+  selector_capability: WorkflowSelectorCapability;
+  mode: WorkflowSelectionMode;
+  workflow_family_id: string | null;
+  workflow_revision_id: string | null;
+  legacy_profile_id: string | null;
+}
+
+export type ChatWorkflowSelectionInput =
+  | { mode: "default" }
+  | { mode: "automatic" }
+  | { mode: "family"; workflow_family_id: string };
+
+export type ProjectWorkflowSelectionInput =
+  | { mode: "inherit" }
+  | { mode: "automatic" }
+  | { mode: "family"; workflow_family_id: string }
+  | { mode: "revision"; workflow_revision_id: string };

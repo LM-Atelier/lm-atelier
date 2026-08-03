@@ -55,6 +55,11 @@ import type {
   WorkerStatus,
   WorkPlan,
   WorkStep,
+  WorkflowFamily,
+  WorkflowSelection,
+  WorkflowSelectorCapability,
+  ChatWorkflowSelectionInput,
+  ProjectWorkflowSelectionInput,
 } from "./types";
 
 let csrfToken = "";
@@ -631,6 +636,39 @@ export const api = {
       body: JSON.stringify(payload),
     }),
   workflows: () => request<Workflow[]>("/api/workflows"),
+  workflowFamilies: (capability?: WorkflowSelectorCapability, includeArchived = false) => {
+    const parameters = new URLSearchParams();
+    if (capability) parameters.set("selector_capability", capability);
+    if (includeArchived) parameters.set("include_archived", "true");
+    const query = parameters.toString();
+    return request<WorkflowFamily[]>(`/api/workflow-families${query ? `?${query}` : ""}`);
+  },
+  chatWorkflowSelections: (chatId: string) =>
+    request<WorkflowSelection[]>(
+      `/api/chats/${encodeURIComponent(chatId)}/workflow-selections`,
+    ),
+  setChatWorkflowSelection: (
+    chatId: string,
+    capability: WorkflowSelectorCapability,
+    selection: ChatWorkflowSelectionInput,
+  ) =>
+    request<WorkflowSelection>(
+      `/api/chats/${encodeURIComponent(chatId)}/workflow-selections/${capability}`,
+      { method: "PUT", body: JSON.stringify(selection) },
+    ),
+  projectWorkflowSelections: (projectId: string) =>
+    request<WorkflowSelection[]>(
+      `/api/projects/${encodeURIComponent(projectId)}/workflow-selections`,
+    ),
+  setProjectWorkflowSelection: (
+    projectId: string,
+    capability: WorkflowSelectorCapability,
+    selection: ProjectWorkflowSelectionInput,
+  ) =>
+    request<WorkflowSelection>(
+      `/api/projects/${encodeURIComponent(projectId)}/workflow-selections/${capability}`,
+      { method: "PUT", body: JSON.stringify(selection) },
+    ),
   createWorkflow: (payload: Record<string, unknown>) =>
     request<Workflow>("/api/workflows", { method: "POST", body: JSON.stringify(payload) }),
   updateWorkflow: (id: string, payload: Record<string, unknown>) =>
