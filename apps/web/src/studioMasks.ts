@@ -196,31 +196,102 @@ export function toAlphaImageData(
   return out;
 }
 
-/** A bounded undo ring; tools push on stroke end, never mid-gesture. */
-export class MaskHistory {
-  private past: MaskRaster[] = [];
-  private future: MaskRaster[] = [];
+/** The default undo budget: generous for ordinary images, and a hard stop
+ * long before a large canvas could exhaust memory. A 32 MP mask is ~32 MB,
+ * so a fixed depth of full clones is not a safe bound - bytes are. */
+export const DEFAULT_MASK_HISTORY_BYTES = 96 * 1024 * 1024;
 
-  constructor(private readonly depth = 16) {}
+/** Run-length encoding of one mask; masks are mostly-uniform by nature, so
+ * a stored snapshot is typically orders of magnitude smaller than the
+ * raster. Pathological content still encodes correctly, just larger. */
+type MaskSnapshot = {
+  readonly width: number;
+  readonly height: number;
+  /** Alternating [value, runLength] pairs over the row-major raster. */
+  readonly runs: Uint32Array;
+};
+
+export function encodeMask(mask: MaskRaster): MaskSnapshot {
+  const runs: number[] = [];
+  let value = mask.data[0] ?? 0;
+  let length = 0;
+  for (const sample of mask.data) {
+    if (sample === value) {
+      length += 1;
+      continue;
+    }
+    runs.push(value, length);
+    value = sample;
+    length = 1;
+  }
+  if (length > 0) runs.push(value, length);
+  return { width: mask.width, height: mask.height, runs: Uint32Array.from(runs) };
+}
+
+export function decodeMask(snapshot: MaskSnapshot): MaskRaster {
+  const mask = createMask(snapshot.width, snapshot.height);
+  let offset = 0;
+  for (let index = 0; index + 1 < snapshot.runs.length; index += 2) {
+    const value = snapshot.runs[index];
+    const length = snapshot.runs[index + 1];
+    if (value !== 0) mask.data.fill(value, offset, offset + length);
+    offset += length;
+  }
+  return mask;
+}
+
+function snapshotBytes(snapshot: MaskSnapshot): number {
+  return snapshot.runs.byteLength;
+}
+
+/** A byte-budgeted undo ring. Callers snapshot BEFORE the first mutation of
+ * a gesture - snapshotting after would store the already-painted raster and
+ * make the first undo a no-op. Oldest entries evict when the budget is
+ * exceeded, so memory is bounded by bytes rather than by a clone count. */
+export class MaskHistory {
+  private past: MaskSnapshot[] = [];
+  private future: MaskSnapshot[] = [];
+  private pastBytes = 0;
+  private futureBytes = 0;
+
+  constructor(
+    private readonly depth = 64,
+    private readonly byteBudget = DEFAULT_MASK_HISTORY_BYTES,
+  ) {}
 
   push(mask: MaskRaster): void {
-    this.past.push(cloneMask(mask));
-    if (this.past.length > this.depth) this.past.shift();
+    this.past.push(encodeMask(mask));
+    this.pastBytes += snapshotBytes(this.past[this.past.length - 1]);
     this.future = [];
+    this.futureBytes = 0;
+    this.evict();
   }
 
   undo(current: MaskRaster): MaskRaster | null {
     const previous = this.past.pop();
     if (!previous) return null;
-    this.future.push(cloneMask(current));
-    return previous;
+    this.pastBytes -= snapshotBytes(previous);
+    const snapshot = encodeMask(current);
+    this.future.push(snapshot);
+    this.futureBytes += snapshotBytes(snapshot);
+    this.evict();
+    return decodeMask(previous);
   }
 
   redo(current: MaskRaster): MaskRaster | null {
     const next = this.future.pop();
     if (!next) return null;
-    this.past.push(cloneMask(current));
-    return next;
+    this.futureBytes -= snapshotBytes(next);
+    const snapshot = encodeMask(current);
+    this.past.push(snapshot);
+    this.pastBytes += snapshotBytes(snapshot);
+    this.evict();
+    return decodeMask(next);
+  }
+
+  /** Bytes currently held; the studio surfaces this when a budget bites. */
+  get usedBytes(): number {
+    return this.pastBytes + this.futureBytes;
   }
 
   get canUndo(): boolean {
@@ -229,5 +300,19 @@ export class MaskHistory {
 
   get canRedo(): boolean {
     return this.future.length > 0;
+  }
+
+  private evict(): void {
+    while (this.past.length > this.depth) {
+      this.pastBytes -= snapshotBytes(this.past.shift()!);
+    }
+    // The oldest undo step goes first; the redo stack is dropped entirely
+    // before any further undo history is sacrificed.
+    while (this.usedBytes > this.byteBudget && this.future.length > 0) {
+      this.futureBytes -= snapshotBytes(this.future.shift()!);
+    }
+    while (this.usedBytes > this.byteBudget && this.past.length > 1) {
+      this.pastBytes -= snapshotBytes(this.past.shift()!);
+    }
   }
 }
