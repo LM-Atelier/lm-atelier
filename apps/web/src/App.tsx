@@ -86,6 +86,7 @@ import { EditingStudio } from "./EditingStudio";
 import { MessageTimestamp } from "./MessageTimestamp";
 import { PendingResponseStatus } from "./PendingResponseStatus";
 import { MarkdownText } from "./MarkdownText";
+import { MessageField } from "./MessageField";
 import { focusMainContent, roleForMode } from "./viewHelpers";
 import { ArtifactPart } from "./ArtifactPart";
 import { FirstRunSetup, SetupWizard } from "./SetupWizard";
@@ -1425,20 +1426,7 @@ function Composer({
           </div>
         )}
         <div className="composer">
-          <textarea
-            ref={textInput}
-            aria-label="Message"
-            value={text}
-            onChange={(event) => setText(event.target.value)}
-            onKeyDown={(event) => {
-              if (event.key === "Enter" && !event.shiftKey) {
-                event.preventDefault();
-                submit();
-              }
-            }}
-            placeholder="Ask anything, or describe an image or video to create…"
-            rows={1}
-          />
+          <MessageField field={textInput} value={text} onChange={setText} onSubmit={submit} />
           <div className="composer-tools">
             <div className="left-tools">
               <button className="icon-button" onClick={() => fileInput.current?.click()} disabled={uploading} aria-label="Attach file"><Paperclip size={18} /></button>
