@@ -10,29 +10,67 @@
   background: #0f0d0b;
   font-synthesis: none;
   text-rendering: optimizeLegibility;
-  --cream: #efe7d8;
-  --blue: #315a9a;
-  --blue-soft: #86a5d2;
-  --terracotta: #b85f3c;
-  --terracotta-soft: #d08a68;
-  --bg: #0f0d0b;
-  --panel: #191613;
-  --panel-2: #24201b;
-  --panel-3: #312c25;
-  --border: #463f34;
-  /* Control boundaries: 3.02:1 against the lightest surface, where
-     --border measures 1.36:1 and is effectively invisible. */
+  /* North Light: an atelier is defined by its light, so the product has
+     two rooms rather than one skin. Reading and writing happen on paper;
+     making happens in a dark room, because colour cannot be judged
+     against a warm ground and prose cannot be read for an hour against a
+     near-black one. A surface opts in with data-room; everything below it
+     follows, because every colour resolves through this layer.
+
+     The making room is the default, so nothing changes until a surface
+     asks to be a reading room. */
+  --surface-0: #0f0d0b;
+  --surface-1: #191613;
+  --surface-2: #24201b;
+  --surface-3: #312c25;
+  --ink-primary: #efe7d8;
+  --ink-secondary: #c3b8a6;
+  --ink-muted: #a79b8b;
+  /* Decorative hairlines and control boundaries are different jobs:
+     1.4.11 asks 3:1 of the edge of anything you type into, and asks
+     nothing of the edge of a card. Forcing both to 3:1 looks awful. */
+  --line: #463f34;
   --line-control: #8a7c68;
-  --muted: #a79b8b;
-  --accent: #4269a8;
-  --accent-2: var(--blue-soft);
+  /* Terracotta has three jobs and they do not want the same value. As a
+     mark it needs 3:1; as a word it needs 4.5:1; behind cream text it
+     needs to be dark enough for the cream, which is the opposite
+     direction. One token for all three is how the primary button ended up
+     at 3.61. */
+  --accent-warm: #b85f3c;
+  --accent-warm-text: #cc8062;
+  --accent-warm-soft: #d08a68;
+  --accent-fill: #9f5234;
+  --accent-ink: #efe7d8;
+  --info: #4d76b9;
+  --info-soft: #86a5d2;
+  --state-danger: #d66a67;
+  --state-danger-text: #da7774;
+  --state-success: #6fa88b;
+  --state-success-text: #6fa88b;
+  --focus-ring: #86a5d2;
+
+  /* The names the rules already use, resolved through the layer above so
+     that a room swap reaches every one of them without touching a rule. */
+  --cream: var(--ink-primary);
+  --blue: #315a9a;
+  --blue-soft: var(--info-soft);
+  --terracotta: var(--accent-warm);
+  --terracotta-soft: var(--accent-warm-soft);
+  --accent: var(--info);
+  --bg: var(--surface-0);
+  --panel: var(--surface-1);
+  --panel-2: var(--surface-2);
+  --panel-3: var(--surface-3);
+  --border: var(--line);
+  --muted: var(--ink-muted);
+  --accent-2: var(--focus-ring);
   --atelier: var(--terracotta);
   --atelier-soft: var(--terracotta-soft);
   --orange: var(--terracotta);
-  --danger: #d66a67;
+  --danger: var(--state-danger);
   /* One shadow for anything that sits above the page. */
   --lift: 0 10px 26px #00000059;
-  --success: #6fa88b;
+  --success: var(--state-success);
   /* Named because they were repeated, not because they are settled:
      the cool inks below still sit on warm surfaces, which is exactly
      the palette decision this layer exists to make possible. */
@@ -45,6 +83,47 @@
   --shadow: #0008;
   --edge-light: #ffffff0d;
   --well: #100f0d;
+}
+
+/* The reading room. Chat, settings, and the libraries are places you read
+   and write in, and a warm paper ground is what long prose wants; the
+   making surfaces stay dark below.
+
+   Every value here clears its floor against ALL THREE paper surfaces, not
+   just the page. Checking only against the lightest is how a muted ink
+   ends up at 4.38 on a pressed row and passes review anyway. */
+[data-room="reading"] {
+  color-scheme: light;
+  --surface-0: #f6f2e9;
+  --surface-1: #efeadd;
+  --surface-2: #e5decd;
+  --surface-3: #dcd4c1;
+  --ink-primary: #211c15;
+  --ink-secondary: #4a4235;
+  --ink-muted: #655b4c;
+  --line: #cfc4ae;
+  --line-control: #847660;
+  --accent-warm: #9c4b29;
+  --accent-warm-text: #924626;
+  --accent-warm-soft: #b8613b;
+  --accent-fill: #9c4b29;
+  --accent-ink: #f6f2e9;
+  --info: #2f5490;
+  --info-soft: #244475;
+  --state-danger: #a33a34;
+  --state-danger-text: #a13933;
+  --state-success: #2f6b4e;
+  --state-success-text: #2d674b;
+  --focus-ring: #1f4fa8;
+  /* Paper does not cast the same shadow a dark room does; the same depth
+     read as soot when it was carried straight across. */
+  --lift: 0 8px 20px #2b241a1f;
+  --shadow: #2b241a26;
+  --edge-light: #ffffffb3;
+  --well: #e5decd;
+  --amber: #8a5a12;
+  --warning-line: #b08a4a;
+  --danger-ink: #a33a34;
 }
 
 * { box-sizing: border-box; }
