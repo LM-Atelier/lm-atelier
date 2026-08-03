@@ -168,3 +168,27 @@ describe("typography", () => {
     expect(endings).toEqual([]);
   });
 });
+
+describe("scale and rhythm", () => {
+  function stepsOf(property: string): number[] {
+    const css = readFileSync(STYLESHEET, "utf8");
+    const found = [...css.matchAll(new RegExp(`\\b${property}:\\s*(\\d+)px;`, "g"))];
+    return [...new Set(found.map((match) => Number(match[1])))].sort((a, b) => a - b);
+  }
+
+  it("keeps type, radii, and spacing on a scale rather than on 17 opinions", () => {
+    // Seventeen font sizes, twenty-one radii, and twenty-one gap values are
+    // not a system; 7px and 9px gaps sit on no grid at all. Ceilings, so a
+    // new arbitrary value has to justify itself as a new step.
+    expect(stepsOf("font-size").length).toBeLessThanOrEqual(8);
+    expect(stepsOf("border-radius").length).toBeLessThanOrEqual(6);
+    expect(stepsOf("gap").length).toBeLessThanOrEqual(7);
+  });
+
+  it("leaves the density floor alone", () => {
+    // Whether this interface should be denser or airier is a design
+    // decision. This change is only about it having a scale at all, so the
+    // smallest step must not drift while nobody is looking.
+    expect(Math.min(...stepsOf("font-size"))).toBe(9);
+  });
+});
