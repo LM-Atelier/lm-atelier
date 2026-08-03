@@ -136,6 +136,7 @@ from .setup_verification import (
     recover_terminal_setup_verifications,
     setup_verification_for_chat,
 )
+from .studio_masks import MASK_SETTING_KEY, MaskContractError, parse_mask_setting
 from .vision import PreparedVisualContext, VisionContextService, VisionInputError
 from .visual_prompt_compiler import (
     compilation_provenance,
@@ -945,6 +946,16 @@ class ConversationOrchestrator:
             inherited_auto=inherited_image_edit_strength,
             workflow_schema=(workflow_revision.input_schema_json if workflow_revision else None),
         )
+        # A selection is validated where the workflow is known, so a mask
+        # aimed at a workflow that cannot apply one refuses before the turn
+        # is accepted rather than after it silently produces an unmasked edit.
+        if plan.operation != Operation.TEXT and effective_settings.get(MASK_SETTING_KEY):
+            if not workflow_revision:
+                raise ValueError("A selection requires a media workflow that accepts one.")
+            try:
+                parse_mask_setting(effective_settings, workflow_revision.input_schema_json)
+            except MaskContractError as exc:
+                raise ValueError(str(exc)) from exc
         lora_resolution = None
         if plan.operation != Operation.TEXT and effective_settings.get("loras"):
             if not workflow_revision:
@@ -3657,6 +3668,19 @@ class ConversationOrchestrator:
                             raise RuntimeError(
                                 "The effective LoRA graph changed after this run was queued."
                             )
+            # The mask travels as a resolved path beside the settings, never
+            # as an input reference: it is instruction, not content, and must
+            # not appear as an attachment or count toward edit lineage.
+            parameters: dict[str, Any] = dict(run.settings_json)
+            mask_setting = run.settings_json.get(MASK_SETTING_KEY)
+            if isinstance(mask_setting, dict):
+                mask_artifact = session.get(Artifact, str(mask_setting.get("artifact_id") or ""))
+                if not mask_artifact:
+                    raise RuntimeError("The selection for this edit is no longer stored.")
+                parameters[MASK_SETTING_KEY] = {
+                    **mask_setting,
+                    "path": str(self.artifacts.resolve(mask_artifact)),
+                }
             request = MediaRequest(
                 run_id=run.id,
                 operation=run.operation,
@@ -3664,7 +3688,7 @@ class ConversationOrchestrator:
                 negative_prompt=str(run.settings_json.get("negative_prompt", "")) or None,
                 input_paths=input_paths,
                 workflow=workflow,
-                parameters=run.settings_json,
+                parameters=parameters,
                 persistence_scope=self.persistence_scope,
                 scope_id=self.scope_id,
             )
