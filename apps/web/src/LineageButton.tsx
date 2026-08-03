@@ -21,9 +21,14 @@ export function LineageButton({
   if (steps.length < 2) return null;
   return (
     <>
-      <button type="button" onClick={() => setOpen(true)}>
+      <button
+        type="button"
+        className="icon-button"
+        aria-label="Show the edit lineage"
+        title="Lineage"
+        onClick={() => setOpen(true)}
+      >
         <GitCommitVertical size={14} aria-hidden="true" />
-        Lineage
       </button>
       {open && (
         <AccessibleDialog

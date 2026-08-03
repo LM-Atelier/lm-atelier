@@ -13,7 +13,15 @@ export function CompareButton({ before, after }: { before: string; after: string
   const [position, setPosition] = useState(50);
   return (
     <>
-      <button type="button" onClick={() => { setPosition(50); setOpen(true); }}>Compare</button>
+      <button
+        type="button"
+        className="icon-button"
+        aria-label="Compare with the source"
+        title="Compare"
+        onClick={() => { setPosition(50); setOpen(true); }}
+      >
+        <Columns2 size={14} aria-hidden="true" />
+      </button>
       {open && (
         <AccessibleDialog
           title="Compare with the source"

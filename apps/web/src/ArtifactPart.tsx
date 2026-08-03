@@ -1,4 +1,13 @@
-import { Film, Image as ImageIcon, LoaderCircle, Paperclip, Star } from "lucide-react";
+import {
+  Download,
+  Film,
+  Image as ImageIcon,
+  LoaderCircle,
+  Paperclip,
+  Quote,
+  Star,
+  Wand2,
+} from "lucide-react";
 import { CompareButton } from "./CompareButton";
 import { LineageButton } from "./LineageButton";
 import {
@@ -56,14 +65,48 @@ export function ArtifactPart({
         <img src={source} alt={label} loading="lazy" />
         <figcaption>
           <ImageIcon size={14} /> {label}
-          {!preview && onEditImage && <button type="button" onClick={() => onEditImage(part, callbackOrigin)}>Edit</button>}
-          {!preview && onAnimateImage && <button type="button" onClick={() => onAnimateImage(part, callbackOrigin)}>Animate</button>}
-          {!preview && onReferenceMedia && <button type="button" onClick={() => onReferenceMedia(part, callbackOrigin)}>Reference</button>}
+          {/* Icons, not labels - but each operation stays distinct: Edit
+              attaches and selects image mode, Animate attaches and seeds a
+              video turn, Reference attaches without changing the mode. */}
+          {!preview && onEditImage && (
+            <button
+              type="button"
+              className="icon-button"
+              aria-label="Edit this image"
+              title="Edit"
+              onClick={() => onEditImage(part, callbackOrigin)}
+            >
+              <Wand2 size={14} aria-hidden="true" />
+            </button>
+          )}
+          {!preview && onAnimateImage && (
+            <button
+              type="button"
+              className="icon-button"
+              aria-label="Animate this image"
+              title="Animate"
+              onClick={() => onAnimateImage(part, callbackOrigin)}
+            >
+              <Film size={14} aria-hidden="true" />
+            </button>
+          )}
+          {!preview && onReferenceMedia && (
+            <button
+              type="button"
+              className="icon-button"
+              aria-label="Reference this media"
+              title="Reference"
+              onClick={() => onReferenceMedia(part, callbackOrigin)}
+            >
+              <Quote size={14} aria-hidden="true" />
+            </button>
+          )}
           {!preview && compareSourceUrl && source && <CompareButton before={compareSourceUrl} after={source} />}
           {!preview && lineage && source && <LineageButton steps={lineage} resultUrl={source} />}
           {!preview && onToggleFavorite && (
             <button
               type="button"
+              className="icon-button"
               aria-label={part.artifact?.favorite ? "Unfavorite this image" : "Favorite this image"}
               aria-pressed={Boolean(part.artifact?.favorite)}
               onClick={() => onToggleFavorite(part)}
@@ -71,7 +114,11 @@ export function ArtifactPart({
               <Star size={14} fill={part.artifact?.favorite ? "currentColor" : "none"} aria-hidden="true" />
             </button>
           )}
-          {!preview && <a href={source} download>Download</a>}
+          {!preview && (
+            <a className="icon-button" href={source} download aria-label="Download this image" title="Download">
+              <Download size={14} aria-hidden="true" />
+            </a>
+          )}
         </figcaption>
       </figure>
     );
