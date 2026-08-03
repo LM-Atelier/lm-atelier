@@ -27,6 +27,13 @@ export interface PointerTool {
   move(point: ImagePoint): void;
   /** Returns true when the gesture changed the mask (history push point). */
   up(point: ImagePoint): boolean;
+  /** Abandon the gesture without committing what it has not applied yet.
+   *
+   * A rectangle or a lasso applies nothing until it closes, so abandoning
+   * leaves the mask untouched. A brush applies as it travels, so what is
+   * already painted stays and Undo is the way back - the snapshot taken at
+   * gesture start is exactly what makes that work. */
+  cancel(): void;
   preview(): ToolPreview;
 }
 
@@ -63,6 +70,11 @@ export class BrushTool implements PointerTool {
     return changed;
   }
 
+  cancel(): void {
+    this.last = null;
+    this.touched = false;
+  }
+
   preview(): ToolPreview {
     const center = this.last ?? this.hover;
     return center
@@ -94,6 +106,11 @@ export class RectTool implements PointerTool {
     if (Math.abs(point.x - from.x) < 1 || Math.abs(point.y - from.y) < 1) return false;
     fillRect(this.mask, from.x, from.y, point.x, point.y);
     return true;
+  }
+
+  cancel(): void {
+    this.origin = null;
+    this.current = null;
   }
 
   preview(): ToolPreview {
@@ -132,6 +149,10 @@ export class LassoTool implements PointerTool {
     if (closed.length < 3) return false;
     fillPolygon(this.mask, closed);
     return true;
+  }
+
+  cancel(): void {
+    this.points = [];
   }
 
   preview(): ToolPreview {

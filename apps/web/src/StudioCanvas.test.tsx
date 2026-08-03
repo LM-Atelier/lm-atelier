@@ -24,6 +24,10 @@ class SpyTool implements PointerTool {
     return this.changed;
   }
 
+  cancel(): void {
+    this.calls.push(["cancel", { x: 0, y: 0 }]);
+  }
+
   preview(): ToolPreview {
     return { kind: "none" };
   }
@@ -171,6 +175,78 @@ describe("StudioCanvas", () => {
 
     fireEvent.keyDown(surface, { key: "+" });
     expect(layers().style.transform).not.toBe(panned);
+  });
+
+
+  it("lets a selection be made without a pointer at all", () => {
+    const tool = new SpyTool();
+    const onGestureStart = vi.fn();
+    const onStrokeEnd = vi.fn();
+    const { container } = render(
+      <StudioCanvas
+        image={image}
+        mask={createMask(400, 200)}
+        tool={tool}
+        onGestureStart={onGestureStart}
+        onStrokeEnd={onStrokeEnd}
+      />,
+    );
+    const surface = container.querySelector(".studio-canvas") as HTMLElement;
+
+    // Every selection tool was pointer-only, so the whole selection-based
+    // half of the studio was unreachable by keyboard. The caret drives the
+    // same tools the pointer does.
+    fireEvent.keyDown(surface, { key: "Enter" });
+    expect(onGestureStart).toHaveBeenCalledTimes(1);
+    fireEvent.keyDown(surface, { key: "ArrowRight" });
+    fireEvent.keyDown(surface, { key: "ArrowDown" });
+    fireEvent.keyDown(surface, { key: "Enter" });
+
+    expect(tool.calls.map(([kind]) => kind)).toEqual(["down", "move", "move", "up"]);
+    // The caret starts at the middle of the picture and moves in image
+    // coordinates, not screen ones.
+    expect(tool.calls[0][1]).toEqual({ x: 200, y: 100 });
+    expect(tool.calls[3][1]).toEqual({ x: 220, y: 120 });
+    expect(onStrokeEnd).toHaveBeenCalledTimes(1);
+  });
+
+  it("keeps panning available while a tool is in hand", () => {
+    const tool = new SpyTool();
+    const { container } = render(
+      <StudioCanvas image={image} mask={createMask(400, 200)} tool={tool} />,
+    );
+    const surface = container.querySelector(".studio-canvas") as HTMLElement;
+    const layers = () => container.querySelector(".studio-canvas-layers") as HTMLElement;
+
+    const before = layers().style.transform;
+    fireEvent.keyDown(surface, { key: "ArrowRight", altKey: true });
+    // Alt pans; without it the same key would have moved the caret, which
+    // is what a tool being selected should mean.
+    expect(layers().style.transform).not.toBe(before);
+    expect(tool.calls).toEqual([]);
+  });
+
+  it("abandons a keyboard selection on Escape", () => {
+    const tool = new SpyTool();
+    const onStrokeEnd = vi.fn();
+    const { container } = render(
+      <StudioCanvas
+        image={image}
+        mask={createMask(400, 200)}
+        tool={tool}
+        onStrokeEnd={onStrokeEnd}
+      />,
+    );
+    const surface = container.querySelector(".studio-canvas") as HTMLElement;
+
+    fireEvent.keyDown(surface, { key: "Enter" });
+    fireEvent.keyDown(surface, { key: "Escape" });
+    fireEvent.keyDown(surface, { key: "ArrowRight" });
+
+    // The stroke is closed, so the arrow that follows moves the caret
+    // rather than silently extending an abandoned selection.
+    expect(onStrokeEnd).not.toHaveBeenCalled();
+    expect(tool.calls.map(([kind]) => kind)).toEqual(["down", "cancel", "move"]);
   });
 
 });
