@@ -1,5 +1,11 @@
 * text=auto eol=lf
 
+# Vendored third-party text ships exactly as its author published it. One
+# of the OFL files carries trailing whitespace upstream, and a licence is
+# not ours to reformat to suit our own rules.
+apps/web/public/fonts/** -whitespace
+*.woff2 binary
+
 *.png binary
 *.jpg binary
 *.jpeg binary
