@@ -27,4 +27,3 @@ export function orderFamilies(
     (left, right) => rank(left) - rank(right) || left.name.localeCompare(right.name),
   );
 }
-
