@@ -1,11 +1,38 @@
+/* Self-hosted, subset to Latin, no CDN - a local-first product that fetches
+   its own typeface from someone else's server is not local-first. Each is
+   OFL; the licences ship beside the files.
+
+   Source Serif carries the reading room's prose because a paper ground
+   wants a text face built for extended reading. Inter carries the chrome.
+   Both are variable, so one file covers every weight the interface uses. */
+@font-face {
+  font-family: "Source Serif 4";
+  src: url("/fonts/source-serif-4-latin.woff2") format("woff2");
+  font-weight: 200 900;
+  font-style: normal;
+  font-display: swap;
+}
+@font-face {
+  font-family: "Inter";
+  src: url("/fonts/inter-latin.woff2") format("woff2");
+  font-weight: 100 900;
+  font-style: normal;
+  font-display: swap;
+}
+@font-face {
+  font-family: "JetBrains Mono";
+  src: url("/fonts/jetbrains-mono-latin.woff2") format("woff2");
+  font-weight: 400;
+  font-style: normal;
+  font-display: swap;
+}
+
 :root {
   color-scheme: dark;
-  /* Inter was named here and never shipped - no @font-face, no font
-     files - so on a clean Windows machine this rendered as Segoe UI by
-     accident. Until a face is chosen and bundled, the stack asks for
-     what each platform actually has, deliberately and in order. */
-  font-family: system-ui, -apple-system, "Segoe UI Variable Text", "Segoe UI",
-    Roboto, "Helvetica Neue", Arial, sans-serif;
+  /* Inter is bundled now rather than merely named, so this is what
+     everyone sees rather than whatever each machine happened to have. */
+  font-family: Inter, system-ui, -apple-system, "Segoe UI Variable Text",
+    "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
   color: #efe7d8;
   background: #0f0d0b;
   font-synthesis: none;
@@ -150,7 +177,7 @@ button:focus-visible, a:focus-visible, input:focus-visible, textarea:focus-visib
 .app-shell { display: grid; grid-template-columns: 272px 1fr; height: 100%; }
 .sidebar { background: linear-gradient(180deg, rgba(25, 23, 19, .98), rgba(18, 17, 15, .98)); border-right: 1px solid var(--border); display: flex; flex-direction: column; min-width: 0; padding: 18px 14px 14px; overflow: hidden; }
 .brand { display: flex; align-items: center; gap: 12px; padding: 0 7px 20px; font-size: 20px; font-weight: 700; letter-spacing: -.02em; }
-.brand > span { display: grid; line-height: 1.05; font-family: "Iowan Old Style", "Palatino Linotype", Palatino, Charter, Georgia, "Times New Roman", serif; }
+.brand > span { display: grid; line-height: 1.05; font-family: "Source Serif 4", "Iowan Old Style", "Palatino Linotype", Charter, Georgia, "Times New Roman", serif; }
 .brand > span small { margin-top: 4px; color: var(--ink-secondary); font: 600 8px/1 ui-sans-serif, system-ui, sans-serif; letter-spacing: .13em; text-transform: uppercase; }
 .brand-mark { width: 36px; height: 36px; display: grid; place-items: center; border: 1px solid var(--line); border-radius: 11px 11px 11px 4px; background: var(--bg); box-shadow: 0 10px 28px #0006, inset 0 1px var(--edge-light); }
 .brand-mark svg { width: 29px; height: 29px; overflow: visible; }
@@ -236,11 +263,16 @@ h1, h2, h3 { margin: 0; }
 .message-text { white-space: pre-wrap; overflow-wrap: anywhere; }
 .message-attachment { display: inline-flex; align-items: center; gap: 6px; max-width: 100%; overflow-wrap: anywhere; }
 .message-text.markdown { white-space: normal; }
+/* Long answers on paper are read the way prose is read, so they get the
+   text face rather than the interface one. This is the whole reason the
+   reading room exists, and it applies only there - the same passage set
+   in serif on a near-black ground is harder to read, not easier. */
+[data-room="reading"] .message-text.markdown { font-family: "Source Serif 4", Charter, Georgia, serif; font-size: 16px; line-height: 1.6; }
 .markdown > :first-child { margin-top: 0; }.markdown > :last-child { margin-bottom: 0; }
 .markdown p, .markdown ul, .markdown ol, .markdown blockquote, .markdown pre, .markdown table { margin: .65em 0; }
 .markdown h1, .markdown h2, .markdown h3 { margin: 1em 0 .45em; line-height: 1.25; }
 .markdown h1 { font-size: 1.5em; }.markdown h2 { font-size: 1.3em; }.markdown h3 { font-size: 1.12em; }
-.markdown code { border-radius: 6px; background: var(--panel-2); padding: 2px 5px; font: .88em/1.5 "SFMono-Regular", Consolas, monospace; }
+.markdown code { border-radius: 6px; background: var(--panel-2); padding: 2px 5px; font: .88em/1.5 "JetBrains Mono", ui-monospace, SFMono-Regular, Consolas, monospace; }
 .markdown-code-block { position: relative; }
 .markdown-code-block pre { overflow-x: auto; border: 1px solid var(--border); border-radius: 10px; background: var(--well); padding: 38px 12px 12px; }
 .markdown pre code { background: transparent; padding: 0; }
@@ -359,7 +391,7 @@ h1, h2, h3 { margin: 0; }
 .page-view { height: 100%; overflow-y: auto; padding: 38px clamp(24px, 4vw, 64px) 90px; }
 .page-header { display: flex; align-items: flex-start; justify-content: space-between; gap: 24px; margin-bottom: 30px; }
 .page-header h1 { font-size: clamp(25px, 3vw, 34px); letter-spacing: -.035em; margin: 4px 0 8px; }
-.page-header h1, .empty-state h2, .section-heading h2 { font-family: "Iowan Old Style", "Palatino Linotype", Palatino, Charter, Georgia, "Times New Roman", serif; font-weight: 600; }
+.page-header h1, .empty-state h2, .section-heading h2 { font-family: "Source Serif 4", "Iowan Old Style", "Palatino Linotype", Charter, Georgia, "Times New Roman", serif; font-weight: 600; }
 .page-header h1::after { content: ""; display: block; width: 34px; height: 2px; margin-top: 8px; border-radius: 3px; background: linear-gradient(90deg, var(--atelier), transparent); }
 .page-header p { color: var(--ink-secondary); max-width: 650px; margin: 0; line-height: 1.55; }
 .storage-pill { display: flex; align-items: center; gap: 6px; border: 1px solid var(--border); color: var(--ink-secondary); border-radius: 10px; background: var(--panel); padding: 9px 12px; white-space: nowrap; }
@@ -417,7 +449,7 @@ h1, h2, h3 { margin: 0; }
 .workflow-detail summary { color: var(--ink-secondary); font-size: 12px; font-weight: 700; cursor: pointer; }
 .detail-title { display: flex; justify-content: space-between; align-items: center; margin-bottom: 17px; }
 .detail-title h2 { font-size: 20px; }
-.workflow-detail pre { max-height: 560px; overflow: auto; border: 1px solid var(--line); border-radius: 10px; background: var(--surface-0); color: var(--ink-secondary); padding: 16px; font: 12px/1.6 "SFMono-Regular", Consolas, monospace; }
+.workflow-detail pre { max-height: 560px; overflow: auto; border: 1px solid var(--line); border-radius: 10px; background: var(--surface-0); color: var(--ink-secondary); padding: 16px; font: 12px/1.6 "JetBrains Mono", ui-monospace, SFMono-Regular, Consolas, monospace; }
 .workflow-revision-bar { display: flex; align-items: flex-end; gap: 8px; flex-wrap: wrap; margin: 18px 0; }
 .workflow-revision-bar label { display: grid; gap: 4px; color: var(--muted); font-size: 10px; }
 .workflow-revision-bar select { min-width: 145px; border: 1px solid var(--border); border-radius: 10px; background: var(--panel-2); color: var(--ink); padding: 7px 9px; }
@@ -470,7 +502,7 @@ h1, h2, h3 { margin: 0; }
 .project-generation-defaults .generation-settings-panel > .segmented { margin: 10px 17px 0; }
 .project-generation-defaults .settings-list { max-height: 360px; padding: 8px 17px 15px; }
 .project-generation-defaults .generation-settings-actions { padding: 12px 17px; }
-.modal textarea { resize: vertical; font: 12px/1.5 "SFMono-Regular", Consolas, monospace; }
+.modal textarea { resize: vertical; font: 12px/1.5 "JetBrains Mono", ui-monospace, SFMono-Regular, Consolas, monospace; }
 .modal footer { justify-content: flex-end; border-top: 1px solid var(--border); padding-top: 15px; }
 .setup-wizard { width: min(820px, 96vw); }
 .setup-intro { margin: 8px 0 16px; color: var(--muted); font-size: 13px; }
@@ -518,7 +550,7 @@ h1, h2, h3 { margin: 0; }
 .worker-metrics span { display: grid; gap: 2px; border: 1px solid var(--border); border-radius: 6px; background: var(--panel-2); color: var(--muted); padding: 6px 8px; font-size: 9px; }
 .worker-metrics strong { color: var(--ink-primary); font-size: 11px; }
 .worker-failure { display: grid; gap: 6px; margin-top: 10px; border: 1px solid #673337; border-radius: 10px; background: var(--surface-2); color: #e8b6b5; padding: 9px 10px; font-size: 11px; }
-.worker-failure pre { max-height: 92px; overflow: auto; margin: 0; white-space: pre-wrap; overflow-wrap: anywhere; color: var(--ink-secondary); font: 10px/1.45 ui-monospace, SFMono-Regular, Consolas, monospace; }
+.worker-failure pre { max-height: 92px; overflow: auto; margin: 0; white-space: pre-wrap; overflow-wrap: anywhere; color: var(--ink-secondary); font: 10px/1.45 "JetBrains Mono", ui-monospace, SFMono-Regular, Consolas, monospace; }
 .worker-failure small { color: var(--ink-muted); overflow-wrap: anywhere; }
 .worker-remedy { margin: 0; color: #dfc7c6; font-size: 11px; line-height: 1.55; }
 .worker-failure details > summary { cursor: pointer; color: var(--ink-secondary); font-size: 10px; }
