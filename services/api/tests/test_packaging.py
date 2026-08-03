@@ -3,6 +3,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import re
 import runpy
 import shutil
 import subprocess
@@ -1154,3 +1155,20 @@ def test_release_metadata_contains_licenses_and_sbom() -> None:
         assert any((output / "third-party-licenses").rglob("*"))
     finally:
         shutil.rmtree(output, ignore_errors=True)
+
+
+def test_the_strict_mypy_gate_names_the_config_it_claims_to_enforce() -> None:
+    """A check that promises more than it enforces is worse than one that
+    promises less.
+
+    Without an explicit config, mypy does not discover the nested API
+    pyproject from the repository root. The step ran across all 142 source
+    files with default settings while being labelled "Strict mypy", so
+    every change had been passing a weaker check than its name.
+    """
+
+    script = (ROOT / "scripts" / "verify.ps1").read_text(encoding="utf-8")
+    step = re.search(r'Invoke-Checked "Strict mypy".*?\)', script, re.S)
+    assert step is not None
+    assert "--config-file" in step.group(0)
+    assert "services/api/pyproject.toml" in step.group(0)

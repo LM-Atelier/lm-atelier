@@ -3,7 +3,7 @@ from __future__ import annotations
 import re
 from collections.abc import Mapping
 from pathlib import PurePosixPath
-from typing import Any
+from typing import Any, Final, Literal
 
 from .comfy_templates import COMFY_TEMPLATE_COMPILER_VERSION
 from .model_planner import INSTALL_RESOLVER_VERSION
@@ -154,7 +154,7 @@ def install_plan_download_request(plan: InstallPlan) -> DownloadRequest:
             remote_id=plan.remote_id,
             source_remote_id=runtime.get("source_remote_id"),
             revision=plan.revision,
-            role=plan.role,  # type: ignore[arg-type]
+            role=_plan_role(plan.role),
             engine=plan.engine,
             allow_patterns=allow_patterns,
             expected_sha256=expected_sha256,
@@ -273,6 +273,29 @@ def _validate_bound_asset(binding: BoundWorkflowAsset, plan: InstallPlan) -> Non
         raise WorkflowAssetDownloadError(
             "binding_asset_changed", "the selected install artifact changed"
         )
+
+
+DOWNLOADABLE_ROLES: Final[tuple[Literal["chat", "image", "video"], ...]] = (
+    "chat",
+    "image",
+    "video",
+)
+
+
+def _plan_role(value: str) -> Literal["chat", "image", "video"]:
+    """The plan's role, proved to be one the download contract accepts.
+
+    The column is a plain string, so nothing stopped a row holding anything
+    at all; the mismatch had been suppressed rather than checked. Refusing
+    here turns a value that would have failed somewhere further downstream
+    into a typed refusal at the boundary that reads it.
+    """
+    for role in DOWNLOADABLE_ROLES:
+        if value == role:
+            return role
+    raise WorkflowAssetDownloadError(
+        "invalid_install_plan", "install plan has a role this engine cannot download"
+    )
 
 
 def _safe_relative_path(value: object) -> str:
