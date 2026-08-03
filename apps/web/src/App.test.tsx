@@ -3606,7 +3606,7 @@ describe("App", () => {
         { package_id: "rgthree-comfy", versions: ["1.2.3"], node_types: ["Power Lora Loader"], locally_resolved: false },
       ],
       asset_references: [
-        { filename: "legacy.ckpt", suffix: ".ckpt", policy: "blocked", kind: "checkpoint", source_url: null, present_locally: false },
+        { filename: "legacy.ckpt", suffix: ".ckpt", policy: "blocked", kind: "checkpoint", source_url: null, present_locally: false, source_candidates: [] },
       ],
       issues: [
         { code: "blocked_asset_format", count: 1, node_types: [], severity: "blocking" },
@@ -3615,6 +3615,7 @@ describe("App", () => {
       runtime_nodes_available: false,
       dependencies_resolved: false,
       node_inventory_available: true,
+      source_candidates: [],
     });
     const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
     const { container } = render(

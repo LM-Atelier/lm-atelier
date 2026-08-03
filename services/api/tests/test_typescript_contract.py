@@ -72,6 +72,7 @@ CHECKED_CONTRACTS = {
     "WorkflowPackageAnalysis": "WorkflowPackageAnalysisOut",
     "WorkflowPackageIssue": "WorkflowPackageIssueOut",
     "WorkflowPackageRequirement": "WorkflowPackageRequirementOut",
+    "WorkflowSourceCandidate": "WorkflowSourceCandidateOut",
     "WorkPlan": "WorkPlanOut",
     "WorkStep": "WorkStepOut",
 }

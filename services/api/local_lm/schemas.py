@@ -959,6 +959,21 @@ class WorkflowPackageRequirementOut(ApiModel):
     locally_resolved: bool
 
 
+class WorkflowSourceCandidateOut(ApiModel):
+    """One source link the package author wrote down, already validated.
+
+    A suggestion of what to preflight - never a download instruction. The
+    normal immutable-plan path still resolves it, and the browser cannot
+    substitute a URL of its own.
+    """
+
+    provider: str
+    remote_id: str
+    revision: str | None
+    filename: str | None
+    url: str
+
+
 class WorkflowAssetReferenceOut(ApiModel):
     filename: str
     suffix: str
@@ -966,6 +981,10 @@ class WorkflowAssetReferenceOut(ApiModel):
     kind: Literal["checkpoint", "configuration", "embedding", "lora", "upscaler", "vae"]
     source_url: str | None
     present_locally: bool
+    # Populated only when the author's own text names this exact file; a link
+    # that names no file is reported once in the analysis instead of guessed
+    # onto an asset here.
+    source_candidates: list[WorkflowSourceCandidateOut] = []
 
 
 class WorkflowPackageIssueOut(ApiModel):
@@ -1008,6 +1027,10 @@ class WorkflowPackageAnalysisOut(ApiModel):
     ready: bool
     runtime_nodes_available: bool
     dependencies_resolved: bool
+    # Links the author recorded that name no particular file. Most authors
+    # write display names rather than filenames, so this is the common case,
+    # and it is offered for the user to assign rather than matched by guess.
+    source_candidates: list[WorkflowSourceCandidateOut] = []
     node_inventory_available: bool
 
 

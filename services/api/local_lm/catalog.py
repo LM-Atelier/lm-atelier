@@ -47,6 +47,7 @@ _CACHE_VERSION = 5
 class HuggingFaceCatalog:
     source_id = "huggingface"
     display_name = "Hugging Face"
+    web_origin = "https://huggingface.co"
 
     def __init__(self, settings: Settings) -> None:
         headers = {"user-agent": "local-lm/0.1"}

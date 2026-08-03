@@ -78,16 +78,17 @@ def collect_source_candidates(
     """
     by_filename: dict[str, list[SourceCandidate]] = {}
     for text in _text_fragments(workflow):
-        for url in _URL.findall(text):
-            candidate = parse_source_url(url, allowed_hosts=allowed_hosts)
-            if candidate is None:
-                continue
-            key = _matching_filename(text, asset_filenames) or ""
-            bucket = by_filename.setdefault(key, [])
-            if any(existing.url == candidate.url for existing in bucket):
-                continue
-            if len(bucket) < MAX_CANDIDATES_PER_ASSET:
-                bucket.append(candidate)
+        for block in _blocks(text):
+            for url in _URL.findall(block):
+                candidate = parse_source_url(url, allowed_hosts=allowed_hosts)
+                if candidate is None:
+                    continue
+                key = _matching_filename(block, asset_filenames) or ""
+                bucket = by_filename.setdefault(key, [])
+                if any(existing.url == candidate.url for existing in bucket):
+                    continue
+                if len(bucket) < MAX_CANDIDATES_PER_ASSET:
+                    bucket.append(candidate)
     return {key: tuple(value) for key, value in by_filename.items()}
 
 
@@ -197,6 +198,18 @@ def _node_strings(node: Mapping[str, Any]) -> list[str]:
     if isinstance(title, str):
         values.append(title)
     return values
+
+
+def _blocks(text: str) -> list[str]:
+    """Split note text where its author separated one subject from the next.
+
+    A single note routinely lists several models, each with its own link. If a
+    filename mentioned anywhere in that note could claim every link in it, one
+    named file would swallow sources belonging to entirely different models -
+    a wrong binding, which is worse than no binding. A blank line is how
+    authors mark "new subject", so it is the boundary honored here.
+    """
+    return [block for block in re.split(r"\n\s*\n", text) if block.strip()]
 
 
 def _matching_filename(text: str, filenames: Sequence[str]) -> str | None:
