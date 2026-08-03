@@ -47,7 +47,13 @@ try {
 
     Invoke-Checked "Ruff format" $Ruff @("format", "--check", "services/api")
     Invoke-Checked "Ruff lint" $Ruff @("check", "services/api")
-    Invoke-Checked "Strict mypy" $Mypy @("services/api/local_lm")
+    # Without the explicit config mypy does not discover the nested API
+    # pyproject from the repository root, so this ran with default settings
+    # while being labelled strict. The label is the promise; the flag is
+    # what keeps it.
+    Invoke-Checked "Strict mypy" $Mypy @(
+        "--config-file", "services/api/pyproject.toml", "services/api/local_lm"
+    )
     Invoke-Checked "Bandit high-severity scan" $Bandit @(
         "-q", "-lll", "-r", "services/api/local_lm"
     )

@@ -154,7 +154,7 @@ def install_plan_download_request(plan: InstallPlan) -> DownloadRequest:
             remote_id=plan.remote_id,
             source_remote_id=runtime.get("source_remote_id"),
             revision=plan.revision,
-            role=plan.role,  # type: ignore[arg-type]
+            role=plan.role,
             engine=plan.engine,
             allow_patterns=allow_patterns,
             expected_sha256=expected_sha256,
