@@ -32,14 +32,36 @@ function issueDescription(code: string): string {
 export function WorkflowPackageReview({
   analysis,
   fileName,
+  uiGraph,
+  onImported,
   onClose,
 }: {
   analysis: WorkflowPackageAnalysis;
   fileName: string;
+  uiGraph?: Record<string, unknown>;
+  onImported?: () => void;
   onClose: () => void;
 }) {
   const missingKnown = analysis.node_inventory_available;
   const [queuedPackages, setQueuedPackages] = useState<string[]>([]);
+  const [importName, setImportName] = useState(fileName.replace(/\.json$/i, ""));
+  // The analyzer's guess prefills the form; the user confirms, nothing is
+  // silently decided. Loading an image suggests the image-conditioned twin.
+  const loadsImage = analysis.required_node_types.some((type) =>
+    type.replaceAll(/[\s_]/g, "").toLowerCase().includes("loadimage"));
+  const [operation, setOperation] = useState(
+    analysis.operation_guess === "video"
+      ? (loadsImage ? "image_to_video" : "text_to_video")
+      : (loadsImage ? "image_to_image" : "text_to_image"),
+  );
+  const importWorkflow = useMutation({
+    mutationFn: () => api.importWorkflowPackage({
+      ui_graph: uiGraph ?? {},
+      name: importName.trim(),
+      operation,
+    }),
+    onSuccess: () => onImported?.(),
+  });
   const prepare = useMutation({
     mutationFn: ({ packageId, version }: { packageId: string; version: string }) =>
       api.prepareWorkflowPackage(packageId, version),
@@ -69,7 +91,7 @@ export function WorkflowPackageReview({
           </small>
           <p>
             {analysis.ready
-              ? "Everything this workflow needs is present. Import and compilation follow as a separate step."
+              ? "Everything this workflow needs is present. Name it and import below; it arrives untrusted."
               : "This workflow cannot be imported or trusted until everything below is resolved."}
           </p>
         </div>
@@ -170,8 +192,41 @@ export function WorkflowPackageReview({
           {prepareError.code ? preparationErrorDescription(prepareError.code) : prepareError.message}
         </p>
       )}
+      {analysis.ready && uiGraph && onImported && (
+        <div className="package-import-form">
+          <label>
+            Workflow name
+            <input
+              value={importName}
+              maxLength={240}
+              onChange={(event) => setImportName(event.target.value)}
+            />
+          </label>
+          <label>
+            Operation
+            <select value={operation} onChange={(event) => setOperation(event.target.value)}>
+              <option value="text_to_image">Text to image</option>
+              <option value="image_to_image">Image to image</option>
+              <option value="text_to_video">Text to video</option>
+              <option value="image_to_video">Image to video</option>
+            </select>
+          </label>
+          {importWorkflow.error && (
+            <p role="alert" className="package-review-note">{importWorkflow.error.message}</p>
+          )}
+        </div>
+      )}
       <footer>
         <button className="secondary" onClick={onClose}>Close</button>
+        {analysis.ready && uiGraph && onImported && (
+          <button
+            className="primary"
+            disabled={!importName.trim() || importWorkflow.isPending}
+            onClick={() => importWorkflow.mutate()}
+          >
+            {importWorkflow.isPending ? "Importing…" : "Import workflow"}
+          </button>
+        )}
       </footer>
     </AccessibleDialog>
   );
