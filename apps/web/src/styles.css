@@ -157,7 +157,7 @@ button:focus-visible, a:focus-visible, input:focus-visible, textarea:focus-visib
 .brand-mark .lma-l { fill: var(--cream); }
 .brand-mark .lma-ma { fill: var(--blue); }
 .mobile-menu { margin-left: auto; display: none !important; }
-.new-chat, .primary { border: 0; border-radius: 10px; background: linear-gradient(135deg, var(--blue), var(--accent) 72%, var(--terracotta)); display: inline-flex; align-items: center; justify-content: center; gap: 8px; font-weight: 600; padding: 10px 14px; cursor: pointer; transition: filter .15s, transform .15s; }
+.new-chat, .primary { border: 0; border-radius: 10px; background: var(--accent-fill); color: var(--accent-ink); display: inline-flex; align-items: center; justify-content: center; gap: 8px; font-weight: 600; padding: 10px 14px; cursor: pointer; transition: filter .15s, transform .15s; }
 .new-chat { width: 100%; margin-bottom: 10px; }
 .new-chat:hover, .primary:hover { filter: brightness(1.1); transform: translateY(-1px); }
 .new-chat:disabled, .primary:disabled { opacity: .55; cursor: default; transform: none; }
@@ -351,6 +351,8 @@ h1, h2, h3 { margin: 0; }
 .lora-stack-item .lora-enabled { display: flex; align-items: center; align-self: center; }
 .lora-stack-item > small { grid-column: 1 / -1; }
 .toggle-row input { width: 38px; height: 20px; accent-color: var(--accent); justify-self: end; }
+.secondary.compact-button { border-color: transparent; background: transparent; color: var(--ink-secondary); }
+.secondary.compact-button:hover { background: var(--surface-2); color: var(--ink-primary); }
 .secondary { border: 1px solid var(--border); background: var(--panel-2); border-radius: 10px; color: var(--ink-primary); display: inline-flex; align-items: center; justify-content: center; gap: 6px; padding: 9px 13px; cursor: pointer; }
 .secondary:hover { background: var(--panel-3); }
 
