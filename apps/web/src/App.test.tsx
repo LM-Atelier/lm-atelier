@@ -111,6 +111,8 @@ vi.mock("./api", () => ({
     cleanupArtifacts: vi.fn(),
     deleteArtifact: vi.fn(),
     favoriteArtifact: vi.fn(),
+    openStudioSession: vi.fn().mockResolvedValue({ id: "chat-studio", messages: [] }),
+    studioSession: vi.fn().mockResolvedValue({ id: "chat-studio", messages: [] }),
     setResponseFeedback: vi.fn(),
     sendTurn: vi.fn(),
     stopAndSendTurn: vi.fn(),
@@ -3739,7 +3741,7 @@ describe("App", () => {
     await waitFor(() => expect(screen.queryByText("observatory.png")).not.toBeInTheDocument());
   });
 
-  it("edits a library image straight into the composer with the studio open", async () => {
+  it("edits a library image straight into the Image Studio", async () => {
     const stamp = "2026-07-22T00:00:00Z";
     const chat: Chat = {
       id: "chat-library-edit",
@@ -3788,11 +3790,10 @@ describe("App", () => {
     fireEvent.click(await screen.findByText("Media library"));
     fireEvent.click(await screen.findByRole("button", { name: "Edit observatory.png" }));
 
-    // Back in the chat: image attached, mode switched, studio ready to pick.
-    expect(await screen.findByRole("dialog", { name: "Editing studio" })).toBeVisible();
-    expect(screen.getByRole("link", { name: "Preview observatory.png" })).toBeVisible();
+    // One image opens the canvas-first studio, not the composer dialog.
+    expect(await screen.findByRole("heading", { name: "Image Studio" })).toBeVisible();
     await waitFor(() =>
-      expect(api.updateChat).toHaveBeenCalledWith(chat.id, { routing_mode: "image" }));
+      expect(api.openStudioSession).toHaveBeenCalledWith("sha256:library-image", null));
   });
 
   it("edits a library selection together through the studio", async () => {

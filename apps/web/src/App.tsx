@@ -94,6 +94,7 @@ import { LoraStackControl } from "./LoraStackControl";
 import { MediaLibraryView } from "./MediaLibraryView";
 import { MediaOutputPlan } from "./MediaOutputPlan";
 import { ModelCard } from "./ModelCard";
+import { StudioView } from "./StudioView";
 import { RecipeCard } from "./RecipeCard";
 import { ModelUpdatesPanel } from "./ModelUpdatesPanel";
 import { RuntimeSetupCard } from "./RuntimeSetupCard";
@@ -146,7 +147,7 @@ import type {
   WorkPlan,
 } from "./types";
 
-type View = "chat" | "media" | "models" | "workflows" | "settings";
+type View = "chat" | "media" | "models" | "workflows" | "studio" | "settings";
 type Visibility = "basic" | "advanced" | "expert";
 type PendingTurn = { id: string; text: string; mode: RoutingMode };
 type VisualTarget = {
@@ -229,6 +230,26 @@ function libraryEditTarget(artifacts: ArtifactLibraryItem[]): VisualTarget | nul
     studio: true,
     extraAttachments: rest,
   };
+}
+
+/** One image opens the studio canvas; a selection keeps the composer's
+ * apply-to-each batch path. */
+function openLibraryEditTargets(
+  artifacts: ArtifactLibraryItem[],
+  handlers: {
+    openStudio: (artifactId: string) => void;
+    openComposer: (target: VisualTarget) => void;
+  },
+): void {
+  if (artifacts.length === 1) {
+    handlers.openStudio(artifacts[0].id);
+    focusMainContent();
+    return;
+  }
+  const target = libraryEditTarget(artifacts);
+  if (!target) return;
+  handlers.openComposer(target);
+  focusMainContent();
 }
 
 function PartView({
@@ -3174,7 +3195,7 @@ function Sidebar({
     <aside className={`sidebar ${mobileOpen ? "mobile-open" : ""}`}>
       <div className="brand"><div className="brand-mark"><AtelierMark /></div><span>LM Atelier<small>Local creative studio</small></span><button className="icon-button mobile-menu" aria-label="Toggle navigation" aria-expanded={mobileOpen} onClick={() => setMobileOpen((open) => !open)}><Menu /></button></div>
       <button className="new-chat" onClick={() => { onNewChat(null); setMobileOpen(false); }}><Plus size={18} />New chat</button>
-      <nav className="primary-nav"><button className={view === "media" ? "active" : ""} aria-current={view === "media" ? "page" : undefined} onClick={() => { onView("media"); setMobileOpen(false); }}><ImageIcon />Media library</button><button className={view === "models" ? "active" : ""} aria-current={view === "models" ? "page" : undefined} onClick={() => { onView("models"); setMobileOpen(false); }}><Library />Model library</button><button className={view === "workflows" ? "active" : ""} aria-current={view === "workflows" ? "page" : undefined} onClick={() => { onView("workflows"); setMobileOpen(false); }}><WorkflowIcon />Workflows</button></nav>
+      <nav className="primary-nav"><button className={view === "media" ? "active" : ""} aria-current={view === "media" ? "page" : undefined} onClick={() => { onView("media"); setMobileOpen(false); }}><ImageIcon />Media library</button><button className={view === "models" ? "active" : ""} aria-current={view === "models" ? "page" : undefined} onClick={() => { onView("models"); setMobileOpen(false); }}><Library />Model library</button><button className={view === "workflows" ? "active" : ""} aria-current={view === "workflows" ? "page" : undefined} onClick={() => { onView("workflows"); setMobileOpen(false); }}><WorkflowIcon />Workflows</button><button className={view === "studio" ? "active" : ""} aria-current={view === "studio" ? "page" : undefined} onClick={() => { onView("studio"); setMobileOpen(false); }}><Wand2 />Image Studio</button></nav>
       <div className="workspace-search"><Search size={14} /><input aria-label="Search projects and chats" placeholder="Search workspace" value={search} onChange={(event) => setSearch(event.target.value)} /><button className={showArchived ? "active" : ""} aria-pressed={showArchived} onClick={() => setShowArchived((value) => !value)}>Archived</button></div>
       <div className="workspace-tree" role="region" aria-label="Projects and chats">
         <div className="sidebar-section">
@@ -3229,6 +3250,7 @@ export default function App() {
   const client = useQueryClient();
   const [view, setView] = useState<View>("chat");
   const [libraryEdit, setLibraryEdit] = useState<VisualTarget | null>(null);
+  const [studioSource, setStudioSource] = useState<{ artifactId: string; chatId: string | null } | null>(null);
   const [modelLibraryRole, setModelLibraryRole] = useState<EngineRole>("chat");
   const [setupOpen, setSetupOpen] = useState<boolean | null>(null);
   const [currentChatId, setCurrentChatId] = useState<string | null>(() => localStorage.getItem(CURRENT_CHAT_KEY));
@@ -3469,17 +3491,30 @@ export default function App() {
   });
 
   const openLibraryEdit = useCallback((artifacts: ArtifactLibraryItem[]) => {
-    const target = libraryEditTarget(artifacts);
-    if (!target) return;
-    setLibraryEdit(target);
-    if (!activeChatId) createChat.mutate(null);
-    setView("chat");
-    focusMainContent();
+    openLibraryEditTargets(artifacts, {
+      openStudio: (artifactId) => {
+        setStudioSource({ artifactId, chatId: null });
+        setView("studio");
+      },
+      openComposer: (target) => {
+        setLibraryEdit(target);
+        if (!activeChatId) createChat.mutate(null);
+        setView("chat");
+      },
+    });
   }, [activeChatId, createChat]);
 
   const allChats = useMemo(() => chats.data ?? [], [chats.data]);
   const allProjects = useMemo(() => projects.data ?? [], [projects.data]);
   const activeContent = useMemo(() => {
+    if (view === "studio") {
+      return (
+        <StudioView
+          sourceArtifactId={studioSource?.artifactId ?? null}
+          sourceChatId={studioSource?.chatId ?? null}
+        />
+      );
+    }
     if (view === "media") return <MediaLibraryView onEditImages={openLibraryEdit} />;
     if (view === "models") return <ModelsView key={modelLibraryRole} initialRole={modelLibraryRole} />;
     if (view === "workflows") return <WorkflowsView />;
@@ -3571,7 +3606,7 @@ export default function App() {
         });
       }
     }} />;
-  }, [view, modelLibraryRole, engines.data, profiles.data, presets.data, workflows.data, allProjects, chat.data, chatDrafts, liveText, pendingTurns, workPlans.data, send, regenerate, selectResponseRevision, branch, stop, cancelWorkPlan, cancelWorkStep, retryWorkStep, updateChat, deleteExchange, forkThread, client, libraryEdit, openLibraryEdit]);
+  }, [studioSource, view, modelLibraryRole, engines.data, profiles.data, presets.data, workflows.data, allProjects, chat.data, chatDrafts, liveText, pendingTurns, workPlans.data, send, regenerate, selectResponseRevision, branch, stop, cancelWorkPlan, cancelWorkStep, retryWorkStep, updateChat, deleteExchange, forkThread, client, libraryEdit, openLibraryEdit]);
 
   if (firstRunSetup && setupReadiness.data) {
     return <FirstRunSetup report={setupReadiness.data} onExit={exitFirstRunSetup} onOpenModels={(role) => { exitFirstRunSetup(); setModelLibraryRole(role); setView("models"); }} onOpenWorkflows={() => { exitFirstRunSetup(); setView("workflows"); }} />;
