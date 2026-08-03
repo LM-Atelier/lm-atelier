@@ -49,6 +49,27 @@ function styledElements(): Array<{ tokens: string[]; file: string }> {
   return elements;
 }
 
+function relativeLuminance(hex: string): number {
+  const value = hex.replace("#", "");
+  const channels = [0, 2, 4].map((at) => parseInt(value.slice(at, at + 2), 16) / 255);
+  const linear = channels.map((c) => (c <= 0.03928 ? c / 12.92 : ((c + 0.055) / 1.055) ** 2.4));
+  return 0.2126 * linear[0] + 0.7152 * linear[1] + 0.0722 * linear[2];
+}
+
+function contrast(a: string, b: string): number {
+  const [high, low] = [relativeLuminance(a), relativeLuminance(b)].sort((x, y) => y - x);
+  return (high + 0.05) / (low + 0.05);
+}
+
+/** A token's value read from the stylesheet, so every check follows the
+ *  palette rather than restating it. */
+function token(name: string): string {
+  const css = readFileSync(STYLESHEET, "utf8");
+  return css.match(new RegExp(`--${name}:\\s*(#[0-9a-f]{6})`))?.[1] ?? "";
+}
+
+const SURFACES = ["bg", "panel", "panel-2", "panel-3"];
+
 describe("style contract", () => {
   it("leaves no element without any styling at all", () => {
     const defined = definedClasses();
@@ -74,23 +95,7 @@ describe("style contract", () => {
 describe("contrast and state", () => {
   const css = readFileSync(STYLESHEET, "utf8");
 
-  function relativeLuminance(hex: string): number {
-    const value = hex.replace("#", "");
-    const channels = [0, 2, 4].map((at) => parseInt(value.slice(at, at + 2), 16) / 255);
-    const linear = channels.map((c) => (c <= 0.03928 ? c / 12.92 : ((c + 0.055) / 1.055) ** 2.4));
-    return 0.2126 * linear[0] + 0.7152 * linear[1] + 0.0722 * linear[2];
-  }
 
-  function contrast(a: string, b: string): number {
-    const [high, low] = [relativeLuminance(a), relativeLuminance(b)].sort((x, y) => y - x);
-    return (high + 0.05) / (low + 0.05);
-  }
-
-  function token(name: string): string {
-    return css.match(new RegExp(`--${name}:\\s*(#[0-9a-f]{6})`))?.[1] ?? "";
-  }
-
-  const SURFACES = ["bg", "panel", "panel-2", "panel-3"];
 
   it("keeps muted text readable on every surface it can sit on", () => {
     // Nearly every small label in the app resolves to this one token, and
@@ -116,5 +121,50 @@ describe("contrast and state", () => {
       const rule = css.match(new RegExp(`${selector}[^{]*\\{([^}]*)\\}`))?.[1] ?? "";
       expect(rule).toMatch(/box-shadow/);
     }
+  });
+});
+
+describe("elevation", () => {
+
+  it("separates each surface from the one below it", () => {
+    // Four named levels spanning 1.05 to 1.10 apart are one surface with
+    // extra names; nothing in the app read as sitting on anything.
+    const ladder = ["bg", "panel", "panel-2", "panel-3"].map(token);
+    for (let at = 1; at < ladder.length; at += 1) {
+      expect(contrast(ladder[at], ladder[at - 1])).toBeGreaterThan(1.07);
+    }
+    expect(contrast(ladder[3], ladder[0])).toBeGreaterThan(1.35);
+  });
+});
+
+describe("the token layer", () => {
+  it("does not grow the pile of one-off colours", () => {
+    const css = readFileSync(STYLESHEET, "utf8");
+    const body = css.slice(css.indexOf("}") + 1);
+    const literals = body.match(/#[0-9a-fA-F]{3,8}\b/g) ?? [];
+
+    // A ceiling, not a target. It ratchets down as values earn names; a
+    // change needing a new one-off colour is a change needing a token. The
+    // palette cannot be reasoned about - or replaced - while most of it is
+    // spelled out across the rules.
+    expect(literals.length).toBeLessThanOrEqual(155);
+  });
+});
+
+describe("typography", () => {
+  it("never leaves a stack that can fall through to nothing", () => {
+    const css = readFileSync(STYLESHEET, "utf8");
+    const GENERIC = /^(serif|sans-serif|monospace|cursive|fantasy|system-ui|ui-serif|ui-sans-serif|ui-monospace|inherit)$/;
+
+    // Inter was declared as the interface font and never shipped - no
+    // @font-face, no font files anywhere in the repository - so what a
+    // reader actually saw depended entirely on what they happened to have
+    // installed. A stack is only honest if its last entry is one that
+    // every platform can satisfy.
+    const endings = [...css.matchAll(/font-family:\s*([^;]+);/g)]
+      .map((match) => match[1].split(",").at(-1)!.trim().replace(/^["']|["']$/g, ""))
+      .filter((name) => !GENERIC.test(name));
+
+    expect(endings).toEqual([]);
   });
 });
