@@ -195,6 +195,17 @@ def contains_secret(path: str) -> bool:
     return any(pattern.search(text) for pattern in SECRET_PATTERNS)
 
 
+# Vendored third-party text is not ours to reformat. A licence in
+# particular has to ship byte for byte as its author published it, and one
+# of the OFL files carries trailing whitespace upstream.
+VENDORED_TEXT = ("apps/web/public/fonts/",)
+
+
+def is_vendored(path: str) -> bool:
+    normalized = path.replace("\\", "/")
+    return normalized.startswith(VENDORED_TEXT)
+
+
 def has_trailing_whitespace(path: str) -> bool:
     payload = Path(path).read_bytes()
     if b"\0" in payload:
@@ -276,7 +287,11 @@ def main() -> int:
             + "\n- ".join(secret_paths)
         )
 
-    whitespace_paths = [path for path in paths if has_trailing_whitespace(path)]
+    whitespace_paths = [
+        path
+        for path in paths
+        if not is_vendored(path) and has_trailing_whitespace(path)
+    ]
     if whitespace_paths:
         raise SystemExit(
             "Trailing whitespace is present in candidate files:\n- "

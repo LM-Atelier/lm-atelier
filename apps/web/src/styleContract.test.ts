@@ -119,8 +119,32 @@ describe("the token layer", () => {
 });
 
 describe("typography", () => {
-  it("never leaves a stack that can fall through to nothing", () => {
+  it("ships every face it names first", () => {
     const css = readFileSync(STYLESHEET, "utf8");
+    const declared = new Set(
+      [...css.matchAll(/@font-face\s*\{[^}]*font-family:\s*"?([^";]+)"?;/g)].map((m) =>
+        m[1].trim()),
+    );
+    const files = new Set(readdirSync(join(SOURCE_DIR, "..", "public", "fonts")));
+
+    // A face named first in a stack is the one the design intends. Inter was
+    // named that way for a year without a single font file in the repository,
+    // so what a reader saw depended on what they happened to have installed.
+    expect(declared.size).toBeGreaterThan(0);
+    for (const family of declared) {
+      const slug = family.toLowerCase().replace(/[^a-z0-9]+/g, "-");
+      expect([...files].some((name) => name.startsWith(slug))).toBe(true);
+    }
+    const leaders = [...css.matchAll(/font-family:\s*([^;]+);/g)]
+      .map((m) => m[1].split(",")[0].trim().replace(/^["']|["']$/g, ""))
+      .filter((name) => /^[A-Z]/.test(name) && !declared.has(name));
+    expect(leaders).toEqual([]);
+  });
+
+  it("never leaves a stack that can fall through to nothing", () => {
+    // @font-face names one face rather than a stack, so it has nothing to
+    // fall through to and nothing to check.
+    const css = readFileSync(STYLESHEET, "utf8").replace(/@font-face\s*\{[^}]*\}/g, "");
     const GENERIC = /^(serif|sans-serif|monospace|cursive|fantasy|system-ui|ui-serif|ui-sans-serif|ui-monospace|inherit)$/;
 
     // Inter was declared as the interface font and never shipped - no
@@ -250,6 +274,48 @@ describe("moving between rooms", () => {
       const block = css.slice(at, css.indexOf("}", at));
       expect(block).toMatch(/--grain:/);
       expect(block).toMatch(/--scrim:/);
+    }
+  });
+});
+
+describe("action hierarchy", () => {
+  const css = readFileSync(STYLESHEET, "utf8");
+
+  /** The body of the rule whose selector list contains this exact selector.
+   *  Rules are often grouped - ".new-chat, .primary" - so matching on the
+   *  first selector in the list would miss most of them. */
+  function rule(selector: string): string {
+    for (const match of css.matchAll(/([^{}]+)\{([^}]*)\}/g)) {
+      const selectors = match[1].split(",").map((one) => one.trim());
+      if (selectors.includes(selector)) return match[2];
+    }
+    return "";
+  }
+
+  it("gives the three levels three different treatments", () => {
+    // 105 identical outlined buttons is not a hierarchy. Primary is filled,
+    // secondary is outlined, and the quiet level - toolbar and row actions,
+    // where four buttons sat in a row with nothing to say which mattered -
+    // carries neither until you point at it.
+    expect(rule(".primary")).toMatch(/background:\s*var\(--accent-fill\)/);
+    expect(rule(".secondary")).toMatch(/border:\s*1px solid var\(--border\)/);
+    expect(rule(".secondary.compact-button")).toMatch(/background:\s*transparent/);
+    expect(rule(".secondary.compact-button")).toMatch(/border-color:\s*transparent/);
+  });
+
+  it("does not paint the primary action with a gradient it cannot vouch for", () => {
+    // The old fill ran blue to terracotta, and the terracotta end measured
+    // 3.61 against the label sitting on it - so whether a primary button
+    // passed depended on where the text fell across the sweep.
+    expect(rule(".primary")).not.toMatch(/gradient/);
+    for (const room of [":root {", '[data-room="reading"]']) {
+      const at = css.indexOf(room);
+      const tokens = Object.fromEntries(
+        [...css.slice(at, css.indexOf("}", at)).matchAll(/--([\w-]+):\s*(#[0-9a-f]{6});/g)].map(
+          (m) => [m[1], m[2]],
+        ),
+      );
+      expect(contrast(tokens["accent-ink"], tokens["accent-fill"])).toBeGreaterThanOrEqual(4.5);
     }
   });
 });
