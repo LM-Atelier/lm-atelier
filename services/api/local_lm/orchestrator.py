@@ -148,6 +148,7 @@ logger = logging.getLogger(__name__)
 
 IDEMPOTENCY_CLAIM_WAIT_SECONDS = 120.0
 MAX_PENDING_WORK_PER_CHAT = 32
+MEDIA_SEED_SPACE = 2_147_483_648
 PENDING_OUTPUT_REFERENCE = re.compile(
     r"\b(?:"
     r"(?:that|this|it|its)(?:\s+(?:image|video|answer|response|story|result|output))?"
@@ -156,6 +157,19 @@ PENDING_OUTPUT_REFERENCE = re.compile(
     r")\b",
     re.IGNORECASE,
 )
+
+
+def _fresh_media_seed(excluding: object = None) -> int:
+    """Choose uniformly from the media seed space, excluding one prior seed."""
+
+    if (
+        isinstance(excluding, int)
+        and not isinstance(excluding, bool)
+        and 0 <= excluding < MEDIA_SEED_SPACE
+    ):
+        candidate = secrets.randbelow(MEDIA_SEED_SPACE - 1)
+        return candidate if candidate < excluding else candidate + 1
+    return secrets.randbelow(MEDIA_SEED_SPACE)
 
 
 class ResponseRevisionConflict(ValueError):
@@ -942,8 +956,22 @@ class ConversationOrchestrator:
             )
             effective_settings["loras"] = lora_resolution.settings
         effective_preset = preset_layers[-1] if preset_layers else None
-        if plan.operation != Operation.TEXT and effective_settings.get("seed") == -1:
-            effective_settings["seed"] = secrets.randbelow(2_147_483_648)
+        current_seed = effective_settings.get("seed")
+        regeneration_seed = (
+            self._active_response_seed(session, replacement_message)
+            if source_action == "regenerate" and replacement_message
+            else None
+        )
+        if plan.operation != Operation.TEXT and (
+            current_seed == -1
+            or (
+                source_action == "regenerate"
+                and (current_seed is not None or regeneration_seed is not None)
+            )
+        ):
+            effective_settings["seed"] = _fresh_media_seed(
+                regeneration_seed if regeneration_seed is not None else current_seed
+            )
         configured_batch_size = effective_settings.get("batch_size", 1)
         try:
             configured_output_count = max(1, int(configured_batch_size))
@@ -1625,7 +1653,7 @@ class ConversationOrchestrator:
                 )
                 effective_settings["loras"] = lora_resolution.settings
             if operation != Operation.TEXT and effective_settings.get("seed") == -1:
-                effective_settings["seed"] = secrets.randbelow(2_147_483_648)
+                effective_settings["seed"] = _fresh_media_seed()
             estimate = (
                 self._media_plan_estimate(operation, effective_settings, 1)
                 if operation != Operation.TEXT
@@ -4847,6 +4875,19 @@ class ConversationOrchestrator:
         session.flush()
         message.active_response_revision_id = revision.id
         return revision
+
+    @staticmethod
+    def _active_response_seed(session: Session, message: Message) -> int | None:
+        revision = (
+            session.get(ResponseRevision, message.active_response_revision_id)
+            if message.active_response_revision_id
+            else None
+        )
+        run = session.get(Run, revision.run_id) if revision and revision.run_id else None
+        value = run.settings_json.get("seed") if run else None
+        if isinstance(value, int) and not isinstance(value, bool) and 0 <= value < MEDIA_SEED_SPACE:
+            return value
+        return None
 
     def _finalize_response_revision(
         self,
