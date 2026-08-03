@@ -1,6 +1,6 @@
 import { useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { Image as ImageIcon, Pencil, Search, Trash2 } from "lucide-react";
+import { Image as ImageIcon, Pencil, Search, Star, Trash2 } from "lucide-react";
 import { api } from "./api";
 import { EmptyState } from "./EmptyState";
 import { ErrorCallout } from "./ErrorCallout";
@@ -15,6 +15,7 @@ export function MediaLibraryView({
   const client = useQueryClient();
   const [kind, setKind] = useState("");
   const [search, setSearch] = useState("");
+  const [favoritesOnly, setFavoritesOnly] = useState(false);
   // A multi-select over image cards; the batch goes to the editing studio
   // together and "Apply to each" runs one turn per image.
   const [selectedIds, setSelectedIds] = useState<ReadonlySet<string>>(new Set());
@@ -26,9 +27,14 @@ export function MediaLibraryView({
   });
   const selectedArtifacts = (artifacts: ArtifactLibraryItem[] | undefined) =>
     (artifacts ?? []).filter((artifact) => selectedIds.has(artifact.id));
+  const favorite = useMutation({
+    mutationFn: ({ artifactId, next }: { artifactId: string; next: boolean }) =>
+      api.favoriteArtifact(artifactId, next),
+    onSuccess: () => void client.invalidateQueries({ queryKey: ["artifacts"] }),
+  });
   const artifacts = useQuery({
-    queryKey: ["artifacts", kind, search],
-    queryFn: () => api.artifacts(kind, search),
+    queryKey: ["artifacts", kind, search, favoritesOnly],
+    queryFn: () => api.artifacts(kind, search, favoritesOnly),
   });
   const storage = useQuery({ queryKey: ["artifact-storage"], queryFn: api.artifactStorage });
   const cleanup = useMutation({
@@ -77,6 +83,7 @@ export function MediaLibraryView({
       <div className="media-toolbar">
         <div className="workspace-search"><Search size={14} /><input aria-label="Search media" placeholder="Search filenames or hashes" value={search} onChange={(event) => setSearch(event.target.value)} /></div>
         <select aria-label="Media type" value={kind} onChange={(event) => setKind(event.target.value)}><option value="">Images and videos</option><option value="image">Images</option><option value="video">Videos</option></select>
+        <select aria-label="Favorites filter" value={favoritesOnly ? "favorites" : "all"} onChange={(event) => setFavoritesOnly(event.target.value === "favorites")}><option value="all">All media</option><option value="favorites">Favorites</option></select>
       </div>
       {onEditImages && selectedIds.size > 0 && (
         <div className="media-selection-bar" role="toolbar" aria-label="Selected images">
@@ -103,7 +110,7 @@ export function MediaLibraryView({
           {/* Generated media has no caption track to point at, and an empty one would claim an affordance that is not there. */}
           {/* eslint-disable-next-line jsx-a11y-x/media-has-caption */}
           {artifact.kind === "image" ? <img src={source} alt={artifact.original_name ?? "Generated image"} loading="lazy" /> : <video src={playbackSource} poster={posterId ? `/api/artifacts/${encodeURIComponent(posterId)}/content` : undefined} controls preload="metadata" />}
-          <div><strong>{artifact.original_name ?? artifact.kind}</strong><small>{formatBytes(artifact.size_bytes)} · {artifact.reference_count} reference{artifact.reference_count === 1 ? "" : "s"}</small><span><a href={source} download>Download</a><code>{artifact.sha256.slice(0, 12)}</code>{artifact.kind === "image" && onEditImages && <input type="checkbox" aria-label={`Select ${artifact.original_name ?? artifact.kind}`} checked={selectedIds.has(artifact.id)} onChange={() => toggleSelected(artifact.id)} />}{artifact.kind === "image" && onEditImages && <button className="icon-button" aria-label={`Edit ${artifact.original_name ?? artifact.kind}`} title="Edit" onClick={() => onEditImages([artifact])}><Pencil size={14} /></button>}<button className="icon-button danger" aria-label={`Delete ${artifact.original_name ?? artifact.kind}`} disabled={deleteArtifact.isPending && deleteArtifact.variables === artifact.id} onClick={() => { const references = artifact.reference_count ? ` and remove ${artifact.reference_count} appearance${artifact.reference_count === 1 ? "" : "s"} from chats` : ""; if (window.confirm(`Permanently delete ${artifact.original_name ?? artifact.kind}${references}?`)) deleteArtifact.mutate(artifact.id); }}><Trash2 size={14} /></button></span></div>
+          <div><strong>{artifact.original_name ?? artifact.kind}</strong><small>{formatBytes(artifact.size_bytes)} · {artifact.reference_count} reference{artifact.reference_count === 1 ? "" : "s"}</small><span><a href={source} download>Download</a><code>{artifact.sha256.slice(0, 12)}</code><button className={`icon-button ${artifact.favorite ? "favorite-active" : ""}`} aria-label={artifact.favorite ? `Unfavorite ${artifact.original_name ?? artifact.kind}` : `Favorite ${artifact.original_name ?? artifact.kind}`} aria-pressed={artifact.favorite} title={artifact.favorite ? "Unfavorite" : "Favorite"} onClick={() => favorite.mutate({ artifactId: artifact.id, next: !artifact.favorite })}><Star size={14} fill={artifact.favorite ? "currentColor" : "none"} /></button>{artifact.kind === "image" && onEditImages && <input type="checkbox" aria-label={`Select ${artifact.original_name ?? artifact.kind}`} checked={selectedIds.has(artifact.id)} onChange={() => toggleSelected(artifact.id)} />}{artifact.kind === "image" && onEditImages && <button className="icon-button" aria-label={`Edit ${artifact.original_name ?? artifact.kind}`} title="Edit" onClick={() => onEditImages([artifact])}><Pencil size={14} /></button>}<button className="icon-button danger" aria-label={`Delete ${artifact.original_name ?? artifact.kind}`} disabled={deleteArtifact.isPending && deleteArtifact.variables === artifact.id} onClick={() => { const references = artifact.reference_count ? ` and remove ${artifact.reference_count} appearance${artifact.reference_count === 1 ? "" : "s"} from chats` : ""; if (window.confirm(`Permanently delete ${artifact.original_name ?? artifact.kind}${references}?`)) deleteArtifact.mutate(artifact.id); }}><Trash2 size={14} /></button></span></div>
         </article>;
       })}</div> : <EmptyState icon={<ImageIcon />} title="No generated media" body="Generated images and videos appear here." />}
     </div>

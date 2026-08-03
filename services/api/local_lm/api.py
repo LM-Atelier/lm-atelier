@@ -162,6 +162,7 @@ from .schemas import (
     ArtifactLibraryItem,
     ArtifactOut,
     ArtifactStorageInfo,
+    ArtifactUpdate,
     BackupInfo,
     CatalogDetail,
     CatalogModel,
@@ -2318,6 +2319,7 @@ async def list_artifacts(
     kind: Literal["image", "video"] | None = None,
     chat_id: str | None = None,
     project_id: str | None = None,
+    favorites: bool = False,
     query: str = Query(default="", max_length=200),
 ) -> list[ArtifactLibraryItem]:
     reference_rows = session.execute(
@@ -2334,6 +2336,8 @@ async def list_artifacts(
     )
     if kind:
         statement = statement.where(Artifact.kind == kind)
+    if favorites:
+        statement = statement.where(Artifact.favorite.is_(True))
     normalized_query = query.strip().lower()
     if normalized_query:
         statement = statement.where(
@@ -2358,6 +2362,23 @@ async def list_artifacts(
         result.url = f"/api/artifacts/{artifact.id}/content"
         results.append(result)
     return results
+
+
+@router.patch("/artifacts/{artifact_id}", response_model=ArtifactOut)
+async def update_artifact(
+    artifact_id: str, payload: ArtifactUpdate, session: ConversationSessionDep
+) -> ArtifactOut:
+    """Set the favorite flag; it pins against automatic cleanup only."""
+
+    artifact = session.get(Artifact, artifact_id)
+    if not artifact:
+        raise api_error(404, "artifact-not-found", "This media item no longer exists")
+    artifact.favorite = payload.favorite
+    session.commit()
+    session.refresh(artifact)
+    result = ArtifactOut.model_validate(artifact)
+    result.url = f"/api/artifacts/{artifact.id}/content"
+    return result
 
 
 @router.get("/artifacts/storage", response_model=ArtifactStorageInfo)

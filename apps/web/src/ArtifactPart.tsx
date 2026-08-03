@@ -1,4 +1,4 @@
-import { Film, Image as ImageIcon, LoaderCircle, Paperclip } from "lucide-react";
+import { Film, Image as ImageIcon, LoaderCircle, Paperclip, Star } from "lucide-react";
 import { CompareButton } from "./CompareButton";
 import { LineageButton } from "./LineageButton";
 import {
@@ -15,6 +15,7 @@ export function ArtifactPart({
   onEditImage,
   onAnimateImage,
   onReferenceMedia,
+  onToggleFavorite,
   compareSourceUrl,
   lineage,
 }: {
@@ -23,6 +24,7 @@ export function ArtifactPart({
   onEditImage?: (part: MessagePart, origin: MediaOrigin) => void;
   onAnimateImage?: (part: MessagePart, origin: MediaOrigin) => void;
   onReferenceMedia?: (part: MessagePart, origin: MediaOrigin) => void;
+  onToggleFavorite?: (part: MessagePart) => void;
   compareSourceUrl?: string | null;
   lineage?: EditLineageStep[];
 }) {
@@ -59,6 +61,16 @@ export function ArtifactPart({
           {!preview && onReferenceMedia && <button type="button" onClick={() => onReferenceMedia(part, callbackOrigin)}>Reference</button>}
           {!preview && compareSourceUrl && source && <CompareButton before={compareSourceUrl} after={source} />}
           {!preview && lineage && source && <LineageButton steps={lineage} resultUrl={source} />}
+          {!preview && onToggleFavorite && (
+            <button
+              type="button"
+              aria-label={part.artifact?.favorite ? "Unfavorite this image" : "Favorite this image"}
+              aria-pressed={Boolean(part.artifact?.favorite)}
+              onClick={() => onToggleFavorite(part)}
+            >
+              <Star size={14} fill={part.artifact?.favorite ? "currentColor" : "none"} aria-hidden="true" />
+            </button>
+          )}
           {!preview && <a href={source} download>Download</a>}
         </figcaption>
       </figure>

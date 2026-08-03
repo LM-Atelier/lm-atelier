@@ -365,6 +365,8 @@ class Artifact(TimestampMixin, Base):
     relative_path: Mapped[str] = mapped_column(Text, unique=True)
     original_name: Mapped[str | None] = mapped_column(String(500), nullable=True)
     metadata_json: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
+    # Pins against automatic cleanup only; explicit deletion always wins.
+    favorite: Mapped[bool] = mapped_column(Boolean, default=False, index=True)
 
 
 class ModelSource(TimestampMixin, Base):

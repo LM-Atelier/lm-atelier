@@ -482,11 +482,17 @@ export const api = {
       body: form,
     });
   },
-  artifacts: (kind = "", query = "") => {
+  artifacts: (kind = "", query = "", favorites = false) => {
     const parameters = new URLSearchParams({ query });
     if (kind) parameters.set("kind", kind);
+    if (favorites) parameters.set("favorites", "true");
     return request<ArtifactLibraryItem[]>(`/api/artifacts?${parameters}`);
   },
+  favoriteArtifact: (artifactId: string, favorite: boolean) =>
+    request<Artifact>(`/api/artifacts/${encodeURIComponent(artifactId)}`, {
+      method: "PATCH",
+      body: JSON.stringify({ favorite }),
+    }),
   artifactStorage: () => request<ArtifactStorageInfo>("/api/artifacts/storage"),
   cleanupArtifacts: (dryRun: boolean) =>
     request<ArtifactCleanupResult>("/api/artifacts/cleanup", {
