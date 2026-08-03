@@ -3,6 +3,9 @@ import {
   cloneMask,
   coverage,
   createMask,
+  decodeMask,
+  DEFAULT_MASK_HISTORY_BYTES,
+  encodeMask,
   feather,
   fillPolygon,
   fillRect,
@@ -116,6 +119,82 @@ describe("mask rasters", () => {
 });
 
 describe("mask history", () => {
+  it("round-trips any raster through run-length encoding", () => {
+    const mask = createMask(37, 11);
+    fillRect(mask, 3, 2, 20, 9);
+    stampCircle(mask, 30, 5, 4, 128);
+    const restored = decodeMask(encodeMask(mask));
+    expect([...restored.data]).toEqual([...mask.data]);
+    expect(restored.width).toBe(37);
+
+    // An all-zero mask and an all-set mask are the degenerate ends.
+    const empty = createMask(8, 8);
+    expect(isEmpty(decodeMask(encodeMask(empty)))).toBe(true);
+    const full = createMask(8, 8);
+    fillRect(full, 0, 0, 8, 8);
+    expect(coverage(decodeMask(encodeMask(full)))).toBe(1);
+  });
+
+  it("bounds memory by bytes and evicts the oldest steps first", () => {
+    const mask = createMask(64, 64);
+    const stripe = (step: number) =>
+      fillRect(mask, step * 2, 0, step * 2 + 1, 64, step % 2 === 0 ? 255 : 0);
+
+    // Measure one snapshot, then budget for roughly three.
+    const probe = new MaskHistory();
+    stripe(0);
+    probe.push(mask);
+    const perSnapshot = probe.usedBytes;
+    expect(perSnapshot).toBeGreaterThan(0);
+
+    const budget = perSnapshot * 3;
+    const history = new MaskHistory(64, budget);
+    const unbounded = new MaskHistory(64, Number.MAX_SAFE_INTEGER);
+    for (let step = 1; step < 12; step += 1) {
+      history.push(mask);
+      unbounded.push(mask);
+      stripe(step);
+    }
+
+    // Later snapshots are larger than the first, so the honest bound is "a
+    // small multiple of budget" - and far below keeping every step.
+    expect(history.usedBytes).toBeLessThan(budget * 4);
+    expect(history.usedBytes).toBeLessThan(unbounded.usedBytes / 2);
+    // Eviction takes the oldest steps, never the newest: undo still works.
+    expect(history.canUndo).toBe(true);
+    expect(history.undo(mask)).not.toBeNull();
+  });
+
+  it("always keeps at least one undo step, however small the budget", () => {
+    // A budget below one snapshot cannot be honored without discarding the
+    // user's only way back; the last step survives deliberately.
+    const history = new MaskHistory(64, 1);
+    const mask = createMask(32, 32);
+    fillRect(mask, 0, 0, 16, 32);
+    history.push(mask);
+    fillRect(mask, 16, 0, 32, 32, 128);
+
+    expect(history.canUndo).toBe(true);
+    const undone = history.undo(mask)!;
+    expect(coverage(undone)).toBeCloseTo(0.5);
+  });
+
+  it("drops redo before sacrificing undo history", () => {
+    const mask = createMask(48, 48);
+    const probe = new MaskHistory();
+    fillRect(mask, 0, 0, 24, 48);
+    probe.push(mask);
+
+    const history = new MaskHistory(64, probe.usedBytes * 2);
+    history.push(mask);
+    fillRect(mask, 24, 0, 48, 48, 128);
+    const undone = history.undo(mask)!;
+    expect(history.canRedo).toBe(true);
+    // Pushing new work clears redo outright, as a new branch must.
+    history.push(undone);
+    expect(history.canRedo).toBe(false);
+  });
+
   it("undoes to the pushed state and redoes forward", () => {
     const history = new MaskHistory();
     const mask = createMask(4, 4);
@@ -133,7 +212,7 @@ describe("mask history", () => {
   });
 
   it("caps depth and clears redo on a new stroke", () => {
-    const history = new MaskHistory(2);
+    const history = new MaskHistory(2, DEFAULT_MASK_HISTORY_BYTES);
     const mask = createMask(2, 2);
     history.push(mask);
     history.push(mask);
