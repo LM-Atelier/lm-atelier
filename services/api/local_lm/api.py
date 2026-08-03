@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import copy
+import dataclasses
 import json
 import logging
 import math
@@ -121,6 +122,7 @@ from .models import (
     ModelInstall,
     ModelProfile,
     Project,
+    ResponseFeedback,
     ResponseRevision,
     ResponseRevisionPart,
     Run,
@@ -162,7 +164,9 @@ from .schemas import (
     ArtifactLibraryItem,
     ArtifactOut,
     ArtifactStorageInfo,
+    ArtifactUpdate,
     BackupInfo,
+    BoundWorkflowAssetOut,
     CatalogDetail,
     CatalogModel,
     CatalogPage,
@@ -218,12 +222,15 @@ from .schemas import (
     RegistryInstallOut,
     RegistryInstallReviewRequest,
     ResolvedSetup,
+    ResponseFeedbackOut,
+    ResponseFeedbackUpdate,
     RunOut,
     RuntimeStatus,
     SettingField,
     SetupReadinessReport,
     SetupVerificationOut,
     StorageCleanupResult,
+    StudioSessionCreate,
     SystemInfo,
     ToolCapabilityProbe,
     TrustDerivation,
@@ -235,7 +242,11 @@ from .schemas import (
     WorkerResetResult,
     WorkerSettings,
     WorkerStatus,
+    WorkflowAssetQueueRequest,
     WorkflowAssetReferenceOut,
+    WorkflowAssetReviewOut,
+    WorkflowAssetReviewRequest,
+    WorkflowAssetSelectionIn,
     WorkflowBundle,
     WorkflowClone,
     WorkflowCreate,
@@ -270,7 +281,22 @@ from .setup_verification import (
     setup_verification_settings,
     verification_evidence_key,
 )
+from .studio_sessions import (
+    STUDIO_SCOPE,
+    find_studio_session,
+    studio_session_title,
+)
 from .verified_setup import build_verified_setup, resolve_verified_setup
+from .workflow_asset_bindings import (
+    WorkflowAssetBindingError,
+    WorkflowAssetBindingPlan,
+    WorkflowAssetPlanSelection,
+    bind_workflow_assets_to_install_plans,
+)
+from .workflow_asset_downloads import (
+    WorkflowAssetDownloadError,
+    compose_workflow_asset_download_requests,
+)
 from .workflow_edit_calibration import validate_workflow_edit_calibration
 from .workflow_package_preparation import (
     PreparationContext,
@@ -394,6 +420,12 @@ def _refresh_credential_clients(
         services.downloads.set_token(token)
     else:
         services.settings.civitai_token = token
+        try:
+            civitai_source = services.catalog_sources.get("civitai")
+        except CatalogSourceNotFound:  # pragma: no cover - registered in build_services
+            return
+        if isinstance(civitai_source, CivitaiCatalog):
+            civitai_source.set_token(token)
 
 
 @router.get("/credentials/{provider}", response_model=CredentialStatus)
@@ -1331,12 +1363,68 @@ async def get_chat(chat_id: str, session: ConversationSessionDep) -> Chat:
             .selectinload(Message.response_revisions)
             .selectinload(ResponseRevision.parts)
             .selectinload(ResponseRevisionPart.artifact),
+            selectinload(Chat.messages).selectinload(Message.feedback_rows),
+            selectinload(Chat.messages)
+            .selectinload(Message.response_revisions)
+            .selectinload(ResponseRevision.feedback_rows),
         )
         .where(Chat.id == chat_id, Chat.scope == STANDARD_CHAT_SCOPE)
     )
     if not chat:
         raise HTTPException(404, "chat not found")
     return chat
+
+
+@router.put("/messages/{message_id}/feedback", response_model=ResponseFeedbackOut)
+async def set_response_feedback(
+    message_id: str, payload: ResponseFeedbackUpdate, session: SessionDep
+) -> ResponseFeedbackOut:
+    """Record one local preference verdict; a null rating clears it.
+
+    The run pointer is the provenance anchor - model, profile, and effective
+    settings already live there - so nothing is copied and nothing trains.
+    """
+
+    message = session.get(Message, message_id)
+    if not message or message.role != MessageRole.ASSISTANT.value:
+        raise api_error(404, "message-not-found", "This response no longer exists")
+    revision = None
+    if payload.response_revision_id is not None:
+        revision = session.get(ResponseRevision, payload.response_revision_id)
+        if not revision or revision.message_id != message.id:
+            raise api_error(404, "revision-not-found", "This response revision no longer exists")
+    existing = session.scalar(
+        select(ResponseFeedback).where(
+            ResponseFeedback.message_id == message.id,
+            ResponseFeedback.response_revision_id == payload.response_revision_id,
+        )
+    )
+    if payload.rating is None:
+        if existing:
+            session.delete(existing)
+            session.commit()
+        return ResponseFeedbackOut(
+            message_id=message.id,
+            response_revision_id=payload.response_revision_id,
+            rating=None,
+        )
+    if existing:
+        existing.rating = payload.rating
+    else:
+        session.add(
+            ResponseFeedback(
+                message_id=message.id,
+                response_revision_id=payload.response_revision_id,
+                run_id=revision.run_id if revision else None,
+                rating=payload.rating,
+            )
+        )
+    session.commit()
+    return ResponseFeedbackOut(
+        message_id=message.id,
+        response_revision_id=payload.response_revision_id,
+        rating=payload.rating,
+    )
 
 
 def _prompt_helper_query(helper_id: str) -> Select[tuple[Chat]]:
@@ -1352,6 +1440,80 @@ def _prompt_helper_query(helper_id: str) -> Select[tuple[Chat]]:
             .selectinload(ResponseRevisionPart.artifact),
         )
         .where(Chat.id == helper_id, Chat.scope == PROMPT_HELPER_SCOPE)
+    )
+
+
+@router.post("/studio/sessions", response_model=ChatDetail)
+async def open_studio_session(
+    payload: StudioSessionCreate, session: ConversationSessionDep
+) -> Chat:
+    """Find or create the hidden session behind the studio canvas.
+
+    One session per source image: reopening resumes the same history, so
+    the filmstrip is durable edit history rather than view state.
+    """
+
+    artifact = session.get(Artifact, payload.source_artifact_id)
+    if not artifact:
+        raise api_error(404, "artifact-not-found", "This media item no longer exists")
+    if artifact.kind != ArtifactKind.IMAGE.value:
+        raise api_error(422, "studio-image-only", "The studio edits images")
+    existing = find_studio_session(session, artifact.id)
+    if existing:
+        return session.scalar(_studio_session_query(existing.id)) or existing
+    source = session.get(Chat, payload.source_chat_id) if payload.source_chat_id else None
+    if payload.source_chat_id and (not source or source.scope != STANDARD_CHAT_SCOPE):
+        raise api_error(404, "chat-not-found", "The source chat no longer exists")
+    studio = Chat(
+        title=studio_session_title(artifact),
+        archived=True,
+        scope=STUDIO_SCOPE,
+        routing_mode=RoutingMode.IMAGE.value,
+        confirm_uncertain_media=False,
+        origin_json={
+            "source_artifact_id": artifact.id,
+            **({"source_chat_id": source.id} if source else {}),
+        },
+        active_chat_profile_id=source.active_chat_profile_id if source else None,
+        active_vision_profile_id=source.active_vision_profile_id if source else None,
+        active_image_profile_id=source.active_image_profile_id if source else None,
+        active_video_profile_id=source.active_video_profile_id if source else None,
+        generation_settings_json=(copy.deepcopy(source.generation_settings_json) if source else {}),
+        generation_preset_ids_json=(
+            copy.deepcopy(source.generation_preset_ids_json) if source else {}
+        ),
+        vision_settings_json=copy.deepcopy(source.vision_settings_json) if source else {},
+    )
+    session.add(studio)
+    session.commit()
+    return session.scalar(_studio_session_query(studio.id)) or studio
+
+
+@router.get("/studio/sessions/{session_id}", response_model=ChatDetail)
+async def get_studio_session(session_id: str, session: ConversationSessionDep) -> Chat:
+    studio = session.scalar(_studio_session_query(session_id))
+    if not studio:
+        raise api_error(404, "studio-session-not-found", "This studio session no longer exists")
+    return studio
+
+
+def _studio_session_query(session_id: str) -> Select[tuple[Chat]]:
+    return (
+        select(Chat)
+        .options(
+            selectinload(Chat.messages)
+            .selectinload(Message.parts)
+            .selectinload(MessagePart.artifact),
+            selectinload(Chat.messages)
+            .selectinload(Message.response_revisions)
+            .selectinload(ResponseRevision.parts)
+            .selectinload(ResponseRevisionPart.artifact),
+            selectinload(Chat.messages).selectinload(Message.feedback_rows),
+            selectinload(Chat.messages)
+            .selectinload(Message.response_revisions)
+            .selectinload(ResponseRevision.feedback_rows),
+        )
+        .where(Chat.id == session_id, Chat.scope == STUDIO_SCOPE)
     )
 
 
@@ -2318,6 +2480,7 @@ async def list_artifacts(
     kind: Literal["image", "video"] | None = None,
     chat_id: str | None = None,
     project_id: str | None = None,
+    favorites: bool = False,
     query: str = Query(default="", max_length=200),
 ) -> list[ArtifactLibraryItem]:
     reference_rows = session.execute(
@@ -2334,6 +2497,8 @@ async def list_artifacts(
     )
     if kind:
         statement = statement.where(Artifact.kind == kind)
+    if favorites:
+        statement = statement.where(Artifact.favorite.is_(True))
     normalized_query = query.strip().lower()
     if normalized_query:
         statement = statement.where(
@@ -2358,6 +2523,23 @@ async def list_artifacts(
         result.url = f"/api/artifacts/{artifact.id}/content"
         results.append(result)
     return results
+
+
+@router.patch("/artifacts/{artifact_id}", response_model=ArtifactOut)
+async def update_artifact(
+    artifact_id: str, payload: ArtifactUpdate, session: ConversationSessionDep
+) -> ArtifactOut:
+    """Set the favorite flag; it pins against automatic cleanup only."""
+
+    artifact = session.get(Artifact, artifact_id)
+    if not artifact:
+        raise api_error(404, "artifact-not-found", "This media item no longer exists")
+    artifact.favorite = payload.favorite
+    session.commit()
+    session.refresh(artifact)
+    result = ArtifactOut.model_validate(artifact)
+    result.url = f"/api/artifacts/{artifact.id}/content"
+    return result
 
 
 @router.get("/artifacts/storage", response_model=ArtifactStorageInfo)
@@ -2644,6 +2826,29 @@ async def catalog_item_detail(
         ) from exc
 
 
+@router.post("/catalog/preflight", response_model=CatalogPreflight)
+async def catalog_item_preflight(
+    payload: CatalogPreflightRequest,
+    request: Request,
+    session: SessionDep,
+    source: str = Query(default="huggingface", min_length=1, max_length=32),
+    item_id: str = Query(alias="id", min_length=1, max_length=500),
+) -> CatalogPreflight:
+    """Preflight any registered source's item; ids are source-shaped."""
+
+    services = _services(request)
+    try:
+        selected = services.catalog_sources.get(source)
+    except CatalogSourceNotFound as exc:
+        raise api_error(404, "catalog-source-unknown", str(exc)) from exc
+    if not selected.validate_item_id(item_id):
+        raise api_error(422, "catalog-item-id-invalid", "This catalog item id is not valid")
+    try:
+        return await resolve_catalog_preflight(services, session, item_id, payload, source=source)
+    except CatalogUnavailableError as exc:
+        raise api_error(503, "catalog-source-unavailable", str(exc)) from exc
+
+
 @router.get("/catalog/{owner}/{name}", response_model=CatalogDetail)
 async def catalog_detail(
     owner: str,
@@ -2691,6 +2896,7 @@ async def resolve_catalog_preflight(
     remote_id: str,
     payload: CatalogPreflightRequest,
     *,
+    source: str = "huggingface",
     validate_resolved: Callable[[ResolvedInstallPlan], None] | None = None,
 ) -> CatalogPreflight:
     """Plan an install without deciding how a caller should report failure.
@@ -2707,9 +2913,40 @@ async def resolve_catalog_preflight(
     leave behind exactly what the refusal was meant to prevent.
     """
 
+    catalog = services.catalog_sources.get(source)
     try:
-        raw_detail = await services.catalog.inspect(remote_id, payload.revision, payload.role)
+        raw_detail = await catalog.inspect(remote_id, payload.revision, payload.role)
         detail = CatalogDetail.model_validate(raw_detail)
+        # CivitAI identities live under each normalized file's metadata; hoist
+        # them once so every downstream consumer - checks, file sources, the
+        # planner - sees one uniform shape. The model id stands where a
+        # repository would and the version where a revision would, so the
+        # tamper comparison covers every provider.
+        detail = detail.model_copy(
+            update={
+                "files": [
+                    {
+                        **item,
+                        # Production normalization puts both identities at the
+                        # file top level; nested metadata carries the version
+                        # but never the file id. Top level always wins.
+                        "source_version_id": item.get("source_version_id")
+                        or item["metadata"].get("source_version_id"),
+                        "source_file_id": item.get("source_file_id"),
+                        "source_remote_id": item.get("source_remote_id")
+                        or item["metadata"].get("source_model_id"),
+                        "source_revision": item.get("source_revision")
+                        or item.get("source_version_id")
+                        or item["metadata"].get("source_version_id"),
+                        "source_filename": item.get("source_filename") or item.get("filename"),
+                    }
+                    if isinstance(item.get("metadata"), dict)
+                    and item["metadata"].get("provider") == "civitai"
+                    else item
+                    for item in detail.files
+                ]
+            }
+        )
         if payload.role == "chat" and payload.engine == "llama.cpp":
             try:
                 initial_selection = (
@@ -2731,7 +2968,7 @@ async def resolve_catalog_preflight(
                 pass
     except Exception as exc:
         raise CatalogUnavailableError(
-            "Hugging Face is temporarily unavailable. Check your connection and retry."
+            f"{catalog.display_name} is temporarily unavailable. Check your connection and retry."
         ) from exc
     system = collect_system_info(services.settings)
 
@@ -2740,7 +2977,7 @@ async def resolve_catalog_preflight(
         resolved_detail: CatalogDetail,
     ) -> CatalogPreflight:
         metadata: dict[str, bytes] = {}
-        inspect_prefix = getattr(services.catalog, "inspect_file_prefix", None)
+        inspect_prefix = getattr(catalog, "inspect_file_prefix", None)
         repo_files = {
             str(item.get("filename") or "")
             for item in resolved_detail.files
@@ -2822,6 +3059,28 @@ async def resolve_catalog_preflight(
                 result.selected_files,
                 role=payload.role,
             )
+        if source == "civitai" and payload.auxiliary_kind == "lora":
+            # CivitAI file-prefix inspection is deliberately unavailable, so a
+            # bare safetensors would inspect as "checkpoint" and block as a
+            # kind mismatch. The provider's own typed declaration substitutes
+            # for planning; the manager's mandatory staged-byte LoRA
+            # inspection still gates activation after download.
+            declared_loras = {
+                str(item.get("filename") or "")
+                for item in resolved_detail.files
+                if isinstance(item.get("metadata"), dict)
+                and str(item["metadata"].get("model_type") or "").casefold() == "lora"
+            }
+            if declared_loras and all(path in declared_loras for path in result.selected_files):
+                inspection = dataclasses.replace(
+                    inspection,
+                    components=tuple(
+                        dataclasses.replace(component, kind="lora", target_folder="loras")
+                        if component.path in declared_loras
+                        else component
+                        for component in inspection.components
+                    ),
+                )
         files = {str(item.get("filename") or ""): item for item in resolved_detail.files}
         selected_metadata = [
             files.get(
@@ -2855,12 +3114,16 @@ async def resolve_catalog_preflight(
                 workflow_component_folders = selected_template.component_folders
             except ValueError as exc:
                 workflow_contract_error = str(exc)
+        # CivitAI file identities live under the normalized file's metadata;
+        # the planner reads them at the top level, so hoist without mutating
+        # the cached detail.
         resolved = resolve_install_plan(
             remote_id=result.remote_id,
             revision=result.revision,
             role=payload.role,
             engine=payload.engine,
             selected_files=selected_metadata,
+            provider=source,
             inspection=inspection,
             workflow_template_id=result.workflow_template_id,
             workflow_template_sha256=result.workflow_template_sha256,
@@ -3225,13 +3488,17 @@ def _planned_download_fields(plan: InstallPlan | None) -> dict[str, Any]:
             for item in plan.artifacts_json
             if item.get("sha256")
         },
-        "file_sources": {
+        "file_sources": {}
+        if plan.provider == "civitai"
+        else {
             str(item["path"]): {
                 "remote_id": str(item["source_remote_id"]),
                 "revision": str(item["source_revision"]),
                 "filename": str(item["source_path"]),
                 "size_bytes": item.get("size_bytes"),
                 "sha256": item.get("sha256"),
+                "source_version_id": item.get("source_version_id"),
+                "source_file_id": item.get("source_file_id"),
             }
             for item in plan.artifacts_json
             if item.get("source_remote_id")
@@ -3747,20 +4014,16 @@ async def check_model_updates(request: Request, session: SessionDep) -> list[Mod
     identities = installed_civitai_identities(session)
     summaries: dict[str, dict[str, Any] | None] = {}
     if identities:
-        # Per-request construction, like the Registry preparation clients: the
-        # source registry only carries browse providers, and the disk cache
-        # makes a fresh adapter as warm as a held one.
-        source = CivitaiCatalog(services.settings, token=services.settings.civitai_token)
-        try:
-            for identity in identities:
-                if identity.model_id in summaries:
-                    continue
-                try:
-                    summaries[identity.model_id] = await source.versions(identity.model_id)
-                except Exception:  # noqa: BLE001 - one model must not hide the rest
-                    summaries[identity.model_id] = None
-        finally:
-            await source.close()
+        source = services.catalog_sources.get("civitai")
+        if not isinstance(source, CivitaiCatalog):  # pragma: no cover - registry invariant
+            raise api_error(503, "provider-unavailable", "CivitAI catalog is not available")
+        for identity in identities:
+            if identity.model_id in summaries:
+                continue
+            try:
+                summaries[identity.model_id] = await source.versions(identity.model_id)
+            except Exception:  # noqa: BLE001 - one model must not hide the rest
+                summaries[identity.model_id] = None
     report: list[ModelUpdateOut] = []
     for identity in identities:
         summary = summaries.get(identity.model_id)
@@ -5200,6 +5463,20 @@ def _local_asset_filenames(session: Session) -> set[str]:
                 filenames.add(PurePosixPath(entry.replace("\\", "/")).name)
     for asset in session.scalars(select(ModelAssetInstall)).all():
         filenames.add(PurePosixPath(asset.local_path.replace("\\", "/")).name)
+        # The manager stores local_path as the install directory; the name a
+        # workflow actually references lives in the manifest. Without these,
+        # a verified LoRA reads as missing during analysis and import.
+        manifest = asset.manifest_json
+        comfy_name = manifest.get("comfy_name")
+        if isinstance(comfy_name, str) and comfy_name:
+            filenames.add(comfy_name)
+            filenames.add(PurePosixPath(comfy_name.replace("\\", "/")).name)
+        asset_files = manifest.get("files")
+        if isinstance(asset_files, list):
+            for entry in asset_files:
+                if isinstance(entry, str) and entry:
+                    filenames.add(entry)
+                    filenames.add(PurePosixPath(entry.replace("\\", "/")).name)
     return filenames
 
 
@@ -5521,6 +5798,117 @@ async def deactivate_registry_install(
         except ComfyRegistryActivationError as exc:
             raise _registry_activation_failure(exc) from exc
     return _registry_install_out(_loaded_registry_install(session, install_id))
+
+
+def _rebuild_asset_binding(
+    session: Session,
+    ui_graph: dict[str, Any],
+    selections: list[WorkflowAssetSelectionIn],
+) -> tuple[WorkflowAssetBindingPlan, dict[str, InstallPlan]]:
+    """Re-analyze and re-bind from current server records.
+
+    Analysis is stateless by design and the browser keeps the graph, so a
+    review is always recomputed here: the client's report, digests, sizes,
+    kinds, and bound assets are never trusted - only its explicit id-based
+    selections are.
+    """
+
+    try:
+        analysis = analyze_comfyui_workflow_package(
+            ui_graph,
+            available_asset_filenames=_local_asset_filenames(session),
+            installed_package_versions=_installed_package_versions(session),
+        )
+    except WorkflowPackageError as exc:
+        raise api_error(422, exc.code, str(exc)) from exc
+    plan_ids = {selection.install_plan_id for selection in selections}
+    plans = {
+        plan.id: plan
+        for plan in session.scalars(select(InstallPlan).where(InstallPlan.id.in_(plan_ids))).all()
+    }
+    try:
+        binding = bind_workflow_assets_to_install_plans(
+            analysis.asset_references,
+            [
+                WorkflowAssetPlanSelection(
+                    reference_filename=selection.reference_filename,
+                    install_plan_id=selection.install_plan_id,
+                    artifact_path=selection.artifact_path,
+                )
+                for selection in selections
+            ],
+            plans,
+        )
+    except WorkflowAssetBindingError as exc:
+        raise api_error(422, exc.code, str(exc)) from exc
+    return binding, plans
+
+
+def _asset_review_out(binding: WorkflowAssetBindingPlan) -> WorkflowAssetReviewOut:
+    return WorkflowAssetReviewOut(
+        binding_plan_hash=binding.plan_hash,
+        assets=[
+            BoundWorkflowAssetOut(
+                reference_filename=asset.reference_filename,
+                kind=asset.kind,
+                install_plan_id=asset.install_plan_id,
+                install_plan_hash=asset.install_plan_hash,
+                provider=asset.provider,
+                remote_id=asset.remote_id,
+                revision=asset.revision,
+                artifact_path=asset.artifact_path,
+                artifact_kind=asset.artifact_kind,
+                target_folder=asset.target_folder,
+                size_bytes=asset.size_bytes,
+                sha256=asset.sha256,
+            )
+            for asset in binding.assets
+        ],
+        download_count=len({asset.install_plan_id for asset in binding.assets}),
+        total_bytes=sum(asset.size_bytes for asset in binding.assets),
+    )
+
+
+@router.post("/workflows/packages/assets/review", response_model=WorkflowAssetReviewOut)
+async def review_workflow_assets(
+    payload: WorkflowAssetReviewRequest, session: SessionDep
+) -> WorkflowAssetReviewOut:
+    """Bind explicit selections to immutable plans and report the cost."""
+
+    binding, _plans = _rebuild_asset_binding(session, payload.ui_graph, payload.selections)
+    return _asset_review_out(binding)
+
+
+@router.post("/workflows/packages/assets/install", response_model=list[JobOut], status_code=202)
+async def install_workflow_assets(
+    payload: WorkflowAssetQueueRequest, request: Request, session: SessionDep
+) -> list[Job]:
+    """Queue the reviewed binding: one download per distinct plan.
+
+    Independent downloads are not a rollback unit. Every created or reused
+    job is returned; a verified partial install stays reusable, while the
+    workflow itself remains unresolved until a fresh analysis says every
+    asset is present.
+    """
+
+    binding, plans = _rebuild_asset_binding(session, payload.ui_graph, payload.selections)
+    try:
+        requests = compose_workflow_asset_download_requests(
+            binding, plans, expected_binding_plan_hash=payload.binding_plan_hash
+        )
+    except WorkflowAssetDownloadError as exc:
+        raise api_error(422, exc.code, str(exc)) from exc
+    manager: DownloadManager = _services(request).downloads
+    # Validate every request before starting any: `create` commits and starts
+    # each transfer, so refusing halfway would leave earlier downloads running
+    # behind a 422 that claims nothing was queued.
+    try:
+        validated = [manager.validated_request(session, download) for download in requests]
+    except ValueError as exc:
+        raise api_error(422, "asset-download-refused", str(exc)) from exc
+    jobs = [manager.create(session, download) for download in validated]
+    session.commit()
+    return jobs
 
 
 @router.post("/workflows/packages/import", response_model=WorkflowOut, status_code=201)

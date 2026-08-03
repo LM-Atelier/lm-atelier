@@ -110,6 +110,8 @@ vi.mock("./api", () => ({
     artifactStorage: vi.fn().mockResolvedValue({ total_bytes: 0, total_count: 0, referenced_bytes: 0, referenced_count: 0, unreferenced_bytes: 0, unreferenced_count: 0, temporary_bytes: 0, temporary_count: 0, eligible_bytes: 0, eligible_count: 0, disk_free_bytes: 1024, warning: false, retention_days: 30, temporary_retention_hours: 24 }),
     cleanupArtifacts: vi.fn(),
     deleteArtifact: vi.fn(),
+    favoriteArtifact: vi.fn(),
+    setResponseFeedback: vi.fn(),
     sendTurn: vi.fn(),
     stopAndSendTurn: vi.fn(),
     regenerateMessage: vi.fn(),
@@ -2394,6 +2396,7 @@ describe("App", () => {
                 size_bytes: 100,
                 original_name: "generation-preview",
                 metadata_json: { temporary_preview: true },
+      favorite: false,
                 created_at: stamp,
                 url: "/api/artifacts/sha256:preview/content",
               },
@@ -2412,7 +2415,7 @@ describe("App", () => {
     );
     expect(await screen.findByAltText("Generation preview")).toBeInTheDocument();
     expect(screen.getByText("Generation preview")).toBeInTheDocument();
-    expect(screen.queryByRole("button", { name: "Animate" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Animate this image" })).not.toBeInTheDocument();
   });
 
   it("stops following progress refreshes after the user scrolls away", async () => {
@@ -3299,6 +3302,7 @@ describe("App", () => {
       [],
       null,
       null,
+      "huggingface",
     ));
     // The transfer must not start until the cost has been shown and accepted.
     expect(await screen.findByRole("dialog", { name: /Install/ })).toBeInTheDocument();
@@ -3433,6 +3437,7 @@ describe("App", () => {
       [],
       null,
       null,
+      "huggingface",
     ));
   });
 
@@ -3504,6 +3509,8 @@ describe("App", () => {
       "main",
       [],
       "lora",
+      null,
+      "huggingface",
     ));
     fireEvent.click(await screen.findByRole("button", { name: /^Download / }));
     await waitFor(() => expect(api.download).toHaveBeenCalledWith(
@@ -3680,6 +3687,7 @@ describe("App", () => {
       size_bytes: 2048,
       original_name: "observatory.png",
       metadata_json: {},
+      favorite: false,
       created_at: stamp,
       url: "/api/artifacts/sha256:image/content",
       reference_count: 1,
@@ -3763,6 +3771,7 @@ describe("App", () => {
       size_bytes: 2048,
       original_name: "observatory.png",
       metadata_json: {},
+      favorite: false,
       created_at: stamp,
       url: "/api/artifacts/sha256:library-image/content",
       reference_count: 1,
@@ -3813,6 +3822,7 @@ describe("App", () => {
       size_bytes: 2048,
       original_name: name,
       metadata_json: {},
+      favorite: false,
       created_at: stamp,
       url: `/api/artifacts/${id}/content`,
       reference_count: 0,
@@ -3841,6 +3851,118 @@ describe("App", () => {
     expect(screen.getByRole("link", { name: "Preview one.png" })).toBeVisible();
     expect(screen.getByRole("link", { name: "Preview two.png" })).toBeVisible();
     expect(screen.getByRole("button", { name: "Apply to each of 2 images" })).toBeInTheDocument();
+  });
+
+  it("records a preference verdict and clears it on the second click", async () => {
+    const stamp = "2026-07-22T00:00:00Z";
+    const chat: Chat = {
+      id: "chat-feedback",
+      project_id: null,
+      title: "Feedback",
+      archived: false,
+      routing_mode: "text",
+      confirm_uncertain_media: false,
+      active_chat_profile_id: null,
+      active_image_profile_id: null,
+      active_video_profile_id: null,
+      active_head_message_id: null,
+      created_at: stamp,
+      updated_at: stamp,
+    };
+    localStorage.setItem("local-lm-chat", chat.id);
+    vi.mocked(api.chats).mockResolvedValue([chat]);
+    let verdict: "up" | "down" | null = null;
+    vi.mocked(api.chat).mockImplementation(async () => ({
+      ...chat,
+      messages: [
+        {
+          id: "msg-user",
+          chat_id: chat.id,
+          parent_id: null,
+          role: "user",
+          status: "complete",
+          parts: [{ id: "p1", position: 0, type: "text", text: "hello", artifact_id: null, metadata_json: {} }],
+          created_at: stamp,
+          updated_at: stamp,
+        },
+        {
+          id: "msg-answer",
+          chat_id: chat.id,
+          parent_id: "msg-user",
+          role: "assistant",
+          status: "complete",
+          feedback: verdict,
+          parts: [{ id: "p2", position: 0, type: "text", text: "hi there", artifact_id: null, metadata_json: {} }],
+          created_at: stamp,
+          updated_at: stamp,
+        },
+      ],
+    }));
+    vi.mocked(api.setResponseFeedback).mockImplementation(async (_id, rating) => {
+      verdict = rating;
+      return { message_id: "msg-answer", response_revision_id: null, rating };
+    });
+    const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+    render(
+      <QueryClientProvider client={client}>
+        <App />
+      </QueryClientProvider>,
+    );
+
+    const thumbsUp = await screen.findByRole("button", { name: "Good response" });
+    expect(thumbsUp).toHaveAttribute("aria-pressed", "false");
+    fireEvent.click(thumbsUp);
+    await waitFor(() =>
+      expect(api.setResponseFeedback).toHaveBeenCalledWith("msg-answer", "up", null));
+    // The refetched verdict shows as pressed; a second click clears it.
+    await waitFor(() =>
+      expect(screen.getByRole("button", { name: "Good response" })).toHaveAttribute("aria-pressed", "true"));
+    fireEvent.click(screen.getByRole("button", { name: "Good response" }));
+    await waitFor(() =>
+      expect(api.setResponseFeedback).toHaveBeenLastCalledWith("msg-answer", null, null));
+  });
+
+  it("favorites a library item and filters down to favorites", async () => {
+    const stamp = "2026-07-22T00:00:00Z";
+    const item = (favorite: boolean) => ({
+      id: "sha256:starred",
+      sha256: "0123456789abcdef",
+      kind: "image",
+      media_type: "image/png",
+      size_bytes: 2048,
+      original_name: "keeper.png",
+      metadata_json: {},
+      favorite,
+      created_at: stamp,
+      url: "/api/artifacts/sha256:starred/content",
+      reference_count: 0,
+      chat_ids: [],
+      project_ids: [],
+    });
+    vi.mocked(api.artifacts).mockResolvedValue([item(false)]);
+    vi.mocked(api.favoriteArtifact).mockImplementation(async () => {
+      vi.mocked(api.artifacts).mockResolvedValue([item(true)]);
+      return item(true);
+    });
+    const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+    render(
+      <QueryClientProvider client={client}>
+        <App />
+      </QueryClientProvider>,
+    );
+
+    fireEvent.click(await screen.findByText("Media library"));
+    fireEvent.click(await screen.findByRole("button", { name: "Favorite keeper.png" }));
+    await waitFor(() =>
+      expect(api.favoriteArtifact).toHaveBeenCalledWith("sha256:starred", true));
+    // The toggle reflects the new state once the list refetches.
+    expect(await screen.findByRole("button", { name: "Unfavorite keeper.png" })).toBeVisible();
+
+    fireEvent.change(screen.getByRole("combobox", { name: "Favorites filter" }), {
+      target: { value: "favorites" },
+    });
+    await waitFor(() =>
+      expect(api.artifacts).toHaveBeenLastCalledWith("", "", true));
   });
 
   it("explains when cleanup only finds media still in the recovery window", async () => {
@@ -5121,7 +5243,7 @@ describe("App", () => {
     expect(screen.queryByText("Attached image")).not.toBeInTheDocument();
 
     // The result of an edit can be held against its source directly.
-    fireEvent.click(screen.getByRole("button", { name: "Compare" }));
+    fireEvent.click(screen.getByRole("button", { name: "Compare with the source" }));
     expect(await screen.findByRole("dialog", { name: "Compare with the source" })).toBeVisible();
     expect(screen.getByRole("img", { name: "The source before the edit" })).toBeVisible();
     expect(screen.getByRole("img", { name: "The edited result" })).toBeVisible();
@@ -5299,7 +5421,7 @@ describe("App", () => {
       },
     }));
     fireEvent.click(screen.getByRole("button", { name: "Close settings" }));
-    fireEvent.click(screen.getByRole("button", { name: "Edit" }));
+    fireEvent.click(screen.getByRole("button", { name: "Edit this image" }));
     await waitFor(() => expect(api.updateChat).toHaveBeenCalledWith(chat.id, { routing_mode: "image" }));
     expect(screen.getByText("sha256:prior")).toBeInTheDocument();
     expect(composer).toHaveFocus();
@@ -5380,7 +5502,7 @@ describe("App", () => {
 
     const firstComposer = await screen.findByRole("textbox", { name: "Message" });
     fireEvent.change(firstComposer, { target: { value: "Unsent first-chat draft" } });
-    fireEvent.click(screen.getByRole("button", { name: "Edit" }));
+    fireEvent.click(screen.getByRole("button", { name: "Edit this image" }));
     expect(await screen.findByRole("button", { name: /Remove Generated image: sha256:synthetic/ })).toBeVisible();
 
     fireEvent.click(screen.getByText(second.title));
@@ -5476,7 +5598,7 @@ describe("App", () => {
       </QueryClientProvider>,
     );
 
-    fireEvent.click(await screen.findByRole("button", { name: "Animate" }));
+    fireEvent.click(await screen.findByRole("button", { name: "Animate this image" }));
     await waitFor(() => expect(api.updateChat).toHaveBeenCalledWith(chat.id, { routing_mode: "video" }));
     const composer = screen.getByRole("textbox", { name: "Message" });
     // The prefill lands after the routing mutation settles, not with it.
@@ -5489,7 +5611,7 @@ describe("App", () => {
     // Reference attaches the same artifact without touching the mode - the
     // distinction from Edit and Animate, which deliberately do change it.
     vi.mocked(api.updateChat).mockClear();
-    fireEvent.click(screen.getByRole("button", { name: "Reference" }));
+    fireEvent.click(screen.getByRole("button", { name: "Reference this media" }));
     expect(screen.getByRole("combobox", { name: "Generation mode" })).toHaveValue("video");
     expect(api.updateChat).not.toHaveBeenCalled();
     expect(screen.getByRole("link", { name: "Preview sha256:animate-source" })).toBeVisible();

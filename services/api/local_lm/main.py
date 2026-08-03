@@ -30,6 +30,7 @@ from .artifacts import ArtifactStore
 from .backups import BackupManager
 from .catalog import HuggingFaceCatalog
 from .catalog_sources import CatalogSources
+from .civitai_catalog import CivitaiCatalog
 from .config import Settings, get_settings
 from .credentials import CredentialStore
 from .custom_nodes import CustomNodeManager
@@ -231,13 +232,14 @@ def build_services(settings: Settings) -> Services:
     processes = ProcessSupervisor(settings, runtimes, events)
     orchestrator = ConversationOrchestrator(engines, artifacts, events, scheduler, processes)
     catalog = HuggingFaceCatalog(settings)
+    civitai = CivitaiCatalog(settings, token=settings.civitai_token)
     services = Services(
         settings=settings,
         security=SessionSecurity(settings),
         events=events,
         artifacts=artifacts,
         engines=engines,
-        catalog_sources=CatalogSources([catalog]),
+        catalog_sources=CatalogSources([catalog, civitai]),
         downloads=DownloadManager(
             settings,
             events,

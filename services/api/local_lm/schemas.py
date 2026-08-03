@@ -109,8 +109,13 @@ class ArtifactOut(ApiModel):
     size_bytes: int
     original_name: str | None
     metadata_json: dict[str, Any]
+    favorite: bool = False
     created_at: datetime
     url: str | None = None
+
+
+class ArtifactUpdate(ApiModel):
+    favorite: bool
 
 
 class ArtifactLibraryItem(ArtifactOut):
@@ -173,6 +178,7 @@ class ResponseRevisionOut(ApiModel):
     sequence: int
     status: str
     parts: list[MessagePartOut]
+    feedback: Literal["up", "down"] | None = None
     created_at: datetime
     updated_at: datetime
 
@@ -187,8 +193,23 @@ class MessageOut(ApiModel):
     active_response_revision_id: str | None
     parts: list[MessagePartOut]
     response_revisions: list[ResponseRevisionOut] = Field(default_factory=list)
+    feedback: Literal["up", "down"] | None = None
     created_at: datetime
     updated_at: datetime
+
+
+class ResponseFeedbackUpdate(ApiModel):
+    """Set or clear one verdict; null rating clears. A click stores a local
+    preference for evaluation and reranking - it never trains weights."""
+
+    rating: Literal["up", "down"] | None
+    response_revision_id: str | None = None
+
+
+class ResponseFeedbackOut(ApiModel):
+    message_id: str
+    response_revision_id: str | None
+    rating: Literal["up", "down"] | None
 
 
 class ChatOut(ApiModel):
@@ -227,6 +248,15 @@ class ExchangeDeletionOut(ApiModel):
     released_artifact_ids: list[str]
     retained_artifact_ids: list[str]
     new_head_message_id: str | None = None
+
+
+class StudioSessionCreate(ApiModel):
+    """Open the studio over one image; the session is found or created."""
+
+    source_artifact_id: str = Field(min_length=1, max_length=80)
+    # When the studio is entered from a chat, its profile and settings
+    # snapshot carry over so applies run with the same models.
+    source_chat_id: str | None = Field(default=None, max_length=40)
 
 
 class PromptHelperCreate(ApiModel):
@@ -849,6 +879,55 @@ class RegistryInstallReviewRequest(ApiModel):
     trusted: bool
 
 
+class WorkflowAssetSelectionIn(ApiModel):
+    """One explicit choice: this missing file comes from that plan artifact."""
+
+    reference_filename: str = Field(min_length=1, max_length=1_000)
+    install_plan_id: str = Field(min_length=1, max_length=40)
+    artifact_path: str = Field(min_length=1, max_length=1_000)
+
+
+class WorkflowAssetReviewRequest(ApiModel):
+    """Review selections against a freshly re-analyzed graph.
+
+    The browser sends the graph and its choices - never a report, digest,
+    size, kind, or bound asset. Everything else is rebuilt server-side.
+    """
+
+    ui_graph: dict[str, Any]
+    selections: list[WorkflowAssetSelectionIn] = Field(default_factory=list, max_length=64)
+
+
+class WorkflowAssetQueueRequest(WorkflowAssetReviewRequest):
+    """Queue exactly the reviewed binding, confirmed by its hash."""
+
+    binding_plan_hash: str = Field(pattern=r"^[0-9a-f]{64}$")
+
+
+class BoundWorkflowAssetOut(ApiModel):
+    reference_filename: str
+    kind: str
+    install_plan_id: str
+    install_plan_hash: str
+    provider: str
+    remote_id: str
+    revision: str
+    artifact_path: str
+    artifact_kind: str
+    target_folder: str
+    size_bytes: int
+    sha256: str
+
+
+class WorkflowAssetReviewOut(ApiModel):
+    """What the browser may show: the binding, its hash, and the cost."""
+
+    binding_plan_hash: str
+    assets: list[BoundWorkflowAssetOut]
+    download_count: int
+    total_bytes: int
+
+
 class WorkflowPackageImportRequest(ApiModel):
     """Import a fully resolved ComfyUI package as an untrusted workflow.
 
@@ -1040,6 +1119,10 @@ class CatalogFileSource(ApiModel):
     filename: str = Field(min_length=1, max_length=1_000)
     size_bytes: int | None = Field(default=None, ge=0)
     sha256: str | None = Field(default=None, pattern=r"^[0-9a-fA-F]{64}$")
+    # CivitAI identity; the download manager derives its URL from these
+    # server-side and never consumes a catalog-supplied one.
+    source_version_id: str | None = Field(default=None, pattern=r"^[1-9][0-9]{0,11}$")
+    source_file_id: str | None = Field(default=None, pattern=r"^[1-9][0-9]{0,11}$")
 
 
 class CatalogPreflight(ApiModel):

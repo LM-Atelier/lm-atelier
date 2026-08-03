@@ -25,6 +25,9 @@ export interface Artifact {
   size_bytes: number;
   original_name: string | null;
   metadata_json: Record<string, unknown>;
+  /** Pins against automatic cleanup only; explicit deletion always wins.
+   * Optional so view fixtures stay lean; the server always sends it. */
+  favorite?: boolean;
   created_at: string;
   url?: string | null;
 }
@@ -88,6 +91,8 @@ export interface Message {
   active_response_revision_id?: string | null;
   parts: MessagePart[];
   response_revisions?: ResponseRevision[];
+  /** The local preference verdict on the base response; revisions carry their own. */
+  feedback?: "up" | "down" | null;
   created_at: string;
   updated_at: string;
 }
@@ -99,6 +104,7 @@ export interface ResponseRevision {
   sequence: number;
   status: "complete" | "pending" | "failed" | "cancelled";
   parts: MessagePart[];
+  feedback?: "up" | "down" | null;
   created_at: string;
   updated_at: string;
 }

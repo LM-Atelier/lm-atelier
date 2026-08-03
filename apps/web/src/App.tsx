@@ -8,8 +8,6 @@ import {
 } from "react";
 import { useInfiniteQuery, useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import {
-  ArrowDown,
-  ArrowUp,
   Bot,
   Check,
   ChevronDown,
@@ -20,7 +18,6 @@ import {
   Download,
   Film,
   Folder,
-  Gauge,
   GitBranch,
   HardDrive,
   Image as ImageIcon,
@@ -39,6 +36,8 @@ import {
   Settings,
   SlidersHorizontal,
   Sparkles,
+  ThumbsDown,
+  ThumbsUp,
   Trash2,
   Upload,
   Wand2,
@@ -91,8 +90,11 @@ import { focusMainContent, roleForMode } from "./viewHelpers";
 import { ArtifactPart } from "./ArtifactPart";
 import { FirstRunSetup, SetupWizard } from "./SetupWizard";
 import { CustomNodesPanel } from "./CustomNodesPanel";
+import { LoraStackControl } from "./LoraStackControl";
 import { MediaLibraryView } from "./MediaLibraryView";
 import { MediaOutputPlan } from "./MediaOutputPlan";
+import { ModelCard } from "./ModelCard";
+import { RecipeCard } from "./RecipeCard";
 import { ModelUpdatesPanel } from "./ModelUpdatesPanel";
 import { RuntimeSetupCard } from "./RuntimeSetupCard";
 import { RegistryInstallsPanel } from "./RegistryInstallsPanel";
@@ -134,7 +136,6 @@ import type {
   ModelProfile,
   ModelProfileBundle,
   Project,
-  ReferenceRecipe,
   RoutingMode,
   RuntimeStatus,
   SetupReadinessReport,
@@ -238,6 +239,7 @@ function PartView({
   onEditImage,
   onAnimateImage,
   onReferenceMedia,
+  onToggleFavorite,
   compareSourceUrl,
   lineage,
 }: {
@@ -248,6 +250,7 @@ function PartView({
   onEditImage?: (part: MessagePart, origin: MediaOrigin) => void;
   onAnimateImage?: (part: MessagePart, origin: MediaOrigin) => void;
   onReferenceMedia?: (part: MessagePart, origin: MediaOrigin) => void;
+  onToggleFavorite?: (part: MessagePart) => void;
   compareSourceUrl?: string | null;
   lineage?: EditLineageStep[];
 }) {
@@ -256,7 +259,7 @@ function PartView({
     return markdown ? <MarkdownText text={text} /> : <div className="message-text">{text}</div>;
   }
   if (part.type === "image" || part.type === "video" || part.type === "attachment") {
-    return <ArtifactPart part={part} origin={origin} onEditImage={onEditImage} onAnimateImage={onAnimateImage} onReferenceMedia={onReferenceMedia} compareSourceUrl={compareSourceUrl} lineage={lineage} />;
+    return <ArtifactPart part={part} origin={origin} onEditImage={onEditImage} onAnimateImage={onAnimateImage} onReferenceMedia={onReferenceMedia} onToggleFavorite={onToggleFavorite} compareSourceUrl={compareSourceUrl} lineage={lineage} />;
   }
   if (part.type === "progress") {
     const progress = Number(part.metadata_json.progress ?? 0);
@@ -291,9 +294,11 @@ function MessageBubble({
   onEditImage,
   onAnimateImage,
   onReferenceMedia,
+  onToggleFavorite,
   onQuote,
   onDeleteExchange,
   onForkThread,
+  onFeedback,
   compareSourceUrl,
   lineage,
 }: {
@@ -307,9 +312,11 @@ function MessageBubble({
   onEditImage?: (part: MessagePart, origin: MediaOrigin) => void;
   onAnimateImage?: (part: MessagePart, origin: MediaOrigin) => void;
   onReferenceMedia?: (part: MessagePart, origin: MediaOrigin) => void;
+  onToggleFavorite?: (part: MessagePart) => void;
   onQuote?: (text: string) => void;
   onDeleteExchange?: (messageId: string) => void;
   onForkThread?: (messageId: string) => void;
+  onFeedback?: (messageId: string, revisionId: string | null, rating: "up" | "down" | null) => void;
   compareSourceUrl?: string | null;
   lineage?: EditLineageStep[];
 }) {
@@ -394,7 +401,7 @@ function MessageBubble({
     <article className={`message ${message.role}`}>
       <div className="avatar">{message.role === "user" ? "You" : <Bot size={19} />}</div>
       <div className="message-content">
-        {editing ? <div className="message-edit"><textarea aria-label="Edit message" rows={4} value={draft} onChange={(event) => setDraft(event.target.value)} /><div><button onClick={() => { setDraft(userText); setEditing(false); }}>Cancel</button><button className="primary" disabled={!draft.trim()} onClick={() => { onEdit?.(message.id, draft.trim()); setEditing(false); }}>Send edited message</button></div></div> : renderedParts.map((part) => <PartView key={part.id} part={part} liveText={liveText} markdown={message.role === "assistant"} origin={mediaOriginForPart(part, operation, message.role === "assistant" ? "generated" : null)} onEditImage={onEditImage} onAnimateImage={onAnimateImage} onReferenceMedia={onReferenceMedia} compareSourceUrl={message.role === "assistant" ? compareSourceUrl : undefined} lineage={message.role === "assistant" ? lineage : undefined} />)}
+        {editing ? <div className="message-edit"><textarea aria-label="Edit message" rows={4} value={draft} onChange={(event) => setDraft(event.target.value)} /><div><button onClick={() => { setDraft(userText); setEditing(false); }}>Cancel</button><button className="primary" disabled={!draft.trim()} onClick={() => { onEdit?.(message.id, draft.trim()); setEditing(false); }}>Send edited message</button></div></div> : renderedParts.map((part) => <PartView key={part.id} part={part} liveText={liveText} markdown={message.role === "assistant"} origin={mediaOriginForPart(part, operation, message.role === "assistant" ? "generated" : null)} onEditImage={onEditImage} onAnimateImage={onAnimateImage} onReferenceMedia={onReferenceMedia} onToggleFavorite={onToggleFavorite} compareSourceUrl={message.role === "assistant" ? compareSourceUrl : undefined} lineage={message.role === "assistant" ? lineage : undefined} />)}
         {liveText && !visibleParts.some((part) => part.type === "text") && (
           <MarkdownText text={liveText} />
         )}
@@ -462,6 +469,35 @@ function MessageBubble({
             {/* Revealed on hover, and on keyboard focus - hover alone would
                 put these actions out of reach without a mouse. */}
             <span className="message-actions">
+              {onFeedback && (() => {
+                const displayed = completedRevisions[revisionIndex] ?? null;
+                const current = displayed ? displayed.feedback ?? null : message.feedback ?? null;
+                const send = (rating: "up" | "down") => onFeedback(
+                  message.id,
+                  displayed?.id ?? null,
+                  current === rating ? null : rating,
+                );
+                return (
+                  <>
+                    <button
+                      aria-label="Good response"
+                      title="Good response (stored locally)"
+                      aria-pressed={current === "up"}
+                      onClick={() => send("up")}
+                    >
+                      <ThumbsUp size={14} fill={current === "up" ? "currentColor" : "none"} />
+                    </button>
+                    <button
+                      aria-label="Poor response"
+                      title="Poor response (stored locally)"
+                      aria-pressed={current === "down"}
+                      onClick={() => send("down")}
+                    >
+                      <ThumbsDown size={14} fill={current === "down" ? "currentColor" : "none"} />
+                    </button>
+                  </>
+                );
+              })()}
               {copyableText && (
                 <CopyTextButton
                   text={copyableText}
@@ -497,110 +533,6 @@ function MessageBubble({
         )}
       </div>
     </article>
-  );
-}
-
-type LoraSetting = {
-  asset_id: string;
-  model_strength: number;
-  clip_strength: number;
-  enabled: boolean;
-};
-
-function LoraStackControl({
-  value,
-  onChange,
-}: {
-  value: unknown;
-  onChange: (value: unknown) => void;
-}) {
-  const assets = useQuery({
-    queryKey: ["model-assets", "lora"],
-    queryFn: () => api.modelAssets("lora"),
-  });
-  const stack: LoraSetting[] = Array.isArray(value)
-    ? value.map((item) => (
-      item && typeof item === "object" && typeof (item as Record<string, unknown>).asset_id === "string"
-        ? {
-            asset_id: String((item as Record<string, unknown>).asset_id),
-            model_strength: Number((item as Record<string, unknown>).model_strength ?? 1),
-            clip_strength: Number((item as Record<string, unknown>).clip_strength ?? 1),
-            enabled: (item as Record<string, unknown>).enabled !== false,
-          }
-        : {
-            asset_id: "",
-            model_strength: 1,
-            clip_strength: 1,
-            enabled: false,
-          }
-    ))
-    : [];
-  const installed = assets.data?.filter((asset) => asset.active && asset.verified_at) ?? [];
-  const used = new Set(stack.map((item) => item.asset_id));
-  const addable = installed.find((asset) => !used.has(asset.id));
-  const update = (index: number, patch: Partial<LoraSetting>) => {
-    onChange(stack.map((item, candidate) => candidate === index ? { ...item, ...patch } : item));
-  };
-  const move = (index: number, offset: number) => {
-    const next = [...stack];
-    const target = index + offset;
-    if (target < 0 || target >= next.length) return;
-    [next[index], next[target]] = [next[target], next[index]];
-    onChange(next);
-  };
-  return (
-    <div className="setting-row lora-stack-control">
-      <span><strong>LoRAs</strong></span>
-      <div className="lora-stack">
-        {stack.map((item, index) => {
-          const asset = installed.find((candidate) => candidate.id === item.asset_id);
-          const metadata = asset?.manifest_json.metadata;
-          const triggerWords = metadata && typeof metadata === "object"
-            && Array.isArray((metadata as Record<string, unknown>).trigger_words)
-            ? (metadata as Record<string, unknown>).trigger_words as string[]
-            : [];
-          return (
-            <div className={`lora-stack-item${asset ? "" : " unavailable"}`} key={`${item.asset_id}:${index}`}>
-              <select
-                aria-label={`LoRA ${index + 1}`}
-                value={item.asset_id}
-                onChange={(event) => update(index, { asset_id: event.target.value })}
-              >
-                {!asset && <option value={item.asset_id}>{item.asset_id ? "Unavailable LoRA" : "Choose LoRA"}</option>}
-                {installed.map((candidate) => (
-                  <option value={candidate.id} key={candidate.id}>{candidate.name}</option>
-                ))}
-              </select>
-              <label>Model<input aria-label={`LoRA ${index + 1} model strength`} type="number" min="-4" max="4" step="0.05" value={item.model_strength} onChange={(event) => update(index, { model_strength: Number(event.target.value) })} /></label>
-              <label>CLIP<input aria-label={`LoRA ${index + 1} CLIP strength`} type="number" min="-4" max="4" step="0.05" value={item.clip_strength} onChange={(event) => update(index, { clip_strength: Number(event.target.value) })} /></label>
-              <label className="lora-enabled"><input aria-label={`Enable LoRA ${index + 1}`} type="checkbox" checked={item.enabled} onChange={(event) => update(index, { enabled: event.target.checked })} />On</label>
-              <span className="row-actions">
-                <button type="button" className="secondary compact-button" aria-label={`Move LoRA ${index + 1} up`} disabled={index === 0} onClick={() => move(index, -1)}><ArrowUp size={13} /></button>
-                <button type="button" className="secondary compact-button" aria-label={`Move LoRA ${index + 1} down`} disabled={index === stack.length - 1} onClick={() => move(index, 1)}><ArrowDown size={13} /></button>
-                <button type="button" className="secondary compact-button danger" aria-label={`Remove LoRA ${index + 1}`} onClick={() => onChange(stack.filter((_, candidate) => candidate !== index))}><X size={13} /></button>
-              </span>
-              {(asset?.family || triggerWords.length > 0) && <small>{[asset?.family, ...triggerWords.slice(0, 3)].filter(Boolean).join(" · ")}</small>}
-            </div>
-          );
-        })}
-        <button
-          type="button"
-          className="secondary compact-button"
-          disabled={!addable || stack.length >= 8}
-          onClick={() => addable && onChange([
-            ...stack,
-            {
-              asset_id: addable.id,
-              model_strength: 1,
-              clip_strength: 1,
-              enabled: true,
-            },
-          ])}
-        >
-          <Plus size={13} /> Add LoRA
-        </button>
-      </div>
-    </div>
   );
 }
 
@@ -1707,6 +1639,23 @@ function ChatView({
   const followMessages = useRef(true);
   const previousChatId = useRef<string | undefined>(undefined);
   const [visualTarget, setVisualTarget] = useState<VisualTarget | null>(null);
+  const favoriteClient = useQueryClient();
+  const feedback = useMutation({
+    mutationFn: ({ messageId, revisionId, rating }: {
+      messageId: string;
+      revisionId: string | null;
+      rating: "up" | "down" | null;
+    }) => api.setResponseFeedback(messageId, rating, revisionId),
+    onSuccess: () => void favoriteClient.invalidateQueries({ queryKey: ["chat"] }),
+  });
+  const toggleFavorite = useMutation({
+    mutationFn: ({ artifactId, next }: { artifactId: string; next: boolean }) =>
+      api.favoriteArtifact(artifactId, next),
+    onSuccess: () => {
+      void favoriteClient.invalidateQueries({ queryKey: ["chat"] });
+      void favoriteClient.invalidateQueries({ queryKey: ["artifacts"] });
+    },
+  });
   const consumedLibraryEdit = useRef<number | null>(null);
   useEffect(() => {
     if (!libraryEdit || consumedLibraryEdit.current === libraryEdit.requestId) return;
@@ -1801,6 +1750,12 @@ function ChatView({
                 liveText={liveText[message.id]}
                 compareSourceUrl={compareSourceUrl}
                 lineage={lineage}
+                onFeedback={(messageId, revisionId, rating) =>
+                  feedback.mutate({ messageId, revisionId, rating })}
+                onToggleFavorite={(part) => part.artifact_id && toggleFavorite.mutate({
+                  artifactId: part.artifact_id,
+                  next: !part.artifact?.favorite,
+                })}
                 hiddenInputArtifactIds={priorVisibleMedia.get(message.id)}
                 onRegenerate={busy ? undefined : (messageId) => onRegenerate(
                   messageId,
@@ -1879,83 +1834,6 @@ function ChatView({
       </div>
       <Composer chat={chat} engines={engines} profiles={profiles} stoppable={stoppable} settings={settings} onSettings={onSettings} presets={presets} presetId={presetId} onPreset={onPreset} onMode={onMode} onSend={onSend} onStop={onStop} onStopAndSend={onStopAndSend} workflows={workflows} project={project} visualTarget={visualTarget} quoteTarget={quoteTarget} />
     </div>
-  );
-}
-
-function ModelCard({
-  model,
-  role,
-  onDownload,
-  status,
-  runtime,
-}: {
-  model: CatalogModel;
-  role: string;
-  onDownload: () => void;
-  status: "idle" | "preparing" | "downloading" | "installed";
-  runtime?: RuntimeStatus;
-}) {
-  const label = {
-    idle: "Install",
-    preparing: "Checking model…",
-    downloading: "Downloading…",
-    installed: "Installed",
-  }[status];
-  const compatibilityLabel = {
-    likely: "Automatic test available",
-    tested: "Tested",
-    advanced_import: "Advanced import",
-    unsupported: "Unsupported",
-  }[model.compatibility] ?? model.compatibility.replace("_", " ");
-  const runtimeUnavailable = Boolean(
-    model.required_runtime === "vllm" && (!runtime || !runtime.supported),
-  );
-  const displayCompatibility = model.required_runtime === "vllm"
-    ? runtimeUnavailable
-      ? "Needs vLLM"
-      : "Automatic test available"
-    : compatibilityLabel;
-  const actionLabel = status === "idle" && model.compatibility === "unsupported"
-    ? "No workflow"
-    : status === "idle" && runtimeUnavailable
-      ? "Needs vLLM"
-      : label;
-  return (
-    <article className="model-card">
-      <div className="model-icon">{role === "video" ? <Film /> : role === "image" || role === "lora" ? <ImageIcon /> : <Bot />}</div>
-      <div className="model-copy">
-        <h3>{model.name}</h3><p>{model.author} · {model.pipeline_tag || model.library_name || "model"}</p>
-        <div className="badges"><span className={`badge ${model.compatibility}`}>{displayCompatibility}</span>{model.gated && <span className="badge">Gated</span>}{model.formats.slice(0, 2).map((format) => <span className="badge" key={format}>{format}</span>)}{model.quantizations.slice(0, 2).map((value) => <span className="badge" key={value}>{value}</span>)}</div>
-        <small>{model.total_size_bytes != null ? `${formatBytes(model.total_size_bytes)} · ` : ""}{formatDate(model.last_modified)}{model.compatibility_reasons.length ? ` · ${model.compatibility_reasons.join(" · ")}` : ""}</small>
-      </div>
-      <div className="model-stats">{model.trending_score != null && <span title="Hugging Face trending score"><Sparkles size={14} />{model.trending_score.toLocaleString()}</span>}<span><Download size={14} />{model.downloads?.toLocaleString() ?? "—"}</span><button className="primary compact-button" title={model.compatibility === "unsupported" || runtimeUnavailable ? model.compatibility_reasons.join(" ") : undefined} onClick={onDownload} disabled={status !== "idle" || model.compatibility === "unsupported" || runtimeUnavailable}>{actionLabel}</button></div>
-    </article>
-  );
-}
-
-function recipeOperationLabel(operation: string): string {
-  return operation
-    .split("_")
-    .map((part) => part === "to" ? "→" : part)
-    .join(" ")
-    .replace(/^\w/, (character) => character.toUpperCase());
-}
-function RecipeCard({ recipe, pending, onInstall }: { recipe: ReferenceRecipe; pending: boolean; onInstall: () => void }) {
-  const memory = recipe.hardware.minimum_vram_gb
-    ? `${recipe.hardware.minimum_vram_gb} GB+ VRAM`
-    : `${recipe.hardware.minimum_ram_gb} GB+ RAM`;
-  return (
-    <article className="recipe-card">
-      <header>
-        <div className="model-icon">{recipe.role === "video" ? <Film /> : recipe.role === "image" ? <ImageIcon /> : <Bot />}</div>
-        <div><small>{recipe.role} · recipe v{recipe.version}</small><h3>{recipe.name}</h3></div>
-      </header>
-      <p>{recipe.summary}</p>
-      <div className="recipe-badges"><span className={`badge ${recipe.certified ? "likely" : ""}`}>{recipe.certified ? "Certified" : "Reference candidate"}</span>{recipe.operations.map((operation) => <span className="badge" key={operation}>{recipeOperationLabel(operation)}</span>)}<span className="badge">{recipe.license_id}</span><span className="badge">{recipe.node_policy || recipe.engine}</span></div>
-      <div className="recipe-meta"><span><HardDrive size={14} />{formatBytes(recipe.total_size_bytes)}</span><span><Gauge size={14} />{memory}</span></div>
-      <small>{recipe.hardware.guidance}</small>
-      <button className="primary" onClick={onInstall} disabled={pending}>{pending ? "Queued" : "Install recipe"}</button>
-    </article>
   );
 }
 
@@ -2139,6 +2017,7 @@ function ModelsView({ initialRole }: { initialRole: EngineRole }) {
   const client = useQueryClient();
   const [query, setQuery] = useState("");
   const [submitted, setSubmitted] = useState("");
+  const [catalogSource, setCatalogSource] = useState("huggingface");
   const [role, setRole] = useState<string>(initialRole);
   const [sort, setSort] = useState("trending");
   const [compatibility, setCompatibility] = useState("");
@@ -2158,8 +2037,9 @@ function ModelsView({ initialRole }: { initialRole: EngineRole }) {
     updated_within_days: updatedWithinDays,
   };
   const catalog = useInfiniteQuery({
-    queryKey: ["catalog", submitted, role, sort, catalogFilters],
-    queryFn: ({ pageParam }) => api.catalog(submitted, role, sort, pageParam, catalogFilters),
+    queryKey: ["catalog", submitted, role, sort, catalogFilters, catalogSource],
+    queryFn: ({ pageParam }) =>
+      api.catalog(submitted, role, sort, pageParam, catalogFilters, catalogSource),
     initialPageParam: null as string | null,
     getNextPageParam: (page) => page.next_cursor ?? undefined,
   });
@@ -2185,25 +2065,31 @@ function ModelsView({ initialRole }: { initialRole: EngineRole }) {
       const auxiliaryKind = selectedRole === "lora" ? "lora" : null;
       const installRole = auxiliaryKind ? "image" : selectedRole;
       const engine = model.required_runtime ?? (installRole === "chat" ? "llama.cpp" : "comfyui");
+      // A CivitAI card's remote id is its exact version; that is also the
+      // revision it pins. Hugging Face keeps floating "main".
+      const revision = model.provider === "civitai" ? model.remote_id : "main";
       const preflight = auxiliaryKind
         ? await api.catalogPreflight(
             model.remote_id,
             installRole,
             engine,
-            "main",
+            revision,
             [],
             auxiliaryKind,
+            null,
+            model.provider,
           )
         : await api.catalogPreflight(
             model.remote_id,
             installRole,
             engine,
-            "main",
+            revision,
             [],
             null,
             // Preflight the exact workflow this card represents; a repository
             // can ship several and ranking must not answer for the user.
             model.workflow_template_id ?? null,
+            model.provider,
           );
       if (!preflight.can_install) {
         const blockers = preflight.checks
@@ -2386,7 +2272,7 @@ function ModelsView({ initialRole }: { initialRole: EngineRole }) {
       <div className="toolbar">
         <form className="search-box" onSubmit={(event) => { event.preventDefault(); setSubmitted(query); }}><Search size={18} /><input value={query} onChange={(event) => setQuery(event.target.value)} placeholder="Search models" /></form>
         <select aria-label="Model role" value={role} onChange={(event) => setRole(event.target.value)}><option value="chat">Chat</option><option value="image">Image</option><option value="video">Video</option><option value="lora">LoRA</option></select>
-        <select aria-label="Model order" value={sort} onChange={(event) => setSort(event.target.value)}><option value="trending">Trending</option><option value="downloads">Downloads</option><option value="likes">Likes</option><option value="newest">Newest</option><option value="updated">Recently updated</option><option value="compatible">Compatible first</option></select>
+        <select aria-label="Model source" value={catalogSource} onChange={(event) => setCatalogSource(event.target.value)}><option value="huggingface">Hugging Face</option><option value="civitai">CivitAI</option></select><select aria-label="Model order" value={sort} onChange={(event) => setSort(event.target.value)}><option value="trending">Trending</option><option value="downloads">Downloads</option><option value="likes">Likes</option><option value="newest">Newest</option><option value="updated">Recently updated</option><option value="compatible">Compatible first</option></select>
       </div>
       <div className="catalog-filters"><select aria-label="Compatibility filter" value={compatibility} onChange={(event) => setCompatibility(event.target.value)}><option value="">All compatibility</option><option value="likely">Automatic test available</option><option value="advanced_import">Advanced import</option><option value="unsupported">Unsupported</option></select><select aria-label="Last updated filter" value={updatedWithinDays} onChange={(event) => setUpdatedWithinDays(event.target.value)}><option value="">Updated any time</option><option value="7">Updated this week</option><option value="30">Updated this month</option><option value="90">Updated in 3 months</option><option value="365">Updated this year</option></select><input aria-label="Quantization filter" placeholder="Quantization (Q4_K_M, FP8…)" value={quantization} onChange={(event) => setQuantization(event.target.value)} /><input aria-label="Maximum download size" type="number" min="0" placeholder="Max download (GB)" value={maxSizeGb} onChange={(event) => setMaxSizeGb(event.target.value)} /></div>
       {(installed.data?.length ?? 0) > 0 && <section>

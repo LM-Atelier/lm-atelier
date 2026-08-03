@@ -360,6 +360,8 @@ def test_chat_preflight_preserves_external_projector_provenance(tmp_path: Path) 
         "filename": "mmproj-vision-model-4B-f16.gguf",
         "size_bytes": 3,
         "sha256": "b" * 64,
+        "source_version_id": None,
+        "source_file_id": None,
     }
 
 

@@ -1,0 +1,259 @@
+"""The registered CivitAI source: browse wiring, tokens, and plan provenance."""
+
+from __future__ import annotations
+
+from typing import Any
+
+import pytest
+from fastapi import FastAPI
+from httpx2 import AsyncClient
+
+from local_lm.civitai_catalog import CivitaiCatalog
+
+pytestmark = pytest.mark.asyncio
+
+SHA256 = "a" * 64
+
+
+async def test_the_civitai_source_is_registered_beside_hugging_face(
+    client: AsyncClient, app: FastAPI
+) -> None:
+    source = app.state.services.catalog_sources.get("civitai")
+    assert isinstance(source, CivitaiCatalog)
+
+
+async def test_a_stored_token_reaches_the_registered_source(
+    client: AsyncClient, app: FastAPI, monkeypatch: pytest.MonkeyPatch
+) -> None:
+
+    from local_lm import credentials as credentials_module
+    from local_lm.credentials import CredentialStore
+
+    values: dict[str, str] = {}
+    monkeypatch.setattr(
+        CredentialStore,
+        "state",
+        lambda self, provider="huggingface": credentials_module.CredentialState(
+            configured=provider in values,
+            source="credential_vault" if provider in values else "none",
+            vault_available=True,
+        ),
+    )
+    monkeypatch.setattr(
+        CredentialStore,
+        "token",
+        lambda self, provider="huggingface": values.get(provider),
+    )
+
+    def set_token(self: Any, value: str, provider: str = "huggingface") -> None:
+        values[provider] = value.strip()
+
+    monkeypatch.setattr(CredentialStore, "set_token", set_token)
+    received: list[str | None] = []
+    source = app.state.services.catalog_sources.get("civitai")
+    monkeypatch.setattr(source, "set_token", received.append)
+
+    response = await client.put("/api/credentials/civitai", json={"token": "civitai-secret"})
+
+    assert response.status_code == 200
+    assert received == ["civitai-secret"]
+
+
+async def test_the_preflight_route_refuses_unknown_sources_and_bad_ids(
+    client: AsyncClient,
+) -> None:
+    unknown = await client.post(
+        "/api/catalog/preflight",
+        params={"source": "nowhere", "id": "1"},
+        json={"revision": "main", "role": "image", "engine": "comfyui", "selected_files": []},
+    )
+    assert unknown.status_code == 404
+    assert unknown.json()["code"] == "catalog-source-unknown"
+
+    invalid = await client.post(
+        "/api/catalog/preflight",
+        params={"source": "civitai", "id": "../escape"},
+        json={"revision": "main", "role": "image", "engine": "comfyui", "selected_files": []},
+    )
+    assert invalid.status_code == 422
+    assert invalid.json()["code"] == "catalog-item-id-invalid"
+
+
+async def test_a_civitai_preflight_composes_into_the_download_manager(
+    client: AsyncClient, app: FastAPI, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """R238/R245: provider and both identities survive from the normalized
+    detail through the plan into the manager's own source synthesis, and the
+    request carries no catalog file sources - the immutable plan is the only
+    identity the manager accepts. No Hugging Face call anywhere."""
+
+    detail: dict[str, Any] = {
+        "model": {
+            "provider": "civitai",
+            "remote_id": "201",
+            "name": "Portrait LoRA - v1",
+            "author": "creator",
+            "pipeline_tag": "lora",
+            "tags": ["portrait"],
+            "downloads": 10,
+            "likes": 2,
+            "created_at": None,
+            "last_modified": None,
+            "gated": False,
+            "private": False,
+            "architecture": "SDXL 1.0",
+            "formats": ["safetensors"],
+            "quantizations": [],
+            "license_id": None,
+            "total_size_bytes": 1024,
+            "compatibility": "supported",
+            "compatibility_reasons": [],
+            "required_runtime": "comfyui",
+            "content_rating": "general",
+        },
+        "revision": "201",
+        # The exact shape production _normalize_files() emits: identities at
+        # the file top level; shared metadata carries the version and the
+        # provider's typed model_type, never the file id.
+        "files": [
+            {
+                "filename": "portrait.safetensors",
+                "size": 1024,
+                "sha256": SHA256,
+                "source_file_id": "301",
+                "source_version_id": "201",
+                "format": "SafeTensor",
+                "pickle_scan_result": "Success",
+                "virus_scan_result": "Success",
+                "metadata": {
+                    "provider": "civitai",
+                    "source_model_id": "101",
+                    "source_version_id": "201",
+                    "version_name": "v1",
+                    "published_at": None,
+                    "model_type": "LORA",
+                    "base_model": "SDXL 1.0",
+                    "base_models": ["SDXL 1.0"],
+                    "tags": ["portrait"],
+                    "trained_words": ["portrait-style"],
+                },
+            }
+        ],
+    }
+
+    async def canned_inspect(
+        self: CivitaiCatalog, item_id: str, revision: str = "main", role: str | None = None
+    ) -> dict[str, Any]:
+        return detail
+
+    monkeypatch.setattr(CivitaiCatalog, "inspect", canned_inspect)
+
+    # Without a token, even a public card blocks: the manager authenticates
+    # every CivitAI transfer, so preflight must say so before the queue.
+    monkeypatch.setattr(app.state.services.settings, "civitai_token", None)
+    refused = await client.post(
+        "/api/catalog/preflight",
+        params={"source": "civitai", "id": "201"},
+        json={
+            "revision": "201",
+            "role": "image",
+            "engine": "comfyui",
+            "selected_files": ["portrait.safetensors"],
+            "auxiliary_kind": "lora",
+        },
+    )
+    assert refused.status_code == 200
+    assert refused.json()["can_install"] is False
+    access = next(c for c in refused.json()["checks"] if c["id"] == "access")
+    assert access["status"] == "block"
+
+    monkeypatch.setattr(app.state.services.settings, "civitai_token", "vaulted-token")
+    response = await client.post(
+        "/api/catalog/preflight",
+        params={"source": "civitai", "id": "201"},
+        json={
+            "revision": "201",
+            "role": "image",
+            "engine": "comfyui",
+            "selected_files": ["portrait.safetensors"],
+            "auxiliary_kind": "lora",
+        },
+    )
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["can_install"] is True
+    plan_out = payload["install_plan"]
+    assert plan_out is not None
+    assert plan_out["provider"] == "civitai"
+    assert plan_out["compatibility"] == "supported"
+    (artifact,) = plan_out["artifacts_json"]
+    assert artifact["kind"] == "lora"
+    assert artifact["source_version_id"] == "201"
+    assert artifact["source_file_id"] == "301"
+    assert artifact["sha256"] == SHA256
+    # The manager accepts identity only from the immutable plan.
+    assert payload["file_sources"] == {}
+
+    from local_lm.api import _planned_download_fields
+    from local_lm.db import SessionLocal
+    from local_lm.models import InstallPlan
+    from local_lm.schemas import DownloadRequest
+
+    services = app.state.services
+    with SessionLocal() as session:
+        plan = session.get(InstallPlan, plan_out["id"])
+        assert plan is not None
+        fields = _planned_download_fields(plan)
+        assert fields["file_sources"] == {}
+        request = DownloadRequest.model_validate({**fields, "install_plan_id": plan.id})
+
+        def observed_start(*args: object, **kwargs: object) -> None:
+            return None
+
+        monkeypatch.setattr(services.downloads, "start", observed_start, raising=False)
+        job = services.downloads.create(session, request)
+        assert job.kind == "download"
+        siblings, sources, revision, extra = await services.downloads._download_sources(
+            request, plan
+        )
+    (sibling,) = siblings
+    assert sibling.rfilename == "portrait.safetensors"
+    assert sibling.size == 1024
+    source = sources["portrait.safetensors"]
+    assert source.provider == "civitai"
+    assert source.remote_id == "201"
+    assert source.source_file_id == "301"
+    assert revision == "201"
+    assert extra == {"source_version_id": "201"}
+
+
+async def test_installed_asset_manifests_feed_the_workflow_inventory(
+    client: AsyncClient,
+) -> None:
+    """A verified LoRA must not read as missing once installed (R240)."""
+
+    from local_lm.api import _local_asset_filenames
+    from local_lm.db import SessionLocal
+    from local_lm.models import ModelAssetInstall
+
+    with SessionLocal() as session:
+        session.add(
+            ModelAssetInstall(
+                name="portrait-lora",
+                kind="lora",
+                family="sdxl",
+                local_path="C:/data/assets/asset_123",
+                size_bytes=10,
+                manifest_json={
+                    "comfy_name": "portrait-style-v1.safetensors",
+                    "files": ["subdir/portrait-style-v1.safetensors"],
+                },
+                active=True,
+            )
+        )
+        session.commit()
+        names = _local_asset_filenames(session)
+
+    assert "portrait-style-v1.safetensors" in names
+    assert "subdir/portrait-style-v1.safetensors" in names

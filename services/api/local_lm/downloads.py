@@ -14,6 +14,7 @@ import subprocess
 import sys
 from collections.abc import Callable, Mapping
 from contextlib import suppress
+from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
 from types import SimpleNamespace
 from typing import TYPE_CHECKING, Any, Literal
@@ -85,6 +86,8 @@ if TYPE_CHECKING:
     from .processes import ProcessSupervisor
 
 _REMOTE_ID = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]*/[A-Za-z0-9][A-Za-z0-9_.-]*$")
+_CIVITAI_ID = re.compile(r"^[1-9][0-9]{0,11}$")
+_CIVITAI_ALLOWED_DOWNLOAD_HOSTS = ("civitai.com", "b2.civitai.com")
 _TRANSFER_ATTEMPTS = 3
 # How often a running transfer records a byte sample. Must stay comfortably
 # under the five-second window `progress._byte_rate` allows between samples,
@@ -99,6 +102,15 @@ _VISION_PROBE_DATA_URL = (
 )
 _ACTIVATION_PROBE_PNG = base64.b64decode(_VISION_PROBE_DATA_URL.partition(",")[2])
 _NUMBERED_WORKFLOW_INPUT_IMAGE = re.compile(r"input_image_(?P<index>\d{1,2})\Z")
+
+
+@dataclass(frozen=True)
+class _FileDownloadSource:
+    provider: Literal["huggingface", "civitai"]
+    remote_id: str
+    revision: str
+    filename: str
+    source_file_id: str | None = None
 
 
 def _workflow_source_image_count(compiled: CompiledComfyTemplate) -> int:
@@ -153,11 +165,31 @@ class DownloadManager:
         self.settings.hf_token = token
         self._api = HfApi(token=token)
 
-    def create(self, session: Session, request: DownloadRequest) -> Job:
-        if not _REMOTE_ID.fullmatch(request.remote_id):
-            raise ValueError("remote_id must be in owner/model form")
-        if request.source_remote_id and not _REMOTE_ID.fullmatch(request.source_remote_id):
-            raise ValueError("source_remote_id must be in owner/model form")
+    def validated_request(self, session: Session, request: DownloadRequest) -> DownloadRequest:
+        """Validate and normalize one request without any side effect.
+
+        Callers that queue several requests at once run this over every one
+        first, so a later refusal cannot leave earlier transfers already
+        started - a partial queue must never look like a total refusal.
+        """
+        plan = (
+            session.get(InstallPlan, request.install_plan_id) if request.install_plan_id else None
+        )
+        provider = str(plan.provider) if plan else "huggingface"
+        if provider == "civitai":
+            if not plan or not _CIVITAI_ID.fullmatch(request.remote_id):
+                raise ValueError("CivitAI downloads require a verified model-version plan")
+            if not _CIVITAI_ID.fullmatch(request.revision):
+                raise ValueError("CivitAI revision must be an exact model-version id")
+            if request.source_remote_id and not _CIVITAI_ID.fullmatch(request.source_remote_id):
+                raise ValueError("CivitAI source id must be an exact model-version id")
+        elif provider == "huggingface":
+            if not _REMOTE_ID.fullmatch(request.remote_id):
+                raise ValueError("remote_id must be in owner/model form")
+            if request.source_remote_id and not _REMOTE_ID.fullmatch(request.source_remote_id):
+                raise ValueError("source_remote_id must be in owner/model form")
+        else:
+            raise ValueError(f"unsupported download provider: {provider}")
         if request.auxiliary_kind and not request.install_plan_id:
             raise ValueError("auxiliary assets require a verified install plan")
         if request.role != "chat" and not request.comfy_paths:
@@ -207,6 +239,10 @@ class DownloadManager:
                 raise ValueError(f"unsupported ComfyUI model folder: {folder}")
             if path.is_absolute() or ".." in path.parts:
                 raise ValueError("ComfyUI model paths must be safe relative paths")
+        return request
+
+    def create(self, session: Session, request: DownloadRequest) -> Job:
+        request = self.validated_request(session, request)
         serialized_request = request.model_dump(mode="json")
         active_statuses = {
             JobStatus.QUEUED.value,
@@ -1084,71 +1120,13 @@ class DownloadManager:
                 else:
                     compiled_template = None
 
-                info = await asyncio.to_thread(
-                    self._api.model_info,
-                    request.remote_id,
-                    revision=request.revision,
-                    files_metadata=True,
-                )
-                siblings: list[Any] = list(info.siblings or [])
-                file_download_sources: dict[str, tuple[str, str, str]] = {}
-                for destination_name, file_source in request.file_sources.items():
-                    if (
-                        not self._safe_relative_filename(destination_name)
-                        or not self._safe_relative_filename(file_source.filename)
-                        or not _REMOTE_ID.fullmatch(file_source.remote_id)
-                    ):
-                        raise ValueError(
-                            "companion file source contains an unsafe path or model ID"
-                        )
-                    if any(
-                        str(getattr(sibling, "rfilename", "") or "") == destination_name
-                        for sibling in siblings
-                    ):
-                        raise ValueError("companion destination conflicts with the primary model")
-                    source_info = await asyncio.to_thread(
-                        self._api.model_info,
-                        file_source.remote_id,
-                        revision=file_source.revision,
-                        files_metadata=True,
-                    )
-                    resolved_source_revision = str(source_info.sha or file_source.revision)
-                    if resolved_source_revision != file_source.revision:
-                        raise ValueError("companion revision changed; run the install check again")
-                    source_sibling = next(
-                        (
-                            sibling
-                            for sibling in source_info.siblings or []
-                            if str(getattr(sibling, "rfilename", "") or "") == file_source.filename
-                        ),
-                        None,
-                    )
-                    if source_sibling is None:
-                        raise ValueError(
-                            "companion file is no longer present; run the install check again"
-                        )
-                    live_size = int(getattr(source_sibling, "size", 0) or 0)
-                    live_sha256 = self._sibling_sha256(source_sibling)
-                    if file_source.size_bytes is not None and live_size != file_source.size_bytes:
-                        raise ValueError("companion size changed; run the install check again")
-                    if (
-                        file_source.sha256
-                        and live_sha256
-                        and file_source.sha256.lower() != live_sha256
-                    ):
-                        raise ValueError("companion SHA-256 changed; run the install check again")
-                    siblings.append(
-                        SimpleNamespace(
-                            rfilename=destination_name,
-                            size=live_size,
-                            lfs={"sha256": live_sha256} if live_sha256 else None,
-                        )
-                    )
-                    file_download_sources[destination_name] = (
-                        file_source.remote_id,
-                        resolved_source_revision,
-                        file_source.filename,
-                    )
+                download_provider = str(plan.provider) if plan else "huggingface"
+                (
+                    siblings,
+                    file_download_sources,
+                    revision,
+                    source_metadata,
+                ) = await self._download_sources(request, plan)
                 filenames = self._select_files(request, siblings)
                 if not filenames:
                     raise ValueError("no files matched the requested model selection")
@@ -1172,12 +1150,6 @@ class DownloadManager:
                         f"have {free_bytes:,}"
                     )
 
-                revision = str(info.sha or request.revision)
-                for filename in filenames:
-                    file_download_sources.setdefault(
-                        filename,
-                        (request.remote_id, revision, filename),
-                    )
                 staging_key = (
                     f"plan-{plan.plan_hash}" if request.install_plan_id and plan else job_id
                 )
@@ -1216,11 +1188,13 @@ class DownloadManager:
                 parallel_paths: dict[str, str] = {}
                 batch_sources = {file_download_sources[filename] for filename in missing_files}
                 can_batch_sources = len(batch_sources) == 1 and all(
-                    file_download_sources[filename][2] == filename for filename in missing_files
+                    file_download_sources[filename].provider == "huggingface"
+                    and file_download_sources[filename].filename == filename
+                    for filename in missing_files
                 )
                 if request.install_plan_id and len(missing_files) > 1 and can_batch_sources:
                     batch_size = sum(file_sizes.get(filename, 0) for filename in missing_files)
-                    batch_remote_id, batch_revision, _ = next(iter(batch_sources))
+                    batch_source = next(iter(batch_sources))
                     with SessionLocal() as session:
                         job = session.get(Job, job_id)
                         if not job or job.status == JobStatus.CANCELLED.value:
@@ -1240,9 +1214,9 @@ class DownloadManager:
                     await self.scheduler.publish_job(job_id)
                     parallel_paths = await self._download_files_parallel(
                         job_id=job_id,
-                        remote_id=batch_remote_id,
+                        remote_id=batch_source.remote_id,
                         filenames=missing_files,
-                        revision=batch_revision,
+                        revision=batch_source.revision,
                         staging=staging,
                         completed_bytes=completed_bytes,
                         total_size=total_size or None,
@@ -1294,23 +1268,24 @@ class DownloadManager:
                         downloaded_path = parallel_paths[filename]
                         actual_hash = None
                     else:
-                        source_remote_id, source_revision, source_filename = file_download_sources[
-                            filename
-                        ]
+                        file_source = file_download_sources[filename]
                         downloaded_path = await self._download_file(
                             job_id=job_id,
-                            remote_id=source_remote_id,
-                            filename=source_filename,
-                            revision=source_revision,
+                            provider=file_source.provider,
+                            remote_id=file_source.remote_id,
+                            filename=file_source.filename,
+                            revision=file_source.revision,
+                            source_file_id=file_source.source_file_id,
+                            expected_sha256=expected_hash,
                             staging=staging,
                             file_size=file_sizes.get(filename) or None,
                             completed_bytes=completed_bytes,
                             total_size=total_size or None,
                         )
-                        if source_filename != filename:
+                        if file_source.filename != filename:
                             downloaded_path = self._relocate_companion_download(
                                 staging=staging,
-                                source_filename=source_filename,
+                                source_filename=file_source.filename,
                                 destination_filename=filename,
                                 downloaded_path=downloaded_path,
                             )
@@ -1431,29 +1406,25 @@ class DownloadManager:
                         raise ValueError("an auxiliary install must contain one verified component")
                     component = inspection.components[0]
                     with SessionLocal() as session:
-                        source = session.scalar(
+                        model_source = session.scalar(
                             select(ModelSource).where(
-                                ModelSource.provider == "huggingface",
+                                ModelSource.provider == download_provider,
                                 ModelSource.remote_id == request.remote_id,
                                 ModelSource.revision == revision,
                             )
                         )
-                        if not source:
-                            source = ModelSource(
-                                provider="huggingface",
+                        if not model_source:
+                            model_source = ModelSource(
+                                provider=download_provider,
                                 remote_id=request.remote_id,
                                 revision=revision,
-                                metadata_json={
-                                    "pipeline_tag": info.pipeline_tag,
-                                    "tags": info.tags or [],
-                                    "gated": info.gated,
-                                },
+                                metadata_json=source_metadata,
                             )
-                            session.add(source)
+                            session.add(model_source)
                             session.flush()
                         asset = ModelAssetInstall(
                             id=new_id("asset"),
-                            source_id=source.id,
+                            source_id=model_source.id,
                             name=request.remote_id.rsplit("/", 1)[-1],
                             kind=request.auxiliary_kind,
                             family=component.family or inspection.family,
@@ -1542,29 +1513,25 @@ class DownloadManager:
                     return
 
                 with SessionLocal() as session:
-                    source = session.scalar(
+                    model_source = session.scalar(
                         select(ModelSource).where(
-                            ModelSource.provider == "huggingface",
+                            ModelSource.provider == download_provider,
                             ModelSource.remote_id == request.remote_id,
                             ModelSource.revision == revision,
                         )
                     )
-                    if not source:
-                        source = ModelSource(
-                            provider="huggingface",
+                    if not model_source:
+                        model_source = ModelSource(
+                            provider=download_provider,
                             remote_id=request.remote_id,
                             revision=revision,
-                            metadata_json={
-                                "pipeline_tag": info.pipeline_tag,
-                                "tags": info.tags or [],
-                                "gated": info.gated,
-                            },
+                            metadata_json=source_metadata,
                         )
-                        session.add(source)
+                        session.add(model_source)
                         session.flush()
                     install = ModelInstall(
                         id=new_id("model"),
-                        source_id=source.id,
+                        source_id=model_source.id,
                         name=request.remote_id.rsplit("/", 1)[-1],
                         role=request.role,
                         engine=request.engine,
@@ -2664,6 +2631,168 @@ class DownloadManager:
             with suppress(ProcessLookupError):
                 await asyncio.to_thread(worker.wait)
 
+    async def _download_sources(
+        self,
+        request: DownloadRequest,
+        plan: InstallPlan | None,
+    ) -> tuple[list[Any], dict[str, _FileDownloadSource], str, dict[str, Any]]:
+        provider = str(plan.provider) if plan else "huggingface"
+        if provider == "civitai":
+            if plan is None:
+                raise ValueError("CivitAI downloads require an immutable install plan")
+            return self._civitai_download_sources(request, plan)
+        if provider != "huggingface":
+            raise ValueError(f"unsupported download provider: {provider}")
+        return await self._huggingface_download_sources(request)
+
+    def _civitai_download_sources(
+        self,
+        request: DownloadRequest,
+        plan: InstallPlan,
+    ) -> tuple[list[Any], dict[str, _FileDownloadSource], str, dict[str, Any]]:
+        if (
+            plan.remote_id != request.remote_id
+            or plan.revision != request.revision
+            or not _CIVITAI_ID.fullmatch(plan.remote_id)
+            or not _CIVITAI_ID.fullmatch(plan.revision)
+        ):
+            raise ValueError("CivitAI request no longer matches its immutable plan")
+        if request.file_sources:
+            raise ValueError("CivitAI file sources must come from the immutable plan")
+        required = [item for item in plan.artifacts_json if item.get("required", True)]
+        planned_paths = [str(item.get("path") or "") for item in required]
+        if (
+            len(planned_paths) != len(set(planned_paths))
+            or set(planned_paths) != set(request.allow_patterns)
+            or any(not self._safe_relative_filename(path) for path in planned_paths)
+        ):
+            raise ValueError("CivitAI file selection no longer matches its immutable plan")
+        planned_hashes = {str(item.get("path") or ""): item.get("sha256") for item in required}
+        if planned_hashes != request.expected_sha256:
+            raise ValueError("CivitAI hashes no longer match the immutable plan")
+
+        siblings: list[Any] = []
+        sources: dict[str, _FileDownloadSource] = {}
+        for item in required:
+            filename = str(item["path"])
+            size = item.get("size_bytes")
+            digest = item.get("sha256")
+            version_id = str(item.get("source_version_id") or "")
+            file_id = str(item.get("source_file_id") or "")
+            if (
+                not isinstance(size, int)
+                or isinstance(size, bool)
+                or size <= 0
+                or not isinstance(digest, str)
+                or not re.fullmatch(r"[0-9a-f]{64}", digest)
+                or not _CIVITAI_ID.fullmatch(version_id)
+                or not _CIVITAI_ID.fullmatch(file_id)
+            ):
+                raise ValueError(
+                    "CivitAI artifact provenance is incomplete; run the install check again"
+                )
+            siblings.append(
+                SimpleNamespace(
+                    rfilename=filename,
+                    size=size,
+                    lfs={"sha256": digest},
+                )
+            )
+            sources[filename] = _FileDownloadSource(
+                provider="civitai",
+                remote_id=version_id,
+                revision=version_id,
+                filename=filename,
+                source_file_id=file_id,
+            )
+        return siblings, sources, plan.revision, {"source_version_id": plan.revision}
+
+    async def _huggingface_download_sources(
+        self,
+        request: DownloadRequest,
+    ) -> tuple[list[Any], dict[str, _FileDownloadSource], str, dict[str, Any]]:
+        info = await asyncio.to_thread(
+            self._api.model_info,
+            request.remote_id,
+            revision=request.revision,
+            files_metadata=True,
+        )
+        siblings: list[Any] = list(info.siblings or [])
+        sources: dict[str, _FileDownloadSource] = {}
+        for destination_name, file_source in request.file_sources.items():
+            if (
+                not self._safe_relative_filename(destination_name)
+                or not self._safe_relative_filename(file_source.filename)
+                or not _REMOTE_ID.fullmatch(file_source.remote_id)
+            ):
+                raise ValueError("companion file source contains an unsafe path or model ID")
+            if any(
+                str(getattr(sibling, "rfilename", "") or "") == destination_name
+                for sibling in siblings
+            ):
+                raise ValueError("companion destination conflicts with the primary model")
+            source_info = await asyncio.to_thread(
+                self._api.model_info,
+                file_source.remote_id,
+                revision=file_source.revision,
+                files_metadata=True,
+            )
+            resolved_source_revision = str(source_info.sha or file_source.revision)
+            if resolved_source_revision != file_source.revision:
+                raise ValueError("companion revision changed; run the install check again")
+            source_sibling = next(
+                (
+                    sibling
+                    for sibling in source_info.siblings or []
+                    if str(getattr(sibling, "rfilename", "") or "") == file_source.filename
+                ),
+                None,
+            )
+            if source_sibling is None:
+                raise ValueError("companion file is no longer present; run the install check again")
+            live_size = int(getattr(source_sibling, "size", 0) or 0)
+            live_sha256 = self._sibling_sha256(source_sibling)
+            if file_source.size_bytes is not None and live_size != file_source.size_bytes:
+                raise ValueError("companion size changed; run the install check again")
+            if file_source.sha256 and live_sha256 and file_source.sha256.lower() != live_sha256:
+                raise ValueError("companion SHA-256 changed; run the install check again")
+            siblings.append(
+                SimpleNamespace(
+                    rfilename=destination_name,
+                    size=live_size,
+                    lfs={"sha256": live_sha256} if live_sha256 else None,
+                )
+            )
+            sources[destination_name] = _FileDownloadSource(
+                provider="huggingface",
+                remote_id=file_source.remote_id,
+                revision=resolved_source_revision,
+                filename=file_source.filename,
+            )
+        revision = str(info.sha or request.revision)
+        for sibling in siblings:
+            filename = str(getattr(sibling, "rfilename", "") or "")
+            if filename:
+                sources.setdefault(
+                    filename,
+                    _FileDownloadSource(
+                        provider="huggingface",
+                        remote_id=request.remote_id,
+                        revision=revision,
+                        filename=filename,
+                    ),
+                )
+        return (
+            siblings,
+            sources,
+            revision,
+            {
+                "pipeline_tag": info.pipeline_tag,
+                "tags": info.tags or [],
+                "gated": info.gated,
+            },
+        )
+
     async def _download_files_parallel(
         self,
         *,
@@ -2817,9 +2946,12 @@ class DownloadManager:
         self,
         *,
         job_id: str,
+        provider: Literal["huggingface", "civitai"] = "huggingface",
         remote_id: str,
         filename: str,
         revision: str,
+        source_file_id: str | None = None,
+        expected_sha256: str | None = None,
         staging: Path,
         file_size: int | None = None,
         completed_bytes: int = 0,
@@ -2831,9 +2963,12 @@ class DownloadManager:
             try:
                 return await self._download_file_once(
                     job_id=job_id,
+                    provider=provider,
                     remote_id=remote_id,
                     filename=filename,
                     revision=revision,
+                    source_file_id=source_file_id,
+                    expected_sha256=expected_sha256,
                     staging=staging,
                     file_size=file_size,
                     completed_bytes=completed_bytes,
@@ -2869,15 +3004,56 @@ class DownloadManager:
         self,
         *,
         job_id: str,
+        provider: Literal["huggingface", "civitai"] = "huggingface",
         remote_id: str,
         filename: str,
         revision: str,
+        source_file_id: str | None = None,
+        expected_sha256: str | None = None,
         staging: Path,
         file_size: int | None = None,
         completed_bytes: int = 0,
         total_size: int | None = None,
     ) -> str:
-        """Run the blocking Hub transfer in a process that pause/cancel can terminate."""
+        """Run a blocking transfer in a process that pause/cancel can terminate."""
+        if provider == "civitai":
+            if (
+                not _CIVITAI_ID.fullmatch(remote_id)
+                or revision != remote_id
+                or not source_file_id
+                or not _CIVITAI_ID.fullmatch(source_file_id)
+                or not isinstance(file_size, int)
+                or isinstance(file_size, bool)
+                or file_size <= 0
+                or not expected_sha256
+                or not re.fullmatch(r"[0-9a-f]{64}", expected_sha256)
+            ):
+                raise ValueError("CivitAI transfer requires exact immutable file provenance")
+            if not self.settings.civitai_token:
+                raise ValueError("CivitAI credential is not configured")
+            worker_request = {
+                "kind": "https",
+                "url": (
+                    f"https://civitai.com/api/download/models/{revision}?fileId={source_file_id}"
+                ),
+                "filename": filename,
+                "local_dir": str(staging),
+                "expected_sha256": expected_sha256,
+                "expected_size": file_size,
+                "allowed_hosts": list(_CIVITAI_ALLOWED_DOWNLOAD_HOSTS),
+                "bearer_token": self.settings.civitai_token,
+            }
+        elif provider == "huggingface":
+            worker_request = {
+                "kind": "huggingface",
+                "repo_id": remote_id,
+                "filename": filename,
+                "revision": revision,
+                "local_dir": str(staging),
+                "token": self.settings.hf_token,
+            }
+        else:
+            raise ValueError(f"unsupported download provider: {provider}")
         creationflags = getattr(subprocess, "CREATE_NO_WINDOW", 0) if os.name == "nt" else 0
         environment = subprocess_environment(overrides={"HF_HUB_DISABLE_PROGRESS_BARS": "1"})
         process = subprocess.Popen(
@@ -2889,16 +3065,7 @@ class DownloadManager:
             creationflags=creationflags,
         )
         self._workers[job_id] = process
-        payload = json.dumps(
-            {
-                "kind": "huggingface",
-                "repo_id": remote_id,
-                "filename": filename,
-                "revision": revision,
-                "local_dir": str(staging),
-                "token": self.settings.hf_token,
-            }
-        ).encode()
+        payload = json.dumps(worker_request).encode()
         monitor_stop: asyncio.Event | None = None
         monitor: asyncio.Task[None] | None = None
         if file_size and total_size:
@@ -2930,14 +3097,14 @@ class DownloadManager:
                     await asyncio.to_thread(process.wait)
         if process.returncode:
             detail = stderr.decode(errors="replace").strip()
-            raise RuntimeError(detail[-2_000:] or "Hub download worker failed")
+            raise RuntimeError(detail[-2_000:] or "download worker failed")
         try:
             result = json.loads(stdout)
             path = result["path"]
         except (json.JSONDecodeError, KeyError, TypeError) as exc:
-            raise RuntimeError("Hub download worker returned an invalid response") from exc
+            raise RuntimeError("download worker returned an invalid response") from exc
         if not isinstance(path, str):
-            raise RuntimeError("Hub download worker returned an invalid path")
+            raise RuntimeError("download worker returned an invalid path")
         return path
 
     async def _monitor_transfer(

@@ -195,7 +195,17 @@ export const api = {
       delete_generated_media: String(deleteGeneratedMedia),
     });
     return request<void>(`/api/chats/${id}?${parameters}`, { method: "DELETE" });
-  },  createPromptHelper: (sourceChatId: string, draftPrompt: string) =>
+  },  openStudioSession: (sourceArtifactId: string, sourceChatId: string | null = null) =>
+    request<ChatDetail>("/api/studio/sessions", {
+      method: "POST",
+      body: JSON.stringify({
+        source_artifact_id: sourceArtifactId,
+        source_chat_id: sourceChatId,
+      }),
+    }),
+  studioSession: (sessionId: string) =>
+    request<ChatDetail>(`/api/studio/sessions/${encodeURIComponent(sessionId)}`),
+  createPromptHelper: (sourceChatId: string, draftPrompt: string) =>
     request<PromptHelperDetail>("/api/prompt-helpers", {
       method: "POST",
       body: JSON.stringify({ source_chat_id: sourceChatId, draft_prompt: draftPrompt }),
@@ -206,6 +216,14 @@ export const api = {
       method: "PATCH",
       body: JSON.stringify({ draft_prompt: draftPrompt }),
     }),
+  setResponseFeedback: (messageId: string, rating: "up" | "down" | null, revisionId: string | null = null) =>
+    request<{ message_id: string; response_revision_id: string | null; rating: "up" | "down" | null }>(
+      `/api/messages/${messageId}/feedback`,
+      {
+        method: "PUT",
+        body: JSON.stringify({ rating, response_revision_id: revisionId }),
+      },
+    ),
   deletePromptHelper: (id: string) =>
     request<void>(`/api/prompt-helpers/${id}`, { method: "DELETE" }),
   sendTurn: async (
@@ -482,11 +500,17 @@ export const api = {
       body: form,
     });
   },
-  artifacts: (kind = "", query = "") => {
+  artifacts: (kind = "", query = "", favorites = false) => {
     const parameters = new URLSearchParams({ query });
     if (kind) parameters.set("kind", kind);
+    if (favorites) parameters.set("favorites", "true");
     return request<ArtifactLibraryItem[]>(`/api/artifacts?${parameters}`);
   },
+  favoriteArtifact: (artifactId: string, favorite: boolean) =>
+    request<Artifact>(`/api/artifacts/${encodeURIComponent(artifactId)}`, {
+      method: "PATCH",
+      body: JSON.stringify({ favorite }),
+    }),
   artifactStorage: () => request<ArtifactStorageInfo>("/api/artifacts/storage"),
   cleanupArtifacts: (dryRun: boolean) =>
     request<ArtifactCleanupResult>("/api/artifacts/cleanup", {
@@ -503,8 +527,10 @@ export const api = {
     sort: string,
     cursor?: string | null,
     filters: Record<string, string> = {},
+    source = "huggingface",
   ) => {
     const parameters = new URLSearchParams({ query, role, sort });
+    if (source !== "huggingface") parameters.set("source", source);
     if (cursor) parameters.set("cursor", cursor);
     for (const [key, value] of Object.entries(filters)) if (value) parameters.set(key, value);
     return request<CatalogPage>(`/api/catalog?${parameters.toString()}`);
@@ -521,17 +547,28 @@ export const api = {
     selectedFiles: string[],
     auxiliaryKind: string | null = null,
     workflowTemplateId: string | null = null,
-  ) => request<CatalogPreflight>(`/api/catalog/${remoteId}/preflight`, {
-    method: "POST",
-    body: JSON.stringify({
+    provider = "huggingface",
+  ) => {
+    const body = JSON.stringify({
       role,
       engine,
       revision,
       selected_files: selectedFiles,
       auxiliary_kind: auxiliaryKind,
       workflow_template_id: workflowTemplateId,
-    }),
-  }),
+    });
+    if (provider !== "huggingface") {
+      const parameters = new URLSearchParams({ source: provider, id: remoteId });
+      return request<CatalogPreflight>(`/api/catalog/preflight?${parameters}`, {
+        method: "POST",
+        body,
+      });
+    }
+    return request<CatalogPreflight>(`/api/catalog/${remoteId}/preflight`, {
+      method: "POST",
+      body,
+    });
+  },
   recipes: () => request<ReferenceRecipe[]>("/api/recipes"),
   installRecipe: (recipeId: string) =>
     request<Job>(`/api/recipes/${encodeURIComponent(recipeId)}/install`, { method: "POST" }),

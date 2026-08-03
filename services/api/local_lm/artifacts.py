@@ -446,7 +446,10 @@ class ArtifactStore:
         reclaimed_bytes = 0
         for artifact in session.scalars(select(Artifact).order_by(Artifact.created_at)).all():
             metadata = dict(artifact.metadata_json)
-            if artifact.id in referenced:
+            # A favorite pins against the automatic sweep exactly like a live
+            # reference: never marked, never removed here. Explicit deletion
+            # is untouched - a user deleting a favorite means it.
+            if artifact.id in referenced or artifact.favorite:
                 if "unreferenced_at" in metadata and not dry_run:
                     metadata.pop("unreferenced_at", None)
                     artifact.metadata_json = metadata
