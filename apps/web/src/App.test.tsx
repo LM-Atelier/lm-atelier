@@ -3733,11 +3733,11 @@ describe("App", () => {
         reclaimed_bytes: 2048,
       };
     });
-    const confirm = vi.spyOn(window, "confirm").mockReturnValue(true);
     fireEvent.click(screen.getByRole("button", { name: "Delete observatory.png" }));
-    expect(confirm).toHaveBeenCalledWith(
-      "Permanently delete observatory.png and remove 1 appearance from chats?",
-    );
+    // The count of chat appearances is part of what is being lost, so the
+    // question states it rather than the user discovering it afterwards.
+    expect(screen.getByText(/removes 1 appearance from your chats/)).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "Delete permanently" }));
     await waitFor(() => expect(vi.mocked(api.deleteArtifact).mock.calls[0]?.[0]).toBe("sha256:image"));
     await waitFor(() => expect(screen.queryByText("observatory.png")).not.toBeInTheDocument());
   });
