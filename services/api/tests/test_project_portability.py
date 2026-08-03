@@ -15,6 +15,7 @@ from sqlalchemy.orm import Session
 from local_lm.artifacts import ArtifactStore
 from local_lm.config import Settings
 from local_lm.db import SessionLocal
+from local_lm.domain import Operation
 from local_lm.exports import _CAS_IMPORT_SESSION_KEY, ProjectExporter
 from local_lm.main import create_app
 from local_lm.models import (
@@ -26,6 +27,7 @@ from local_lm.models import (
     WorkflowRevision,
 )
 from local_lm.profile_service import AUTO_PROFILE_ID
+from local_lm.project_dependencies import DependencySourceIndex
 from local_lm.project_portability import (
     LOCAL_PATH_REDACTION,
     has_local_path,
@@ -764,6 +766,50 @@ def test_import_keeps_settings_the_registry_does_not_define() -> None:
 
 def _exporter() -> ProjectExporter:
     return ProjectExporter(Settings(), ArtifactStore(Settings()))
+
+
+def test_workflow_activation_provenance_exports_only_portable_digests() -> None:
+    exporter = _exporter()
+    dependencies = DependencySourceIndex(
+        profile_roles={},
+        preset_roles={},
+        revision_operations={"revision-source": "text_to_image"},
+        revision_workflow_ids={"revision-source": "workflow-source"},
+    )
+    provenance = {
+        "workflow": {
+            "revision_id": "revision-source",
+            "definition_id": "workflow-source",
+            "trusted": True,
+            "activation": {
+                "id": "wfact-local",
+                "resolver_version": "workflow-activation-v1",
+                "dependency_contract_sha256": "a" * 64,
+                "binding_sha256": "b" * 64,
+                "launch_sha256": "c" * 64,
+            },
+        }
+    }
+
+    portable = exporter._portable_provenance(
+        provenance,
+        Operation.TEXT_TO_IMAGE,
+        dependencies,
+        set(),
+    )
+
+    assert portable["workflow"]["activation"] == {
+        "resolver_version": "workflow-activation-v1",
+        "dependency_contract_sha256": "a" * 64,
+        "binding_sha256": "b" * 64,
+    }
+    with pytest.raises(ValueError, match="local workflow activation"):
+        exporter._validate_portable_provenance(
+            provenance,
+            Operation.TEXT_TO_IMAGE,
+            dependencies,
+            set(),
+        )
 
 
 def _field(key: str, kind: str = "number", **extra: object) -> SettingField:

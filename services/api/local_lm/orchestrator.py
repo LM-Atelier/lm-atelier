@@ -99,6 +99,7 @@ from .models import (
     ResponseRevisionPart,
     Run,
     TurnCreationClaim,
+    WorkflowActivation,
     WorkflowDefinition,
     WorkflowRevision,
     WorkPlan,
@@ -144,6 +145,12 @@ from .visual_prompt_compiler import (
     visual_prompt_compilation_eligibility,
 )
 from .work_plans import plan_status_summary, refresh_plan_status
+from .workflow_activations import (
+    WorkflowActivationError,
+    WorkflowActivationLaunchScope,
+    materialize_comfy_runtime_dependency,
+    revalidate_workflow_activation,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -171,6 +178,45 @@ def _fresh_media_seed(excluding: object = None) -> int:
         candidate = secrets.randbelow(MEDIA_SEED_SPACE - 1)
         return candidate if candidate < excluding else candidate + 1
     return secrets.randbelow(MEDIA_SEED_SPACE)
+
+
+def _queued_workflow_activation(
+    session: Session,
+    revision: WorkflowRevision | None,
+) -> dict[str, str] | None:
+    """Freeze the current ready activation when a contract-backed step is admitted."""
+
+    if revision is None or revision.dependency_contract_sha256 is None:
+        return None
+    activation = session.scalar(
+        select(WorkflowActivation).where(
+            WorkflowActivation.workflow_revision_id == revision.id,
+            WorkflowActivation.is_active.is_(True),
+            WorkflowActivation.state == "ready",
+        )
+    )
+    launch_sha256 = (
+        activation.details_json.get("launch_sha256")
+        if activation is not None and isinstance(activation.details_json, dict)
+        else None
+    )
+    if (
+        activation is None
+        or activation.dependency_contract_sha256 != revision.dependency_contract_sha256
+        or not isinstance(launch_sha256, str)
+        or re.fullmatch(r"[0-9a-f]{64}", launch_sha256) is None
+    ):
+        raise ValueError(
+            "The selected workflow dependencies are not ready. Review and activate the "
+            "workflow before generating."
+        )
+    return {
+        "id": activation.id,
+        "resolver_version": activation.resolver_version,
+        "dependency_contract_sha256": activation.dependency_contract_sha256,
+        "binding_sha256": activation.binding_sha256,
+        "launch_sha256": launch_sha256,
+    }
 
 
 class ResponseRevisionConflict(ValueError):
@@ -852,6 +898,7 @@ class ConversationOrchestrator:
                     "No ready workflow matches the active media engine. Install a supported "
                     "image or video model and LM Atelier will configure it automatically."
                 )
+        workflow_activation = _queued_workflow_activation(session, workflow_revision)
         role = self._role_for_operation(plan.operation)
         engine = (
             profile.engine if profile else workflow_revision.engine if workflow_revision else None
@@ -1146,6 +1193,7 @@ class ConversationOrchestrator:
                 "engine_version": workflow_revision.engine_version,
                 "trusted": workflow_revision.trusted,
                 "dependencies": workflow_revision.dependencies_json,
+                "activation": workflow_activation,
             }
             if workflow_revision
             else None
@@ -1549,6 +1597,7 @@ class ConversationOrchestrator:
                     raise ValueError(
                         f"Ordered step {index + 1} is not ready: " + "; ".join(dependency_errors)
                     )
+            workflow_activation = _queued_workflow_activation(session, workflow_revision)
             role = self._role_for_operation(operation)
             engine = (
                 profile.engine
@@ -1686,6 +1735,7 @@ class ConversationOrchestrator:
                     "profile_id": profile_id,
                     "vision_profile_id": vision_profile.id if vision_profile else None,
                     "workflow": workflow_revision,
+                    "workflow_activation": workflow_activation,
                     "role": role,
                     "settings": effective_settings,
                     "model_selection": model_selection,
@@ -1894,6 +1944,7 @@ class ConversationOrchestrator:
                     "engine_version": workflow_revision.engine_version,
                     "trusted": workflow_revision.trusted,
                     "dependencies": workflow_revision.dependencies_json,
+                    "activation": resolved["workflow_activation"],
                 }
                 if workflow_revision
                 else None
@@ -3354,6 +3405,7 @@ class ConversationOrchestrator:
 
         selected_chat_profile_id, queued_text_next = self._handoff_chat_target(chat_profile_id)
         recycle_managed_media = False
+        recycled_activation_scope = False
         try:
             media_worker = next(item for item in self.processes.statuses() if item.name == "media")
             if self.engines.settings.media_engine == "comfyui" and media_worker.managed:
@@ -3363,6 +3415,8 @@ class ConversationOrchestrator:
                 # stalled before sampling. A managed worker recycle releases
                 # both VRAM and host allocations while preserving the automatic
                 # Ready media service expected by the desktop application.
+                launch_scope = getattr(self.processes, "launch_scope_sha256", None)
+                recycled_activation_scope = bool(launch_scope and launch_scope("media") is not None)
                 await self.processes.stop("media")
                 recycle_managed_media = True
         except Exception:
@@ -3376,6 +3430,11 @@ class ConversationOrchestrator:
         # CPU. Once chat is ready, warm the empty ComfyUI service in a tracked
         # background task so the queued text job can proceed immediately.
         await self._resume_chat_worker(selected_chat_profile_id)
+        if recycled_activation_scope:
+            # A broad empty-worker restart would expose dependencies outside the
+            # activation that just ran. The next contract-backed media step will
+            # revalidate and start its own exact scope instead.
+            return
         if queued_text_next:
             self._media_restart_after_chat_activity = True
         else:
@@ -3429,6 +3488,13 @@ class ConversationOrchestrator:
             or next_step.status != JobStatus.QUEUED.value
         ):
             return
+        next_revision_id = getattr(next_step, "workflow_revision_id", None)
+        if next_revision_id:
+            next_revision = session.get(WorkflowRevision, next_revision_id)
+            if next_revision and next_revision.dependency_contract_sha256 is not None:
+                # Legacy prewarm has no activation scope. Do not broaden a
+                # contract-backed successor merely to hide startup latency.
+                return
         media_worker = next(
             (item for item in self.processes.statuses() if item.name == "media"), None
         )
@@ -3492,6 +3558,7 @@ class ConversationOrchestrator:
         *,
         job_id: str | None = None,
         run_id: str | None = None,
+        activation_scope: WorkflowActivationLaunchScope | None = None,
     ) -> None:
         restart_task = self._media_restart_task
         if restart_task and not restart_task.done():
@@ -3499,15 +3566,86 @@ class ConversationOrchestrator:
                 await self._set_media_phase(job_id, run_id, "Waiting for media worker")
             await asyncio.shield(restart_task)
         status = next(item for item in self.processes.statuses() if item.name == "media")
-        if not status.running or status.state != "ready":
+        if activation_scope is not None or not status.running or status.state != "ready":
             if job_id and run_id:
 
                 async def report_phase(phase: str) -> None:
                     await self._set_media_phase(job_id, run_id, phase)
 
-                await self.processes.start_media(phase_callback=report_phase)
+                if activation_scope is not None:
+                    await self.processes.start_media(
+                        phase_callback=report_phase,
+                        activation_scope=activation_scope,
+                    )
+                else:
+                    await self.processes.start_media(phase_callback=report_phase)
             else:
-                await self.processes.start_media()
+                if activation_scope is not None:
+                    await self.processes.start_media(activation_scope=activation_scope)
+                else:
+                    await self.processes.start_media()
+
+    def _media_activation_scope(
+        self,
+        session: Session,
+        run: Run,
+    ) -> WorkflowActivationLaunchScope | None:
+        revision = (
+            session.get(WorkflowRevision, run.workflow_revision_id)
+            if run.workflow_revision_id
+            else None
+        )
+        if revision is None or revision.dependency_contract_sha256 is None:
+            return None
+        workflow = run.provenance_json.get("workflow")
+        snapshot = workflow.get("activation") if isinstance(workflow, dict) else None
+        required = (
+            "id",
+            "resolver_version",
+            "dependency_contract_sha256",
+            "binding_sha256",
+            "launch_sha256",
+        )
+        if not isinstance(snapshot, dict) or any(
+            not isinstance(snapshot.get(key), str) or not snapshot[key] for key in required
+        ):
+            raise RuntimeError("Queued workflow activation provenance is invalid")
+        activation = session.get(WorkflowActivation, snapshot["id"])
+        if (
+            activation is None
+            or activation.workflow_revision_id != revision.id
+            or activation.resolver_version != snapshot["resolver_version"]
+            or activation.dependency_contract_sha256 != snapshot["dependency_contract_sha256"]
+            or activation.binding_sha256 != snapshot["binding_sha256"]
+        ):
+            raise RuntimeError("Queued workflow activation no longer matches its snapshot")
+        provisioner = self.processes.runtimes
+        runtime_materializer = (
+            (
+                lambda requirement, selection: materialize_comfy_runtime_dependency(
+                    provisioner,
+                    requirement,
+                    selection,
+                )
+            )
+            if provisioner is not None
+            else None
+        )
+        try:
+            scope = revalidate_workflow_activation(
+                session,
+                activation,
+                runtime_materializer=runtime_materializer,
+                custom_node_root=self.engines.settings.custom_node_dir,
+                registry_environment_root=(
+                    self.engines.settings.state_dir / "registry-wheel-environments"
+                ),
+            )
+        except WorkflowActivationError as exc:
+            raise RuntimeError(f"Workflow activation is unavailable ({exc.code})") from exc
+        if scope.launch_sha256 != snapshot["launch_sha256"]:
+            raise RuntimeError("Queued workflow activation launch identity changed")
+        return scope
 
     async def _successful_media_capabilities(self) -> EngineCapabilities | None:
         try:
@@ -3610,8 +3748,23 @@ class ConversationOrchestrator:
         return evidence.evidence_key
 
     async def _execute_media(self, job_id: str, run_id: str) -> str | None:
+        activation_scope: WorkflowActivationLaunchScope | None = None
         if self.engines.settings.media_engine == "comfyui":
-            await self._ensure_media_worker(job_id=job_id, run_id=run_id)
+            with self.session_factory() as session:
+                run = session.get(Run, run_id)
+                if not run:
+                    return None
+                try:
+                    activation_scope = self._media_activation_scope(session, run)
+                except Exception:
+                    session.commit()
+                    raise
+                session.commit()
+            await self._ensure_media_worker(
+                job_id=job_id,
+                run_id=run_id,
+                activation_scope=activation_scope,
+            )
         await self._set_media_phase(job_id, run_id, "Validating media workflow")
         with self.session_factory() as session:
             run = session.get(Run, run_id)

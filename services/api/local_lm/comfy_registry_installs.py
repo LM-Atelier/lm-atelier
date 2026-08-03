@@ -2,9 +2,10 @@ from __future__ import annotations
 
 import re
 import stat
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
+from typing import TYPE_CHECKING
 from urllib.parse import urlparse
 
 from sqlalchemy import select
@@ -30,6 +31,9 @@ from .comfy_registry_wheel_environments import (
     verify_comfy_registry_wheel_environment,
 )
 from .models import ComfyRegistryInstall
+
+if TYPE_CHECKING:
+    from .workflow_activations import WorkflowRegistryLaunchBinding
 
 _PACKAGE_ID = re.compile(r"^[a-z0-9][a-z0-9._-]{0,99}$")
 _SEMANTIC_VERSION = re.compile(r"^[0-9]+\.[0-9]+\.[0-9]+(?:[-+][0-9A-Za-z.-]+)?$")
@@ -207,6 +211,48 @@ def trusted_comfy_registry_launch_contract(
         )
         .order_by(ComfyRegistryInstall.installed_path)
     ).all()
+    return _verified_comfy_registry_launch_contract(
+        installs,
+        custom_node_root=custom_node_root,
+        environment_root=environment_root,
+    )
+
+
+def scoped_comfy_registry_launch_contract(
+    session: Session,
+    bindings: Sequence[WorkflowRegistryLaunchBinding],
+    *,
+    custom_node_root: Path,
+    environment_root: Path,
+) -> ComfyRegistryLaunchContract:
+    """Revalidate only the exact Registry packages frozen into one activation."""
+
+    installs: list[ComfyRegistryInstall] = []
+    seen: set[str] = set()
+    for binding in bindings:
+        if binding.registry_install_id in seen:
+            raise ComfyRegistryInstallError("Registry launch scope contains duplicate packages")
+        seen.add(binding.registry_install_id)
+        install = session.get(ComfyRegistryInstall, binding.registry_install_id)
+        if install is None or not install.trusted or not install.active:
+            raise ComfyRegistryInstallError("Registry launch scope package is unavailable")
+        _assert_scoped_registry_identity(install, binding)
+        installs.append(install)
+    return _verified_comfy_registry_launch_contract(
+        installs,
+        custom_node_root=custom_node_root,
+        environment_root=environment_root,
+        expected_bindings={item.registry_install_id: item for item in bindings},
+    )
+
+
+def _verified_comfy_registry_launch_contract(
+    installs: Sequence[ComfyRegistryInstall],
+    *,
+    custom_node_root: Path,
+    environment_root: Path,
+    expected_bindings: Mapping[str, WorkflowRegistryLaunchBinding] | None = None,
+) -> ComfyRegistryLaunchContract:
     if not installs:
         return ComfyRegistryLaunchContract((), (), ())
     node_root = _managed_root(custom_node_root)
@@ -216,6 +262,9 @@ def trusted_comfy_registry_launch_contract(
     node_types: set[str] = set()
     for install in installs:
         folder = _registry_node_path(node_root, install.installed_path)
+        expected = expected_bindings.get(install.id) if expected_bindings else None
+        if expected is not None and folder != expected.installed_path:
+            raise ComfyRegistryInstallError("Registry launch scope node path changed")
         review = _activation_review(install.review_json)
         try:
             verify_staged_comfy_registry_archive(
@@ -236,6 +285,8 @@ def trusted_comfy_registry_launch_contract(
             wheel_root,
             wheel_root / install.wheel_environment_path,
         )
+        if expected is not None and environment / "site-packages" != expected.site_packages:
+            raise ComfyRegistryInstallError("Registry launch scope environment path changed")
         try:
             verify_comfy_registry_wheel_environment(
                 environment,
@@ -255,6 +306,37 @@ def trusted_comfy_registry_launch_contract(
         tuple(sorted(site_packages)),
         tuple(sorted(node_types)),
     )
+
+
+def _assert_scoped_registry_identity(
+    install: ComfyRegistryInstall,
+    binding: WorkflowRegistryLaunchBinding,
+) -> None:
+    expected = (
+        binding.package_id,
+        binding.package_version,
+        binding.archive_sha256,
+        binding.manifest_sha256,
+        binding.wheel_closure_sha256,
+        binding.wheel_environment_sha256,
+        binding.node_types,
+    )
+    actual = (
+        install.package_id,
+        install.package_version,
+        install.archive_sha256.lower(),
+        install.manifest_sha256.lower(),
+        str(install.wheel_closure_sha256).lower(),
+        str(install.wheel_environment_sha256).lower(),
+        tuple(
+            sorted(
+                _node_types(install.node_types_json),
+                key=lambda item: (item.casefold(), item),
+            )
+        ),
+    )
+    if actual != expected:
+        raise ComfyRegistryInstallError("Registry launch scope identity changed")
 
 
 def _identity(
