@@ -32,6 +32,7 @@ from local_lm.model_planner import (
     resolve_install_plan,
 )
 from local_lm.models import (
+    InstallPlan,
     Job,
     ModelAssetInstall,
     ModelCapabilityEvidence,
@@ -1037,6 +1038,220 @@ async def test_download_worker_receives_token_over_stdin_not_command_line(
     assert "GITHUB_TOKEN" not in environments[0]
     assert "AWS_SECRET_ACCESS_KEY" not in environments[0]
     assert "job_test" not in manager._workers
+
+
+def _civitai_plan(*, artifact: dict[str, Any]) -> InstallPlan:
+    return InstallPlan(
+        id="plan_civitai",
+        provider="civitai",
+        remote_id="202",
+        revision="202",
+        role="image",
+        engine="comfyui",
+        plan_hash="f" * 64,
+        resolver_version="test",
+        compatibility="ready",
+        artifacts_json=[artifact],
+        runtime_contract_json={},
+        activation_probe_json={},
+    )
+
+
+def _civitai_request(*, digest: str) -> DownloadRequest:
+    return DownloadRequest(
+        install_plan_id="plan_civitai",
+        remote_id="202",
+        revision="202",
+        role="image",
+        engine="comfyui",
+        allow_patterns=["model.safetensors"],
+        expected_sha256={"model.safetensors": digest},
+        comfy_paths={"checkpoints": "."},
+    )
+
+
+async def test_civitai_sources_come_only_from_the_immutable_plan(
+    settings: Settings,
+) -> None:
+    digest = "a" * 64
+    plan = _civitai_plan(
+        artifact={
+            "path": "model.safetensors",
+            "required": True,
+            "size_bytes": 17,
+            "sha256": digest,
+            "source_version_id": "202",
+            "source_file_id": "303",
+        }
+    )
+    manager = DownloadManager(settings, EventBroker())
+    manager._api = SimpleNamespace(
+        model_info=lambda *_args, **_kwargs: pytest.fail(
+            "CivitAI provenance must not be re-resolved through Hugging Face"
+        )
+    )  # type: ignore[assignment]
+
+    siblings, sources, revision, metadata = await manager._download_sources(
+        _civitai_request(digest=digest),
+        plan,
+    )
+
+    assert revision == "202"
+    assert metadata == {"source_version_id": "202"}
+    assert [(item.rfilename, item.size, item.lfs) for item in siblings] == [
+        ("model.safetensors", 17, {"sha256": digest})
+    ]
+    source = sources["model.safetensors"]
+    assert source.provider == "civitai"
+    assert source.remote_id == "202"
+    assert source.revision == "202"
+    assert source.filename == "model.safetensors"
+    assert source.source_file_id == "303"
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("size_bytes", None),
+        ("size_bytes", True),
+        ("sha256", "A" * 64),
+        ("source_version_id", "latest"),
+        ("source_file_id", ""),
+    ],
+)
+def test_civitai_sources_reject_incomplete_provenance(
+    settings: Settings,
+    field: str,
+    value: object,
+) -> None:
+    digest = "a" * 64
+    artifact: dict[str, Any] = {
+        "path": "model.safetensors",
+        "required": True,
+        "size_bytes": 17,
+        "sha256": digest,
+        "source_version_id": "202",
+        "source_file_id": "303",
+    }
+    artifact[field] = value
+    request_digest = str(artifact["sha256"])
+    manager = DownloadManager(settings, EventBroker())
+
+    with pytest.raises(ValueError, match="provenance is incomplete"):
+        manager._civitai_download_sources(
+            _civitai_request(digest=request_digest),
+            _civitai_plan(artifact=artifact),
+        )
+
+
+async def test_civitai_download_worker_receives_a_verified_redacted_envelope(
+    settings: Settings,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    manager = DownloadManager(settings, EventBroker())
+    manager.settings.civitai_token = "secret-civitai-token"
+    workers: list[FakeCompletedWorker] = []
+    environments: list[dict[str, str]] = []
+
+    def fake_popen(command: list[str], **kwargs: Any) -> FakeCompletedWorker:
+        worker = FakeCompletedWorker(command)
+        workers.append(worker)
+        environments.append(kwargs["env"])
+        return worker
+
+    monkeypatch.setenv("CIVITAI_TOKEN", "inherited-civitai-token")
+    monkeypatch.setenv("GITHUB_TOKEN", "inherited-github-token")
+    monkeypatch.setattr("local_lm.downloads.subprocess.Popen", fake_popen)
+    path = await manager._download_file(
+        job_id="job_civitai",
+        provider="civitai",
+        remote_id="202",
+        revision="202",
+        source_file_id="303",
+        filename="model.safetensors",
+        expected_sha256="a" * 64,
+        file_size=17,
+        staging=Path("C:/staging"),
+    )
+
+    assert path == "C:/models/model.gguf"
+    assert "secret-civitai-token" not in " ".join(workers[0].command)
+    assert json.loads(workers[0].payload) == {
+        "kind": "https",
+        "url": "https://civitai.com/api/download/models/202?fileId=303",
+        "filename": "model.safetensors",
+        "local_dir": str(Path("C:/staging")),
+        "expected_sha256": "a" * 64,
+        "expected_size": 17,
+        "allowed_hosts": ["civitai.com", "b2.civitai.com"],
+        "bearer_token": "secret-civitai-token",
+    }
+    assert "CIVITAI_TOKEN" not in environments[0]
+    assert "GITHUB_TOKEN" not in environments[0]
+    assert "job_civitai" not in manager._workers
+
+
+@pytest.mark.parametrize(
+    ("field", "value", "message"),
+    [
+        ("source_file_id", "latest", "exact immutable file provenance"),
+        ("file_size", 0, "exact immutable file provenance"),
+        ("expected_sha256", "A" * 64, "exact immutable file provenance"),
+    ],
+)
+async def test_civitai_worker_rejects_unverified_inputs_before_spawn(
+    settings: Settings,
+    monkeypatch: pytest.MonkeyPatch,
+    field: str,
+    value: object,
+    message: str,
+) -> None:
+    manager = DownloadManager(settings, EventBroker())
+    manager.settings.civitai_token = "secret-civitai-token"
+    values: dict[str, Any] = {
+        "job_id": "job_civitai",
+        "provider": "civitai",
+        "remote_id": "202",
+        "revision": "202",
+        "source_file_id": "303",
+        "filename": "model.safetensors",
+        "expected_sha256": "a" * 64,
+        "file_size": 17,
+        "staging": Path("C:/staging"),
+    }
+    values[field] = value
+    monkeypatch.setattr(
+        "local_lm.downloads.subprocess.Popen",
+        lambda *_args, **_kwargs: pytest.fail("invalid input must not spawn a worker"),
+    )
+
+    with pytest.raises(ValueError, match=message):
+        await manager._download_file(**values)
+
+
+async def test_civitai_worker_requires_a_configured_credential(
+    settings: Settings,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    manager = DownloadManager(settings, EventBroker())
+    manager.settings.civitai_token = None
+    monkeypatch.setattr(
+        "local_lm.downloads.subprocess.Popen",
+        lambda *_args, **_kwargs: pytest.fail("missing credentials must not spawn a worker"),
+    )
+
+    with pytest.raises(ValueError, match="credential is not configured"):
+        await manager._download_file(
+            job_id="job_civitai",
+            provider="civitai",
+            remote_id="202",
+            revision="202",
+            source_file_id="303",
+            filename="model.safetensors",
+            expected_sha256="a" * 64,
+            file_size=17,
+            staging=Path("C:/staging"),
+        )
 
 
 async def test_planned_components_use_one_bounded_parallel_worker(
