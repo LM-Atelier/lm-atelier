@@ -12,6 +12,19 @@ const STUDIO_SESSION_KEY = "local-lm-studio-session";
  * first - rather than as messages. Applies are ordinary turns underneath;
  * the surface only ever sees pictures and the instruction that made each.
  */
+export type StudioMaskUpload = {
+  /** The mask raster as PNG alpha, at the source image's resolution. */
+  blob: Blob;
+  featherPx: number;
+  invert: boolean;
+};
+
+type StudioApply = {
+  instruction: string;
+  artifactId: string;
+  mask?: StudioMaskUpload;
+};
+
 export type StudioStep = {
   messageId: string;
   artifactId: string;
@@ -50,8 +63,13 @@ export function useStudioSession(sourceArtifactId: string | null, sourceChatId: 
   });
 
   const apply = useMutation({
-    mutationFn: ({ instruction, artifactId }: { instruction: string; artifactId: string }) =>
-      api.sendTurn(sessionId!, instruction, "image", [artifactId], {}),
+    mutationFn: async ({ instruction, artifactId, mask }: StudioApply) => {
+      // The mask uploads as its own artifact and travels in settings, not in
+      // input_artifact_ids: a selection is instruction, not content, so it
+      // must never render as an attachment or count toward edit lineage.
+      const settings = mask ? { mask: await uploadMask(mask) } : {};
+      return api.sendTurn(sessionId!, instruction, "image", [artifactId], settings);
+    },
     onSuccess: () => void client.invalidateQueries({ queryKey: ["studio-session", sessionId] }),
   });
 
@@ -61,7 +79,20 @@ export function useStudioSession(sourceArtifactId: string | null, sourceChatId: 
     steps: session.data ? studioSteps(session.data, sourceArtifactId) : [],
     busy: apply.isPending || hasPendingWork(session.data),
     error: open.error ?? session.error ?? apply.error,
-    apply: (instruction: string, artifactId: string) => apply.mutate({ instruction, artifactId }),
+    apply: (instruction: string, artifactId: string, mask?: StudioMaskUpload) =>
+      apply.mutate({ instruction, artifactId, mask }),
+  };
+}
+
+export const uploadMaskForTest = uploadMask;
+
+async function uploadMask(mask: StudioMaskUpload) {
+  const file = new File([mask.blob], "studio-selection.png", { type: "image/png" });
+  const artifact = await api.upload(file);
+  return {
+    artifact_id: artifact.id,
+    feather_px: mask.featherPx,
+    invert: mask.invert,
   };
 }
 
