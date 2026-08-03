@@ -151,6 +151,14 @@ from .workflow_activations import (
     materialize_comfy_runtime_dependency,
     revalidate_workflow_activation,
 )
+from .workflow_compatibility import (
+    ChatSelectorCapability,
+    ProjectSelectorCapability,
+    WorkflowSelectionInvalid,
+    mirror_legacy_project_workflow_selections,
+    resolve_chat_workflow_selection,
+    resolve_project_workflow_selection,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -5416,12 +5424,15 @@ class ConversationOrchestrator:
         operation: Operation,
         prompt: str,
     ) -> tuple[ModelProfile | None, dict[str, Any]]:
+        capability: ChatSelectorCapability
         if operation == Operation.TEXT:
-            selected_id = chat.active_chat_profile_id
+            capability = "chat"
         elif "image" in operation.value and "video" not in operation.value:
-            selected_id = chat.active_image_profile_id
+            capability = "image"
         else:
-            selected_id = chat.active_video_profile_id
+            capability = "video"
+        workflow_selection = resolve_chat_workflow_selection(session, chat, capability)
+        selected_id = workflow_selection.profile_id
         role = cls._role_for_operation(operation)
         profiles = list(
             session.scalars(
@@ -5438,6 +5449,7 @@ class ConversationOrchestrator:
                     "mode": "explicit",
                     "profile_id": selected.id,
                     "profile_name": selected.name,
+                    "workflow_family_id": workflow_selection.workflow_family_id,
                 }
 
         default = next((profile for profile in profiles if profile.is_default), None)
@@ -5446,6 +5458,7 @@ class ConversationOrchestrator:
                 "mode": "default",
                 "profile_id": default.id if default else None,
                 "profile_name": default.name if default else None,
+                "workflow_family_id": workflow_selection.workflow_family_id,
             }
 
         installed = [
@@ -5466,6 +5479,7 @@ class ConversationOrchestrator:
             "profile_id": selected.id if selected else None,
             "profile_name": selected.name if selected else None,
             "profile_use_case": selected.use_case if selected else "",
+            "workflow_family_id": workflow_selection.workflow_family_id,
             "score": score,
             "matched_terms": matches,
             "fallback": score == 0,
@@ -5574,11 +5588,9 @@ class ConversationOrchestrator:
         project = session.get(Project, project_id) if project_id else None
         if not project or operation == Operation.TEXT:
             return None
-        return (
-            project.video_workflow_revision_id
-            if "video" in operation.value
-            else project.image_workflow_revision_id
-        )
+        capability: ProjectSelectorCapability = "video" if "video" in operation.value else "image"
+        selection = resolve_project_workflow_selection(session, project, capability)
+        return selection.workflow_revision_id
 
     def _profile_has_verified_vision(self, session: Session, profile: ModelProfile) -> bool:
         if not profile.model_install_id:
@@ -5650,7 +5662,7 @@ class ConversationOrchestrator:
             and install.active
             and self._profile_has_verified_vision(session, profile)
         ]
-        selected_id = chat.active_vision_profile_id
+        selected_id = resolve_chat_workflow_selection(session, chat, "vision").profile_id
         if selected_id and selected_id != AUTO_PROFILE_ID:
             return next((profile for profile in verified if profile.id == selected_id), None)
         if selected_id == AUTO_PROFILE_ID:
@@ -5941,13 +5953,20 @@ class ConversationOrchestrator:
         if project_id:
             project = session.get(Project, project_id)
             is_video = "video" in operation.value
+            capability: ProjectSelectorCapability = "video" if is_video else "image"
             revision_id = None
             if project:
-                revision_id = (
-                    project.video_workflow_revision_id
-                    if is_video
-                    else project.image_workflow_revision_id
+                project_selection = resolve_project_workflow_selection(
+                    session,
+                    project,
+                    capability,
                 )
+                if project_selection.mode == "family":
+                    raise WorkflowSelectionInvalid(
+                        capability=capability,
+                        reason="family_variant_resolution_pending",
+                    )
+                revision_id = project_selection.workflow_revision_id
             if project and revision_id:
                 return self._resolve_project_pin(
                     session,
@@ -6093,8 +6112,10 @@ class ConversationOrchestrator:
             # Carry the pin forward so it keeps naming the revision in use.
             if role == "video":
                 project.video_workflow_revision_id = candidate.id
+                mirror_legacy_project_workflow_selections(session, project, ["video"])
             else:
                 project.image_workflow_revision_id = candidate.id
+                mirror_legacy_project_workflow_selections(session, project, ["image"])
         return candidate
 
     @staticmethod

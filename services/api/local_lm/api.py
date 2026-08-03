@@ -298,6 +298,14 @@ from .workflow_asset_downloads import (
     WorkflowAssetDownloadError,
     compose_workflow_asset_download_requests,
 )
+from .workflow_compatibility import (
+    copy_chat_workflow_selections,
+    ensure_legacy_profile_workflow,
+    mirror_legacy_chat_workflow_selections,
+    mirror_legacy_project_workflow_selections,
+    reconcile_legacy_workflow_compatibility,
+    retire_legacy_profile_workflow,
+)
 from .workflow_edit_calibration import validate_workflow_edit_calibration
 from .workflow_package_preparation import (
     PreparationContext,
@@ -812,6 +820,7 @@ async def start_setup_verification(
     )
     session.add(chat)
     session.flush()
+    mirror_legacy_chat_workflow_selections(session, chat)
     verification.chat_id = chat.id
 
     input_artifact_ids: list[str] = []
@@ -1211,6 +1220,8 @@ async def create_project(
     await _validate_generation_defaults(request, session, values)
     project = Project(**values)
     session.add(project)
+    session.flush()
+    mirror_legacy_project_workflow_selections(session, project)
     session.commit()
     session.refresh(project)
     return project
@@ -1250,6 +1261,7 @@ async def import_project(
     except ValueError as exc:
         session.rollback()
         raise HTTPException(422, str(exc)) from exc
+    reconcile_legacy_workflow_compatibility(session)
     session.commit()
     session.refresh(project)
     return project
@@ -1270,6 +1282,20 @@ async def update_project(
     await _validate_generation_defaults(request, session, values)
     for key, value in values.items():
         setattr(project, key, value)
+    changed_capabilities = [
+        capability
+        for capability, field in {
+            "image": "image_workflow_revision_id",
+            "video": "video_workflow_revision_id",
+        }.items()
+        if field in values
+    ]
+    if changed_capabilities:
+        mirror_legacy_project_workflow_selections(
+            session,
+            project,
+            cast(list[Literal["image", "video"]], changed_capabilities),
+        )
     session.commit()
     session.refresh(project)
     return project
@@ -1348,6 +1374,8 @@ async def create_chat(
         active_video_profile_id=AUTO_PROFILE_ID,
     )
     session.add(chat)
+    session.flush()
+    mirror_legacy_chat_workflow_selections(session, chat)
     session.commit()
     session.refresh(chat)
     return chat
@@ -1487,6 +1515,11 @@ async def open_studio_session(
         vision_settings_json=copy.deepcopy(source.vision_settings_json) if source else {},
     )
     session.add(studio)
+    session.flush()
+    if source:
+        copy_chat_workflow_selections(session, source, studio)
+    else:
+        mirror_legacy_chat_workflow_selections(session, studio)
     session.commit()
     return session.scalar(_studio_session_query(studio.id)) or studio
 
@@ -1558,6 +1591,8 @@ async def create_prompt_helper(
         vision_settings_json=copy.deepcopy(source.vision_settings_json),
     )
     session.add(helper)
+    session.flush()
+    copy_chat_workflow_selections(session, source, helper)
     session.commit()
     return session.scalar(_prompt_helper_query(helper.id)) or helper
 
@@ -1666,6 +1701,16 @@ async def update_chat(
                 )
     for key, value in values.items():
         setattr(chat, key, value)
+    changed_capabilities = [
+        cast(
+            Literal["chat", "vision", "image", "video"],
+            field.removeprefix("active_").removesuffix("_profile_id"),
+        )
+        for field in profile_fields
+        if field in values
+    ]
+    if changed_capabilities:
+        mirror_legacy_chat_workflow_selections(session, chat, changed_capabilities)
     session.commit()
     session.refresh(chat)
     return chat
@@ -4758,6 +4803,8 @@ async def create_profile(
         is_default=payload.is_default,
     )
     session.add(profile)
+    session.flush()
+    ensure_legacy_profile_workflow(session, profile)
     session.commit()
     session.refresh(profile)
     return profile
@@ -4816,6 +4863,7 @@ async def update_profile(
             raise HTTPException(422, str(exc)) from exc
     for key, value in values.items():
         setattr(profile, key, value)
+    reconcile_legacy_workflow_compatibility(session)
     session.commit()
     session.refresh(profile)
     return profile
@@ -4835,7 +4883,10 @@ async def delete_profile(profile_id: str, request: Request, session: SessionDep)
             for worker in services.processes.statuses()
         ):
             raise HTTPException(409, "unload the active worker before deleting its profile")
+        retire_legacy_profile_workflow(session, profile)
         session.delete(profile)
+        session.flush()
+        reconcile_legacy_workflow_compatibility(session)
         session.commit()
         return Response(status_code=204)
 
@@ -4878,6 +4929,7 @@ async def reset_profile(profile_id: str, session: SessionDep) -> ModelProfile:
         raise HTTPException(422, str(exc)) from exc
     profile.load_settings_json = {}
     profile.request_settings_json = {}
+    ensure_legacy_profile_workflow(session, profile)
     session.commit()
     session.refresh(profile)
     return profile
