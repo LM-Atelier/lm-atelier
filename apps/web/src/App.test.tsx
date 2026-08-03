@@ -2415,7 +2415,7 @@ describe("App", () => {
     );
     expect(await screen.findByAltText("Generation preview")).toBeInTheDocument();
     expect(screen.getByText("Generation preview")).toBeInTheDocument();
-    expect(screen.queryByRole("button", { name: "Animate" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Animate this image" })).not.toBeInTheDocument();
   });
 
   it("stops following progress refreshes after the user scrolls away", async () => {
@@ -5243,7 +5243,7 @@ describe("App", () => {
     expect(screen.queryByText("Attached image")).not.toBeInTheDocument();
 
     // The result of an edit can be held against its source directly.
-    fireEvent.click(screen.getByRole("button", { name: "Compare" }));
+    fireEvent.click(screen.getByRole("button", { name: "Compare with the source" }));
     expect(await screen.findByRole("dialog", { name: "Compare with the source" })).toBeVisible();
     expect(screen.getByRole("img", { name: "The source before the edit" })).toBeVisible();
     expect(screen.getByRole("img", { name: "The edited result" })).toBeVisible();
@@ -5421,7 +5421,7 @@ describe("App", () => {
       },
     }));
     fireEvent.click(screen.getByRole("button", { name: "Close settings" }));
-    fireEvent.click(screen.getByRole("button", { name: "Edit" }));
+    fireEvent.click(screen.getByRole("button", { name: "Edit this image" }));
     await waitFor(() => expect(api.updateChat).toHaveBeenCalledWith(chat.id, { routing_mode: "image" }));
     expect(screen.getByText("sha256:prior")).toBeInTheDocument();
     expect(composer).toHaveFocus();
@@ -5502,7 +5502,7 @@ describe("App", () => {
 
     const firstComposer = await screen.findByRole("textbox", { name: "Message" });
     fireEvent.change(firstComposer, { target: { value: "Unsent first-chat draft" } });
-    fireEvent.click(screen.getByRole("button", { name: "Edit" }));
+    fireEvent.click(screen.getByRole("button", { name: "Edit this image" }));
     expect(await screen.findByRole("button", { name: /Remove Generated image: sha256:synthetic/ })).toBeVisible();
 
     fireEvent.click(screen.getByText(second.title));
@@ -5598,7 +5598,7 @@ describe("App", () => {
       </QueryClientProvider>,
     );
 
-    fireEvent.click(await screen.findByRole("button", { name: "Animate" }));
+    fireEvent.click(await screen.findByRole("button", { name: "Animate this image" }));
     await waitFor(() => expect(api.updateChat).toHaveBeenCalledWith(chat.id, { routing_mode: "video" }));
     const composer = screen.getByRole("textbox", { name: "Message" });
     // The prefill lands after the routing mutation settles, not with it.
@@ -5611,7 +5611,7 @@ describe("App", () => {
     // Reference attaches the same artifact without touching the mode - the
     // distinction from Edit and Animate, which deliberately do change it.
     vi.mocked(api.updateChat).mockClear();
-    fireEvent.click(screen.getByRole("button", { name: "Reference" }));
+    fireEvent.click(screen.getByRole("button", { name: "Reference this media" }));
     expect(screen.getByRole("combobox", { name: "Generation mode" })).toHaveValue("video");
     expect(api.updateChat).not.toHaveBeenCalled();
     expect(screen.getByRole("link", { name: "Preview sha256:animate-source" })).toBeVisible();

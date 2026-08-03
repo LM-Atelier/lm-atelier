@@ -13,13 +13,13 @@ describe("LineageButton", () => {
 
   it("stays hidden until a result is at least two edits deep", () => {
     render(<LineageButton steps={steps.slice(0, 1)} resultUrl="/api/artifacts/result/content" />);
-    expect(screen.queryByRole("button", { name: /Lineage/ })).toBeNull();
+    expect(screen.queryByRole("button", { name: "Show the edit lineage" })).toBeNull();
   });
 
   it("walks the chain oldest first and ends at the current result", () => {
     render(<LineageButton steps={steps} resultUrl="/api/artifacts/result/content" />);
 
-    fireEvent.click(screen.getByRole("button", { name: /Lineage/ }));
+    fireEvent.click(screen.getByRole("button", { name: "Show the edit lineage" }));
 
     const dialog = screen.getByRole("dialog", { name: "Edit lineage" });
     expect(dialog).toBeVisible();
