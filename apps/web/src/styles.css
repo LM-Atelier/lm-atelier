@@ -935,3 +935,7 @@ h1, h2, h3 { margin: 0; }
 .app-shell { background: var(--surface-0); color: var(--ink-primary); }
 .theme-toggle { display: flex; gap: 2px; padding: 4px 0 6px; }
 .theme-toggle .icon-button { width: 28px; height: 28px; }
+.studio-open-image { display: grid; gap: 8px; justify-items: center; text-align: center; align-content: center; height: 100%; border: 2px dashed var(--line-control); border-radius: 14px; background: var(--surface-1); color: var(--ink-muted); padding: 24px; }
+.studio-open-image.over { border-color: var(--accent-warm); background: var(--surface-2); }
+.studio-open-image h2 { color: var(--ink-primary); font-size: 16px; }
+.studio-open-image p { max-width: 42ch; margin: 0; line-height: 1.5; font-size: 12px; }

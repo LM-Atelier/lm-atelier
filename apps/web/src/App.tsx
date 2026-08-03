@@ -265,6 +265,7 @@ function PartView({
   markdown = false,
   origin,
   onEditImage,
+  onOpenStudio,
   onAnimateImage,
   onReferenceMedia,
   onToggleFavorite,
@@ -276,6 +277,7 @@ function PartView({
   markdown?: boolean;
   origin: MediaOrigin | null;
   onEditImage?: (part: MessagePart, origin: MediaOrigin) => void;
+  onOpenStudio?: (part: MessagePart) => void;
   onAnimateImage?: (part: MessagePart, origin: MediaOrigin) => void;
   onReferenceMedia?: (part: MessagePart, origin: MediaOrigin) => void;
   onToggleFavorite?: (part: MessagePart) => void;
@@ -287,7 +289,7 @@ function PartView({
     return markdown ? <MarkdownText text={text} /> : <div className="message-text">{text}</div>;
   }
   if (part.type === "image" || part.type === "video" || part.type === "attachment") {
-    return <ArtifactPart part={part} origin={origin} onEditImage={onEditImage} onAnimateImage={onAnimateImage} onReferenceMedia={onReferenceMedia} onToggleFavorite={onToggleFavorite} compareSourceUrl={compareSourceUrl} lineage={lineage} />;
+    return <ArtifactPart part={part} origin={origin} onEditImage={onEditImage} onOpenStudio={onOpenStudio} onAnimateImage={onAnimateImage} onReferenceMedia={onReferenceMedia} onToggleFavorite={onToggleFavorite} compareSourceUrl={compareSourceUrl} lineage={lineage} />;
   }
   if (part.type === "progress") {
     const progress = Number(part.metadata_json.progress ?? 0);
@@ -320,6 +322,7 @@ function MessageBubble({
   onSelectRevision,
   onCancelQueued,
   onEditImage,
+  onOpenStudio,
   onAnimateImage,
   onReferenceMedia,
   onToggleFavorite,
@@ -338,6 +341,7 @@ function MessageBubble({
   onSelectRevision?: (messageId: string, revisionId: string) => void;
   onCancelQueued?: () => void;
   onEditImage?: (part: MessagePart, origin: MediaOrigin) => void;
+  onOpenStudio?: (part: MessagePart) => void;
   onAnimateImage?: (part: MessagePart, origin: MediaOrigin) => void;
   onReferenceMedia?: (part: MessagePart, origin: MediaOrigin) => void;
   onToggleFavorite?: (part: MessagePart) => void;
@@ -429,7 +433,7 @@ function MessageBubble({
     <article className={`message ${message.role}`}>
       <div className="avatar">{message.role === "user" ? "You" : <Bot size={19} />}</div>
       <div className="message-content">
-        {editing ? <div className="message-edit"><textarea aria-label="Edit message" rows={4} value={draft} onChange={(event) => setDraft(event.target.value)} /><div><button onClick={() => { setDraft(userText); setEditing(false); }}>Cancel</button><button className="primary" disabled={!draft.trim()} onClick={() => { onEdit?.(message.id, draft.trim()); setEditing(false); }}>Send edited message</button></div></div> : renderedParts.map((part) => <PartView key={part.id} part={part} liveText={liveText} markdown={message.role === "assistant"} origin={mediaOriginForPart(part, operation, message.role === "assistant" ? "generated" : null)} onEditImage={onEditImage} onAnimateImage={onAnimateImage} onReferenceMedia={onReferenceMedia} onToggleFavorite={onToggleFavorite} compareSourceUrl={message.role === "assistant" ? compareSourceUrl : undefined} lineage={message.role === "assistant" ? lineage : undefined} />)}
+        {editing ? <div className="message-edit"><textarea aria-label="Edit message" rows={4} value={draft} onChange={(event) => setDraft(event.target.value)} /><div><button onClick={() => { setDraft(userText); setEditing(false); }}>Cancel</button><button className="primary" disabled={!draft.trim()} onClick={() => { onEdit?.(message.id, draft.trim()); setEditing(false); }}>Send edited message</button></div></div> : renderedParts.map((part) => <PartView key={part.id} part={part} liveText={liveText} markdown={message.role === "assistant"} origin={mediaOriginForPart(part, operation, message.role === "assistant" ? "generated" : null)} onEditImage={onEditImage} onOpenStudio={onOpenStudio} onAnimateImage={onAnimateImage} onReferenceMedia={onReferenceMedia} onToggleFavorite={onToggleFavorite} compareSourceUrl={message.role === "assistant" ? compareSourceUrl : undefined} lineage={message.role === "assistant" ? lineage : undefined} />)}
         {liveText && !visibleParts.some((part) => part.type === "text") && (
           <MarkdownText text={liveText} />
         )}
@@ -1583,6 +1587,7 @@ function workflowSchemaForTurn(
 }
 
 function ChatView({
+  onOpenStudio,
   chat,
   engines,
   profiles,
@@ -1611,6 +1616,7 @@ function ChatView({
   onForkThread,
   libraryEdit,
 }: {
+  onOpenStudio: (artifactId: string) => void;
   chat?: ChatDetail;
   engines: EngineCapabilities[];
   profiles: ModelProfile[];
@@ -1788,6 +1794,7 @@ function ChatView({
                     ? () => onCancelPlan(messagePlan.id)
                     : undefined
                 }
+                onOpenStudio={busy ? undefined : (part) => onOpenStudio(part.artifact_id!)}
                 onEditImage={busy ? undefined : (part, origin) => setVisualTarget({
                   attachment: {
                     id: part.artifact_id!,
@@ -3464,6 +3471,7 @@ export default function App() {
         <StudioView
           sourceArtifactId={studioSource?.artifactId ?? null}
           sourceChatId={studioSource?.chatId ?? null}
+          onOpenArtifact={(artifactId) => setStudioSource({ artifactId, chatId: null })}
         />
       );
     }
@@ -3488,7 +3496,7 @@ export default function App() {
       ));
       updateChat.mutate({ id: displayedChat.id, values });
     };
-    return <ChatView key={displayedChat?.id ?? "empty-chat"} libraryEdit={libraryEdit} chat={displayedChat} engines={engines.data ?? []} profiles={profiles.data ?? []} presets={presets.data ?? []} workflows={workflows.data ?? []} project={allProjects.find((item) => item.id === displayedChat?.project_id)} liveText={liveText} pendingTurns={displayedChat ? pendingTurns[displayedChat.id] ?? [] : []} workPlans={workPlans.data ?? []} settings={scopedSettings} presetId={presetId} onSettings={(settings) => {
+    return <ChatView key={displayedChat?.id ?? "empty-chat"} onOpenStudio={(artifactId) => { setStudioSource({ artifactId, chatId: displayedChat?.id ?? null }); setView("studio"); focusMainContent(); }} libraryEdit={libraryEdit} chat={displayedChat} engines={engines.data ?? []} profiles={profiles.data ?? []} presets={presets.data ?? []} workflows={workflows.data ?? []} project={allProjects.find((item) => item.id === displayedChat?.project_id)} liveText={liveText} pendingTurns={displayedChat ? pendingTurns[displayedChat.id] ?? [] : []} workPlans={workPlans.data ?? []} settings={scopedSettings} presetId={presetId} onSettings={(settings) => {
       if (!displayedChat) return;
       const role = roleForMode(displayedChat.routing_mode);
       persistActiveChat({
