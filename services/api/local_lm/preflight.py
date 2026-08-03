@@ -358,7 +358,11 @@ def assess_catalog_install(
                 "access",
                 "Repository access",
                 "pass",
-                "Access is open or a local Hugging Face token is available.",
+                (
+                    "A local CivitAI token is available."
+                    if provider == "civitai"
+                    else "Access is open or a local Hugging Face token is available."
+                ),
             )
         )
 

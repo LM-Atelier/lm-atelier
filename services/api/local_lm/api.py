@@ -5899,12 +5899,14 @@ async def install_workflow_assets(
     except WorkflowAssetDownloadError as exc:
         raise api_error(422, exc.code, str(exc)) from exc
     manager: DownloadManager = _services(request).downloads
-    jobs: list[Job] = []
-    for download in requests:
-        try:
-            jobs.append(manager.create(session, download))
-        except ValueError as exc:
-            raise api_error(422, "asset-download-refused", str(exc)) from exc
+    # Validate every request before starting any: `create` commits and starts
+    # each transfer, so refusing halfway would leave earlier downloads running
+    # behind a 422 that claims nothing was queued.
+    try:
+        validated = [manager.validated_request(session, download) for download in requests]
+    except ValueError as exc:
+        raise api_error(422, "asset-download-refused", str(exc)) from exc
+    jobs = [manager.create(session, download) for download in validated]
     session.commit()
     return jobs
 

@@ -165,7 +165,13 @@ class DownloadManager:
         self.settings.hf_token = token
         self._api = HfApi(token=token)
 
-    def create(self, session: Session, request: DownloadRequest) -> Job:
+    def validated_request(self, session: Session, request: DownloadRequest) -> DownloadRequest:
+        """Validate and normalize one request without any side effect.
+
+        Callers that queue several requests at once run this over every one
+        first, so a later refusal cannot leave earlier transfers already
+        started - a partial queue must never look like a total refusal.
+        """
         plan = (
             session.get(InstallPlan, request.install_plan_id) if request.install_plan_id else None
         )
@@ -233,6 +239,10 @@ class DownloadManager:
                 raise ValueError(f"unsupported ComfyUI model folder: {folder}")
             if path.is_absolute() or ".." in path.parts:
                 raise ValueError("ComfyUI model paths must be safe relative paths")
+        return request
+
+    def create(self, session: Session, request: DownloadRequest) -> Job:
+        request = self.validated_request(session, request)
         serialized_request = request.model_dump(mode="json")
         active_statuses = {
             JobStatus.QUEUED.value,
