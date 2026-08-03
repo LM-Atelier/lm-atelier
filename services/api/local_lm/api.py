@@ -166,6 +166,7 @@ from .schemas import (
     ArtifactStorageInfo,
     ArtifactUpdate,
     BackupInfo,
+    BoundWorkflowAssetOut,
     CatalogDetail,
     CatalogModel,
     CatalogPage,
@@ -241,7 +242,11 @@ from .schemas import (
     WorkerResetResult,
     WorkerSettings,
     WorkerStatus,
+    WorkflowAssetQueueRequest,
     WorkflowAssetReferenceOut,
+    WorkflowAssetReviewOut,
+    WorkflowAssetReviewRequest,
+    WorkflowAssetSelectionIn,
     WorkflowBundle,
     WorkflowClone,
     WorkflowCreate,
@@ -282,6 +287,16 @@ from .studio_sessions import (
     studio_session_title,
 )
 from .verified_setup import build_verified_setup, resolve_verified_setup
+from .workflow_asset_bindings import (
+    WorkflowAssetBindingError,
+    WorkflowAssetBindingPlan,
+    WorkflowAssetPlanSelection,
+    bind_workflow_assets_to_install_plans,
+)
+from .workflow_asset_downloads import (
+    WorkflowAssetDownloadError,
+    compose_workflow_asset_download_requests,
+)
 from .workflow_edit_calibration import validate_workflow_edit_calibration
 from .workflow_package_preparation import (
     PreparationContext,
@@ -5783,6 +5798,115 @@ async def deactivate_registry_install(
         except ComfyRegistryActivationError as exc:
             raise _registry_activation_failure(exc) from exc
     return _registry_install_out(_loaded_registry_install(session, install_id))
+
+
+def _rebuild_asset_binding(
+    session: Session,
+    ui_graph: dict[str, Any],
+    selections: list[WorkflowAssetSelectionIn],
+) -> tuple[WorkflowAssetBindingPlan, dict[str, InstallPlan]]:
+    """Re-analyze and re-bind from current server records.
+
+    Analysis is stateless by design and the browser keeps the graph, so a
+    review is always recomputed here: the client's report, digests, sizes,
+    kinds, and bound assets are never trusted - only its explicit id-based
+    selections are.
+    """
+
+    try:
+        analysis = analyze_comfyui_workflow_package(
+            ui_graph,
+            available_asset_filenames=_local_asset_filenames(session),
+            installed_package_versions=_installed_package_versions(session),
+        )
+    except WorkflowPackageError as exc:
+        raise api_error(422, exc.code, str(exc)) from exc
+    plan_ids = {selection.install_plan_id for selection in selections}
+    plans = {
+        plan.id: plan
+        for plan in session.scalars(select(InstallPlan).where(InstallPlan.id.in_(plan_ids))).all()
+    }
+    try:
+        binding = bind_workflow_assets_to_install_plans(
+            analysis.asset_references,
+            [
+                WorkflowAssetPlanSelection(
+                    reference_filename=selection.reference_filename,
+                    install_plan_id=selection.install_plan_id,
+                    artifact_path=selection.artifact_path,
+                )
+                for selection in selections
+            ],
+            plans,
+        )
+    except WorkflowAssetBindingError as exc:
+        raise api_error(422, exc.code, str(exc)) from exc
+    return binding, plans
+
+
+def _asset_review_out(binding: WorkflowAssetBindingPlan) -> WorkflowAssetReviewOut:
+    return WorkflowAssetReviewOut(
+        binding_plan_hash=binding.plan_hash,
+        assets=[
+            BoundWorkflowAssetOut(
+                reference_filename=asset.reference_filename,
+                kind=asset.kind,
+                install_plan_id=asset.install_plan_id,
+                install_plan_hash=asset.install_plan_hash,
+                provider=asset.provider,
+                remote_id=asset.remote_id,
+                revision=asset.revision,
+                artifact_path=asset.artifact_path,
+                artifact_kind=asset.artifact_kind,
+                target_folder=asset.target_folder,
+                size_bytes=asset.size_bytes,
+                sha256=asset.sha256,
+            )
+            for asset in binding.assets
+        ],
+        download_count=len({asset.install_plan_id for asset in binding.assets}),
+        total_bytes=sum(asset.size_bytes for asset in binding.assets),
+    )
+
+
+@router.post("/workflows/packages/assets/review", response_model=WorkflowAssetReviewOut)
+async def review_workflow_assets(
+    payload: WorkflowAssetReviewRequest, session: SessionDep
+) -> WorkflowAssetReviewOut:
+    """Bind explicit selections to immutable plans and report the cost."""
+
+    binding, _plans = _rebuild_asset_binding(session, payload.ui_graph, payload.selections)
+    return _asset_review_out(binding)
+
+
+@router.post("/workflows/packages/assets/install", response_model=list[JobOut], status_code=202)
+async def install_workflow_assets(
+    payload: WorkflowAssetQueueRequest, request: Request, session: SessionDep
+) -> list[Job]:
+    """Queue the reviewed binding: one download per distinct plan.
+
+    Independent downloads are not a rollback unit. Every created or reused
+    job is returned; a verified partial install stays reusable, while the
+    workflow itself remains unresolved until a fresh analysis says every
+    asset is present.
+    """
+
+    binding, plans = _rebuild_asset_binding(session, payload.ui_graph, payload.selections)
+    try:
+        requests = compose_workflow_asset_download_requests(
+            binding, plans, expected_binding_plan_hash=payload.binding_plan_hash
+        )
+    except WorkflowAssetDownloadError as exc:
+        raise api_error(422, exc.code, str(exc)) from exc
+    manager: DownloadManager = _services(request).downloads
+    jobs: list[Job] = []
+    for download in requests:
+        try:
+            jobs.append(manager.create(session, download))
+        except ValueError as exc:
+            raise api_error(422, "asset-download-refused", str(exc)) from exc
+    session.commit()
+    return jobs
 
 
 @router.post("/workflows/packages/import", response_model=WorkflowOut, status_code=201)
