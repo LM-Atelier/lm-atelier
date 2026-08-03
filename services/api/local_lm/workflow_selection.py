@@ -92,7 +92,7 @@ _STOP_WORDS = {
 _DIGEST = re.compile(r"[0-9a-f]{64}")
 
 
-class WorkflowFamilySelectionError(RuntimeError):
+class WorkflowFamilySelectionError(ValueError):
     def __init__(
         self,
         *,
@@ -434,6 +434,8 @@ def _validate_revision(
         raise _error(capability, operation, "operation_mismatch", workflow_family_id)
     if engine is not None and revision.engine != engine:
         raise _error(capability, operation, "engine_mismatch", workflow_family_id)
+    if operation != Operation.TEXT and engine != "mock" and not revision.api_graph_json:
+        raise _error(capability, operation, "revision_not_executable", workflow_family_id)
     if not revision.trusted:
         raise _error(capability, operation, "revision_untrusted", workflow_family_id)
     if not required_capabilities.issubset(set(revision.capabilities_json)):
