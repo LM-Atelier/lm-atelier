@@ -132,3 +132,35 @@ def test_provenance_carries_the_whole_story() -> None:
     with pytest.raises(MaskContractError) as raised:
         mask_provenance(selection, geometry, coverage=1.5)
     assert raised.value.code == "mask-coverage-invalid"
+
+
+def test_the_turn_contract_holds_end_to_end(client) -> None:
+    """A masked edit must refuse before acceptance, not after execution."""
+
+    from local_lm.db import SessionLocal
+    from local_lm.models import Chat, WorkflowDefinition, WorkflowRevision
+
+    with SessionLocal() as session:
+        chat = Chat(title="Masked edit")
+        session.add(chat)
+        definition = WorkflowDefinition(name="Plain editor", operation="image_to_image")
+        session.add(definition)
+        session.flush()
+        # This workflow declares no mask input at all.
+        revision = WorkflowRevision(
+            workflow_id=definition.id,
+            version=1,
+            engine="comfyui",
+            api_graph_json={},
+            input_schema_json={"type": "object", "properties": {}},
+            dependencies_json={},
+            trusted=True,
+        )
+        session.add(revision)
+        session.commit()
+        schema = revision.input_schema_json
+
+    # The refusal is the contract's, raised where the workflow is known.
+    with pytest.raises(MaskContractError) as raised:
+        parse_mask_setting({"mask": {"artifact_id": ARTIFACT}}, schema)
+    assert raised.value.code == "workflow-has-no-mask-input"
