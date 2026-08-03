@@ -573,16 +573,16 @@ function SettingControl({
   }
   if (field.type === "boolean") {
     return (
-      <label className="setting-row toggle-row" title={field.help || undefined}>
-        <span><strong>{field.label}</strong>{fixed && field.help && <small>{field.help}</small>}</span>
+      <label className="setting-row toggle-row">
+        <span><strong>{field.label}</strong>{field.help && <small>{field.help}</small>}</span>
         <input type="checkbox" checked={Boolean(value)} disabled={fixed} onChange={(event) => onChange(event.target.checked)} />
       </label>
     );
   }
   if (field.type === "enum") {
     return (
-      <label className="setting-row" title={field.help || undefined}>
-        <span><strong>{field.label}</strong>{fixed && field.help && <small>{field.help}</small>}</span>
+      <label className="setting-row">
+        <span><strong>{field.label}</strong>{field.help && <small>{field.help}</small>}</span>
         <select value={String(value ?? "")} disabled={fixed} onChange={(event) => onChange(event.target.value)}>
           {field.choices.map((choice) => <option key={String(choice)}>{String(choice)}</option>)}
         </select>
@@ -591,8 +591,8 @@ function SettingControl({
   }
   if (field.type === "number" || field.type === "integer") {
     return (
-      <label className="setting-row" title={field.help || undefined}>
-        <span><strong>{field.label}</strong>{fixed && field.help && <small>{field.help}</small>}</span>
+      <label className="setting-row">
+        <span><strong>{field.label}</strong>{field.help && <small>{field.help}</small>}</span>
         <input
           type="number"
           value={Number(value ?? field.default)}
@@ -607,8 +607,8 @@ function SettingControl({
   }
   if (field.type === "array" || field.type === "object") {
     return (
-      <label className="setting-row" title={field.help || undefined}>
-        <span><strong>{field.label}</strong>{fixed && field.help && <small>{field.help}</small>}</span>
+      <label className="setting-row">
+        <span><strong>{field.label}</strong>{field.help && <small>{field.help}</small>}</span>
         <textarea
           rows={3}
           disabled={fixed}
@@ -628,8 +628,8 @@ function SettingControl({
     );
   }
   return (
-    <label className="setting-row" title={field.help || undefined}>
-      <span><strong>{field.label}</strong>{fixed && field.help && <small>{field.help}</small>}</span>
+    <label className="setting-row">
+      <span><strong>{field.label}</strong>{field.help && <small>{field.help}</small>}</span>
       <input value={String(value ?? "")} disabled={fixed} onChange={(event) => onChange(event.target.value)} />
     </label>
   );
