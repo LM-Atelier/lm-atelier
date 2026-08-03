@@ -124,6 +124,15 @@ class Message(TimestampMixin, Base):
         order_by="ResponseRevision.sequence",
         foreign_keys="ResponseRevision.message_id",
     )
+    feedback_rows: Mapped[list[ResponseFeedback]] = relationship(
+        cascade="all, delete-orphan", foreign_keys="ResponseFeedback.message_id"
+    )
+
+    @property
+    def feedback(self) -> str | None:
+        """The base response's verdict; revisions carry their own."""
+        row = next((item for item in self.feedback_rows if item.response_revision_id is None), None)
+        return row.rating if row else None
 
 
 class MessagePart(TimestampMixin, Base):
@@ -273,6 +282,34 @@ class Run(TimestampMixin, Base):
     chat: Mapped[Chat] = relationship(back_populates="runs")
 
 
+class ResponseFeedback(TimestampMixin, Base):
+    """One local preference verdict on a response or one of its revisions.
+
+    The run is the provenance anchor - it already records the model, profile,
+    and effective settings - so feedback stores a pointer, never a copy. A
+    verdict is per (message, revision) and overwrites in place; clearing
+    deletes the row. Nothing here trains weights; consumers are local
+    preference matching and evaluation.
+    """
+
+    __tablename__ = "response_feedback"
+    __table_args__ = (
+        UniqueConstraint("message_id", "response_revision_id", name="uq_response_feedback_target"),
+    )
+
+    id: Mapped[str] = mapped_column(String(40), primary_key=True, default=lambda: new_id("fb"))
+    message_id: Mapped[str] = mapped_column(
+        ForeignKey("messages.id", ondelete="CASCADE"), index=True
+    )
+    response_revision_id: Mapped[str | None] = mapped_column(
+        ForeignKey("response_revisions.id", ondelete="CASCADE"), nullable=True, index=True
+    )
+    run_id: Mapped[str | None] = mapped_column(
+        ForeignKey("runs.id", ondelete="SET NULL"), nullable=True, index=True
+    )
+    rating: Mapped[str] = mapped_column(String(8))
+
+
 class ResponseRevision(TimestampMixin, Base):
     __tablename__ = "response_revisions"
     __table_args__ = (
@@ -295,6 +332,14 @@ class ResponseRevision(TimestampMixin, Base):
     )
     sequence: Mapped[int] = mapped_column(Integer)
     status: Mapped[str] = mapped_column(String(16), default=MessageStatus.PENDING.value, index=True)
+
+    feedback_rows: Mapped[list[ResponseFeedback]] = relationship(
+        cascade="all, delete-orphan", foreign_keys="ResponseFeedback.response_revision_id"
+    )
+
+    @property
+    def feedback(self) -> str | None:
+        return self.feedback_rows[0].rating if self.feedback_rows else None
 
     message: Mapped[Message] = relationship(
         back_populates="response_revisions",

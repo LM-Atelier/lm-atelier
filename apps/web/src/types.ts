@@ -91,6 +91,8 @@ export interface Message {
   active_response_revision_id?: string | null;
   parts: MessagePart[];
   response_revisions?: ResponseRevision[];
+  /** The local preference verdict on the base response; revisions carry their own. */
+  feedback?: "up" | "down" | null;
   created_at: string;
   updated_at: string;
 }
@@ -102,6 +104,7 @@ export interface ResponseRevision {
   sequence: number;
   status: "complete" | "pending" | "failed" | "cancelled";
   parts: MessagePart[];
+  feedback?: "up" | "down" | null;
   created_at: string;
   updated_at: string;
 }

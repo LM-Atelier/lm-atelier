@@ -122,6 +122,7 @@ from .models import (
     ModelInstall,
     ModelProfile,
     Project,
+    ResponseFeedback,
     ResponseRevision,
     ResponseRevisionPart,
     Run,
@@ -220,6 +221,8 @@ from .schemas import (
     RegistryInstallOut,
     RegistryInstallReviewRequest,
     ResolvedSetup,
+    ResponseFeedbackOut,
+    ResponseFeedbackUpdate,
     RunOut,
     RuntimeStatus,
     SettingField,
@@ -1339,12 +1342,68 @@ async def get_chat(chat_id: str, session: ConversationSessionDep) -> Chat:
             .selectinload(Message.response_revisions)
             .selectinload(ResponseRevision.parts)
             .selectinload(ResponseRevisionPart.artifact),
+            selectinload(Chat.messages).selectinload(Message.feedback_rows),
+            selectinload(Chat.messages)
+            .selectinload(Message.response_revisions)
+            .selectinload(ResponseRevision.feedback_rows),
         )
         .where(Chat.id == chat_id, Chat.scope == STANDARD_CHAT_SCOPE)
     )
     if not chat:
         raise HTTPException(404, "chat not found")
     return chat
+
+
+@router.put("/messages/{message_id}/feedback", response_model=ResponseFeedbackOut)
+async def set_response_feedback(
+    message_id: str, payload: ResponseFeedbackUpdate, session: SessionDep
+) -> ResponseFeedbackOut:
+    """Record one local preference verdict; a null rating clears it.
+
+    The run pointer is the provenance anchor - model, profile, and effective
+    settings already live there - so nothing is copied and nothing trains.
+    """
+
+    message = session.get(Message, message_id)
+    if not message or message.role != MessageRole.ASSISTANT.value:
+        raise api_error(404, "message-not-found", "This response no longer exists")
+    revision = None
+    if payload.response_revision_id is not None:
+        revision = session.get(ResponseRevision, payload.response_revision_id)
+        if not revision or revision.message_id != message.id:
+            raise api_error(404, "revision-not-found", "This response revision no longer exists")
+    existing = session.scalar(
+        select(ResponseFeedback).where(
+            ResponseFeedback.message_id == message.id,
+            ResponseFeedback.response_revision_id == payload.response_revision_id,
+        )
+    )
+    if payload.rating is None:
+        if existing:
+            session.delete(existing)
+            session.commit()
+        return ResponseFeedbackOut(
+            message_id=message.id,
+            response_revision_id=payload.response_revision_id,
+            rating=None,
+        )
+    if existing:
+        existing.rating = payload.rating
+    else:
+        session.add(
+            ResponseFeedback(
+                message_id=message.id,
+                response_revision_id=payload.response_revision_id,
+                run_id=revision.run_id if revision else None,
+                rating=payload.rating,
+            )
+        )
+    session.commit()
+    return ResponseFeedbackOut(
+        message_id=message.id,
+        response_revision_id=payload.response_revision_id,
+        rating=payload.rating,
+    )
 
 
 def _prompt_helper_query(helper_id: str) -> Select[tuple[Chat]]:
