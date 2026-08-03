@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useReducer, useState } from "react";
-import { Image as ImageIcon, Wand2 } from "lucide-react";
+import { Wand2 } from "lucide-react";
 import { EmptyState } from "./EmptyState";
 import { ErrorCallout } from "./ErrorCallout";
 import { StudioCanvas } from "./StudioCanvas";
@@ -113,7 +113,12 @@ export function StudioView({
               onStrokeEnd={() => dispatch({ type: "stroke-end" })}
             />
           ) : (
-            <EmptyState icon={<ImageIcon />} title="Loading the image" body="" />
+            // Not an empty state: the empty-state tile is styled to say
+            // "nothing here", which is the opposite of what is happening.
+            <div className="studio-stage-loading" role="status">
+              <div className="loading-line" />
+              <p>Loading the image…</p>
+            </div>
           )}
         </div>
         <aside className="studio-panel">
