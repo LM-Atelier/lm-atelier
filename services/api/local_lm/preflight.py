@@ -282,25 +282,41 @@ def assess_catalog_install(
         and isinstance(files[name].get("sha256"), str)
         and re.fullmatch(r"[0-9a-fA-F]{64}", str(files[name]["sha256"]))
     }
-    file_sources = {
-        name: CatalogFileSource(
-            remote_id=str(files[name]["source_remote_id"]),
-            revision=str(files[name]["source_revision"]),
-            filename=str(files[name]["source_filename"]),
-            size_bytes=(
-                int(files[name]["size"])
-                if isinstance(files[name].get("size"), int)
-                and not isinstance(files[name]["size"], bool)
-                else None
-            ),
-            sha256=expected_sha256.get(name),
-        )
-        for name in selected
-        if name in files
-        and files[name].get("source_remote_id")
-        and files[name].get("source_revision")
-        and files[name].get("source_filename")
-    }
+    # CivitAI requests must carry no file sources: the frozen manager accepts
+    # exact identity only from the immutable plan and rejects any echoed here.
+    file_sources = (
+        {}
+        if (detail.model.provider or "huggingface") == "civitai"
+        else {
+            name: CatalogFileSource(
+                remote_id=str(files[name]["source_remote_id"]),
+                revision=str(files[name]["source_revision"]),
+                filename=str(files[name]["source_filename"]),
+                size_bytes=(
+                    int(files[name]["size"])
+                    if isinstance(files[name].get("size"), int)
+                    and not isinstance(files[name]["size"], bool)
+                    else None
+                ),
+                sha256=expected_sha256.get(name),
+                source_version_id=(
+                    str(files[name]["source_version_id"])
+                    if files[name].get("source_version_id")
+                    else None
+                ),
+                source_file_id=(
+                    str(files[name]["source_file_id"])
+                    if files[name].get("source_file_id")
+                    else None
+                ),
+            )
+            for name in selected
+            if name in files
+            and files[name].get("source_remote_id")
+            and files[name].get("source_revision")
+            and files[name].get("source_filename")
+        }
+    )
     checksum_complete = bool(selected) and len(expected_sha256) == len(selected)
     checks.append(
         _check(
@@ -315,13 +331,25 @@ def assess_catalog_install(
         )
     )
 
-    if detail.model.gated and not settings.hf_token:
+    provider = detail.model.provider or "huggingface"
+    # The download manager authenticates every CivitAI transfer with the
+    # vaulted token, gated or not - a public card without one would pass here
+    # and fail mid-queue. Hugging Face keeps its gated-only requirement.
+    if provider == "civitai":
+        access_blocked = not settings.civitai_token
+        access_message = "CivitAI downloads need a CivitAI token supplied to the local service."
+    else:
+        access_blocked = bool(detail.model.gated and not settings.hf_token)
+        access_message = (
+            "This gated model needs a Hugging Face token supplied to the local service."
+        )
+    if access_blocked:
         checks.append(
             _check(
                 "access",
                 "Repository access",
                 "block",
-                "This gated model needs a Hugging Face token supplied to the local service.",
+                access_message,
             )
         )
     else:

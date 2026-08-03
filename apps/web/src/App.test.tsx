@@ -3301,6 +3301,7 @@ describe("App", () => {
       [],
       null,
       null,
+      "huggingface",
     ));
     // The transfer must not start until the cost has been shown and accepted.
     expect(await screen.findByRole("dialog", { name: /Install/ })).toBeInTheDocument();
@@ -3435,6 +3436,7 @@ describe("App", () => {
       [],
       null,
       null,
+      "huggingface",
     ));
   });
 
@@ -3506,6 +3508,8 @@ describe("App", () => {
       "main",
       [],
       "lora",
+      null,
+      "huggingface",
     ));
     fireEvent.click(await screen.findByRole("button", { name: /^Download / }));
     await waitFor(() => expect(api.download).toHaveBeenCalledWith(

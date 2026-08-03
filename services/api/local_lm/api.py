@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import copy
+import dataclasses
 import json
 import logging
 import math
@@ -395,6 +396,12 @@ def _refresh_credential_clients(
         services.downloads.set_token(token)
     else:
         services.settings.civitai_token = token
+        try:
+            civitai_source = services.catalog_sources.get("civitai")
+        except CatalogSourceNotFound:  # pragma: no cover - registered in build_services
+            return
+        if isinstance(civitai_source, CivitaiCatalog):
+            civitai_source.set_token(token)
 
 
 @router.get("/credentials/{provider}", response_model=CredentialStatus)
@@ -2665,6 +2672,29 @@ async def catalog_item_detail(
         ) from exc
 
 
+@router.post("/catalog/preflight", response_model=CatalogPreflight)
+async def catalog_item_preflight(
+    payload: CatalogPreflightRequest,
+    request: Request,
+    session: SessionDep,
+    source: str = Query(default="huggingface", min_length=1, max_length=32),
+    item_id: str = Query(alias="id", min_length=1, max_length=500),
+) -> CatalogPreflight:
+    """Preflight any registered source's item; ids are source-shaped."""
+
+    services = _services(request)
+    try:
+        selected = services.catalog_sources.get(source)
+    except CatalogSourceNotFound as exc:
+        raise api_error(404, "catalog-source-unknown", str(exc)) from exc
+    if not selected.validate_item_id(item_id):
+        raise api_error(422, "catalog-item-id-invalid", "This catalog item id is not valid")
+    try:
+        return await resolve_catalog_preflight(services, session, item_id, payload, source=source)
+    except CatalogUnavailableError as exc:
+        raise api_error(503, "catalog-source-unavailable", str(exc)) from exc
+
+
 @router.get("/catalog/{owner}/{name}", response_model=CatalogDetail)
 async def catalog_detail(
     owner: str,
@@ -2712,6 +2742,7 @@ async def resolve_catalog_preflight(
     remote_id: str,
     payload: CatalogPreflightRequest,
     *,
+    source: str = "huggingface",
     validate_resolved: Callable[[ResolvedInstallPlan], None] | None = None,
 ) -> CatalogPreflight:
     """Plan an install without deciding how a caller should report failure.
@@ -2728,9 +2759,40 @@ async def resolve_catalog_preflight(
     leave behind exactly what the refusal was meant to prevent.
     """
 
+    catalog = services.catalog_sources.get(source)
     try:
-        raw_detail = await services.catalog.inspect(remote_id, payload.revision, payload.role)
+        raw_detail = await catalog.inspect(remote_id, payload.revision, payload.role)
         detail = CatalogDetail.model_validate(raw_detail)
+        # CivitAI identities live under each normalized file's metadata; hoist
+        # them once so every downstream consumer - checks, file sources, the
+        # planner - sees one uniform shape. The model id stands where a
+        # repository would and the version where a revision would, so the
+        # tamper comparison covers every provider.
+        detail = detail.model_copy(
+            update={
+                "files": [
+                    {
+                        **item,
+                        # Production normalization puts both identities at the
+                        # file top level; nested metadata carries the version
+                        # but never the file id. Top level always wins.
+                        "source_version_id": item.get("source_version_id")
+                        or item["metadata"].get("source_version_id"),
+                        "source_file_id": item.get("source_file_id"),
+                        "source_remote_id": item.get("source_remote_id")
+                        or item["metadata"].get("source_model_id"),
+                        "source_revision": item.get("source_revision")
+                        or item.get("source_version_id")
+                        or item["metadata"].get("source_version_id"),
+                        "source_filename": item.get("source_filename") or item.get("filename"),
+                    }
+                    if isinstance(item.get("metadata"), dict)
+                    and item["metadata"].get("provider") == "civitai"
+                    else item
+                    for item in detail.files
+                ]
+            }
+        )
         if payload.role == "chat" and payload.engine == "llama.cpp":
             try:
                 initial_selection = (
@@ -2752,7 +2814,7 @@ async def resolve_catalog_preflight(
                 pass
     except Exception as exc:
         raise CatalogUnavailableError(
-            "Hugging Face is temporarily unavailable. Check your connection and retry."
+            f"{catalog.display_name} is temporarily unavailable. Check your connection and retry."
         ) from exc
     system = collect_system_info(services.settings)
 
@@ -2761,7 +2823,7 @@ async def resolve_catalog_preflight(
         resolved_detail: CatalogDetail,
     ) -> CatalogPreflight:
         metadata: dict[str, bytes] = {}
-        inspect_prefix = getattr(services.catalog, "inspect_file_prefix", None)
+        inspect_prefix = getattr(catalog, "inspect_file_prefix", None)
         repo_files = {
             str(item.get("filename") or "")
             for item in resolved_detail.files
@@ -2843,6 +2905,28 @@ async def resolve_catalog_preflight(
                 result.selected_files,
                 role=payload.role,
             )
+        if source == "civitai" and payload.auxiliary_kind == "lora":
+            # CivitAI file-prefix inspection is deliberately unavailable, so a
+            # bare safetensors would inspect as "checkpoint" and block as a
+            # kind mismatch. The provider's own typed declaration substitutes
+            # for planning; the manager's mandatory staged-byte LoRA
+            # inspection still gates activation after download.
+            declared_loras = {
+                str(item.get("filename") or "")
+                for item in resolved_detail.files
+                if isinstance(item.get("metadata"), dict)
+                and str(item["metadata"].get("model_type") or "").casefold() == "lora"
+            }
+            if declared_loras and all(path in declared_loras for path in result.selected_files):
+                inspection = dataclasses.replace(
+                    inspection,
+                    components=tuple(
+                        dataclasses.replace(component, kind="lora", target_folder="loras")
+                        if component.path in declared_loras
+                        else component
+                        for component in inspection.components
+                    ),
+                )
         files = {str(item.get("filename") or ""): item for item in resolved_detail.files}
         selected_metadata = [
             files.get(
@@ -2876,12 +2960,16 @@ async def resolve_catalog_preflight(
                 workflow_component_folders = selected_template.component_folders
             except ValueError as exc:
                 workflow_contract_error = str(exc)
+        # CivitAI file identities live under the normalized file's metadata;
+        # the planner reads them at the top level, so hoist without mutating
+        # the cached detail.
         resolved = resolve_install_plan(
             remote_id=result.remote_id,
             revision=result.revision,
             role=payload.role,
             engine=payload.engine,
             selected_files=selected_metadata,
+            provider=source,
             inspection=inspection,
             workflow_template_id=result.workflow_template_id,
             workflow_template_sha256=result.workflow_template_sha256,
@@ -3246,13 +3334,17 @@ def _planned_download_fields(plan: InstallPlan | None) -> dict[str, Any]:
             for item in plan.artifacts_json
             if item.get("sha256")
         },
-        "file_sources": {
+        "file_sources": {}
+        if plan.provider == "civitai"
+        else {
             str(item["path"]): {
                 "remote_id": str(item["source_remote_id"]),
                 "revision": str(item["source_revision"]),
                 "filename": str(item["source_path"]),
                 "size_bytes": item.get("size_bytes"),
                 "sha256": item.get("sha256"),
+                "source_version_id": item.get("source_version_id"),
+                "source_file_id": item.get("source_file_id"),
             }
             for item in plan.artifacts_json
             if item.get("source_remote_id")
@@ -3768,20 +3860,16 @@ async def check_model_updates(request: Request, session: SessionDep) -> list[Mod
     identities = installed_civitai_identities(session)
     summaries: dict[str, dict[str, Any] | None] = {}
     if identities:
-        # Per-request construction, like the Registry preparation clients: the
-        # source registry only carries browse providers, and the disk cache
-        # makes a fresh adapter as warm as a held one.
-        source = CivitaiCatalog(services.settings, token=services.settings.civitai_token)
-        try:
-            for identity in identities:
-                if identity.model_id in summaries:
-                    continue
-                try:
-                    summaries[identity.model_id] = await source.versions(identity.model_id)
-                except Exception:  # noqa: BLE001 - one model must not hide the rest
-                    summaries[identity.model_id] = None
-        finally:
-            await source.close()
+        source = services.catalog_sources.get("civitai")
+        if not isinstance(source, CivitaiCatalog):  # pragma: no cover - registry invariant
+            raise api_error(503, "provider-unavailable", "CivitAI catalog is not available")
+        for identity in identities:
+            if identity.model_id in summaries:
+                continue
+            try:
+                summaries[identity.model_id] = await source.versions(identity.model_id)
+            except Exception:  # noqa: BLE001 - one model must not hide the rest
+                summaries[identity.model_id] = None
     report: list[ModelUpdateOut] = []
     for identity in identities:
         summary = summaries.get(identity.model_id)
@@ -5221,6 +5309,20 @@ def _local_asset_filenames(session: Session) -> set[str]:
                 filenames.add(PurePosixPath(entry.replace("\\", "/")).name)
     for asset in session.scalars(select(ModelAssetInstall)).all():
         filenames.add(PurePosixPath(asset.local_path.replace("\\", "/")).name)
+        # The manager stores local_path as the install directory; the name a
+        # workflow actually references lives in the manifest. Without these,
+        # a verified LoRA reads as missing during analysis and import.
+        manifest = asset.manifest_json
+        comfy_name = manifest.get("comfy_name")
+        if isinstance(comfy_name, str) and comfy_name:
+            filenames.add(comfy_name)
+            filenames.add(PurePosixPath(comfy_name.replace("\\", "/")).name)
+        asset_files = manifest.get("files")
+        if isinstance(asset_files, list):
+            for entry in asset_files:
+                if isinstance(entry, str) and entry:
+                    filenames.add(entry)
+                    filenames.add(PurePosixPath(entry.replace("\\", "/")).name)
     return filenames
 
 

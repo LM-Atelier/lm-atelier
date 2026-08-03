@@ -20,7 +20,6 @@ import {
   Download,
   Film,
   Folder,
-  Gauge,
   GitBranch,
   HardDrive,
   Image as ImageIcon,
@@ -94,6 +93,7 @@ import { CustomNodesPanel } from "./CustomNodesPanel";
 import { MediaLibraryView } from "./MediaLibraryView";
 import { MediaOutputPlan } from "./MediaOutputPlan";
 import { ModelCard } from "./ModelCard";
+import { RecipeCard } from "./RecipeCard";
 import { ModelUpdatesPanel } from "./ModelUpdatesPanel";
 import { RuntimeSetupCard } from "./RuntimeSetupCard";
 import { RegistryInstallsPanel } from "./RegistryInstallsPanel";
@@ -135,7 +135,6 @@ import type {
   ModelProfile,
   ModelProfileBundle,
   Project,
-  ReferenceRecipe,
   RoutingMode,
   RuntimeStatus,
   SetupReadinessReport,
@@ -1900,32 +1899,6 @@ function ChatView({
   );
 }
 
-function recipeOperationLabel(operation: string): string {
-  return operation
-    .split("_")
-    .map((part) => part === "to" ? "→" : part)
-    .join(" ")
-    .replace(/^\w/, (character) => character.toUpperCase());
-}
-function RecipeCard({ recipe, pending, onInstall }: { recipe: ReferenceRecipe; pending: boolean; onInstall: () => void }) {
-  const memory = recipe.hardware.minimum_vram_gb
-    ? `${recipe.hardware.minimum_vram_gb} GB+ VRAM`
-    : `${recipe.hardware.minimum_ram_gb} GB+ RAM`;
-  return (
-    <article className="recipe-card">
-      <header>
-        <div className="model-icon">{recipe.role === "video" ? <Film /> : recipe.role === "image" ? <ImageIcon /> : <Bot />}</div>
-        <div><small>{recipe.role} · recipe v{recipe.version}</small><h3>{recipe.name}</h3></div>
-      </header>
-      <p>{recipe.summary}</p>
-      <div className="recipe-badges"><span className={`badge ${recipe.certified ? "likely" : ""}`}>{recipe.certified ? "Certified" : "Reference candidate"}</span>{recipe.operations.map((operation) => <span className="badge" key={operation}>{recipeOperationLabel(operation)}</span>)}<span className="badge">{recipe.license_id}</span><span className="badge">{recipe.node_policy || recipe.engine}</span></div>
-      <div className="recipe-meta"><span><HardDrive size={14} />{formatBytes(recipe.total_size_bytes)}</span><span><Gauge size={14} />{memory}</span></div>
-      <small>{recipe.hardware.guidance}</small>
-      <button className="primary" onClick={onInstall} disabled={pending}>{pending ? "Queued" : "Install recipe"}</button>
-    </article>
-  );
-}
-
 function InstalledModelRow({
   model,
   profile,
@@ -2106,6 +2079,7 @@ function ModelsView({ initialRole }: { initialRole: EngineRole }) {
   const client = useQueryClient();
   const [query, setQuery] = useState("");
   const [submitted, setSubmitted] = useState("");
+  const [catalogSource, setCatalogSource] = useState("huggingface");
   const [role, setRole] = useState<string>(initialRole);
   const [sort, setSort] = useState("trending");
   const [compatibility, setCompatibility] = useState("");
@@ -2125,8 +2099,9 @@ function ModelsView({ initialRole }: { initialRole: EngineRole }) {
     updated_within_days: updatedWithinDays,
   };
   const catalog = useInfiniteQuery({
-    queryKey: ["catalog", submitted, role, sort, catalogFilters],
-    queryFn: ({ pageParam }) => api.catalog(submitted, role, sort, pageParam, catalogFilters),
+    queryKey: ["catalog", submitted, role, sort, catalogFilters, catalogSource],
+    queryFn: ({ pageParam }) =>
+      api.catalog(submitted, role, sort, pageParam, catalogFilters, catalogSource),
     initialPageParam: null as string | null,
     getNextPageParam: (page) => page.next_cursor ?? undefined,
   });
@@ -2152,25 +2127,31 @@ function ModelsView({ initialRole }: { initialRole: EngineRole }) {
       const auxiliaryKind = selectedRole === "lora" ? "lora" : null;
       const installRole = auxiliaryKind ? "image" : selectedRole;
       const engine = model.required_runtime ?? (installRole === "chat" ? "llama.cpp" : "comfyui");
+      // A CivitAI card's remote id is its exact version; that is also the
+      // revision it pins. Hugging Face keeps floating "main".
+      const revision = model.provider === "civitai" ? model.remote_id : "main";
       const preflight = auxiliaryKind
         ? await api.catalogPreflight(
             model.remote_id,
             installRole,
             engine,
-            "main",
+            revision,
             [],
             auxiliaryKind,
+            null,
+            model.provider,
           )
         : await api.catalogPreflight(
             model.remote_id,
             installRole,
             engine,
-            "main",
+            revision,
             [],
             null,
             // Preflight the exact workflow this card represents; a repository
             // can ship several and ranking must not answer for the user.
             model.workflow_template_id ?? null,
+            model.provider,
           );
       if (!preflight.can_install) {
         const blockers = preflight.checks
@@ -2353,7 +2334,7 @@ function ModelsView({ initialRole }: { initialRole: EngineRole }) {
       <div className="toolbar">
         <form className="search-box" onSubmit={(event) => { event.preventDefault(); setSubmitted(query); }}><Search size={18} /><input value={query} onChange={(event) => setQuery(event.target.value)} placeholder="Search models" /></form>
         <select aria-label="Model role" value={role} onChange={(event) => setRole(event.target.value)}><option value="chat">Chat</option><option value="image">Image</option><option value="video">Video</option><option value="lora">LoRA</option></select>
-        <select aria-label="Model order" value={sort} onChange={(event) => setSort(event.target.value)}><option value="trending">Trending</option><option value="downloads">Downloads</option><option value="likes">Likes</option><option value="newest">Newest</option><option value="updated">Recently updated</option><option value="compatible">Compatible first</option></select>
+        <select aria-label="Model source" value={catalogSource} onChange={(event) => setCatalogSource(event.target.value)}><option value="huggingface">Hugging Face</option><option value="civitai">CivitAI</option></select><select aria-label="Model order" value={sort} onChange={(event) => setSort(event.target.value)}><option value="trending">Trending</option><option value="downloads">Downloads</option><option value="likes">Likes</option><option value="newest">Newest</option><option value="updated">Recently updated</option><option value="compatible">Compatible first</option></select>
       </div>
       <div className="catalog-filters"><select aria-label="Compatibility filter" value={compatibility} onChange={(event) => setCompatibility(event.target.value)}><option value="">All compatibility</option><option value="likely">Automatic test available</option><option value="advanced_import">Advanced import</option><option value="unsupported">Unsupported</option></select><select aria-label="Last updated filter" value={updatedWithinDays} onChange={(event) => setUpdatedWithinDays(event.target.value)}><option value="">Updated any time</option><option value="7">Updated this week</option><option value="30">Updated this month</option><option value="90">Updated in 3 months</option><option value="365">Updated this year</option></select><input aria-label="Quantization filter" placeholder="Quantization (Q4_K_M, FP8…)" value={quantization} onChange={(event) => setQuantization(event.target.value)} /><input aria-label="Maximum download size" type="number" min="0" placeholder="Max download (GB)" value={maxSizeGb} onChange={(event) => setMaxSizeGb(event.target.value)} /></div>
       {(installed.data?.length ?? 0) > 0 && <section>

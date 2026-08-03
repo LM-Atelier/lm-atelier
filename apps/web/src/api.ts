@@ -509,8 +509,10 @@ export const api = {
     sort: string,
     cursor?: string | null,
     filters: Record<string, string> = {},
+    source = "huggingface",
   ) => {
     const parameters = new URLSearchParams({ query, role, sort });
+    if (source !== "huggingface") parameters.set("source", source);
     if (cursor) parameters.set("cursor", cursor);
     for (const [key, value] of Object.entries(filters)) if (value) parameters.set(key, value);
     return request<CatalogPage>(`/api/catalog?${parameters.toString()}`);
@@ -527,17 +529,28 @@ export const api = {
     selectedFiles: string[],
     auxiliaryKind: string | null = null,
     workflowTemplateId: string | null = null,
-  ) => request<CatalogPreflight>(`/api/catalog/${remoteId}/preflight`, {
-    method: "POST",
-    body: JSON.stringify({
+    provider = "huggingface",
+  ) => {
+    const body = JSON.stringify({
       role,
       engine,
       revision,
       selected_files: selectedFiles,
       auxiliary_kind: auxiliaryKind,
       workflow_template_id: workflowTemplateId,
-    }),
-  }),
+    });
+    if (provider !== "huggingface") {
+      const parameters = new URLSearchParams({ source: provider, id: remoteId });
+      return request<CatalogPreflight>(`/api/catalog/preflight?${parameters}`, {
+        method: "POST",
+        body,
+      });
+    }
+    return request<CatalogPreflight>(`/api/catalog/${remoteId}/preflight`, {
+      method: "POST",
+      body,
+    });
+  },
   recipes: () => request<ReferenceRecipe[]>("/api/recipes"),
   installRecipe: (recipeId: string) =>
     request<Job>(`/api/recipes/${encodeURIComponent(recipeId)}/install`, { method: "POST" }),
