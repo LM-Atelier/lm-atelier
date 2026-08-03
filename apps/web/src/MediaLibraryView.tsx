@@ -103,7 +103,10 @@ export function MediaLibraryView({
       )}
       {cleanup.data && <div className="callout success" role="status">{cleanup.data.removed_count > 0 && <>Removed {cleanup.data.removed_count} artifact{cleanup.data.removed_count === 1 ? "" : "s"} and reclaimed {formatBytes(cleanup.data.reclaimed_bytes)}. </>}{cleanup.data.marked_count > 0 ? `${cleanup.data.marked_count} newly unreferenced artifact${cleanup.data.marked_count === 1 ? "" : "s"} entered the ${storage.data?.retention_days ?? 30}-day recovery window.` : cleanup.data.retention_pending_count > 0 ? `${cleanup.data.retention_pending_count} artifact${cleanup.data.retention_pending_count === 1 ? "" : "s"} ${cleanup.data.retention_pending_count === 1 ? "remains" : "remain"} in the recovery window; none are eligible yet.` : cleanup.data.removed_count === 0 ? "Nothing needed cleanup." : null}</div>}
       {(cleanup.error || deleteArtifact.error) && <ErrorCallout message={cleanup.error?.message || deleteArtifact.error?.message} />}
-      {artifacts.data?.length ? <div className="media-grid">{artifacts.data.map((artifact) => {
+      {/* "No generated media" while the request is still in flight tells the
+          user something untrue about their own library. */}
+      {artifacts.isLoading && <div className="loading-line" role="status" aria-label="Loading your media" />}
+      {artifacts.isLoading ? null : artifacts.data?.length ? <div className="media-grid">{artifacts.data.map((artifact) => {
         const source = `/api/artifacts/${encodeURIComponent(artifact.id)}/content`;
         const proxyId = typeof artifact.metadata_json.browser_proxy_artifact_id === "string" ? artifact.metadata_json.browser_proxy_artifact_id : null;
         const playbackSource = proxyId ? `/api/artifacts/${encodeURIComponent(proxyId)}/content` : source;

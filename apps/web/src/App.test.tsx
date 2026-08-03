@@ -1013,7 +1013,6 @@ describe("App", () => {
     vi.mocked(api.deleteChat).mockImplementation(
       () => new Promise<void>((resolve) => { finishDelete = resolve; }),
     );
-    const confirm = vi.spyOn(window, "confirm").mockReturnValue(true);
     const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
     render(
       <QueryClientProvider client={client}>
@@ -1025,6 +1024,10 @@ describe("App", () => {
     expect(screen.getByText("Ask before Auto mode starts an image or video when the planner is unsure.")).toBeVisible();
     fireEvent.click(screen.getByRole("checkbox", { name: /Delete generated media with chat/ }));
     fireEvent.click(screen.getByRole("button", { name: "Delete chat" }));
+    // The question names the media that goes with the chat, which is the
+    // part the checkbox above just changed.
+    expect(screen.getByText(/generated media used only by this chat/)).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "Delete chat and history" }));
 
     await waitFor(() => {
       expect(screen.queryByRole("button", { name: "Manage First chat" })).not.toBeInTheDocument();
@@ -1033,7 +1036,6 @@ describe("App", () => {
     });
     expect(vi.mocked(api.deleteChat)).toHaveBeenCalledWith("chat-1", true);
     finishDelete?.();
-    confirm.mockRestore();
   });
 
   it("contains long chat lists in a dedicated workspace scroll region", async () => {
@@ -1876,7 +1878,6 @@ describe("App", () => {
       restore_pending: true,
     });
     vi.mocked(api.deleteBackup).mockResolvedValue(undefined);
-    const confirm = vi.spyOn(window, "confirm").mockReturnValue(true);
     const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
     render(
       <QueryClientProvider client={client}>
@@ -1891,15 +1892,18 @@ describe("App", () => {
     expect(vi.mocked(api.verifyBackup).mock.calls[0]?.[0]).toBe(first.name);
 
     fireEvent.click(screen.getByRole("button", { name: `Restore backup ${first.name} on restart` }));
+    // Restoring discards everything created since the backup was taken, so
+    // the question says that rather than only naming the action.
+    fireEvent.click(await screen.findByRole("button", { name: "Restore on restart" }));
     await waitFor(() => expect(vi.mocked(api.restoreBackup).mock.calls[0]?.[0]).toBe(first.name));
     expect(await screen.findByText("Restore scheduled. Restart LM Atelier to apply this backup.")).toBeInTheDocument();
     expect(screen.getByRole("button", { name: `Restore backup ${first.name} on restart` })).toBeDisabled();
 
     fireEvent.click(screen.getByRole("button", { name: `Delete backup ${second.name}` }));
+    fireEvent.click(await screen.findByRole("button", { name: "Delete backup" }));
     await waitFor(() => expect(vi.mocked(api.deleteBackup).mock.calls[0]?.[0]).toBe(second.name));
     expect(screen.queryByText(second.name)).not.toBeInTheDocument();
     expect(await screen.findByText("Backup deleted.")).toBeInTheDocument();
-    confirm.mockRestore();
   });
 
   it("prevents duplicate backup creation while a snapshot is pending", async () => {
@@ -4260,7 +4264,7 @@ describe("App", () => {
     });
     await waitFor(() => expect(api.upload).toHaveBeenCalledTimes(2));
     fireEvent.click(screen.getByRole("button", { name: "Open editing studio" }));
-    fireEvent.click(await screen.findByRole("option", { name: /Colorize/ }));
+    fireEvent.click(await screen.findByRole("button", { name: /Colorize/ }));
     fireEvent.click(screen.getByRole("button", { name: "Apply to each of 2 images" }));
 
     // Two independent edit turns, one image each - not one turn with both.
@@ -4328,7 +4332,7 @@ describe("App", () => {
 
     expect(await screen.findByRole("dialog", { name: "Editing studio" })).toBeVisible();
     await waitFor(() => expect(api.editTemplates).toHaveBeenCalled());
-    fireEvent.click(await screen.findByRole("option", { name: /Watercolor painting/ }));
+    fireEvent.click(await screen.findByRole("button", { name: /Watercolor painting/ }));
     fireEvent.change(screen.getByRole("textbox", { name: "Add detail (optional)" }), {
       target: { value: "Focus on the harbor." },
     });

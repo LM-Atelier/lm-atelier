@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useReducer, useState } from "react";
-import { Image as ImageIcon, Wand2 } from "lucide-react";
+import { Wand2 } from "lucide-react";
 import { EmptyState } from "./EmptyState";
 import { ErrorCallout } from "./ErrorCallout";
 import { StudioCanvas } from "./StudioCanvas";
@@ -113,7 +113,12 @@ export function StudioView({
               onStrokeEnd={() => dispatch({ type: "stroke-end" })}
             />
           ) : (
-            <EmptyState icon={<ImageIcon />} title="Loading the image" body="" />
+            // Not an empty state: the empty-state tile is styled to say
+            // "nothing here", which is the opposite of what is happening.
+            <div className="studio-stage-loading" role="status">
+              <div className="loading-line" />
+              <p>Loading the image…</p>
+            </div>
           )}
         </div>
         <aside className="studio-panel">
@@ -219,12 +224,15 @@ function StudioFilmstrip({
 }) {
   if (steps.length === 0) return null;
   return (
-    <div className="studio-filmstrip" role="listbox" aria-label="Edit history">
+    // A group of buttons, not a listbox: a real listbox owns focus with a
+    // roving tabindex and aria-activedescendant, and role="option" would
+    // override the native button role so these stop announcing as
+    // activatable at all.
+    <div className="studio-filmstrip" role="group" aria-label="Edit history">
       {steps.map((step, index) => (
         <button
           key={`${step.messageId}-${step.artifactId}`}
-          role="option"
-          aria-selected={step.artifactId === selectedId}
+          aria-pressed={step.artifactId === selectedId}
           className={step.artifactId === selectedId ? "selected" : ""}
           onClick={() => onSelect(step.artifactId)}
         >

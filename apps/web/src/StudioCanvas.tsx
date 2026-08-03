@@ -4,6 +4,7 @@ import {
   useMemo,
   useRef,
   useState,
+  type KeyboardEvent as ReactKeyboardEvent,
   type PointerEvent as ReactPointerEvent,
   type WheelEvent as ReactWheelEvent,
 } from "react";
@@ -138,6 +139,39 @@ export function StudioCanvas({
     };
   }, []);
 
+  const onKeyDown = (event: ReactKeyboardEvent<HTMLDivElement>) => {
+    const step = event.shiftKey ? 80 : 20;
+    const PANS: Record<string, [number, number]> = {
+      ArrowLeft: [step, 0],
+      ArrowRight: [-step, 0],
+      ArrowUp: [0, step],
+      ArrowDown: [0, -step],
+    };
+    const pan = PANS[event.key];
+    if (pan) {
+      event.preventDefault();
+      setViewport((current) => panBy(current, pan[0], pan[1]));
+      return;
+    }
+    // Zoom about the middle of the view, since there is no pointer to
+    // zoom about.
+    const bounds = containerRef.current?.getBoundingClientRect();
+    const middle = { x: (bounds?.width ?? 0) / 2, y: (bounds?.height ?? 0) / 2 };
+    if (event.key === "+" || event.key === "=") {
+      event.preventDefault();
+      setViewport((current) => zoomAbout(current, middle, 1.2));
+    } else if (event.key === "-" || event.key === "_") {
+      event.preventDefault();
+      setViewport((current) => zoomAbout(current, middle, 1 / 1.2));
+    } else if (event.key === "0" && image) {
+      event.preventDefault();
+      setViewport(fitViewport(image, {
+        width: bounds?.width ?? 0,
+        height: bounds?.height ?? 0,
+      }));
+    }
+  };
+
   const screenPoint = (event: ReactPointerEvent | ReactWheelEvent) => {
     const bounds = containerRef.current?.getBoundingClientRect();
     // A synthetic or touch-only event can omit client coordinates; treating
@@ -235,11 +269,23 @@ export function StudioCanvas({
   };
 
   return (
+    /* eslint-disable-next-line jsx-a11y-x/no-noninteractive-element-interactions */
     <div
       ref={containerRef}
       className="studio-canvas"
+      /* The rules below read the implicit role of the tag, not the explicit
+         one: a focusable canvas application is exactly what they exist to
+         prevent being written by accident, and exactly what this is. */
+      /* eslint-disable-next-line jsx-a11y-x/no-noninteractive-tabindex */
+      tabIndex={0}
+      // This role hands every key to the element rather than to the screen
+      // reader, which was a lie while the element could not take focus and
+      // handled no keys at all. It is true now: the canvas is focusable and
+      // drives its own viewport. Drawing a selection still needs a pointer.
       role="application"
-      aria-label="Image editing canvas"
+      aria-roledescription="Image canvas"
+      aria-label="Image editing canvas. Arrow keys pan, plus and minus zoom, zero fits the image."
+      onKeyDown={onKeyDown}
       onPointerDown={onPointerDown}
       onPointerMove={onPointerMove}
       onPointerUp={onPointerUp}
