@@ -28,6 +28,7 @@ from local_lm.models import (
 )
 from local_lm.orchestrator import ConversationOrchestrator
 from local_lm.schemas import WorkerStatus
+from local_lm.workflow_edit_calibration import standard_edit_calibration
 
 
 def _orchestrator(*, session_factory=None) -> ConversationOrchestrator:  # type: ignore[no-untyped-def]
@@ -66,12 +67,30 @@ def test_successful_edit_queues_one_dependent_low_priority_verifier(monkeypatch)
     )
     profile = SimpleNamespace(id="profile-vision")
     plan = SimpleNamespace(id="plan-edit", source_action="send", summary_json={})
+    revision = SimpleNamespace(
+        id="revision-edit",
+        input_schema_json={
+            "type": "object",
+            "properties": {
+                "denoise": {"type": "number", "default": 0.5},
+                "steps": {"type": "integer", "default": 4},
+            },
+            "x-lm-atelier-edit-calibration": standard_edit_calibration(
+                parameter="denoise",
+                minimum=0,
+                maximum=1,
+                steps_parameter="steps",
+            ),
+        },
+    )
     run = SimpleNamespace(
         id="run-edit",
         chat_id=chat.id,
         operation=Operation.IMAGE_TO_IMAGE.value,
         work_plan_id=plan.id,
         work_step_id="step-source",
+        workflow_revision_id=revision.id,
+        settings_json={"denoise": 0.66, "steps": 4},
         provenance_json={
             "image_edit": {
                 "strength": {
@@ -88,6 +107,7 @@ def test_successful_edit_queues_one_dependent_low_priority_verifier(monkeypatch)
         (Artifact, source.id): source,
         (Artifact, result.id): result,
         (WorkPlan, plan.id): plan,
+        (WorkflowRevision, revision.id): revision,
     }
     added: list[object] = []
 
@@ -153,6 +173,7 @@ def test_successful_edit_queues_one_dependent_low_priority_verifier(monkeypatch)
         payload.maximum,
     ) == ("denoise", 0.66, 0.3, 0.8)
     assert payload.automatic_strength is True
+    assert payload.schedule_steps == 4
     assert dependencies[0].depends_on_step_id == run.work_step_id
 
 
@@ -571,6 +592,8 @@ async def test_automatic_retry_reuses_source_turn_as_a_response_revision() -> No
             "scope": "localized",
             "confidence": "high",
         },
+        "preferred_profile_id": source_run.profile_id,
+        "preferred_workflow_revision_id": source_run.workflow_revision_id,
     }
     assert retry_run.provenance_json["image_edit_verification_retry"] == {
         "version": "image-edit-verification-v1",
@@ -582,3 +605,46 @@ async def test_automatic_retry_reuses_source_turn_as_a_response_revision() -> No
         "strength_before": 0.5,
         "strength_after": 0.62,
     }
+
+
+def test_retry_selection_pins_the_source_profile_and_workflow() -> None:
+    profile = SimpleNamespace(
+        id="profile-source",
+        role="image",
+        name="Source editor",
+        model_install_id="install-source",
+    )
+    workflow = SimpleNamespace(id="workflow-source")
+
+    class FakeSession:
+        def get(self, model, identity):  # type: ignore[no-untyped-def]
+            if model is ModelProfile and identity == profile.id:
+                return profile
+            return None
+
+    orchestrator = _orchestrator()
+    orchestrator._workflow_for_operation = Mock(return_value=workflow)  # type: ignore[method-assign]
+    fake_session = FakeSession()
+
+    selected, provenance, selected_workflow = orchestrator._profile_and_workflow_for_operation(
+        fake_session,  # type: ignore[arg-type]
+        SimpleNamespace(project_id=None),  # type: ignore[arg-type]
+        Operation.IMAGE_TO_IMAGE,
+        "Make the mug green",
+        preferred_profile_id=profile.id,
+        preferred_revision_id=workflow.id,
+    )
+
+    assert selected is profile
+    assert selected_workflow is workflow
+    assert provenance == {
+        "mode": "pinned_retry",
+        "profile_id": profile.id,
+        "profile_name": profile.name,
+    }
+    orchestrator._workflow_for_operation.assert_called_once_with(
+        fake_session,
+        Operation.IMAGE_TO_IMAGE,
+        model_install_id=profile.model_install_id,
+        preferred_revision_id=workflow.id,
+    )

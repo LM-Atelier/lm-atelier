@@ -144,6 +144,7 @@ from .visual_prompt_compiler import (
     visual_prompt_compilation_eligibility,
 )
 from .work_plans import plan_status_summary, refresh_plan_status
+from .workflow_edit_calibration import safe_workflow_edit_calibration
 
 logger = logging.getLogger(__name__)
 
@@ -419,6 +420,8 @@ class ConversationOrchestrator:
         replacement_message_id: str | None = None,
         source_action: str = "send",
         inherited_image_edit_strength: dict[str, Any] | None = None,
+        preferred_profile_id: str | None = None,
+        preferred_workflow_revision_id: str | None = None,
     ) -> TurnAccepted:
         if not self._admission_open:
             raise RuntimeError(
@@ -433,6 +436,8 @@ class ConversationOrchestrator:
                 replacement_message_id=replacement_message_id,
                 source_action=source_action,
                 inherited_image_edit_strength=inherited_image_edit_strength,
+                preferred_profile_id=preferred_profile_id,
+                preferred_workflow_revision_id=preferred_workflow_revision_id,
             )
 
     async def _create_turn(
@@ -445,6 +450,8 @@ class ConversationOrchestrator:
         replacement_message_id: str | None = None,
         source_action: str = "send",
         inherited_image_edit_strength: dict[str, Any] | None = None,
+        preferred_profile_id: str | None = None,
+        preferred_workflow_revision_id: str | None = None,
     ) -> TurnAccepted:
         # Never resolve an idempotency key until its URL-scoped chat has been
         # validated. Otherwise a key from one chat could disclose another
@@ -482,6 +489,8 @@ class ConversationOrchestrator:
                 replacement_message_id=replacement_message_id,
                 source_action=source_action,
                 inherited_image_edit_strength=inherited_image_edit_strength,
+                preferred_profile_id=preferred_profile_id,
+                preferred_workflow_revision_id=preferred_workflow_revision_id,
             )
 
         owner_token, replay = await self._claim_or_replay_turn(
@@ -511,6 +520,8 @@ class ConversationOrchestrator:
                 replacement_message_id=replacement_message_id,
                 source_action=source_action,
                 inherited_image_edit_strength=inherited_image_edit_strength,
+                preferred_profile_id=preferred_profile_id,
+                preferred_workflow_revision_id=preferred_workflow_revision_id,
             )
         finally:
             self._release_turn_claim(session, chat_id, key, owner_token)
@@ -617,6 +628,8 @@ class ConversationOrchestrator:
         replacement_message_id: str | None = None,
         source_action: str = "send",
         inherited_image_edit_strength: dict[str, Any] | None = None,
+        preferred_profile_id: str | None = None,
+        preferred_workflow_revision_id: str | None = None,
     ) -> TurnAccepted:
         chat = session.get(Chat, chat_id)
         if not chat:
@@ -817,7 +830,12 @@ class ConversationOrchestrator:
             chat,
             plan.operation,
             f"{request.text}\n{plan.standalone_prompt}",
-            preferred_revision_id=self._setup_verification_workflow_id(session, chat),
+            preferred_profile_id=preferred_profile_id,
+            preferred_revision_id=(
+                preferred_workflow_revision_id
+                if preferred_workflow_revision_id is not None
+                else self._setup_verification_workflow_id(session, chat)
+            ),
         )
         profile_id = profile.id if profile else None
         vision_profile = (
@@ -4025,6 +4043,21 @@ class ConversationOrchestrator:
         strength_values = strength if isinstance(strength, dict) else {}
         bounds = strength_values.get("applied_bounds")
         bound_values = bounds if isinstance(bounds, dict) else {}
+        schedule_steps: float | None = None
+        if run.workflow_revision_id:
+            workflow_revision = session.get(WorkflowRevision, run.workflow_revision_id)
+            calibration = safe_workflow_edit_calibration(
+                workflow_revision.input_schema_json if workflow_revision else None
+            )
+            raw_steps = (
+                run.settings_json.get(calibration.steps_parameter)
+                if calibration and calibration.steps_parameter
+                else None
+            )
+            if isinstance(raw_steps, int | float) and not isinstance(raw_steps, bool):
+                numeric_steps = float(raw_steps)
+                if 0 < numeric_steps <= 10_000:
+                    schedule_steps = numeric_steps
         payload = ImageEditVerificationJobPayload(
             chat_id=chat.id,
             source_run_id=run.id,
@@ -4054,6 +4087,7 @@ class ConversationOrchestrator:
                 and not isinstance(value, bool)
                 else None
             ),
+            schedule_steps=schedule_steps,
         )
         step: WorkStep | None = None
         if run.work_plan_id and run.work_step_id:
@@ -4303,6 +4337,8 @@ class ConversationOrchestrator:
             replacement_message_id=source_assistant_id,
             source_action="image_edit_verification_retry",
             inherited_image_edit_strength=inherited_strength,
+            preferred_profile_id=source_run.profile_id,
+            preferred_workflow_revision_id=source_run.workflow_revision_id,
         )
         retry_run = session.get(Run, accepted.run.id)
         if retry_run:
@@ -4544,6 +4580,7 @@ class ConversationOrchestrator:
                 current_strength=payload.current_strength,
                 minimum=payload.minimum,
                 maximum=payload.maximum,
+                schedule_steps=payload.schedule_steps,
             )
             persisted = {
                 **decision.provenance(assessment),
@@ -5325,8 +5362,29 @@ class ConversationOrchestrator:
         operation: Operation,
         prompt: str,
         *,
+        preferred_profile_id: str | None = None,
         preferred_revision_id: str | None = None,
     ) -> tuple[ModelProfile | None, dict[str, Any], WorkflowRevision | None]:
+        if preferred_profile_id is not None:
+            profile = session.get(ModelProfile, preferred_profile_id)
+            expected_role = self._role_for_operation(operation)
+            if not profile or profile.role != expected_role:
+                raise ValueError("The image edit retry profile is no longer available.")
+            if operation != Operation.TEXT and preferred_revision_id is None:
+                raise ValueError("The image edit retry workflow is no longer available.")
+            workflow = self._workflow_for_operation(
+                session,
+                operation,
+                model_install_id=profile.model_install_id,
+                preferred_revision_id=preferred_revision_id,
+            )
+            if operation != Operation.TEXT and not workflow:
+                raise ValueError("The image edit retry workflow is no longer available.")
+            return profile, {
+                "mode": "pinned_retry",
+                "profile_id": profile.id,
+                "profile_name": profile.name,
+            }, workflow
         profile, selection = self._profile_for_operation(session, chat, operation, prompt)
         workflow = self._workflow_for_operation(
             session,
