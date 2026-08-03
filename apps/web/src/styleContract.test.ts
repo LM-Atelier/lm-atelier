@@ -70,3 +70,51 @@ describe("style contract", () => {
     expect(css).toMatch(/\.studio-canvas-layers\s*>\s*canvas\s*\{[^}]*position:\s*absolute/);
   });
 });
+
+describe("contrast and state", () => {
+  const css = readFileSync(STYLESHEET, "utf8");
+
+  function relativeLuminance(hex: string): number {
+    const value = hex.replace("#", "");
+    const channels = [0, 2, 4].map((at) => parseInt(value.slice(at, at + 2), 16) / 255);
+    const linear = channels.map((c) => (c <= 0.03928 ? c / 12.92 : ((c + 0.055) / 1.055) ** 2.4));
+    return 0.2126 * linear[0] + 0.7152 * linear[1] + 0.0722 * linear[2];
+  }
+
+  function contrast(a: string, b: string): number {
+    const [high, low] = [relativeLuminance(a), relativeLuminance(b)].sort((x, y) => y - x);
+    return (high + 0.05) / (low + 0.05);
+  }
+
+  function token(name: string): string {
+    return css.match(new RegExp(`--${name}:\\s*(#[0-9a-f]{6})`))?.[1] ?? "";
+  }
+
+  const SURFACES = ["bg", "panel", "panel-2", "panel-3"];
+
+  it("keeps muted text readable on every surface it can sit on", () => {
+    // Nearly every small label in the app resolves to this one token, and
+    // most of it is 9-11px where no large-text exemption applies.
+    const worst = Math.min(...SURFACES.map((name) => contrast(token("muted"), token(name))));
+    expect(worst).toBeGreaterThanOrEqual(4.5);
+  });
+
+  it("gives controls a boundary that can actually be seen", () => {
+    // WCAG 1.4.11 wants 3:1 for the edge of anything you type into. The
+    // decorative --border measures about 1.4:1 and is a different job.
+    const worst = Math.min(...SURFACES.map((name) => contrast(token("line-control"), token(name))));
+    expect(worst).toBeGreaterThanOrEqual(3);
+  });
+
+  it("does not leave an indeterminate bar parked at a false percentage", () => {
+    const reducedMotion = css.slice(css.indexOf("@media (prefers-reduced-motion"));
+    expect(reducedMotion).toMatch(/\.indeterminate\s*\{[^}]*width:\s*100%/);
+  });
+
+  it("distinguishes where you are from where the pointer is", () => {
+    for (const selector of [".primary-nav button.active", ".chat-main.active"]) {
+      const rule = css.match(new RegExp(`${selector}[^{]*\\{([^}]*)\\}`))?.[1] ?? "";
+      expect(rule).toMatch(/box-shadow/);
+    }
+  });
+});
