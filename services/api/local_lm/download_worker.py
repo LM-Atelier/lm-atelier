@@ -7,12 +7,21 @@ from typing import Any
 
 from huggingface_hub import hf_hub_download
 
+from .https_transfer import HttpsTransferError, download_https_artifact
+
 _MAX_DOWNLOAD_FILES = 512
 
 
 def main() -> int:
     payload: dict[str, Any] = json.load(sys.stdin.buffer)
     kind = str(payload.get("kind") or "huggingface")
+    if kind == "https":
+        try:
+            path = download_https_artifact(payload)
+        except HttpsTransferError as exc:
+            raise ValueError(f"https transfer failed: {exc.code}") from None
+        json.dump({"path": path}, sys.stdout)
+        return 0
     if kind != "huggingface":
         raise ValueError(f"unsupported download worker kind: {kind}")
     raw_files = payload.get("files")
