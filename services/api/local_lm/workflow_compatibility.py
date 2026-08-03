@@ -478,7 +478,21 @@ def resolve_chat_workflow_selection(
         )
     )
     if mapping is None:
-        raise WorkflowSelectionInvalid(capability=capability, reason="family_not_bound")
+        family = session.get(WorkflowFamily, selection.workflow_family_id)
+        preference = session.scalar(
+            select(WorkflowPreference).where(
+                WorkflowPreference.workflow_family_id == selection.workflow_family_id,
+                WorkflowPreference.selector_capability == capability,
+            )
+        )
+        if family is None or preference is None:
+            raise WorkflowSelectionInvalid(capability=capability, reason="family_not_bound")
+        return ResolvedChatWorkflowSelection(
+            capability=capability,
+            mode="family",
+            profile_id=None,
+            workflow_family_id=selection.workflow_family_id,
+        )
     profile = session.get(ModelProfile, mapping.model_profile_id)
     if profile is None or profile.role != _CAPABILITY_ROLE[capability]:
         raise WorkflowSelectionInvalid(capability=capability, reason="profile_incompatible")

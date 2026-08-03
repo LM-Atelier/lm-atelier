@@ -7,6 +7,7 @@ import json
 import logging
 import math
 import os
+import re
 import shutil
 import stat
 from collections.abc import AsyncGenerator, AsyncIterator, Callable
@@ -110,6 +111,7 @@ from .models import (
     AppSetting,
     Artifact,
     Chat,
+    ChatWorkflowSelection,
     ComfyRegistryInstall,
     CustomNodeInstall,
     EditTemplate,
@@ -122,12 +124,17 @@ from .models import (
     ModelInstall,
     ModelProfile,
     Project,
+    ProjectWorkflowSelection,
     ResponseFeedback,
     ResponseRevision,
     ResponseRevisionPart,
     Run,
     SetupVerification,
+    WorkflowActivation,
     WorkflowDefinition,
+    WorkflowFamily,
+    WorkflowPreference,
+    WorkflowProfileCompatibility,
     WorkflowRevision,
     WorkPlan,
     WorkStep,
@@ -177,6 +184,7 @@ from .schemas import (
     ChatDetail,
     ChatOut,
     ChatUpdate,
+    ChatWorkflowSelectionIn,
     CredentialSet,
     CredentialStatus,
     CustomNodeInstallRequest,
@@ -214,6 +222,7 @@ from .schemas import (
     ProjectCreate,
     ProjectOut,
     ProjectUpdate,
+    ProjectWorkflowSelectionIn,
     PromptHelperCreate,
     PromptHelperDetail,
     PromptHelperUpdate,
@@ -250,6 +259,9 @@ from .schemas import (
     WorkflowBundle,
     WorkflowClone,
     WorkflowCreate,
+    WorkflowFamilyOut,
+    WorkflowFamilyPreferenceOut,
+    WorkflowFamilyVariantOut,
     WorkflowMissingNodeOut,
     WorkflowOpenTarget,
     WorkflowOut,
@@ -261,8 +273,12 @@ from .schemas import (
     WorkflowPackageRequirementOut,
     WorkflowRevisionCreate,
     WorkflowRevisionOut,
+    WorkflowSelectionOut,
+    WorkflowSelectionResponseMode,
+    WorkflowSelectorCapability,
     WorkflowSourceCandidateOut,
     WorkflowUpdate,
+    WorkflowVariantReadiness,
     WorkPlanOut,
     WorkStepOut,
 )
@@ -5277,6 +5293,497 @@ async def remove_custom_node(
     session.delete(install)
     session.commit()
     return Response(status_code=204)
+
+
+_CHAT_WORKFLOW_PROFILE_FIELDS: dict[WorkflowSelectorCapability, str] = {
+    "chat": "active_chat_profile_id",
+    "vision": "active_vision_profile_id",
+    "image": "active_image_profile_id",
+    "video": "active_video_profile_id",
+}
+_PROJECT_WORKFLOW_REVISION_FIELDS = {
+    "image": "image_workflow_revision_id",
+    "video": "video_workflow_revision_id",
+}
+_SELECTOR_OPERATIONS: dict[WorkflowSelectorCapability, frozenset[Operation]] = {
+    "chat": frozenset({Operation.TEXT}),
+    "vision": frozenset({Operation.TEXT}),
+    "image": frozenset({Operation.TEXT_TO_IMAGE, Operation.IMAGE_TO_IMAGE}),
+    "video": frozenset({Operation.TEXT_TO_VIDEO, Operation.IMAGE_TO_VIDEO}),
+}
+_WORKFLOW_SELECTION_RESPONSE_MODES: frozenset[WorkflowSelectionResponseMode] = frozenset(
+    {"default", "inherit", "automatic", "family", "revision", "legacy"}
+)
+
+
+def _workflow_selection_response_mode(value: str) -> WorkflowSelectionResponseMode:
+    if value not in _WORKFLOW_SELECTION_RESPONSE_MODES:
+        raise api_error(500, "workflow-selection-corrupt", "workflow selection mode is invalid")
+    return value
+
+
+def _workflow_selector_capability(value: str) -> WorkflowSelectorCapability:
+    if value not in _SELECTOR_OPERATIONS:
+        raise api_error(
+            500,
+            "workflow-preference-corrupt",
+            "workflow preference selector capability is invalid",
+        )
+    return value
+
+
+def _workflow_preference(
+    session: Session,
+    family_id: str,
+    capability: WorkflowSelectorCapability,
+) -> WorkflowPreference | None:
+    return session.scalar(
+        select(WorkflowPreference).where(
+            WorkflowPreference.workflow_family_id == family_id,
+            WorkflowPreference.selector_capability == capability,
+        )
+    )
+
+
+def _selectable_workflow_family(
+    session: Session,
+    family_id: str,
+    capability: WorkflowSelectorCapability,
+) -> WorkflowFamily:
+    family = session.get(WorkflowFamily, family_id)
+    if family is None:
+        raise api_error(404, "workflow-family-not-found", "workflow family not found")
+    preference = _workflow_preference(session, family.id, capability)
+    if family.archived or not family.enabled or preference is None or not preference.enabled:
+        raise api_error(
+            422,
+            "workflow-family-not-selectable",
+            "workflow family is not enabled for this selector",
+        )
+    operations = {operation.value for operation in _SELECTOR_OPERATIONS[capability]}
+    compatible_definition = session.scalar(
+        select(WorkflowDefinition.id)
+        .where(
+            WorkflowDefinition.family_id == family.id,
+            WorkflowDefinition.operation.in_(operations),
+        )
+        .limit(1)
+    )
+    if compatible_definition is None:
+        raise api_error(
+            422,
+            "workflow-family-operation-unavailable",
+            "workflow family has no compatible operation variant",
+        )
+    return family
+
+
+def _chat_workflow_selection_out(
+    session: Session,
+    chat: Chat,
+    capability: WorkflowSelectorCapability,
+) -> WorkflowSelectionOut:
+    selection = session.scalar(
+        select(ChatWorkflowSelection).where(
+            ChatWorkflowSelection.chat_id == chat.id,
+            ChatWorkflowSelection.selector_capability == capability,
+        )
+    )
+    if selection is not None:
+        return WorkflowSelectionOut(
+            selector_capability=capability,
+            mode=_workflow_selection_response_mode(selection.mode),
+            workflow_family_id=selection.workflow_family_id,
+        )
+    legacy_profile_id = getattr(chat, _CHAT_WORKFLOW_PROFILE_FIELDS[capability])
+    if legacy_profile_id is None:
+        mode: WorkflowSelectionResponseMode = "default"
+    elif legacy_profile_id == AUTO_PROFILE_ID:
+        mode = "automatic"
+    else:
+        mode = "legacy"
+    return WorkflowSelectionOut(
+        selector_capability=capability,
+        mode=mode,
+        legacy_profile_id=legacy_profile_id if mode == "legacy" else None,
+    )
+
+
+def _project_workflow_selection_out(
+    session: Session,
+    project: Project,
+    capability: Literal["image", "video"],
+) -> WorkflowSelectionOut:
+    selection = session.scalar(
+        select(ProjectWorkflowSelection).where(
+            ProjectWorkflowSelection.project_id == project.id,
+            ProjectWorkflowSelection.selector_capability == capability,
+        )
+    )
+    if selection is None:
+        legacy_revision_id = getattr(project, _PROJECT_WORKFLOW_REVISION_FIELDS[capability])
+        return WorkflowSelectionOut(
+            selector_capability=capability,
+            mode="revision" if legacy_revision_id else "inherit",
+            workflow_revision_id=legacy_revision_id,
+        )
+    return WorkflowSelectionOut(
+        selector_capability=capability,
+        mode=_workflow_selection_response_mode(selection.mode),
+        workflow_family_id=selection.workflow_family_id,
+        workflow_revision_id=selection.workflow_revision_id,
+    )
+
+
+def _revision_readiness(
+    session: Session,
+    revision: WorkflowRevision,
+    *,
+    expected_engine: str,
+    operation: Operation,
+) -> tuple[Literal["ready", "setup_required", "review_required", "unavailable"], str | None]:
+    if revision.engine != expected_engine:
+        return "unavailable", "engine_mismatch"
+    if operation != Operation.TEXT and expected_engine != "mock" and not revision.api_graph_json:
+        return "unavailable", "revision_not_executable"
+    if not revision.trusted:
+        return "review_required", "revision_untrusted"
+    if revision.dependency_contract_sha256 is None:
+        return "ready", None
+    activation = session.scalar(
+        select(WorkflowActivation).where(
+            WorkflowActivation.workflow_revision_id == revision.id,
+            WorkflowActivation.is_active.is_(True),
+            WorkflowActivation.state == "ready",
+            WorkflowActivation.invalidated_at.is_(None),
+        )
+    )
+    launch_sha256 = (
+        activation.details_json.get("launch_sha256")
+        if activation is not None and isinstance(activation.details_json, dict)
+        else None
+    )
+    if (
+        activation is None
+        or activation.dependency_contract_sha256 != revision.dependency_contract_sha256
+        or not isinstance(launch_sha256, str)
+        or re.fullmatch(r"[0-9a-f]{64}", launch_sha256) is None
+    ):
+        return "setup_required", "activation_not_ready"
+    return "ready", None
+
+
+def _workflow_family_variant_out(
+    session: Session,
+    services: Services,
+    family: WorkflowFamily,
+    definition: WorkflowDefinition,
+    compatibility: WorkflowProfileCompatibility | None,
+) -> WorkflowFamilyVariantOut:
+    readiness: WorkflowVariantReadiness
+    reason: str | None
+    operation = Operation(definition.operation)
+    expected_engine = (
+        services.settings.chat_engine
+        if operation == Operation.TEXT
+        else services.settings.media_engine
+    )
+    revision = (
+        session.get(WorkflowRevision, definition.current_revision_id)
+        if definition.current_revision_id
+        else None
+    )
+    if compatibility is not None and revision is None:
+        profile = session.get(ModelProfile, compatibility.model_profile_id)
+        if profile is not None:
+            if operation == Operation.TEXT:
+                install = (
+                    session.get(ModelInstall, profile.model_install_id)
+                    if profile.model_install_id
+                    else None
+                )
+                profile_ready = profile.engine == expected_engine and (
+                    expected_engine == "mock" or (install is not None and install.active)
+                )
+                if profile_ready:
+                    readiness, reason = "ready", None
+                else:
+                    readiness, reason = "setup_required", "model_unavailable"
+            else:
+                revision = services.orchestrator.legacy_workflow_revision(
+                    session,
+                    profile,
+                    operation,
+                )
+                if revision is None:
+                    readiness, reason = "setup_required", "operation_unavailable"
+                else:
+                    readiness, reason = _revision_readiness(
+                        session,
+                        revision,
+                        expected_engine=expected_engine,
+                        operation=operation,
+                    )
+        else:
+            readiness, reason = "setup_required", "model_unavailable"
+    elif revision is None or revision.workflow_id != definition.id:
+        readiness, reason = "setup_required", "current_revision_missing"
+        revision = None
+    else:
+        readiness, reason = _revision_readiness(
+            session,
+            revision,
+            expected_engine=expected_engine,
+            operation=operation,
+        )
+    if family.archived:
+        readiness, reason = "unavailable", "family_archived"
+    elif not family.enabled:
+        readiness, reason = "unavailable", "family_disabled"
+    return WorkflowFamilyVariantOut(
+        id=definition.id,
+        variant_key=definition.variant_key or "",
+        name=definition.name,
+        operation=operation,
+        current_revision_id=revision.id if revision else None,
+        current_revision_version=revision.version if revision else None,
+        engine=revision.engine if revision else None,
+        capabilities=list(revision.capabilities_json) if revision else [],
+        trusted=revision.trusted if revision else compatibility is not None,
+        readiness=readiness,
+        readiness_reason=reason,
+    )
+
+
+@router.get("/workflow-families", response_model=list[WorkflowFamilyOut])
+async def list_workflow_families(
+    request: Request,
+    session: SessionDep,
+    selector_capability: WorkflowSelectorCapability | None = None,
+    include_archived: bool = False,
+) -> list[WorkflowFamilyOut]:
+    query = select(WorkflowFamily).options(
+        selectinload(WorkflowFamily.definitions),
+        selectinload(WorkflowFamily.preferences),
+    )
+    if not include_archived:
+        query = query.where(WorkflowFamily.archived.is_(False))
+    if selector_capability is not None:
+        query = query.join(WorkflowPreference).where(
+            WorkflowPreference.selector_capability == selector_capability
+        )
+    families = list(
+        session.scalars(query.order_by(WorkflowFamily.name, WorkflowFamily.id)).unique()
+    )
+    services = _services(request)
+    result: list[WorkflowFamilyOut] = []
+    for family in families:
+        compatibility = session.scalar(
+            select(WorkflowProfileCompatibility).where(
+                WorkflowProfileCompatibility.workflow_family_id == family.id
+            )
+        )
+        result.append(
+            WorkflowFamilyOut(
+                id=family.id,
+                name=family.name,
+                description=family.description,
+                use_case=family.use_case,
+                tags=[item for item in family.tags_json if isinstance(item, str)],
+                enabled=family.enabled,
+                archived=family.archived,
+                compatibility=compatibility is not None,
+                variants=[
+                    _workflow_family_variant_out(
+                        session,
+                        services,
+                        family,
+                        definition,
+                        compatibility,
+                    )
+                    for definition in sorted(
+                        family.definitions,
+                        key=lambda item: (item.operation, item.variant_key or "", item.id),
+                    )
+                ],
+                preferences=[
+                    WorkflowFamilyPreferenceOut(
+                        selector_capability=_workflow_selector_capability(
+                            preference.selector_capability
+                        ),
+                        enabled=preference.enabled,
+                        is_default=preference.is_default,
+                        sort_order=preference.sort_order,
+                    )
+                    for preference in sorted(
+                        family.preferences,
+                        key=lambda item: (item.selector_capability, item.sort_order, item.id),
+                    )
+                ],
+                created_at=family.created_at,
+                updated_at=family.updated_at,
+            )
+        )
+    return result
+
+
+@router.get(
+    "/chats/{chat_id}/workflow-selections",
+    response_model=list[WorkflowSelectionOut],
+)
+async def list_chat_workflow_selections(
+    chat_id: str,
+    session: ConversationSessionDep,
+) -> list[WorkflowSelectionOut]:
+    chat = session.get(Chat, chat_id)
+    if chat is None:
+        raise api_error(404, "chat-not-found", "chat not found")
+    return [
+        _chat_workflow_selection_out(session, chat, capability)
+        for capability in ("chat", "vision", "image", "video")
+    ]
+
+
+@router.put(
+    "/chats/{chat_id}/workflow-selections/{selector_capability}",
+    response_model=WorkflowSelectionOut,
+)
+async def set_chat_workflow_selection(
+    chat_id: str,
+    selector_capability: WorkflowSelectorCapability,
+    payload: ChatWorkflowSelectionIn,
+    session: ConversationSessionDep,
+) -> WorkflowSelectionOut:
+    chat = session.get(Chat, chat_id)
+    if chat is None:
+        raise api_error(404, "chat-not-found", "chat not found")
+    selection = session.scalar(
+        select(ChatWorkflowSelection).where(
+            ChatWorkflowSelection.chat_id == chat.id,
+            ChatWorkflowSelection.selector_capability == selector_capability,
+        )
+    )
+    legacy_field = _CHAT_WORKFLOW_PROFILE_FIELDS[selector_capability]
+    if payload.mode == "default":
+        if selection is not None:
+            session.delete(selection)
+        setattr(chat, legacy_field, None)
+    else:
+        family_id: str | None = None
+        legacy_profile_id: str | None = AUTO_PROFILE_ID
+        if payload.mode == "family":
+            family = _selectable_workflow_family(
+                session,
+                payload.workflow_family_id,
+                selector_capability,
+            )
+            family_id = family.id
+            compatibility = session.scalar(
+                select(WorkflowProfileCompatibility).where(
+                    WorkflowProfileCompatibility.workflow_family_id == family.id
+                )
+            )
+            legacy_profile_id = (
+                compatibility.model_profile_id if compatibility is not None else None
+            )
+        if selection is None:
+            selection = ChatWorkflowSelection(
+                chat_id=chat.id,
+                selector_capability=selector_capability,
+                mode=payload.mode,
+                workflow_family_id=family_id,
+            )
+            session.add(selection)
+        else:
+            selection.mode = payload.mode
+            selection.workflow_family_id = family_id
+        setattr(chat, legacy_field, legacy_profile_id)
+    session.commit()
+    return _chat_workflow_selection_out(session, chat, selector_capability)
+
+
+@router.get(
+    "/projects/{project_id}/workflow-selections",
+    response_model=list[WorkflowSelectionOut],
+)
+async def list_project_workflow_selections(
+    project_id: str,
+    session: SessionDep,
+) -> list[WorkflowSelectionOut]:
+    project = session.get(Project, project_id)
+    if project is None:
+        raise api_error(404, "project-not-found", "project not found")
+    return [
+        _project_workflow_selection_out(session, project, capability)
+        for capability in ("image", "video")
+    ]
+
+
+@router.put(
+    "/projects/{project_id}/workflow-selections/{selector_capability}",
+    response_model=WorkflowSelectionOut,
+)
+async def set_project_workflow_selection(
+    project_id: str,
+    selector_capability: Literal["image", "video"],
+    payload: ProjectWorkflowSelectionIn,
+    session: SessionDep,
+) -> WorkflowSelectionOut:
+    project = session.get(Project, project_id)
+    if project is None:
+        raise api_error(404, "project-not-found", "project not found")
+    selection = session.scalar(
+        select(ProjectWorkflowSelection).where(
+            ProjectWorkflowSelection.project_id == project.id,
+            ProjectWorkflowSelection.selector_capability == selector_capability,
+        )
+    )
+    legacy_field = _PROJECT_WORKFLOW_REVISION_FIELDS[selector_capability]
+    if payload.mode == "inherit":
+        if selection is not None:
+            session.delete(selection)
+        setattr(project, legacy_field, None)
+    else:
+        family_id: str | None = None
+        revision_id: str | None = None
+        if payload.mode == "family":
+            family = _selectable_workflow_family(
+                session,
+                payload.workflow_family_id,
+                selector_capability,
+            )
+            family_id = family.id
+        elif payload.mode == "revision":
+            revision = session.get(WorkflowRevision, payload.workflow_revision_id)
+            definition = session.get(WorkflowDefinition, revision.workflow_id) if revision else None
+            operations = {
+                operation.value for operation in _SELECTOR_OPERATIONS[selector_capability]
+            }
+            if revision is None or definition is None:
+                raise api_error(404, "workflow-revision-not-found", "workflow revision not found")
+            if definition.operation not in operations:
+                raise api_error(
+                    422,
+                    "workflow-revision-selector-mismatch",
+                    "workflow revision does not match this selector",
+                )
+            revision_id = revision.id
+        if selection is None:
+            selection = ProjectWorkflowSelection(
+                project_id=project.id,
+                selector_capability=selector_capability,
+                mode=payload.mode,
+                workflow_family_id=family_id,
+                workflow_revision_id=revision_id,
+            )
+            session.add(selection)
+        else:
+            selection.mode = payload.mode
+            selection.workflow_family_id = family_id
+            selection.workflow_revision_id = revision_id
+        setattr(project, legacy_field, revision_id)
+    session.commit()
+    return _project_workflow_selection_out(session, project, selector_capability)
 
 
 @router.get("/workflows", response_model=list[WorkflowOut])
