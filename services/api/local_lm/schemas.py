@@ -839,6 +839,14 @@ WorkflowVariantReadiness = Literal[
     "review_required",
     "unavailable",
 ]
+WorkflowSelectionResponseMode = Literal[
+    "default",
+    "inherit",
+    "automatic",
+    "family",
+    "revision",
+    "legacy",
+]
 
 
 class WorkflowFamilyVariantOut(ApiModel):
@@ -927,14 +935,7 @@ ProjectWorkflowSelectionIn = Annotated[
 
 class WorkflowSelectionOut(ApiModel):
     selector_capability: WorkflowSelectorCapability
-    mode: Literal[
-        "default",
-        "inherit",
-        "automatic",
-        "family",
-        "revision",
-        "legacy",
-    ]
+    mode: WorkflowSelectionResponseMode
     workflow_family_id: str | None = None
     workflow_revision_id: str | None = None
     legacy_profile_id: str | None = None

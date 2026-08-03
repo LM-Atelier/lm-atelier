@@ -274,9 +274,11 @@ from .schemas import (
     WorkflowRevisionCreate,
     WorkflowRevisionOut,
     WorkflowSelectionOut,
+    WorkflowSelectionResponseMode,
     WorkflowSelectorCapability,
     WorkflowSourceCandidateOut,
     WorkflowUpdate,
+    WorkflowVariantReadiness,
     WorkPlanOut,
     WorkStepOut,
 )
@@ -5309,6 +5311,25 @@ _SELECTOR_OPERATIONS: dict[WorkflowSelectorCapability, frozenset[Operation]] = {
     "image": frozenset({Operation.TEXT_TO_IMAGE, Operation.IMAGE_TO_IMAGE}),
     "video": frozenset({Operation.TEXT_TO_VIDEO, Operation.IMAGE_TO_VIDEO}),
 }
+_WORKFLOW_SELECTION_RESPONSE_MODES: frozenset[WorkflowSelectionResponseMode] = frozenset(
+    {"default", "inherit", "automatic", "family", "revision", "legacy"}
+)
+
+
+def _workflow_selection_response_mode(value: str) -> WorkflowSelectionResponseMode:
+    if value not in _WORKFLOW_SELECTION_RESPONSE_MODES:
+        raise api_error(500, "workflow-selection-corrupt", "workflow selection mode is invalid")
+    return value
+
+
+def _workflow_selector_capability(value: str) -> WorkflowSelectorCapability:
+    if value not in _SELECTOR_OPERATIONS:
+        raise api_error(
+            500,
+            "workflow-preference-corrupt",
+            "workflow preference selector capability is invalid",
+        )
+    return value
 
 
 def _workflow_preference(
@@ -5371,12 +5392,12 @@ def _chat_workflow_selection_out(
     if selection is not None:
         return WorkflowSelectionOut(
             selector_capability=capability,
-            mode=selection.mode,
+            mode=_workflow_selection_response_mode(selection.mode),
             workflow_family_id=selection.workflow_family_id,
         )
     legacy_profile_id = getattr(chat, _CHAT_WORKFLOW_PROFILE_FIELDS[capability])
     if legacy_profile_id is None:
-        mode = "default"
+        mode: WorkflowSelectionResponseMode = "default"
     elif legacy_profile_id == AUTO_PROFILE_ID:
         mode = "automatic"
     else:
@@ -5408,7 +5429,7 @@ def _project_workflow_selection_out(
         )
     return WorkflowSelectionOut(
         selector_capability=capability,
-        mode=selection.mode,
+        mode=_workflow_selection_response_mode(selection.mode),
         workflow_family_id=selection.workflow_family_id,
         workflow_revision_id=selection.workflow_revision_id,
     )
@@ -5459,6 +5480,8 @@ def _workflow_family_variant_out(
     definition: WorkflowDefinition,
     compatibility: WorkflowProfileCompatibility | None,
 ) -> WorkflowFamilyVariantOut:
+    readiness: WorkflowVariantReadiness
+    reason: str | None
     operation = Operation(definition.operation)
     expected_engine = (
         services.settings.chat_engine
@@ -5585,7 +5608,9 @@ async def list_workflow_families(
                 ],
                 preferences=[
                     WorkflowFamilyPreferenceOut(
-                        selector_capability=preference.selector_capability,
+                        selector_capability=_workflow_selector_capability(
+                            preference.selector_capability
+                        ),
                         enabled=preference.enabled,
                         is_default=preference.is_default,
                         sort_order=preference.sort_order,
