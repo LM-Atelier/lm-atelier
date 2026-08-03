@@ -261,6 +261,7 @@ from .schemas import (
     WorkflowPackageRequirementOut,
     WorkflowRevisionCreate,
     WorkflowRevisionOut,
+    WorkflowSourceCandidateOut,
     WorkflowUpdate,
     WorkPlanOut,
     WorkStepOut,
@@ -303,6 +304,7 @@ from .workflow_package_preparation import (
     WorkflowPackagePreparationError,
     prepare_workflow_package,
 )
+from .workflow_source_candidates import collect_source_candidates
 from .workflow_trust import (
     TRUST_DERIVATION_VERSION,
     TrustDecision,
@@ -5997,6 +5999,15 @@ async def analyze_workflow_package(
         )
     except WorkflowPackageError as exc:
         raise api_error(422, exc.code, str(exc)) from exc
+    # Authors often record where a model came from. A filename search cannot
+    # find a file inside a repository, so those links are frequently the only
+    # way an asset is findable at all - read from the graph, validated here,
+    # and still resolved by the ordinary preflight path.
+    candidates = collect_source_candidates(
+        payload.ui_graph,
+        allowed_hosts=services.catalog_sources.host_map(),
+        asset_filenames=[asset.filename for asset in analysis.asset_references],
+    )
     return WorkflowPackageAnalysisOut(
         format_version=analysis.format_version,
         frontend_version=analysis.frontend_version,
@@ -6033,6 +6044,10 @@ async def analyze_workflow_package(
                 kind=asset.kind,
                 source_url=asset.source_url,
                 present_locally=asset.present_locally,
+                source_candidates=[
+                    WorkflowSourceCandidateOut(**candidate.as_dict())
+                    for candidate in candidates.get(asset.filename, ())
+                ],
             )
             for asset in analysis.asset_references
         ],
@@ -6048,6 +6063,10 @@ async def analyze_workflow_package(
         ready=analysis.ready,
         runtime_nodes_available=analysis.runtime_nodes_available,
         dependencies_resolved=analysis.dependencies_resolved,
+        source_candidates=[
+            WorkflowSourceCandidateOut(**candidate.as_dict())
+            for candidate in candidates.get("", ())
+        ],
         node_inventory_available=node_inventory_available,
     )
 

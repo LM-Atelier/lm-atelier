@@ -180,6 +180,30 @@ export function WorkflowPackageReview({
           </ul>
         </section>
       )}
+      {/* Authors usually name a model the way it is titled on its page, not
+          the way it is named on disk, so these links cannot be matched to a
+          file automatically. Showing them is still the difference between a
+          findable model and a dead end. */}
+      {analysis.source_candidates.length > 0 && (
+        <section>
+          <h3>Sources this workflow mentions</h3>
+          <p className="package-review-note">
+            The author recorded these, but did not say which file each one is.
+            Open one to see what it is, then pick it above for the file it
+            belongs to.
+          </p>
+          <ul>
+            {analysis.source_candidates.map((candidate) => (
+              <li key={candidate.url}>
+                <a href={candidate.url} target="_blank" rel="noreferrer noopener">
+                  {candidate.filename ?? candidate.remote_id}
+                </a>
+                <small>{` ${candidate.provider}`}</small>
+              </li>
+            ))}
+          </ul>
+        </section>
+      )}
       {analysis.issues.length > 0 && (
         <section>
           <h3>Findings</h3>

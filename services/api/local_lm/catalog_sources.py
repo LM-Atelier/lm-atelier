@@ -4,11 +4,16 @@ from collections.abc import Iterable
 from typing import Any, Protocol
 
 from .schemas import CatalogPage
+from .workflow_source_candidates import catalog_host_map
 
 
 class CatalogSource(Protocol):
     source_id: str
     display_name: str
+    # The site this source serves, so a link found in a workflow can be
+    # attributed to it. A deployment registering a different source brings its
+    # own origin with it; nothing elsewhere hardcodes which hosts exist.
+    web_origin: str
 
     def validate_item_id(self, item_id: str) -> bool: ...
 
@@ -80,6 +85,18 @@ class CatalogSources:
 
     def default(self) -> CatalogSource:
         return self.get(self.default_source_id)
+
+    def host_map(self) -> dict[str, str]:
+        """Hostname -> source id for every source registered here.
+
+        This is the only answer to "may we parse a link pointing there": a
+        host is acceptable because a registered source serves it, not because
+        it appears in a list somewhere.
+        """
+        return catalog_host_map(
+            (source.source_id, getattr(source, "web_origin", ""))
+            for source in self._sources.values()
+        )
 
     async def close(self) -> None:
         for source in self._sources.values():

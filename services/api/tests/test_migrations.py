@@ -85,6 +85,44 @@ def test_migrations_round_trip(tmp_path) -> None:  # type: ignore[no-untyped-def
             row[1]
             for row in connection.execute("PRAGMA table_info(comfy_registry_installs)").fetchall()
         }
+        workflow_definition_columns = {
+            row[1]
+            for row in connection.execute("PRAGMA table_info(workflow_definitions)").fetchall()
+        }
+        workflow_revision_columns = {
+            row[1] for row in connection.execute("PRAGMA table_info(workflow_revisions)").fetchall()
+        }
+        workflow_family_columns = {
+            row[1] for row in connection.execute("PRAGMA table_info(workflow_families)").fetchall()
+        }
+        workflow_preference_columns = {
+            row[1]
+            for row in connection.execute("PRAGMA table_info(workflow_preferences)").fetchall()
+        }
+        workflow_preference_indexes = {
+            row[1]
+            for row in connection.execute("PRAGMA index_list(workflow_preferences)").fetchall()
+        }
+        workflow_default_index_sql = connection.execute(
+            """
+            SELECT sql
+            FROM sqlite_master
+            WHERE type = 'index'
+              AND name = 'uq_workflow_preferences_default_selector'
+            """
+        ).fetchone()
+        workflow_definition_foreign_keys = {
+            (row[3], row[2], row[4], row[6])
+            for row in connection.execute(
+                "PRAGMA foreign_key_list(workflow_definitions)"
+            ).fetchall()
+        }
+        workflow_preference_foreign_keys = {
+            (row[3], row[2], row[4], row[6])
+            for row in connection.execute(
+                "PRAGMA foreign_key_list(workflow_preferences)"
+            ).fetchall()
+        }
         workflow_id_type = next(
             row[2]
             for row in connection.execute("PRAGMA table_info(workflow_definitions)").fetchall()
@@ -126,6 +164,8 @@ def test_migrations_round_trip(tmp_path) -> None:  # type: ignore[no-untyped-def
         "comfy_registry_installs",
         "model_asset_installs",
         "turn_creation_claims",
+        "workflow_families",
+        "workflow_preferences",
     } <= tables
     assert {
         "active_head_message_id",
@@ -168,6 +208,43 @@ def test_migrations_round_trip(tmp_path) -> None:  # type: ignore[no-untyped-def
         "trusted",
         "active",
     } <= registry_install_columns
+    assert {"family_id", "variant_key"} <= workflow_definition_columns
+    assert "capabilities_json" in workflow_revision_columns
+    assert {
+        "id",
+        "name",
+        "description",
+        "use_case",
+        "tags_json",
+        "enabled",
+        "archived",
+    } <= workflow_family_columns
+    assert {
+        "id",
+        "workflow_family_id",
+        "selector_capability",
+        "enabled",
+        "is_default",
+        "sort_order",
+    } <= workflow_preference_columns
+    assert {
+        "ix_workflow_preferences_selector_order",
+        "uq_workflow_preferences_default_selector",
+    } <= workflow_preference_indexes
+    assert workflow_default_index_sql is not None
+    assert "WHERE is_default = 1" in workflow_default_index_sql[0]
+    assert (
+        "family_id",
+        "workflow_families",
+        "id",
+        "SET NULL",
+    ) in workflow_definition_foreign_keys
+    assert (
+        "workflow_family_id",
+        "workflow_families",
+        "id",
+        "CASCADE",
+    ) in workflow_preference_foreign_keys
     assert ("chat_id", "idempotency_key") in unique_run_indexes
     assert ("idempotency_key",) not in unique_run_indexes
     assert workflow_id_type == "VARCHAR(64)"
@@ -179,6 +256,249 @@ def test_migrations_round_trip(tmp_path) -> None:  # type: ignore[no-untyped-def
     command.downgrade(config, "base")
     command.upgrade(config, "head")
     with sqlite3.connect(settings.state_dir / "local-lm.sqlite3") as connection:
+        assert connection.execute("PRAGMA integrity_check").fetchone() == ("ok",)
+
+
+def test_workflow_family_migration_preserves_existing_revisions(tmp_path: Path) -> None:
+    settings = Settings(data_dir=tmp_path / "workflow-family-migration")
+    settings.prepare()
+    config = alembic_config(settings)
+    command.upgrade(config, "d8b3e6f92a41")
+    database = settings.state_dir / "local-lm.sqlite3"
+    timestamp = "2026-08-03 00:00:00"
+    definition = (
+        "workflow_existing",
+        "Existing workflow",
+        "image_to_image",
+        "Existing description",
+        "revision_existing",
+        timestamp,
+        timestamp,
+    )
+    second_definition = (
+        "workflow_existing_alternative",
+        "Existing alternative",
+        "image_to_image",
+        "Another workflow with the same legacy operation",
+        None,
+        timestamp,
+        timestamp,
+    )
+    revision = (
+        "revision_existing",
+        "workflow_existing",
+        3,
+        "comfyui",
+        "0.3.50",
+        '{"nodes":[{"id":1}]}',
+        '{"1":{"class_type":"KSampler"}}',
+        '{"type":"object"}',
+        '{"model_install_ids":["model_existing"]}',
+        "c" * 64,
+        1,
+        timestamp,
+        timestamp,
+    )
+    with sqlite3.connect(database) as connection:
+        connection.execute(
+            """
+            INSERT INTO workflow_definitions (
+                id, name, operation, description, current_revision_id,
+                created_at, updated_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?)
+            """,
+            definition,
+        )
+        connection.execute(
+            """
+            INSERT INTO workflow_definitions (
+                id, name, operation, description, current_revision_id,
+                created_at, updated_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?)
+            """,
+            second_definition,
+        )
+        connection.execute(
+            """
+            INSERT INTO workflow_revisions (
+                id, workflow_id, version, engine, engine_version,
+                ui_graph_json, api_graph_json, input_schema_json,
+                dependencies_json, artifact_sha256, trusted,
+                created_at, updated_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            revision,
+        )
+        connection.commit()
+
+    command.upgrade(config, "head")
+
+    with sqlite3.connect(database) as connection:
+        migrated_definition = connection.execute(
+            """
+            SELECT id, name, operation, description, current_revision_id,
+                   created_at, updated_at, family_id, variant_key
+            FROM workflow_definitions
+            WHERE id = 'workflow_existing'
+            """
+        ).fetchone()
+        migrated_revision = connection.execute(
+            """
+            SELECT id, workflow_id, version, engine, engine_version,
+                   ui_graph_json, api_graph_json, input_schema_json,
+                   capabilities_json, dependencies_json, artifact_sha256, trusted,
+                   created_at, updated_at
+            FROM workflow_revisions
+            WHERE id = 'revision_existing'
+            """
+        ).fetchone()
+        assert migrated_definition == (*definition, None, None)
+        assert migrated_revision == (*revision[:8], "[]", *revision[8:])
+        assert connection.execute(
+            """
+            SELECT COUNT(*)
+            FROM workflow_definitions
+            WHERE operation = 'image_to_image'
+              AND family_id IS NULL
+              AND variant_key IS NULL
+            """
+        ).fetchone() == (2,)
+        assert connection.execute("SELECT COUNT(*) FROM workflow_families").fetchone() == (0,)
+        assert connection.execute("SELECT COUNT(*) FROM workflow_preferences").fetchone() == (0,)
+        assert connection.execute("PRAGMA foreign_key_check").fetchall() == []
+
+        connection.execute("PRAGMA foreign_keys=ON")
+        connection.execute(
+            """
+            INSERT INTO workflow_families (
+                id, name, description, use_case, tags_json, enabled, archived,
+                created_at, updated_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                "wffamily_delete_probe",
+                "Delete probe",
+                "",
+                "",
+                "[]",
+                1,
+                0,
+                timestamp,
+                timestamp,
+            ),
+        )
+        connection.execute(
+            """
+            UPDATE workflow_definitions
+            SET family_id = 'wffamily_delete_probe', variant_key = 'edit'
+            WHERE id = 'workflow_existing'
+            """
+        )
+        connection.execute(
+            """
+            INSERT INTO workflow_preferences (
+                id, workflow_family_id, selector_capability, enabled,
+                is_default, sort_order, created_at, updated_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                "wfpref_delete_probe",
+                "wffamily_delete_probe",
+                "image",
+                1,
+                1,
+                0,
+                timestamp,
+                timestamp,
+            ),
+        )
+        connection.execute("DELETE FROM workflow_families WHERE id = 'wffamily_delete_probe'")
+        assert connection.execute(
+            "SELECT family_id, variant_key FROM workflow_definitions WHERE id = 'workflow_existing'"
+        ).fetchone() == (None, "edit")
+        assert connection.execute("SELECT COUNT(*) FROM workflow_preferences").fetchone() == (0,)
+        assert connection.execute(
+            "SELECT COUNT(*) FROM workflow_revisions WHERE id = 'revision_existing'"
+        ).fetchone() == (1,)
+        connection.commit()
+
+    command.downgrade(config, "d8b3e6f92a41")
+
+    with sqlite3.connect(database) as connection:
+        tables = {
+            row[0]
+            for row in connection.execute(
+                "SELECT name FROM sqlite_master WHERE type = 'table'"
+            ).fetchall()
+        }
+        restored_definition = connection.execute(
+            """
+            SELECT id, name, operation, description, current_revision_id,
+                   created_at, updated_at
+            FROM workflow_definitions
+            WHERE id = 'workflow_existing'
+            """
+        ).fetchone()
+        restored_revision = connection.execute(
+            """
+            SELECT id, workflow_id, version, engine, engine_version,
+                   ui_graph_json, api_graph_json, input_schema_json,
+                   dependencies_json, artifact_sha256, trusted,
+                   created_at, updated_at
+            FROM workflow_revisions
+            WHERE id = 'revision_existing'
+            """
+        ).fetchone()
+        assert "workflow_families" not in tables
+        assert "workflow_preferences" not in tables
+        assert restored_definition == definition
+        assert restored_revision == revision
+        assert connection.execute(
+            "SELECT COUNT(*) FROM workflow_definitions WHERE operation = 'image_to_image'"
+        ).fetchone() == (2,)
+        assert connection.execute("PRAGMA foreign_key_check").fetchall() == []
+        assert connection.execute("PRAGMA integrity_check").fetchone() == ("ok",)
+
+
+def test_workflow_family_migration_refuses_lossy_downgrade(tmp_path: Path) -> None:
+    settings = Settings(data_dir=tmp_path / "workflow-family-downgrade")
+    settings.prepare()
+    config = alembic_config(settings)
+    command.upgrade(config, "head")
+    database = settings.state_dir / "local-lm.sqlite3"
+    timestamp = "2026-08-03 00:00:00"
+    with sqlite3.connect(database) as connection:
+        connection.execute(
+            """
+            INSERT INTO workflow_families (
+                id, name, description, use_case, tags_json, enabled, archived,
+                created_at, updated_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                "wffamily_keep",
+                "Keep this family",
+                "",
+                "",
+                "[]",
+                1,
+                0,
+                timestamp,
+                timestamp,
+            ),
+        )
+        connection.commit()
+
+    with pytest.raises(RuntimeError, match="Cannot downgrade workflow families"):
+        command.downgrade(config, "d8b3e6f92a41")
+
+    with sqlite3.connect(database) as connection:
+        assert connection.execute("SELECT version_num FROM alembic_version").fetchone() == (
+            "b6a1e4d92c70",
+        )
+        assert connection.execute(
+            "SELECT name FROM workflow_families WHERE id = 'wffamily_keep'"
+        ).fetchone() == ("Keep this family",)
         assert connection.execute("PRAGMA integrity_check").fetchone() == ("ok",)
 
 

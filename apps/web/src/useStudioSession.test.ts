@@ -1,4 +1,4 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { studioSteps } from "./useStudioSession";
 import type { ChatDetail, Message, MessagePart } from "./types";
 
@@ -96,5 +96,28 @@ describe("studio filmstrip", () => {
   it("works before any edit and without a known source", () => {
     expect(studioSteps(session([]), "art-source")).toHaveLength(1);
     expect(studioSteps(session([]), null)).toEqual([]);
+  });
+});
+
+describe("studio mask upload", () => {
+  it("keeps a selection out of the turn's attachments", async () => {
+    // A mask is instruction, not content: it must ride in settings so it
+    // never renders as an attachment or counts toward edit lineage.
+    const { api } = await import("./api");
+    const upload = vi.spyOn(api, "upload").mockResolvedValue({ id: "sha256:mask" } as never);
+    const sendTurn = vi.spyOn(api, "sendTurn").mockResolvedValue({} as never);
+
+    const { uploadMaskForTest } = await import("./useStudioSession");
+    const setting = await uploadMaskForTest({
+      blob: new Blob([new Uint8Array([1, 2])], { type: "image/png" }),
+      featherPx: 6,
+      invert: true,
+    });
+
+    expect(upload).toHaveBeenCalled();
+    expect(setting).toEqual({ artifact_id: "sha256:mask", feather_px: 6, invert: true });
+    expect(sendTurn).not.toHaveBeenCalled();
+    upload.mockRestore();
+    sendTurn.mockRestore();
   });
 });

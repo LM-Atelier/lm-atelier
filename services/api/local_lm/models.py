@@ -6,6 +6,7 @@ from typing import Any
 from sqlalchemy import (
     JSON,
     Boolean,
+    CheckConstraint,
     DateTime,
     Float,
     ForeignKey,
@@ -657,21 +658,109 @@ class EditTemplate(TimestampMixin, Base):
     enabled: Mapped[bool] = mapped_column(Boolean, default=True)
 
 
+class WorkflowFamily(TimestampMixin, Base):
+    __tablename__ = "workflow_families"
+
+    id: Mapped[str] = mapped_column(
+        String(64), primary_key=True, default=lambda: new_id("wffamily")
+    )
+    name: Mapped[str] = mapped_column(String(240), index=True)
+    description: Mapped[str] = mapped_column(Text, default="")
+    use_case: Mapped[str] = mapped_column(Text, default="")
+    tags_json: Mapped[list[str]] = mapped_column(JSON, default=list)
+    enabled: Mapped[bool] = mapped_column(Boolean, default=True)
+    archived: Mapped[bool] = mapped_column(Boolean, default=False, index=True)
+
+    definitions: Mapped[list[WorkflowDefinition]] = relationship(
+        back_populates="family", passive_deletes=True
+    )
+    preferences: Mapped[list[WorkflowPreference]] = relationship(
+        back_populates="family",
+        cascade="all, delete-orphan",
+        passive_deletes=True,
+    )
+
+
 class WorkflowDefinition(TimestampMixin, Base):
     __tablename__ = "workflow_definitions"
+    __table_args__ = (
+        UniqueConstraint(
+            "family_id",
+            "variant_key",
+            name="uq_workflow_definition_family_variant",
+        ),
+        CheckConstraint(
+            "family_id IS NULL OR variant_key IS NOT NULL",
+            name="ck_workflow_definition_family_variant",
+        ),
+    )
 
     id: Mapped[str] = mapped_column(
         String(64), primary_key=True, default=lambda: new_id("workflow")
     )
+    family_id: Mapped[str | None] = mapped_column(
+        ForeignKey("workflow_families.id", ondelete="SET NULL"),
+        nullable=True,
+        index=True,
+    )
+    variant_key: Mapped[str | None] = mapped_column(String(100), nullable=True)
     name: Mapped[str] = mapped_column(String(240), index=True)
     operation: Mapped[str] = mapped_column(String(32))
     description: Mapped[str] = mapped_column(Text, default="")
     current_revision_id: Mapped[str | None] = mapped_column(String(40), nullable=True)
 
+    family: Mapped[WorkflowFamily | None] = relationship(
+        back_populates="definitions", foreign_keys=[family_id]
+    )
     revisions: Mapped[list[WorkflowRevision]] = relationship(
         back_populates="definition",
         cascade="all, delete-orphan",
         foreign_keys="WorkflowRevision.workflow_id",
+    )
+
+
+class WorkflowPreference(TimestampMixin, Base):
+    __tablename__ = "workflow_preferences"
+    __table_args__ = (
+        UniqueConstraint(
+            "workflow_family_id",
+            "selector_capability",
+            name="uq_workflow_preference_family_selector",
+        ),
+        CheckConstraint(
+            "length(trim(selector_capability)) > 0",
+            name="ck_workflow_preference_selector_nonempty",
+        ),
+        CheckConstraint(
+            "NOT is_default OR enabled",
+            name="ck_workflow_preference_default_enabled",
+        ),
+        Index(
+            "ix_workflow_preferences_selector_order",
+            "selector_capability",
+            "enabled",
+            "sort_order",
+        ),
+        Index(
+            "uq_workflow_preferences_default_selector",
+            "selector_capability",
+            unique=True,
+            sqlite_where=text("is_default = 1"),
+            postgresql_where=text("is_default IS TRUE"),
+        ),
+    )
+
+    id: Mapped[str] = mapped_column(String(40), primary_key=True, default=lambda: new_id("wfpref"))
+    workflow_family_id: Mapped[str] = mapped_column(
+        ForeignKey("workflow_families.id", ondelete="CASCADE"), index=True
+    )
+    selector_capability: Mapped[str] = mapped_column(String(32))
+    enabled: Mapped[bool] = mapped_column(Boolean, default=True)
+    is_default: Mapped[bool] = mapped_column(Boolean, default=False)
+    sort_order: Mapped[int] = mapped_column(Integer, default=0)
+
+    family: Mapped[WorkflowFamily] = relationship(
+        back_populates="preferences", foreign_keys=[workflow_family_id]
     )
 
 
@@ -689,6 +778,7 @@ class WorkflowRevision(TimestampMixin, Base):
     ui_graph_json: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
     api_graph_json: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
     input_schema_json: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
+    capabilities_json: Mapped[list[str]] = mapped_column(JSON, default=list)
     dependencies_json: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
     # Identifies what this revision executes, so capability evidence survives a
     # compiler change that does not alter the compiled output.

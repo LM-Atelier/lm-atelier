@@ -443,6 +443,32 @@ def test_repository_hygiene_rejects_force_added_artifacts(
     assert namespace["unsafe_path"](path) is unsafe
 
 
+def test_secret_scan_finds_keys_without_flagging_hyphenated_names() -> None:
+    """A scanner that cries wolf gets disabled, so its edges matter.
+
+    The `sk-` rule matched mid-word before: `mask-feather-out-of-range` and
+    `task-scheduler-configuration` both looked like OpenAI keys, which
+    failed the gate on ordinary identifiers.
+    """
+
+    namespace = runpy.run_path(str(ROOT / "scripts/check-repository-hygiene.py"))
+    patterns = namespace["SECRET_PATTERNS"]
+
+    def flagged(value: str) -> bool:
+        return any(pattern.search(value) for pattern in patterns)
+
+    # Real credentials are still caught, bare and in context.
+    assert flagged("sk-" + "a1b2c3d4e5f6g7h8i9j0")
+    assert flagged('OPENAI_KEY="sk-' + "a1b2c3d4e5f6g7h8i9j0" + '"')
+    assert flagged("hf_" + "abcdefghijklmnopqrstuvwxyz")
+    assert flagged("AKIA" + "ABCDEFGHIJKLMNOP")
+
+    # Ordinary hyphenated identifiers are not credentials.
+    assert not flagged("mask-feather-out-of-range")
+    assert not flagged("task-scheduler-configuration-error")
+    assert not flagged("workflow-asset-binding-plan-changed")
+
+
 def test_release_metadata_timestamp_honors_source_date_epoch(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

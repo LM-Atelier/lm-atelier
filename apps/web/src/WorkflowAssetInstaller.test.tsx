@@ -18,7 +18,7 @@ vi.mock("./api", () => ({
 const uiGraph = { nodes: [] };
 
 const missing: WorkflowAssetReference[] = [
-  { filename: "Detailer-KREA2.safetensors", suffix: ".safetensors", policy: "supported", kind: "lora", source_url: null, present_locally: false },
+  { filename: "Detailer-KREA2.safetensors", suffix: ".safetensors", policy: "supported", kind: "lora", source_url: null, present_locally: false , source_candidates: [] },
 ];
 
 const candidate = {

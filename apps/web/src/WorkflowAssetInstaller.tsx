@@ -5,7 +5,12 @@ import { api } from "./api";
 import { ErrorCallout } from "./ErrorCallout";
 import { formatBytes } from "./format";
 import { catalogRoleFor, searchTermFor } from "./workflowAssetSearch";
-import type { CatalogModel, WorkflowAssetReference, WorkflowAssetReview } from "./types";
+import type {
+  CatalogModel,
+  WorkflowAssetReference,
+  WorkflowAssetReview,
+  WorkflowSourceCandidate,
+} from "./types";
 
 type Selection = {
   reference_filename: string;
@@ -168,6 +173,38 @@ function AssetRow({
     },
   });
 
+  // The author recorded where this exact file came from. Searching a catalog
+  // for a filename frequently finds nothing - a repository file is not
+  // indexed by its path - so the recorded source is offered first, and it
+  // still goes through the same preflight that produces an immutable plan.
+  const recorded = asset.source_candidates;
+
+  const preflightCandidate = useMutation({
+    mutationFn: (candidate: WorkflowSourceCandidate) =>
+      api.catalogPreflight(
+        candidate.remote_id,
+        catalogRoleFor(asset.kind),
+        "comfyui",
+        candidate.revision ?? "main",
+        // Naming the file the author pointed at keeps a multi-file repository
+        // from resolving to whichever file the catalog would have picked.
+        candidate.filename ? [candidate.filename] : [],
+        asset.kind === "lora" ? "lora" : null,
+        null,
+        candidate.provider,
+      ),
+    onSuccess: (result) => {
+      const planId = result.install_plan?.id;
+      const artifact = result.selected_files[0];
+      if (!planId || !artifact) return;
+      onChoose({
+        reference_filename: asset.filename,
+        install_plan_id: planId,
+        artifact_path: artifact,
+      });
+    },
+  });
+
   return (
     <li className="asset-install-row">
       <span>
@@ -184,6 +221,25 @@ function AssetRow({
         </span>
       ) : (
         <div className="asset-install-search">
+          {recorded.length > 0 && (
+            <div className="asset-install-recorded">
+              <small>Recorded by this workflow&rsquo;s author</small>
+              <ul>
+                {recorded.map((candidate) => (
+                  <li key={candidate.url}>
+                    <button
+                      className="secondary compact-button"
+                      disabled={preflightCandidate.isPending}
+                      onClick={() => preflightCandidate.mutate(candidate)}
+                    >
+                      {candidate.filename ?? candidate.remote_id}
+                    </button>
+                    <small>{candidate.provider}</small>
+                  </li>
+                ))}
+              </ul>
+            </div>
+          )}
           <select
             aria-label={`Source for ${asset.filename}`}
             value={source}
@@ -205,8 +261,10 @@ function AssetRow({
             <Search size={14} />
             {search.isPending ? "Searching…" : "Search"}
           </button>
-          {(search.error || preflight.error) && (
-            <small role="alert">{((search.error ?? preflight.error) as Error).message}</small>
+          {(search.error || preflight.error || preflightCandidate.error) && (
+            <small role="alert">
+              {((search.error ?? preflight.error ?? preflightCandidate.error) as Error).message}
+            </small>
           )}
           <ul className="asset-install-candidates">
             {results.map((model) => (
