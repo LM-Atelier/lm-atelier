@@ -101,6 +101,8 @@ from .models import (
     TurnCreationClaim,
     WorkflowActivation,
     WorkflowDefinition,
+    WorkflowFamily,
+    WorkflowProfileCompatibility,
     WorkflowRevision,
     WorkPlan,
     WorkStep,
@@ -158,6 +160,12 @@ from .workflow_compatibility import (
     mirror_legacy_project_workflow_selections,
     resolve_chat_workflow_selection,
     resolve_project_workflow_selection,
+)
+from .workflow_selection import (
+    ResolvedWorkflowFamily,
+    WorkflowFamilySelectionError,
+    WorkflowSelectionMode,
+    resolve_workflow_family,
 )
 
 logger = logging.getLogger(__name__)
@@ -5494,6 +5502,15 @@ class ConversationOrchestrator:
         *,
         preferred_revision_id: str | None = None,
     ) -> tuple[ModelProfile | None, dict[str, Any], WorkflowRevision | None]:
+        workflow_first = self._workflow_family_for_operation(
+            session,
+            chat,
+            operation,
+            prompt,
+            preferred_revision_id=preferred_revision_id,
+        )
+        if workflow_first is not None:
+            return workflow_first
         profile, selection = self._profile_for_operation(session, chat, operation, prompt)
         workflow = self._workflow_for_operation(
             session,
@@ -5549,6 +5566,186 @@ class ConversationOrchestrator:
             "fallback_from_profile_id": profile.id if profile else None,
         }
         return fallback_profile, fallback_selection, workflows_by_profile[fallback_profile.id]
+
+    def _workflow_family_for_operation(
+        self,
+        session: Session,
+        chat: Chat,
+        operation: Operation,
+        prompt: str,
+        *,
+        preferred_revision_id: str | None,
+    ) -> tuple[ModelProfile | None, dict[str, Any], WorkflowRevision | None] | None:
+        """Resolve new workflow choices before entering the legacy compatibility path."""
+
+        if preferred_revision_id:
+            return None
+        capability: ChatSelectorCapability
+        if operation == Operation.TEXT:
+            capability = "chat"
+        elif "image" in operation.value and "video" not in operation.value:
+            capability = "image"
+        else:
+            capability = "video"
+
+        mode: WorkflowSelectionMode
+        workflow_family_id: str | None
+        project = (
+            session.get(Project, chat.project_id)
+            if chat.project_id and operation != Operation.TEXT
+            else None
+        )
+        if project is not None:
+            project_capability: ProjectSelectorCapability = (
+                "video" if capability == "video" else "image"
+            )
+            project_selection = resolve_project_workflow_selection(
+                session,
+                project,
+                project_capability,
+            )
+            if project_selection.workflow_revision_id:
+                return None
+            if project_selection.mode == "family":
+                mode = "explicit"
+                workflow_family_id = project_selection.workflow_family_id
+            elif project_selection.mode == "automatic":
+                mode = "automatic"
+                workflow_family_id = None
+            else:
+                project = None
+
+        if project is None:
+            chat_selection = resolve_chat_workflow_selection(session, chat, capability)
+            if chat_selection.mode == "family":
+                mode = "explicit"
+                workflow_family_id = chat_selection.workflow_family_id
+            elif chat_selection.mode == "automatic":
+                mode = "automatic"
+                workflow_family_id = None
+            elif chat_selection.profile_id is None:
+                mode = "default"
+                workflow_family_id = None
+            else:
+                return None
+
+        engine = (
+            self.engines.settings.chat_engine
+            if operation == Operation.TEXT
+            else self.engines.settings.media_engine
+        )
+
+        def legacy_revision(
+            legacy_session: Session,
+            profile: ModelProfile,
+            legacy_operation: Operation,
+        ) -> WorkflowRevision | None:
+            return self._workflow_for_operation(
+                legacy_session,
+                legacy_operation,
+                model_install_id=profile.model_install_id,
+            )
+
+        try:
+            resolved = resolve_workflow_family(
+                session,
+                capability=capability,
+                operation=operation,
+                mode=mode,
+                workflow_family_id=workflow_family_id,
+                prompt=prompt,
+                engine=engine,
+                legacy_revision_resolver=legacy_revision,
+            )
+        except WorkflowFamilySelectionError as exc:
+            # A missing workflow default during the additive compatibility
+            # window retains the existing role-default behavior. Real explicit
+            # choices fail closed; the compatibility cases below retain only
+            # the behavior that existed before workflow-first selection.
+            if mode == "default":
+                return None
+            if mode == "automatic" and exc.reason == "no_ready_workflow":
+                # Auto remains workflow-first whenever a ready family exists.
+                # During the additive window, an empty workflow candidate set
+                # delegates to the existing profile fallback instead of making
+                # previously valid chats fail admission.
+                return None
+            if (
+                mode == "explicit"
+                and workflow_family_id is not None
+                and session.scalar(
+                    select(WorkflowProfileCompatibility).where(
+                        WorkflowProfileCompatibility.workflow_family_id == workflow_family_id
+                    )
+                )
+                is not None
+            ):
+                # Preserve every established validation/fallback behavior while
+                # the saved choice is still a generated compatibility family.
+                # The legacy path keeps this exact profile and does not
+                # substitute another.
+                return None
+            raise
+        return self._resolved_family_execution(session, resolved, prompt=prompt)
+
+    @classmethod
+    def _resolved_family_execution(
+        cls,
+        session: Session,
+        resolved: ResolvedWorkflowFamily,
+        *,
+        prompt: str,
+    ) -> tuple[ModelProfile | None, dict[str, Any], WorkflowRevision | None]:
+        profile = session.get(ModelProfile, resolved.profile_id) if resolved.profile_id else None
+        revision = (
+            session.get(WorkflowRevision, resolved.workflow_revision_id)
+            if resolved.workflow_revision_id
+            else None
+        )
+        family = session.get(WorkflowFamily, resolved.workflow_family_id)
+        mode = "auto" if resolved.mode == "automatic" else resolved.mode
+        selection: dict[str, Any] = {
+            "mode": mode,
+            "profile_id": profile.id if profile else None,
+            "profile_name": profile.name if profile else None,
+            "profile_use_case": family.use_case if family else "",
+            "workflow_family_id": resolved.workflow_family_id,
+            "workflow_family_name": resolved.workflow_family_name,
+            "workflow_definition_id": resolved.workflow_definition_id,
+            "workflow_revision_id": resolved.workflow_revision_id,
+            "workflow_activation_id": resolved.workflow_activation_id,
+            "workflow_compatibility": resolved.compatibility,
+            "score": resolved.score,
+            "matched_terms": list(resolved.matched_terms),
+            "fallback": resolved.mode == "automatic" and resolved.score == 0,
+        }
+        if resolved.mode == "automatic" and resolved.compatibility:
+            profiles = list(
+                session.scalars(
+                    select(ModelProfile)
+                    .where(ModelProfile.role == cls._role_for_operation(resolved.operation))
+                    .order_by(ModelProfile.updated_at.desc(), ModelProfile.id)
+                ).all()
+            )
+            installed = [
+                candidate
+                for candidate in profiles
+                if candidate.model_install_id
+                and (install := session.get(ModelInstall, candidate.model_install_id))
+                and install.active
+            ]
+            ranked = cls._rank_profiles(installed or profiles, prompt)
+            initial = ranked[0][1] if ranked else None
+            if initial is not None and initial.id != resolved.profile_id:
+                # Compatibility-only diagnostic: selection was workflow-first,
+                # but old clients still receive the profile that could not
+                # satisfy this operation until their API contract migrates.
+                selection.update(
+                    fallback=True,
+                    fallback_reason="operation_workflow_unavailable",
+                    fallback_from_profile_id=initial.id,
+                )
+        return profile, selection, revision
 
     @classmethod
     def _rank_profiles(
@@ -5994,6 +6191,20 @@ class ConversationOrchestrator:
                 continue
             generic.append(revision)
         return generic[0] if generic else None
+
+    def legacy_workflow_revision(
+        self,
+        session: Session,
+        profile: ModelProfile,
+        operation: Operation,
+    ) -> WorkflowRevision | None:
+        """Resolve the executable used by one generated compatibility family."""
+
+        return self._workflow_for_operation(
+            session,
+            operation,
+            model_install_id=profile.model_install_id,
+        )
 
     @staticmethod
     def _revision_declares_a_model(revision: WorkflowRevision) -> bool:

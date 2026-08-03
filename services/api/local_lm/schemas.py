@@ -832,6 +832,115 @@ class WorkflowOut(ApiModel):
     updated_at: datetime
 
 
+WorkflowSelectorCapability = Literal["chat", "vision", "image", "video"]
+WorkflowVariantReadiness = Literal[
+    "ready",
+    "setup_required",
+    "review_required",
+    "unavailable",
+]
+WorkflowSelectionResponseMode = Literal[
+    "default",
+    "inherit",
+    "automatic",
+    "family",
+    "revision",
+    "legacy",
+]
+
+
+class WorkflowFamilyVariantOut(ApiModel):
+    id: str
+    variant_key: str
+    name: str
+    operation: Operation
+    current_revision_id: str | None
+    current_revision_version: int | None
+    engine: str | None
+    capabilities: list[str] = Field(default_factory=list)
+    trusted: bool
+    readiness: WorkflowVariantReadiness
+    readiness_reason: str | None = None
+
+
+class WorkflowFamilyPreferenceOut(ApiModel):
+    selector_capability: WorkflowSelectorCapability
+    enabled: bool
+    is_default: bool
+    sort_order: int
+
+
+class WorkflowFamilyOut(ApiModel):
+    id: str
+    name: str
+    description: str
+    use_case: str
+    tags: list[str] = Field(default_factory=list)
+    enabled: bool
+    archived: bool
+    compatibility: bool
+    variants: list[WorkflowFamilyVariantOut] = Field(default_factory=list)
+    preferences: list[WorkflowFamilyPreferenceOut] = Field(default_factory=list)
+    created_at: datetime
+    updated_at: datetime
+
+
+class ChatWorkflowDefaultSelectionIn(ApiModel):
+    mode: Literal["default"]
+
+
+class ChatWorkflowAutomaticSelectionIn(ApiModel):
+    mode: Literal["automatic"]
+
+
+class ChatWorkflowFamilySelectionIn(ApiModel):
+    mode: Literal["family"]
+    workflow_family_id: str = Field(min_length=1, max_length=64)
+
+
+ChatWorkflowSelectionIn = Annotated[
+    ChatWorkflowDefaultSelectionIn
+    | ChatWorkflowAutomaticSelectionIn
+    | ChatWorkflowFamilySelectionIn,
+    Field(discriminator="mode"),
+]
+
+
+class ProjectWorkflowInheritSelectionIn(ApiModel):
+    mode: Literal["inherit"]
+
+
+class ProjectWorkflowAutomaticSelectionIn(ApiModel):
+    mode: Literal["automatic"]
+
+
+class ProjectWorkflowFamilySelectionIn(ApiModel):
+    mode: Literal["family"]
+    workflow_family_id: str = Field(min_length=1, max_length=64)
+
+
+class ProjectWorkflowRevisionSelectionIn(ApiModel):
+    mode: Literal["revision"]
+    workflow_revision_id: str = Field(min_length=1, max_length=40)
+
+
+ProjectWorkflowSelectionIn = Annotated[
+    ProjectWorkflowInheritSelectionIn
+    | ProjectWorkflowAutomaticSelectionIn
+    | ProjectWorkflowFamilySelectionIn
+    | ProjectWorkflowRevisionSelectionIn,
+    Field(discriminator="mode"),
+]
+
+
+class WorkflowSelectionOut(ApiModel):
+    selector_capability: WorkflowSelectorCapability
+    mode: WorkflowSelectionResponseMode
+    workflow_family_id: str | None = None
+    workflow_revision_id: str | None = None
+    legacy_profile_id: str | None = None
+
+
 class WorkflowOpenTarget(ApiModel):
     url: str
     filename: str
