@@ -55,7 +55,12 @@ import type {
   WorkerStatus,
   WorkPlan,
   WorkStep,
+  WorkflowDependencyResourceKind,
   WorkflowFamily,
+  WorkflowFamilyPreferenceUpdate,
+  WorkflowFamilyRemovalImpact,
+  WorkflowFamilyUpdate,
+  WorkflowResourceConsumers,
   WorkflowSelection,
   WorkflowSelectorCapability,
   ChatWorkflowSelectionInput,
@@ -636,6 +641,30 @@ export const api = {
       body: JSON.stringify(payload),
     }),
   workflows: () => request<Workflow[]>("/api/workflows"),
+  workflowFamily: (familyId: string) =>
+    request<WorkflowFamily>(`/api/workflow-families/${encodeURIComponent(familyId)}`),
+  updateWorkflowFamily: (familyId: string, changes: WorkflowFamilyUpdate) =>
+    request<WorkflowFamily>(`/api/workflow-families/${encodeURIComponent(familyId)}`, {
+      method: "PATCH",
+      body: JSON.stringify(changes),
+    }),
+  setWorkflowFamilyPreference: (
+    familyId: string,
+    capability: WorkflowSelectorCapability,
+    preference: WorkflowFamilyPreferenceUpdate,
+  ) =>
+    request<WorkflowFamily>(
+      `/api/workflow-families/${encodeURIComponent(familyId)}/preferences/${capability}`,
+      { method: "PUT", body: JSON.stringify(preference) },
+    ),
+  workflowFamilyRemovalImpact: (familyId: string) =>
+    request<WorkflowFamilyRemovalImpact>(
+      `/api/workflow-families/${encodeURIComponent(familyId)}/removal-impact`,
+    ),
+  workflowResourceConsumers: (kind: WorkflowDependencyResourceKind, resourceId: string) =>
+    request<WorkflowResourceConsumers>(
+      `/api/workflow-dependencies/${kind}/${encodeURIComponent(resourceId)}/consumers`,
+    ),
   workflowFamilies: (capability?: WorkflowSelectorCapability, includeArchived = false) => {
     const parameters = new URLSearchParams();
     if (capability) parameters.set("selector_capability", capability);
