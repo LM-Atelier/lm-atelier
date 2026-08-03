@@ -19,18 +19,18 @@
 
      The making room is the default, so nothing changes until a surface
      asks to be a reading room. */
-  --surface-0: #0f0d0b;
-  --surface-1: #191613;
-  --surface-2: #24201b;
-  --surface-3: #312c25;
-  --ink-primary: #efe7d8;
-  --ink-secondary: #c3b8a6;
-  --ink-muted: #a79b8b;
+  --surface-0: #0e0e10;
+  --surface-1: #17171a;
+  --surface-2: #202024;
+  --surface-3: #2b2b30;
+  --ink-primary: #ededf0;
+  --ink-secondary: #c3c3ca;
+  --ink-muted: #9a9aa4;
   /* Decorative hairlines and control boundaries are different jobs:
      1.4.11 asks 3:1 of the edge of anything you type into, and asks
      nothing of the edge of a card. Forcing both to 3:1 looks awful. */
-  --line: #463f34;
-  --line-control: #8a7c68;
+  --line: #3a3a40;
+  --line-control: #8a8a95;
   /* Terracotta has three jobs and they do not want the same value. As a
      mark it needs 3:1; as a word it needs 4.5:1; behind cream text it
      needs to be dark enough for the cream, which is the opposite
@@ -40,7 +40,7 @@
   --accent-warm-text: #cc8062;
   --accent-warm-soft: #d08a68;
   --accent-fill: #9f5234;
-  --accent-ink: #efe7d8;
+  --accent-ink: #ededf0;
   --info: #4d76b9;
   --info-soft: #86a5d2;
   --state-danger: #d66a67;
@@ -50,8 +50,8 @@
   --focus-ring: #86a5d2;
   /* Grain and scrim belong to the room: a light grain reads on a dark
      ground and disappears on paper, and the reverse. */
-  --grain: #d8cdb81a;
-  --scrim: #0f0d0bc7;
+  --grain: #c8c8d21a;
+  --scrim: #0e0e10c7;
 
   /* The names the rules already use, resolved through the layer above so
      that a room swap reaches every one of them without touching a rule. */
@@ -78,15 +78,15 @@
   /* Named because they were repeated, not because they are settled:
      the cool inks below still sit on warm surfaces, which is exactly
      the palette decision this layer exists to make possible. */
-  --ink: #e8ebef;
-  --ink-2: #818a98;
-  --ink-3: #929ba8;
+  --ink: var(--ink-primary);
+  --ink-2: var(--ink-muted);
+  --ink-3: var(--ink-muted);
   --warning-line: #765c38;
   --amber: #d9a05b;
-  --danger-ink: #ffadb5;
+  --danger-ink: var(--state-danger-text);
   --shadow: #0008;
   --edge-light: #ffffff0d;
-  --well: #100f0d;
+  --well: #0b0b0d;
 }
 
 /* The reading room. Chat, settings, and the libraries are places you read
@@ -129,17 +129,17 @@
   --well: #e5decd;
   --amber: #8a5a12;
   --warning-line: #b08a4a;
-  --danger-ink: #a33a34;
+  --ink: var(--ink-primary);
+  --ink-2: var(--ink-muted);
+  --ink-3: var(--ink-muted);
+  --danger-ink: var(--state-danger-text);
 }
 
 * { box-sizing: border-box; }
 html, body, #root { width: 100%; height: 100%; margin: 0; }
 body {
   overflow: hidden;
-  background:
-    radial-gradient(circle at 72% -25%, #315a9a45 0, transparent 38%),
-    radial-gradient(circle at 8% 108%, #b85f3c38 0, transparent 28%),
-    var(--bg);
+  background: var(--surface-0);
 }
 button, input, textarea, select { font: inherit; }
 button { color: inherit; }
