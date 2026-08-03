@@ -647,3 +647,84 @@ h1, h2, h3 { margin: 0; }
 .studio-save span, .studio-save small { color: var(--muted); }
 .template-settings-chip { display: flex; align-items: center; gap: 7px; margin: 0 2px 7px; color: var(--muted); font-size: 12px; }
 .template-settings-chip button { display: inline-flex; padding: 2px; }
+
+/* Image Studio. The canvas is three stacked layers - picture, mask tint,
+   live stroke - so they must occupy the same box; without positioning they
+   lay out as inline siblings and the mask paints beside the picture rather
+   than on it. Everything else here follows from the stage owning the space:
+   the rail and panel are fixed columns, the stage takes the remainder and
+   is the only scroll container. */
+.studio-view { display: grid; grid-template-rows: auto 1fr; gap: 12px; height: 100%; min-height: 0; }
+.studio-layout { display: grid; grid-template-columns: auto minmax(0, 1fr) minmax(240px, 300px); gap: 12px; min-height: 0; }
+.studio-stage { display: grid; place-items: center; min-height: 0; min-width: 0; overflow: hidden; border: 1px solid var(--border); border-radius: 12px; background: var(--bg); }
+.studio-canvas { position: relative; width: 100%; height: 100%; overflow: hidden; touch-action: none; cursor: crosshair; }
+.studio-canvas-layers { position: absolute; top: 0; left: 0; }
+.studio-canvas-layers > canvas { position: absolute; inset: 0; width: 100%; height: 100%; }
+/* The picture is the only opaque layer; the two above it must not hide it. */
+.studio-canvas-layers > canvas[data-layer] { background: transparent; pointer-events: none; }
+.studio-tool-rail { display: flex; flex-direction: column; align-items: center; gap: 5px; padding: 7px; border: 1px solid var(--border); border-radius: 12px; background: var(--panel); align-self: start; }
+.studio-rail-divider { width: 18px; height: 1px; margin: 3px 0; background: var(--border); }
+/* The selected tool needs a visible state, not only aria-pressed: without
+   this the rail announces its selection correctly and shows nothing. */
+.icon-button.selected { background: var(--panel-3); border-color: var(--atelier); color: var(--cream); }
+.studio-panel { display: flex; flex-direction: column; gap: 12px; min-height: 0; overflow-y: auto; padding: 12px; border: 1px solid var(--border); border-radius: 12px; background: var(--panel); }
+.studio-panel textarea { min-height: 96px; resize: vertical; border: 1px solid var(--border); border-radius: 9px; background: var(--panel-2); color: var(--cream); padding: 9px 10px; }
+.studio-selection-controls { display: grid; gap: 9px; }
+.studio-selection-controls label { display: grid; gap: 4px; color: var(--muted); font-size: 11px; }
+.studio-selection-controls input[type="range"] { accent-color: var(--atelier); width: 100%; }
+.studio-filmstrip { display: flex; gap: 7px; overflow-x: auto; padding: 2px; list-style: none; margin: 0; }
+.studio-filmstrip button { padding: 0; border: 1px solid var(--border); border-radius: 9px; overflow: hidden; background: var(--panel-2); cursor: pointer; }
+.studio-filmstrip button.selected { border-color: var(--atelier); }
+.studio-filmstrip img { display: block; width: 64px; height: 64px; object-fit: cover; }
+@media (max-width: 900px) {
+  .studio-layout { grid-template-columns: minmax(0, 1fr); grid-template-rows: auto minmax(240px, 1fr) auto; }
+  .studio-tool-rail { flex-direction: row; flex-wrap: wrap; justify-self: start; }
+  .studio-rail-divider { width: 1px; height: 18px; margin: 0 3px; }
+}
+
+/* Surfaces that shipped referencing classes the stylesheet never defined.
+   Each rendered as an unstyled block: browser-default bullets, no spacing,
+   and - for the delete confirmation - a destructive button indistinguishable
+   from the one that cancels it. */
+.workflow-asset-installer { display: grid; gap: 9px; margin: 12px 0; }
+.asset-install-list { display: grid; gap: 7px; list-style: none; margin: 0; padding: 0; }
+.asset-install-row { display: grid; gap: 7px; border: 1px solid var(--border); border-radius: 10px; background: var(--panel-2); padding: 10px 11px; }
+.asset-install-row > span:first-child { display: flex; align-items: baseline; gap: 7px; flex-wrap: wrap; }
+.asset-install-row small { color: var(--muted); }
+.asset-install-chosen { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+.asset-install-search { display: grid; gap: 7px; grid-template-columns: auto minmax(0, 1fr) auto; align-items: center; }
+.asset-install-search > small, .asset-install-search > .asset-install-recorded, .asset-install-candidates { grid-column: 1 / -1; }
+.asset-install-search input, .asset-install-search select { border: 1px solid var(--border); border-radius: 8px; background: var(--panel); color: var(--cream); padding: 7px 9px; }
+.asset-install-recorded { display: grid; gap: 5px; }
+.asset-install-recorded > small { color: var(--muted); }
+.asset-install-recorded ul, .asset-install-candidates { display: grid; gap: 5px; list-style: none; margin: 0; padding: 0; }
+.asset-install-recorded li, .asset-install-candidates li { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+.asset-install-recorded small, .asset-install-candidates small { color: var(--muted); }
+.asset-install-review { display: grid; gap: 4px; border: 1px solid var(--border); border-radius: 10px; background: var(--panel-2); padding: 10px 11px; }
+.asset-install-review small { color: var(--muted); }
+.package-import-form { display: grid; gap: 9px; margin-top: 12px; }
+.package-import-form label { display: grid; gap: 4px; color: var(--muted); font-size: 11px; }
+.package-import-form input, .package-import-form select { border: 1px solid var(--border); border-radius: 8px; background: var(--panel-2); color: var(--cream); padding: 8px 10px; font-size: 13px; }
+.model-updates, .media-selection-bar { display: grid; gap: 9px; }
+.media-selection-bar { grid-auto-flow: column; justify-content: start; align-items: center; border: 1px solid var(--border); border-radius: 10px; background: var(--panel-2); padding: 8px 11px; margin-bottom: 11px; }
+.project-group { display: grid; gap: 3px; margin-bottom: 7px; }
+.lineage-dialog { width: min(560px, 96vw); }
+.lineage-steps { display: grid; gap: 7px; list-style: none; margin: 0; padding: 0; }
+.lineage-steps li { border-left: 2px solid var(--border); padding: 2px 0 2px 11px; }
+.lineage-steps small { color: var(--muted); }
+.markdown-image-reference { color: var(--muted); font-style: italic; }
+/* A destructive confirmation whose two buttons look identical is not a
+   confirmation. These inherit .message-meta button, which is transparent
+   grey for both, so the danger side is stated here explicitly. */
+.delete-confirm { display: inline-flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+.delete-confirm > span { color: var(--muted); }
+.delete-confirm .danger, .icon-button.danger { color: #ffadb5; }
+.delete-confirm .danger { border: 1px solid #693b42; border-radius: 8px; padding: 3px 9px; }
+.icon-button.danger:hover { background: #3b2025; border-color: #75414a; }
+/* "Untrusted", "Review required", and "not installed" all carried this
+   class while it had no rule, so a warning rendered quieter than the green
+   "Trusted" beside it - the safe state was the loud one. */
+.badge.advanced_import { border-color: #7a5a2e; background: #35280f; color: #e8c07a; }
+/* Only .toast.error supplied a background, so the disconnect notice was
+   transparent text floating over the page. */
+.toast { border: 1px solid var(--border); background: var(--panel-3); color: var(--cream); }
