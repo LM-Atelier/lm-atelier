@@ -7286,6 +7286,8 @@ async def test_comfy_catalog_preflight_pins_a_multirepository_official_bundle(
             "filename": "encoders/encoder.safetensors",
             "size_bytes": 1_024,
             "sha256": "e" * 64,
+            "source_version_id": None,
+            "source_file_id": None,
         },
         "vae.safetensors": {
             "remote_id": "owner/vae",
@@ -7293,6 +7295,8 @@ async def test_comfy_catalog_preflight_pins_a_multirepository_official_bundle(
             "filename": "vae.safetensors",
             "size_bytes": 512,
             "sha256": "f" * 64,
+            "source_version_id": None,
+            "source_file_id": None,
         },
     }
     assert payload["install_plan"]["compatibility"] == "supported"

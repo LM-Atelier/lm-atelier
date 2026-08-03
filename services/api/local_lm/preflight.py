@@ -294,6 +294,14 @@ def assess_catalog_install(
                 else None
             ),
             sha256=expected_sha256.get(name),
+            source_version_id=(
+                str(files[name]["source_version_id"])
+                if files[name].get("source_version_id")
+                else None
+            ),
+            source_file_id=(
+                str(files[name]["source_file_id"]) if files[name].get("source_file_id") else None
+            ),
         )
         for name in selected
         if name in files

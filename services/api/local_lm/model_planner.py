@@ -16,7 +16,7 @@ from .domain import new_id
 from .model_manifests import ModelManifestInspection
 from .models import InstallPlan, ModelComponentManifest
 
-INSTALL_RESOLVER_VERSION = "install-resolver-v6"
+INSTALL_RESOLVER_VERSION = "install-resolver-v7"
 ACTIVATION_PROBE_VERSION = "activation-probe-v2"
 LAUNCH_CONTRACT_VERSION = "worker-launch-v1"
 
@@ -225,6 +225,11 @@ class PlannedArtifact:
     source_remote_id: str | None = None
     source_revision: str | None = None
     source_path: str | None = None
+    # CivitAI identity: the exact version and file this artifact came from.
+    # The download manager derives its URL from these server-side and never
+    # consumes a catalog-supplied one, so they are part of the plan hash.
+    source_version_id: str | None = None
+    source_file_id: str | None = None
 
     def as_dict(self) -> dict[str, Any]:
         return {
@@ -238,6 +243,8 @@ class PlannedArtifact:
             "source_remote_id": self.source_remote_id,
             "source_revision": self.source_revision,
             "source_path": self.source_path,
+            "source_version_id": self.source_version_id,
+            "source_file_id": self.source_file_id,
         }
 
 
@@ -310,6 +317,7 @@ def resolve_install_plan(
     workflow_component_folders: dict[str, str] | None = None,
     source_remote_id: str | None = None,
     auxiliary_kind: str | None = None,
+    provider: str = "huggingface",
 ) -> ResolvedInstallPlan:
     metadata_by_path = {component.path: component for component in inspection.components}
     workflow_contracts = {
@@ -371,6 +379,10 @@ def resolve_install_plan(
             ),
             source_revision=(str(item["source_revision"]) if item.get("source_revision") else None),
             source_path=(str(item["source_filename"]) if item.get("source_filename") else None),
+            source_version_id=(
+                str(item["source_version_id"]) if item.get("source_version_id") else None
+            ),
+            source_file_id=(str(item["source_file_id"]) if item.get("source_file_id") else None),
         )
         for item in selected_files
     )
@@ -469,7 +481,7 @@ def resolve_install_plan(
         "required": compatibility == "supported",
     }
     return ResolvedInstallPlan(
-        provider="huggingface",
+        provider=provider,
         remote_id=remote_id,
         revision=revision,
         role=role,

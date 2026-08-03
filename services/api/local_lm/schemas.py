@@ -1045,6 +1045,10 @@ class CatalogFileSource(ApiModel):
     filename: str = Field(min_length=1, max_length=1_000)
     size_bytes: int | None = Field(default=None, ge=0)
     sha256: str | None = Field(default=None, pattern=r"^[0-9a-fA-F]{64}$")
+    # CivitAI identity; the download manager derives its URL from these
+    # server-side and never consumes a catalog-supplied one.
+    source_version_id: str | None = Field(default=None, pattern=r"^[1-9][0-9]{0,11}$")
+    source_file_id: str | None = Field(default=None, pattern=r"^[1-9][0-9]{0,11}$")
 
 
 class CatalogPreflight(ApiModel):

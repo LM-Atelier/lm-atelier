@@ -753,3 +753,33 @@ it("surfaces the stable error code beside the human-readable detail", async () =
   expect((failure as InstanceType<typeof ApiError>).code).toBe("media_worker_running");
   expect((failure as Error).message).toBe("Stop the media worker first");
 });
+
+it("routes a CivitAI preflight through the source-aware endpoint", async () => {
+  const fetchMock = vi.fn()
+    .mockResolvedValueOnce(
+      new Response(JSON.stringify({ csrf_token: "csrf" }), {
+        status: 200,
+        headers: { "content-type": "application/json" },
+      }),
+    )
+    .mockResolvedValueOnce(
+      new Response(JSON.stringify({ can_install: true }), {
+        status: 200,
+        headers: { "content-type": "application/json" },
+      }),
+    );
+  vi.stubGlobal("fetch", fetchMock);
+
+  const { api } = await import("./api");
+  await api.catalogPreflight("201", "image", "comfyui", "201", [], "lora", null, "civitai");
+  expect(fetchMock.mock.calls[1][0]).toBe("/api/catalog/preflight?source=civitai&id=201");
+  // The Hugging Face path is untouched.
+  fetchMock.mockResolvedValueOnce(
+    new Response(JSON.stringify({ can_install: true }), {
+      status: 200,
+      headers: { "content-type": "application/json" },
+    }),
+  );
+  await api.catalogPreflight("owner/name", "chat", "llama.cpp", "main", []);
+  expect(fetchMock.mock.calls[2][0]).toBe("/api/catalog/owner/name/preflight");
+});
