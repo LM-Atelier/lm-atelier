@@ -9,7 +9,7 @@ import {
   type WheelEvent as ReactWheelEvent,
 } from "react";
 import { toAlphaImageData, type MaskRaster } from "./studioMasks";
-import type { PointerTool } from "./studioTools";
+import type { ImagePoint, PointerTool } from "./studioTools";
 import {
   fitViewport,
   identityViewport,
@@ -51,6 +51,8 @@ export function StudioCanvas({
   const imageLayer = useRef<HTMLCanvasElement>(null);
   const maskLayer = useRef<HTMLCanvasElement>(null);
   const interactionLayer = useRef<HTMLCanvasElement>(null);
+  const caret = useRef<ImagePoint | null>(null);
+  const keyboardStroke = useRef(false);
   const [viewport, setViewport] = useState<Viewport>(identityViewport);
   const [panning, setPanning] = useState(false);
   const spaceHeld = useRef(false);
@@ -139,18 +141,67 @@ export function StudioCanvas({
     };
   }, []);
 
+  /** Where the caret sits, put at the middle of the picture on first use. */
+  const caretPoint = (): ImagePoint => {
+    if (!caret.current) {
+      caret.current = { x: (image?.width ?? 0) / 2, y: (image?.height ?? 0) / 2 };
+    }
+    return caret.current;
+  };
+
   const onKeyDown = (event: ReactKeyboardEvent<HTMLDivElement>) => {
     const step = event.shiftKey ? 80 : 20;
-    const PANS: Record<string, [number, number]> = {
-      ArrowLeft: [step, 0],
-      ArrowRight: [-step, 0],
-      ArrowUp: [0, step],
-      ArrowDown: [0, -step],
+    const NUDGES: Record<string, [number, number]> = {
+      ArrowLeft: [-1, 0],
+      ArrowRight: [1, 0],
+      ArrowUp: [0, -1],
+      ArrowDown: [0, 1],
     };
-    const pan = PANS[event.key];
-    if (pan) {
+    const nudge = NUDGES[event.key];
+    if (nudge) {
       event.preventDefault();
-      setViewport((current) => panBy(current, pan[0], pan[1]));
+      // With a tool in hand the arrows move the caret, because that is the
+      // thing there was no keyboard path to at all. Panning keeps them
+      // under Alt, and keeps them outright when no tool is selected.
+      if (!tool || event.altKey) {
+        setViewport((current) => panBy(current, -nudge[0] * step, -nudge[1] * step));
+        return;
+      }
+      const at = caretPoint();
+      const moved = { x: at.x + nudge[0] * step, y: at.y + nudge[1] * step };
+      caret.current = moved;
+      // move() paints only while a stroke is open and merely tracks the
+      // hover otherwise, so this both extends a live selection and shows
+      // the caret when there is none.
+      tool.move(moved);
+      drawPreview();
+      return;
+    }
+    if (tool && (event.key === "Enter" || event.key === " ")) {
+      event.preventDefault();
+      const at = caretPoint();
+      if (keyboardStroke.current) {
+        keyboardStroke.current = false;
+        if (tool.up(at)) {
+          onStrokeEnd?.();
+        }
+        drawPreview();
+      } else {
+        onGestureStart?.();
+        keyboardStroke.current = true;
+        tool.down(at);
+        drawPreview();
+      }
+      return;
+    }
+    if (keyboardStroke.current && event.key === "Escape") {
+      event.preventDefault();
+      keyboardStroke.current = false;
+      // Abandon rather than finish: up() on a rectangle or lasso is what
+      // commits it, so cancelling through that door would paint the very
+      // thing being cancelled.
+      tool?.cancel();
+      drawPreview();
       return;
     }
     // Zoom about the middle of the view, since there is no pointer to
@@ -284,7 +335,11 @@ export function StudioCanvas({
       // drives its own viewport. Drawing a selection still needs a pointer.
       role="application"
       aria-roledescription="Image canvas"
-      aria-label="Image editing canvas. Arrow keys pan, plus and minus zoom, zero fits the image."
+      aria-label={
+        tool
+          ? "Image editing canvas. Arrow keys move the selection point, Enter starts and finishes a selection, Escape cancels it, Alt with arrows pans, plus and minus zoom, zero fits the image."
+          : "Image editing canvas. Arrow keys pan, plus and minus zoom, zero fits the image."
+      }
       onKeyDown={onKeyDown}
       onPointerDown={onPointerDown}
       onPointerMove={onPointerMove}

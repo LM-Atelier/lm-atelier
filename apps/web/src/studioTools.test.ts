@@ -88,3 +88,40 @@ describe("lasso tool", () => {
     expect(coverage(mask)).toBe(0);
   });
 });
+
+describe("abandoning a gesture", () => {
+  it("leaves a rectangle and a lasso with nothing applied", () => {
+    // These apply on close, so cancelling must not go through up() - that
+    // is the call that commits, and cancelling through it would paint the
+    // very thing being cancelled.
+    const rectMask = createMask(40, 40);
+    const rect = new RectTool(rectMask);
+    rect.down({ x: 4, y: 4 });
+    rect.move({ x: 30, y: 30 });
+    rect.cancel();
+    expect(coverage(rectMask)).toBe(0);
+    expect(rect.up({ x: 30, y: 30 })).toBe(false);
+
+    const lassoMask = createMask(40, 40);
+    const lasso = new LassoTool(lassoMask);
+    lasso.down({ x: 4, y: 4 });
+    lasso.move({ x: 30, y: 6 });
+    lasso.move({ x: 20, y: 30 });
+    lasso.cancel();
+    expect(coverage(lassoMask)).toBe(0);
+  });
+
+  it("keeps what a brush already painted, since undo is the way back", () => {
+    const mask = createMask(40, 40);
+    const brush = new BrushTool(mask, 5);
+    brush.down({ x: 20, y: 20 });
+    const painted = coverage(mask);
+    expect(painted).toBeGreaterThan(0);
+
+    brush.cancel();
+    // A brush applies as it travels; there is nothing held back to discard,
+    // and the snapshot taken at gesture start is what restores it.
+    expect(coverage(mask)).toBe(painted);
+    expect(brush.up({ x: 20, y: 20 })).toBe(false);
+  });
+});
