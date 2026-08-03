@@ -1,8 +1,16 @@
-import { useEffect, useState } from "react";
+import { useEffect, useMemo, useReducer, useState } from "react";
 import { Image as ImageIcon, Wand2 } from "lucide-react";
 import { EmptyState } from "./EmptyState";
 import { ErrorCallout } from "./ErrorCallout";
 import { StudioCanvas } from "./StudioCanvas";
+import { StudioToolRail } from "./StudioToolRail";
+import { coverage } from "./studioMasks";
+import {
+  initialToolState,
+  studioToolReducer,
+  toolFor,
+  type StudioToolKind,
+} from "./studioToolState";
 import { useStudioSession, type StudioStep } from "./useStudioSession";
 
 /** The Image Studio: a canvas-first editing surface, not a conversation.
@@ -23,6 +31,15 @@ export function StudioView({
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [instruction, setInstruction] = useState("");
   const [bitmap, setBitmap] = useState<ImageBitmap | null>(null);
+  const [tools, dispatch] = useReducer(studioToolReducer, undefined, initialToolState);
+  // The pointer tool is rebuilt whenever the mode or brush changes; each one
+  // is a cheap wrapper over the shared raster, never a copy of it.
+  const pointerTool = useMemo(
+    () => toolFor(tools),
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [tools.kind, tools.brushRadius, tools.mask],
+  );
+  const selectionCoverage = tools.mask ? coverage(tools.mask) : 0;
 
   // Derived, never synced: with nothing chosen the studio shows the newest
   // result, so a finished apply lands on the canvas without an effect.
@@ -44,7 +61,9 @@ export function StudioView({
       .then((response) => response.blob())
       .then((blob) => createImageBitmap(blob))
       .then((decoded) => {
-        if (live) setBitmap(decoded);
+        if (!live) return;
+        setBitmap(decoded);
+        dispatch({ type: "image-changed", width: decoded.width, height: decoded.height });
       })
       .catch(() => {
         if (live) setBitmap(null);
@@ -74,16 +93,76 @@ export function StudioView({
       </header>
       {error && <ErrorCallout message={(error as Error).message} />}
       <div className="studio-layout">
+        <StudioToolRail
+          active={tools.kind}
+          onSelect={(kind: StudioToolKind) => dispatch({ type: "select-tool", kind })}
+          onUndo={() => dispatch({ type: "undo" })}
+          onRedo={() => dispatch({ type: "redo" })}
+          canUndo={tools.history.canUndo}
+          canRedo={tools.history.canRedo}
+          disabled={!bitmap}
+        />
         <div className="studio-stage">
           {bitmap ? (
-            <StudioCanvas image={bitmap} mask={null} tool={null} />
+            <StudioCanvas
+              image={bitmap}
+              mask={tools.mask}
+              tool={pointerTool}
+              maskVersion={tools.maskVersion}
+              onGestureStart={() => dispatch({ type: "gesture-start" })}
+              onStrokeEnd={() => dispatch({ type: "stroke-end" })}
+            />
           ) : (
             <EmptyState icon={<ImageIcon />} title="Loading the image" body="" />
           )}
         </div>
         <aside className="studio-panel">
+          {tools.kind !== "instruct" && (
+            <div className="studio-selection-controls">
+              <label>
+                Brush size
+                <input
+                  type="range"
+                  min={1}
+                  max={200}
+                  value={tools.brushRadius}
+                  onChange={(event) =>
+                    dispatch({ type: "set-brush-radius", radius: Number(event.target.value) })}
+                />
+              </label>
+              <div className="row-actions">
+                <button
+                  className="secondary compact-button"
+                  onClick={() => dispatch({ type: "invert" })}
+                >
+                  Invert
+                </button>
+                <button
+                  className="secondary compact-button"
+                  onClick={() => dispatch({ type: "feather" })}
+                >
+                  Soften edges
+                </button>
+                <button
+                  className="secondary compact-button"
+                  onClick={() => dispatch({ type: "clear" })}
+                >
+                  Clear
+                </button>
+              </div>
+              <small>
+                {selectionCoverage > 0
+                  ? `${(selectionCoverage * 100).toFixed(1)}% of the image selected`
+                  : "Nothing selected yet - paint over what you want to change."}
+              </small>
+            </div>
+          )}
           <label>
-            <span><strong>Describe the edit</strong></span>
+            <span>
+              <strong>
+                {tools.kind === "instruct" ? "Describe the edit" : "Describe the change here"}
+              </strong>
+            </span>
             <textarea
               rows={4}
               value={instruction}
