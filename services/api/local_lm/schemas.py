@@ -178,6 +178,7 @@ class ResponseRevisionOut(ApiModel):
     sequence: int
     status: str
     parts: list[MessagePartOut]
+    feedback: Literal["up", "down"] | None = None
     created_at: datetime
     updated_at: datetime
 
@@ -192,8 +193,23 @@ class MessageOut(ApiModel):
     active_response_revision_id: str | None
     parts: list[MessagePartOut]
     response_revisions: list[ResponseRevisionOut] = Field(default_factory=list)
+    feedback: Literal["up", "down"] | None = None
     created_at: datetime
     updated_at: datetime
+
+
+class ResponseFeedbackUpdate(ApiModel):
+    """Set or clear one verdict; null rating clears. A click stores a local
+    preference for evaluation and reranking - it never trains weights."""
+
+    rating: Literal["up", "down"] | None
+    response_revision_id: str | None = None
+
+
+class ResponseFeedbackOut(ApiModel):
+    message_id: str
+    response_revision_id: str | None
+    rating: Literal["up", "down"] | None
 
 
 class ChatOut(ApiModel):
