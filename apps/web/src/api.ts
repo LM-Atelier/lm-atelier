@@ -45,6 +45,7 @@ import type {
   EditTemplate,
   Workflow,
   WorkflowBundle,
+  WorkflowAssetReview,
   WorkflowPackageAnalysis,
   WorkflowRevision,
   WorkerLogLocation,
@@ -672,6 +673,35 @@ export const api = {
     request<WorkflowPackageAnalysis>("/api/workflows/packages/analyze", {
       method: "POST",
       body: JSON.stringify({ ui_graph: uiGraph }),
+    }),
+  reviewWorkflowAssets: (
+    uiGraph: Record<string, unknown>,
+    selections: Array<{
+      reference_filename: string;
+      install_plan_id: string;
+      artifact_path: string;
+    }>,
+  ) =>
+    request<WorkflowAssetReview>("/api/workflows/packages/assets/review", {
+      method: "POST",
+      body: JSON.stringify({ ui_graph: uiGraph, selections }),
+    }),
+  installWorkflowAssets: (
+    uiGraph: Record<string, unknown>,
+    selections: Array<{
+      reference_filename: string;
+      install_plan_id: string;
+      artifact_path: string;
+    }>,
+    bindingPlanHash: string,
+  ) =>
+    request<Job[]>("/api/workflows/packages/assets/install", {
+      method: "POST",
+      body: JSON.stringify({
+        ui_graph: uiGraph,
+        selections,
+        binding_plan_hash: bindingPlanHash,
+      }),
     }),
   importWorkflowPackage: (payload: {
     ui_graph: Record<string, unknown>;

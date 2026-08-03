@@ -611,6 +611,30 @@ export interface CatalogPreflight {
   }>;
 }
 
+/** One missing workflow file bound to an exact plan artifact. */
+export interface BoundWorkflowAsset {
+  reference_filename: string;
+  kind: string;
+  install_plan_id: string;
+  install_plan_hash: string;
+  provider: string;
+  remote_id: string;
+  revision: string;
+  artifact_path: string;
+  artifact_kind: string;
+  target_folder: string;
+  size_bytes: number;
+  sha256: string;
+}
+
+/** The server's review of a selection set; the hash confirms the queue. */
+export interface WorkflowAssetReview {
+  binding_plan_hash: string;
+  assets: BoundWorkflowAsset[];
+  download_count: number;
+  total_bytes: number;
+}
+
 export interface RecipeFile {
   path: string;
   size_bytes: number | null;
