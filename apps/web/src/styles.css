@@ -901,3 +901,7 @@ h1, h2, h3 { margin: 0; }
 .family-archive-impact { display: grid; gap: 12px; margin: 12px 0; }
 .family-archive-impact h4 { margin: 0 0 4px; color: var(--ink-muted); font-size: 10px; font-weight: 700; text-transform: uppercase; letter-spacing: .11em; }
 .family-archive-impact ul { display: grid; gap: 4px; margin: 0; padding-left: 16px; color: var(--ink-secondary); font-size: 12px; line-height: 1.5; }
+.workflow-consumers { display: grid; gap: 4px; border: 1px solid var(--line); border-radius: 10px; background: var(--surface-2); padding: 12px; margin: 12px 0; }
+.workflow-consumers h4 { margin: 0; color: var(--ink-primary); font-size: 12px; }
+.workflow-consumers ul { display: grid; gap: 2px; margin: 0; padding-left: 16px; color: var(--ink-secondary); font-size: 12px; }
+.workflow-consumers small { color: var(--ink-muted); font-size: 11px; }
