@@ -209,11 +209,25 @@ def test_rejects_workflows_without_executable_nodes() -> None:
     _assert_error("empty_executable_workflow", workflow, {})
 
 
-def test_rejects_subgraphs_and_virtual_nodes() -> None:
+def test_a_subgraph_that_cannot_be_expanded_exactly_still_refuses() -> None:
     workflow = _workflow()
-    workflow["definitions"] = {"subgraphs": [{"id": "group", "nodes": [], "links": []}]}
-    _assert_error("unsupported_subgraphs", workflow, _object_info())
+    # An instance whose definition declares an input nothing feeds. Expansion
+    # refuses rather than inventing a source, because a guess here compiles,
+    # runs, and produces a picture that is not the one the author drew.
+    workflow["definitions"] = {
+        "subgraphs": [
+            {
+                "id": "group",
+                "nodes": [{"id": 7, "type": "Save", "inputs": [], "outputs": []}],
+                "links": [[70, "-10", 0, 7, 0, "IMAGE"]],
+            }
+        ]
+    }
+    workflow["nodes"].append({"id": 9, "type": "group", "inputs": [], "outputs": []})
+    _assert_error("unconnected_subgraph_input", workflow, _object_info())
 
+
+def test_rejects_virtual_nodes() -> None:
     workflow = _workflow()
     workflow["nodes"].append(
         {"id": 3, "type": "PrimitiveNode", "inputs": [], "outputs": [], "widgets_values": [1]}
@@ -221,8 +235,12 @@ def test_rejects_subgraphs_and_virtual_nodes() -> None:
     _assert_error("unsupported_frontend_node", workflow, _object_info())
 
 
-@pytest.mark.parametrize("mode", [1, 2, 3, 4])
+@pytest.mark.parametrize("mode", [1, 2, 3])
 def test_rejects_frontend_execution_modes(mode: int) -> None:
+    # Mode 4 is no longer here: a bypassed node is routed around rather than
+    # refused, which is what makes authored graphs that use it runnable.
+    # Muted and the trigger modes still mean something the runtime cannot be
+    # handed, so they still refuse.
     workflow = _workflow()
     workflow["nodes"][0]["mode"] = mode
 
