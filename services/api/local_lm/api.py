@@ -229,6 +229,7 @@ from .schemas import (
     SetupReadinessReport,
     SetupVerificationOut,
     StorageCleanupResult,
+    StudioSessionCreate,
     SystemInfo,
     ToolCapabilityProbe,
     TrustDerivation,
@@ -274,6 +275,11 @@ from .setup_verification import (
     setup_verification_prompt,
     setup_verification_settings,
     verification_evidence_key,
+)
+from .studio_sessions import (
+    STUDIO_SCOPE,
+    find_studio_session,
+    studio_session_title,
 )
 from .verified_setup import build_verified_setup, resolve_verified_setup
 from .workflow_edit_calibration import validate_workflow_edit_calibration
@@ -1419,6 +1425,80 @@ def _prompt_helper_query(helper_id: str) -> Select[tuple[Chat]]:
             .selectinload(ResponseRevisionPart.artifact),
         )
         .where(Chat.id == helper_id, Chat.scope == PROMPT_HELPER_SCOPE)
+    )
+
+
+@router.post("/studio/sessions", response_model=ChatDetail)
+async def open_studio_session(
+    payload: StudioSessionCreate, session: ConversationSessionDep
+) -> Chat:
+    """Find or create the hidden session behind the studio canvas.
+
+    One session per source image: reopening resumes the same history, so
+    the filmstrip is durable edit history rather than view state.
+    """
+
+    artifact = session.get(Artifact, payload.source_artifact_id)
+    if not artifact:
+        raise api_error(404, "artifact-not-found", "This media item no longer exists")
+    if artifact.kind != ArtifactKind.IMAGE.value:
+        raise api_error(422, "studio-image-only", "The studio edits images")
+    existing = find_studio_session(session, artifact.id)
+    if existing:
+        return session.scalar(_studio_session_query(existing.id)) or existing
+    source = session.get(Chat, payload.source_chat_id) if payload.source_chat_id else None
+    if payload.source_chat_id and (not source or source.scope != STANDARD_CHAT_SCOPE):
+        raise api_error(404, "chat-not-found", "The source chat no longer exists")
+    studio = Chat(
+        title=studio_session_title(artifact),
+        archived=True,
+        scope=STUDIO_SCOPE,
+        routing_mode=RoutingMode.IMAGE.value,
+        confirm_uncertain_media=False,
+        origin_json={
+            "source_artifact_id": artifact.id,
+            **({"source_chat_id": source.id} if source else {}),
+        },
+        active_chat_profile_id=source.active_chat_profile_id if source else None,
+        active_vision_profile_id=source.active_vision_profile_id if source else None,
+        active_image_profile_id=source.active_image_profile_id if source else None,
+        active_video_profile_id=source.active_video_profile_id if source else None,
+        generation_settings_json=(copy.deepcopy(source.generation_settings_json) if source else {}),
+        generation_preset_ids_json=(
+            copy.deepcopy(source.generation_preset_ids_json) if source else {}
+        ),
+        vision_settings_json=copy.deepcopy(source.vision_settings_json) if source else {},
+    )
+    session.add(studio)
+    session.commit()
+    return session.scalar(_studio_session_query(studio.id)) or studio
+
+
+@router.get("/studio/sessions/{session_id}", response_model=ChatDetail)
+async def get_studio_session(session_id: str, session: ConversationSessionDep) -> Chat:
+    studio = session.scalar(_studio_session_query(session_id))
+    if not studio:
+        raise api_error(404, "studio-session-not-found", "This studio session no longer exists")
+    return studio
+
+
+def _studio_session_query(session_id: str) -> Select[tuple[Chat]]:
+    return (
+        select(Chat)
+        .options(
+            selectinload(Chat.messages)
+            .selectinload(Message.parts)
+            .selectinload(MessagePart.artifact),
+            selectinload(Chat.messages)
+            .selectinload(Message.response_revisions)
+            .selectinload(ResponseRevision.parts)
+            .selectinload(ResponseRevisionPart.artifact),
+            selectinload(Chat.messages).selectinload(Message.feedback_rows),
+            selectinload(Chat.messages)
+            .selectinload(Message.response_revisions)
+            .selectinload(ResponseRevision.feedback_rows),
+        )
+        .where(Chat.id == session_id, Chat.scope == STUDIO_SCOPE)
     )
 
 
