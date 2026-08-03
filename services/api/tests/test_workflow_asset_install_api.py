@@ -8,6 +8,7 @@ client-supplied evidence and that queueing honors the reviewed hash.
 
 from __future__ import annotations
 
+import hashlib
 from typing import Any
 
 import pytest
@@ -38,7 +39,7 @@ def _ui_graph(filename: str = "styles/detail.safetensors") -> dict[str, Any]:
     }
 
 
-def _seed_plan(plan_id: str = "plan_lora") -> str:
+def _seed_plan(plan_id: str = "plan_lora", *, artifact_path: str | None = None) -> str:
     from local_lm.db import SessionLocal
     from local_lm.models import InstallPlan
 
@@ -51,12 +52,12 @@ def _seed_plan(plan_id: str = "plan_lora") -> str:
                 revision="202",
                 role="image",
                 engine="comfyui",
-                plan_hash="b" * 64,
+                plan_hash=hashlib.sha256(plan_id.encode()).hexdigest(),
                 resolver_version=INSTALL_RESOLVER_VERSION,
                 compatibility="supported",
                 artifacts_json=[
                     {
-                        "path": "styles/detail.safetensors",
+                        "path": artifact_path or "styles/detail.safetensors",
                         "kind": "lora",
                         "target_folder": "loras",
                         "size_bytes": 17,
@@ -184,3 +185,74 @@ async def test_a_missing_plan_refuses_typed(client: AsyncClient) -> None:
 
     assert response.status_code == 422
     assert response.json()["code"] in {"install_plan_not_found", "unknown_install_plan"}
+
+
+async def test_a_later_manager_refusal_starts_no_earlier_download(
+    client: AsyncClient,
+) -> None:
+    """Two plans, the second refused: nothing may already be running.
+
+    `DownloadManager.create` commits and starts each transfer, so validating
+    only as it queues would leave the first download live behind a 422 that
+    claims nothing happened.
+    """
+
+    from local_lm.db import SessionLocal
+    from local_lm.models import InstallPlan
+
+    first = _seed_plan("plan_first")
+    second = _seed_plan("plan_second", artifact_path="styles/second.safetensors")
+    with SessionLocal() as session:
+        plan = session.get(InstallPlan, second)
+        assert plan is not None
+        # A manager-only refusal: the plan still binds, but its revision is
+        # not the exact model-version id CivitAI transfers require.
+        plan.revision = "not-a-version"
+        session.commit()
+
+    graph = _ui_graph()
+    graph["nodes"].append(
+        {
+            "id": 2,
+            "type": "LoraLoader",
+            "mode": 0,
+            "inputs": [],
+            "outputs": [],
+            "widgets_values": ["styles/second.safetensors"],
+            "properties": {"cnr_id": "comfy-core", "version": "0.28.0"},
+        }
+    )
+    selections = [
+        {
+            "reference_filename": "styles/detail.safetensors",
+            "install_plan_id": first,
+            "artifact_path": "styles/detail.safetensors",
+        },
+        {
+            "reference_filename": "styles/second.safetensors",
+            "install_plan_id": second,
+            "artifact_path": "styles/second.safetensors",
+        },
+    ]
+    reviewed = await client.post(
+        "/api/workflows/packages/assets/review",
+        json={"ui_graph": graph, "selections": selections},
+    )
+    if reviewed.status_code != 200:
+        # The binding contract refused first, which is also all-or-nothing.
+        assert (await client.get("/api/jobs")).json() == []
+        return
+
+    queued = await client.post(
+        "/api/workflows/packages/assets/install",
+        json={
+            "ui_graph": graph,
+            "selections": selections,
+            "binding_plan_hash": reviewed.json()["binding_plan_hash"],
+        },
+    )
+
+    assert queued.status_code == 422
+    assert queued.json()["code"] == "asset-download-refused"
+    jobs = (await client.get("/api/jobs")).json()
+    assert [job for job in jobs if job["kind"] == "download"] == []
