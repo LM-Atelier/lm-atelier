@@ -6,6 +6,8 @@ import type { WorkflowBundle, WorkflowPackageAnalysis } from "./types";
 export type PackageReviewState = {
   analysis: WorkflowPackageAnalysis;
   fileName: string;
+  /** The parsed export itself, so a ready review can import it directly. */
+  uiGraph: Record<string, unknown>;
 };
 
 // FileReader rather than File.text(): equally supported in browsers, and it
@@ -38,6 +40,7 @@ export function useWorkflowPackageImport(onImported: () => void) {
         setPackageReview({
           analysis: await api.analyzeWorkflowPackage(parsed),
           fileName: file.name,
+          uiGraph: parsed,
         });
         return null;
       }

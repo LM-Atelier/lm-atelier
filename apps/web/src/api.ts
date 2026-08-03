@@ -636,6 +636,16 @@ export const api = {
       method: "POST",
       body: JSON.stringify({ ui_graph: uiGraph }),
     }),
+  importWorkflowPackage: (payload: {
+    ui_graph: Record<string, unknown>;
+    name: string;
+    operation: string;
+    description?: string;
+  }) =>
+    request<Workflow>("/api/workflows/packages/import", {
+      method: "POST",
+      body: JSON.stringify(payload),
+    }),
   customNodes: () => request<CustomNodeInstall[]>("/api/custom-nodes"),
   installCustomNode: (payload: { name: string; source_url: string; revision: string }) =>
     request<CustomNodeInstall>("/api/custom-nodes", { method: "POST", body: JSON.stringify(payload) }),

@@ -849,6 +849,19 @@ class RegistryInstallReviewRequest(ApiModel):
     trusted: bool
 
 
+class WorkflowPackageImportRequest(ApiModel):
+    """Import a fully resolved ComfyUI package as an untrusted workflow.
+
+    The user confirms the name and operation - the analyzer's guess prefills
+    the form, but nothing is silently decided for them.
+    """
+
+    ui_graph: dict[str, Any]
+    name: str = Field(min_length=1, max_length=240)
+    operation: Operation
+    description: str = Field(default="", max_length=10_000)
+
+
 class WorkflowPackagePrepareRequest(ApiModel):
     # Preparation binds to one exact identity; an unpinned request has nothing
     # to verify against and the resolver refuses it anyway.
