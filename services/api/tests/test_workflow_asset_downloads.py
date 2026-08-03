@@ -406,3 +406,18 @@ def test_malformed_required_flags_are_not_silently_ignored(required: object) -> 
     with pytest.raises(WorkflowAssetDownloadError) as caught:
         install_plan_download_request(_plan(artifacts=[artifact]))
     assert caught.value.code == "invalid_install_plan"
+
+
+def test_a_plan_role_the_engine_cannot_download_is_refused() -> None:
+    """The role column is a plain string, so nothing stopped a row holding
+    anything at all. That mismatch used to be suppressed with a type
+    comment rather than checked, which meant a bad value travelled until
+    something further downstream fell over."""
+
+    with pytest.raises(WorkflowAssetDownloadError) as caught:
+        install_plan_download_request(_plan(role="embedding"))
+    assert caught.value.code == "invalid_install_plan"
+
+    # The three the download contract accepts still pass through untouched.
+    for role in ("chat", "image", "video"):
+        assert install_plan_download_request(_plan(role=role)).role == role
