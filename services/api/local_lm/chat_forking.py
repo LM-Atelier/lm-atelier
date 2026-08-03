@@ -22,6 +22,7 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session, selectinload
 
 from .models import Chat, Message, MessagePart
+from .workflow_compatibility import copy_chat_workflow_selections
 
 MAX_FORK_TITLE = 240
 
@@ -69,6 +70,7 @@ def fork_chat_from_message(session: Session, message_id: str) -> ChatFork:
     )
     session.add(fork)
     session.flush()
+    copy_chat_workflow_selections(session, origin, fork)
 
     copied: list[str] = []
     parent_id: str | None = None

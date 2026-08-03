@@ -772,6 +772,115 @@ class WorkflowPreference(TimestampMixin, Base):
     )
 
 
+class WorkflowProfileCompatibility(TimestampMixin, Base):
+    """Local bridge from one legacy profile to its generated workflow family."""
+
+    __tablename__ = "workflow_profile_compatibility"
+    __table_args__ = (
+        CheckConstraint(
+            _lowercase_sha256_check("source_fingerprint_sha256"),
+            name="ck_workflow_profile_compatibility_fingerprint_sha256",
+        ),
+    )
+
+    model_profile_id: Mapped[str] = mapped_column(
+        ForeignKey("model_profiles.id", ondelete="CASCADE"), primary_key=True
+    )
+    workflow_family_id: Mapped[str] = mapped_column(
+        ForeignKey("workflow_families.id", ondelete="CASCADE"),
+        unique=True,
+        index=True,
+    )
+    source_fingerprint_sha256: Mapped[str] = mapped_column(String(64))
+
+    model_profile: Mapped[ModelProfile] = relationship(foreign_keys=[model_profile_id])
+    workflow_family: Mapped[WorkflowFamily] = relationship(foreign_keys=[workflow_family_id])
+
+
+class ChatWorkflowSelection(TimestampMixin, Base):
+    """Workflow-first chat choice; absence deliberately preserves legacy semantics."""
+
+    __tablename__ = "chat_workflow_selections"
+    __table_args__ = (
+        UniqueConstraint(
+            "chat_id",
+            "selector_capability",
+            name="uq_chat_workflow_selection_capability",
+        ),
+        CheckConstraint(
+            "length(trim(selector_capability)) > 0",
+            name="ck_chat_workflow_selection_capability_nonempty",
+        ),
+        CheckConstraint(
+            "(mode = 'automatic' AND workflow_family_id IS NULL) OR "
+            "(mode = 'family' AND workflow_family_id IS NOT NULL)",
+            name="ck_chat_workflow_selection_mode_target",
+        ),
+    )
+
+    id: Mapped[str] = mapped_column(String(40), primary_key=True, default=lambda: new_id("wfsel"))
+    chat_id: Mapped[str] = mapped_column(ForeignKey("chats.id", ondelete="CASCADE"), index=True)
+    selector_capability: Mapped[str] = mapped_column(String(32))
+    mode: Mapped[str] = mapped_column(String(16))
+    workflow_family_id: Mapped[str | None] = mapped_column(
+        ForeignKey("workflow_families.id", ondelete="RESTRICT"),
+        nullable=True,
+        index=True,
+    )
+
+    chat: Mapped[Chat] = relationship(foreign_keys=[chat_id])
+    workflow_family: Mapped[WorkflowFamily | None] = relationship(foreign_keys=[workflow_family_id])
+
+
+class ProjectWorkflowSelection(TimestampMixin, Base):
+    """Workflow-first project choice with exact-revision pin support."""
+
+    __tablename__ = "project_workflow_selections"
+    __table_args__ = (
+        UniqueConstraint(
+            "project_id",
+            "selector_capability",
+            name="uq_project_workflow_selection_capability",
+        ),
+        CheckConstraint(
+            "length(trim(selector_capability)) > 0",
+            name="ck_project_workflow_selection_capability_nonempty",
+        ),
+        CheckConstraint(
+            "(mode = 'automatic' AND workflow_family_id IS NULL "
+            "AND workflow_revision_id IS NULL) OR "
+            "(mode = 'family' AND workflow_family_id IS NOT NULL "
+            "AND workflow_revision_id IS NULL) OR "
+            "(mode = 'revision' AND workflow_family_id IS NULL "
+            "AND workflow_revision_id IS NOT NULL)",
+            name="ck_project_workflow_selection_mode_target",
+        ),
+    )
+
+    id: Mapped[str] = mapped_column(String(40), primary_key=True, default=lambda: new_id("wfsel"))
+    project_id: Mapped[str] = mapped_column(
+        ForeignKey("projects.id", ondelete="CASCADE"), index=True
+    )
+    selector_capability: Mapped[str] = mapped_column(String(32))
+    mode: Mapped[str] = mapped_column(String(16))
+    workflow_family_id: Mapped[str | None] = mapped_column(
+        ForeignKey("workflow_families.id", ondelete="RESTRICT"),
+        nullable=True,
+        index=True,
+    )
+    workflow_revision_id: Mapped[str | None] = mapped_column(
+        ForeignKey("workflow_revisions.id", ondelete="RESTRICT"),
+        nullable=True,
+        index=True,
+    )
+
+    project: Mapped[Project] = relationship(foreign_keys=[project_id])
+    workflow_family: Mapped[WorkflowFamily | None] = relationship(foreign_keys=[workflow_family_id])
+    workflow_revision: Mapped[WorkflowRevision | None] = relationship(
+        foreign_keys=[workflow_revision_id]
+    )
+
+
 class WorkflowRevision(TimestampMixin, Base):
     __tablename__ = "workflow_revisions"
     __table_args__ = (

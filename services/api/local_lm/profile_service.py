@@ -14,6 +14,11 @@ from .settings_registry import (
     VIDEO_SETTINGS,
     compatible_stored_settings,
 )
+from .workflow_compatibility import (
+    ChatSelectorCapability,
+    ensure_legacy_profile_workflow,
+    mirror_legacy_chat_workflow_selections,
+)
 
 AUTO_PROFILE_ID = "__auto__"
 LAST_CHAT_PROFILE_KEY = "workers.last_chat_profile_id"
@@ -100,14 +105,20 @@ def _reset_profile_selections(session: Session, profile_ids: set[str]) -> None:
         )
     ).all()
     for chat in chats:
+        changed: list[ChatSelectorCapability] = []
         if chat.active_chat_profile_id in profile_ids:
             chat.active_chat_profile_id = AUTO_PROFILE_ID
+            changed.append("chat")
         if chat.active_vision_profile_id in profile_ids:
             chat.active_vision_profile_id = AUTO_PROFILE_ID
+            changed.append("vision")
         if chat.active_image_profile_id in profile_ids:
             chat.active_image_profile_id = AUTO_PROFILE_ID
+            changed.append("image")
         if chat.active_video_profile_id in profile_ids:
             chat.active_video_profile_id = AUTO_PROFILE_ID
+            changed.append("video")
+        mirror_legacy_chat_workflow_selections(session, chat, changed)
     last_chat_profile = session.get(AppSetting, LAST_CHAT_PROFILE_KEY)
     if (
         last_chat_profile
@@ -164,6 +175,7 @@ def ensure_profile_for_install(
         .limit(1)
     )
     if existing:
+        ensure_legacy_profile_workflow(session, existing)
         return existing
 
     profile = build_profile_for_install(
@@ -173,6 +185,7 @@ def ensure_profile_for_install(
     )
     session.add(profile)
     session.flush()
+    ensure_legacy_profile_workflow(session, profile)
     return profile
 
 
