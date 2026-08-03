@@ -2,7 +2,7 @@
   color-scheme: dark;
   font-family: Inter, ui-sans-serif, system-ui, sans-serif;
   color: #efe7d8;
-  background: #12110f;
+  background: #0f0d0b;
   font-synthesis: none;
   text-rendering: optimizeLegibility;
   --cream: #efe7d8;
@@ -10,14 +10,14 @@
   --blue-soft: #86a5d2;
   --terracotta: #b85f3c;
   --terracotta-soft: #d08a68;
-  --bg: #12110f;
-  --panel: #191713;
-  --panel-2: #201d19;
-  --panel-3: #29251f;
-  --border: #3a342c;
+  --bg: #0f0d0b;
+  --panel: #191613;
+  --panel-2: #24201b;
+  --panel-3: #312c25;
+  --border: #463f34;
   /* Control boundaries: 3.02:1 against the lightest surface, where
      --border measures 1.36:1 and is effectively invisible. */
-  --line-control: #7a6d5c;
+  --line-control: #8a7c68;
   --muted: #a79b8b;
   --accent: #4269a8;
   --accent-2: var(--blue-soft);
@@ -25,6 +25,8 @@
   --atelier-soft: var(--terracotta-soft);
   --orange: var(--terracotta);
   --danger: #d66a67;
+  /* One shadow for anything that sits above the page. */
+  --lift: 0 10px 26px #00000059;
   --success: #6fa88b;
 }
 
@@ -48,7 +50,7 @@ button:focus-visible, a:focus-visible, input:focus-visible, textarea:focus-visib
 .brand { display: flex; align-items: center; gap: 11px; padding: 0 7px 20px; font-size: 19px; font-weight: 700; letter-spacing: -.02em; }
 .brand > span { display: grid; line-height: 1.05; font-family: Georgia, "Times New Roman", serif; }
 .brand > span small { margin-top: 4px; color: #9b8f7e; font: 600 8px/1 ui-sans-serif, system-ui, sans-serif; letter-spacing: .13em; text-transform: uppercase; }
-.brand-mark { width: 36px; height: 36px; display: grid; place-items: center; border: 1px solid #4a4338; border-radius: 11px 11px 11px 4px; background: #12110f; box-shadow: 0 10px 28px #0006, inset 0 1px #ffffff0d; }
+.brand-mark { width: 36px; height: 36px; display: grid; place-items: center; border: 1px solid #4a4338; border-radius: 11px 11px 11px 4px; background: #0f0d0b; box-shadow: 0 10px 28px #0006, inset 0 1px #ffffff0d; }
 .brand-mark svg { width: 29px; height: 29px; overflow: visible; }
 .brand-mark .lma-l { fill: var(--cream); }
 .brand-mark .lma-ma { fill: var(--blue); }
@@ -271,7 +273,7 @@ h1, h2, h3 { margin: 0; }
 .section-heading h2 { font-size: 19px; margin-top: 3px; }
 .section-heading p { max-width: 570px; color: var(--muted); font-size: 12px; line-height: 1.5; margin: 0; }
 .recipe-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(245px, 1fr)); gap: 10px; }
-.recipe-card { display: flex; flex-direction: column; gap: 11px; min-height: 275px; background: linear-gradient(145deg, var(--panel-2), var(--panel)); border: 1px solid var(--border); border-radius: 13px 13px 13px 5px; padding: 15px; }
+.recipe-card { display: flex; flex-direction: column; gap: 11px; min-height: 275px; background: linear-gradient(145deg, var(--panel-2), var(--panel)); border: 1px solid var(--border); border-radius: 13px 13px 13px 5px; padding: 15px; box-shadow: var(--lift); }
 .recipe-card header { display: flex; align-items: center; gap: 11px; }
 .recipe-card header h3 { font-size: 14px; margin-top: 3px; }
 .recipe-card header small, .recipe-card > small { color: var(--muted); line-height: 1.45; }
@@ -405,7 +407,7 @@ h1, h2, h3 { margin: 0; }
 .settings-page section { margin: 35px 0; }
 .settings-page section > h2 { font-size: 17px; margin-bottom: 13px; }
 .engine-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(250px, 1fr)); gap: 12px; }
-.engine-card { border: 1px solid var(--border); border-radius: 13px; background: var(--panel); padding: 15px; }
+.engine-card { border: 1px solid var(--border); border-radius: 13px; background: var(--panel); padding: 15px; box-shadow: var(--lift); }
 .engine-card header { display: grid; grid-template-columns: 42px 1fr auto; align-items: center; gap: 11px; }
 .engine-card h3 { font-size: 14px; }.engine-card p { color: #7f8895; font-size: 11px; margin: 3px 0 0; }
 .worker-metrics { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 12px; }
@@ -524,12 +526,12 @@ h1, h2, h3 { margin: 0; }
 .media-toolbar { display: grid; grid-template-columns: minmax(220px, 1fr) 190px; gap: 10px; margin-bottom: 15px; }
 .media-toolbar .workspace-search { margin: 0; }.media-toolbar select { color: #e8ebef; border: 1px solid var(--border); border-radius: 9px; background: var(--panel); padding: 9px; }
 .media-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(250px, 1fr)); gap: 13px; }
-.gallery-card { min-width: 0; overflow: hidden; border: 1px solid var(--border); border-radius: 12px; background: var(--panel); }
+.gallery-card { min-width: 0; overflow: hidden; border: 1px solid var(--border); border-radius: 12px; background: var(--panel); box-shadow: var(--lift); }
 .gallery-card > img, .gallery-card > video { width: 100%; height: 210px; display: block; object-fit: contain; background: #080a0d; }
 .gallery-card > div { display: grid; gap: 5px; padding: 11px; }.gallery-card strong { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 12px; }.gallery-card small { color: var(--muted); font-size: 10px; }
 .gallery-card span { display: flex; align-items: center; gap: 8px; }.gallery-card a { color: var(--accent-2); font-size: 11px; }.gallery-card code { color: var(--muted); font-size: 9px; margin-right: auto; }
 
-.jobs-panel { position: fixed; right: 16px; bottom: 16px; width: 310px; max-height: min(70vh, 560px); overflow-y: auto; z-index: 15; border: 1px solid var(--border); border-radius: 12px; background: #191713eb; backdrop-filter: blur(12px); box-shadow: 0 16px 45px #0008; padding: 11px; }
+.jobs-panel { position: fixed; right: 16px; bottom: 16px; width: 310px; max-height: min(70vh, 560px); overflow-y: auto; z-index: 15; border: 1px solid var(--border); border-radius: 12px; background: #191613eb; backdrop-filter: blur(12px); box-shadow: 0 16px 45px #0008; padding: 11px; }
 .jobs-panel > header { display: flex; align-items: center; gap: 7px; color: #c4cbd5; font-size: 12px; padding: 2px 3px 9px; }
 .jobs-clear { margin-left: auto; border: 0; background: transparent; color: #aab2bd; padding: 3px 5px; font-size: 11px; cursor: pointer; }
 .jobs-clear:hover { color: #fff; }
