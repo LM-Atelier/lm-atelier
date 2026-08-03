@@ -150,4 +150,27 @@ describe("StudioCanvas", () => {
     expect(layers.style.transform).not.toBe(before);
     expect(layers.style.transform).toContain("scale(1.2");
   });
+
+  it("is reachable and steerable from the keyboard", () => {
+    const { container } = render(
+      <StudioCanvas image={image} mask={createMask(400, 200)} tool={null} />,
+    );
+    const surface = container.querySelector(".studio-canvas") as HTMLElement;
+    const layers = () => container.querySelector(".studio-canvas-layers") as HTMLElement;
+
+    // role="application" hands every key to the element instead of to the
+    // screen reader. That was a lie while the element could take neither
+    // focus nor a keystroke, so what this pins is that both are now true.
+    expect(surface).toHaveAttribute("role", "application");
+    expect(surface).toHaveAttribute("tabindex", "0");
+
+    const start = layers().style.transform;
+    fireEvent.keyDown(surface, { key: "ArrowRight" });
+    const panned = layers().style.transform;
+    expect(panned).not.toBe(start);
+
+    fireEvent.keyDown(surface, { key: "+" });
+    expect(layers().style.transform).not.toBe(panned);
+  });
+
 });

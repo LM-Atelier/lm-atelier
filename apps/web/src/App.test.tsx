@@ -4260,7 +4260,7 @@ describe("App", () => {
     });
     await waitFor(() => expect(api.upload).toHaveBeenCalledTimes(2));
     fireEvent.click(screen.getByRole("button", { name: "Open editing studio" }));
-    fireEvent.click(await screen.findByRole("option", { name: /Colorize/ }));
+    fireEvent.click(await screen.findByRole("button", { name: /Colorize/ }));
     fireEvent.click(screen.getByRole("button", { name: "Apply to each of 2 images" }));
 
     // Two independent edit turns, one image each - not one turn with both.
@@ -4328,7 +4328,7 @@ describe("App", () => {
 
     expect(await screen.findByRole("dialog", { name: "Editing studio" })).toBeVisible();
     await waitFor(() => expect(api.editTemplates).toHaveBeenCalled());
-    fireEvent.click(await screen.findByRole("option", { name: /Watercolor painting/ }));
+    fireEvent.click(await screen.findByRole("button", { name: /Watercolor painting/ }));
     fireEvent.change(screen.getByRole("textbox", { name: "Add detail (optional)" }), {
       target: { value: "Focus on the harbor." },
     });

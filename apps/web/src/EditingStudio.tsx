@@ -57,12 +57,11 @@ export function EditingStudio({
         composer, ready to adjust before sending.
       </p>
       {templates.error && <p role="alert">{templates.error.message}</p>}
-      <div className="studio-template-grid" role="listbox" aria-label="Edit templates">
+      <div className="studio-template-grid" role="group" aria-label="Edit templates">
         {(templates.data ?? []).map((template) => (
           <button
             key={template.id}
-            role="option"
-            aria-selected={template.id === selectedId}
+            aria-pressed={template.id === selectedId}
             className={`studio-template ${template.id === selectedId ? "selected" : ""}`}
             onClick={() => setSelectedId(template.id)}
           >

@@ -219,12 +219,15 @@ function StudioFilmstrip({
 }) {
   if (steps.length === 0) return null;
   return (
-    <div className="studio-filmstrip" role="listbox" aria-label="Edit history">
+    // A group of buttons, not a listbox: a real listbox owns focus with a
+    // roving tabindex and aria-activedescendant, and role="option" would
+    // override the native button role so these stop announcing as
+    // activatable at all.
+    <div className="studio-filmstrip" role="group" aria-label="Edit history">
       {steps.map((step, index) => (
         <button
           key={`${step.messageId}-${step.artifactId}`}
-          role="option"
-          aria-selected={step.artifactId === selectedId}
+          aria-pressed={step.artifactId === selectedId}
           className={step.artifactId === selectedId ? "selected" : ""}
           onClick={() => onSelect(step.artifactId)}
         >
