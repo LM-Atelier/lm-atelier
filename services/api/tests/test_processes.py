@@ -32,6 +32,11 @@ from local_lm.processes import (
     _RotatingWorkerLog,
 )
 from local_lm.worker_failures import WorkerFailureCode
+from local_lm.workflow_activations import (
+    WorkflowActivationLaunchScope,
+    WorkflowAssetLaunchBinding,
+    WorkflowModelLaunchBinding,
+)
 
 # Reproduced from CPython 3.12 by making the socket teardown inside
 # `_ProactorBasePipeTransport._call_connection_lost` raise. asyncio composes the
@@ -1445,6 +1450,193 @@ async def test_media_start_disables_unapproved_custom_nodes(
     assert command[command.index("--preview-method") + 1] == "latent2rgb"
     assert "--disable-all-custom-nodes" in command
     assert command[command.index("--whitelist-custom-nodes") + 1 :] == ["lm-atelier-node_reviewed"]
+
+
+async def test_media_start_uses_only_the_exact_activation_scope(
+    settings,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,  # type: ignore[no-untyped-def]
+) -> None:
+    runtime = tmp_path / "comfyui"
+    runtime.mkdir()
+    (runtime / "main.py").touch()
+    executable = tmp_path / "python.exe"
+    executable.touch()
+    model_root = tmp_path / "selected-model"
+    model_root.mkdir()
+    asset_root = tmp_path / "selected-asset"
+    asset_root.mkdir()
+    site_packages = tmp_path / "selected-registry" / "site-packages"
+    site_packages.mkdir(parents=True)
+    digest = "a" * 64
+    scope = WorkflowActivationLaunchScope(
+        "wfact_selected",
+        "wfrev_selected",
+        "b" * 64,
+        digest,
+        ("model_selected",),
+        ("asset_selected",),
+        (),
+        (),
+        (),
+        (
+            WorkflowModelLaunchBinding(
+                "model_selected",
+                model_root.resolve(),
+                (("checkpoints", "."),),
+                (),
+            ),
+        ),
+        (
+            WorkflowAssetLaunchBinding(
+                "asset_selected",
+                asset_root.resolve(),
+                "loras",
+                "style.safetensors",
+                "c" * 64,
+            ),
+        ),
+        (),
+        (),
+        (),
+    )
+    settings.comfy_directory = runtime
+    settings.comfy_executable = executable
+    supervisor = ProcessSupervisor(settings)
+    captured: dict[str, object] = {}
+
+    async def scoped_nodes(
+        current: WorkflowActivationLaunchScope,
+    ) -> tuple[list[str], tuple[str, ...]]:
+        assert current is scope
+        return ["lm-atelier-node_selected"], ("SelectedNode",)
+
+    async def broad_nodes() -> list[str]:
+        raise AssertionError("scoped launch queried broad custom-node state")
+
+    async def replace_worker(
+        name: str,
+        command: list[str],
+        _health_url: str,
+        _profile_id: str | None = None,
+        _estimated_memory_bytes: int | None = None,
+        *,
+        environment_overrides: dict[str, str] | None = None,
+        ready_check=None,  # type: ignore[no-untyped-def]
+        launch_scope_sha256: str | None = None,
+    ) -> None:
+        captured.update(
+            name=name,
+            command=command,
+            environment_overrides=environment_overrides,
+            ready_check=ready_check,
+            launch_scope_sha256=launch_scope_sha256,
+        )
+
+    monkeypatch.setattr(supervisor, "_scoped_comfy_node_folders", scoped_nodes)
+    monkeypatch.setattr(
+        supervisor,
+        "_scoped_comfy_registry_contract",
+        lambda current: (
+            ComfyRegistryLaunchContract(
+                ("lm-atelier-registry_selected",),
+                (site_packages,),
+                ("RegistryNode",),
+            )
+            if current is scope
+            else None
+        ),
+    )
+    monkeypatch.setattr(supervisor, "_trusted_comfy_node_folders", broad_nodes)
+    monkeypatch.setattr(
+        supervisor,
+        "_trusted_comfy_registry_contract",
+        lambda: (_ for _ in ()).throw(AssertionError("scoped launch queried broad Registry state")),
+    )
+    monkeypatch.setattr(supervisor, "_replace", replace_worker)
+
+    await supervisor.start_media(activation_scope=scope)
+
+    command = captured["command"]
+    assert isinstance(command, list)
+    config_path = Path(command[command.index("--extra-model-paths-config") + 1])
+    assert config_path.name == f"{digest}.yaml"
+    assert json.loads(config_path.read_text(encoding="utf-8")) == {
+        "local_lm_1": {
+            "base_path": str(model_root.resolve()),
+            "checkpoints": ".",
+        },
+        "local_lm_2": {
+            "base_path": str(asset_root.resolve()),
+            "loras": ".",
+        },
+    }
+    assert command[command.index("--whitelist-custom-nodes") + 1 :] == [
+        "lm-atelier-node_selected",
+        "lm-atelier-registry_selected",
+    ]
+    assert captured["environment_overrides"] == {"PYTHONPATH": str(site_packages)}
+    assert callable(captured["ready_check"])
+    assert captured["launch_scope_sha256"] == digest
+
+
+async def test_activation_scoped_worker_is_reused_only_for_the_same_ready_launch(
+    settings,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,  # type: ignore[no-untyped-def]
+) -> None:
+    supervisor = ProcessSupervisor(settings)
+    command = ["python", "worker.py"]
+    process = FakeRunningProcess(12345, terminate_code=0)
+    log = _RotatingWorkerLog(tmp_path / "reuse.log")
+    record = WorkerRecord(
+        "media",
+        process,  # type: ignore[arg-type]
+        command,
+        log,
+        state="ready",
+        launch_scope_sha256="a" * 64,
+    )
+    supervisor._workers["media"] = record
+    stopped = AsyncMock(side_effect=AssertionError("matching worker was restarted"))
+    monkeypatch.setattr(supervisor, "_stop_unlocked", stopped)
+
+    await supervisor._replace(
+        "media",
+        list(command),
+        "http://127.0.0.1:8289/system_stats",
+        launch_scope_sha256="a" * 64,
+    )
+
+    stopped.assert_not_awaited()
+    assert supervisor._workers["media"] is record
+    log.close()
+
+
+async def test_activation_scope_cannot_be_broadened_with_provisional_paths(
+    settings,
+    tmp_path: Path,  # type: ignore[no-untyped-def]
+) -> None:
+    supervisor = ProcessSupervisor(settings)
+    scope = WorkflowActivationLaunchScope(
+        "wfact_selected",
+        "wfrev_selected",
+        "b" * 64,
+        "a" * 64,
+        (),
+        (),
+        (),
+        (),
+        (),
+        (),
+        (),
+        (),
+        (),
+        (),
+    )
+
+    with pytest.raises(ValueError, match="cannot broaden"):
+        await supervisor.start_media((tmp_path, {}), activation_scope=scope)
 
 
 async def test_media_start_uses_only_verified_registry_overlay_contract(

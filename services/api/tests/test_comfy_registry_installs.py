@@ -19,11 +19,13 @@ from local_lm.comfy_registry_installs import (
     bind_comfy_registry_wheel_environment,
     installed_comfy_registry_versions,
     persist_comfy_registry_install,
+    scoped_comfy_registry_launch_contract,
     trusted_comfy_registry_launch_contract,
 )
 from local_lm.comfy_registry_wheel_environments import ComfyRegistryWheelEnvironmentReport
 from local_lm.db import Base
 from local_lm.models import ComfyRegistryInstall
+from local_lm.workflow_activations import WorkflowRegistryLaunchBinding
 
 
 @pytest.fixture
@@ -279,6 +281,52 @@ def test_trusted_launch_contract_revalidates_node_code_and_overlay(
     assert contract.custom_node_folders == (folder_name,)
     assert contract.site_packages == (site_packages,)
     assert contract.node_types == ("ExampleLoader", "ExampleSampler")
+
+    unselected = persist_comfy_registry_install(
+        session,
+        resolution=_resolution(
+            package_id="comfyui-unselected-node",
+            registry_record_id="record-unselected",
+            repository_url="https://github.com/example/comfyui-unselected-node.git",
+            download_url="https://cdn.comfy.org/unselected/1.2.3.zip",
+        ),
+        archive=_archive(archive_sha256="e" * 64, manifest_sha256="f" * 64),
+        installed_path="lm-atelier-registry_unselected",
+    )
+    unselected.wheel_closure_sha256 = "1" * 64
+    unselected.wheel_environment_sha256 = "2" * 64
+    unselected.wheel_environment_path = f"registry-wheels-{'1' * 64}"
+    unselected.trusted = True
+    unselected.active = True
+    session.flush()
+    binding = WorkflowRegistryLaunchBinding(
+        install.id,
+        folder.resolve(),
+        site_packages.resolve(),
+        install.package_id,
+        install.package_version,
+        install.archive_sha256,
+        install.manifest_sha256,
+        closure_sha256,
+        environment_sha256,
+        ("ExampleLoader", "ExampleSampler"),
+    )
+
+    scoped = scoped_comfy_registry_launch_contract(
+        session,
+        [binding],
+        custom_node_root=node_root,
+        environment_root=environment_root,
+    )
+
+    assert scoped == contract
+    with pytest.raises(ComfyRegistryInstallError, match="scope identity changed"):
+        scoped_comfy_registry_launch_contract(
+            session,
+            [replace(binding, package_version="9.9.9")],
+            custom_node_root=node_root,
+            environment_root=environment_root,
+        )
 
     (folder / "node.py").write_bytes(b"changed")
     with pytest.raises(ComfyRegistryInstallError, match="node files failed verification"):

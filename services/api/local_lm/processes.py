@@ -32,6 +32,7 @@ from .worker_failures import WorkerFailure, WorkerFailureCode, classify_worker_f
 if TYPE_CHECKING:
     from .comfy_registry_installs import ComfyRegistryLaunchContract
     from .runtime_provisioning import RuntimeProvisioner
+    from .workflow_activations import WorkflowActivationLaunchScope
 
 logger = logging.getLogger(__name__)
 
@@ -197,6 +198,7 @@ class WorkerRecord:
     output_task: asyncio.Task[None] | None = None
     monitor_task: asyncio.Task[None] | None = None
     failure_detail: str | None = None
+    launch_scope_sha256: str | None = None
 
 
 class ProcessSupervisor:
@@ -303,6 +305,14 @@ class ProcessSupervisor:
                 )
             )
         return result
+
+    def launch_scope_sha256(self, name: str) -> str | None:
+        """Return the live ready worker's exact activation scope, if it has one."""
+
+        record = self._workers.get(name)
+        if record is None or record.process.returncode is not None or record.state != "ready":
+            return None
+        return record.launch_scope_sha256
 
     async def load_chat(self, profile: ModelProfile, install: ModelInstall) -> WorkerStatus:
         if profile.engine == "vllm":
@@ -434,6 +444,7 @@ class ProcessSupervisor:
         provisional_model_paths: tuple[Path, dict[str, str]] | None = None,
         *,
         phase_callback: Callable[[str], Awaitable[None]] | None = None,
+        activation_scope: WorkflowActivationLaunchScope | None = None,
     ) -> WorkerStatus:
         async def report_phase(phase: str) -> None:
             if phase_callback is None:
@@ -445,6 +456,8 @@ class ProcessSupervisor:
             except Exception:
                 logger.warning("Could not publish media startup phase", exc_info=True)
 
+        if provisional_model_paths is not None and activation_scope is not None:
+            raise ValueError("Provisional model paths cannot broaden an activation-scoped launch")
         if (
             not self.settings.comfy_executable
             or not self.settings.comfy_executable.is_file()
@@ -463,18 +476,31 @@ class ProcessSupervisor:
             raise ValueError("ComfyUI entrypoint escapes its configured directory")
         parsed = urlparse(self.settings.comfy_url)
         await report_phase("Validating media dependencies")
-        trusted_custom_nodes = await self._trusted_comfy_node_folders()
-        registry_contract = await asyncio.to_thread(self._trusted_comfy_registry_contract)
+        custom_node_types: tuple[str, ...] = ()
+        if activation_scope is None:
+            trusted_custom_nodes = await self._trusted_comfy_node_folders()
+            registry_contract = await asyncio.to_thread(self._trusted_comfy_registry_contract)
+        else:
+            trusted_custom_nodes, custom_node_types = await self._scoped_comfy_node_folders(
+                activation_scope
+            )
+            registry_contract = await asyncio.to_thread(
+                self._scoped_comfy_registry_contract,
+                activation_scope,
+            )
         trusted_custom_nodes = sorted(
             {*trusted_custom_nodes, *registry_contract.custom_node_folders}
         )
         output_directory = self.settings.comfy_output_dir.resolve()
         output_directory.mkdir(parents=True, exist_ok=True)
-        model_paths_config = (
-            self._write_comfy_model_paths(provisional_model_paths)
-            if provisional_model_paths
-            else self._write_comfy_model_paths()
-        )
+        if activation_scope is not None:
+            model_paths_config = self._write_scoped_comfy_model_paths(activation_scope)
+        else:
+            model_paths_config = (
+                self._write_comfy_model_paths(provisional_model_paths)
+                if provisional_model_paths is not None
+                else self._write_comfy_model_paths()
+            )
         command = [
             str(executable.expanduser().resolve(strict=True)),
             str(entrypoint),
@@ -493,7 +519,29 @@ class ProcessSupervisor:
         if trusted_custom_nodes:
             command.extend(["--whitelist-custom-nodes", *trusted_custom_nodes])
         await report_phase("Starting media runtime")
-        if registry_contract.site_packages:
+        if activation_scope is not None:
+            expected_node_types = tuple(sorted({*custom_node_types, *registry_contract.node_types}))
+            await self._replace(
+                "media",
+                command,
+                self.settings.comfy_url + "/system_stats",
+                environment_overrides=(
+                    {
+                        "PYTHONPATH": os.pathsep.join(
+                            str(path) for path in registry_contract.site_packages
+                        )
+                    }
+                    if registry_contract.site_packages
+                    else None
+                ),
+                ready_check=(
+                    (lambda: self._verify_comfy_node_types(expected_node_types))
+                    if expected_node_types
+                    else None
+                ),
+                launch_scope_sha256=activation_scope.launch_sha256,
+            )
+        elif registry_contract.site_packages:
             await self._replace(
                 "media",
                 command,
@@ -508,6 +556,24 @@ class ProcessSupervisor:
         else:
             await self._replace("media", command, self.settings.comfy_url + "/system_stats")
         return self.statuses()[1]
+
+    def _scoped_comfy_registry_contract(
+        self, scope: WorkflowActivationLaunchScope
+    ) -> ComfyRegistryLaunchContract:
+        from .comfy_registry_installs import scoped_comfy_registry_launch_contract
+        from .db import SessionLocal
+
+        if tuple(item.registry_install_id for item in scope.registry_packages) != (
+            scope.registry_install_ids
+        ):
+            raise ValueError("Workflow activation Registry package scope is inconsistent")
+        with SessionLocal() as session:
+            return scoped_comfy_registry_launch_contract(
+                session,
+                scope.registry_packages,
+                custom_node_root=self.settings.custom_node_dir,
+                environment_root=self.settings.state_dir / "registry-wheel-environments",
+            )
 
     def _trusted_comfy_registry_contract(self) -> ComfyRegistryLaunchContract:
         from .comfy_registry_installs import trusted_comfy_registry_launch_contract
@@ -574,6 +640,97 @@ class ProcessSupervisor:
         for install in installs:
             await manager.verify(install)
         return [install.installed_path for install in installs]
+
+    async def _scoped_comfy_node_folders(
+        self, scope: WorkflowActivationLaunchScope
+    ) -> tuple[list[str], tuple[str, ...]]:
+        from .custom_nodes import CustomNodeManager
+        from .db import SessionLocal
+        from .models import CustomNodeInstall
+        from .workflow_bindings import materialize_custom_node
+
+        if tuple(item.custom_node_install_id for item in scope.custom_nodes) != (
+            scope.custom_node_install_ids
+        ):
+            raise ValueError("Workflow activation custom-node scope is inconsistent")
+        manager = CustomNodeManager(self.settings)
+        installs: list[CustomNodeInstall] = []
+        node_types: set[str] = set()
+        with SessionLocal() as session:
+            for binding in scope.custom_nodes:
+                install = session.get(CustomNodeInstall, binding.custom_node_install_id)
+                raw_node_types = (
+                    install.security_json.get("node_types")
+                    if install is not None and isinstance(install.security_json, dict)
+                    else None
+                )
+                declared = (
+                    tuple(sorted(raw_node_types, key=lambda item: (item.casefold(), item)))
+                    if isinstance(raw_node_types, list)
+                    and all(isinstance(item, str) and item for item in raw_node_types)
+                    else ()
+                )
+                expected_path = (
+                    (self.settings.custom_node_dir / install.installed_path).resolve()
+                    if install is not None
+                    else None
+                )
+                identity = materialize_custom_node(install).identity if install is not None else {}
+                if (
+                    install is None
+                    or not install.active
+                    or not install.trusted
+                    or expected_path != binding.installed_path
+                    or identity.get("source_url") != binding.source_url
+                    or identity.get("revision") != binding.revision
+                    or identity.get("tree_hash") != binding.tree_hash
+                    or declared != binding.node_types
+                ):
+                    raise ValueError("Workflow activation custom-node identity changed")
+                installs.append(install)
+                node_types.update(declared)
+                session.expunge(install)
+        for install in installs:
+            await manager.verify(install)
+        return [install.installed_path for install in installs], tuple(sorted(node_types))
+
+    def _write_scoped_comfy_model_paths(self, scope: WorkflowActivationLaunchScope) -> Path:
+        if not re.fullmatch(r"[0-9a-f]{64}", scope.launch_sha256):
+            raise ValueError("Workflow activation launch identity is invalid")
+        if tuple(item.model_install_id for item in scope.models) != scope.model_install_ids:
+            raise ValueError("Workflow activation model scope is inconsistent")
+        if tuple(item.model_asset_install_id for item in scope.assets) != (
+            scope.model_asset_install_ids
+        ):
+            raise ValueError("Workflow activation asset scope is inconsistent")
+        config: dict[str, dict[str, str]] = {}
+        for model in scope.models:
+            paths = dict(model.comfy_paths)
+            if self._validated_comfy_paths(paths) != paths or not model.base_path.is_dir():
+                raise ValueError("Workflow activation model path scope is invalid")
+            config[f"local_lm_{len(config) + 1}"] = {
+                "base_path": str(model.base_path),
+                **paths,
+            }
+        for asset in scope.assets:
+            if (
+                asset.loader_folder not in self._validated_comfy_paths({asset.loader_folder: "."})
+                or not asset.base_path.is_dir()
+            ):
+                raise ValueError("Workflow activation asset path scope is invalid")
+            config[f"local_lm_{len(config) + 1}"] = {
+                "base_path": str(asset.base_path),
+                asset.loader_folder: ".",
+            }
+        destination_dir = self.settings.state_dir / "comfy-launch"
+        destination_dir.mkdir(parents=True, exist_ok=True)
+        destination = destination_dir / f"{scope.launch_sha256}.yaml"
+        temporary = destination.with_name(
+            f"{destination.name}.{os.getpid()}.{threading.get_ident()}.tmp"
+        )
+        temporary.write_text(json.dumps(config, indent=2), encoding="utf-8")
+        os.replace(temporary, destination)
+        return destination
 
     def _write_comfy_model_paths(
         self,
@@ -689,8 +846,23 @@ class ProcessSupervisor:
         estimated_memory_bytes: int | None = None,
         environment_overrides: Mapping[str, str] | None = None,
         ready_check: Callable[[], Awaitable[None]] | None = None,
+        launch_scope_sha256: str | None = None,
     ) -> None:
+        if launch_scope_sha256 is not None and not re.fullmatch(
+            r"[0-9a-f]{64}", launch_scope_sha256
+        ):
+            raise ValueError("Worker launch scope identity is invalid")
         async with self._locks[name]:
+            current = self._workers.get(name)
+            if (
+                launch_scope_sha256 is not None
+                and current is not None
+                and current.process.returncode is None
+                and current.state == "ready"
+                and current.command == command
+                and current.launch_scope_sha256 == launch_scope_sha256
+            ):
+                return
             await self._stop_unlocked(name)
             await self._ensure_port_available(name, health_url)
             startup_started_at = time.perf_counter()
@@ -730,6 +902,7 @@ class ProcessSupervisor:
                 worker_log,
                 profile_id,
                 estimated_memory_bytes=estimated_memory_bytes,
+                launch_scope_sha256=launch_scope_sha256,
             )
             record.output_task = asyncio.create_task(self._capture_process_output(record))
             self._workers[name] = record
