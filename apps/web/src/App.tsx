@@ -92,6 +92,7 @@ import { focusMainContent, roleForMode } from "./viewHelpers";
 import { ArtifactPart } from "./ArtifactPart";
 import { FirstRunSetup, SetupWizard } from "./SetupWizard";
 import { ChatManager } from "./ChatManager";
+import { PromptDialog } from "./ConfirmDialog";
 import { CustomNodesPanel } from "./CustomNodesPanel";
 import { LoraStackControl } from "./LoraStackControl";
 import { MediaLibraryView } from "./MediaLibraryView";
@@ -3190,6 +3191,7 @@ function Sidebar({
 export default function App() {
   const client = useQueryClient();
   const [view, setView] = useState<View>("chat");
+  const [namingProject, setNamingProject] = useState(false);
   const [libraryEdit, setLibraryEdit] = useState<VisualTarget | null>(null);
   const [studioSource, setStudioSource] = useState<{ artifactId: string; chatId: string | null } | null>(null);
   const [modelLibraryRole, setModelLibraryRole] = useState<EngineRole>("chat");
@@ -3555,7 +3557,8 @@ export default function App() {
   return (
     <div className="app-shell">
       <a className="skip-link" href="#main-content">Skip to main content</a>
-      <Sidebar projects={allProjects} chats={allChats} engines={engines.data ?? []} presets={presets.data ?? []} workflows={workflows.data ?? []} currentChatId={activeChatId} view={view} setupState={setupReadiness.data?.state} onSetup={() => setSetupOpen(true)} onChat={(id) => { setCurrentChatId(id); localStorage.setItem(CURRENT_CHAT_KEY, id); setView("chat"); focusMainContent(); }} onView={(nextView) => { setView(nextView); focusMainContent(); }} onNewChat={(projectId) => createChat.mutate(projectId)} onNewProject={() => { const name = window.prompt("Project name"); if (name?.trim()) createProject.mutate(name.trim()); }} onExportProject={(id, includeMedia) => exportProject.mutate({ id, includeMedia })} onImportProject={(file) => importProject.mutate(file)} onUpdateChat={(id, values) => manageChat.mutate({ id, values })} onDeleteChat={(id, deleteGeneratedMedia) => deleteChat.mutate({ id, deleteGeneratedMedia })} onUpdateProject={(id, values) => updateProject.mutate({ id, values })} onDeleteProject={(id) => deleteProject.mutate(id)} />
+      <Sidebar projects={allProjects} chats={allChats} engines={engines.data ?? []} presets={presets.data ?? []} workflows={workflows.data ?? []} currentChatId={activeChatId} view={view} setupState={setupReadiness.data?.state} onSetup={() => setSetupOpen(true)} onChat={(id) => { setCurrentChatId(id); localStorage.setItem(CURRENT_CHAT_KEY, id); setView("chat"); focusMainContent(); }} onView={(nextView) => { setView(nextView); focusMainContent(); }} onNewChat={(projectId) => createChat.mutate(projectId)} onNewProject={() => setNamingProject(true)} onExportProject={(id, includeMedia) => exportProject.mutate({ id, includeMedia })} onImportProject={(file) => importProject.mutate(file)} onUpdateChat={(id, values) => manageChat.mutate({ id, values })} onDeleteChat={(id, deleteGeneratedMedia) => deleteChat.mutate({ id, deleteGeneratedMedia })} onUpdateProject={(id, values) => updateProject.mutate({ id, values })} onDeleteProject={(id) => deleteProject.mutate(id)} />
+      {namingProject && <PromptDialog title="New project" label="Project name" confirmLabel="Create project" placeholder="Portrait studies" onCancel={() => setNamingProject(false)} onConfirm={(name) => { setNamingProject(false); createProject.mutate(name); }} />}
       <main id="main-content" tabIndex={-1}>{activeContent}</main>
       {setupOpen === true && !setupReadiness.data && (
         <AccessibleDialog
