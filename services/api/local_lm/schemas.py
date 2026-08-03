@@ -879,6 +879,55 @@ class RegistryInstallReviewRequest(ApiModel):
     trusted: bool
 
 
+class WorkflowAssetSelectionIn(ApiModel):
+    """One explicit choice: this missing file comes from that plan artifact."""
+
+    reference_filename: str = Field(min_length=1, max_length=1_000)
+    install_plan_id: str = Field(min_length=1, max_length=40)
+    artifact_path: str = Field(min_length=1, max_length=1_000)
+
+
+class WorkflowAssetReviewRequest(ApiModel):
+    """Review selections against a freshly re-analyzed graph.
+
+    The browser sends the graph and its choices - never a report, digest,
+    size, kind, or bound asset. Everything else is rebuilt server-side.
+    """
+
+    ui_graph: dict[str, Any]
+    selections: list[WorkflowAssetSelectionIn] = Field(default_factory=list, max_length=64)
+
+
+class WorkflowAssetQueueRequest(WorkflowAssetReviewRequest):
+    """Queue exactly the reviewed binding, confirmed by its hash."""
+
+    binding_plan_hash: str = Field(pattern=r"^[0-9a-f]{64}$")
+
+
+class BoundWorkflowAssetOut(ApiModel):
+    reference_filename: str
+    kind: str
+    install_plan_id: str
+    install_plan_hash: str
+    provider: str
+    remote_id: str
+    revision: str
+    artifact_path: str
+    artifact_kind: str
+    target_folder: str
+    size_bytes: int
+    sha256: str
+
+
+class WorkflowAssetReviewOut(ApiModel):
+    """What the browser may show: the binding, its hash, and the cost."""
+
+    binding_plan_hash: str
+    assets: list[BoundWorkflowAssetOut]
+    download_count: int
+    total_bytes: int
+
+
 class WorkflowPackageImportRequest(ApiModel):
     """Import a fully resolved ComfyUI package as an untrusted workflow.
 
