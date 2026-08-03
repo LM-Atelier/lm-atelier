@@ -316,3 +316,24 @@ export class MaskHistory {
     }
   }
 }
+
+/** Encode a mask as a PNG whose alpha channel is the coverage.
+ *
+ * The canvas is the only encoder available in the browser, so this is the
+ * one place mask bytes meet a DOM API; everything upstream stays pure.
+ * Returns null when no canvas context exists, so callers refuse rather
+ * than sending an empty selection.
+ */
+export async function encodeMaskPng(mask: MaskRaster): Promise<Blob | null> {
+  const canvas = document.createElement("canvas");
+  canvas.width = mask.width;
+  canvas.height = mask.height;
+  const context = canvas.getContext("2d");
+  if (!context) return null;
+  context.putImageData(
+    new ImageData(toAlphaImageData(mask, [255, 255, 255]), mask.width, mask.height),
+    0,
+    0,
+  );
+  return new Promise((resolve) => canvas.toBlob((blob) => resolve(blob), "image/png"));
+}

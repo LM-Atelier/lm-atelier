@@ -4,7 +4,7 @@ import { EmptyState } from "./EmptyState";
 import { ErrorCallout } from "./ErrorCallout";
 import { StudioCanvas } from "./StudioCanvas";
 import { StudioToolRail } from "./StudioToolRail";
-import { coverage } from "./studioMasks";
+import { coverage, encodeMaskPng, isEmpty } from "./studioMasks";
 import {
   initialToolState,
   studioToolReducer,
@@ -175,12 +175,27 @@ export function StudioView({
             disabled={!instruction.trim() || busy || !current}
             onClick={() => {
               if (!current) return;
-              apply(instruction.trim(), current.artifactId);
-              setInstruction("");
-              setSelectedId(null);
+              const selection = tools.kind !== "instruct" && tools.mask && !isEmpty(tools.mask)
+                ? tools.mask
+                : null;
+              const send = (mask: Blob | null) => {
+                apply(
+                  instruction.trim(),
+                  current.artifactId,
+                  mask ? { blob: mask, featherPx: tools.featherPx, invert: false } : undefined,
+                );
+                setInstruction("");
+                setSelectedId(null);
+              };
+              if (selection) void encodeMaskPng(selection).then(send);
+              else send(null);
             }}
           >
-            {busy ? "Applying…" : "Apply edit"}
+            {busy
+              ? "Applying…"
+              : tools.kind !== "instruct" && selectionCoverage > 0
+                ? "Apply to selection"
+                : "Apply edit"}
           </button>
         </aside>
       </div>
