@@ -16,11 +16,40 @@ from local_lm.models import (
     ModelInstall,
     ModelProfile,
     Run,
+    WorkflowActivation,
     WorkflowRevision,
     WorkStep,
 )
-from local_lm.orchestrator import ConversationOrchestrator
+from local_lm.orchestrator import ConversationOrchestrator, _queued_workflow_activation
 from local_lm.schemas import EngineCapabilities, WorkerStatus
+from local_lm.workflow_activations import WorkflowActivationLaunchScope
+
+
+def test_contract_backed_queue_freezes_only_the_ready_active_activation() -> None:
+    revision = SimpleNamespace(id="wfrev-one", dependency_contract_sha256="a" * 64)
+    activation = SimpleNamespace(
+        id="wfact-one",
+        resolver_version="workflow-activation-v1",
+        dependency_contract_sha256="a" * 64,
+        binding_sha256="b" * 64,
+        details_json={"launch_sha256": "c" * 64},
+    )
+
+    class FakeSession:
+        def scalar(self, _query):  # type: ignore[no-untyped-def]
+            return activation
+
+    assert _queued_workflow_activation(FakeSession(), revision) == {
+        "id": "wfact-one",
+        "resolver_version": "workflow-activation-v1",
+        "dependency_contract_sha256": "a" * 64,
+        "binding_sha256": "b" * 64,
+        "launch_sha256": "c" * 64,
+    }
+    activation.details_json = {}
+    with pytest.raises(ValueError, match="dependencies are not ready"):
+        _queued_workflow_activation(FakeSession(), revision)
+    assert _queued_workflow_activation(FakeSession(), None) is None
 
 
 def test_successful_media_evidence_requires_an_exact_official_contract(monkeypatch) -> None:
@@ -487,6 +516,151 @@ async def test_media_worker_startup_forwards_truthful_phases() -> None:
     ]
 
 
+async def test_ready_media_worker_still_receives_an_exact_activation_scope() -> None:
+    media = WorkerStatus(
+        name="media",
+        state="ready",
+        managed=True,
+        running=True,
+        pid=22,
+    )
+    scope = WorkflowActivationLaunchScope(
+        "wfact-one",
+        "wfrev-one",
+        "a" * 64,
+        "b" * 64,
+        (),
+        (),
+        (),
+        (),
+        (),
+        (),
+        (),
+        (),
+        (),
+        (),
+    )
+    start_media = AsyncMock()
+    orchestrator = ConversationOrchestrator(
+        engines=SimpleNamespace(settings=SimpleNamespace()),
+        artifacts=Mock(),
+        events=Mock(),
+        scheduler=Mock(),
+        processes=SimpleNamespace(
+            statuses=Mock(return_value=[media]),
+            start_media=start_media,
+        ),
+    )
+
+    await orchestrator._ensure_media_worker(activation_scope=scope)
+
+    start_media.assert_awaited_once_with(activation_scope=scope)
+
+
+def test_media_execution_revalidates_the_exact_queued_activation(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    snapshot = {
+        "id": "wfact-one",
+        "resolver_version": "workflow-activation-v1",
+        "dependency_contract_sha256": "a" * 64,
+        "binding_sha256": "b" * 64,
+        "launch_sha256": "c" * 64,
+    }
+    revision = SimpleNamespace(id="wfrev-one", dependency_contract_sha256="a" * 64)
+    activation = SimpleNamespace(
+        id="wfact-one",
+        workflow_revision_id="wfrev-one",
+        resolver_version="workflow-activation-v1",
+        dependency_contract_sha256="a" * 64,
+        binding_sha256="b" * 64,
+    )
+    run = SimpleNamespace(
+        workflow_revision_id="wfrev-one",
+        provenance_json={"workflow": {"activation": snapshot}},
+    )
+    scope = WorkflowActivationLaunchScope(
+        "wfact-one",
+        "wfrev-one",
+        "b" * 64,
+        "c" * 64,
+        (),
+        (),
+        (),
+        (),
+        (),
+        (),
+        (),
+        (),
+        (),
+        (),
+    )
+
+    class FakeSession:
+        def get(self, model, identity):  # type: ignore[no-untyped-def]
+            return {
+                (WorkflowRevision, "wfrev-one"): revision,
+                (WorkflowActivation, "wfact-one"): activation,
+            }.get((model, identity))
+
+    revalidate = Mock(return_value=scope)
+    monkeypatch.setattr("local_lm.orchestrator.revalidate_workflow_activation", revalidate)
+    settings = SimpleNamespace(
+        custom_node_dir=tmp_path / "nodes",
+        state_dir=tmp_path / "state",
+    )
+    orchestrator = ConversationOrchestrator(
+        engines=SimpleNamespace(settings=settings),
+        artifacts=Mock(),
+        events=Mock(),
+        scheduler=Mock(),
+        processes=SimpleNamespace(runtimes=None),
+    )
+
+    assert orchestrator._media_activation_scope(FakeSession(), run) is scope
+    assert revalidate.call_args.kwargs == {
+        "runtime_materializer": None,
+        "custom_node_root": settings.custom_node_dir,
+        "registry_environment_root": settings.state_dir / "registry-wheel-environments",
+    }
+
+    run.provenance_json["workflow"]["activation"]["launch_sha256"] = "d" * 64
+    with pytest.raises(RuntimeError, match="launch identity changed"):
+        orchestrator._media_activation_scope(FakeSession(), run)
+
+
+async def test_scoped_media_handoff_does_not_restart_a_broad_worker() -> None:
+    media = WorkerStatus(
+        name="media",
+        state="ready",
+        managed=True,
+        running=True,
+        pid=22,
+    )
+    processes = SimpleNamespace(
+        statuses=Mock(return_value=[media]),
+        launch_scope_sha256=Mock(return_value="a" * 64),
+        stop=AsyncMock(),
+        start_media=AsyncMock(),
+    )
+    orchestrator = ConversationOrchestrator(
+        engines=SimpleNamespace(settings=SimpleNamespace(media_engine="comfyui")),
+        artifacts=Mock(),
+        events=Mock(),
+        scheduler=Mock(),
+        processes=processes,
+    )
+    orchestrator._resume_chat_worker = AsyncMock()  # type: ignore[method-assign]
+
+    await orchestrator._complete_media_handoff("profile-chat")
+
+    processes.stop.assert_awaited_once_with("media")
+    orchestrator._resume_chat_worker.assert_awaited_once_with("profile-chat")
+    processes.start_media.assert_not_awaited()
+    assert orchestrator._media_restart_task is None
+
+
 async def test_media_execution_awaits_inflight_handoff_restart() -> None:
     restart_release = asyncio.Event()
     restart_entered = asyncio.Event()
@@ -538,6 +712,7 @@ def _plan_prewarm_orchestrator(  # type: ignore[no-untyped-def]
     media_running: bool = False,
     start_media=None,
     job=None,
+    next_revision=None,
 ):
     current_step = SimpleNamespace(ordinal=1)
 
@@ -552,6 +727,7 @@ def _plan_prewarm_orchestrator(  # type: ignore[no-untyped-def]
             return {
                 (WorkStep, "step-current"): current_step,
                 (Job, "job-current"): job,
+                (WorkflowRevision, "revision-next"): next_revision,
             }.get((model, identity))
 
         def scalar(self, _query):  # type: ignore[no-untyped-def]
@@ -618,6 +794,26 @@ async def test_ordered_text_step_does_not_prewarm_a_text_successor() -> None:
 
     assert orchestrator._step_prewarm_plan_id is None
     assert orchestrator._step_prewarm_task is None
+    processes.start_media.assert_not_awaited()
+
+
+async def test_ordered_text_step_does_not_broadly_prewarm_a_contract_workflow() -> None:
+    next_step = SimpleNamespace(
+        operation="text_to_image",
+        status="queued",
+        workflow_revision_id="revision-next",
+    )
+    next_revision = SimpleNamespace(dependency_contract_sha256="a" * 64)
+    orchestrator, processes, session_factory = _plan_prewarm_orchestrator(
+        next_step,
+        next_revision=next_revision,
+    )
+
+    with session_factory() as session:
+        orchestrator._arm_step_prewarm(session, _ordered_text_run())
+    orchestrator._begin_step_prewarm()
+
+    assert orchestrator._step_prewarm_plan_id is None
     processes.start_media.assert_not_awaited()
 
 

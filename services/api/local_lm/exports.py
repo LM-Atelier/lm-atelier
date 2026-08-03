@@ -649,6 +649,10 @@ class ProjectExporter:
                 else None
             )
             workflow["trusted"] = False
+            activation = workflow.get("activation")
+            if isinstance(activation, dict):
+                activation.pop("id", None)
+                activation.pop("launch_sha256", None)
 
         worker = provenance.get("worker")
         if isinstance(worker, dict):
@@ -753,6 +757,10 @@ class ProjectExporter:
                 workflow["revision_id"] = None
                 workflow["definition_id"] = None
             workflow["trusted"] = False
+            activation = workflow.get("activation")
+            if isinstance(activation, dict):
+                activation.pop("id", None)
+                activation.pop("launch_sha256", None)
 
         worker = provenance.get("worker")
         if isinstance(worker, dict):
@@ -1457,6 +1465,9 @@ class ProjectExporter:
         workflow = value.get("workflow")
         if not isinstance(workflow, dict):
             return
+        activation = workflow.get("activation")
+        if isinstance(activation, dict) and ("id" in activation or "launch_sha256" in activation):
+            raise ValueError("project provenance contains a local workflow activation")
         revision_id = workflow.get("revision_id")
         self._validate_revision_source(
             revision_id,
