@@ -150,3 +150,21 @@ describe("the token layer", () => {
     expect(literals.length).toBeLessThanOrEqual(155);
   });
 });
+
+describe("typography", () => {
+  it("never leaves a stack that can fall through to nothing", () => {
+    const css = readFileSync(STYLESHEET, "utf8");
+    const GENERIC = /^(serif|sans-serif|monospace|cursive|fantasy|system-ui|ui-serif|ui-sans-serif|ui-monospace|inherit)$/;
+
+    // Inter was declared as the interface font and never shipped - no
+    // @font-face, no font files anywhere in the repository - so what a
+    // reader actually saw depended entirely on what they happened to have
+    // installed. A stack is only honest if its last entry is one that
+    // every platform can satisfy.
+    const endings = [...css.matchAll(/font-family:\s*([^;]+);/g)]
+      .map((match) => match[1].split(",").at(-1)!.trim().replace(/^["']|["']$/g, ""))
+      .filter((name) => !GENERIC.test(name));
+
+    expect(endings).toEqual([]);
+  });
+});
