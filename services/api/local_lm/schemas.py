@@ -833,6 +833,14 @@ class WorkflowOut(ApiModel):
 
 
 WorkflowSelectorCapability = Literal["chat", "vision", "image", "video"]
+WorkflowDependencyResourceKind = Literal[
+    "model_profile",
+    "model_install",
+    "model_asset",
+    "custom_node",
+    "registry_package",
+    "runtime",
+]
 WorkflowVariantReadiness = Literal[
     "ready",
     "setup_required",
@@ -883,6 +891,67 @@ class WorkflowFamilyOut(ApiModel):
     preferences: list[WorkflowFamilyPreferenceOut] = Field(default_factory=list)
     created_at: datetime
     updated_at: datetime
+
+
+class WorkflowFamilyUpdate(ApiModel):
+    name: str | None = Field(default=None, min_length=1, max_length=240)
+    description: str | None = Field(default=None, max_length=10_000)
+    use_case: str | None = Field(default=None, max_length=10_000)
+    tags: list[str] | None = Field(default=None, max_length=100)
+    enabled: bool | None = None
+    archived: bool | None = None
+
+
+class WorkflowFamilyPreferenceUpdate(ApiModel):
+    enabled: bool = True
+    is_default: bool = False
+    sort_order: int = Field(default=0, ge=-1_000_000, le=1_000_000)
+
+
+class WorkflowDependencyImpactOut(ApiModel):
+    resource_kind: str
+    resource_id: str
+    resource_name: str
+    binding_count: int
+    revision_count: int
+    current_revision: bool
+    shared: bool
+    other_workflow_count: int
+    other_family_ids: list[str] = Field(default_factory=list)
+
+
+class WorkflowFamilyRemovalImpactOut(ApiModel):
+    family_id: str
+    removal_strategy: Literal["archive"] = "archive"
+    archive_blocked: bool
+    revision_count: int
+    current_revision_count: int
+    chat_selection_count: int
+    project_selection_count: int
+    project_revision_pin_count: int
+    active_run_count: int
+    queued_step_count: int
+    historical_run_count: int
+    active_activation_count: int
+    default_for: list[WorkflowSelectorCapability] = Field(default_factory=list)
+    dependencies: list[WorkflowDependencyImpactOut] = Field(default_factory=list)
+
+
+class WorkflowResourceConsumerOut(ApiModel):
+    workflow_id: str
+    workflow_name: str
+    workflow_family_id: str | None = None
+    workflow_family_name: str | None = None
+    revision_ids: list[str] = Field(default_factory=list)
+    binding_count: int
+    current_revision: bool
+
+
+class WorkflowResourceConsumersOut(ApiModel):
+    resource_kind: WorkflowDependencyResourceKind
+    resource_id: str
+    resource_name: str
+    consumers: list[WorkflowResourceConsumerOut] = Field(default_factory=list)
 
 
 class ChatWorkflowDefaultSelectionIn(ApiModel):

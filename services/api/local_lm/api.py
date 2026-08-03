@@ -259,8 +259,13 @@ from .schemas import (
     WorkflowBundle,
     WorkflowClone,
     WorkflowCreate,
+    WorkflowDependencyImpactOut,
+    WorkflowDependencyResourceKind,
     WorkflowFamilyOut,
     WorkflowFamilyPreferenceOut,
+    WorkflowFamilyPreferenceUpdate,
+    WorkflowFamilyRemovalImpactOut,
+    WorkflowFamilyUpdate,
     WorkflowFamilyVariantOut,
     WorkflowMissingNodeOut,
     WorkflowOpenTarget,
@@ -271,6 +276,8 @@ from .schemas import (
     WorkflowPackageIssueOut,
     WorkflowPackagePrepareRequest,
     WorkflowPackageRequirementOut,
+    WorkflowResourceConsumerOut,
+    WorkflowResourceConsumersOut,
     WorkflowRevisionCreate,
     WorkflowRevisionOut,
     WorkflowSelectionOut,
@@ -323,6 +330,13 @@ from .workflow_compatibility import (
     retire_legacy_profile_workflow,
 )
 from .workflow_edit_calibration import validate_workflow_edit_calibration
+from .workflow_library import (
+    WorkflowFamilyRemovalImpact,
+    workflow_family_removal_impact,
+    workflow_family_selector_reference_count,
+    workflow_resource_consumers,
+    workflow_resource_name,
+)
 from .workflow_package_preparation import (
     PreparationContext,
     WorkflowPackagePreparationError,
@@ -5555,6 +5569,114 @@ def _workflow_family_variant_out(
     )
 
 
+def _workflow_family_out(
+    session: Session,
+    services: Services,
+    family: WorkflowFamily,
+) -> WorkflowFamilyOut:
+    compatibility = session.scalar(
+        select(WorkflowProfileCompatibility).where(
+            WorkflowProfileCompatibility.workflow_family_id == family.id
+        )
+    )
+    return WorkflowFamilyOut(
+        id=family.id,
+        name=family.name,
+        description=family.description,
+        use_case=family.use_case,
+        tags=[item for item in family.tags_json if isinstance(item, str)],
+        enabled=family.enabled,
+        archived=family.archived,
+        compatibility=compatibility is not None,
+        variants=[
+            _workflow_family_variant_out(
+                session,
+                services,
+                family,
+                definition,
+                compatibility,
+            )
+            for definition in sorted(
+                family.definitions,
+                key=lambda item: (item.operation, item.variant_key or "", item.id),
+            )
+        ],
+        preferences=[
+            WorkflowFamilyPreferenceOut(
+                selector_capability=_workflow_selector_capability(preference.selector_capability),
+                enabled=preference.enabled,
+                is_default=preference.is_default,
+                sort_order=preference.sort_order,
+            )
+            for preference in sorted(
+                family.preferences,
+                key=lambda item: (item.selector_capability, item.sort_order, item.id),
+            )
+        ],
+        created_at=family.created_at,
+        updated_at=family.updated_at,
+    )
+
+
+def _workflow_family_row(session: Session, family_id: str) -> WorkflowFamily:
+    family = session.scalar(
+        select(WorkflowFamily)
+        .options(
+            selectinload(WorkflowFamily.definitions),
+            selectinload(WorkflowFamily.preferences),
+        )
+        .where(WorkflowFamily.id == family_id)
+    )
+    if family is None:
+        raise api_error(404, "workflow-family-not-found", "workflow family not found")
+    return family
+
+
+def _workflow_family_compatibility_profile(
+    session: Session,
+    family_id: str,
+) -> ModelProfile | None:
+    mapping = session.scalar(
+        select(WorkflowProfileCompatibility).where(
+            WorkflowProfileCompatibility.workflow_family_id == family_id
+        )
+    )
+    return session.get(ModelProfile, mapping.model_profile_id) if mapping is not None else None
+
+
+def _workflow_family_removal_impact_out(
+    impact: WorkflowFamilyRemovalImpact,
+) -> WorkflowFamilyRemovalImpactOut:
+    return WorkflowFamilyRemovalImpactOut(
+        family_id=impact.family_id,
+        archive_blocked=impact.archive_blocked,
+        revision_count=impact.revision_count,
+        current_revision_count=impact.current_revision_count,
+        chat_selection_count=impact.chat_selection_count,
+        project_selection_count=impact.project_selection_count,
+        project_revision_pin_count=impact.project_revision_pin_count,
+        active_run_count=impact.active_run_count,
+        queued_step_count=impact.queued_step_count,
+        historical_run_count=impact.historical_run_count,
+        active_activation_count=impact.active_activation_count,
+        default_for=[_workflow_selector_capability(value) for value in impact.default_for],
+        dependencies=[
+            WorkflowDependencyImpactOut(
+                resource_kind=dependency.resource_kind,
+                resource_id=dependency.resource_id,
+                resource_name=dependency.resource_name,
+                binding_count=dependency.binding_count,
+                revision_count=dependency.revision_count,
+                current_revision=dependency.current_revision,
+                shared=dependency.shared,
+                other_workflow_count=dependency.other_workflow_count,
+                other_family_ids=list(dependency.other_family_ids),
+            )
+            for dependency in impact.dependencies
+        ],
+    )
+
+
 @router.get("/workflow-families", response_model=list[WorkflowFamilyOut])
 async def list_workflow_families(
     request: Request,
@@ -5576,55 +5698,237 @@ async def list_workflow_families(
         session.scalars(query.order_by(WorkflowFamily.name, WorkflowFamily.id)).unique()
     )
     services = _services(request)
-    result: list[WorkflowFamilyOut] = []
-    for family in families:
-        compatibility = session.scalar(
-            select(WorkflowProfileCompatibility).where(
-                WorkflowProfileCompatibility.workflow_family_id == family.id
+    return [_workflow_family_out(session, services, family) for family in families]
+
+
+@router.get("/workflow-families/{family_id}", response_model=WorkflowFamilyOut)
+async def get_workflow_family(
+    family_id: str,
+    request: Request,
+    session: SessionDep,
+) -> WorkflowFamilyOut:
+    family = _workflow_family_row(session, family_id)
+    return _workflow_family_out(session, _services(request), family)
+
+
+@router.patch("/workflow-families/{family_id}", response_model=WorkflowFamilyOut)
+async def update_workflow_family(
+    family_id: str,
+    payload: WorkflowFamilyUpdate,
+    request: Request,
+    session: SessionDep,
+) -> WorkflowFamilyOut:
+    family = _workflow_family_row(session, family_id)
+    values = payload.model_dump(exclude_unset=True)
+    disabling = values.get("enabled") is False and family.enabled
+    archiving = values.get("archived") is True and not family.archived
+    if disabling or archiving:
+        impact = workflow_family_removal_impact(session, family)
+        if impact.archive_blocked:
+            raise api_error(
+                409,
+                "workflow-family-in-use",
+                "clear active workflow selections and defaults before disabling this family",
+                chat_selection_count=impact.chat_selection_count,
+                project_selection_count=impact.project_selection_count,
+                default_for=list(impact.default_for),
             )
+    final_archived = values.get("archived", family.archived)
+    if final_archived and values.get("enabled") is True:
+        raise api_error(
+            422,
+            "workflow-family-archived",
+            "an archived workflow family cannot be enabled",
         )
-        result.append(
-            WorkflowFamilyOut(
-                id=family.id,
-                name=family.name,
-                description=family.description,
-                use_case=family.use_case,
-                tags=[item for item in family.tags_json if isinstance(item, str)],
-                enabled=family.enabled,
-                archived=family.archived,
-                compatibility=compatibility is not None,
-                variants=[
-                    _workflow_family_variant_out(
-                        session,
-                        services,
-                        family,
-                        definition,
-                        compatibility,
-                    )
-                    for definition in sorted(
-                        family.definitions,
-                        key=lambda item: (item.operation, item.variant_key or "", item.id),
-                    )
-                ],
-                preferences=[
-                    WorkflowFamilyPreferenceOut(
-                        selector_capability=_workflow_selector_capability(
-                            preference.selector_capability
-                        ),
-                        enabled=preference.enabled,
-                        is_default=preference.is_default,
-                        sort_order=preference.sort_order,
-                    )
-                    for preference in sorted(
-                        family.preferences,
-                        key=lambda item: (item.selector_capability, item.sort_order, item.id),
-                    )
-                ],
-                created_at=family.created_at,
-                updated_at=family.updated_at,
+    compatibility_profile = _workflow_family_compatibility_profile(session, family.id)
+    if values.get("name") is not None:
+        name = values["name"].strip()
+        if not name:
+            raise api_error(422, "workflow-family-name-empty", "workflow family name is empty")
+        family.name = name
+        if compatibility_profile is not None:
+            compatibility_profile.name = name
+    if values.get("description") is not None:
+        family.description = values["description"].strip()
+    if values.get("use_case") is not None:
+        family.use_case = values["use_case"].strip()
+        if compatibility_profile is not None:
+            compatibility_profile.use_case = family.use_case
+    if values.get("tags") is not None:
+        family.tags_json = _normalized_workflow_family_tags(values["tags"])
+    if archiving:
+        family.archived = True
+        family.enabled = False
+        for preference in family.preferences:
+            preference.enabled = False
+            preference.is_default = False
+    else:
+        if "archived" in values:
+            family.archived = values["archived"]
+        if "enabled" in values:
+            family.enabled = values["enabled"]
+    if compatibility_profile is not None and ({"name", "use_case"} & values.keys()):
+        ensure_legacy_profile_workflow(session, compatibility_profile)
+    session.commit()
+    family = _workflow_family_row(session, family.id)
+    return _workflow_family_out(session, _services(request), family)
+
+
+def _normalized_workflow_family_tags(tags: list[str]) -> list[str]:
+    normalized: list[str] = []
+    seen: set[str] = set()
+    for raw_tag in tags:
+        tag = raw_tag.strip()
+        key = tag.casefold()
+        if not tag or len(tag) > 100:
+            raise api_error(
+                422,
+                "workflow-family-tag-invalid",
+                "workflow family tags must contain 1 to 100 characters",
             )
+        if key not in seen:
+            normalized.append(tag)
+            seen.add(key)
+    return normalized
+
+
+@router.put(
+    "/workflow-families/{family_id}/preferences/{selector_capability}",
+    response_model=WorkflowFamilyPreferenceOut,
+)
+async def update_workflow_family_preference(
+    family_id: str,
+    selector_capability: WorkflowSelectorCapability,
+    payload: WorkflowFamilyPreferenceUpdate,
+    session: SessionDep,
+) -> WorkflowFamilyPreferenceOut:
+    family = _workflow_family_row(session, family_id)
+    if payload.is_default and not payload.enabled:
+        raise api_error(
+            422,
+            "workflow-default-disabled",
+            "a default workflow preference must be enabled",
         )
-    return result
+    if payload.enabled and (family.archived or not family.enabled):
+        raise api_error(
+            422,
+            "workflow-family-not-selectable",
+            "enable and restore the workflow family before adding it to a selector",
+        )
+    compatible_operations = {
+        operation.value for operation in _SELECTOR_OPERATIONS[selector_capability]
+    }
+    has_variant = session.scalar(
+        select(WorkflowDefinition.id)
+        .where(
+            WorkflowDefinition.family_id == family.id,
+            WorkflowDefinition.operation.in_(compatible_operations),
+        )
+        .limit(1)
+    )
+    if has_variant is None:
+        raise api_error(
+            422,
+            "workflow-family-operation-unavailable",
+            "workflow family has no compatible operation variant",
+        )
+    if not payload.enabled:
+        reference_count = workflow_family_selector_reference_count(
+            session,
+            family.id,
+            selector_capability,
+        )
+        if reference_count:
+            raise api_error(
+                409,
+                "workflow-preference-in-use",
+                "clear active workflow selections before disabling this preference",
+                selector_reference_count=reference_count,
+            )
+    preference = _workflow_preference(session, family.id, selector_capability)
+    compatibility_profile = _workflow_family_compatibility_profile(session, family.id)
+    if payload.is_default:
+        for previous_default in session.scalars(
+            select(WorkflowPreference).where(
+                WorkflowPreference.selector_capability == selector_capability,
+                WorkflowPreference.is_default.is_(True),
+                WorkflowPreference.workflow_family_id != family.id,
+            )
+        ).all():
+            previous_default.is_default = False
+        # The database enforces one default per selector with a partial unique
+        # index. Flush the old default first so SQLite cannot order the two
+        # updates in the unsafe direction inside the final commit.
+        session.flush()
+    if preference is None:
+        preference = WorkflowPreference(
+            workflow_family_id=family.id,
+            selector_capability=selector_capability,
+        )
+        session.add(preference)
+    preference.enabled = payload.enabled
+    preference.is_default = payload.is_default
+    preference.sort_order = payload.sort_order
+    if compatibility_profile is not None:
+        if payload.is_default:
+            for sibling in session.scalars(
+                select(ModelProfile).where(
+                    ModelProfile.role == compatibility_profile.role,
+                    ModelProfile.id != compatibility_profile.id,
+                )
+            ).all():
+                sibling.is_default = False
+        compatibility_profile.is_default = payload.is_default
+        reconcile_legacy_workflow_compatibility(session)
+    session.commit()
+    session.refresh(preference)
+    return WorkflowFamilyPreferenceOut(
+        selector_capability=selector_capability,
+        enabled=preference.enabled,
+        is_default=preference.is_default,
+        sort_order=preference.sort_order,
+    )
+
+
+@router.get(
+    "/workflow-families/{family_id}/removal-impact",
+    response_model=WorkflowFamilyRemovalImpactOut,
+)
+async def get_workflow_family_removal_impact(
+    family_id: str,
+    session: SessionDep,
+) -> WorkflowFamilyRemovalImpactOut:
+    family = _workflow_family_row(session, family_id)
+    return _workflow_family_removal_impact_out(workflow_family_removal_impact(session, family))
+
+
+@router.get(
+    "/workflow-dependencies/{resource_kind}/{resource_id}/consumers",
+    response_model=WorkflowResourceConsumersOut,
+)
+async def get_workflow_dependency_consumers(
+    resource_kind: WorkflowDependencyResourceKind,
+    resource_id: str,
+    session: SessionDep,
+) -> WorkflowResourceConsumersOut:
+    consumers = workflow_resource_consumers(session, resource_kind, resource_id)
+    return WorkflowResourceConsumersOut(
+        resource_kind=resource_kind,
+        resource_id=resource_id,
+        resource_name=workflow_resource_name(session, resource_kind, resource_id),
+        consumers=[
+            WorkflowResourceConsumerOut(
+                workflow_id=consumer.workflow_id,
+                workflow_name=consumer.workflow_name,
+                workflow_family_id=consumer.workflow_family_id,
+                workflow_family_name=consumer.workflow_family_name,
+                revision_ids=list(consumer.revision_ids),
+                binding_count=consumer.binding_count,
+                current_revision=consumer.current_revision,
+            )
+            for consumer in consumers
+        ],
+    )
 
 
 @router.get(
