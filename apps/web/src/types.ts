@@ -935,3 +935,153 @@ export interface RegistryInstall {
   reviewed_at: string | null;
   activated_at: string | null;
 }
+
+export type WorkflowSelectorCapability = "chat" | "vision" | "image" | "video";
+
+/** Whether a variant can actually run right now, and why not when it cannot. */
+export type WorkflowVariantReadiness = "ready" | "setup_required" | "unavailable";
+
+export type WorkflowSelectionMode =
+  | "default"
+  | "inherit"
+  | "automatic"
+  | "family"
+  | "revision"
+  | "legacy";
+
+export interface WorkflowFamilyVariant {
+  id: string;
+  variant_key: string;
+  name: string;
+  operation: string;
+  current_revision_id: string | null;
+  current_revision_version: number | null;
+  engine: string | null;
+  capabilities: string[];
+  trusted: boolean;
+  readiness: WorkflowVariantReadiness;
+  readiness_reason: string | null;
+}
+
+export interface WorkflowFamilyPreference {
+  selector_capability: WorkflowSelectorCapability;
+  enabled: boolean;
+  is_default: boolean;
+  sort_order: number;
+}
+
+/** A family and the operation variants it resolves to.
+ *
+ * `compatibility` marks a family generated from a legacy profile rather than
+ * authored as one, which is worth saying out loud rather than hiding: those
+ * resolve to their original profile and behave exactly as they did.
+ */
+export interface WorkflowFamily {
+  id: string;
+  name: string;
+  description: string;
+  use_case: string;
+  tags: string[];
+  enabled: boolean;
+  archived: boolean;
+  compatibility: boolean;
+  variants: WorkflowFamilyVariant[];
+  preferences: WorkflowFamilyPreference[];
+  created_at: string;
+  updated_at: string;
+}
+
+export interface WorkflowSelection {
+  selector_capability: WorkflowSelectorCapability;
+  mode: WorkflowSelectionMode;
+  workflow_family_id: string | null;
+  workflow_revision_id: string | null;
+  legacy_profile_id: string | null;
+}
+
+export type ChatWorkflowSelectionInput =
+  | { mode: "default" }
+  | { mode: "automatic" }
+  | { mode: "family"; workflow_family_id: string };
+
+export type ProjectWorkflowSelectionInput =
+  | { mode: "inherit" }
+  | { mode: "automatic" }
+  | { mode: "family"; workflow_family_id: string }
+  | { mode: "revision"; workflow_revision_id: string };
+
+export type WorkflowDependencyResourceKind =
+  | "model_profile"
+  | "model_install"
+  | "model_asset"
+  | "custom_node"
+  | "registry_package"
+  | "runtime";
+
+export interface WorkflowFamilyUpdate {
+  name?: string;
+  description?: string;
+  use_case?: string;
+  tags?: string[];
+  enabled?: boolean;
+  archived?: boolean;
+}
+
+export interface WorkflowFamilyPreferenceUpdate {
+  enabled: boolean;
+  is_default: boolean;
+  sort_order: number;
+}
+
+/** One thing a family depends on, and whether anything else depends on it too. */
+export interface WorkflowDependencyImpact {
+  resource_kind: string;
+  resource_id: string;
+  resource_name: string;
+  binding_count: number;
+  revision_count: number;
+  current_revision: boolean;
+  shared: boolean;
+  other_workflow_count: number;
+  other_family_ids: string[];
+}
+
+/** What archiving a family would touch.
+ *
+ * Removal is archival by design: immutable revisions, exact project pins,
+ * queued steps, run history, and shared bytes all survive it. These counts
+ * exist so the question can say that, rather than implying things vanish.
+ */
+export interface WorkflowFamilyRemovalImpact {
+  family_id: string;
+  removal_strategy: "archive";
+  archive_blocked: boolean;
+  revision_count: number;
+  current_revision_count: number;
+  chat_selection_count: number;
+  project_selection_count: number;
+  project_revision_pin_count: number;
+  active_run_count: number;
+  queued_step_count: number;
+  historical_run_count: number;
+  active_activation_count: number;
+  default_for: WorkflowSelectorCapability[];
+  dependencies: WorkflowDependencyImpact[];
+}
+
+export interface WorkflowResourceConsumer {
+  workflow_id: string;
+  workflow_name: string;
+  workflow_family_id: string | null;
+  workflow_family_name: string | null;
+  revision_ids: string[];
+  binding_count: number;
+  current_revision: boolean;
+}
+
+export interface WorkflowResourceConsumers {
+  resource_kind: WorkflowDependencyResourceKind;
+  resource_id: string;
+  resource_name: string;
+  consumers: WorkflowResourceConsumer[];
+}

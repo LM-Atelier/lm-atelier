@@ -93,6 +93,7 @@ import { ArtifactPart } from "./ArtifactPart";
 import { FirstRunSetup, SetupWizard } from "./SetupWizard";
 import { ChatManager } from "./ChatManager";
 import { READING_ROOM_VIEWS, type View } from "./rooms";
+import { WorkflowConsumers } from "./WorkflowConsumers";
 import { PromptDialog } from "./ConfirmDialog";
 import { CustomNodesPanel } from "./CustomNodesPanel";
 import { LoraStackControl } from "./LoraStackControl";
@@ -2312,7 +2313,7 @@ function ModelsView({ initialRole }: { initialRole: EngineRole }) {
           saving={updateUseCase.isPending && updateUseCase.variables?.profileId === profile?.id}
           defaulting={setDefaultModel.isPending && setDefaultModel.variables?.model.id === model.id}
           onCreate={() => createProfile.mutate(model)}
-          onDelete={() => void confirm({ title: `Delete ${model.name}?`, question: "This removes the model file and its saved settings from local storage. Downloading it again is the only way back.", confirmLabel: "Delete model" }).then((ok) => ok && deleteModel.mutate(model.id))}
+          onDelete={() => void confirm({ title: `Delete ${model.name}?`, question: "This removes the model file and its saved settings from local storage. Downloading it again is the only way back.", detail: <WorkflowConsumers kind="model_install" resourceId={model.id} />, confirmLabel: "Delete model" }).then((ok) => ok && deleteModel.mutate(model.id))}
           onSaveUseCase={async (value) => {
             if (!profile) return false;
             try {
@@ -2343,7 +2344,7 @@ function ModelsView({ initialRole }: { initialRole: EngineRole }) {
                   return false;
                 }
               }}
-              onDelete={() => void confirm({ title: `Delete ${asset.name}?`, question: "This removes the file from local storage.", confirmLabel: "Delete" }).then((ok) => ok && deleteModelAsset.mutate(asset.id))}
+              onDelete={() => void confirm({ title: `Delete ${asset.name}?`, question: "This removes the file from local storage.", detail: <WorkflowConsumers kind="model_asset" resourceId={asset.id} />, confirmLabel: "Delete" }).then((ok) => ok && deleteModelAsset.mutate(asset.id))}
             />
           ))}
         </div>
