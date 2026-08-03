@@ -31,6 +31,7 @@ const analysis = (overrides: Partial<WorkflowPackageAnalysis> = {}): WorkflowPac
   runtime_nodes_available: true,
   dependencies_resolved: true,
   node_inventory_available: true,
+  source_candidates: [],
   ...overrides,
 });
 
@@ -94,5 +95,37 @@ describe("WorkflowPackageReview import", () => {
       "Start the media worker to compile workflows",
     );
     expect(onImported).not.toHaveBeenCalled();
+  });
+});
+
+describe("WorkflowPackageReview sources", () => {
+  afterEach(() => {
+    cleanup();
+  });
+
+  it("offers the sources the author recorded when they name no file", () => {
+    renderReview(
+      analysis({
+        source_candidates: [
+          {
+            provider: "civitai",
+            remote_id: "3075606",
+            revision: "3075606",
+            filename: null,
+            url: "https://civitai.com/models/1662740/lenovo?modelVersionId=3075606",
+          },
+        ],
+      }),
+    );
+
+    const link = screen.getByRole("link", { name: "3075606" });
+    expect(link).toHaveAttribute("href", "https://civitai.com/models/1662740/lenovo?modelVersionId=3075606");
+    // Opening someone else's link must not hand them this window.
+    expect(link).toHaveAttribute("rel", expect.stringContaining("noopener"));
+  });
+
+  it("says nothing about sources when the author recorded none", () => {
+    renderReview(analysis());
+    expect(screen.queryByText("Sources this workflow mentions")).toBeNull();
   });
 });

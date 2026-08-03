@@ -811,6 +811,20 @@ export interface WorkflowPackageRequirement {
   locally_resolved: boolean;
 }
 
+/** A source link the workflow's author wrote down, validated server-side.
+ *
+ * A suggestion of what to look up - never a download instruction. The browser
+ * cannot supply one of these, and installing still goes through the ordinary
+ * immutable-plan path.
+ */
+export interface WorkflowSourceCandidate {
+  provider: string;
+  remote_id: string;
+  revision: string | null;
+  filename: string | null;
+  url: string;
+}
+
 export interface WorkflowAssetReference {
   filename: string;
   suffix: string;
@@ -818,6 +832,8 @@ export interface WorkflowAssetReference {
   kind: "checkpoint" | "configuration" | "embedding" | "lora" | "upscaler" | "vae";
   source_url: string | null;
   present_locally: boolean;
+  /** Present only when the author's text names this exact file. */
+  source_candidates: WorkflowSourceCandidate[];
 }
 
 export interface WorkflowPackageIssue {
@@ -855,6 +871,9 @@ export interface WorkflowPackageAnalysis {
   /** False when the media runtime could not list nodes - "missing" is then
    * "unknown" and must be presented that way. */
   node_inventory_available: boolean;
+  /** Links the author recorded that name no particular file, for the user to
+   * assign. Most authors write display names, so this is the common case. */
+  source_candidates: WorkflowSourceCandidate[];
 }
 
 /** A one-click edit: a named instruction scaffold over an edit workflow. */
