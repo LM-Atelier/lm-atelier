@@ -45,7 +45,7 @@ run_checked "Ruff format" \
 run_checked "Ruff lint" \
   "$python_tools/ruff" check services/api
 run_checked "Strict mypy" \
-  "$python_tools/mypy" services/api/local_lm
+  "$python_tools/mypy" --config-file services/api/pyproject.toml services/api/local_lm
 run_checked "Bandit high-severity scan" \
   "$python_tools/bandit" -q -lll -r services/api/local_lm
 run_checked "Version metadata" \
