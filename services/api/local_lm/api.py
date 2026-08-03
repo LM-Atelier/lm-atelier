@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import copy
+import dataclasses
 import json
 import logging
 import math
@@ -2772,11 +2773,16 @@ async def resolve_catalog_preflight(
                 "files": [
                     {
                         **item,
-                        "source_version_id": item["metadata"].get("source_version_id"),
-                        "source_file_id": item["metadata"].get("source_file_id"),
+                        # Production normalization puts both identities at the
+                        # file top level; nested metadata carries the version
+                        # but never the file id. Top level always wins.
+                        "source_version_id": item.get("source_version_id")
+                        or item["metadata"].get("source_version_id"),
+                        "source_file_id": item.get("source_file_id"),
                         "source_remote_id": item.get("source_remote_id")
                         or item["metadata"].get("source_model_id"),
                         "source_revision": item.get("source_revision")
+                        or item.get("source_version_id")
                         or item["metadata"].get("source_version_id"),
                         "source_filename": item.get("source_filename") or item.get("filename"),
                     }
@@ -2808,7 +2814,7 @@ async def resolve_catalog_preflight(
                 pass
     except Exception as exc:
         raise CatalogUnavailableError(
-            "Hugging Face is temporarily unavailable. Check your connection and retry."
+            f"{catalog.display_name} is temporarily unavailable. Check your connection and retry."
         ) from exc
     system = collect_system_info(services.settings)
 
@@ -2899,6 +2905,28 @@ async def resolve_catalog_preflight(
                 result.selected_files,
                 role=payload.role,
             )
+        if source == "civitai" and payload.auxiliary_kind == "lora":
+            # CivitAI file-prefix inspection is deliberately unavailable, so a
+            # bare safetensors would inspect as "checkpoint" and block as a
+            # kind mismatch. The provider's own typed declaration substitutes
+            # for planning; the manager's mandatory staged-byte LoRA
+            # inspection still gates activation after download.
+            declared_loras = {
+                str(item.get("filename") or "")
+                for item in resolved_detail.files
+                if isinstance(item.get("metadata"), dict)
+                and str(item["metadata"].get("model_type") or "").casefold() == "lora"
+            }
+            if declared_loras and all(path in declared_loras for path in result.selected_files):
+                inspection = dataclasses.replace(
+                    inspection,
+                    components=tuple(
+                        dataclasses.replace(component, kind="lora", target_folder="loras")
+                        if component.path in declared_loras
+                        else component
+                        for component in inspection.components
+                    ),
+                )
         files = {str(item.get("filename") or ""): item for item in resolved_detail.files}
         selected_metadata = [
             files.get(
@@ -3306,7 +3334,9 @@ def _planned_download_fields(plan: InstallPlan | None) -> dict[str, Any]:
             for item in plan.artifacts_json
             if item.get("sha256")
         },
-        "file_sources": {
+        "file_sources": {}
+        if plan.provider == "civitai"
+        else {
             str(item["path"]): {
                 "remote_id": str(item["source_remote_id"]),
                 "revision": str(item["source_revision"]),
