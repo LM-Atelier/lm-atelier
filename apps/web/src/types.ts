@@ -25,6 +25,9 @@ export interface Artifact {
   size_bytes: number;
   original_name: string | null;
   metadata_json: Record<string, unknown>;
+  /** Pins against automatic cleanup only; explicit deletion always wins.
+   * Optional so view fixtures stay lean; the server always sends it. */
+  favorite?: boolean;
   created_at: string;
   url?: string | null;
 }

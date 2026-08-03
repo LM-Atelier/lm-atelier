@@ -93,6 +93,7 @@ import { FirstRunSetup, SetupWizard } from "./SetupWizard";
 import { CustomNodesPanel } from "./CustomNodesPanel";
 import { MediaLibraryView } from "./MediaLibraryView";
 import { MediaOutputPlan } from "./MediaOutputPlan";
+import { ModelCard } from "./ModelCard";
 import { ModelUpdatesPanel } from "./ModelUpdatesPanel";
 import { RuntimeSetupCard } from "./RuntimeSetupCard";
 import { RegistryInstallsPanel } from "./RegistryInstallsPanel";
@@ -238,6 +239,7 @@ function PartView({
   onEditImage,
   onAnimateImage,
   onReferenceMedia,
+  onToggleFavorite,
   compareSourceUrl,
   lineage,
 }: {
@@ -248,6 +250,7 @@ function PartView({
   onEditImage?: (part: MessagePart, origin: MediaOrigin) => void;
   onAnimateImage?: (part: MessagePart, origin: MediaOrigin) => void;
   onReferenceMedia?: (part: MessagePart, origin: MediaOrigin) => void;
+  onToggleFavorite?: (part: MessagePart) => void;
   compareSourceUrl?: string | null;
   lineage?: EditLineageStep[];
 }) {
@@ -256,7 +259,7 @@ function PartView({
     return markdown ? <MarkdownText text={text} /> : <div className="message-text">{text}</div>;
   }
   if (part.type === "image" || part.type === "video" || part.type === "attachment") {
-    return <ArtifactPart part={part} origin={origin} onEditImage={onEditImage} onAnimateImage={onAnimateImage} onReferenceMedia={onReferenceMedia} compareSourceUrl={compareSourceUrl} lineage={lineage} />;
+    return <ArtifactPart part={part} origin={origin} onEditImage={onEditImage} onAnimateImage={onAnimateImage} onReferenceMedia={onReferenceMedia} onToggleFavorite={onToggleFavorite} compareSourceUrl={compareSourceUrl} lineage={lineage} />;
   }
   if (part.type === "progress") {
     const progress = Number(part.metadata_json.progress ?? 0);
@@ -291,6 +294,7 @@ function MessageBubble({
   onEditImage,
   onAnimateImage,
   onReferenceMedia,
+  onToggleFavorite,
   onQuote,
   onDeleteExchange,
   onForkThread,
@@ -307,6 +311,7 @@ function MessageBubble({
   onEditImage?: (part: MessagePart, origin: MediaOrigin) => void;
   onAnimateImage?: (part: MessagePart, origin: MediaOrigin) => void;
   onReferenceMedia?: (part: MessagePart, origin: MediaOrigin) => void;
+  onToggleFavorite?: (part: MessagePart) => void;
   onQuote?: (text: string) => void;
   onDeleteExchange?: (messageId: string) => void;
   onForkThread?: (messageId: string) => void;
@@ -394,7 +399,7 @@ function MessageBubble({
     <article className={`message ${message.role}`}>
       <div className="avatar">{message.role === "user" ? "You" : <Bot size={19} />}</div>
       <div className="message-content">
-        {editing ? <div className="message-edit"><textarea aria-label="Edit message" rows={4} value={draft} onChange={(event) => setDraft(event.target.value)} /><div><button onClick={() => { setDraft(userText); setEditing(false); }}>Cancel</button><button className="primary" disabled={!draft.trim()} onClick={() => { onEdit?.(message.id, draft.trim()); setEditing(false); }}>Send edited message</button></div></div> : renderedParts.map((part) => <PartView key={part.id} part={part} liveText={liveText} markdown={message.role === "assistant"} origin={mediaOriginForPart(part, operation, message.role === "assistant" ? "generated" : null)} onEditImage={onEditImage} onAnimateImage={onAnimateImage} onReferenceMedia={onReferenceMedia} compareSourceUrl={message.role === "assistant" ? compareSourceUrl : undefined} lineage={message.role === "assistant" ? lineage : undefined} />)}
+        {editing ? <div className="message-edit"><textarea aria-label="Edit message" rows={4} value={draft} onChange={(event) => setDraft(event.target.value)} /><div><button onClick={() => { setDraft(userText); setEditing(false); }}>Cancel</button><button className="primary" disabled={!draft.trim()} onClick={() => { onEdit?.(message.id, draft.trim()); setEditing(false); }}>Send edited message</button></div></div> : renderedParts.map((part) => <PartView key={part.id} part={part} liveText={liveText} markdown={message.role === "assistant"} origin={mediaOriginForPart(part, operation, message.role === "assistant" ? "generated" : null)} onEditImage={onEditImage} onAnimateImage={onAnimateImage} onReferenceMedia={onReferenceMedia} onToggleFavorite={onToggleFavorite} compareSourceUrl={message.role === "assistant" ? compareSourceUrl : undefined} lineage={message.role === "assistant" ? lineage : undefined} />)}
         {liveText && !visibleParts.some((part) => part.type === "text") && (
           <MarkdownText text={liveText} />
         )}
@@ -1707,6 +1712,15 @@ function ChatView({
   const followMessages = useRef(true);
   const previousChatId = useRef<string | undefined>(undefined);
   const [visualTarget, setVisualTarget] = useState<VisualTarget | null>(null);
+  const favoriteClient = useQueryClient();
+  const toggleFavorite = useMutation({
+    mutationFn: ({ artifactId, next }: { artifactId: string; next: boolean }) =>
+      api.favoriteArtifact(artifactId, next),
+    onSuccess: () => {
+      void favoriteClient.invalidateQueries({ queryKey: ["chat"] });
+      void favoriteClient.invalidateQueries({ queryKey: ["artifacts"] });
+    },
+  });
   const consumedLibraryEdit = useRef<number | null>(null);
   useEffect(() => {
     if (!libraryEdit || consumedLibraryEdit.current === libraryEdit.requestId) return;
@@ -1801,6 +1815,10 @@ function ChatView({
                 liveText={liveText[message.id]}
                 compareSourceUrl={compareSourceUrl}
                 lineage={lineage}
+                onToggleFavorite={(part) => part.artifact_id && toggleFavorite.mutate({
+                  artifactId: part.artifact_id,
+                  next: !part.artifact?.favorite,
+                })}
                 hiddenInputArtifactIds={priorVisibleMedia.get(message.id)}
                 onRegenerate={busy ? undefined : (messageId) => onRegenerate(
                   messageId,
@@ -1879,57 +1897,6 @@ function ChatView({
       </div>
       <Composer chat={chat} engines={engines} profiles={profiles} stoppable={stoppable} settings={settings} onSettings={onSettings} presets={presets} presetId={presetId} onPreset={onPreset} onMode={onMode} onSend={onSend} onStop={onStop} onStopAndSend={onStopAndSend} workflows={workflows} project={project} visualTarget={visualTarget} quoteTarget={quoteTarget} />
     </div>
-  );
-}
-
-function ModelCard({
-  model,
-  role,
-  onDownload,
-  status,
-  runtime,
-}: {
-  model: CatalogModel;
-  role: string;
-  onDownload: () => void;
-  status: "idle" | "preparing" | "downloading" | "installed";
-  runtime?: RuntimeStatus;
-}) {
-  const label = {
-    idle: "Install",
-    preparing: "Checking model…",
-    downloading: "Downloading…",
-    installed: "Installed",
-  }[status];
-  const compatibilityLabel = {
-    likely: "Automatic test available",
-    tested: "Tested",
-    advanced_import: "Advanced import",
-    unsupported: "Unsupported",
-  }[model.compatibility] ?? model.compatibility.replace("_", " ");
-  const runtimeUnavailable = Boolean(
-    model.required_runtime === "vllm" && (!runtime || !runtime.supported),
-  );
-  const displayCompatibility = model.required_runtime === "vllm"
-    ? runtimeUnavailable
-      ? "Needs vLLM"
-      : "Automatic test available"
-    : compatibilityLabel;
-  const actionLabel = status === "idle" && model.compatibility === "unsupported"
-    ? "No workflow"
-    : status === "idle" && runtimeUnavailable
-      ? "Needs vLLM"
-      : label;
-  return (
-    <article className="model-card">
-      <div className="model-icon">{role === "video" ? <Film /> : role === "image" || role === "lora" ? <ImageIcon /> : <Bot />}</div>
-      <div className="model-copy">
-        <h3>{model.name}</h3><p>{model.author} · {model.pipeline_tag || model.library_name || "model"}</p>
-        <div className="badges"><span className={`badge ${model.compatibility}`}>{displayCompatibility}</span>{model.gated && <span className="badge">Gated</span>}{model.formats.slice(0, 2).map((format) => <span className="badge" key={format}>{format}</span>)}{model.quantizations.slice(0, 2).map((value) => <span className="badge" key={value}>{value}</span>)}</div>
-        <small>{model.total_size_bytes != null ? `${formatBytes(model.total_size_bytes)} · ` : ""}{formatDate(model.last_modified)}{model.compatibility_reasons.length ? ` · ${model.compatibility_reasons.join(" · ")}` : ""}</small>
-      </div>
-      <div className="model-stats">{model.trending_score != null && <span title="Hugging Face trending score"><Sparkles size={14} />{model.trending_score.toLocaleString()}</span>}<span><Download size={14} />{model.downloads?.toLocaleString() ?? "—"}</span><button className="primary compact-button" title={model.compatibility === "unsupported" || runtimeUnavailable ? model.compatibility_reasons.join(" ") : undefined} onClick={onDownload} disabled={status !== "idle" || model.compatibility === "unsupported" || runtimeUnavailable}>{actionLabel}</button></div>
-    </article>
   );
 }
 

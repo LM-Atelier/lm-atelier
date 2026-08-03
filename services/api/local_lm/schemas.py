@@ -109,8 +109,13 @@ class ArtifactOut(ApiModel):
     size_bytes: int
     original_name: str | None
     metadata_json: dict[str, Any]
+    favorite: bool = False
     created_at: datetime
     url: str | None = None
+
+
+class ArtifactUpdate(ApiModel):
+    favorite: bool
 
 
 class ArtifactLibraryItem(ArtifactOut):
