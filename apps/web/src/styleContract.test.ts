@@ -114,7 +114,7 @@ describe("the token layer", () => {
     // change needing a new one-off colour is a change needing a token. The
     // palette cannot be reasoned about - or replaced - while most of it is
     // spelled out across the rules.
-    expect(literals.length).toBeLessThanOrEqual(156);
+    expect(literals.length).toBeLessThanOrEqual(65);
   });
 });
 
