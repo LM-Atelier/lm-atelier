@@ -893,3 +893,8 @@ h1, h2, h3 { margin: 0; }
 .prompt-problem { color: var(--danger-ink); font-size: 12px; margin: 7px 0 0; }
 .studio-stage-loading { display: grid; gap: 8px; justify-items: center; width: min(280px, 70%); color: var(--muted); }
 .studio-stage-loading .loading-line { width: 100%; margin: 0; }
+.workflow-selector { display: grid; gap: 4px; min-width: 0; }
+.workflow-selector > span { color: var(--ink-muted); font-size: 10px; font-weight: 700; text-transform: uppercase; letter-spacing: .11em; }
+.workflow-selector select { border: 1px solid var(--line-control); border-radius: 10px; background: var(--surface-2); color: var(--ink-primary); padding: 6px 8px; font-size: 12px; }
+.workflow-selector small { color: var(--ink-muted); font-size: 11px; line-height: 1.4; }
+.workflow-selector-blocked { color: var(--state-danger-text); }
