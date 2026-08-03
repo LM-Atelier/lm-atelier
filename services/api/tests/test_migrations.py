@@ -169,6 +169,9 @@ def test_migrations_round_trip(tmp_path) -> None:  # type: ignore[no-untyped-def
         "workflow_dependency_slots",
         "workflow_activations",
         "workflow_dependency_bindings",
+        "workflow_profile_compatibility",
+        "chat_workflow_selections",
+        "project_workflow_selections",
     } <= tables
     assert {
         "active_head_message_id",
