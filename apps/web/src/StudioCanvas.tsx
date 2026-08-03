@@ -31,6 +31,7 @@ export function StudioCanvas({
   mask,
   tool,
   maskVersion,
+  onGestureStart,
   onStrokeEnd,
 }: {
   image: ImageBitmap | null;
@@ -39,6 +40,10 @@ export function StudioCanvas({
   tool: PointerTool | null;
   /** Bump to trigger a mask repaint after undo/redo or programmatic edits. */
   maskVersion?: number;
+  /** Fires before the first mutation of a gesture: the undo snapshot point.
+   * Pushing at stroke end would snapshot the already-mutated raster, making
+   * the first Undo a no-op. */
+  onGestureStart?: () => void;
   onStrokeEnd?: () => void;
 }) {
   const containerRef = useRef<HTMLDivElement>(null);
@@ -49,6 +54,8 @@ export function StudioCanvas({
   const [panning, setPanning] = useState(false);
   const spaceHeld = useRef(false);
   const lastPointer = useRef<{ x: number; y: number } | null>(null);
+  const activePointers = useRef<Map<number, { x: number; y: number }>>(new Map());
+  const drawingPointer = useRef<number | null>(null);
 
   const size = useMemo(
     () => ({ width: image?.width ?? 0, height: image?.height ?? 0 }),
@@ -115,33 +122,76 @@ export function StudioCanvas({
     const onKey = (event: KeyboardEvent) => {
       if (event.code === "Space") spaceHeld.current = event.type === "keydown";
     };
+    // A Space release outside the window would otherwise strand pan mode.
+    const onBlur = () => {
+      spaceHeld.current = false;
+      setPanning(false);
+      lastPointer.current = null;
+    };
     window.addEventListener("keydown", onKey);
     window.addEventListener("keyup", onKey);
+    window.addEventListener("blur", onBlur);
     return () => {
       window.removeEventListener("keydown", onKey);
       window.removeEventListener("keyup", onKey);
+      window.removeEventListener("blur", onBlur);
     };
   }, []);
 
   const screenPoint = (event: ReactPointerEvent | ReactWheelEvent) => {
     const bounds = containerRef.current?.getBoundingClientRect();
-    return { x: event.clientX - (bounds?.left ?? 0), y: event.clientY - (bounds?.top ?? 0) };
+    // A synthetic or touch-only event can omit client coordinates; treating
+    // them as zero keeps every downstream point finite.
+    const clientX = Number.isFinite(event.clientX) ? event.clientX : 0;
+    const clientY = Number.isFinite(event.clientY) ? event.clientY : 0;
+    const left = Number.isFinite(bounds?.left) ? (bounds?.left ?? 0) : 0;
+    const top = Number.isFinite(bounds?.top) ? (bounds?.top ?? 0) : 0;
+    return { x: clientX - left, y: clientY - top };
   };
 
   const onPointerDown = (event: ReactPointerEvent) => {
     (event.target as Element).setPointerCapture?.(event.pointerId);
     const screen = screenPoint(event);
+    activePointers.current.set(event.pointerId, screen);
+    // A second pointer converts the gesture to pan/zoom rather than drawing
+    // two strokes at once; the in-progress stroke ends where it stands. The
+    // check is "a stroke is already live", not a pointer count, because a
+    // second down can reuse an id and would otherwise start a second stroke.
+    if (activePointers.current.size > 1 || drawingPointer.current !== null) {
+      if (drawingPointer.current !== null && tool) {
+        const pointerId = drawingPointer.current;
+        drawingPointer.current = null;
+        tool.up(toImagePoint(viewport, activePointers.current.get(pointerId) ?? screen));
+        drawPreview();
+      }
+      setPanning(true);
+      lastPointer.current = screen;
+      return;
+    }
     if (spaceHeld.current || event.button === 1 || !tool) {
       setPanning(true);
       lastPointer.current = screen;
       return;
     }
+    drawingPointer.current = event.pointerId;
+    onGestureStart?.();
     tool.down(toImagePoint(viewport, screen));
     drawPreview();
   };
 
+  const endDrawing = (screen: { x: number; y: number }): boolean => {
+    if (drawingPointer.current === null || !tool) return false;
+    drawingPointer.current = null;
+    const changed = tool.up(toImagePoint(viewport, screen));
+    drawPreview();
+    return changed;
+  };
+
   const onPointerMove = (event: ReactPointerEvent) => {
     const screen = screenPoint(event);
+    if (activePointers.current.has(event.pointerId)) {
+      activePointers.current.set(event.pointerId, screen);
+    }
     if (panning && lastPointer.current) {
       setViewport((current) =>
         panBy(current, screen.x - lastPointer.current!.x, screen.y - lastPointer.current!.y));
@@ -153,15 +203,29 @@ export function StudioCanvas({
   };
 
   const onPointerUp = (event: ReactPointerEvent) => {
+    const screen = screenPoint(event);
+    activePointers.current.delete(event.pointerId);
     if (panning) {
-      setPanning(false);
-      lastPointer.current = null;
+      if (activePointers.current.size === 0) {
+        setPanning(false);
+        lastPointer.current = null;
+      }
       return;
     }
-    if (!tool) return;
-    const changed = tool.up(toImagePoint(viewport, screenPoint(event)));
-    drawPreview();
-    if (changed) onStrokeEnd?.();
+    if (endDrawing(screen)) onStrokeEnd?.();
+  };
+
+  /** Cancellation and lost capture must not leave a half-drawn gesture. */
+  const onPointerCancel = (event: ReactPointerEvent) => {
+    activePointers.current.delete(event.pointerId);
+    if (drawingPointer.current === event.pointerId) {
+      endDrawing(screenPoint(event));
+      onStrokeEnd?.();
+    }
+    if (activePointers.current.size === 0) {
+      setPanning(false);
+      lastPointer.current = null;
+    }
   };
 
   const onWheel = (event: ReactWheelEvent) => {
@@ -179,6 +243,8 @@ export function StudioCanvas({
       onPointerDown={onPointerDown}
       onPointerMove={onPointerMove}
       onPointerUp={onPointerUp}
+      onPointerCancel={onPointerCancel}
+      onLostPointerCapture={onPointerCancel}
       onWheel={onWheel}
     >
       <div

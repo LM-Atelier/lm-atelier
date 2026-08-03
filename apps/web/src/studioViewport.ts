@@ -65,6 +65,11 @@ export function fitViewport(
   image: { width: number; height: number },
   container: { width: number; height: number },
 ): Viewport {
+  // A container with no measured size (a detached or test DOM) would make
+  // the ratio zero or NaN and every unprojected point NaN with it.
+  if (!image.width || !image.height || !container.width || !container.height) {
+    return identityViewport();
+  }
   const scale = clampScale(
     Math.min(container.width / image.width, container.height / image.height),
   );
