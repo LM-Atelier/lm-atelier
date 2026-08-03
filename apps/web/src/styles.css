@@ -48,6 +48,10 @@
   --state-success: #6fa88b;
   --state-success-text: #6fa88b;
   --focus-ring: #86a5d2;
+  /* Grain and scrim belong to the room: a light grain reads on a dark
+     ground and disappears on paper, and the reverse. */
+  --grain: #d8cdb81a;
+  --scrim: #0f0d0bc7;
 
   /* The names the rules already use, resolved through the layer above so
      that a room swap reaches every one of them without touching a rule. */
@@ -115,6 +119,8 @@
   --state-success: #2f6b4e;
   --state-success-text: #2d674b;
   --focus-ring: #1f4fa8;
+  --grain: #4a422f14;
+  --scrim: #f6f2e9d6;
   /* Paper does not cast the same shadow a dark room does; the same depth
      read as soot when it was carried straight across. */
   --lift: 0 8px 20px #2b241a1f;
@@ -199,10 +205,10 @@ button:focus-visible, a:focus-visible, input:focus-visible, textarea:focus-visib
 .status-dot.healthy { background: var(--success); box-shadow: 0 0 0 3px #60d7a71f; }
 .status-dot.offline { background: var(--danger); }
 
-main { min-width: 0; height: 100%; overflow: hidden; position: relative; }
-main::before { content: ""; position: absolute; inset: 0; pointer-events: none; opacity: .12; background-image: linear-gradient(#aab0c008 1px, transparent 1px), linear-gradient(90deg, #aab0c006 1px, transparent 1px); background-size: 28px 28px; mask-image: linear-gradient(to bottom, #000, transparent 55%); }
+main { min-width: 0; height: 100%; overflow: hidden; position: relative; background: var(--surface-0); color: var(--ink-primary); }
+main::before { content: ""; position: absolute; inset: 0; pointer-events: none; background-image: linear-gradient(var(--grain) 1px, transparent 1px), linear-gradient(90deg, var(--grain) 1px, transparent 1px); background-size: 28px 28px; mask-image: linear-gradient(to bottom, #000, transparent 55%); }
 .chat-view { min-width: 0; height: 100%; display: grid; grid-template-rows: auto 1fr auto; }
-.chat-header { min-width: 0; height: 76px; display: flex; align-items: center; justify-content: space-between; padding: 0 30px; border-bottom: 1px solid var(--border); background: rgba(18, 17, 15, .78); backdrop-filter: blur(16px); }
+.chat-header { min-width: 0; height: 76px; display: flex; align-items: center; justify-content: space-between; padding: 0 30px; border-bottom: 1px solid var(--border); background: var(--scrim); backdrop-filter: blur(16px); }
 .chat-header small, .page-header small, .detail-title small, .settings-drawer header small { color: var(--accent-2); font-size: 11px; font-weight: 700; text-transform: uppercase; letter-spacing: .11em; }
 h1, h2, h3 { margin: 0; }
 .chat-header h1 { font-size: 16px; margin-top: 2px; }

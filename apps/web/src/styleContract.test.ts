@@ -221,3 +221,35 @@ describe("the two rooms", () => {
     expect(themed.filter((key) => !(key in making))).toEqual([]);
   });
 });
+
+describe("moving between rooms", () => {
+  it("puts the work surface in a room and leaves the building alone", () => {
+    const app = readFileSync(join(SOURCE_DIR, "App.tsx"), "utf8");
+    const rooms = readFileSync(join(SOURCE_DIR, "rooms.ts"), "utf8");
+    // The sidebar staying constant is what makes this read as moving
+    // between rooms rather than as the page repainting itself.
+    expect(app).toMatch(/data-room=\{READING_ROOM_VIEWS\.has\(view\)/);
+    const reading = rooms.match(/READING_ROOM_VIEWS[^=]*=\s*new Set<View>\(\[([^\]]*)\]\)/)?.[1] ?? "";
+    expect(reading).toContain('"chat"');
+    expect(reading).toContain('"settings"');
+    // Colour cannot be judged against a warm ground, so the surfaces where
+    // the work is looked at must not become paper.
+    expect(reading).not.toContain('"studio"');
+    expect(reading).not.toContain('"media"');
+  });
+
+  it("gives the ground, the grain, and the header scrim to the room", () => {
+    const css = readFileSync(STYLESHEET, "utf8");
+    // Any of these left as a literal would half-flip the page: a dark
+    // header bar floating over paper, or a light grain over nothing.
+    expect(css).toMatch(/^main \{[^}]*background:\s*var\(--surface-0\)/m);
+    expect(css).toMatch(/main::before \{[^}]*var\(--grain\)/);
+    expect(css).toMatch(/\.chat-header \{[^}]*background:\s*var\(--scrim\)/);
+    for (const room of [':root {', '[data-room="reading"]']) {
+      const at = css.indexOf(room);
+      const block = css.slice(at, css.indexOf("}", at));
+      expect(block).toMatch(/--grain:/);
+      expect(block).toMatch(/--scrim:/);
+    }
+  });
+});

@@ -92,6 +92,7 @@ import { focusMainContent, roleForMode } from "./viewHelpers";
 import { ArtifactPart } from "./ArtifactPart";
 import { FirstRunSetup, SetupWizard } from "./SetupWizard";
 import { ChatManager } from "./ChatManager";
+import { READING_ROOM_VIEWS, type View } from "./rooms";
 import { PromptDialog } from "./ConfirmDialog";
 import { CustomNodesPanel } from "./CustomNodesPanel";
 import { LoraStackControl } from "./LoraStackControl";
@@ -151,7 +152,6 @@ import type {
   WorkPlan,
 } from "./types";
 
-type View = "chat" | "media" | "models" | "workflows" | "studio" | "settings";
 type Visibility = "basic" | "advanced" | "expert";
 type PendingTurn = { id: string; text: string; mode: RoutingMode };
 type VisualTarget = {
@@ -3187,7 +3187,6 @@ function Sidebar({
   );
 }
 
-
 export default function App() {
   const client = useQueryClient();
   const [view, setView] = useState<View>("chat");
@@ -3559,7 +3558,7 @@ export default function App() {
       <a className="skip-link" href="#main-content">Skip to main content</a>
       <Sidebar projects={allProjects} chats={allChats} engines={engines.data ?? []} presets={presets.data ?? []} workflows={workflows.data ?? []} currentChatId={activeChatId} view={view} setupState={setupReadiness.data?.state} onSetup={() => setSetupOpen(true)} onChat={(id) => { setCurrentChatId(id); localStorage.setItem(CURRENT_CHAT_KEY, id); setView("chat"); focusMainContent(); }} onView={(nextView) => { setView(nextView); focusMainContent(); }} onNewChat={(projectId) => createChat.mutate(projectId)} onNewProject={() => setNamingProject(true)} onExportProject={(id, includeMedia) => exportProject.mutate({ id, includeMedia })} onImportProject={(file) => importProject.mutate(file)} onUpdateChat={(id, values) => manageChat.mutate({ id, values })} onDeleteChat={(id, deleteGeneratedMedia) => deleteChat.mutate({ id, deleteGeneratedMedia })} onUpdateProject={(id, values) => updateProject.mutate({ id, values })} onDeleteProject={(id) => deleteProject.mutate(id)} />
       {namingProject && <PromptDialog title="New project" label="Project name" confirmLabel="Create project" placeholder="Portrait studies" onCancel={() => setNamingProject(false)} onConfirm={(name) => { setNamingProject(false); createProject.mutate(name); }} />}
-      <main id="main-content" tabIndex={-1}>{activeContent}</main>
+      <main id="main-content" tabIndex={-1} data-room={READING_ROOM_VIEWS.has(view) ? "reading" : undefined}>{activeContent}</main>
       {setupOpen === true && !setupReadiness.data && (
         <AccessibleDialog
           title="Checking local setup"
