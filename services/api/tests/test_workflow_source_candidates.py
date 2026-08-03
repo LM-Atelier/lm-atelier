@@ -178,3 +178,26 @@ def test_display_named_notes_still_yield_usable_suggestions() -> None:
     assert [key for key in found if key] == []
     # ...but both recorded sources survive for the user to assign.
     assert {candidate.remote_id for candidate in found[""]} == {"3075606", "3075498"}
+
+
+def test_one_named_file_does_not_swallow_a_neighbors_link() -> None:
+    """A note listing several models keeps each link with its own subject."""
+
+    workflow = {
+        "nodes": [
+            _note(
+                "Lenovo UltraReal\nhttps://civitai.com/models/1/l?modelVersionId=2\n\n"
+                "VAE qwen_image_vae.safetensors "
+                "https://huggingface.co/Comfy-Org/Qwen/resolve/main/qwen_image_vae.safetensors"
+            )
+        ]
+    }
+
+    found = collect_source_candidates(
+        workflow,
+        allowed_hosts=HOSTS,
+        asset_filenames=["lenovo_krea2.safetensors", "qwen_image_vae.safetensors"],
+    )
+
+    assert [c.remote_id for c in found["qwen_image_vae.safetensors"]] == ["Comfy-Org/Qwen"]
+    assert [c.remote_id for c in found[""]] == ["2"]

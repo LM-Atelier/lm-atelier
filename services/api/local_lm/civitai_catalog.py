@@ -44,6 +44,7 @@ _MATURE_LEVEL_MASK = 4 | 8 | 16 | 32
 class CivitaiCatalog:
     source_id = "civitai"
     display_name = "CivitAI"
+    web_origin = "https://civitai.com"
 
     def __init__(
         self,
