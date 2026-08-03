@@ -5590,8 +5590,12 @@ class ConversationOrchestrator:
 
         mode: WorkflowSelectionMode
         workflow_family_id: str | None
-        project = session.get(Project, chat.project_id) if chat.project_id else None
-        if project is not None and operation != Operation.TEXT:
+        project = (
+            session.get(Project, chat.project_id)
+            if chat.project_id and operation != Operation.TEXT
+            else None
+        )
+        if project is not None:
             project_capability: ProjectSelectorCapability = (
                 "video" if capability == "video" else "image"
             )
@@ -5655,14 +5659,20 @@ class ConversationOrchestrator:
             )
         except WorkflowFamilySelectionError as exc:
             # A missing workflow default during the additive compatibility
-            # window retains the existing role-default behavior. Explicit and
-            # Auto choices are workflow-first and never fall back to profiles.
+            # window retains the existing role-default behavior. Real explicit
+            # choices fail closed; the compatibility cases below retain only
+            # the behavior that existed before workflow-first selection.
             if mode == "default":
+                return None
+            if mode == "automatic" and exc.reason == "no_ready_workflow":
+                # Auto remains workflow-first whenever a ready family exists.
+                # During the additive window, an empty workflow candidate set
+                # delegates to the existing profile fallback instead of making
+                # previously valid chats fail admission.
                 return None
             if (
                 mode == "explicit"
                 and workflow_family_id is not None
-                and exc.reason == "operation_unavailable"
                 and session.scalar(
                     select(WorkflowProfileCompatibility).where(
                         WorkflowProfileCompatibility.workflow_family_id == workflow_family_id
@@ -5670,9 +5680,10 @@ class ConversationOrchestrator:
                 )
                 is not None
             ):
-                # Preserve the established user-facing error while the saved
-                # choice is still a generated compatibility family. The legacy
-                # path keeps this exact profile and does not substitute another.
+                # Preserve every established validation/fallback behavior while
+                # the saved choice is still a generated compatibility family.
+                # The legacy path keeps this exact profile and does not
+                # substitute another.
                 return None
             raise
         return self._resolved_family_execution(session, resolved, prompt=prompt)
@@ -6180,6 +6191,20 @@ class ConversationOrchestrator:
                 continue
             generic.append(revision)
         return generic[0] if generic else None
+
+    def legacy_workflow_revision(
+        self,
+        session: Session,
+        profile: ModelProfile,
+        operation: Operation,
+    ) -> WorkflowRevision | None:
+        """Resolve the executable used by one generated compatibility family."""
+
+        return self._workflow_for_operation(
+            session,
+            operation,
+            model_install_id=profile.model_install_id,
+        )
 
     @staticmethod
     def _revision_declares_a_model(revision: WorkflowRevision) -> bool:

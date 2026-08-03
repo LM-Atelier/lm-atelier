@@ -156,18 +156,21 @@ async def test_explicit_chat_family_queues_its_current_operation_revision(
     chat = (await client.post("/api/chats", json={"title": "Workflow family"})).json()
     with SessionLocal() as session:
         family, revision = _ready_image_family(session, name="Selected family")
-        selection = session.scalar(
-            select(ChatWorkflowSelection).where(
-                ChatWorkflowSelection.chat_id == chat["id"],
-                ChatWorkflowSelection.selector_capability == "image",
-            )
-        )
-        assert selection is not None
-        selection.mode = "family"
-        selection.workflow_family_id = family.id
         session.commit()
         family_id = family.id
         revision_id = revision.id
+    selected_response = await client.put(
+        f"/api/chats/{chat['id']}/workflow-selections/image",
+        json={"mode": "family", "workflow_family_id": family_id},
+    )
+    assert selected_response.status_code == 200, selected_response.json()
+    assert selected_response.json() == {
+        "selector_capability": "image",
+        "mode": "family",
+        "workflow_family_id": family_id,
+        "workflow_revision_id": None,
+        "legacy_profile_id": None,
+    }
 
     accepted = await client.post(
         f"/api/chats/{chat['id']}/turns",
@@ -209,6 +212,11 @@ async def test_automatic_chat_selection_ranks_ready_workflow_families(
         session.commit()
         family_id = selected_family.id
         revision_id = selected_revision.id
+    selected_response = await client.put(
+        f"/api/chats/{chat['id']}/workflow-selections/image",
+        json={"mode": "automatic"},
+    )
+    assert selected_response.status_code == 200
 
     accepted = await client.post(
         f"/api/chats/{chat['id']}/turns",
@@ -243,26 +251,20 @@ async def test_project_family_overrides_the_chat_family_without_changing_its_rev
             session,
             name="Chat workflow",
         )
-        chat_selection = session.scalar(
-            select(ChatWorkflowSelection).where(
-                ChatWorkflowSelection.chat_id == chat["id"],
-                ChatWorkflowSelection.selector_capability == "image",
-            )
-        )
-        assert chat_selection is not None
-        chat_selection.mode = "family"
-        chat_selection.workflow_family_id = chat_family.id
-        session.add(
-            ProjectWorkflowSelection(
-                project_id=project["id"],
-                selector_capability="image",
-                mode="family",
-                workflow_family_id=project_family.id,
-            )
-        )
         session.commit()
         project_family_id = project_family.id
         project_revision_id = project_revision.id
+        chat_family_id = chat_family.id
+    chat_selected = await client.put(
+        f"/api/chats/{chat['id']}/workflow-selections/image",
+        json={"mode": "family", "workflow_family_id": chat_family_id},
+    )
+    assert chat_selected.status_code == 200
+    project_selected = await client.put(
+        f"/api/projects/{project['id']}/workflow-selections/image",
+        json={"mode": "family", "workflow_family_id": project_family_id},
+    )
+    assert project_selected.status_code == 200, project_selected.json()
 
     accepted = await client.post(
         f"/api/chats/{chat['id']}/turns",
@@ -273,3 +275,81 @@ async def test_project_family_overrides_the_chat_family_without_changing_its_rev
     run = accepted.json()["run"]
     assert run["workflow_revision_id"] == project_revision_id
     assert run["provenance_json"]["model_selection"]["workflow_family_id"] == (project_family_id)
+
+    text_accepted = await client.post(
+        f"/api/chats/{chat['id']}/turns",
+        json={"text": "Summarize the diagram", "mode": "text"},
+    )
+
+    assert text_accepted.status_code == 202, text_accepted.json()
+
+
+async def test_workflow_family_catalog_reports_variants_preferences_and_readiness(
+    client: AsyncClient,
+) -> None:
+    with SessionLocal() as session:
+        family, revision = _ready_image_family(
+            session,
+            name="Catalog family",
+            use_case="product illustrations",
+        )
+        session.commit()
+        family_id = family.id
+        revision_id = revision.id
+
+    response = await client.get("/api/workflow-families?selector_capability=image")
+
+    assert response.status_code == 200
+    card = next(item for item in response.json() if item["id"] == family_id)
+    assert card["use_case"] == "product illustrations"
+    assert card["compatibility"] is False
+    assert card["preferences"] == [
+        {
+            "selector_capability": "image",
+            "enabled": True,
+            "is_default": False,
+            "sort_order": 0,
+        }
+    ]
+    assert card["variants"][0] == {
+        "id": card["variants"][0]["id"],
+        "variant_key": "create",
+        "name": "Catalog family create",
+        "operation": "text_to_image",
+        "current_revision_id": revision_id,
+        "current_revision_version": 1,
+        "engine": "mock",
+        "capabilities": [],
+        "trusted": True,
+        "readiness": "ready",
+        "readiness_reason": None,
+    }
+
+
+async def test_selector_endpoints_clear_to_default_and_inherit(client: AsyncClient) -> None:
+    chat = (await client.post("/api/chats", json={"title": "Selector reset"})).json()
+    automatic = await client.put(
+        f"/api/chats/{chat['id']}/workflow-selections/image",
+        json={"mode": "automatic"},
+    )
+    assert automatic.status_code == 200
+    default = await client.put(
+        f"/api/chats/{chat['id']}/workflow-selections/image",
+        json={"mode": "default"},
+    )
+    assert default.status_code == 200
+    assert default.json()["mode"] == "default"
+
+    project = (await client.post("/api/projects", json={"name": "Selector reset"})).json()
+    inherited = await client.put(
+        f"/api/projects/{project['id']}/workflow-selections/image",
+        json={"mode": "inherit"},
+    )
+    assert inherited.status_code == 200
+    assert inherited.json()["mode"] == "inherit"
+
+    invalid = await client.put(
+        f"/api/chats/{chat['id']}/workflow-selections/image",
+        json={"mode": "automatic", "workflow_family_id": "wffamily_typo"},
+    )
+    assert invalid.status_code == 422
