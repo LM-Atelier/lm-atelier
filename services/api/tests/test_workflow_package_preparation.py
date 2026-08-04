@@ -199,6 +199,7 @@ async def test_commit_pin_stages_reads_closes_and_prepares_the_same_tree(
     result = await prepare_workflow_package(
         _NullSessionFactory(),
         package_id="example-pack",
+        node_types=("ExampleNode",),
         version=revision,
         context=_CONTEXT,
         media_worker_stopped=True,
@@ -266,6 +267,7 @@ async def test_commit_pin_cancellation_discards_the_staged_tree(
         await prepare_workflow_package(
             _NullSessionFactory(),
             package_id="example-pack",
+            node_types=("ExampleNode",),
             version=revision,
             context=_CONTEXT,
             media_worker_stopped=True,
