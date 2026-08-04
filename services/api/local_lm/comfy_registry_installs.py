@@ -19,6 +19,7 @@ from .comfy_registry_dependencies import (
     ComfyRegistryDependencyError,
     plan_comfy_registry_dependencies,
 )
+from .comfy_registry_runtime import ComfyRegistryRuntimeDistribution
 from .comfy_registry_sources import ComfyPackageSourceError, resolve_comfy_package_source
 from .comfy_registry_wheel_closure import (
     ComfyRegistryWheelClosure,
@@ -65,6 +66,7 @@ class ComfyRegistryLaunchContract:
     custom_node_folders: tuple[str, ...]
     site_packages: tuple[Path, ...]
     node_types: tuple[str, ...]
+    runtime_distributions: tuple[ComfyRegistryRuntimeDistribution, ...] = ()
 
 
 def installed_comfy_registry_versions(session: Session) -> dict[str, set[str]]:
@@ -258,6 +260,7 @@ def _verified_comfy_registry_launch_contract(
     folders: list[str] = []
     site_packages: set[Path] = set()
     node_types: set[str] = set()
+    runtime_baselines: set[tuple[ComfyRegistryRuntimeDistribution, ...]] = set()
     for install in installs:
         folder = _registry_node_path(node_root, install.installed_path)
         expected = expected_bindings.get(install.id) if expected_bindings else None
@@ -286,7 +289,7 @@ def _verified_comfy_registry_launch_contract(
         if expected is not None and environment / "site-packages" != expected.site_packages:
             raise ComfyRegistryInstallError("Registry launch scope environment path changed")
         try:
-            verify_comfy_registry_wheel_environment(
+            report = verify_comfy_registry_wheel_environment(
                 environment,
                 expected_closure_sha256=install.wheel_closure_sha256,
                 expected_environment_sha256=install.wheel_environment_sha256,
@@ -295,14 +298,22 @@ def _verified_comfy_registry_launch_contract(
             raise ComfyRegistryInstallError(
                 "Registry wheel environment failed verification"
             ) from exc
+        if report.runtime_distributions:
+            runtime_baselines.add(report.runtime_distributions)
         declared_nodes = _node_types(install.node_types_json)
         folders.append(folder.name)
         site_packages.add(environment / "site-packages")
         node_types.update(declared_nodes)
+    if len(runtime_baselines) > 1:
+        raise ComfyRegistryInstallError(
+            "Registry packages require different managed runtime baselines"
+        )
+    runtime_distributions = next(iter(runtime_baselines), ())
     return ComfyRegistryLaunchContract(
         tuple(folders),
         tuple(sorted(site_packages)),
         tuple(sorted(node_types)),
+        runtime_distributions,
     )
 
 

@@ -8,6 +8,11 @@ from contextlib import suppress
 from pathlib import Path
 from typing import Any
 
+from .comfy_registry_runtime import (
+    ComfyRegistryRuntimeDistribution,
+    ComfyRegistryRuntimeError,
+    canonical_comfy_registry_runtime_distributions,
+)
 from .comfy_registry_wheel_artifacts import (
     ComfyRegistryWheelArtifactError,
     comfy_registry_wheel_target_sha256,
@@ -22,6 +27,7 @@ _READ_CHUNK_BYTES = 64 * 1024
 _REPARSE_POINT = getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0x400)
 _PROBE_PROGRAM = """
 import json
+from importlib.metadata import distributions
 from packaging.markers import default_environment
 from packaging.tags import sys_tags
 
@@ -31,6 +37,11 @@ print(json.dumps(
     {
         "marker_environment": environment,
         "supported_tags": [str(tag) for tag in sys_tags()],
+        "runtime_distributions": [
+            {"name": item.metadata["Name"], "version": item.version}
+            for item in distributions()
+            if item.metadata["Name"] and item.version
+        ],
     },
     ensure_ascii=True,
     separators=(",", ":"),
@@ -48,9 +59,13 @@ class _ProbeOutputTooLarge(Exception):
     pass
 
 
-async def probe_comfy_registry_wheel_target(
+async def probe_comfy_registry_runtime_target(
     python_executable: Path,
-) -> tuple[dict[str, str], tuple[str, ...]]:
+) -> tuple[
+    dict[str, str],
+    tuple[str, ...],
+    tuple[ComfyRegistryRuntimeDistribution, ...],
+]:
     """Read wheel markers and tags from the exact managed ComfyUI interpreter."""
 
     executable = _python_executable(python_executable)
@@ -62,9 +77,9 @@ async def probe_comfy_registry_wheel_target(
             "interpreter_probe_invalid_output",
             "The managed runtime returned invalid wheel-target data.",
         ) from exc
-    if not isinstance(payload, dict) or set(payload) != {
-        "marker_environment",
-        "supported_tags",
+    if not isinstance(payload, dict) or frozenset(payload) not in {
+        frozenset({"marker_environment", "supported_tags"}),
+        frozenset({"marker_environment", "supported_tags", "runtime_distributions"}),
     }:
         raise ComfyRegistryInterpreterError(
             "interpreter_probe_invalid_output",
@@ -72,6 +87,7 @@ async def probe_comfy_registry_wheel_target(
         )
     environment_value = payload["marker_environment"]
     tags_value = payload["supported_tags"]
+    distributions_value = payload.get("runtime_distributions", [])
     if (
         not isinstance(environment_value, dict)
         or any(
@@ -80,6 +96,14 @@ async def probe_comfy_registry_wheel_target(
         )
         or not isinstance(tags_value, list)
         or any(not isinstance(value, str) for value in tags_value)
+        or not isinstance(distributions_value, list)
+        or any(
+            not isinstance(item, dict)
+            or set(item) != {"name", "version"}
+            or not isinstance(item["name"], str)
+            or not isinstance(item["version"], str)
+            for item in distributions_value
+        )
     ):
         raise ComfyRegistryInterpreterError(
             "interpreter_probe_invalid_output",
@@ -89,12 +113,32 @@ async def probe_comfy_registry_wheel_target(
     environment.setdefault("extra", "")
     tags = tuple(tags_value)
     try:
+        distributions = canonical_comfy_registry_runtime_distributions(
+            tuple(
+                ComfyRegistryRuntimeDistribution(item["name"], item["version"])
+                for item in distributions_value
+            )
+        )
+    except ComfyRegistryRuntimeError as exc:
+        raise ComfyRegistryInterpreterError(
+            exc.code,
+            "The managed runtime returned invalid distribution data.",
+        ) from exc
+    try:
         comfy_registry_wheel_target_sha256(environment, tags)
     except ComfyRegistryWheelArtifactError as exc:
         raise ComfyRegistryInterpreterError(
             "interpreter_probe_invalid_target",
             "The managed runtime returned an invalid wheel target.",
         ) from exc
+    return environment, tags, distributions
+
+
+async def probe_comfy_registry_wheel_target(
+    python_executable: Path,
+) -> tuple[dict[str, str], tuple[str, ...]]:
+    """Read wheel markers and tags while preserving the original probe contract."""
+    environment, tags, _ = await probe_comfy_registry_runtime_target(python_executable)
     return environment, tags
 
 
