@@ -94,6 +94,21 @@ _TRANSFER_ATTEMPTS = 3
 # or the displayed transfer rate silently disappears.
 _TRANSFER_SAMPLE_SECONDS = 1.0
 _PROVISIONAL_INSTALL_KEY = "_provisional_install"
+_WORKFLOW_ASSET_KINDS = frozenset(
+    {
+        "checkpoint",
+        "clip_vision",
+        "controlnet",
+        "diffusion_model",
+        "embedding",
+        "gguf_model",
+        "ip_adapter",
+        "lora",
+        "text_encoder",
+        "upscaler",
+        "vae",
+    }
+)
 logger = logging.getLogger(__name__)
 _VISION_PROBE_DATA_URL = (
     "data:image/png;base64,"
@@ -190,9 +205,25 @@ class DownloadManager:
                 raise ValueError("source_remote_id must be in owner/model form")
         else:
             raise ValueError(f"unsupported download provider: {provider}")
-        if request.auxiliary_kind and not request.install_plan_id:
-            raise ValueError("auxiliary assets require a verified install plan")
+        if request.auxiliary_kind and request.workflow_asset_kind:
+            raise ValueError("a download cannot be both auxiliary and workflow-owned")
+        if (request.auxiliary_kind or request.workflow_asset_kind) and not request.install_plan_id:
+            raise ValueError("model assets require a verified install plan")
+        if request.workflow_asset_kind and (
+            request.engine != "comfyui" or request.role not in {"image", "video"}
+        ):
+            raise ValueError("workflow assets require a ComfyUI media plan")
+        if plan:
+            runtime = plan.runtime_contract_json
+            if (
+                not isinstance(runtime, dict)
+                or request.auxiliary_kind != runtime.get("auxiliary_kind")
+                or request.workflow_asset_kind != runtime.get("workflow_asset_kind")
+            ):
+                raise ValueError("model asset request no longer matches its immutable plan")
         if request.role != "chat" and not request.comfy_paths:
+            if request.workflow_asset_kind:
+                raise ValueError("workflow asset plan has no declared ComfyUI path")
             request = request.model_copy(
                 update={
                     "comfy_paths": (
@@ -327,6 +358,7 @@ class DownloadManager:
         filenames: list[str],
         request: DownloadRequest,
         compiled_template: CompiledComfyTemplate | None,
+        plan: InstallPlan | None,
     ) -> ModelManifestInspection | None:
         """Read the staged files' component manifest, if they can be read.
 
@@ -341,11 +373,23 @@ class DownloadManager:
         checked again by the caller.
         """
         try:
+            component_folders: Mapping[str, str] | None = None
+            if compiled_template:
+                component_folders = compiled_template.template.component_folders
+            elif plan and request.workflow_asset_kind:
+                raw_folders = plan.runtime_contract_json.get("workflow_component_folders")
+                if not isinstance(raw_folders, Mapping):
+                    raise ValueError("workflow asset plan has no component folder contract")
+                component_folders = {
+                    str(path): str(folder)
+                    for path, folder in raw_folders.items()
+                    if isinstance(path, str) and isinstance(folder, str)
+                }
             return self._inspect_staged_model(
                 staging,
                 filenames,
                 request.role,
-                compiled_template.template.component_folders if compiled_template else None,
+                component_folders,
             )
         except (OSError, ValueError):
             if request.install_plan_id:
@@ -413,6 +457,8 @@ class DownloadManager:
         if set(expected) != set(actual):
             raise ValueError("downloaded model components do not match the install plan")
         auxiliary_kind = plan.runtime_contract_json.get("auxiliary_kind")
+        workflow_asset_kind = plan.runtime_contract_json.get("workflow_asset_kind")
+        asset_kind = workflow_asset_kind or auxiliary_kind
         workflow_template_id = plan.runtime_contract_json.get("workflow_template_id")
         workflow_component_kinds = {
             "checkpoint",
@@ -431,7 +477,7 @@ class DownloadManager:
             raw_inspected_contract = actual[path]
             inspected_contract = (
                 planned_contract
-                if workflow_template_id
+                if (workflow_template_id or workflow_asset_kind)
                 and raw_inspected_contract[0] == "unknown_safetensors"
                 and planned_contract[0] in workflow_component_kinds
                 else raw_inspected_contract
@@ -440,17 +486,17 @@ class DownloadManager:
             # bounded real header may refine generic safe-tensor weights into
             # a more specific declarative component, but never into executable
             # or auxiliary content.
-            if auxiliary_kind and (
-                planned_contract[0] != auxiliary_kind or inspected_contract[0] != auxiliary_kind
+            if asset_kind and (
+                planned_contract[0] != asset_kind or inspected_contract[0] != asset_kind
             ):
-                raise ValueError(f"downloaded auxiliary asset contract changed for {path}")
+                raise ValueError(f"downloaded model asset contract changed for {path}")
             if (
-                not auxiliary_kind
+                not asset_kind
                 and planned_contract != inspected_contract
                 and planned_contract[0] not in {"checkpoint", "unknown_safetensors"}
             ):
                 raise ValueError(f"downloaded component contract changed for {path}")
-            if not auxiliary_kind and (
+            if not asset_kind and (
                 inspected_contract[0] in {"unknown_safetensors", "metadata"}
                 or (inspected_contract[0] == "lora" and not workflow_template_id)
             ):
@@ -458,8 +504,10 @@ class DownloadManager:
             if path not in component_hashes:
                 raise ValueError(f"downloaded component could not be verified: {path}")
             validated_kinds.add(inspected_contract[0])
-        if auxiliary_kind:
-            if auxiliary_kind != "lora":
+        if asset_kind:
+            if workflow_asset_kind and workflow_asset_kind not in _WORKFLOW_ASSET_KINDS:
+                raise ValueError("this workflow asset kind is not enabled")
+            if auxiliary_kind and auxiliary_kind != "lora":
                 raise ValueError("this auxiliary asset kind is not enabled")
             return
         kinds = validated_kinds
@@ -1159,6 +1207,10 @@ class DownloadManager:
                     request.remote_id,
                     revision,
                 )
+                if request.workflow_asset_kind and plan:
+                    destination = destination.with_name(
+                        f"{destination.name}-asset-{plan.plan_hash[:12]}"
+                    )
                 staging.mkdir(parents=True, exist_ok=True)
                 reused_by_file: dict[str, tuple[Path, int]] = {}
                 for filename in filenames:
@@ -1357,7 +1409,7 @@ class DownloadManager:
                 # while the inspection itself was still gated on the plan - so
                 # plan-less installs still recorded nothing.
                 inspection = self._inspect_staged_component_manifest(
-                    staging, filenames, request, compiled_template
+                    staging, filenames, request, compiled_template, plan
                 )
                 if request.install_plan_id:
                     if not inspection:
@@ -1401,9 +1453,12 @@ class DownloadManager:
                 )
                 default_settings = {**template_defaults, **request.default_settings}
 
-                if request.auxiliary_kind:
+                asset_kind = request.workflow_asset_kind or request.auxiliary_kind
+                if asset_kind:
                     if not inspection or len(inspection.components) != 1:
-                        raise ValueError("an auxiliary install must contain one verified component")
+                        raise ValueError(
+                            "a model asset install must contain one verified component"
+                        )
                     component = inspection.components[0]
                     with SessionLocal() as session:
                         model_source = session.scalar(
@@ -1426,7 +1481,7 @@ class DownloadManager:
                             id=new_id("asset"),
                             source_id=model_source.id,
                             name=request.remote_id.rsplit("/", 1)[-1],
-                            kind=request.auxiliary_kind,
+                            kind=asset_kind,
                             family=component.family or inspection.family,
                             local_path=str(destination),
                             size_bytes=installed_size,
@@ -1439,6 +1494,7 @@ class DownloadManager:
                                 "comfy_name": component.path,
                                 "metadata": component.metadata,
                                 "comfy_paths": request.comfy_paths,
+                                "workflow_asset_kind": request.workflow_asset_kind,
                                 "content_rating": request.content_rating,
                             },
                             active=False,
@@ -1451,7 +1507,11 @@ class DownloadManager:
                             return
                         update_job_progress(
                             job,
-                            stage="validating auxiliary asset",
+                            stage=(
+                                "validating workflow asset"
+                                if request.workflow_asset_kind
+                                else "validating auxiliary asset"
+                            ),
                             completed_units=completed_bytes if total_size else None,
                             total_units=total_size or None,
                             unit="bytes" if total_size else None,
@@ -1475,7 +1535,7 @@ class DownloadManager:
                         await self.processes.start_media((destination, request.comfy_paths))
                         self.media_adapter.invalidate_object_info_cache()
                         object_info = await self.media_adapter.object_info()
-                        if request.auxiliary_kind == "lora" and "LoraLoader" not in object_info:
+                        if asset_kind == "lora" and "LoraLoader" not in object_info:
                             raise RuntimeError(
                                 "The active ComfyUI runtime does not provide the core LoRA loader."
                             )

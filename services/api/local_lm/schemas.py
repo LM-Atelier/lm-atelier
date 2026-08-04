@@ -1377,6 +1377,25 @@ class DownloadRequest(ApiModel):
         ]
         | None
     ) = None
+    # A dependency owned by one reviewed workflow binding. Unlike an
+    # auxiliary asset it is never offered for auto-application or activated as
+    # a standalone profile.
+    workflow_asset_kind: (
+        Literal[
+            "checkpoint",
+            "clip_vision",
+            "controlnet",
+            "diffusion_model",
+            "embedding",
+            "gguf_model",
+            "ip_adapter",
+            "lora",
+            "text_encoder",
+            "upscaler",
+            "vae",
+        ]
+        | None
+    ) = None
 
 
 class ModelAssetOut(ApiModel):
