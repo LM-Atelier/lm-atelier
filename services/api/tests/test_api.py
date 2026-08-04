@@ -267,6 +267,9 @@ async def test_about_reports_version_and_local_support_paths(
         "version": __version__,
         "data_directory": str(settings.data_dir.resolve()),
         "log_directory": str(settings.log_dir.resolve()),
+        # Reported so the UI can explain a switch it cannot offer. Shut unless
+        # the installation says otherwise.
+        "web_access_enabled": False,
     }
 
 

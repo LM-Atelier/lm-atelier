@@ -2003,6 +2003,7 @@ describe("App", () => {
       version: "0.1.7",
       data_directory: "C:\\Users\\someone\\LM Atelier\\data",
       log_directory: "C:\\Users\\someone\\LM Atelier\\data\\logs",
+      web_access_enabled: false,
     });
     vi.mocked(api.system).mockResolvedValue({
       platform: "Windows",
