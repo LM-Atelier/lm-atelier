@@ -2996,7 +2996,8 @@ async def resolve_catalog_preflight(
 
     catalog = services.catalog_sources.get(source)
     try:
-        raw_detail = await catalog.inspect(remote_id, payload.revision, payload.role)
+        inspection_role = "lora" if payload.auxiliary_kind == "lora" else payload.role
+        raw_detail = await catalog.inspect(remote_id, payload.revision, inspection_role)
         detail = CatalogDetail.model_validate(raw_detail)
         # CivitAI identities live under each normalized file's metadata; hoist
         # them once so every downstream consumer - checks, file sources, the

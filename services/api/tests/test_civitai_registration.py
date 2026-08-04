@@ -141,9 +141,12 @@ async def test_a_civitai_preflight_composes_into_the_download_manager(
         ],
     }
 
+    inspected_roles: list[str | None] = []
+
     async def canned_inspect(
         self: CivitaiCatalog, item_id: str, revision: str = "main", role: str | None = None
     ) -> dict[str, Any]:
+        inspected_roles.append(role)
         return detail
 
     monkeypatch.setattr(CivitaiCatalog, "inspect", canned_inspect)
@@ -182,6 +185,7 @@ async def test_a_civitai_preflight_composes_into_the_download_manager(
 
     assert response.status_code == 200
     payload = response.json()
+    assert inspected_roles == ["lora", "lora"]
     assert payload["can_install"] is True
     plan_out = payload["install_plan"]
     assert plan_out is not None
