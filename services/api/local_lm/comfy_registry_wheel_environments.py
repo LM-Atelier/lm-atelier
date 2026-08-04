@@ -551,10 +551,10 @@ def _scan_environment(
             continue
         if not path.is_file():
             continue
-        if path.suffix.lower() == ".pth":
-            raise ComfyRegistryWheelEnvironmentError(
-                "unsafe_environment_pth", "Wheel environment contains a .pth file"
-            )
+        # Registry overlays are inserted with sys.path directly, never through
+        # site.addsitedir, so .pth files stay inert. Preserve and hash them like
+        # every other wheel byte; activation still has to prove the required
+        # node inventory before the package can become usable.
         size, digest = _file_identity(path)
         file_count += 1
         total_bytes += size

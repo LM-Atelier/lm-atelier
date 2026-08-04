@@ -59,6 +59,46 @@ COMFY_OBJECT_INFO_MAX_BYTES = 64 * 1024 * 1024
 WINDOWS_CREATE_NO_WINDOW = 0x08000000
 WINDOWS_SO_EXCLUSIVEADDRUSE = int(getattr(socket, "SO_EXCLUSIVEADDRUSE", -5))
 
+# The official Windows ComfyUI runtime uses Python's isolated ``._pth`` layout,
+# which deliberately ignores PYTHONPATH. Insert only the already verified
+# Registry overlays as ordinary sys.path entries, then execute the exact ComfyUI
+# entrypoint. Ordinary insertion is important: unlike site.addsitedir, it never
+# evaluates executable lines from a wheel's .pth files.
+_COMFY_REGISTRY_BOOTSTRAP = (
+    "import os,runpy,sys;"
+    "count=int(sys.argv[1]);"
+    "paths=sys.argv[2:2+count];"
+    "sys.argv=sys.argv[2+count:];"
+    "sys.path[:0]=paths+[os.path.dirname(sys.argv[0])];"
+    "runpy.run_path(sys.argv[0],run_name='__main__')"
+)
+
+
+def _with_comfy_registry_overlays(
+    command: list[str],
+    site_packages: tuple[Path, ...],
+) -> list[str]:
+    """Run ComfyUI with verified overlays while leaving every .pth inert."""
+    if len(command) < 2 or not site_packages:
+        raise ValueError("ComfyUI Registry overlay command is incomplete")
+    overlays: list[str] = []
+    for path in site_packages:
+        resolved = path.resolve(strict=True)
+        if resolved.name != "site-packages" or not resolved.is_dir():
+            raise ValueError("ComfyUI Registry overlay path is invalid")
+        overlays.append(str(resolved))
+    if len(overlays) != len(set(overlays)):
+        raise ValueError("ComfyUI Registry overlay paths contain duplicates")
+    return [
+        command[0],
+        "-c",
+        _COMFY_REGISTRY_BOOTSTRAP,
+        str(len(overlays)),
+        *overlays,
+        *command[1:],
+    ]
+
+
 _ANSI_ESCAPE = re.compile(r"\x1b(?:[@-_][0-?]*[ -/]*[@-~]|\][^\x07]*(?:\x07|\x1b\\))")
 # asyncio composes the first line as "Exception in callback {callback}", but a
 # worker rarely writes it bare: captured logs from the field carry a "[ERROR] "
@@ -534,6 +574,11 @@ class ProcessSupervisor:
             "latent2rgb",
             "--disable-all-custom-nodes",
         ]
+        if registry_contract.site_packages:
+            command = _with_comfy_registry_overlays(
+                command,
+                registry_contract.site_packages,
+            )
         if trusted_custom_nodes:
             command.extend(["--whitelist-custom-nodes", *trusted_custom_nodes])
         await report_phase("Starting media runtime")
@@ -543,15 +588,6 @@ class ProcessSupervisor:
                 "media",
                 command,
                 self.settings.comfy_url + "/system_stats",
-                environment_overrides=(
-                    {
-                        "PYTHONPATH": os.pathsep.join(
-                            str(path) for path in registry_contract.site_packages
-                        )
-                    }
-                    if registry_contract.site_packages
-                    else None
-                ),
                 ready_check=(
                     (lambda: self._verify_comfy_node_types(expected_node_types))
                     if expected_node_types
@@ -564,11 +600,6 @@ class ProcessSupervisor:
                 "media",
                 command,
                 self.settings.comfy_url + "/system_stats",
-                environment_overrides={
-                    "PYTHONPATH": os.pathsep.join(
-                        str(path) for path in registry_contract.site_packages
-                    )
-                },
                 ready_check=lambda: self._verify_comfy_node_types(registry_contract.node_types),
             )
         else:
