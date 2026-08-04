@@ -10,7 +10,7 @@ import os
 import re
 import shutil
 import stat
-from collections.abc import AsyncGenerator, AsyncIterator, Callable
+from collections.abc import AsyncGenerator, AsyncIterator, Callable, Mapping
 from contextlib import suppress
 from pathlib import Path, PurePosixPath
 from typing import TYPE_CHECKING, Annotated, Any, Literal, cast
@@ -229,6 +229,7 @@ from .schemas import (
     ReferenceRecipe,
     RegenerateRequest,
     RegistryInstallOut,
+    RegistryInstallReviewOut,
     RegistryInstallReviewRequest,
     ResolvedSetup,
     ResponseFeedbackOut,
@@ -6588,7 +6589,40 @@ def _registry_install_out(install: ComfyRegistryInstall) -> RegistryInstallOut:
         active=install.active,
         reviewed_at=reviewed_at if isinstance(reviewed_at, str) else None,
         activated_at=activated_at if isinstance(activated_at, str) else None,
+        review=_registry_review_out(review),
     )
+
+
+def _registry_review_out(review: Mapping[str, object]) -> RegistryInstallReviewOut | None:
+    """Report what staging recorded, or nothing rather than a reassuring zero.
+
+    An install prepared before this record existed has no findings to show.
+    Rendering that as an empty list would read as "nothing to worry about",
+    which is a different claim from "we did not look".
+    """
+    if not review.get("review_required"):
+        return None
+    return RegistryInstallReviewOut(
+        file_count=_review_count(review.get("file_count")),
+        expanded_bytes=_review_count(review.get("expanded_bytes")),
+        python_file_count=_review_count(review.get("python_file_count")),
+        install_scripts=_review_paths(review.get("install_scripts")),
+        startup_hooks=_review_paths(review.get("startup_hooks")),
+        native_files=_review_paths(review.get("native_files")),
+        dependency_manifests=_review_paths(review.get("dependency_manifests")),
+        top_level_entries=_review_paths(review.get("top_level_entries")),
+        registry_warnings=_review_paths(review.get("registry_warnings")),
+    )
+
+
+def _review_count(value: object) -> int:
+    return value if isinstance(value, int) and not isinstance(value, bool) and value >= 0 else 0
+
+
+def _review_paths(value: object) -> list[str]:
+    if not isinstance(value, list):
+        return []
+    return [item for item in value if isinstance(item, str)][:64]
 
 
 def _loaded_registry_install(session: Session, install_id: str) -> ComfyRegistryInstall:
