@@ -12,7 +12,9 @@ from collections.abc import AsyncIterator, Callable
 from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Any
+from urllib.parse import urlparse
 
+import httpx
 from sqlalchemy import delete, func, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session, object_session, selectinload
@@ -145,6 +147,14 @@ from .visual_prompt_compiler import (
     compilation_provenance,
     compile_visual_prompt,
     visual_prompt_compilation_eligibility,
+)
+from .web_access import may_fetch_urls
+from .web_lookup import choose_from_conversation, source_message
+from .web_retrieval import (
+    REQUEST_HEADERS,
+    REQUEST_TIMEOUT_SECONDS,
+    WebRetrievalError,
+    fetch_source,
 )
 from .work_plans import plan_status_summary, refresh_plan_status
 from .workflow_activations import (
@@ -2488,9 +2498,27 @@ class ConversationOrchestrator:
                 context_metadata,
                 tool_calling_available,
             ) = await self._prepare_chat_context(session, run)
+            chat = session.get(Chat, run.chat_id)
+            web_allowed = may_fetch_urls(
+                # Absent reads as shut. A gate that cannot find its own
+                # setting has not been opened by anyone.
+                installation_enabled=getattr(self.engines.settings, "web_access_enabled", False),
+                chat_settings=getattr(chat, "web_settings_json", None),
+            )
+
+        # Retrieval runs with no session held. A fetch may take the whole
+        # timeout, and a database session open across it blocks every other
+        # writer for that long.
+        web_source = await self._read_linked_page(messages, run_id, job_id) if web_allowed else None
+
+        with self.session_factory() as session:
+            run = session.get(Run, run_id)
+            if not run:
+                return
             run.provenance_json = {
                 **run.provenance_json,
                 "context": context_metadata,
+                **({"web_source": web_source} if web_source else {}),
                 **(
                     {
                         "worker": worker.model_dump(
@@ -2662,6 +2690,59 @@ class ConversationOrchestrator:
                 "assistant_message_id": completed_assistant_id,
             },
         )
+
+    async def _read_linked_page(
+        self,
+        messages: list[dict[str, Any]],
+        run_id: str,
+        job_id: str,
+    ) -> dict[str, Any] | None:
+        """Read one page this conversation linked, if one is wanted.
+
+        Deliberately holds no database session: the caller checks the gates,
+        closes its session, and then calls this, because a retrieval can take
+        the whole timeout and nothing else may write while it does.
+
+        Returns provenance for the run, and appends the page to `messages` as
+        quoted evidence. The pass that then answers is built with no tools at
+        all, so a page telling it to do something has nothing to do it with.
+
+        Nothing here may fail a turn. A refusal, a timeout, or an unreachable
+        host means the answer is written without the page, which is a complete
+        outcome rather than an error.
+        """
+        texts = [
+            content
+            for message in messages
+            if isinstance(content := message.get("content"), str) and message.get("role") == "user"
+        ]
+        chosen = await choose_from_conversation(self.engines.chat, texts=texts, run_id=run_id)
+        if chosen is None:
+            return None
+        host = urlparse(chosen.url).hostname or chosen.url
+        await self._set_chat_phase(job_id, run_id, f"Reading {host}")
+        try:
+            async with httpx.AsyncClient(
+                follow_redirects=False,
+                timeout=REQUEST_TIMEOUT_SECONDS,
+                headers=REQUEST_HEADERS,
+            ) as client:
+                source = await fetch_source(chosen.url, request=client.get)
+        except WebRetrievalError as refused:
+            # Recorded rather than raised: the user asked a question, not for a
+            # download, and they still get an answer.
+            return {"url": chosen.url, "reason": chosen.reason, "refused": refused.code}
+        except Exception:
+            return {"url": chosen.url, "reason": chosen.reason, "refused": "web-unreachable"}
+        messages.append(source_message(source))
+        return {
+            "url": source.url,
+            "final_url": source.final_url,
+            "title": source.title,
+            "reason": chosen.reason,
+            "byte_count": source.byte_count,
+            "truncated": source.truncated,
+        }
 
     async def _set_chat_phase(self, job_id: str, run_id: str, label: str) -> None:
         assistant_id = ""
