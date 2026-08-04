@@ -4,7 +4,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import App from "./App";
 import { api, connectEvents } from "./api";
 import type { BackupInfo, Chat, ChatDetail, EngineCapabilities, Job, SettingField, SetupReadinessReport, SetupRoleReadiness, TurnAccepted } from "./types";
-
+import { DEFAULT_CHAT_WORKFLOW_SELECTIONS, DEFAULT_PROJECT_WORKFLOW_SELECTIONS, familiesForWorkflows } from "./workflowSelectionFixtures";
 const clipboardWrite = vi.fn();
 
 const imageSetting: SettingField = {
@@ -235,7 +235,7 @@ vi.mock("./api", () => ({
     installRecipe: vi.fn(),
     download: vi.fn(),
     importModel: vi.fn(),
-    workflows: vi.fn(),
+    workflows: vi.fn(), workflowFamilies: vi.fn().mockResolvedValue([]), setWorkflowFamilyPreference: vi.fn(), chatWorkflowSelections: vi.fn().mockResolvedValue([]), setChatWorkflowSelection: vi.fn(), projectWorkflowSelections: vi.fn().mockResolvedValue([]), setProjectWorkflowSelection: vi.fn(),
     editTemplates: vi.fn().mockResolvedValue([]),
     createEditTemplate: vi.fn(),
     deleteEditTemplate: vi.fn(),
@@ -310,10 +310,8 @@ describe("App", () => {
     localStorage.clear();
     sessionStorage.clear();
     vi.mocked(api.setupReadiness).mockResolvedValue({ version: 2, state: "ready", roles: [] });
-    vi.mocked(api.projects).mockResolvedValue([]);
-    vi.mocked(api.profiles).mockResolvedValue([]);
-    vi.mocked(api.presets).mockResolvedValue([]);
-    vi.mocked(api.chats).mockResolvedValue([]);
+    vi.mocked(api.projects).mockResolvedValue([]); vi.mocked(api.profiles).mockResolvedValue([]);
+    vi.mocked(api.presets).mockResolvedValue([]); vi.mocked(api.chats).mockResolvedValue([]);
     // No prior visual to reuse is the resting state for most of this suite.
     vi.mocked(api.classifyDraft).mockResolvedValue({ references_prior_visual: false });
     vi.mocked(api.engines).mockResolvedValue([
@@ -342,10 +340,12 @@ describe("App", () => {
     vi.mocked(api.catalog).mockResolvedValue({ items: [], next_cursor: null });
     vi.mocked(api.workflowCatalogModels).mockResolvedValue([]);
     vi.mocked(api.workflows).mockResolvedValue([]);
+    vi.mocked(api.workflowFamilies).mockImplementation(async () => familiesForWorkflows(await api.workflows()));
+    vi.mocked(api.chatWorkflowSelections).mockResolvedValue(DEFAULT_CHAT_WORKFLOW_SELECTIONS);
+    vi.mocked(api.projectWorkflowSelections).mockResolvedValue(DEFAULT_PROJECT_WORKFLOW_SELECTIONS);
     vi.mocked(api.customNodes).mockResolvedValue([]);
   });
   afterEach(cleanup);
-
   it("renders the local workspace shell without an existing chat", async () => {
     const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
     render(
@@ -1483,6 +1483,7 @@ describe("App", () => {
     vi.mocked(api.chats).mockResolvedValue([chat]);
     vi.mocked(api.chat).mockResolvedValue({ ...chat, messages: [] });
     vi.mocked(api.engines).mockResolvedValue([roleAwareMediaEngine]);
+    vi.mocked(api.projectWorkflowSelections).mockResolvedValue([{ selector_capability: "video", mode: "revision", workflow_family_id: null, workflow_revision_id: "revision-video", legacy_profile_id: null }]);
     vi.mocked(api.workflows).mockResolvedValue([{
       id: "workflow-lora",
       name: "LoRA image",
@@ -1536,7 +1537,6 @@ describe("App", () => {
         <App />
       </QueryClientProvider>,
     );
-
     fireEvent.click(await screen.findByRole("button", { name: "Turn settings" }));
     fireEvent.click(screen.getByRole("button", { name: "advanced" }));
     const addLora = await screen.findByRole("button", { name: "Add LoRA" });
@@ -3584,12 +3584,12 @@ describe("App", () => {
     );
     fireEvent.click(await screen.findByText("Workflows"));
     fireEvent.click(await screen.findByText("Studio image"));
+    expect(await screen.findByText("Where this workflow is offered")).toBeInTheDocument();
     expect(await screen.findByText("Declared controls")).toBeInTheDocument();
     expect(screen.getByDisplayValue("20")).toBeInTheDocument();
     expect(screen.getByText("v2 · current")).toBeInTheDocument();
     expect(screen.queryByText("Restore as new revision")).not.toBeInTheDocument();
   });
-
   it("reviews a raw ComfyUI workflow instead of rejecting it", async () => {
     vi.mocked(api.workflows).mockResolvedValue([]);
     vi.mocked(api.analyzeWorkflowPackage).mockResolvedValue({
@@ -3631,7 +3631,7 @@ describe("App", () => {
     const graph = { version: 0.4, nodes: [{ id: 1, type: "KSampler" }], links: [] };
     const input = container.querySelector<HTMLInputElement>('input[accept="application/json,.json"]');
     fireEvent.change(input!, {
-      target: { files: [new File([JSON.stringify(graph)], "photoflow.json", { type: "application/json" })] },
+      target: { files: [new File([JSON.stringify(graph)], "portrait-workflow.json", { type: "application/json" })] },
     });
 
     await waitFor(() => expect(api.analyzeWorkflowPackage).toHaveBeenCalledWith(graph));

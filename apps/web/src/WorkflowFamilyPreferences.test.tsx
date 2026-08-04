@@ -20,7 +20,7 @@ function family(preferences: WorkflowFamily["preferences"] = []): WorkflowFamily
     enabled: true,
     archived: false,
     compatibility: false,
-    variants: [],
+    variants: [{ operation: "text_to_image" } as never],
     preferences,
     created_at: "2026-08-03T00:00:00Z",
     updated_at: "2026-08-03T00:00:00Z",
@@ -81,6 +81,14 @@ describe("where a workflow family is offered", () => {
       family([{ selector_capability: "image", enabled: true, is_default: false, sort_order: 0 }]),
     );
     expect(screen.getAllByRole("button", { name: "Make this the default" })).toHaveLength(1);
+  });
+
+  it("does not offer capabilities the family has no operation for", () => {
+    renderPreferences(family());
+    expect(screen.getByRole("checkbox", { name: /Images/ })).toBeInTheDocument();
+    expect(screen.queryByRole("checkbox", { name: /Conversation/ })).toBeNull();
+    expect(screen.queryByRole("checkbox", { name: /Looking at images/ })).toBeNull();
+    expect(screen.queryByRole("checkbox", { name: /Video/ })).toBeNull();
   });
 
   it("says what the server's refusals mean", () => {
