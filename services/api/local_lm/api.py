@@ -6443,38 +6443,54 @@ async def shutdown_registry_preparations() -> None:
     _REGISTRY_PREPARE_TASKS.clear()
 
 
-_MAX_NODE_TYPE_CHARACTERS = 200
+def _prepared_node_types(
+    session: Session, ui_graph: dict[str, Any], package_id: str, version: str
+) -> tuple[str, ...]:
+    """Derive what this package must provide, from the graph, on the server.
 
+    The browser says which package to prepare. It does not get to say what that
+    package provides. Those identities are persisted and later read as the
+    package's capability, so accepting a client-authored list would mean review
+    and activation were judging a claim the caller wrote rather than one the
+    analysis produced.
 
-def _prepared_node_types(values: list[str]) -> tuple[str, ...]:
-    """The exact node identities this package must provide, or a typed refusal.
-
-    Checked here rather than at the lifecycle because a job that must fail on
-    its first step is a worse answer than a 422. Persistence refuses an empty
-    or malformed set on purpose; nothing about that should be relaxed, so the
-    same rules are applied before anything is queued.
+    So the graph is analyzed again here, exactly as import already does. The
+    named package must appear in that fresh analysis exactly once, and the
+    requested version must be one the analysis says it needs. Anything else
+    refuses before a job exists.
     """
-    cleaned = [value.strip() for value in values]
-    if any(
-        not value or len(value) > _MAX_NODE_TYPE_CHARACTERS or _has_control_character(value)
-        for value in cleaned
-    ):
+    try:
+        analysis = analyze_comfyui_workflow_package(
+            ui_graph,
+            available_asset_filenames=_local_asset_filenames(session),
+            installed_package_versions=_installed_package_versions(session),
+        )
+    except WorkflowPackageError as exc:
+        raise api_error(422, exc.code, str(exc)) from exc
+    matching = [item for item in analysis.custom_packages if item.package_id == package_id]
+    if len(matching) != 1:
         raise api_error(
             422,
-            "workflow-package-node-type-invalid",
-            "A node type must be non-empty, printable, and within the length limit.",
+            "workflow-package-not-in-analysis",
+            "This workflow does not require that package exactly once. "
+            "Re-analyze the workflow and prepare a package it actually names.",
         )
-    if len(set(cleaned)) != len(cleaned):
+    requirement = matching[0]
+    if version not in requirement.versions:
         raise api_error(
             422,
-            "workflow-package-node-type-repeated",
-            "The same node type was named more than once. Send each exactly once.",
+            "workflow-package-version-not-required",
+            "This workflow does not name that version of the package. "
+            "Re-analyze the workflow and prepare a version it requires.",
         )
-    return tuple(cleaned)
-
-
-def _has_control_character(value: str) -> bool:
-    return any(character < " " or character == "\x7f" for character in value)
+    if not requirement.node_types:
+        raise api_error(
+            422,
+            "workflow-package-provides-nothing",
+            "The analysis found no node types for this package, so there is "
+            "nothing for it to provide.",
+        )
+    return tuple(requirement.node_types)
 
 
 async def _run_workflow_package_preparation(
@@ -6569,10 +6585,12 @@ async def prepare_workflow_package_endpoint(
     """Queue one package preparation; the result stays inactive and untrusted."""
 
     services = _services(request)
-    # The request is judged before the machine is. A malformed node identity is
-    # wrong on every machine, so answering it with a runtime complaint would
-    # send the caller to fix the wrong thing.
-    node_types = _prepared_node_types(payload.node_types)
+    # The request is judged before the machine is. A package this workflow does
+    # not name is wrong on every machine, so answering it with a runtime
+    # complaint would send the caller to fix the wrong thing.
+    node_types = _prepared_node_types(
+        session, payload.ui_graph, payload.package_id, payload.version
+    )
     # Then refuse when the machine cannot prepare at all - a job that must fail
     # on its first step is a worse answer than a typed 422.
     try:

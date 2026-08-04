@@ -1,15 +1,20 @@
-"""The node identities a prepared package promises to provide.
+"""What a prepared package is recorded as providing, and who decides it.
 
-Preparation used to carry only a package id and a version. Composition then
-built a requirement providing no node types at all, persistence correctly
-refused an empty node identity, and so a prepared package could never reach
-the activation contract honestly. What the analysis showed the user has to
-survive the queue.
+Preparation used to carry only a package id and a version, so composition
+built a requirement declaring no node types at all and persistence correctly
+refused it. The first fix sent the identities from the browser, which traded
+one defect for a worse one: those identities are persisted and later read as
+the package's capability, so a caller could prepare one package while claiming
+another's nodes and review would be judging a claim rather than a finding.
+
+The graph is analyzed again on the server. The browser chooses which package
+to prepare; it never says what that package provides.
 """
 
 from __future__ import annotations
 
 from pathlib import Path
+from typing import Any
 
 import pytest
 from httpx2 import AsyncClient
@@ -18,38 +23,50 @@ from local_lm.config import Settings
 
 pytestmark = pytest.mark.asyncio
 
-_OVERLONG = "N" * 201
-_WITH_CONTROL = "Example\tNode"
+
+def _node(identifier: int, node_type: str, package: str, version: str) -> dict[str, Any]:
+    return {
+        "id": identifier,
+        "type": node_type,
+        "properties": {"cnr_id": package, "ver": version},
+        "widgets_values": [],
+    }
 
 
-async def test_the_queued_job_keeps_the_node_types_it_was_given(
-    client: AsyncClient,
-    settings: Settings,
-    monkeypatch: pytest.MonkeyPatch,
-    tmp_path: Path,
-) -> None:
-    from local_lm import api as api_module
+def _graph() -> dict[str, Any]:
+    return {
+        "version": 0.4,
+        "nodes": [
+            _node(1, "PowerLoraLoader", "rgthree-comfy", "1.2.3"),
+            _node(2, "PowerPrompt", "rgthree-comfy", "1.2.3"),
+            {"id": 3, "type": "SaveImage", "properties": {"cnr_id": "comfy-core"}},
+        ],
+        "links": [],
+    }
 
+
+@pytest.fixture
+def configured(settings: Settings, tmp_path: Path) -> Settings:
     settings.comfy_executable = tmp_path / "python.exe"
     settings.comfy_executable.write_bytes(b"runtime")
     settings.comfy_directory = tmp_path / "ComfyUI"
     settings.comfy_directory.mkdir()
+    return settings
 
-    captured: dict[str, object] = {}
 
-    async def capture(*_args: object, **kwargs: object) -> object:
-        captured.update(kwargs)
+async def test_the_queued_job_carries_what_the_server_analyzed(
+    client: AsyncClient, configured: Settings, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from local_lm import api as api_module
+
+    async def capture(*_args: object, **_kwargs: object) -> object:
         raise RuntimeError("captured; the job may fail after this")
 
     monkeypatch.setattr(api_module, "prepare_workflow_package", capture)
 
     queued = await client.post(
         "/api/workflows/packages/prepare",
-        json={
-            "package_id": "example-pack",
-            "version": "1.2.3",
-            "node_types": ["ExampleNode", "OtherNode"],
-        },
+        json={"package_id": "rgthree-comfy", "version": "1.2.3", "ui_graph": _graph()},
     )
 
     assert queued.status_code == 202
@@ -57,41 +74,65 @@ async def test_the_queued_job_keeps_the_node_types_it_was_given(
     listed = await client.get("/api/jobs")
     payload = next(job for job in listed.json() if job["id"] == job_id)["payload_json"]
 
-    assert payload["node_types"] == ["ExampleNode", "OtherNode"]
+    # Derived from the graph, and complete: both nodes, not whichever the
+    # caller felt like naming.
+    assert sorted(payload["node_types"]) == ["PowerLoraLoader", "PowerPrompt"]
 
 
-@pytest.mark.parametrize(
-    ("node_types", "code"),
-    [
-        ([""], "workflow-package-node-type-invalid"),
-        (["   "], "workflow-package-node-type-invalid"),
-        ([_WITH_CONTROL], "workflow-package-node-type-invalid"),
-        ([_OVERLONG], "workflow-package-node-type-invalid"),
-        (["ExampleNode", "ExampleNode"], "workflow-package-node-type-repeated"),
-        (["ExampleNode", "  ExampleNode  "], "workflow-package-node-type-repeated"),
-    ],
-)
-async def test_refuses_an_identity_persistence_would_reject(
-    client: AsyncClient, node_types: list[str], code: str
+async def test_a_node_list_from_the_caller_is_not_accepted_at_all(
+    client: AsyncClient, configured: Settings
 ) -> None:
-    """The rules persistence enforces, applied before anything is queued.
-
-    A job that must fail on its first step is a worse answer than a typed 422,
-    and relaxing persistence to accept these instead would be worse still.
-    """
+    """The field does not exist. A request carrying one is a 422, not a hint."""
     response = await client.post(
         "/api/workflows/packages/prepare",
-        json={"package_id": "example-pack", "version": "1.2.3", "node_types": node_types},
+        json={
+            "package_id": "rgthree-comfy",
+            "version": "1.2.3",
+            "ui_graph": _graph(),
+            "node_types": ["WhateverIWant"],
+        },
     )
 
     assert response.status_code == 422
-    assert response.json()["code"] == code
 
 
-async def test_refuses_a_request_naming_no_node_types_at_all(client: AsyncClient) -> None:
+async def test_refuses_a_package_the_workflow_does_not_name(
+    client: AsyncClient, configured: Settings
+) -> None:
     response = await client.post(
         "/api/workflows/packages/prepare",
-        json={"package_id": "example-pack", "version": "1.2.3", "node_types": []},
+        json={"package_id": "some-other-pack", "version": "1.2.3", "ui_graph": _graph()},
     )
 
     assert response.status_code == 422
+    assert response.json()["code"] == "workflow-package-not-in-analysis"
+
+
+async def test_refuses_a_version_the_workflow_does_not_require(
+    client: AsyncClient, configured: Settings
+) -> None:
+    """Preparing 9.9.9 of a package the graph pins to 1.2.3 is not that graph."""
+    response = await client.post(
+        "/api/workflows/packages/prepare",
+        json={"package_id": "rgthree-comfy", "version": "9.9.9", "ui_graph": _graph()},
+    )
+
+    assert response.status_code == 422
+    assert response.json()["code"] == "workflow-package-version-not-required"
+
+
+async def test_refuses_a_graph_that_names_no_packages(
+    client: AsyncClient, configured: Settings
+) -> None:
+    empty = {
+        "version": 0.4,
+        "nodes": [{"id": 1, "type": "SaveImage", "properties": {}}],
+        "links": [],
+    }
+    response = await client.post(
+        "/api/workflows/packages/prepare",
+        json={"package_id": "rgthree-comfy", "version": "1.2.3", "ui_graph": empty},
+    )
+
+    assert response.status_code == 422
+    assert response.json()["code"] == "workflow-package-not-in-analysis"

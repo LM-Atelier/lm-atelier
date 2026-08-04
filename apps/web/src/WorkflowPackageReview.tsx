@@ -70,11 +70,8 @@ export function WorkflowPackageReview({
     onSuccess: () => onImported?.(),
   });
   const prepare = useMutation({
-    mutationFn: ({ packageId, version, nodeTypes }: {
-      packageId: string;
-      version: string;
-      nodeTypes: string[];
-    }) => api.prepareWorkflowPackage(packageId, version, nodeTypes),
+    mutationFn: ({ packageId, version }: { packageId: string; version: string }) =>
+      api.prepareWorkflowPackage(packageId, version, uiGraph ?? {}),
     onSuccess: (_job, variables) =>
       setQueuedPackages((current) => [...current, variables.packageId]),
   });
@@ -151,7 +148,7 @@ export function WorkflowPackageReview({
                         type="button"
                         className="secondary compact-button"
                         disabled={prepare.isPending}
-                        onClick={() => prepare.mutate({ packageId: pkg.package_id, version: pkg.versions[0], nodeTypes: pkg.node_types })}
+                        onClick={() => prepare.mutate({ packageId: pkg.package_id, version: pkg.versions[0] })}
                       >
                         Prepare {pkg.versions[0]}
                       </button>

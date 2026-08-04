@@ -16,7 +16,21 @@ async def test_an_unconfigured_runtime_refuses_before_queueing(client: AsyncClie
 
     response = await client.post(
         "/api/workflows/packages/prepare",
-        json={"package_id": "example-pack", "version": "1.2.3", "node_types": ["ExampleNode"]},
+        json={
+            "package_id": "example-pack",
+            "version": "1.2.3",
+            "ui_graph": {
+                "version": 0.4,
+                "nodes": [
+                    {
+                        "id": 1,
+                        "type": "ExampleNode",
+                        "properties": {"cnr_id": "example-pack", "ver": "1.2.3"},
+                    }
+                ],
+                "links": [],
+            },
+        },
     )
 
     assert response.status_code == 422
@@ -56,7 +70,21 @@ async def test_a_configured_runtime_queues_and_fails_closed_on_the_probe(
 
     response = await client.post(
         "/api/workflows/packages/prepare",
-        json={"package_id": "example-pack", "version": "1.2.3", "node_types": ["ExampleNode"]},
+        json={
+            "package_id": "example-pack",
+            "version": "1.2.3",
+            "ui_graph": {
+                "version": 0.4,
+                "nodes": [
+                    {
+                        "id": 1,
+                        "type": "ExampleNode",
+                        "properties": {"cnr_id": "example-pack", "ver": "1.2.3"},
+                    }
+                ],
+                "links": [],
+            },
+        },
     )
 
     assert response.status_code == 202
@@ -125,7 +153,21 @@ async def test_cancel_stops_a_blocking_preparation_for_good(
 
     queued = await client.post(
         "/api/workflows/packages/prepare",
-        json={"package_id": "example-pack", "version": "1.2.3", "node_types": ["ExampleNode"]},
+        json={
+            "package_id": "example-pack",
+            "version": "1.2.3",
+            "ui_graph": {
+                "version": 0.4,
+                "nodes": [
+                    {
+                        "id": 1,
+                        "type": "ExampleNode",
+                        "properties": {"cnr_id": "example-pack", "ver": "1.2.3"},
+                    }
+                ],
+                "links": [],
+            },
+        },
     )
     assert queued.status_code == 202
     job_id = queued.json()["id"]

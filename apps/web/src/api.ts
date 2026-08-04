@@ -720,10 +720,12 @@ export const api = {
     request<EditTemplate>("/api/edit-templates", { method: "POST", body: JSON.stringify(payload) }),
   deleteEditTemplate: (id: string) =>
     request<void>(`/api/edit-templates/${id}`, { method: "DELETE" }),
-  prepareWorkflowPackage: (packageId: string, version: string, nodeTypes: string[]) =>
+  prepareWorkflowPackage: (packageId: string, version: string, uiGraph: unknown) =>
     request<Job>("/api/workflows/packages/prepare", {
       method: "POST",
-      body: JSON.stringify({ package_id: packageId, version, node_types: nodeTypes }),
+      // The graph, not a node list. The server re-analyzes it to decide what
+      // this package provides; a list sent from here would be a claim.
+      body: JSON.stringify({ package_id: packageId, version, ui_graph: uiGraph ?? {} }),
     }),
   registryInstalls: () => request<RegistryInstall[]>("/api/workflows/packages/installs"),
   reviewRegistryInstall: (installId: string, trusted: boolean) =>

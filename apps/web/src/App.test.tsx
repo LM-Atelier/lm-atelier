@@ -3656,11 +3656,14 @@ describe("App", () => {
     vi.mocked(api.prepareWorkflowPackage).mockResolvedValue({ id: "job-prep" } as never);
     fireEvent.click(screen.getByRole("button", { name: "Prepare 1.2.3" }));
     await waitFor(() =>
-      // The node types the analysis showed travel with the request; without
-      // them the prepared package would claim to provide nothing.
-      expect(api.prepareWorkflowPackage).toHaveBeenCalledWith("rgthree-comfy", "1.2.3", [
-        "Power Lora Loader",
-      ]),
+      // The graph travels with the request, not a list of node types. The
+      // server re-analyzes it to decide what this package provides, so the
+      // browser never gets to author that claim.
+      expect(api.prepareWorkflowPackage).toHaveBeenCalledWith(
+        "rgthree-comfy",
+        "1.2.3",
+        expect.any(Object),
+      ),
     );
     expect(await screen.findByText(/stays inactive and untrusted/)).toBeInTheDocument();
   });
