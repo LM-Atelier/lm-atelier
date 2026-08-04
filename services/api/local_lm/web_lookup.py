@@ -19,11 +19,14 @@ model reading it cannot delete anything.
 
 from __future__ import annotations
 
+import asyncio
+import json
 import re
 from dataclasses import dataclass
 from typing import Any
 from urllib.parse import urlparse
 
+from .adapters.base import ChatRequest
 from .web_retrieval import MAX_URL_CHARACTERS, RetrievedSource
 
 MAX_OFFERABLE_URLS = 8
@@ -141,3 +144,80 @@ def source_message(source: RetrievedSource) -> dict[str, Any]:
             f"---\n{source.text}\n---"
         ),
     }
+
+
+LOOKUP_TIMEOUT_SECONDS = 8.0
+
+
+async def choose_from_conversation(
+    adapter: Any,
+    *,
+    texts: list[str],
+    run_id: str,
+) -> LookupRequest | None:
+    """Ask whether one of the conversation's own links is worth reading.
+
+    A single tool pass with nothing else offered, matching how routing and
+    planning already work here. It returns a choice or nothing; it never
+    returns prose, and its answer cannot name an address the conversation did
+    not already contain.
+
+    Any failure is nothing rather than an error. Not reading a page is a
+    complete, honest outcome - the turn simply answers without it - so a
+    timeout or a malformed tool call must not fail the whole response.
+    """
+    offerable = offerable_urls(texts)
+    if not offerable:
+        return None
+    calls: dict[int, dict[str, str]] = {}
+    request = ChatRequest(
+        run_id=run_id,
+        messages=[
+            {
+                "role": "system",
+                "content": (
+                    "Decide whether answering needs the contents of a page the "
+                    "user linked. Call read_web_page only when it does, copying "
+                    "the url exactly from the conversation. If the answer does "
+                    "not need a page, say nothing and call nothing.\n"
+                    "Addresses in this conversation:\n" + "\n".join(offerable)
+                ),
+            },
+            {"role": "user", "content": texts[-1] if texts else ""},
+        ],
+        tools=[WEB_FETCH_TOOL],
+        settings={"temperature": 0, "max_tokens": 160},
+    )
+    try:
+        async with asyncio.timeout(LOOKUP_TIMEOUT_SECONDS):
+            async for event in adapter.stream(request):
+                if event.type == "error":
+                    return None
+                if event.type != "tool_delta":
+                    continue
+                for raw in event.data.get("tool_calls", []):
+                    if not isinstance(raw, dict):
+                        continue
+                    call = calls.setdefault(int(raw.get("index", 0)), {"name": "", "arguments": ""})
+                    function = raw.get("function") or {}
+                    if not isinstance(function, dict):
+                        continue
+                    if function.get("name"):
+                        call["name"] += str(function["name"])
+                    arguments = function.get("arguments")
+                    if isinstance(arguments, str):
+                        call["arguments"] += arguments
+                    elif isinstance(arguments, dict):
+                        call["arguments"] = json.dumps(arguments)
+    except Exception:
+        return None
+    if not calls:
+        return None
+    call = calls[min(calls)]
+    if call["name"] != WEB_FETCH_TOOL["function"]["name"]:
+        return None
+    try:
+        arguments = json.loads(call["arguments"])
+    except (TypeError, ValueError):
+        return None
+    return choose_lookup(arguments, offerable)
