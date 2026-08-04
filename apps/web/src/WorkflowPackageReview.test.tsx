@@ -112,14 +112,14 @@ describe("WorkflowPackageReview sources", () => {
             remote_id: "3075606",
             revision: "3075606",
             filename: null,
-            url: "https://civitai.com/models/1662740/lenovo?modelVersionId=3075606",
+            url: "https://civitai.com/models/1662740/portrait?modelVersionId=3075606",
           },
         ],
       }),
     );
 
     const link = screen.getByRole("link", { name: "3075606" });
-    expect(link).toHaveAttribute("href", "https://civitai.com/models/1662740/lenovo?modelVersionId=3075606");
+    expect(link).toHaveAttribute("href", "https://civitai.com/models/1662740/portrait?modelVersionId=3075606");
     // Opening someone else's link must not hand them this window.
     expect(link).toHaveAttribute("rel", expect.stringContaining("noopener"));
   });
