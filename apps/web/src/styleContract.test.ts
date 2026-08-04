@@ -416,4 +416,32 @@ describe("material character", () => {
     const [, , third] = easing.match(/cubic-bezier\(([\d.]+), ([\d.]+), ([\d.]+), ([\d.]+)\)/) ?? [];
     expect(Number(third)).toBeLessThanOrEqual(1);
   });
+
+  it("times every movement from the two the palette declares", () => {
+    // Arbitrary durations scattered through a stylesheet are what make an
+    // interface read as unconsidered: nothing is wrong anywhere, and nothing
+    // agrees with anything either. The palette declares two; transitions use
+    // them and nothing else.
+    const transitions = css.match(/transition:[^;]+;/g) ?? [];
+    expect(transitions.length).toBeGreaterThan(3);
+    const arbitrary = transitions.filter(
+      (rule) => !rule.includes("none") && /\b\d*\.?\d+m?s\b/.test(rule),
+    );
+    expect(arbitrary).toEqual([]);
+  });
+
+  it("gives working motion its own slower register", () => {
+    // A spinner borrowed from a page loader says "waiting for a server". A
+    // generation is work in progress, and reads as deliberate rather than
+    // impatient - so continuous animation is slower than any interaction and
+    // eases rather than running linear.
+    const animations = css.match(/animation:[^;]+infinite;/g) ?? [];
+    expect(animations.length).toBeGreaterThan(3);
+    for (const rule of animations) {
+      expect(rule).toContain("var(--ease)");
+      expect(rule).not.toContain("linear");
+      const seconds = Number(rule.match(/\b(\d*\.?\d+)s\b/)?.[1] ?? 0);
+      expect(seconds).toBeGreaterThan(1);
+    }
+  });
 });
