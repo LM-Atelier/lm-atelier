@@ -31,6 +31,7 @@ from local_lm.processes import (
     ProcessSupervisor,
     WorkerRecord,
     _RotatingWorkerLog,
+    _with_comfy_registry_overlays,
 )
 from local_lm.worker_failures import WorkerFailureCode
 from local_lm.workflow_activations import (
@@ -1634,7 +1635,9 @@ async def test_media_start_uses_only_the_exact_activation_scope(
         "lm-atelier-node_selected",
         "lm-atelier-registry_selected",
     ]
-    assert captured["environment_overrides"] == {"PYTHONPATH": str(site_packages)}
+    assert command[:4] == [str(executable.resolve()), "-c", command[2], "1"]
+    assert command[4:6] == [str(site_packages.resolve()), str((runtime / "main.py").resolve())]
+    assert captured["environment_overrides"] is None
     assert callable(captured["ready_check"])
     assert captured["launch_scope_sha256"] == digest
 
@@ -1759,8 +1762,44 @@ async def test_media_start_uses_only_verified_registry_overlay_contract(
         "lm-atelier-node_reviewed",
         "lm-atelier-registry_example",
     ]
-    assert captured["environment_overrides"] == {"PYTHONPATH": str(site_packages)}
+    assert command[:4] == [str(executable.resolve()), "-c", command[2], "1"]
+    assert command[4:6] == [str(site_packages.resolve()), str((runtime / "main.py").resolve())]
+    assert captured["environment_overrides"] is None
     assert callable(captured["ready_check"])
+
+
+def test_registry_overlay_bootstrap_imports_without_executing_pth(tmp_path: Path) -> None:
+    site_packages = tmp_path / "registry-environment" / "site-packages"
+    site_packages.mkdir(parents=True)
+    (site_packages / "registry_probe.py").write_text("VALUE = 7\n", encoding="utf-8")
+    (site_packages / "unsafe.pth").write_text(
+        "import os; os.environ['LM_ATELIER_PTH_EXECUTED'] = '1'\n",
+        encoding="utf-8",
+    )
+    entrypoint = tmp_path / "main.py"
+    entrypoint.write_text(
+        "import json, os\n"
+        "import registry_probe\n"
+        "print(json.dumps({'value': registry_probe.VALUE, "
+        "'pth': os.environ.get('LM_ATELIER_PTH_EXECUTED')}))\n",
+        encoding="utf-8",
+    )
+    environment = os.environ.copy()
+    environment.pop("LM_ATELIER_PTH_EXECUTED", None)
+
+    result = subprocess.run(
+        _with_comfy_registry_overlays(
+            [sys.executable, str(entrypoint)],
+            (site_packages,),
+        ),
+        cwd=tmp_path,
+        env=environment,
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+
+    assert json.loads(result.stdout) == {"value": 7, "pth": None}
 
 
 @pytest.mark.parametrize(("inventory", "missing"), [({"ExampleLoader": {}}, False), ({}, True)])

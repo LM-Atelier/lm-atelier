@@ -516,6 +516,47 @@ async def test_wheel_stage_identity_mismatch_rolls_back_every_new_artifact(
     assert session.scalar(select(func.count()).select_from(ComfyRegistryInstall)) == 0
 
 
+async def test_wheel_environment_refusal_keeps_typed_code_and_cleans_artifacts(
+    session: Session,
+    tmp_path: Path,
+) -> None:
+    content = _wheel_content()
+    resolution = _resolution(pip_dependencies=("alpha==1.0",))
+    closure = _populated_closure(content)
+    archive = _ArchiveDownloader()
+    wheels = _PopulatedWheelDownloader(content)
+    custom_nodes, state = _roots(tmp_path)
+
+    async def refuse_environment(*_args: object, **_kwargs: object) -> object:
+        raise environment_module.ComfyRegistryWheelEnvironmentError(
+            "unsafe_environment_fixture",
+            "The wheel environment fixture was refused",
+        )
+
+    with pytest.raises(ComfyRegistryLifecycleError) as raised:
+        await prepare_comfy_registry_install(
+            session,
+            resolution=resolution,
+            closure=closure,
+            archive_downloader=archive,
+            wheel_downloader=wheels,
+            python_executable=Path(sys.executable),
+            custom_node_root=custom_nodes,
+            state_root=state,
+            media_worker_stopped=True,
+            environment_assembler=refuse_environment,  # type: ignore[arg-type]
+        )
+
+    assert raised.value.code == "unsafe_environment_fixture"
+    assert str(raised.value) == "The wheel environment fixture was refused"
+    assert archive.calls == 1
+    assert wheels.calls == 1
+    assert not list(custom_nodes.iterdir())
+    assert not any((state / "registry-wheel-staging").iterdir())
+    assert not any((state / "registry-wheel-environments").iterdir())
+    assert session.scalar(select(func.count()).select_from(ComfyRegistryInstall)) == 0
+
+
 async def test_unbound_existing_environment_is_preserved_and_refused(
     session: Session,
     tmp_path: Path,

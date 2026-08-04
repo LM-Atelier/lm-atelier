@@ -42,6 +42,7 @@ from .comfy_registry_wheel_downloads import (
     WheelDownloadProgress,
 )
 from .comfy_registry_wheel_environments import (
+    ComfyRegistryWheelEnvironmentError,
     ComfyRegistryWheelEnvironmentReport,
     assemble_comfy_registry_wheel_environment,
     verify_comfy_registry_wheel_environment,
@@ -312,12 +313,15 @@ async def _environment(
                 "unbound_wheel_environment",
                 "The existing Registry wheel environment has no trusted database identity",
             )
-        report = await asyncio.to_thread(
-            verify_comfy_registry_wheel_environment,
-            environment_destination,
-            expected_closure_sha256=closure.closure_sha256,
-            expected_environment_sha256=existing.wheel_environment_sha256,
-        )
+        try:
+            report = await asyncio.to_thread(
+                verify_comfy_registry_wheel_environment,
+                environment_destination,
+                expected_closure_sha256=closure.closure_sha256,
+                expected_environment_sha256=existing.wheel_environment_sha256,
+            )
+        except ComfyRegistryWheelEnvironmentError as exc:
+            raise ComfyRegistryLifecycleError(exc.code, str(exc)) from exc
         return report, True
 
     wheel_files: dict[str, Path] = {}
@@ -335,13 +339,16 @@ async def _environment(
         wheel_files = {
             artifact.filename: wheel_destination / artifact.filename for artifact in artifacts
         }
-    report = await environment_assembler(
-        closure,
-        wheel_files,
-        python_executable=python_executable,
-        destination=environment_destination,
-        media_worker_stopped=True,
-    )
+    try:
+        report = await environment_assembler(
+            closure,
+            wheel_files,
+            python_executable=python_executable,
+            destination=environment_destination,
+            media_worker_stopped=True,
+        )
+    except ComfyRegistryWheelEnvironmentError as exc:
+        raise ComfyRegistryLifecycleError(exc.code, str(exc)) from exc
     return report, False
 
 
