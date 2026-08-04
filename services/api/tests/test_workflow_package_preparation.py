@@ -206,6 +206,24 @@ async def test_context_requires_a_configured_managed_runtime(tmp_path: Path) -> 
     assert context.state_root == tmp_path / "registry"
 
 
+async def test_a_fresh_profile_already_has_the_registry_state_directory(tmp_path: Path) -> None:
+    """Preparation validates this root rather than creating it, so startup must.
+
+    A brand-new profile that had never prepared a package refused every
+    Registry package with `invalid_managed_root`, because this one directory
+    was absent from the set the application creates for itself.
+    """
+    settings = Settings(
+        data_dir=tmp_path,
+        comfy_executable=tmp_path / "python.exe",
+        comfy_directory=tmp_path / "ComfyUI",
+    )
+    assert not settings.registry_dir.exists()
+    settings.prepare()
+    assert settings.registry_dir.is_dir()
+    assert PreparationContext.from_settings(settings).state_root == settings.registry_dir
+
+
 async def test_another_writer_progresses_while_preparation_awaits(
     client: AsyncClient,
     monkeypatch: pytest.MonkeyPatch,
