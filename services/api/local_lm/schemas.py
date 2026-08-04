@@ -42,6 +42,16 @@ def new_chat_vision_settings() -> VisionSettings:
     return VisionSettings(verify_image_edits=True)
 
 
+class WebSettings(ApiModel):
+    """Whether this conversation may reach the internet.
+
+    Off unless someone turned it on for this chat specifically. A new chat
+    never inherits it, so permission cannot spread by being nearby.
+    """
+
+    allow_url_fetch: bool = False
+
+
 class ProjectCreate(ApiModel):
     name: str = Field(min_length=1, max_length=200)
     description: str = Field(default="", max_length=10_000)
@@ -102,6 +112,7 @@ class ChatUpdate(ApiModel):
     generation_settings_json: GenerationSettingsByRole | None = None
     generation_preset_ids_json: GenerationPresetIdsByRole | None = None
     vision_settings_json: VisionSettings | None = None
+    web_settings_json: WebSettings | None = None
 
 
 class ArtifactOut(ApiModel):
@@ -231,6 +242,7 @@ class ChatOut(ApiModel):
     generation_settings_json: GenerationSettingsByRole
     generation_preset_ids_json: GenerationPresetIdsByRole
     vision_settings_json: VisionSettings
+    web_settings_json: WebSettings = Field(default_factory=WebSettings)
     # Empty for a chat created directly; carries the source chat and message
     # when this thread was forked from one.
     origin_json: dict[str, Any] = Field(default_factory=dict)
@@ -1604,6 +1616,10 @@ class ApplicationInfo(ApiModel):
     version: str
     data_directory: str
     log_directory: str
+    # The installation-wide gate. When this is false no chat can open its
+    # own, and the UI says so rather than offering a switch that does
+    # nothing.
+    web_access_enabled: bool = False
 
 
 class WorkerStatus(ApiModel):

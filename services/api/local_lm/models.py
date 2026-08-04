@@ -95,6 +95,12 @@ class Chat(TimestampMixin, Base):
     generation_settings_json: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
     generation_preset_ids_json: Mapped[dict[str, str | None]] = mapped_column(JSON, default=dict)
     vision_settings_json: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
+    # Whether this conversation may reach the internet. Empty means no. It is
+    # deliberately per-chat and never copied into a new one: permission that
+    # spreads by default is permission nobody granted.
+    web_settings_json: Mapped[dict[str, Any]] = mapped_column(
+        JSON, default=dict, server_default="{}"
+    )
     # Where a forked thread came from, empty for chats created directly.
     origin_json: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict, server_default="{}")
 

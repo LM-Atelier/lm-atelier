@@ -124,6 +124,8 @@ export interface Chat {
   active_video_profile_id: string | null;
   active_head_message_id: string | null;
   vision_settings_json?: Record<string, unknown>;
+  /** Whether this conversation may reach the internet. Never inherited. */
+  web_settings_json?: WebSettings;
   generation_settings_json?: GenerationSettingsByRole;
   generation_preset_ids_json?: GenerationPresetIdsByRole;
   // Empty unless this chat was forked from a message in another one.
@@ -755,6 +757,13 @@ export interface ApplicationInfo {
   version: string;
   data_directory: string;
   log_directory: string;
+  // The installation-wide gate. False means no chat can open its own, and
+  // the UI says so rather than offering a switch that does nothing.
+  web_access_enabled: boolean;
+}
+
+export interface WebSettings {
+  allow_url_fetch: boolean;
 }
 
 export type CredentialProvider = "huggingface" | "civitai";
