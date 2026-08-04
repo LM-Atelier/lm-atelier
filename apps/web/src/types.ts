@@ -923,6 +923,19 @@ export interface ModelUpdate {
   update_changelog: string | null;
 }
 
+/** What staging found, so trusting a package can be an informed act. */
+export interface RegistryInstallReview {
+  file_count: number;
+  expanded_bytes: number;
+  python_file_count: number;
+  install_scripts: string[];
+  startup_hooks: string[];
+  native_files: string[];
+  dependency_manifests: string[];
+  top_level_entries: string[];
+  registry_warnings: string[];
+}
+
 export interface RegistryInstall {
   id: string;
   package_id: string;
@@ -936,6 +949,9 @@ export interface RegistryInstall {
   active: boolean;
   reviewed_at: string | null;
   activated_at: string | null;
+  // Absent for a package prepared before this record existed. Absent means
+  // "not looked at", which is not the same as "nothing found".
+  review: RegistryInstallReview | null;
 }
 
 export type WorkflowSelectorCapability = "chat" | "vision" | "image" | "video";

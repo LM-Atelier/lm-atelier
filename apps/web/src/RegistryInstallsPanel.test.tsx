@@ -3,7 +3,7 @@ import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { api } from "./api";
 import { RegistryInstallsPanel } from "./RegistryInstallsPanel";
-import type { RegistryInstall } from "./types";
+import type { RegistryInstall, RegistryInstallReview } from "./types";
 
 vi.mock("./api", () => ({
   api: {
@@ -27,6 +27,20 @@ const install = (overrides: Partial<RegistryInstall> = {}): RegistryInstall => (
   active: false,
   reviewed_at: null,
   activated_at: null,
+  review: null,
+  ...overrides,
+});
+
+const review = (overrides: Partial<RegistryInstallReview> = {}): RegistryInstallReview => ({
+  file_count: 12,
+  expanded_bytes: 2048,
+  python_file_count: 4,
+  install_scripts: [],
+  startup_hooks: [],
+  native_files: [],
+  dependency_manifests: [],
+  top_level_entries: ["example-node"],
+  registry_warnings: [],
   ...overrides,
 });
 
@@ -71,6 +85,50 @@ describe("RegistryInstallsPanel", () => {
 
     fireEvent.click(screen.getByRole("button", { name: "I reviewed this package - trust it" }));
     await waitFor(() => expect(api.reviewRegistryInstall).toHaveBeenCalledWith("install-1", true));
+  });
+
+  it("shows what there is to review before asking whether it was reviewed", async () => {
+    vi.mocked(api.registryInstalls).mockResolvedValue([
+      install({
+        review: review({
+          install_scripts: ["example-node/install.py"],
+          startup_hooks: ["example-node/prestartup_script.py"],
+          native_files: ["example-node/_fast.pyd"],
+          registry_warnings: ["source_review_required"],
+        }),
+      }),
+    ]);
+    renderPanel();
+    fireEvent.click(await screen.findByRole("button", { name: "Trust package" }));
+
+    // Confirming "I reviewed this package" is only meaningful if the things
+    // that decide the answer were on screen.
+    expect(screen.getByText("example-node/install.py")).toBeInTheDocument();
+    expect(screen.getByText("example-node/prestartup_script.py")).toBeInTheDocument();
+    expect(screen.getByText("example-node/_fast.pyd")).toBeInTheDocument();
+    expect(screen.getByText(/source review required/)).toBeInTheDocument();
+    expect(screen.getByText(/12 files/)).toBeInTheDocument();
+  });
+
+  it("says a clean package is clean rather than listing empty rows", async () => {
+    vi.mocked(api.registryInstalls).mockResolvedValue([install({ review: review() })]);
+    renderPanel();
+    fireEvent.click(await screen.findByRole("button", { name: "Trust package" }));
+
+    expect(
+      screen.getByText("No install scripts, startup hooks, or compiled binaries."),
+    ).toBeInTheDocument();
+  });
+
+  it("says nothing about findings for a package prepared before they were recorded", async () => {
+    // Absent is not the same claim as empty: one means nothing was found, the
+    // other means nobody looked.
+    vi.mocked(api.registryInstalls).mockResolvedValue([install({ review: null })]);
+    renderPanel();
+    fireEvent.click(await screen.findByRole("button", { name: "Trust package" }));
+
+    expect(screen.queryByText(/No install scripts/)).not.toBeInTheDocument();
+    expect(screen.queryByText("Contents")).not.toBeInTheDocument();
   });
 
   it("does nothing when the trust confirmation is declined", async () => {

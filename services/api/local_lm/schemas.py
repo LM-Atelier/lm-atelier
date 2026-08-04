@@ -1040,6 +1040,29 @@ class EditTemplateOut(ApiModel):
     enabled: bool
 
 
+class RegistryInstallReviewOut(ApiModel):
+    """What staging found, so that trusting a package can be an informed act.
+
+    Trust is what lets this code run. Asking someone to confirm they reviewed
+    a package while showing them nothing to review makes the confirmation a
+    formality, so these are the things that decide the answer: code that runs
+    on install, code that runs at startup, compiled binaries, and the files
+    that declare what else gets pulled in.
+    """
+
+    file_count: int
+    expanded_bytes: int
+    python_file_count: int
+    install_scripts: list[str] = Field(default_factory=list, max_length=64)
+    startup_hooks: list[str] = Field(default_factory=list, max_length=64)
+    native_files: list[str] = Field(default_factory=list, max_length=64)
+    dependency_manifests: list[str] = Field(default_factory=list, max_length=64)
+    top_level_entries: list[str] = Field(default_factory=list, max_length=64)
+    # Carried from the resolution: why this package needs looking at, in the
+    # resolver's words rather than restated here.
+    registry_warnings: list[str] = Field(default_factory=list, max_length=32)
+
+
 class RegistryInstallOut(ApiModel):
     """One prepared package and the two explicit decisions it is waiting for."""
 
@@ -1055,6 +1078,7 @@ class RegistryInstallOut(ApiModel):
     active: bool
     reviewed_at: str | None
     activated_at: str | None
+    review: RegistryInstallReviewOut | None = None
 
 
 class RegistryInstallReviewRequest(ApiModel):
