@@ -2998,7 +2998,15 @@ async def resolve_catalog_preflight(
 
     catalog = services.catalog_sources.get(source)
     try:
-        inspection_role = "lora" if payload.auxiliary_kind == "lora" else payload.role
+        # A LoRA is inspected through the LoRA catalog role however it was
+        # asked for. A provider shown a LoRA card under an image role
+        # classifies it as unsupported, which is correct of the provider and
+        # useless to us.
+        inspection_role = (
+            "lora"
+            if "lora" in {payload.auxiliary_kind, payload.workflow_reference_kind}
+            else payload.role
+        )
         raw_detail = await catalog.inspect(remote_id, payload.revision, inspection_role)
         detail = CatalogDetail.model_validate(raw_detail)
         # CivitAI identities live under each normalized file's metadata; hoist
@@ -3274,6 +3282,25 @@ async def resolve_catalog_preflight(
                     "comfy_paths": {COMFY_AUXILIARY_FOLDERS[payload.auxiliary_kind]: "."},
                 }
             ),
+            detail,
+        )
+
+    if payload.workflow_reference_kind:
+        # A workflow named one exact file. Template ranking exists to guess
+        # what a repository is for, and there is nothing left to guess here.
+        # Letting it run is how asking for one 4GB text encoder planned the
+        # repository's official four-file bundle instead: a diffusion model, an
+        # unrelated LoRA, the encoder actually wanted, and a VAE already on
+        # disk, together over 19GB.
+        if len(payload.selected_files) != 1:
+            raise api_error(
+                422,
+                "workflow-asset-file-not-exact",
+                "A workflow asset install must name exactly one file. "
+                "Run the install check again with the exact file the workflow needs.",
+            )
+        return await finalize(
+            assess_catalog_install(detail, payload, services.settings, system),
             detail,
         )
 
