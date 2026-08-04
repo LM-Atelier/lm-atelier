@@ -46,7 +46,7 @@ from .comfy_registry_activation import (
 from .comfy_registry_closure_driver import ComfyRegistryWheelMetadataClient
 from .comfy_registry_downloads import ComfyRegistryArchiveDownloader
 from .comfy_registry_installs import installed_comfy_registry_versions
-from .comfy_registry_interpreter import probe_comfy_registry_wheel_target
+from .comfy_registry_interpreter import probe_comfy_registry_runtime_target
 from .comfy_registry_wheel_downloads import ComfyRegistryWheelDownloader
 from .comfy_registry_wheel_projects import ComfyRegistryWheelProjectClient
 from .comfy_templates import (
@@ -6573,7 +6573,7 @@ async def _run_workflow_package_preparation(
                 node_types=node_types,
                 context=PreparationContext.from_settings(services.settings),
                 media_worker_stopped=media_stopped,
-                interpreter_probe=probe_comfy_registry_wheel_target,
+                interpreter_probe=probe_comfy_registry_runtime_target,
                 registry_client=ComfyRegistryClient(),
                 project_client=ComfyRegistryWheelProjectClient(),
                 metadata_client=ComfyRegistryWheelMetadataClient(),

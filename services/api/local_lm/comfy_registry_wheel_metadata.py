@@ -14,6 +14,11 @@ from packaging.requirements import InvalidRequirement, Requirement
 from packaging.utils import canonicalize_name
 from packaging.version import InvalidVersion, Version
 
+from .comfy_registry_runtime import (
+    ComfyRegistryRuntimeDistribution,
+    ComfyRegistryRuntimeError,
+    comfy_registry_runtime_distribution_map,
+)
 from .comfy_registry_wheel_artifacts import (
     ComfyRegistryWheelArtifact,
     ComfyRegistryWheelArtifactManifest,
@@ -103,6 +108,7 @@ def plan_comfy_registry_wheel_metadata(
     metadata_documents: Mapping[str, bytes],
     *,
     marker_environment: Mapping[str, str],
+    runtime_distributions: (Mapping[str, str] | Sequence[ComfyRegistryRuntimeDistribution]) = (),
 ) -> ComfyRegistryWheelMetadataPlan:
     """Parse hash-bound wheel metadata into an inert transitive dependency frontier."""
     artifacts = _artifacts(manifest)
@@ -130,7 +136,11 @@ def plan_comfy_registry_wheel_metadata(
         artifact.filename for artifact in artifacts if artifact.metadata_sha256 is None
     )
     requirements = _active_requirements(records, artifacts, environment)
-    frontier, conflicts = _frontier(requirements, artifacts)
+    try:
+        runtime = comfy_registry_runtime_distribution_map(runtime_distributions)
+    except ComfyRegistryRuntimeError as exc:
+        raise ComfyRegistryWheelMetadataError(exc.code, str(exc)) from exc
+    frontier, conflicts = _frontier(requirements, artifacts, runtime)
     payload = {
         "version": 1,
         "artifact_manifest_sha256": manifest.manifest_sha256,
@@ -507,6 +517,7 @@ def _evaluate_requirements(
 def _frontier(
     requirements: Sequence[ComfyRegistryWheelMetadataRequirement],
     artifacts: Sequence[ComfyRegistryWheelArtifact],
+    runtime_distributions: Mapping[str, str],
 ) -> tuple[
     tuple[ComfyRegistryWheelMetadataFrontier, ...],
     tuple[str, ...],
@@ -523,6 +534,8 @@ def _frontier(
         sources = tuple(sorted({item.source_name for item in items}))
         extras = tuple(sorted({extra for item in items for extra in item.extras}))
         locked_version = locked.get(name)
+        if locked_version is None:
+            locked_version = runtime_distributions.get(name)
         status = "resolve"
         if locked_version is not None:
             version = Version(locked_version)

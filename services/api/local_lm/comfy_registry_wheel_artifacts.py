@@ -20,6 +20,11 @@ from .comfy_registry_dependencies import (
     ComfyRegistryDependencyPlan,
     plan_comfy_registry_dependencies,
 )
+from .comfy_registry_runtime import (
+    ComfyRegistryRuntimeDistribution,
+    ComfyRegistryRuntimeError,
+    comfy_registry_runtime_distribution_map,
+)
 
 # Large, long-lived projects can legitimately exceed two MiB in PyPI's Simple
 # JSON format. Keep the document bounded while allowing the already-bounded
@@ -203,6 +208,7 @@ def resolve_comfy_registry_wheel_artifacts(
     *,
     marker_environment: Mapping[str, str],
     supported_tags: Sequence[str],
+    runtime_distributions: (Mapping[str, str] | Sequence[ComfyRegistryRuntimeDistribution]) = (),
 ) -> ComfyRegistryWheelArtifactManifest:
     """Bind active requirements to immutable compatible PyPI wheel records.
 
@@ -220,7 +226,11 @@ def resolve_comfy_registry_wheel_artifacts(
         marker_environment,
         supported_tags,
     )
-    active = _active_dependencies(plan.dependencies, environment)
+    try:
+        runtime = comfy_registry_runtime_distribution_map(runtime_distributions)
+    except ComfyRegistryRuntimeError as exc:
+        raise ComfyRegistryWheelArtifactError(exc.code, str(exc)) from exc
+    active = _active_dependencies(plan.dependencies, environment, runtime)
     documents = _project_documents(project_documents)
     expected = {dependency.name for dependency in active}
     supplied = set(documents)
@@ -341,6 +351,7 @@ def _supported_tags(values: Sequence[str]) -> tuple[tuple[Tag, ...], dict[Tag, i
 def _active_dependencies(
     dependencies: Sequence[ComfyRegistryDependency],
     environment: Mapping[str, str],
+    runtime_distributions: Mapping[str, str],
 ) -> tuple[ComfyRegistryDependency, ...]:
     active: list[ComfyRegistryDependency] = []
     names: set[str] = set()
@@ -353,6 +364,16 @@ def _active_dependencies(
                 f"Multiple Registry requirements target active package {dependency.name}",
             )
         names.add(dependency.name)
+        runtime_version = runtime_distributions.get(dependency.name)
+        if runtime_version is not None:
+            requirement = Requirement(dependency.requirement)
+            if requirement.specifier.contains(Version(runtime_version), prereleases=True):
+                continue
+            raise ComfyRegistryWheelArtifactError(
+                "managed_runtime_dependency_conflict",
+                f"Managed runtime {dependency.name} {runtime_version} does not satisfy "
+                f"{dependency.requirement}",
+            )
         active.append(dependency)
     return tuple(active)
 
