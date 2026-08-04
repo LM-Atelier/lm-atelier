@@ -1,12 +1,16 @@
 """Choosing a page to read: only ever one the conversation already named."""
 
+# ruff: noqa: E501
+
 from __future__ import annotations
 
 import pytest
 
+from local_lm.adapters.base import ChatEvent
 from local_lm.web_lookup import (
     MAX_OFFERABLE_URLS,
     WEB_FETCH_TOOL,
+    choose_from_conversation,
     choose_lookup,
     offerable_urls,
     source_message,
@@ -123,3 +127,88 @@ def test_the_tool_describes_the_only_thing_it_can_do() -> None:
     assert function["parameters"]["additionalProperties"] is False
     # The description must not promise a capability the boundary refuses.
     assert "already linked in this conversation" in function["description"]
+
+
+class _FakeAdapter:
+    """One scripted tool pass, shaped like the real streaming contract."""
+
+    def __init__(self, *events: object, fail: bool = False) -> None:
+        self._events = list(events)
+        self._fail = fail
+        self.requests: list[object] = []
+
+    async def stream(self, request: object):  # type: ignore[no-untyped-def]
+        self.requests.append(request)
+        if self._fail:
+            raise RuntimeError("the planner fell over")
+        for event in self._events:
+            yield event
+
+
+def _tool_call(name: str, arguments: object) -> ChatEvent:
+    return ChatEvent(
+        type="tool_delta",
+        data={"tool_calls": [{"index": 0, "function": {"name": name, "arguments": arguments}}]},
+    )
+
+
+async def test_reads_a_page_when_the_model_asks_for_one_the_user_linked() -> None:
+    adapter = _FakeAdapter(
+        _tool_call("read_web_page", {"url": "https://example.com/a", "reason": "the versions"})
+    )
+
+    chosen = await choose_from_conversation(
+        adapter, texts=["see https://example.com/a", "what does it say?"], run_id="run-1"
+    )
+
+    assert chosen is not None
+    assert chosen.url == "https://example.com/a"
+    # Exactly one tool is offered, and it is the only thing this pass can do.
+    offered = adapter.requests[0].tools  # type: ignore[attr-defined]
+    assert [item["function"]["name"] for item in offered] == ["read_web_page"]
+
+
+async def test_asks_nothing_when_the_conversation_contains_no_address() -> None:
+    adapter = _FakeAdapter(_tool_call("read_web_page", {"url": "https://x.test/", "reason": "r"}))
+
+    assert await choose_from_conversation(adapter, texts=["no links here"], run_id="r") is None
+    # Not even asked: with nothing readable there is nothing to decide.
+    assert adapter.requests == []
+
+
+async def test_a_model_naming_an_address_nobody_wrote_is_refused() -> None:
+    adapter = _FakeAdapter(
+        _tool_call("read_web_page", {"url": "https://evil.test/x", "reason": "trust me"})
+    )
+
+    assert (
+        await choose_from_conversation(adapter, texts=["see https://example.com/a"], run_id="r")
+        is None
+    )
+
+
+async def test_no_tool_call_means_the_answer_does_not_need_a_page() -> None:
+    adapter = _FakeAdapter(ChatEvent(type="delta", text="I already know this."))
+
+    assert (
+        await choose_from_conversation(adapter, texts=["https://example.com/a"], run_id="r") is None
+    )
+
+
+@pytest.mark.parametrize(
+    "adapter",
+    [
+        _FakeAdapter(fail=True),
+        _FakeAdapter(ChatEvent(type="error")),
+        _FakeAdapter(_tool_call("read_web_page", "{not json")),
+        _FakeAdapter(_tool_call("something_else", {"url": "https://example.com/a", "reason": "r"})),
+    ],
+)
+async def test_a_failed_decision_reads_nothing_rather_than_failing_the_turn(
+    adapter: _FakeAdapter,
+) -> None:
+    """Not reading a page is a complete outcome; the turn answers without it."""
+    assert (
+        await choose_from_conversation(adapter, texts=["see https://example.com/a"], run_id="r")
+        is None
+    )
