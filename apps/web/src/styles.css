@@ -851,7 +851,7 @@ h1, h2, h3 { margin: 0; }
 .studio-canvas-layers > canvas { position: absolute; inset: 0; width: 100%; height: 100%; }
 /* The picture is the only opaque layer; the two above it must not hide it. */
 .studio-canvas-layers > canvas[data-layer] { background: transparent; pointer-events: none; }
-.studio-tool-rail { display: flex; flex-direction: column; align-items: center; gap: 4px; padding: 7px; border: 1px solid var(--border); border-radius: 14px; background: var(--panel); align-self: start; }
+.studio-tool-rail { display: flex; flex-direction: column; align-items: center; gap: 4px; padding: 7px; border: 1px solid var(--border); border-radius: var(--cut); background: var(--panel); align-self: start; }
 .studio-rail-divider { width: 18px; height: 1px; margin: 3px 0; background: var(--border); }
 /* The selected tool needs a visible state, not only aria-pressed: without
    this the rail announces its selection correctly and shows nothing. */
