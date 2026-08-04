@@ -191,15 +191,7 @@ def bind_workflow_assets_to_install_plans(
             )
         _validate_plan(plan, selection.install_plan_id)
         artifact_path = _validated_path(selection.artifact_path, code="invalid_artifact_path")
-        matches = [
-            artifact
-            for artifact in plan.artifacts_json
-            if isinstance(artifact, Mapping) and artifact.get("path") == artifact_path
-        ]
-        if len(matches) != 1:
-            code = "artifact_not_found" if not matches else "ambiguous_plan_artifact"
-            raise WorkflowAssetBindingError(code, "install plan does not name one exact artifact")
-        artifact = matches[0]
+        artifact = validate_workflow_asset_candidate(reference, plan, artifact_path)
         if artifact_path != reference.filename:
             raise WorkflowAssetBindingError(
                 "artifact_path_mismatch",
@@ -214,6 +206,34 @@ def bind_workflow_assets_to_install_plans(
         bound.append(_bound_asset(reference, plan, artifact))
 
     return WorkflowAssetBindingPlan(tuple(bound))
+
+
+def validate_workflow_asset_candidate(
+    reference: WorkflowAssetReference,
+    plan: InstallPlan,
+    artifact_path: str,
+) -> Mapping[str, Any]:
+    """Validate one source-plan artifact against a workflow reference.
+
+    Runtime-alias materialization uses the same fail-closed checks as the final
+    binder before it creates a derived immutable plan. The filename equality
+    check intentionally remains in the binder: an alias exists precisely when
+    the provider and workflow names differ.
+    """
+
+    _validate_plan(plan, plan.id)
+    normalized_path = _validated_path(artifact_path, code="invalid_artifact_path")
+    matches = [
+        artifact
+        for artifact in plan.artifacts_json
+        if isinstance(artifact, Mapping) and artifact.get("path") == normalized_path
+    ]
+    if len(matches) != 1:
+        code = "artifact_not_found" if not matches else "ambiguous_plan_artifact"
+        raise WorkflowAssetBindingError(code, "install plan does not name one exact artifact")
+    artifact = matches[0]
+    _bound_asset(reference, plan, artifact)
+    return artifact
 
 
 def _validate_plan(plan: InstallPlan, expected_id: str) -> None:

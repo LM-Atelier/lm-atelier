@@ -39,6 +39,24 @@ def _ui_graph(filename: str = "styles/detail.safetensors") -> dict[str, Any]:
     }
 
 
+def _checkpoint_graph(filename: str) -> dict[str, Any]:
+    return {
+        "version": 0.4,
+        "nodes": [
+            {
+                "id": 1,
+                "type": "CheckpointLoaderSimple",
+                "mode": 0,
+                "inputs": [],
+                "outputs": [],
+                "widgets_values": [filename],
+                "properties": {"cnr_id": "comfy-core", "version": "0.28.0"},
+            }
+        ],
+        "links": [],
+    }
+
+
 def _seed_plan(plan_id: str = "plan_lora", *, artifact_path: str | None = None) -> str:
     from local_lm.db import SessionLocal
     from local_lm.models import InstallPlan
@@ -166,6 +184,86 @@ async def test_installing_requires_the_reviewed_hash(client: AsyncClient) -> Non
     # One download per distinct plan; every job is returned, not a fake unit.
     assert len(jobs) == 1
     assert jobs[0]["kind"] == "download"
+
+
+async def test_review_materializes_a_provider_filename_as_the_workflow_runtime_name(
+    client: AsyncClient,
+) -> None:
+    from local_lm.db import SessionLocal
+    from local_lm.models import InstallPlan
+
+    source_path = "provider-checkpoint.safetensors"
+    reference = "workflow-checkpoint.safetensors"
+    source_plan_id = "plan_provider_checkpoint"
+    with SessionLocal() as session:
+        session.add(
+            InstallPlan(
+                id=source_plan_id,
+                provider="civitai",
+                remote_id="101",
+                revision="202",
+                role="image",
+                engine="comfyui",
+                plan_hash="b" * 64,
+                resolver_version=INSTALL_RESOLVER_VERSION,
+                compatibility="supported",
+                artifacts_json=[
+                    {
+                        "path": source_path,
+                        "kind": "checkpoint",
+                        "target_folder": "checkpoints",
+                        "size_bytes": 29,
+                        "sha256": DIGEST,
+                        "required": True,
+                        "reuse": "download",
+                        "source_version_id": "202",
+                        "source_file_id": "301",
+                    }
+                ],
+                runtime_contract_json={},
+                activation_probe_json={},
+                status="planned",
+            )
+        )
+        session.commit()
+    selections = [
+        {
+            "reference_filename": reference,
+            "install_plan_id": source_plan_id,
+            "artifact_path": source_path,
+        }
+    ]
+    reviewed = await client.post(
+        "/api/workflows/packages/assets/review",
+        json={"ui_graph": _checkpoint_graph(reference), "selections": selections},
+    )
+
+    assert reviewed.status_code == 200
+    body = reviewed.json()
+    (asset,) = body["assets"]
+    assert asset["install_plan_id"] != source_plan_id
+    assert asset["artifact_path"] == reference
+    assert asset["sha256"] == DIGEST
+    with SessionLocal() as session:
+        derived = session.get(InstallPlan, asset["install_plan_id"])
+        assert derived is not None
+        assert derived.artifacts_json[0]["source_file_id"] == "301"
+        assert derived.runtime_contract_json["workflow_asset_kind"] == "checkpoint"
+        assert derived.runtime_contract_json["workflow_asset_alias"]["source_artifact_path"] == (
+            source_path
+        )
+
+    queued = await client.post(
+        "/api/workflows/packages/assets/install",
+        json={
+            "ui_graph": _checkpoint_graph(reference),
+            "selections": selections,
+            "binding_plan_hash": body["binding_plan_hash"],
+        },
+    )
+
+    assert queued.status_code == 202
+    assert len(queued.json()) == 1
 
 
 async def test_a_missing_plan_refuses_typed(client: AsyncClient) -> None:

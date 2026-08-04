@@ -311,6 +311,10 @@ from .studio_sessions import (
     studio_session_title,
 )
 from .verified_setup import build_verified_setup, resolve_verified_setup
+from .workflow_asset_aliases import (
+    WorkflowAssetAliasError,
+    materialize_workflow_asset_aliases,
+)
 from .workflow_asset_bindings import (
     WorkflowAssetBindingError,
     WorkflowAssetBindingPlan,
@@ -6699,20 +6703,27 @@ def _rebuild_asset_binding(
         plan.id: plan
         for plan in session.scalars(select(InstallPlan).where(InstallPlan.id.in_(plan_ids))).all()
     }
+    raw_selections = [
+        WorkflowAssetPlanSelection(
+            reference_filename=selection.reference_filename,
+            install_plan_id=selection.install_plan_id,
+            artifact_path=selection.artifact_path,
+        )
+        for selection in selections
+    ]
     try:
-        binding = bind_workflow_assets_to_install_plans(
+        materialized_selections, plans = materialize_workflow_asset_aliases(
+            session,
             analysis.asset_references,
-            [
-                WorkflowAssetPlanSelection(
-                    reference_filename=selection.reference_filename,
-                    install_plan_id=selection.install_plan_id,
-                    artifact_path=selection.artifact_path,
-                )
-                for selection in selections
-            ],
+            raw_selections,
             plans,
         )
-    except WorkflowAssetBindingError as exc:
+        binding = bind_workflow_assets_to_install_plans(
+            analysis.asset_references,
+            materialized_selections,
+            plans,
+        )
+    except (WorkflowAssetAliasError, WorkflowAssetBindingError) as exc:
         raise api_error(422, exc.code, str(exc)) from exc
     return binding, plans
 
@@ -6749,6 +6760,10 @@ async def review_workflow_assets(
     """Bind explicit selections to immutable plans and report the cost."""
 
     binding, _plans = _rebuild_asset_binding(session, payload.ui_graph, payload.selections)
+    # Alias plans are durable confirmation records. The install call rebuilds
+    # the same plan from the original provider selection and must recover the
+    # identical plan id/hash the user reviewed.
+    session.commit()
     return _asset_review_out(binding)
 
 

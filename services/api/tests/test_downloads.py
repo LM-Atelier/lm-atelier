@@ -28,6 +28,7 @@ from local_lm.model_manifests import (
     inspect_repository_metadata,
 )
 from local_lm.model_planner import (
+    INSTALL_RESOLVER_VERSION,
     persist_install_plan,
     resolve_install_plan,
 )
@@ -897,6 +898,133 @@ async def test_lora_plan_installs_as_a_verified_auxiliary_asset(
         assert asset.manifest_json["content_rating"] == "unknown"
         assert stored_plan and stored_plan.status == "activated"
     assert processes.started[0][1] == {"loras": "."}
+    assert processes.stopped == ["media"]
+
+
+async def test_workflow_checkpoint_installs_as_an_inert_verified_asset(
+    settings: Settings,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    settings.prepare()
+    configure_database(settings)
+    init_db()
+    filename = "workflow-checkpoint.safetensors"
+    content = safetensors_bytes(
+        [
+            "model.diffusion_model.input_blocks.0.weight",
+            "first_stage_model.encoder.weight",
+        ]
+    )
+    digest = hashlib.sha256(content).hexdigest()
+    plan_hash = "9" * 64
+    with SessionLocal() as session:
+        plan = InstallPlan(
+            id="plan_workflow_checkpoint",
+            provider="civitai",
+            remote_id="101",
+            revision="202",
+            role="image",
+            engine="comfyui",
+            plan_hash=plan_hash,
+            resolver_version=INSTALL_RESOLVER_VERSION,
+            compatibility="supported",
+            artifacts_json=[
+                {
+                    "path": filename,
+                    "kind": "checkpoint",
+                    "target_folder": "checkpoints",
+                    "size_bytes": len(content),
+                    "sha256": digest,
+                    "required": True,
+                    "reuse": "download",
+                    "source_version_id": "202",
+                    "source_file_id": "301",
+                }
+            ],
+            runtime_contract_json={
+                "auxiliary_kind": None,
+                "workflow_asset_kind": "checkpoint",
+                "comfy_paths": {"checkpoints": "."},
+                "workflow_component_folders": {filename: "checkpoints"},
+            },
+            activation_probe_json={"kind": "workflow_asset", "required": False},
+            status="planned",
+        )
+        session.add(plan)
+        request = DownloadRequest(
+            install_plan_id=plan.id,
+            remote_id=plan.remote_id,
+            revision=plan.revision,
+            role="image",
+            engine="comfyui",
+            allow_patterns=[filename],
+            expected_sha256={filename: digest},
+            comfy_paths={"checkpoints": "."},
+            workflow_asset_kind="checkpoint",
+        )
+        session.add(
+            Job(
+                id="job_workflow_checkpoint",
+                kind=JobKind.DOWNLOAD.value,
+                status=JobStatus.QUEUED.value,
+                payload_json=request.model_dump(mode="json"),
+            )
+        )
+        session.commit()
+
+    class Processes:
+        def __init__(self) -> None:
+            self.started: list[tuple[Path, dict[str, str]]] = []
+            self.stopped: list[str] = []
+
+        def statuses(self) -> list[object]:
+            return [SimpleNamespace(name="media", running=False, profile_id=None)]
+
+        async def start_media(self, model_root: tuple[Path, dict[str, str]]) -> None:
+            self.started.append(model_root)
+
+        async def stop(self, name: str) -> None:
+            self.stopped.append(name)
+
+    class MediaAdapter:
+        def invalidate_object_info_cache(self) -> None:
+            return None
+
+        async def object_info(self) -> dict[str, object]:
+            return {"CheckpointLoaderSimple": {}}
+
+    processes = Processes()
+    manager = DownloadManager(
+        settings,
+        EventBroker(),
+        scheduler=ResourceScheduler(),
+        media_adapter=MediaAdapter(),  # type: ignore[arg-type]
+        processes=processes,  # type: ignore[arg-type]
+    )
+
+    async def download_file(**kwargs: Any) -> str:
+        target = kwargs["staging"] / kwargs["filename"]
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_bytes(content)
+        return str(target)
+
+    monkeypatch.setattr(manager, "_download_file", download_file)
+    await manager._download("job_workflow_checkpoint")
+
+    with SessionLocal() as session:
+        job = session.get(Job, "job_workflow_checkpoint")
+        asset = session.query(ModelAssetInstall).one()
+        stored_plan = session.get(InstallPlan, "plan_workflow_checkpoint")
+        assert job and job.status == JobStatus.COMPLETE.value
+        assert asset.active is True
+        assert asset.verified_at is not None
+        assert asset.kind == "checkpoint"
+        assert asset.manifest_json["comfy_name"] == filename
+        assert asset.manifest_json["workflow_asset_kind"] == "checkpoint"
+        assert session.query(ModelInstall).count() == 0
+        assert stored_plan and stored_plan.status == "activated"
+    assert processes.started[0][0].name.endswith(f"-asset-{plan_hash[:12]}")
+    assert processes.started[0][1] == {"checkpoints": "."}
     assert processes.stopped == ["media"]
 
 
