@@ -1,5 +1,6 @@
 import { useState } from "react";
 import { AccessibleDialog } from "./AccessibleDialog";
+import { WorkflowSelector } from "./WorkflowSelector";
 import { useConfirm } from "./useConfirm";
 import type { Chat, Project } from "./types";
 
@@ -42,6 +43,18 @@ export function ChatManager({
     >
       <label>Title<input value={title} onChange={(event) => setTitle(event.target.value)} /></label>
       <label>Project<select value={projectId} onChange={(event) => setProjectId(event.target.value)}><option value="">Unfiled</option>{projects.filter((project) => !project.archived).map((project) => <option key={project.id} value={project.id}>{project.name}</option>)}</select></label>
+      {/* Which workflow answers each kind of request, chosen here rather
+          than in the header - four more controls above every conversation
+          is not where a setting belongs. */}
+      <section className="workflow-selectors">
+        <h3>Workflows for this chat</h3>
+        <div>
+          <WorkflowSelector scope="chat" scopeId={chat.id} capability="chat" label="Conversation" />
+          <WorkflowSelector scope="chat" scopeId={chat.id} capability="vision" label="Looking at images" />
+          <WorkflowSelector scope="chat" scopeId={chat.id} capability="image" label="Images" />
+          <WorkflowSelector scope="chat" scopeId={chat.id} capability="video" label="Video" />
+        </div>
+      </section>
       <label className="toggle-row"><span className="toggle-copy"><strong>Confirm uncertain media</strong><small>Ask before Auto mode starts an image or video when the planner is unsure.</small></span><input type="checkbox" checked={confirmUncertainMedia} onChange={(event) => setConfirmUncertainMedia(event.target.checked)} /></label>
       <label className="toggle-row"><span className="toggle-copy"><strong>Review image edits</strong><small>Check the result locally and retry once when the requested change is missing.</small></span><input type="checkbox" checked={verifyImageEdits} onChange={(event) => setVerifyImageEdits(event.target.checked)} /></label>
       <label className="toggle-row"><span className="toggle-copy"><strong>Compose visual prompts</strong><small>When a request asks to picture something written earlier, rewrite that passage as one scene description before generating.</small></span><input type="checkbox" checked={compileVisualPrompts} onChange={(event) => setCompileVisualPrompts(event.target.checked)} /></label>
