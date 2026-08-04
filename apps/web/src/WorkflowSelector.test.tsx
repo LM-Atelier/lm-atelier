@@ -137,6 +137,65 @@ describe("WorkflowSelector", () => {
     ).toBeInTheDocument();
   });
 
+  it("shows an exact project revision as the active compatibility choice", async () => {
+    vi.mocked(api.workflowFamilies).mockResolvedValue([]);
+    vi.mocked(api.projectWorkflowSelections).mockResolvedValue([
+      {
+        selector_capability: "image",
+        mode: "revision",
+        workflow_family_id: null,
+        workflow_revision_id: "rev-legacy",
+        legacy_profile_id: null,
+      },
+    ]);
+    renderSelector("project");
+
+    await waitFor(() =>
+      expect(screen.getByRole("combobox")).toHaveValue("compatibility:revision"),
+    );
+    expect(screen.getByRole("option", { name: "Exact workflow revision (existing choice)" }))
+      .toBeInTheDocument();
+    expect(screen.getByText(/Pinned to one exact revision/)).toBeInTheDocument();
+  });
+
+  it("shows a legacy chat profile instead of claiming the project is active", async () => {
+    vi.mocked(api.workflowFamilies).mockResolvedValue([]);
+    vi.mocked(api.chatWorkflowSelections).mockResolvedValue([
+      {
+        selector_capability: "image",
+        mode: "legacy",
+        workflow_family_id: null,
+        workflow_revision_id: null,
+        legacy_profile_id: "profile-legacy",
+      },
+    ]);
+    renderSelector();
+
+    await waitFor(() =>
+      expect(screen.getByRole("combobox")).toHaveValue("compatibility:legacy"),
+    );
+    expect(screen.getByRole("option", { name: "Existing model setup" })).toBeInTheDocument();
+    expect(screen.getByText(/Using the model previously configured here/)).toBeInTheDocument();
+  });
+
+  it("keeps an unavailable selected family visible", async () => {
+    vi.mocked(api.workflowFamilies).mockResolvedValue([]);
+    vi.mocked(api.chatWorkflowSelections).mockResolvedValue([
+      {
+        selector_capability: "image",
+        mode: "family",
+        workflow_family_id: "family-missing",
+        workflow_revision_id: null,
+        legacy_profile_id: null,
+      },
+    ]);
+    renderSelector();
+
+    await waitFor(() => expect(screen.getByRole("combobox")).toHaveValue("family-missing"));
+    expect(screen.getByRole("option", { name: "Selected workflow (unavailable)" }))
+      .toBeInTheDocument();
+  });
+
   it("warns when the chosen family cannot run at all", async () => {
     const blocked = family({
       variants: [

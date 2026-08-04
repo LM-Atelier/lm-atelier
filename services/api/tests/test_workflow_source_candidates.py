@@ -46,7 +46,7 @@ def test_a_model_link_without_a_version_is_not_installable() -> None:
     # A model page names a thing; a version names something installable.
     assert parse_source_url("https://civitai.com/models/1662740", allowed_hosts=HOSTS) is None
     candidate = parse_source_url(
-        "https://civitai.com/models/1662740/lenovo?modelVersionId=3075606", allowed_hosts=HOSTS
+        "https://civitai.com/models/1662740/portrait?modelVersionId=3075606", allowed_hosts=HOSTS
     )
     assert candidate is not None
     assert candidate.provider == "civitai"
@@ -97,7 +97,7 @@ def test_candidates_attach_to_the_file_their_text_names() -> None:
     found = collect_source_candidates(
         workflow,
         allowed_hosts=HOSTS,
-        asset_filenames=["qwen_image_vae.safetensors", "Detailer-KREA2.safetensors"],
+        asset_filenames=["qwen_image_vae.safetensors", "detail-slider.safetensors"],
     )
 
     assert found["qwen_image_vae.safetensors"][0].remote_id == "Comfy-Org/Qwen"
@@ -127,11 +127,11 @@ def test_an_ambiguous_note_never_guesses_which_file_it_means() -> None:
 
 
 def test_a_stem_mention_still_matches_its_file() -> None:
-    workflow = {"nodes": [_note("Detailer-KREA2 https://civitai.com/models/9/d?modelVersionId=11")]}
+    workflow = {"nodes": [_note("detail-slider https://civitai.com/models/9/d?modelVersionId=11")]}
     found = collect_source_candidates(
-        workflow, allowed_hosts=HOSTS, asset_filenames=["Detailer-KREA2.safetensors"]
+        workflow, allowed_hosts=HOSTS, asset_filenames=["detail-slider.safetensors"]
     )
-    assert found["Detailer-KREA2.safetensors"][0].remote_id == "11"
+    assert found["detail-slider.safetensors"][0].remote_id == "11"
 
 
 def test_duplicates_collapse_and_the_scan_is_bounded() -> None:
@@ -149,8 +149,8 @@ def test_a_graph_without_notes_yields_nothing() -> None:
 def test_display_named_notes_still_yield_usable_suggestions() -> None:
     """The realistic shape: authors name models, not files.
 
-    A note reads "Lenovo UltraReal <link>" while the file is
-    lenovo_krea2.safetensors. Nothing there licenses a binding - but the
+    A note reads "Portrait Finish <link>" while the file is
+    portrait_finish.safetensors. Nothing there licenses a binding - but the
     link is exactly what the user needs, so it is offered for them to
     assign rather than discarded or guessed at.
     """
@@ -158,11 +158,11 @@ def test_display_named_notes_still_yield_usable_suggestions() -> None:
     workflow = {
         "nodes": [
             _note(
-                "## LoRAs\n\nLenovo UltraReal\nhttps://civitai.com/models/1662740/l?modelVersionId=3075606",
+                "## LoRAs\n\nPortrait Finish\nhttps://civitai.com/models/1662740/l?modelVersionId=3075606",
                 1,
             ),
             _note(
-                "NiceGirls UltraReal\nhttps://civitai.com/models/1862761/n?modelVersionId=3075498",
+                "Soft Focus\nhttps://civitai.com/models/1862761/n?modelVersionId=3075498",
                 2,
             ),
         ]
@@ -171,7 +171,7 @@ def test_display_named_notes_still_yield_usable_suggestions() -> None:
     found = collect_source_candidates(
         workflow,
         allowed_hosts=HOSTS,
-        asset_filenames=["lenovo_krea2.safetensors", "nicegirls_krea2.safetensors"],
+        asset_filenames=["portrait_finish.safetensors", "soft_focus.safetensors"],
     )
 
     # No filename is named, so nothing is bound...
@@ -186,7 +186,7 @@ def test_one_named_file_does_not_swallow_a_neighbors_link() -> None:
     workflow = {
         "nodes": [
             _note(
-                "Lenovo UltraReal\nhttps://civitai.com/models/1/l?modelVersionId=2\n\n"
+                "Portrait Finish\nhttps://civitai.com/models/1/l?modelVersionId=2\n\n"
                 "VAE qwen_image_vae.safetensors "
                 "https://huggingface.co/Comfy-Org/Qwen/resolve/main/qwen_image_vae.safetensors"
             )
@@ -196,7 +196,7 @@ def test_one_named_file_does_not_swallow_a_neighbors_link() -> None:
     found = collect_source_candidates(
         workflow,
         allowed_hosts=HOSTS,
-        asset_filenames=["lenovo_krea2.safetensors", "qwen_image_vae.safetensors"],
+        asset_filenames=["portrait_finish.safetensors", "qwen_image_vae.safetensors"],
     )
 
     assert [c.remote_id for c in found["qwen_image_vae.safetensors"]] == ["Comfy-Org/Qwen"]

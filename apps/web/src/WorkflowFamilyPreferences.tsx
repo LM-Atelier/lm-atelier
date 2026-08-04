@@ -15,6 +15,13 @@ const CAPABILITIES: Array<{ key: WorkflowSelectorCapability; label: string }> = 
   { key: "video", label: "Video" },
 ];
 
+const OPERATIONS: Record<WorkflowSelectorCapability, string[]> = {
+  chat: ["text"],
+  vision: ["text"],
+  image: ["text_to_image", "image_to_image"],
+  video: ["text_to_video", "image_to_video"],
+};
+
 /** Decide where a workflow family is offered, and where it leads.
  *
  * Two separate questions that look like one. Being offered for a kind of
@@ -58,7 +65,9 @@ export function WorkflowFamilyPreferences({ family }: { family: WorkflowFamily }
         <ErrorCallout message={refusal ?? (save.error as Error).message} />
       )}
       <ul>
-        {CAPABILITIES.map(({ key, label }) => {
+        {CAPABILITIES.filter(({ key }) => family.variants.some(
+          (variant) => OPERATIONS[key].includes(variant.operation),
+        )).map(({ key, label }) => {
           const preference = known(key);
           return (
             <li key={key}>

@@ -70,7 +70,7 @@ def collect_source_candidates(
     suggestion, because guessing which unnamed link answers which file is
     exactly the substitution this whole path refuses to make.
 
-    In practice most authors write display names ("Lenovo UltraReal") rather
+    In practice most authors write display names ("Portrait Finish") rather
     than filenames, so the general bucket is the common case - and that is
     the point. A list of sources the author actually recorded, for the user
     to assign, beats a filename search that returns nothing, and beats a
@@ -219,7 +219,7 @@ def _matching_filename(text: str, filenames: Sequence[str]) -> str | None:
     if len(matches) == 1:
         return matches[0]
     if not matches:
-        # A stem match catches "Detailer-KREA2" written without .safetensors.
+        # A stem match catches "detail-slider" written without .safetensors.
         stems = [
             name for name in filenames if name and name.rsplit(".", 1)[0].casefold() in lowered
         ]
