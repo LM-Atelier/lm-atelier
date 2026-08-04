@@ -17,8 +17,10 @@ import psutil
 import pytest
 from sqlalchemy.orm import object_session
 
+import local_lm.comfy_registry_interpreter as registry_interpreter_module
 from local_lm.comfy_editor_bridge import BRIDGE_DIRECTORY_NAME
 from local_lm.comfy_registry_installs import ComfyRegistryLaunchContract
+from local_lm.comfy_registry_runtime import ComfyRegistryRuntimeDistribution
 from local_lm.custom_nodes import CustomNodeManager
 from local_lm.db import SessionLocal
 from local_lm.events import EventBroker
@@ -1719,6 +1721,7 @@ async def test_media_start_uses_only_verified_registry_overlay_contract(
     settings.comfy_executable = executable
     supervisor = ProcessSupervisor(settings)
     captured: dict[str, object] = {}
+    runtime_baseline = (ComfyRegistryRuntimeDistribution("torch", "2.13.0+cu130"),)
 
     async def trusted_nodes() -> list[str]:
         return ["lm-atelier-node_reviewed"]
@@ -1748,7 +1751,17 @@ async def test_media_start_uses_only_verified_registry_overlay_contract(
             ("lm-atelier-registry_example",),
             (site_packages,),
             ("ExampleLoader",),
+            runtime_baseline,
         ),
+    )
+
+    async def probe_runtime(_executable: Path):  # type: ignore[no-untyped-def]
+        return {}, (), runtime_baseline
+
+    monkeypatch.setattr(
+        registry_interpreter_module,
+        "probe_comfy_registry_runtime_target",
+        probe_runtime,
     )
     monkeypatch.setattr(supervisor, "_write_comfy_model_paths", lambda: model_paths)
     monkeypatch.setattr(supervisor, "_replace", replace)
@@ -1766,6 +1779,43 @@ async def test_media_start_uses_only_verified_registry_overlay_contract(
     assert command[4:6] == [str(site_packages.resolve()), str((runtime / "main.py").resolve())]
     assert captured["environment_overrides"] is None
     assert callable(captured["ready_check"])
+
+
+async def test_media_start_refuses_registry_overlay_after_runtime_drift(
+    settings,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,  # type: ignore[no-untyped-def]
+) -> None:
+    runtime = tmp_path / "comfyui"
+    runtime.mkdir()
+    (runtime / "main.py").touch()
+    executable = tmp_path / "python.exe"
+    executable.touch()
+    settings.comfy_directory = runtime
+    settings.comfy_executable = executable
+    supervisor = ProcessSupervisor(settings)
+    prepared = (ComfyRegistryRuntimeDistribution("torch", "2.13.0+cu130"),)
+
+    async def trusted_nodes() -> list[str]:
+        return []
+
+    async def drifted_runtime(_executable: Path):  # type: ignore[no-untyped-def]
+        return {}, (), (ComfyRegistryRuntimeDistribution("torch", "2.14.0+cu130"),)
+
+    monkeypatch.setattr(supervisor, "_trusted_comfy_node_folders", trusted_nodes)
+    monkeypatch.setattr(
+        supervisor,
+        "_trusted_comfy_registry_contract",
+        lambda: ComfyRegistryLaunchContract((), (tmp_path,), (), prepared),
+    )
+    monkeypatch.setattr(
+        registry_interpreter_module,
+        "probe_comfy_registry_runtime_target",
+        drifted_runtime,
+    )
+
+    with pytest.raises(RuntimeError, match="changed after workflow dependencies"):
+        await supervisor.start_media()
 
 
 def test_registry_overlay_bootstrap_imports_without_executing_pth(tmp_path: Path) -> None:

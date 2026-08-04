@@ -19,6 +19,12 @@ from pathlib import Path, PurePosixPath
 from packaging.utils import canonicalize_name
 from packaging.version import InvalidVersion, Version
 
+from .comfy_registry_runtime import (
+    ComfyRegistryRuntimeDistribution,
+    ComfyRegistryRuntimeError,
+    canonical_comfy_registry_runtime_distributions,
+    comfy_registry_runtime_distribution_payload,
+)
 from .comfy_registry_wheel_artifacts import ComfyRegistryWheelArtifact
 from .comfy_registry_wheel_closure import (
     ComfyRegistryWheelClosure,
@@ -61,6 +67,7 @@ class ComfyRegistryWheelEnvironmentReport:
     file_count: int
     total_bytes: int
     distributions: tuple[ComfyRegistryWheelEnvironmentDistribution, ...]
+    runtime_distributions: tuple[ComfyRegistryRuntimeDistribution, ...] = ()
 
 
 async def assemble_comfy_registry_wheel_environment(
@@ -172,22 +179,70 @@ def verify_comfy_registry_wheel_environment(
         raise ComfyRegistryWheelEnvironmentError(
             "invalid_environment_manifest", "Wheel environment manifest is invalid"
         ) from exc
-    if not isinstance(payload, dict) or set(payload) != {
-        "version",
-        "closure_sha256",
-        "artifact_count",
-        "file_count",
-        "total_bytes",
-        "distributions",
-        "inventory",
+    if not isinstance(payload, dict) or frozenset(payload) not in {
+        frozenset(
+            {
+                "version",
+                "closure_sha256",
+                "artifact_count",
+                "file_count",
+                "total_bytes",
+                "distributions",
+                "inventory",
+            }
+        ),
+        frozenset(
+            {
+                "version",
+                "closure_sha256",
+                "artifact_count",
+                "file_count",
+                "total_bytes",
+                "distributions",
+                "runtime_distributions",
+                "inventory",
+            }
+        ),
     }:
         raise ComfyRegistryWheelEnvironmentError(
             "invalid_environment_manifest", "Wheel environment manifest shape is invalid"
         )
     artifact_count = _count(payload["artifact_count"], "artifact")
-    if payload["version"] != 1 or payload["closure_sha256"] != closure_sha256:
+    version = payload["version"]
+    if (
+        version not in {1, 2}
+        or (version == 1) != ("runtime_distributions" not in payload)
+        or payload["closure_sha256"] != closure_sha256
+    ):
         raise ComfyRegistryWheelEnvironmentError(
             "invalid_environment_manifest", "Wheel environment manifest identity is invalid"
+        )
+    runtime_value = payload.get("runtime_distributions", [])
+    if not isinstance(runtime_value, list):
+        raise ComfyRegistryWheelEnvironmentError(
+            "invalid_environment_manifest",
+            "Wheel environment runtime baseline is invalid",
+        )
+    try:
+        runtime_distributions = canonical_comfy_registry_runtime_distributions(
+            tuple(
+                ComfyRegistryRuntimeDistribution(item["name"], item["version"])
+                for item in runtime_value
+                if isinstance(item, dict)
+                and set(item) == {"name", "version"}
+                and isinstance(item["name"], str)
+                and isinstance(item["version"], str)
+            )
+        )
+    except (ComfyRegistryRuntimeError, TypeError) as exc:
+        raise ComfyRegistryWheelEnvironmentError(
+            "invalid_environment_manifest",
+            "Wheel environment runtime baseline is invalid",
+        ) from exc
+    if len(runtime_distributions) != len(runtime_value):
+        raise ComfyRegistryWheelEnvironmentError(
+            "invalid_environment_manifest",
+            "Wheel environment runtime baseline is invalid",
         )
     inventory, file_count, total_bytes, distributions = _scan_environment(site_packages)
     verified_payload = _environment_payload(
@@ -197,6 +252,7 @@ def verify_comfy_registry_wheel_environment(
         total_bytes,
         distributions,
         inventory,
+        runtime_distributions=runtime_distributions,
     )
     canonical = _encode_environment_payload(verified_payload)
     if not hmac.compare_digest(canonical, encoded):
@@ -210,6 +266,7 @@ def verify_comfy_registry_wheel_environment(
         file_count,
         total_bytes,
         distributions,
+        runtime_distributions,
     )
 
 
@@ -508,6 +565,7 @@ def _audit_environment(
         total_bytes,
         resolved,
         inventory,
+        runtime_distributions=closure.runtime_distributions,
     )
     encoded = _encode_environment_payload(payload)
     environment_sha256 = hashlib.sha256(encoded).hexdigest()
@@ -519,6 +577,7 @@ def _audit_environment(
             file_count,
             total_bytes,
             resolved,
+            closure.runtime_distributions,
         ),
         encoded,
     )
@@ -620,9 +679,12 @@ def _environment_payload(
     total_bytes: int,
     distributions: Sequence[ComfyRegistryWheelEnvironmentDistribution],
     inventory: Sequence[dict[str, object]],
+    *,
+    runtime_distributions: Sequence[ComfyRegistryRuntimeDistribution] = (),
 ) -> dict[str, object]:
-    return {
-        "version": 1,
+    runtime = canonical_comfy_registry_runtime_distributions(runtime_distributions)
+    payload: dict[str, object] = {
+        "version": 2 if runtime else 1,
         "closure_sha256": closure_sha256,
         "artifact_count": artifact_count,
         "file_count": file_count,
@@ -633,6 +695,9 @@ def _environment_payload(
         ],
         "inventory": list(inventory),
     }
+    if runtime:
+        payload["runtime_distributions"] = comfy_registry_runtime_distribution_payload(runtime)
+    return payload
 
 
 def _encode_environment_payload(payload: object) -> bytes:
