@@ -228,6 +228,182 @@ async def test_a_civitai_preflight_composes_into_the_download_manager(
     assert extra == {"source_version_id": "201"}
 
 
+async def test_civitai_preflight_keeps_the_provider_primary_duplicate(
+    client: AsyncClient, app: FastAPI, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    primary_sha = "b" * 64
+    alternate_sha = "c" * 64
+    shared = {
+        "filename": "duplicate.safetensors",
+        "source_version_id": "201",
+        "format": "SafeTensor",
+        "pickle_scan_result": "Success",
+        "virus_scan_result": "Success",
+        "metadata": {
+            "provider": "civitai",
+            "source_model_id": "101",
+            "source_version_id": "201",
+            "model_type": "LORA",
+            "content_rating": "general",
+        },
+    }
+    detail: dict[str, Any] = {
+        "model": {
+            "provider": "civitai",
+            "remote_id": "201",
+            "name": "Duplicate variants",
+            "compatibility": "supported",
+            "required_runtime": "comfyui",
+            "content_rating": "general",
+        },
+        "revision": "201",
+        "files": [
+            {
+                **shared,
+                "size": 24_000,
+                "sha256": alternate_sha,
+                "source_file_id": "302",
+                "source_file_type": "Other",
+                "source_file_precision": "bf16",
+            },
+            {
+                **shared,
+                "size": 12_000,
+                "sha256": primary_sha,
+                "source_file_id": "301",
+                "source_file_type": "Model",
+                "source_file_precision": "fp8",
+            },
+        ],
+    }
+
+    async def canned_inspect(
+        self: CivitaiCatalog, item_id: str, revision: str = "main", role: str | None = None
+    ) -> dict[str, Any]:
+        return detail
+
+    monkeypatch.setattr(CivitaiCatalog, "inspect", canned_inspect)
+    monkeypatch.setattr(app.state.services.settings, "civitai_token", "vaulted-token")
+
+    automatic = await client.post(
+        "/api/catalog/preflight",
+        params={"source": "civitai", "id": "201"},
+        json={
+            "revision": "201",
+            "role": "image",
+            "engine": "comfyui",
+            "selected_files": [],
+            "auxiliary_kind": "lora",
+        },
+    )
+    assert automatic.status_code == 200
+    automatic_payload = automatic.json()
+    assert automatic_payload["can_install"] is True
+    assert automatic_payload["selected_files"] == ["duplicate.safetensors"]
+    (artifact,) = automatic_payload["install_plan"]["artifacts_json"]
+    assert artifact["source_file_id"] == "301"
+    assert artifact["sha256"] == primary_sha
+    assert artifact["size_bytes"] == 12_000
+
+    ambiguous = await client.post(
+        "/api/catalog/preflight",
+        params={"source": "civitai", "id": "201"},
+        json={
+            "revision": "201",
+            "role": "image",
+            "engine": "comfyui",
+            "selected_files": ["duplicate.safetensors"],
+            "auxiliary_kind": "lora",
+        },
+    )
+    assert ambiguous.status_code == 200
+    ambiguous_payload = ambiguous.json()
+    assert ambiguous_payload["can_install"] is False
+    selection = next(check for check in ambiguous_payload["checks"] if check["id"] == "selection")
+    assert selection["status"] == "block"
+    assert "exact file variant" in selection["detail"]
+
+
+async def test_civitai_automatic_selection_skips_an_unsafe_unique_file(
+    client: AsyncClient, app: FastAPI, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    safe_sha = "d" * 64
+    detail: dict[str, Any] = {
+        "model": {
+            "provider": "civitai",
+            "remote_id": "201",
+            "name": "Mixed files",
+            "compatibility": "supported",
+            "required_runtime": "comfyui",
+            "content_rating": "general",
+        },
+        "revision": "201",
+        "files": [
+            {
+                "filename": "model.safetensors",
+                "size": 50_000,
+                "sha256": None,
+                "source_file_id": "302",
+                "source_version_id": "201",
+                "source_file_type": "Model",
+                "pickle_scan_result": "Danger",
+                "virus_scan_result": "Success",
+                "metadata": {
+                    "provider": "civitai",
+                    "source_model_id": "101",
+                    "source_version_id": "201",
+                    "model_type": "LORA",
+                    "content_rating": "general",
+                },
+            },
+            {
+                "filename": "safe.safetensors",
+                "size": 10_000,
+                "sha256": safe_sha,
+                "source_file_id": "301",
+                "source_version_id": "201",
+                "source_file_type": "Other",
+                "pickle_scan_result": "Success",
+                "virus_scan_result": "Success",
+                "metadata": {
+                    "provider": "civitai",
+                    "source_model_id": "101",
+                    "source_version_id": "201",
+                    "model_type": "LORA",
+                    "content_rating": "general",
+                },
+            },
+        ],
+    }
+
+    async def canned_inspect(
+        self: CivitaiCatalog, item_id: str, revision: str = "main", role: str | None = None
+    ) -> dict[str, Any]:
+        return detail
+
+    monkeypatch.setattr(CivitaiCatalog, "inspect", canned_inspect)
+    monkeypatch.setattr(app.state.services.settings, "civitai_token", "vaulted-token")
+
+    response = await client.post(
+        "/api/catalog/preflight",
+        params={"source": "civitai", "id": "201"},
+        json={
+            "revision": "201",
+            "role": "image",
+            "engine": "comfyui",
+            "selected_files": [],
+            "auxiliary_kind": "lora",
+        },
+    )
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["can_install"] is True
+    assert payload["selected_files"] == ["safe.safetensors"]
+    (artifact,) = payload["install_plan"]["artifacts_json"]
+    assert artifact["source_file_id"] == "301"
+    assert artifact["sha256"] == safe_sha
+
+
 async def test_installed_asset_manifests_feed_the_workflow_inventory(
     client: AsyncClient,
 ) -> None:

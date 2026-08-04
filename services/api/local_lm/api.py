@@ -146,7 +146,7 @@ from .orchestrator import (
 )
 from .ordered_planning import OrderedPlanConfirmationRequired
 from .platforms import list_platform_matrix
-from .preflight import assess_catalog_install
+from .preflight import assess_catalog_install, catalog_file_index
 from .profile_service import (
     AUTO_PROFILE_ID,
     LAST_CHAT_PROFILE_KEY,
@@ -3072,7 +3072,11 @@ async def resolve_catalog_preflight(
             if path.casefold().endswith((".gguf", ".safetensors"))
         ][:8]
 
-        file_metadata = {str(item.get("filename") or ""): item for item in resolved_detail.files}
+        file_metadata, _ambiguous_files = catalog_file_index(
+            resolved_detail.files,
+            provider=source,
+            prefer_duplicate_variants=not payload.selected_files,
+        )
 
         async def fetch_prefix(path: str) -> tuple[str, bytes] | None:
             if not callable(inspect_prefix):
@@ -3158,7 +3162,11 @@ async def resolve_catalog_preflight(
                         for component in inspection.components
                     ),
                 )
-        files = {str(item.get("filename") or ""): item for item in resolved_detail.files}
+        files, _ambiguous_files = catalog_file_index(
+            resolved_detail.files,
+            provider=source,
+            prefer_duplicate_variants=not payload.selected_files,
+        )
         selected_metadata = [
             files.get(
                 filename,

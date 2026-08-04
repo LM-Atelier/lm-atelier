@@ -21,6 +21,8 @@ from .schemas import (
 )
 
 _BLOCKED_SUFFIXES = {".bin", ".pt", ".pth", ".ckpt", ".pkl", ".pickle"}
+_CIVITAI_ID = re.compile(r"^[1-9][0-9]{0,11}$")
+_SHA256 = re.compile(r"^[0-9a-fA-F]{64}$")
 
 
 _VLLM_SNAPSHOT_FILES = {
@@ -41,6 +43,68 @@ _VLLM_SNAPSHOT_FILES = {
     "video_preprocessor_config.json",
     "vocab.json",
 }
+
+
+def catalog_file_index(
+    files: list[dict[str, Any]],
+    *,
+    provider: str,
+    prefer_duplicate_variants: bool,
+) -> tuple[dict[str, dict[str, Any]], frozenset[str]]:
+    """Index catalog paths without silently discarding provider variants."""
+
+    groups: dict[str, list[dict[str, Any]]] = {}
+    for item in files:
+        filename = str(item.get("filename") or "")
+        groups.setdefault(filename, []).append(item)
+
+    indexed: dict[str, dict[str, Any]] = {}
+    ambiguous: set[str] = set()
+    for filename, candidates in groups.items():
+        identities = {
+            (
+                str(item.get("source_file_id") or ""),
+                str(item.get("sha256") or "").casefold(),
+                item.get("size"),
+            )
+            for item in candidates
+        }
+        if len(identities) > 1:
+            ambiguous.add(filename)
+        if provider == "civitai" and prefer_duplicate_variants:
+            indexed[filename] = min(candidates, key=_civitai_variant_rank)
+        else:
+            # The caller refuses distinct duplicates before a plan can become
+            # installable. Keeping the first item makes blocked-plan evidence
+            # deterministic instead of preserving the old last-write-wins bug.
+            indexed[filename] = candidates[0]
+    return indexed, frozenset(ambiguous)
+
+
+def _safe_civitai_file(item: dict[str, Any]) -> bool:
+    size = item.get("size")
+    return (
+        PurePosixPath(str(item.get("filename") or "")).suffix.casefold() == ".safetensors"
+        and isinstance(size, int)
+        and not isinstance(size, bool)
+        and size > 0
+        and bool(_SHA256.fullmatch(str(item.get("sha256") or "")))
+        and bool(_CIVITAI_ID.fullmatch(str(item.get("source_file_id") or "")))
+        and str(item.get("pickle_scan_result") or "").casefold() == "success"
+        and str(item.get("virus_scan_result") or "").casefold() == "success"
+    )
+
+
+def _civitai_variant_rank(item: dict[str, Any]) -> tuple[int, int, int, str, str]:
+    size = item.get("size")
+    provider_primary = str(item.get("source_file_type") or "").casefold() == "model"
+    return (
+        0 if _safe_civitai_file(item) else 1,
+        0 if provider_primary else 1,
+        size if isinstance(size, int) and not isinstance(size, bool) and size > 0 else 2**63 - 1,
+        str(item.get("source_file_id") or ""),
+        str(item.get("sha256") or ""),
+    )
 
 
 def _automatic_vllm_selection(files: list[dict[str, Any]]) -> list[str]:
@@ -150,8 +214,13 @@ def assess_catalog_install(
     system: SystemInfo,
 ) -> CatalogPreflight:
     resolved_revision = detail.revision
-    files = {str(item.get("filename") or ""): item for item in detail.files}
+    provider = detail.model.provider or "huggingface"
     requested_selected = list(request.selected_files)
+    files, ambiguous_files = catalog_file_index(
+        detail.files,
+        provider=provider,
+        prefer_duplicate_variants=not requested_selected,
+    )
     selected = list(dict.fromkeys(requested_selected))
     checks: list[CatalogPreflightCheck] = []
     selection_error: str | None = None
@@ -161,15 +230,29 @@ def assess_catalog_install(
         selection_error = (
             "The file selection contains duplicate paths. Run the install check again."
         )
+    elif requested_selected and any(name in ambiguous_files for name in selected):
+        selection_error = (
+            "Several provider files share the selected filename. "
+            "Choose an exact file variant and run the install check again."
+        )
+    elif not requested_selected and provider != "civitai" and ambiguous_files:
+        selection_error = (
+            "Several catalog files share one path. The provider must return a unique file identity."
+        )
     elif not selected:
         try:
+            automatic_files = (
+                {name: item for name, item in files.items() if _safe_civitai_file(item)}
+                if provider == "civitai"
+                else files
+            )
             selected = (
                 _automatic_vllm_selection(detail.files)
                 if request.role == "chat" and request.engine == "vllm"
                 else automatic_gguf_selection(detail.files, system.memory_total_bytes)
                 if request.role == "chat"
                 else _automatic_selection(
-                    files,
+                    automatic_files,
                     request.role,
                     system.memory_total_bytes,
                     request.auxiliary_kind,
@@ -177,6 +260,14 @@ def assess_catalog_install(
             )
         except GGUFSelectionError as exc:
             selection_error = str(exc)
+    if (
+        selection_error is None
+        and provider == "civitai"
+        and any(name in files and not _safe_civitai_file(files[name]) for name in selected)
+    ):
+        selection_error = (
+            "The selected CivitAI file is not a scan-cleared, hash-pinned safetensors file."
+        )
     if (
         request.role == "chat"
         and request.engine == "llama.cpp"
@@ -331,7 +422,6 @@ def assess_catalog_install(
         )
     )
 
-    provider = detail.model.provider or "huggingface"
     # The download manager authenticates every CivitAI transfer with the
     # vaulted token, gated or not - a public card without one would pass here
     # and fail mid-queue. Hugging Face keeps its gated-only requirement.
