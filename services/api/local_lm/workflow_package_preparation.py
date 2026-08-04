@@ -68,7 +68,7 @@ class PreparationContext:
         return cls(
             python_executable=Path(settings.comfy_executable),
             custom_node_root=Path(settings.comfy_directory) / "custom_nodes",
-            state_root=Path(settings.data_dir) / "registry",
+            state_root=settings.registry_dir,
         )
 
 

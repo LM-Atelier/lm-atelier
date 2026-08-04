@@ -218,25 +218,30 @@ async def test_inactive_direct_marker_is_not_fetched() -> None:
 
 
 @pytest.mark.asyncio
-async def test_unpinned_direct_dependency_refuses_before_network() -> None:
-    called = False
+async def test_a_directly_declared_range_resolves_like_a_transitive_one() -> None:
+    """The same requirement must resolve wherever it is declared.
 
-    async def projects(names: Sequence[str]) -> Mapping[str, object]:
-        nonlocal called
-        called = True
-        return {}
+    `alpha>=1` arriving as a package's own dependency was refused, while the
+    identical requirement arriving through another package's metadata resolved
+    to its newest compatible version. Ranges are what packages ordinarily
+    declare, so the direct path refusing them made most packages unusable.
+    """
+    alpha, alpha_metadata = _project("alpha", [("1.0", []), ("2.0", [])])
+    sources = _Sources({"alpha": alpha}, alpha_metadata)
 
-    with pytest.raises(ComfyRegistryWheelClosureDriverError) as raised:
-        await drive_comfy_registry_wheel_closure(
-            _resolution("alpha>=1"),
-            project_fetcher=projects,
-            metadata_fetcher=lambda manifest: asyncio.sleep(0, result={}),
-            marker_environment=_environment(),
-            supported_tags=(_TAG,),
-        )
+    result = await drive_comfy_registry_wheel_closure(
+        _resolution("alpha>=1"),
+        project_fetcher=sources.fetch_projects,
+        metadata_fetcher=sources.fetch_metadata,
+        marker_environment=_environment(),
+        supported_tags=(_TAG,),
+    )
 
-    assert raised.value.code == "version_resolution_required"
-    assert called is False
+    assert result.closure.complete is True
+    assert [
+        (artifact.name, artifact.version) for artifact in result.closure.manifest.artifacts
+    ] == [("alpha", "2.0")]
+    assert sources.project_calls == [("alpha",)]
 
 
 @pytest.mark.asyncio
