@@ -112,8 +112,6 @@ def test_rejects_direct_local_and_vcs_urls(declaration: str) -> None:
     "declarations",
     [
         "example==1",
-        [""],
-        ["-r requirements.txt"],
         ["example==1\nother==2"],
         [123],
     ],
@@ -121,6 +119,40 @@ def test_rejects_direct_local_and_vcs_urls(declaration: str) -> None:
 def test_rejects_invalid_dependency_declarations(declarations: object) -> None:
     expected = "invalid_dependency_list" if isinstance(declarations, str) else "invalid_dependency"
     _assert_error(expected, declarations)
+
+
+@pytest.mark.parametrize(
+    "declaration",
+    ["-r requirements.txt", "-e .", "--index-url https://example.com/simple"],
+)
+def test_rejects_installer_options_with_their_own_code(declaration: str) -> None:
+    """Dropping one of these would install something other than what was declared."""
+    _assert_error("dependency_option_unsupported", [declaration])
+
+
+@pytest.mark.parametrize(
+    "declarations",
+    [
+        [""],
+        ["   "],
+        ["# pinned for the CUDA build"],
+        ["  # indented comment"],
+    ],
+)
+def test_ignores_what_a_requirements_file_carries_but_does_not_declare(
+    declarations: list[str],
+) -> None:
+    """Publishers dump a requirements file here, furniture and all."""
+    plan = plan_comfy_registry_dependencies(declarations)
+
+    assert plan.dependencies == ()
+    assert plan.artifact_resolution_required is False
+
+
+def test_an_inline_comment_does_not_make_a_requirement_invalid() -> None:
+    plan = plan_comfy_registry_dependencies(["numpy>=1.26  # needed by the sampler", ""])
+
+    assert [dependency.requirement for dependency in plan.dependencies] == ["numpy>=1.26"]
 
 
 def test_rejects_too_many_dependencies() -> None:
