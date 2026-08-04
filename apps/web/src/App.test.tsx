@@ -884,7 +884,12 @@ describe("App", () => {
   it("searches and manages chats from the workspace sidebar", async () => {
     const stamp = "2026-07-22T00:00:00Z";
     vi.mocked(api.projects).mockResolvedValue([{ id: "project-1", name: "Research", description: "", instructions: "", pinned: false, archived: false, image_workflow_revision_id: null, video_workflow_revision_id: null, created_at: stamp, updated_at: stamp }]);
-    const chat = { id: "chat-1", project_id: "project-1", title: "Model notes", pinned: false, archived: false, routing_mode: "auto" as const, confirm_uncertain_media: false, active_chat_profile_id: null, active_image_profile_id: null, active_video_profile_id: null, active_head_message_id: null, vision_settings_json: { max_images: 4 }, created_at: stamp, updated_at: stamp };
+    const chat = {
+      id: "chat-1", project_id: "project-1", title: "Model notes", pinned: false, archived: false,
+      routing_mode: "auto" as const, confirm_uncertain_media: false, active_chat_profile_id: null,
+      active_image_profile_id: null, active_video_profile_id: null, active_head_message_id: null,
+      vision_settings_json: { max_images: 4 }, created_at: stamp, updated_at: stamp,
+    };
     vi.mocked(api.chats).mockResolvedValue([chat]);
     vi.mocked(api.chat).mockResolvedValue({ ...chat, messages: [] });
     vi.mocked(api.updateChat).mockResolvedValue({ id: "chat-1", project_id: null, title: "Renamed notes", pinned: false, archived: true, routing_mode: "auto", confirm_uncertain_media: false, active_chat_profile_id: null, active_image_profile_id: null, active_video_profile_id: null, active_head_message_id: null, created_at: stamp, updated_at: stamp });
