@@ -7376,6 +7376,28 @@ async def test_comfy_catalog_preflight_pins_a_multirepository_official_bundle(
     assert [item["path"] for item in named["install_plan"]["artifacts_json"]] == [
         "model.safetensors"
     ]
+    assert named["install_plan"]["resolver_version"] == "install-resolver-v8"
+    runtime_contract = named["install_plan"]["runtime_contract_json"]
+    assert runtime_contract["workflow_reference_kind"] == "checkpoint"
+    assert runtime_contract["workflow_asset_kind"] == "checkpoint"
+    assert runtime_contract["workflow_component_folders"] == {"model.safetensors": "checkpoints"}
+
+    # Configuration references belong to the analyzer but are not model
+    # installs. They reach the same exact planner and fail closed on kind.
+    configuration = await client.post(
+        "/api/catalog/owner/primary/preflight",
+        json={
+            "revision": "main",
+            "role": "image",
+            "engine": "comfyui",
+            "selected_files": ["model.safetensors"],
+            "workflow_reference_kind": "configuration",
+        },
+    )
+    assert configuration.status_code == 200
+    configuration_plan = configuration.json()["install_plan"]
+    assert configuration_plan["compatibility"] == "unsupported"
+    assert configuration_plan["failure_code"] == "workflow_asset_kind_mismatch"
 
     # Naming no file, or several, is refused rather than resolved. A workflow
     # reference answers to exactly one artifact.

@@ -3684,7 +3684,9 @@ describe("App", () => {
     vi.mocked(api.prepareWorkflowPackage).mockResolvedValue({ id: "job-prep" } as never);
     fireEvent.click(screen.getByRole("button", { name: "Prepare 1.2.3" }));
     await waitFor(() =>
-      expect(api.prepareWorkflowPackage).toHaveBeenCalledWith("rgthree-comfy", "1.2.3"),
+      // The original graph travels with the selection so the API can derive
+      // the package's exact node closure independently.
+      expect(api.prepareWorkflowPackage).toHaveBeenCalledWith("rgthree-comfy", "1.2.3", graph),
     );
     expect(await screen.findByText(/stays inactive and untrusted/)).toBeInTheDocument();
   });

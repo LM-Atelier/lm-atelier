@@ -720,10 +720,10 @@ export const api = {
     request<EditTemplate>("/api/edit-templates", { method: "POST", body: JSON.stringify(payload) }),
   deleteEditTemplate: (id: string) =>
     request<void>(`/api/edit-templates/${id}`, { method: "DELETE" }),
-  prepareWorkflowPackage: (packageId: string, version: string) =>
+  prepareWorkflowPackage: (packageId: string, version: string, uiGraph: Record<string, unknown>) =>
     request<Job>("/api/workflows/packages/prepare", {
       method: "POST",
-      body: JSON.stringify({ package_id: packageId, version }),
+      body: JSON.stringify({ package_id: packageId, version, ui_graph: uiGraph }),
     }),
   registryInstalls: () => request<RegistryInstall[]>("/api/workflows/packages/installs"),
   reviewRegistryInstall: (installId: string, trusted: boolean) =>

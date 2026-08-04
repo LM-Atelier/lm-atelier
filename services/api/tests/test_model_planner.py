@@ -298,6 +298,152 @@ def test_static_inspector_accepts_lora_only_as_a_typed_auxiliary_plan() -> None:
     ]
 
 
+def test_workflow_owned_encoder_stays_one_inert_exact_component() -> None:
+    inspection = ModelManifestInspection(
+        architecture=None,
+        family="qwen",
+        components=(
+            InspectedComponent(
+                path="text_encoders/qwen.safetensors",
+                kind="text_encoder",
+                target_folder="text_encoders",
+            ),
+        ),
+        metadata_files=(),
+    )
+
+    plan = resolve_install_plan(
+        remote_id="synthetic/workflow-components",
+        revision="a" * 40,
+        role="image",
+        engine="comfyui",
+        selected_files=[
+            {
+                "filename": "text_encoders/qwen.safetensors",
+                "size": 4_096,
+                "sha256": "b" * 64,
+            }
+        ],
+        inspection=inspection,
+        workflow_reference_kind="checkpoint",
+    )
+
+    assert plan.compatibility == "supported"
+    assert [(item.path, item.kind, item.target_folder) for item in plan.artifacts] == [
+        ("text_encoders/qwen.safetensors", "text_encoder", "text_encoders")
+    ]
+    assert plan.runtime_contract["workflow_asset_kind"] == "text_encoder"
+    assert plan.runtime_contract["workflow_reference_kind"] == "checkpoint"
+    assert plan.runtime_contract["comfy_paths"] == {"text_encoders": "."}
+    assert plan.runtime_contract["workflow_component_folders"] == {
+        "text_encoders/qwen.safetensors": "text_encoders"
+    }
+    assert plan.activation_probe == {
+        "version": "activation-probe-v2",
+        "kind": "workflow_asset",
+        "timeout_seconds": 300,
+        "required": False,
+    }
+
+
+def test_workflow_owned_lora_does_not_become_a_standalone_auxiliary() -> None:
+    inspection = ModelManifestInspection(
+        architecture=None,
+        family=None,
+        components=(
+            InspectedComponent(
+                path="detail.safetensors",
+                kind="lora",
+                target_folder="loras",
+            ),
+        ),
+        metadata_files=(),
+    )
+
+    plan = resolve_install_plan(
+        remote_id="synthetic/workflow-lora",
+        revision="c" * 40,
+        role="image",
+        engine="comfyui",
+        selected_files=[{"filename": "detail.safetensors", "size": 1_024, "sha256": "d" * 64}],
+        inspection=inspection,
+        workflow_reference_kind="lora",
+    )
+
+    assert plan.compatibility == "supported"
+    assert plan.runtime_contract["auxiliary_kind"] is None
+    assert plan.runtime_contract["workflow_asset_kind"] == "lora"
+    assert plan.activation_probe["required"] is False
+
+
+@pytest.mark.parametrize(
+    ("reference_kind", "size", "digest", "failure_code"),
+    [
+        ("lora", 1_024, "e" * 64, "workflow_asset_kind_mismatch"),
+        ("checkpoint", 0, "e" * 64, "unverified_workflow_asset"),
+        ("checkpoint", 1_024, "E" * 64, "unverified_workflow_asset"),
+    ],
+)
+def test_workflow_owned_assets_fail_closed_on_kind_or_evidence(
+    reference_kind: str,
+    size: int,
+    digest: str,
+    failure_code: str,
+) -> None:
+    inspection = ModelManifestInspection(
+        architecture=None,
+        family=None,
+        components=(
+            InspectedComponent(
+                path="encoder.safetensors",
+                kind="text_encoder",
+                target_folder="text_encoders",
+            ),
+        ),
+        metadata_files=(),
+    )
+
+    plan = resolve_install_plan(
+        remote_id="synthetic/workflow-components",
+        revision="f" * 40,
+        role="image",
+        engine="comfyui",
+        selected_files=[{"filename": "encoder.safetensors", "size": size, "sha256": digest}],
+        inspection=inspection,
+        workflow_reference_kind=reference_kind,
+    )
+
+    assert plan.compatibility == "unsupported"
+    assert plan.failure_code == failure_code
+
+
+def test_standalone_encoder_without_a_template_remains_unsupported() -> None:
+    inspection = ModelManifestInspection(
+        architecture=None,
+        family=None,
+        components=(
+            InspectedComponent(
+                path="encoder.safetensors",
+                kind="text_encoder",
+                target_folder="text_encoders",
+            ),
+        ),
+        metadata_files=(),
+    )
+
+    plan = resolve_install_plan(
+        remote_id="synthetic/workflow-components",
+        revision="1" * 40,
+        role="image",
+        engine="comfyui",
+        selected_files=[{"filename": "encoder.safetensors", "size": 1_024, "sha256": "2" * 64}],
+        inspection=inspection,
+    )
+
+    assert plan.compatibility == "trusted_extension_required"
+    assert plan.failure_code == "workflow_contract_missing"
+
+
 def test_media_plan_rejects_pickle_compatible_weight_formats() -> None:
     inspection = inspect_repository_metadata(
         {},

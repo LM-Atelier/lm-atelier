@@ -29,6 +29,22 @@ capability_pack_datas = [
     for source in capability_pack_root.iterdir()
     if source.is_file()
 ]
+editor_bridge_root = (
+    repository_root / "services" / "api" / "local_lm" / "comfy_editor_bridge_assets"
+)
+editor_bridge_datas = [
+    (
+        str(source),
+        str(
+            Path("local_lm/comfy_editor_bridge_assets")
+            / source.relative_to(editor_bridge_root).parent
+        ),
+    )
+    for source in editor_bridge_root.rglob("*")
+    if source.is_file()
+    and "__pycache__" not in source.parts
+    and source.suffix not in {".pyc", ".pyo"}
+]
 
 datas = [
     (str(repository_root / "apps" / "web" / "dist"), "web"),
@@ -39,6 +55,7 @@ datas = [
     ),
     *migration_datas,
     *capability_pack_datas,
+    *editor_bridge_datas,
     (str(repository_root / "build" / "release-metadata" / "LICENSE"), "."),
     (
         str(repository_root / "build" / "release-metadata" / "THIRD_PARTY_NOTICES.md"),

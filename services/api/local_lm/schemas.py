@@ -1152,6 +1152,9 @@ class WorkflowPackagePrepareRequest(ApiModel):
     # to verify against and the resolver refuses it anyway.
     package_id: str = Field(min_length=1, max_length=200)
     version: str = Field(min_length=1, max_length=200)
+    # The server re-analyzes the source graph and derives the exact node types.
+    # A browser-provided node list would only be another unverified claim.
+    ui_graph: dict[str, Any]
 
 
 class WorkflowPackageAnalyzeRequest(ApiModel):

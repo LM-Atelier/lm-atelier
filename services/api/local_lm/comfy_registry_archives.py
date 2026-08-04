@@ -63,10 +63,13 @@ def stage_comfy_registry_archive(
     destination: Path,
     *,
     expected_sha256: str | None = None,
+    strip_single_root: bool = False,
 ) -> ComfyRegistryArchiveReport:
     """Validate and extract an immutable registry archive without executing it."""
     if expected_sha256 is not None and not _ARCHIVE_HASH.fullmatch(expected_sha256):
         raise ComfyRegistryArchiveError("invalid expected archive hash")
+    if not isinstance(strip_single_root, bool):
+        raise ComfyRegistryArchiveError("invalid archive root normalization")
     if destination.exists() or destination.is_symlink():
         raise ComfyRegistryArchiveError("archive staging destination already exists")
     if not destination.parent.is_dir():
@@ -81,6 +84,8 @@ def stage_comfy_registry_archive(
     try:
         with zipfile.ZipFile(io.BytesIO(payload)) as archive:
             entries = _validate_entries(archive)
+            if strip_single_root:
+                entries = _without_single_archive_root(entries)
             expanded_bytes = sum(
                 entry.info.file_size for entry in entries if not entry.info.is_dir()
             )
@@ -96,6 +101,28 @@ def stage_comfy_registry_archive(
         shutil.rmtree(destination, ignore_errors=True)
         raise ComfyRegistryArchiveError("invalid Comfy Registry archive") from exc
     return report
+
+
+def _without_single_archive_root(
+    entries: tuple[_ValidatedEntry, ...],
+) -> tuple[_ValidatedEntry, ...]:
+    """Remove GitHub's synthetic repository wrapper from an inert archive."""
+    roots = {entry.path.parts[0] for entry in entries}
+    if len(roots) != 1:
+        raise ComfyRegistryArchiveError("commit archive does not have one repository root")
+    stripped: list[_ValidatedEntry] = []
+    for entry in entries:
+        parts = entry.path.parts[1:]
+        if not parts:
+            if not entry.info.is_dir():
+                raise ComfyRegistryArchiveError("commit archive repository root is not a directory")
+            continue
+        path = PurePosixPath(*parts)
+        key = "/".join(unicodedata.normalize("NFC", part).casefold() for part in parts)
+        stripped.append(_ValidatedEntry(entry.info, path, key))
+    if not stripped or not any(not entry.info.is_dir() for entry in stripped):
+        raise ComfyRegistryArchiveError("commit archive repository root is empty")
+    return tuple(stripped)
 
 
 def verify_staged_comfy_registry_archive(

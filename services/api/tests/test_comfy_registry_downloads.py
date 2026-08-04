@@ -43,6 +43,17 @@ def resolution(**updates: Any) -> ComfyNodeResolution:
     return replace(value, **updates)
 
 
+def commit_resolution(**updates: Any) -> ComfyNodeResolution:
+    value = ComfyNodeResolution(
+        package_id="example-pack",
+        declared_version="a" * 40,
+        node_types=("ExampleNode",),
+        install_kind="git_commit",
+        repository_url="https://github.com/example/example-pack.git",
+    )
+    return replace(value, **updates)
+
+
 async def download_with(
     handler: httpx.AsyncBaseTransport,
     destination: Path,
@@ -96,6 +107,39 @@ async def test_exact_archive_download_is_hashed_staged_and_reported(tmp_path: Pa
     assert not list(tmp_path.glob("registry-archive-*"))
 
 
+async def test_commit_archive_uses_exact_codeload_url_and_removes_wrapper(
+    tmp_path: Path,
+) -> None:
+    revision = "a" * 40
+    payload = archive_bytes(
+        {
+            f"example-pack-{revision}/__init__.py": b"NODE_CLASS_MAPPINGS = {}\n",
+            f"example-pack-{revision}/requirements.txt": b"pillow>=12\n",
+        }
+    )
+    requests: list[httpx.Request] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        requests.append(request)
+        return httpx.Response(200, content=payload)
+
+    destination = tmp_path / "staged"
+    report = await download_with(
+        httpx.MockTransport(handler),
+        destination,
+        value=commit_resolution(),
+    )
+
+    assert [request.url for request in requests] == [
+        httpx.URL(f"https://codeload.github.com/example/example-pack/zip/{revision}")
+    ]
+    assert (destination / "__init__.py").is_file()
+    assert (destination / "requirements.txt").is_file()
+    assert not (destination / f"example-pack-{revision}").exists()
+    assert report.dependency_manifests == ("requirements.txt",)
+    assert report.top_level_entries == ("__init__.py", "requirements.txt")
+
+
 async def test_missing_content_length_reports_indeterminate_progress(tmp_path: Path) -> None:
     payload = archive_bytes()
 
@@ -131,7 +175,7 @@ async def test_incomplete_resolution_is_rejected_before_network(
     def handler(_request: httpx.Request) -> httpx.Response:
         raise AssertionError("invalid resolution must not reach the network")
 
-    with pytest.raises(ComfyRegistryDownloadError, match="exact registry archive"):
+    with pytest.raises(ComfyRegistryDownloadError, match="archive"):
         await download_with(
             httpx.MockTransport(handler),
             tmp_path / "staged",
@@ -296,8 +340,10 @@ async def test_cancellation_waits_for_staging_and_removes_its_output(
         destination: Path,
         *,
         expected_sha256: str,
+        strip_single_root: bool,
     ) -> object:
         assert expected_sha256 == hashlib.sha256(payload).hexdigest()
+        assert strip_single_root is False
         destination.mkdir()
         (destination / "partial.py").write_text("partial")
         started.set()

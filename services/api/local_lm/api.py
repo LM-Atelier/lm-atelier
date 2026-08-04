@@ -3232,6 +3232,7 @@ async def resolve_catalog_preflight(
             workflow_component_folders=workflow_component_folders,
             source_remote_id=result.source_remote_id,
             auxiliary_kind=payload.auxiliary_kind,
+            workflow_reference_kind=payload.workflow_reference_kind,
         )
         if inspection_error:
             resolved = resolved.blocked(
@@ -6443,11 +6444,76 @@ async def shutdown_registry_preparations() -> None:
     _REGISTRY_PREPARE_TASKS.clear()
 
 
+_MAX_NODE_TYPE_CHARACTERS = 200
+
+
+def _prepared_node_types(values: list[str]) -> tuple[str, ...]:
+    """The exact node identities this package must provide, or a typed refusal.
+
+    Checked here rather than at the lifecycle because a job that must fail on
+    its first step is a worse answer than a 422. Persistence refuses an empty
+    or malformed set on purpose; nothing about that should be relaxed, so the
+    same rules are applied before anything is queued.
+    """
+    cleaned = [value.strip() for value in values]
+    if any(
+        not value or len(value) > _MAX_NODE_TYPE_CHARACTERS or _has_control_character(value)
+        for value in cleaned
+    ):
+        raise api_error(
+            422,
+            "workflow-package-node-type-invalid",
+            "A node type must be non-empty, printable, and within the length limit.",
+        )
+    if len(set(cleaned)) != len(cleaned):
+        raise api_error(
+            422,
+            "workflow-package-node-type-repeated",
+            "The same node type was named more than once. Send each exactly once.",
+        )
+    return tuple(cleaned)
+
+
+def _has_control_character(value: str) -> bool:
+    return any(character < " " or character == "\x7f" for character in value)
+
+
+def _analyzed_package_node_types(
+    ui_graph: dict[str, Any], package_id: str, version: str
+) -> tuple[str, ...]:
+    """Derive one exact package identity from the submitted source graph."""
+
+    try:
+        analysis = analyze_comfyui_workflow_package(ui_graph)
+    except WorkflowPackageError as exc:
+        raise api_error(422, exc.code, str(exc)) from exc
+    matches = [
+        requirement
+        for requirement in analysis.custom_packages
+        if requirement.package_id == package_id
+    ]
+    if len(matches) != 1:
+        raise api_error(
+            422,
+            "workflow-package-requirement-not-found",
+            "The workflow does not declare exactly one matching custom-node package.",
+        )
+    requirement = matches[0]
+    if requirement.versions != (version,):
+        raise api_error(
+            422,
+            "workflow-package-version-mismatch",
+            "The selected package version does not exactly match the workflow declaration.",
+        )
+    return _prepared_node_types(list(requirement.node_types))
+
+
 async def _run_workflow_package_preparation(
     services: Services,
     job_id: str,
     package_id: str,
     version: str,
+    node_types: tuple[str, ...],
 ) -> None:
     """One durable preparation job: lease held, worker state told truthfully."""
 
@@ -6475,6 +6541,7 @@ async def _run_workflow_package_preparation(
                 SessionLocal,
                 package_id=package_id,
                 version=version,
+                node_types=node_types,
                 context=PreparationContext.from_settings(services.settings),
                 media_worker_stopped=media_stopped,
                 interpreter_probe=probe_comfy_registry_wheel_target,
@@ -6533,8 +6600,11 @@ async def prepare_workflow_package_endpoint(
     """Queue one package preparation; the result stays inactive and untrusted."""
 
     services = _services(request)
-    # Refuse before queueing when the machine cannot prepare at all - a job
-    # that must fail on its first step is a worse answer than a typed 422.
+    # Re-analyze the source graph before judging the machine. The package name,
+    # version, and node closure have to agree independently of browser state.
+    node_types = _analyzed_package_node_types(payload.ui_graph, payload.package_id, payload.version)
+    # Then refuse when the machine cannot prepare at all - a job that must fail
+    # on its first step is a worse answer than a typed 422.
     try:
         PreparationContext.from_settings(services.settings)
     except WorkflowPackagePreparationError as exc:
@@ -6542,13 +6612,19 @@ async def prepare_workflow_package_endpoint(
     job = Job(
         kind=JobKind.REGISTRY_PREPARE.value,
         status=JobStatus.QUEUED.value,
-        payload_json={"package_id": payload.package_id, "version": payload.version},
+        payload_json={
+            "package_id": payload.package_id,
+            "version": payload.version,
+            "node_types": list(node_types),
+        },
         cancellable=True,
     )
     session.add(job)
     session.commit()
     task = asyncio.create_task(
-        _run_workflow_package_preparation(services, job.id, payload.package_id, payload.version),
+        _run_workflow_package_preparation(
+            services, job.id, payload.package_id, payload.version, node_types
+        ),
         name=f"registry-prepare-{job.id}",
     )
     _REGISTRY_PREPARE_TASKS[job.id] = task
