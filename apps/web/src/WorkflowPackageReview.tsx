@@ -70,8 +70,11 @@ export function WorkflowPackageReview({
     onSuccess: () => onImported?.(),
   });
   const prepare = useMutation({
-    mutationFn: ({ packageId, version }: { packageId: string; version: string }) =>
-      api.prepareWorkflowPackage(packageId, version),
+    mutationFn: ({ packageId, version, sourceGraph }: {
+      packageId: string;
+      version: string;
+      sourceGraph: Record<string, unknown>;
+    }) => api.prepareWorkflowPackage(packageId, version, sourceGraph),
     onSuccess: (_job, variables) =>
       setQueuedPackages((current) => [...current, variables.packageId]),
   });
@@ -140,7 +143,7 @@ export function WorkflowPackageReview({
                 <span className={`badge ${pkg.locally_resolved ? "likely" : "advanced_import"}`}>
                   {pkg.locally_resolved ? "installed" : "not installed"}
                 </span>
-                {!pkg.locally_resolved && pkg.versions.length === 1 && (
+                {uiGraph && !pkg.locally_resolved && pkg.versions.length === 1 && (
                   queuedPackages.includes(pkg.package_id)
                     ? <small>Preparation queued - progress shows in the jobs panel. The result stays inactive and untrusted until reviewed.</small>
                     : (
@@ -148,7 +151,11 @@ export function WorkflowPackageReview({
                         type="button"
                         className="secondary compact-button"
                         disabled={prepare.isPending}
-                        onClick={() => prepare.mutate({ packageId: pkg.package_id, version: pkg.versions[0] })}
+                        onClick={() => prepare.mutate({
+                          packageId: pkg.package_id,
+                          version: pkg.versions[0],
+                          sourceGraph: uiGraph,
+                        })}
                       >
                         Prepare {pkg.versions[0]}
                       </button>
