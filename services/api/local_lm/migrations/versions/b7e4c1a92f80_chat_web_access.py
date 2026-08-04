@@ -1,7 +1,11 @@
 """Per-chat web access consent
 
 Revision ID: b7e4c1a92f80
-Revises: a4d7e2b9c150
+Revises: b6e9c4a17d20
+
+Both this and the install-offer revision were written against the same parent.
+Two additive columns do not need a merge revision to reconcile them, so this
+one follows the other rather than branching beside it.
 """
 
 from __future__ import annotations
@@ -10,7 +14,7 @@ import sqlalchemy as sa
 from alembic import op
 
 revision: str = "b7e4c1a92f80"
-down_revision: str | None = "a4d7e2b9c150"
+down_revision: str | None = "b6e9c4a17d20"
 branch_labels: str | None = None
 depends_on: str | None = None
 
