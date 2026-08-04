@@ -476,6 +476,8 @@ class CivitaiCatalog:
                     "sha256": sha256.lower() if _SHA256.fullmatch(sha256) else None,
                     "source_file_id": str(value.get("id") or ""),
                     "source_version_id": str(version.get("id") or ""),
+                    "source_file_type": str(value.get("type") or ""),
+                    "source_file_precision": str(file_metadata.get("fp") or ""),
                     "format": str(file_metadata.get("format") or ""),
                     "pickle_scan_result": value.get("pickleScanResult"),
                     "virus_scan_result": value.get("virusScanResult"),

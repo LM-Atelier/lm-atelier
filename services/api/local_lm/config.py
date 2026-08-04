@@ -50,6 +50,12 @@ class Settings(BaseSettings):
         le=256 * 1024**2,
     )
     vision_max_pixels: int = Field(default=40_000_000, ge=1_000_000, le=200_000_000)
+    # How far back a prior picture may be carried into a new turn. The
+    # search used to climb the whole conversation, so a chat that ever
+    # contained an image paid for vision on every message afterwards -
+    # "make it brighter" refers to something a turn or two ago, never to
+    # something fifty messages back.
+    vision_prior_visual_lookback: int = Field(default=4, ge=0, le=64)
     vision_max_video_frames: int = Field(default=6, ge=3, le=16)
     vision_max_video_duration_seconds: int = Field(default=3600, ge=1, le=86_400)
     vision_max_frame_dimension: int = Field(default=1280, ge=256, le=4096)

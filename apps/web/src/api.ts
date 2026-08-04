@@ -57,6 +57,7 @@ import type {
   WorkStep,
   WorkflowDependencyResourceKind,
   WorkflowFamily,
+  WorkflowFamilyPreference,
   WorkflowFamilyPreferenceUpdate,
   WorkflowFamilyRemovalImpact,
   WorkflowFamilyUpdate,
@@ -653,7 +654,7 @@ export const api = {
     capability: WorkflowSelectorCapability,
     preference: WorkflowFamilyPreferenceUpdate,
   ) =>
-    request<WorkflowFamily>(
+    request<WorkflowFamilyPreference>(
       `/api/workflow-families/${encodeURIComponent(familyId)}/preferences/${capability}`,
       { method: "PUT", body: JSON.stringify(preference) },
     ),

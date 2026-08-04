@@ -97,6 +97,8 @@ import { ThemeToggle } from "./ThemeToggle";
 import { roomFor, useThemeChoice, type ThemeChoice } from "./theme";
 import { WorkflowConsumers } from "./WorkflowConsumers";
 import { WorkflowSelector } from "./WorkflowSelector";
+import { operationForTurn, revisionForTurn, schemaForRevision } from "./turnWorkflow";
+import type { WorkflowFamily, WorkflowSelection } from "./types";
 import { PromptDialog } from "./ConfirmDialog";
 import { CustomNodesPanel } from "./CustomNodesPanel";
 import { LoraStackControl } from "./LoraStackControl";
@@ -1300,6 +1302,12 @@ function Composer({
     attachments.some((attachment) => attachment.kind === "image")
     || (priorImage && usePriorVisual)
   );
+  const families = useQuery({ queryKey: ["workflow-families"], queryFn: () => api.workflowFamilies() });
+  const selections = useQuery({
+    queryKey: ["chat", chat?.id, "workflow-selections"],
+    queryFn: () => api.chatWorkflowSelections(chat!.id),
+    enabled: Boolean(chat?.id),
+  });
   const imageProfile = profiles.find((profile) => profile.id === chat.active_image_profile_id)
     ?? profiles.find((profile) => profile.role === "image" && profile.is_default);
   const profileValues = {
@@ -1311,6 +1319,8 @@ function Composer({
     project,
     mode,
     attachments.length > 0 || usePriorVisual,
+    families.data ?? [],
+    selections.data ?? [],
   );
 
   const submit = (stopCurrent = false) => {
@@ -1568,23 +1578,21 @@ function workflowSchemaForTurn(
   project: Project | undefined,
   mode: RoutingMode,
   hasAttachments: boolean,
+  families: WorkflowFamily[] = [],
+  selections: WorkflowSelection[] = [],
 ): Record<string, unknown> | undefined {
   if (mode !== "image" && mode !== "video") return undefined;
-  const operation = mode === "image"
-    ? hasAttachments ? "image_to_image" : "text_to_image"
-    : hasAttachments ? "image_to_video" : "text_to_video";
-  const pinnedRevisionId = mode === "image"
-    ? project?.image_workflow_revision_id
-    : project?.video_workflow_revision_id;
-  if (pinnedRevisionId) {
-    for (const workflow of workflows) {
-      const revision = workflow.revisions.find((item) => item.id === pinnedRevisionId);
-      if (revision && workflow.operation === operation) return revision.input_schema_json;
-    }
-  }
-  const workflow = workflows.find((item) => item.operation === operation);
-  return workflow?.revisions.find((item) => item.id === workflow.current_revision_id)
-    ?.input_schema_json;
+  const operation = operationForTurn(mode, hasAttachments);
+  // The panel has to resolve the revision the same way the executor does,
+  // or it shows the settings of one workflow while another runs.
+  const revisionId = revisionForTurn(
+    workflows,
+    families,
+    selections.find((one) => one.selector_capability === mode),
+    mode === "image" ? project?.image_workflow_revision_id : project?.video_workflow_revision_id,
+    operation,
+  );
+  return schemaForRevision(workflows, revisionId, operation);
 }
 
 function ChatView({
@@ -2370,10 +2378,19 @@ function ModelsView({ initialRole }: { initialRole: EngineRole }) {
         />
       )}
       {(download.error || confirmInstall.error || deleteModel.error || cleanupDownloads.error || updateUseCase.error || setDefaultModel.error || updateModelAsset.error || deleteModelAsset.error) && <ErrorCallout message={download.error?.message || confirmInstall.error?.message || deleteModel.error?.message || cleanupDownloads.error?.message || updateUseCase.error?.message || setDefaultModel.error?.message || updateModelAsset.error?.message || deleteModelAsset.error?.message} />}
-      {catalog.isLoading && <div className="loading-line" />}
+      {/* isFetching, not isLoading: the latter is only true the first
+          time, so changing a filter swapped the results with no sign
+          anything had happened - which reads as the page refreshing
+          itself for no reason. */}
+      {catalog.isFetching && !catalog.isFetchingNextPage && (
+        <div className="catalog-loading" role="status">
+          <div className="loading-line" />
+          <span>{catalogItems.length > 0 ? "Finding models…" : "Loading the catalogue…"}</span>
+        </div>
+      )}
       <ErrorCallout message={catalog.error?.message} action={<button className="secondary compact-button" disabled={catalog.isFetching} onClick={() => void catalog.refetch()}>Retry</button>} />
       {catalogIsStale && !catalog.error && <div className="callout warning action-callout" role="status"><span>Showing saved results while Hugging Face is unavailable.</span><button className="secondary compact-button" disabled={catalog.isFetching} onClick={() => void catalog.refetch()}>Refresh</button></div>}
-      <div className="model-grid">{catalogItems.map((model) => <ModelCard key={model.remote_id} model={model} role={role} runtime={runtimeFor(model)} status={statusFor(model)} onDownload={() => download.mutate({ model, selectedRole: role })} />)}</div>
+      <div className={`model-grid ${catalog.isFetching && !catalog.isFetchingNextPage ? "superseded" : ""}`}>{catalogItems.map((model) => <ModelCard key={model.remote_id} model={model} role={role} runtime={runtimeFor(model)} status={statusFor(model)} onDownload={() => download.mutate({ model, selectedRole: role })} />)}</div>
       {catalog.hasNextPage && <div className="load-more"><button className="secondary" disabled={catalog.isFetchingNextPage} onClick={() => void catalog.fetchNextPage()}>{catalog.isFetchingNextPage ? "Loading…" : "Load more models"}</button></div>}
       {importOpen && (
         <AccessibleDialog
@@ -2647,7 +2664,6 @@ function ProjectManager({
   project,
   engines,
   presets,
-  workflows,
   onClose,
   onSave,
   onDelete,
@@ -2656,7 +2672,6 @@ function ProjectManager({
   project: Project;
   engines: EngineCapabilities[];
   presets: GenerationPreset[];
-  workflows: Workflow[];
   onClose: () => void;
   onSave: (values: Partial<Project>) => void;
   onDelete: () => void;
@@ -2667,8 +2682,6 @@ function ProjectManager({
   const [description, setDescription] = useState(project.description);
   const [instructions, setInstructions] = useState(project.instructions);
   const [archived, setArchived] = useState(project.archived);
-  const [imageWorkflowRevisionId, setImageWorkflowRevisionId] = useState(project.image_workflow_revision_id ?? "");
-  const [videoWorkflowRevisionId, setVideoWorkflowRevisionId] = useState(project.video_workflow_revision_id ?? "");
   const [settingsRole, setSettingsRole] = useState<EngineRole>("chat");
   const [generationSettings, setGenerationSettings] = useState<
     NonNullable<Project["generation_settings_json"]>
@@ -2681,13 +2694,6 @@ function ProjectManager({
   const [generationPresetIds, setGenerationPresetIds] = useState<
     NonNullable<Project["generation_preset_ids_json"]>
   >({ ...(project.generation_preset_ids_json ?? {}) });
-  const workflowOptions = (kind: "image" | "video") => workflows
-    .filter((workflow) => workflow.operation.includes(kind))
-    .flatMap((workflow) => workflow.revisions.map((revision) => (
-      <option key={revision.id} value={revision.id}>
-        {workflow.name} · {workflow.operation.replaceAll("_", " ")} · v{revision.version}
-      </option>
-    )));
   const setRoleSettings = (values: Record<string, unknown>) => {
     setGenerationSettings((current) => {
       const next = { ...current };
@@ -2723,8 +2729,6 @@ function ProjectManager({
       <label>Name<input value={name} onChange={(event) => setName(event.target.value)} /></label>
       <label>Description<textarea rows={3} value={description} onChange={(event) => setDescription(event.target.value)} /></label>
       <label>Project instructions<textarea rows={5} value={instructions} onChange={(event) => setInstructions(event.target.value)} /></label>
-      <label>Default image workflow revision<select value={imageWorkflowRevisionId} onChange={(event) => setImageWorkflowRevisionId(event.target.value)}><option value="">Use global default</option>{workflowOptions("image")}</select></label>
-      <label>Default video workflow revision<select value={videoWorkflowRevisionId} onChange={(event) => setVideoWorkflowRevisionId(event.target.value)}><option value="">Use global default</option>{workflowOptions("video")}</select></label>
       <section className="project-generation-defaults" aria-labelledby="project-generation-defaults-heading">
         <div className="project-defaults-heading">
           <div>
@@ -2783,8 +2787,6 @@ function ProjectManager({
             description,
             instructions,
             archived,
-            image_workflow_revision_id: imageWorkflowRevisionId || null,
-            video_workflow_revision_id: videoWorkflowRevisionId || null,
             generation_settings_json: generationSettings,
             generation_preset_ids_json: generationPresetIds,
           })}
@@ -3106,7 +3108,6 @@ function Sidebar({
   chats,
   engines,
   presets,
-  workflows,
   currentChatId,
   view,
   setupState,
@@ -3128,7 +3129,6 @@ function Sidebar({
   chats: Chat[];
   engines: EngineCapabilities[];
   presets: GenerationPreset[];
-  workflows: Workflow[];
   currentChatId: string | null;
   view: View;
   setupState?: SetupReadinessReport["state"] | undefined;
@@ -3210,7 +3210,7 @@ function Sidebar({
         <button className={view === "settings" ? "active" : ""} aria-current={view === "settings" ? "page" : undefined} onClick={() => { onView("settings"); setMobileOpen(false); }}><Settings />Settings</button>
       </div>
       {managedChat && <ChatManager chat={managedChat} projects={projects} onClose={() => setManagedChat(null)} onSave={(values) => { onUpdateChat(managedChat.id, values); setManagedChat(null); }} onDelete={(deleteGeneratedMedia) => { onDeleteChat(managedChat.id, deleteGeneratedMedia); setManagedChat(null); }} />}
-      {managedProject && <ProjectManager project={managedProject} engines={engines} presets={presets} workflows={workflows} onClose={() => setManagedProject(null)} onSave={(values) => { onUpdateProject(managedProject.id, values); setManagedProject(null); }} onDelete={() => { onDeleteProject(managedProject.id); setManagedProject(null); }} onExport={(includeMedia) => onExportProject(managedProject.id, includeMedia)} />}
+      {managedProject && <ProjectManager project={managedProject} engines={engines} presets={presets} onClose={() => setManagedProject(null)} onSave={(values) => { onUpdateProject(managedProject.id, values); setManagedProject(null); }} onDelete={() => { onDeleteProject(managedProject.id); setManagedProject(null); }} onExport={(includeMedia) => onExportProject(managedProject.id, includeMedia)} />}
     </aside>
   );
 }
@@ -3585,7 +3585,7 @@ export default function App() {
   return (
     <div className="app-shell" data-room={theme === "light" ? "reading" : "making"}>
       <a className="skip-link" href="#main-content">Skip to main content</a>
-      <Sidebar projects={allProjects} chats={allChats} engines={engines.data ?? []} presets={presets.data ?? []} workflows={workflows.data ?? []} currentChatId={activeChatId} view={view} setupState={setupReadiness.data?.state} onSetup={() => setSetupOpen(true)} onChat={(id) => { setCurrentChatId(id); localStorage.setItem(CURRENT_CHAT_KEY, id); setView("chat"); focusMainContent(); }} onView={(nextView) => { setView(nextView); focusMainContent(); }} onNewChat={(projectId) => createChat.mutate(projectId)} onNewProject={(name) => createProject.mutate(name)} onExportProject={(id, includeMedia) => exportProject.mutate({ id, includeMedia })} onImportProject={(file) => importProject.mutate(file)} onUpdateChat={(id, values) => manageChat.mutate({ id, values })} onDeleteChat={(id, deleteGeneratedMedia) => deleteChat.mutate({ id, deleteGeneratedMedia })} onUpdateProject={(id, values) => updateProject.mutate({ id, values })} onDeleteProject={(id) => deleteProject.mutate(id)} theme={theme} onTheme={chooseTheme} />
+      <Sidebar projects={allProjects} chats={allChats} engines={engines.data ?? []} presets={presets.data ?? []} currentChatId={activeChatId} view={view} setupState={setupReadiness.data?.state} onSetup={() => setSetupOpen(true)} onChat={(id) => { setCurrentChatId(id); localStorage.setItem(CURRENT_CHAT_KEY, id); setView("chat"); focusMainContent(); }} onView={(nextView) => { setView(nextView); focusMainContent(); }} onNewChat={(projectId) => createChat.mutate(projectId)} onNewProject={(name) => createProject.mutate(name)} onExportProject={(id, includeMedia) => exportProject.mutate({ id, includeMedia })} onImportProject={(file) => importProject.mutate(file)} onUpdateChat={(id, values) => manageChat.mutate({ id, values })} onDeleteChat={(id, deleteGeneratedMedia) => deleteChat.mutate({ id, deleteGeneratedMedia })} onUpdateProject={(id, values) => updateProject.mutate({ id, values })} onDeleteProject={(id) => deleteProject.mutate(id)} theme={theme} onTheme={chooseTheme} />
       <main id="main-content" tabIndex={-1} data-room={roomFor(theme, READING_ROOM_VIEWS.has(view))}>{activeContent}</main>
       {setupOpen === true && !setupReadiness.data && (
         <AccessibleDialog
