@@ -9,7 +9,6 @@ import tempfile
 from collections.abc import Awaitable, Callable
 from contextlib import suppress
 from pathlib import Path
-from urllib.parse import urlparse
 
 import httpx
 
@@ -18,6 +17,11 @@ from .comfy_registry_archives import (
     MAX_ARCHIVE_BYTES,
     ComfyRegistryArchiveReport,
     stage_comfy_registry_archive,
+)
+from .comfy_registry_sources import (
+    ComfyPackageSourceError,
+    ComfyPackageSourceIdentity,
+    resolve_comfy_package_source,
 )
 from .network import shared_tls_context
 
@@ -57,7 +61,7 @@ class ComfyRegistryArchiveDownloader:
         *,
         progress: DownloadProgress | None = None,
     ) -> ComfyRegistryArchiveReport:
-        url = _resolved_archive_url(resolution)
+        source = _resolved_archive_source(resolution)
         if destination.exists() or destination.is_symlink():
             raise ComfyRegistryDownloadError("archive staging destination already exists")
         if not destination.parent.is_dir():
@@ -71,11 +75,12 @@ class ComfyRegistryArchiveDownloader:
         os.close(descriptor)
         temporary = Path(temporary_name)
         try:
-            archive_sha256 = await self._download(url, temporary, progress)
+            archive_sha256 = await self._download(source.download_url, temporary, progress)
             return await _stage_without_orphan(
                 temporary,
                 destination,
                 archive_sha256,
+                strip_single_root=source.install_kind == "git_commit",
             )
         finally:
             temporary.unlink(missing_ok=True)
@@ -123,30 +128,17 @@ class ComfyRegistryArchiveDownloader:
         return digest.hexdigest()
 
 
-def _resolved_archive_url(resolution: ComfyNodeResolution) -> str:
-    if (
-        not resolution.resolved
-        or resolution.install_kind != "registry_archive"
-        or not resolution.package_id
-        or not resolution.declared_version
-        or not resolution.registry_record_id
-        or not resolution.download_url
-    ):
-        raise ComfyRegistryDownloadError("resolution does not identify an exact registry archive")
-    parsed = urlparse(resolution.download_url)
-    if (
-        parsed.scheme != "https"
-        or parsed.hostname != "cdn.comfy.org"
-        or parsed.username
-        or parsed.password
-        or parsed.port
-        or parsed.query
-        or parsed.fragment
-        or not parsed.path.startswith("/")
-        or not parsed.path.endswith(".zip")
-    ):
-        raise ComfyRegistryDownloadError("resolution has an untrusted archive URL")
-    return resolution.download_url
+def _resolved_archive_source(
+    resolution: ComfyNodeResolution,
+) -> ComfyPackageSourceIdentity:
+    try:
+        return resolve_comfy_package_source(resolution)
+    except ComfyPackageSourceError as exc:
+        if "download URL" in str(exc):
+            raise ComfyRegistryDownloadError("resolution has an untrusted archive URL") from exc
+        raise ComfyRegistryDownloadError(
+            "resolution does not identify an exact registry archive or exact commit archive"
+        ) from exc
 
 
 def _content_length(response: httpx.Response) -> int | None:
@@ -187,6 +179,8 @@ async def _stage_without_orphan(
     temporary: Path,
     destination: Path,
     archive_sha256: str,
+    *,
+    strip_single_root: bool,
 ) -> ComfyRegistryArchiveReport:
     task = asyncio.create_task(
         asyncio.to_thread(
@@ -194,6 +188,7 @@ async def _stage_without_orphan(
             temporary,
             destination,
             expected_sha256=archive_sha256,
+            strip_single_root=strip_single_root,
         )
     )
     try:

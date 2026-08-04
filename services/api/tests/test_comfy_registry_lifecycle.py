@@ -24,6 +24,7 @@ from local_lm.comfy_registry_lifecycle import (
     ComfyRegistryLifecycleError,
     ComfyRegistryPreparation,
     prepare_comfy_registry_install,
+    stage_comfy_registry_install_archive,
 )
 from local_lm.comfy_registry_wheel_artifacts import (
     ComfyRegistryWheelArtifactManifest,
@@ -351,6 +352,52 @@ async def test_prepares_exact_package_as_committed_inert_install(
         assert check.scalar(select(func.count()).select_from(ComfyRegistryInstall)) == 1
 
 
+async def test_pre_staged_commit_archive_is_reused_without_a_second_download(
+    session: Session,
+    tmp_path: Path,
+) -> None:
+    revision = "a" * 40
+    resolution = _resolution(
+        declared_version=revision,
+        install_kind="git_commit",
+        registry_record_id=None,
+        download_url=None,
+        warnings=(
+            "source_review_required",
+            "dependency_manifest_review_required",
+        ),
+    )
+    archive = _ArchiveDownloader()
+    custom_nodes, state = _roots(tmp_path)
+    staged = await stage_comfy_registry_install_archive(
+        resolution=resolution,
+        archive_downloader=archive,
+        custom_node_root=custom_nodes,
+        media_worker_stopped=True,
+    )
+
+    result = await prepare_comfy_registry_install(
+        session,
+        resolution=resolution,
+        closure=_closure(resolution),
+        archive_downloader=archive,
+        wheel_downloader=_WheelDownloader(),
+        python_executable=Path(sys.executable),
+        custom_node_root=custom_nodes,
+        state_root=state,
+        media_worker_stopped=True,
+        staged_archive=staged,
+    )
+
+    install = session.get(ComfyRegistryInstall, result.install_id)
+    assert archive.calls == 1
+    assert install is not None
+    assert install.package_version == revision
+    assert install.registry_record_id.startswith("github-commit:")
+    assert install.archive_sha256 == staged.report.archive_sha256
+    assert (custom_nodes / result.installed_path / "__init__.py").is_file()
+
+
 async def test_reuses_only_database_bound_verified_environment(
     session: Session,
     tmp_path: Path,
@@ -611,10 +658,10 @@ async def test_persistence_failure_removes_new_node_and_environment(
             media_worker_stopped=True,
         )
 
-    assert archive.calls == 1
+    assert archive.calls == 0
     assert not list(custom_nodes.iterdir())
-    assert not any((state / "registry-wheel-staging").iterdir())
-    assert not any((state / "registry-wheel-environments").iterdir())
+    assert not (state / "registry-wheel-staging").exists()
+    assert not (state / "registry-wheel-environments").exists()
     assert session.scalar(select(func.count()).select_from(ComfyRegistryInstall)) == 0
 
 
@@ -641,3 +688,47 @@ async def test_exact_retry_is_rejected_before_another_download(
     assert raised.value.code == "registry_install_exists"
     assert archive.calls == 0
     assert (custom_nodes / result.installed_path).is_dir()
+
+
+async def test_existing_install_is_not_removed_by_a_staged_argument(
+    session: Session,
+    tmp_path: Path,
+) -> None:
+    result, _, _, custom_nodes, state = await _prepare(session, tmp_path)
+    content = b"NODE_CLASS_MAPPINGS = {}\n"
+    digest = hashlib.sha256(content).hexdigest()
+    manifest = f"__init__.py{chr(0)}{len(content)}{chr(0)}{digest}{chr(10)}"
+    staged = lifecycle_module.ComfyRegistryStagedArchive(
+        result.installed_path,
+        custom_nodes / result.installed_path,
+        ComfyRegistryArchiveReport(
+            archive_sha256="a" * 64,
+            manifest_sha256=hashlib.sha256(manifest.encode()).hexdigest(),
+            entry_count=1,
+            file_count=1,
+            expanded_bytes=len(content),
+            python_file_count=1,
+            dependency_manifests=(),
+            install_scripts=(),
+            startup_hooks=(),
+            native_files=(),
+            top_level_entries=("__init__.py",),
+        ),
+    )
+
+    with pytest.raises(ComfyRegistryLifecycleError) as raised:
+        await prepare_comfy_registry_install(
+            session,
+            resolution=_resolution(),
+            closure=_closure(_resolution()),
+            archive_downloader=_ArchiveDownloader(),
+            wheel_downloader=_WheelDownloader(),
+            python_executable=Path(sys.executable),
+            custom_node_root=custom_nodes,
+            state_root=state,
+            media_worker_stopped=True,
+            staged_archive=staged,
+        )
+
+    assert raised.value.code == "registry_install_exists"
+    assert (custom_nodes / result.installed_path / "__init__.py").read_bytes() == content

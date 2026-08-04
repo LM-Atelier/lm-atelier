@@ -6,7 +6,6 @@ from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING
-from urllib.parse import urlparse
 
 from sqlalchemy import select
 from sqlalchemy.orm import Session
@@ -20,6 +19,7 @@ from .comfy_registry_dependencies import (
     ComfyRegistryDependencyError,
     plan_comfy_registry_dependencies,
 )
+from .comfy_registry_sources import ComfyPackageSourceError, resolve_comfy_package_source
 from .comfy_registry_wheel_closure import (
     ComfyRegistryWheelClosure,
     ComfyRegistryWheelClosureError,
@@ -36,10 +36,8 @@ if TYPE_CHECKING:
     from .workflow_activations import WorkflowRegistryLaunchBinding
 
 _PACKAGE_ID = re.compile(r"^[a-z0-9][a-z0-9._-]{0,99}$")
-_SEMANTIC_VERSION = re.compile(r"^[0-9]+\.[0-9]+\.[0-9]+(?:[-+][0-9A-Za-z.-]+)?$")
 _DIGEST = re.compile(r"^[0-9a-fA-F]{64}$")
 _INSTALL_PATH = re.compile(r"^lm-atelier-registry_[A-Za-z0-9._-]{1,200}$")
-_REPOSITORY_PART = re.compile(r"^[A-Za-z0-9_.-]+$")
 _ENVIRONMENT_PATH = re.compile(r"^registry-wheels-([0-9a-f]{64})$")
 
 
@@ -344,26 +342,14 @@ def _identity(
     archive: ComfyRegistryArchiveReport,
     installed_path: str,
 ) -> _InstallIdentity:
-    if (
-        not resolution.resolved
-        or resolution.install_kind != "registry_archive"
-        or not resolution.package_id
-        or not resolution.declared_version
-        or not resolution.registry_record_id
-        or not resolution.repository_url
-        or not resolution.download_url
-    ):
-        raise ComfyRegistryInstallError(
-            "resolution does not identify an exact Comfy Registry archive"
-        )
-    if not _PACKAGE_ID.fullmatch(resolution.package_id):
-        raise ComfyRegistryInstallError("resolution has an invalid Registry package id")
-    version = _text(resolution.declared_version, "Registry package version", 100)
-    if not _SEMANTIC_VERSION.fullmatch(version):
-        raise ComfyRegistryInstallError("resolution has an invalid Registry package version")
-    record_id = _text(resolution.registry_record_id, "Registry record id", 1_000)
-    repository_url = _repository_url(resolution.repository_url)
-    download_url = _download_url(resolution.download_url)
+    try:
+        source = resolve_comfy_package_source(resolution)
+    except ComfyPackageSourceError as exc:
+        raise ComfyRegistryInstallError(str(exc)) from exc
+    version = _text(source.package_version, "package version", 100)
+    record_id = _text(source.source_record_id, "package source record id", 1_000)
+    repository_url = _text(source.repository_url, "package repository URL", 1_000)
+    download_url = _text(source.download_url, "package download URL", 1_000)
     archive_sha256 = _digest(archive.archive_sha256, "archive hash")
     manifest_sha256 = _digest(archive.manifest_sha256, "manifest hash")
     if not archive.review_required:
@@ -379,7 +365,7 @@ def _identity(
         _text(value, "Registry warning", 200) for value in resolution.warnings
     ]
     return _InstallIdentity(
-        resolution.package_id,
+        source.package_id,
         version,
         record_id,
         repository_url,
@@ -425,48 +411,6 @@ def _digest(value: object, name: str) -> str:
     if not isinstance(value, str) or not _DIGEST.fullmatch(value):
         raise ComfyRegistryInstallError(f"invalid {name}")
     return value.lower()
-
-
-def _repository_url(value: str) -> str:
-    source = _text(value, "Registry repository URL", 1_000)
-    parsed = urlparse(source)
-    parts = [part for part in parsed.path.split("/") if part]
-    if (
-        parsed.scheme != "https"
-        or parsed.hostname != "github.com"
-        or parsed.username
-        or parsed.password
-        or parsed.port
-        or parsed.query
-        or parsed.fragment
-        or len(parts) != 2
-        or not _REPOSITORY_PART.fullmatch(parts[0])
-    ):
-        raise ComfyRegistryInstallError("invalid Registry repository URL")
-    repository = parts[1][:-4] if parts[1].endswith(".git") else ""
-    canonical = f"https://github.com/{parts[0]}/{repository}.git"
-    if not repository or not _REPOSITORY_PART.fullmatch(repository) or source != canonical:
-        raise ComfyRegistryInstallError("invalid Registry repository URL")
-    return canonical
-
-
-def _download_url(value: str) -> str:
-    source = _text(value, "Registry download URL", 1_000)
-    parsed = urlparse(source)
-    if (
-        parsed.scheme != "https"
-        or parsed.hostname != "cdn.comfy.org"
-        or parsed.username
-        or parsed.password
-        or parsed.port
-        or parsed.query
-        or parsed.fragment
-        or not parsed.path.startswith("/")
-        or not parsed.path.endswith(".zip")
-        or source != f"https://cdn.comfy.org{parsed.path}"
-    ):
-        raise ComfyRegistryInstallError("invalid Registry download URL")
-    return source
 
 
 def _review(archive: ComfyRegistryArchiveReport) -> dict[str, object]:

@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
-import re
 import shutil
 import stat
 from collections.abc import Awaitable, Callable
@@ -14,7 +13,11 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from .comfy_registry import ComfyNodeResolution
-from .comfy_registry_archives import ComfyRegistryArchiveReport
+from .comfy_registry_archives import (
+    ComfyRegistryArchiveError,
+    ComfyRegistryArchiveReport,
+    verify_staged_comfy_registry_archive,
+)
 from .comfy_registry_dependencies import (
     ComfyRegistryDependencyError,
     plan_comfy_registry_dependencies,
@@ -24,6 +27,7 @@ from .comfy_registry_installs import (
     bind_comfy_registry_wheel_environment,
     persist_comfy_registry_install,
 )
+from .comfy_registry_sources import ComfyPackageSourceError, resolve_comfy_package_source
 from .comfy_registry_wheel_artifacts import (
     ComfyRegistryWheelArtifact,
     ComfyRegistryWheelArtifactManifest,
@@ -44,8 +48,6 @@ from .comfy_registry_wheel_environments import (
 )
 from .models import ComfyRegistryInstall
 
-_PACKAGE_ID = re.compile(r"^[a-z0-9][a-z0-9._-]{0,99}$")
-_SEMANTIC_VERSION = re.compile(r"^[0-9]+\.[0-9]+\.[0-9]+(?:[-+][0-9A-Za-z.-]+)?$")
 _REPARSE_POINT = getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0x400)
 
 
@@ -90,6 +92,72 @@ class ComfyRegistryPreparation:
     reused_wheel_environment: bool
 
 
+@dataclass(frozen=True)
+class ComfyRegistryStagedArchive:
+    installed_path: str
+    destination: Path
+    report: ComfyRegistryArchiveReport
+
+
+async def stage_comfy_registry_install_archive(
+    *,
+    resolution: ComfyNodeResolution,
+    archive_downloader: RegistryArchiveDownloader,
+    custom_node_root: Path,
+    media_worker_stopped: bool,
+    archive_progress: DownloadProgress | None = None,
+) -> ComfyRegistryStagedArchive:
+    """Stage package code once, still inert and review-required."""
+    if media_worker_stopped is not True:
+        raise ComfyRegistryLifecycleError(
+            "media_worker_running",
+            "The media worker must be stopped before preparing a Registry package",
+        )
+    package_id, package_version, record_id = _resolution_identity(resolution)
+    node_root = _managed_root(custom_node_root, "custom node")
+    installed_path = _installed_path(package_id, package_version, record_id)
+    destination = node_root / installed_path
+    if destination.exists() or destination.is_symlink():
+        raise ComfyRegistryLifecycleError(
+            "node_destination_exists", "The managed Registry node destination already exists"
+        )
+    try:
+        report = await archive_downloader.download_and_stage(
+            resolution,
+            destination,
+            progress=archive_progress,
+        )
+        staged = ComfyRegistryStagedArchive(installed_path, destination, report)
+        _validate_staged_archive(staged, destination, installed_path)
+        return staged
+    except (Exception, asyncio.CancelledError):
+        if destination.exists() or destination.is_symlink():
+            await _remove_tree(destination, node_root)
+        raise
+
+
+async def discard_comfy_registry_staged_archive(
+    *,
+    resolution: ComfyNodeResolution,
+    staged_archive: ComfyRegistryStagedArchive,
+    custom_node_root: Path,
+) -> None:
+    """Remove only the deterministic inert tree belonging to this resolution."""
+    package_id, package_version, record_id = _resolution_identity(resolution)
+    node_root = _managed_root(custom_node_root, "custom node")
+    installed_path = _installed_path(package_id, package_version, record_id)
+    destination = node_root / installed_path
+    if (
+        not isinstance(staged_archive, ComfyRegistryStagedArchive)
+        or staged_archive.installed_path != installed_path
+        or staged_archive.destination != destination
+    ):
+        raise ComfyRegistryLifecycleError(
+            "invalid_staged_archive", "The staged Registry package identity is invalid"
+        )
+    await _remove_tree(destination, node_root)
+
+
 async def prepare_comfy_registry_install(
     session: Session,
     *,
@@ -103,6 +171,7 @@ async def prepare_comfy_registry_install(
     media_worker_stopped: bool,
     archive_progress: DownloadProgress | None = None,
     wheel_progress: WheelDownloadProgress | None = None,
+    staged_archive: ComfyRegistryStagedArchive | None = None,
     environment_assembler: EnvironmentAssembler = assemble_comfy_registry_wheel_environment,
 ) -> ComfyRegistryPreparation:
     """Prepare one exact Registry package without trusting or activating it."""
@@ -121,30 +190,41 @@ async def prepare_comfy_registry_install(
     node_destination = node_root / installed_path
     environment_destination = environment_root / f"registry-wheels-{closure.closure_sha256}"
     wheel_destination = staging_root / f"registry-wheels-{closure.closure_sha256}"
-    if session.scalar(
-        select(ComfyRegistryInstall.id).where(ComfyRegistryInstall.registry_record_id == record_id)
-    ):
-        raise ComfyRegistryLifecycleError(
-            "registry_install_exists", "This exact Registry package is already prepared"
-        )
-    if node_destination.exists() or node_destination.is_symlink():
-        raise ComfyRegistryLifecycleError(
-            "node_destination_exists", "The managed Registry node destination already exists"
-        )
-    if wheel_destination.exists() or wheel_destination.is_symlink():
-        raise ComfyRegistryLifecycleError(
-            "wheel_stage_exists", "Registry wheel staging from another attempt still exists"
-        )
-
     environment_preexisting = (
         environment_destination.exists() or environment_destination.is_symlink()
     )
+    owns_node_destination = False
     try:
-        archive = await archive_downloader.download_and_stage(
-            resolution,
-            node_destination,
-            progress=archive_progress,
-        )
+        if session.scalar(
+            select(ComfyRegistryInstall.id).where(
+                ComfyRegistryInstall.registry_record_id == record_id
+            )
+        ):
+            raise ComfyRegistryLifecycleError(
+                "registry_install_exists", "This exact Registry package is already prepared"
+            )
+        if staged_archive is None:
+            if node_destination.exists() or node_destination.is_symlink():
+                raise ComfyRegistryLifecycleError(
+                    "node_destination_exists",
+                    "The managed Registry node destination already exists",
+                )
+            owns_node_destination = True
+            staged_archive = await stage_comfy_registry_install_archive(
+                resolution=resolution,
+                archive_downloader=archive_downloader,
+                custom_node_root=node_root,
+                media_worker_stopped=True,
+                archive_progress=archive_progress,
+            )
+        else:
+            _validate_staged_archive(staged_archive, node_destination, installed_path)
+            owns_node_destination = True
+        if wheel_destination.exists() or wheel_destination.is_symlink():
+            raise ComfyRegistryLifecycleError(
+                "wheel_stage_exists", "Registry wheel staging from another attempt still exists"
+            )
+        archive = staged_archive.report
         environment, reused = await _environment(
             session,
             closure=closure,
@@ -196,7 +276,7 @@ async def prepare_comfy_registry_install(
     except (Exception, asyncio.CancelledError):
         session.rollback()
         await _remove_tree(wheel_destination, staging_root)
-        if node_destination.exists() or node_destination.is_symlink():
+        if owns_node_destination and (node_destination.exists() or node_destination.is_symlink()):
             await _remove_tree(node_destination, node_root)
         if not environment_preexisting and (
             environment_destination.exists() or environment_destination.is_symlink()
@@ -289,28 +369,39 @@ def _complete_closure(
 
 
 def _resolution_identity(resolution: ComfyNodeResolution) -> tuple[str, str, str]:
-    if not isinstance(resolution, ComfyNodeResolution) or not resolution.resolved:
-        raise ComfyRegistryLifecycleError(
-            "invalid_resolution", "Registry package resolution is incomplete"
-        )
-    package_id = resolution.package_id
-    package_version = resolution.declared_version
-    record_id = resolution.registry_record_id
+    try:
+        source = resolve_comfy_package_source(resolution)
+    except ComfyPackageSourceError as exc:
+        raise ComfyRegistryLifecycleError("invalid_resolution", str(exc)) from exc
+    return source.package_id, source.package_version, source.source_record_id
+
+
+def _validate_staged_archive(
+    staged_archive: ComfyRegistryStagedArchive,
+    destination: Path,
+    installed_path: str,
+) -> None:
     if (
-        resolution.install_kind != "registry_archive"
-        or not isinstance(package_id, str)
-        or not _PACKAGE_ID.fullmatch(package_id)
-        or not isinstance(package_version, str)
-        or not _SEMANTIC_VERSION.fullmatch(package_version)
-        or not isinstance(record_id, str)
-        or not record_id
-        or len(record_id) > 1_000
-        or _has_control(record_id)
+        not isinstance(staged_archive, ComfyRegistryStagedArchive)
+        or staged_archive.installed_path != installed_path
+        or staged_archive.destination != destination
+        or not isinstance(staged_archive.report, ComfyRegistryArchiveReport)
+        or staged_archive.report.review_required is not True
     ):
         raise ComfyRegistryLifecycleError(
-            "invalid_resolution", "Registry package resolution has an invalid identity"
+            "invalid_staged_archive", "The staged Registry package identity is invalid"
         )
-    return package_id, package_version, record_id
+    try:
+        verify_staged_comfy_registry_archive(
+            destination,
+            expected_manifest_sha256=staged_archive.report.manifest_sha256,
+            expected_file_count=staged_archive.report.file_count,
+            expected_expanded_bytes=staged_archive.report.expanded_bytes,
+        )
+    except ComfyRegistryArchiveError as exc:
+        raise ComfyRegistryLifecycleError(
+            "invalid_staged_archive", "The staged Registry package files are invalid"
+        ) from exc
 
 
 def _installed_path(package_id: str, package_version: str, record_id: str) -> str:
@@ -366,10 +457,6 @@ async def _remove_tree(path: Path, root: Path) -> None:
             "cleanup_failed", "Registry preparation cleanup path is unsafe"
         )
     await asyncio.to_thread(shutil.rmtree, path)
-
-
-def _has_control(value: str) -> bool:
-    return any(character < " " or character == "\x7f" for character in value)
 
 
 def _is_link_or_reparse(path: Path) -> bool:

@@ -45,6 +45,7 @@ _TREE_HASH = re.compile(r"^(?:[0-9a-fA-F]{40}|[0-9a-fA-F]{64})$")
 _COMMIT = re.compile(r"^[0-9a-fA-F]{40}$")
 _STABLE_TEXT = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.:/+-]{0,199}$")
 _PACKAGE_ID = re.compile(r"^[a-z0-9][a-z0-9._-]{0,99}$")
+_LOWERCASE_COMMIT = re.compile(r"^[0-9a-f]{40}$")
 _SEMANTIC_VERSION = re.compile(r"^[0-9]+[.][0-9]+[.][0-9]+(?:[-+][0-9A-Za-z.-]+)?$")
 _REGISTRY_ENVIRONMENT_PATH = re.compile(r"^registry-wheels-([0-9a-f]{64})$")
 _COMFY_MODEL_FOLDERS = frozenset(
@@ -546,7 +547,10 @@ def materialize_registry_package(
         not install.active
         or not install.trusted
         or not _PACKAGE_ID.fullmatch(install.package_id)
-        or not _SEMANTIC_VERSION.fullmatch(install.package_version)
+        or not (
+            _SEMANTIC_VERSION.fullmatch(install.package_version)
+            or _LOWERCASE_COMMIT.fullmatch(install.package_version)
+        )
         or not install.registry_record_id
         or len(install.registry_record_id) > 1_000
         or environment_match is None
