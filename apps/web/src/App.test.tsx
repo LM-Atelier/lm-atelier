@@ -5433,7 +5433,7 @@ describe("App", () => {
     }));
     fireEvent.click(screen.getByRole("button", { name: "Close settings" }));
     fireEvent.click(screen.getByRole("button", { name: "Edit this image" }));
-    await waitFor(() => expect(api.updateChat).toHaveBeenCalledWith(chat.id, { pinned: false, routing_mode: "image" }));
+    await waitFor(() => expect(api.updateChat).toHaveBeenCalledWith(chat.id, { routing_mode: "image" }));
     expect(screen.getByText("sha256:prior")).toBeInTheDocument();
     expect(composer).toHaveFocus();
   });
@@ -5610,7 +5610,7 @@ describe("App", () => {
     );
 
     fireEvent.click(await screen.findByRole("button", { name: "Animate this image" }));
-    await waitFor(() => expect(api.updateChat).toHaveBeenCalledWith(chat.id, { pinned: false, routing_mode: "video" }));
+    await waitFor(() => expect(api.updateChat).toHaveBeenCalledWith(chat.id, { routing_mode: "video" }));
     const composer = screen.getByRole("textbox", { name: "Message" });
     // The prefill lands after the routing mutation settles, not with it.
     await waitFor(() => expect(composer).toHaveValue("Animate this image"));
@@ -5702,9 +5702,7 @@ describe("App", () => {
     });
     fireEvent.click(await screen.findByRole("button", { name: "Edit attached image" }));
 
-    await waitFor(() => expect(api.updateChat).toHaveBeenCalledWith(chat.id, {
-      pinned: false, routing_mode: "image",
-    }));
+    await waitFor(() => expect(api.updateChat).toHaveBeenCalledWith(chat.id, { routing_mode: "image" }));
     expect(composer).toHaveFocus();
     const sourcePreview = screen.getByRole("link", { name: "Preview source.png" });
     expect(sourcePreview).toHaveAttribute("href", "/api/artifacts/sha256%3Auploaded-image/content");
@@ -6067,7 +6065,7 @@ describe("App", () => {
     fireEvent.change(mode, { target: { value: "image" } });
     await waitFor(() => expect(api.updateChat).toHaveBeenCalledWith(
       firstChat.id,
-      { pinned: false, routing_mode: "image" },
+      { routing_mode: "image" },
     ));
     fireEvent.click(screen.getByRole("button", { name: "Turn settings" }));
     fireEvent.change(screen.getByRole("combobox", { name: "image preset" }), {
@@ -6214,7 +6212,7 @@ describe("App", () => {
     // The skipped file is named, not silently dropped.
     expect(screen.getByRole("alert")).toHaveTextContent("Only images and videos can be attached.");
     fireEvent.click(screen.getByRole("button", { name: "Animate attached image" }));
-    await waitFor(() => expect(api.updateChat).toHaveBeenCalledWith("chat-drop", { pinned: false, routing_mode: "video" }));
+    await waitFor(() => expect(api.updateChat).toHaveBeenCalledWith("chat-drop", { routing_mode: "video" }));
     // The prefill lands after the routing mutation settles, not with it.
     await waitFor(() => expect(textarea).toHaveValue("Animate this image"));
     expect(textarea).toHaveFocus();
