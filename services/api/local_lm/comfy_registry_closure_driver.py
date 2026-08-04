@@ -209,12 +209,6 @@ async def drive_comfy_registry_wheel_closure(
         )
     except ComfyRegistryWheelArtifactError as exc:
         raise _driver_error(exc) from exc
-    if dependency_plan.version_resolution_required:
-        raise ComfyRegistryWheelClosureDriverError(
-            "version_resolution_required",
-            "Registry dependency versions must be exact before resolving wheel artifacts",
-        )
-
     project_names = _active_project_names(dependency_plan, marker_environment)
     if project_names:
         await _publish_progress(progress, "fetching_projects", 0, project_names)
