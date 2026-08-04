@@ -116,6 +116,35 @@ describe("the token layer", () => {
     // spelled out across the rules.
     expect(literals.length).toBeLessThanOrEqual(65);
   });
+
+  it("paints no surface or ink with a colour that cannot change room", () => {
+    // This is the defect the contrast test could not see. Every rule it
+    // walked used tokens, so every room looked correct - while `:root`
+    // painted `#0f0d0b` under a light ink, the sidebar hardcoded a dark
+    // gradient, and a dozen badges spelled out dark-room colours. In the
+    // dark room they all agreed and nothing looked wrong. In the light one
+    // the chrome stayed dark, the ink stayed pale, and text on paper became
+    // unreadable.
+    //
+    // A literal cannot follow the room. So a surface or an ink must name a
+    // token, and only the palette blocks may hold a colour.
+    const css = readFileSync(STYLESHEET, "utf8");
+    const offenders: string[] = [];
+    for (const rule of css.matchAll(/([^{}\n][^{}]*)\{([^}]*)\}/g)) {
+      const [, selector, body] = rule;
+      if (selector.trim().startsWith("[data-room=")) continue;
+      const declarations = body.matchAll(
+        /(?<![-\w])(background|background-color|color|border-color):\s*([^;]+);/g,
+      );
+      for (const [, property, value] of declarations) {
+        if (/#[0-9a-fA-F]{3,8}\b|rgba?\(/.test(value)) {
+          offenders.push(`${selector.trim().slice(0, 40)} { ${property}: ${value.trim()} }`);
+        }
+      }
+    }
+
+    expect(offenders).toEqual([]);
+  });
 });
 
 describe("typography", () => {
