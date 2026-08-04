@@ -18,6 +18,16 @@ type Selection = {
   artifact_path: string;
 };
 
+/** The one file this asset resolves to, or nothing at all.
+ *
+ * A workflow reference answers to exactly one artifact. A plan holding more
+ * than one means the repository was ranked rather than the file being read,
+ * and binding the first of several would quietly install the rest.
+ */
+function exactArtifact(result: { selected_files: string[] }): string | null {
+  return result.selected_files.length === 1 ? result.selected_files[0] : null;
+}
+
 /** Install the model files a workflow needs, one explicit choice at a time.
  *
  * A workflow names filenames, not sources - so nothing is guessed here. For
@@ -156,14 +166,18 @@ function AssetRow({
         asset.kind === "lora" ? "image" : "image",
         model.required_runtime ?? "comfyui",
         model.provider === "civitai" ? model.remote_id : "main",
-        [],
+        // Name the file the workflow asked for. Leaving this empty let the
+        // repository's own bundle be ranked instead, which is how one text
+        // encoder turned into a four-file, 19GB install.
+        [asset.filename],
         asset.kind === "lora" ? "lora" : null,
         null,
         model.provider,
+        asset.kind,
       ),
     onSuccess: (result) => {
       const planId = result.install_plan?.id;
-      const artifact = result.selected_files[0];
+      const artifact = exactArtifact(result);
       if (!planId || !artifact) return;
       onChoose({
         reference_filename: asset.filename,
@@ -188,14 +202,15 @@ function AssetRow({
         candidate.revision ?? "main",
         // Naming the file the author pointed at keeps a multi-file repository
         // from resolving to whichever file the catalog would have picked.
-        candidate.filename ? [candidate.filename] : [],
+        candidate.filename ? [candidate.filename] : [asset.filename],
         asset.kind === "lora" ? "lora" : null,
         null,
         candidate.provider,
+        asset.kind,
       ),
     onSuccess: (result) => {
       const planId = result.install_plan?.id;
-      const artifact = result.selected_files[0];
+      const artifact = exactArtifact(result);
       if (!planId || !artifact) return;
       onChoose({
         reference_filename: asset.filename,

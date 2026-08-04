@@ -1156,11 +1156,16 @@ class WorkflowSourceCandidateOut(ApiModel):
     url: str
 
 
+# What the workflow analyzer can say a referenced file is. One definition, so
+# a caller naming an exact file cannot name a kind the analyzer never emits.
+WorkflowAssetKind = Literal["checkpoint", "configuration", "embedding", "lora", "upscaler", "vae"]
+
+
 class WorkflowAssetReferenceOut(ApiModel):
     filename: str
     suffix: str
     policy: Literal["supported", "blocked", "unsupported"]
-    kind: Literal["checkpoint", "configuration", "embedding", "lora", "upscaler", "vae"]
+    kind: WorkflowAssetKind
     source_url: str | None
     present_locally: bool
     # Populated only when the author's own text names this exact file; a link
@@ -1298,6 +1303,12 @@ class CatalogPreflightRequest(ApiModel):
     # The exact workflow variant the user chose from the catalog. Absent for
     # repository-only callers, which keep the ranked fallback.
     workflow_template_id: str | None = Field(default=None, max_length=200)
+    # A workflow named this exact file, so plan that file and nothing else.
+    # Absent means an ordinary repository install, which keeps template
+    # ranking. Present means the caller already knows what it needs, and
+    # ranking a repository's official bundle over it would install several
+    # gigabytes nobody asked for.
+    workflow_reference_kind: WorkflowAssetKind | None = None
     auxiliary_kind: (
         Literal[
             "lora",
