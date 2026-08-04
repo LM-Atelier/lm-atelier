@@ -7,6 +7,7 @@ from pathlib import Path
 import pytest
 
 from local_lm.comfy_package_requirements import (
+    MAX_REQUIREMENTS_BYTES,
     MAX_REQUIREMENTS_LINES,
     StagedRequirementsError,
     read_staged_requirements,
@@ -70,6 +71,24 @@ def test_refuses_a_file_that_is_not_valid_utf8(tmp_path: Path) -> None:
         read_staged_requirements(tmp_path, "node/requirements.txt")
 
     assert refused.value.code == "unreadable_requirements"
+
+
+def test_refuses_a_file_larger_than_the_byte_limit(tmp_path: Path) -> None:
+    """The bound acts on what is read, not on what was already allocated."""
+    _stage(tmp_path, "node/requirements.txt", "n" * (MAX_REQUIREMENTS_BYTES + 1))
+
+    with pytest.raises(StagedRequirementsError) as refused:
+        read_staged_requirements(tmp_path, "node/requirements.txt")
+
+    assert refused.value.code == "requirements_too_large"
+
+
+def test_reads_a_file_exactly_at_the_byte_limit(tmp_path: Path) -> None:
+    _stage(tmp_path, "node/requirements.txt", "n" * MAX_REQUIREMENTS_BYTES)
+
+    assert read_staged_requirements(tmp_path, "node/requirements.txt") == (
+        "n" * MAX_REQUIREMENTS_BYTES,
+    )
 
 
 def test_refuses_a_file_with_too_many_lines(tmp_path: Path) -> None:

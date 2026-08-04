@@ -65,7 +65,12 @@ def read_staged_requirements(root: Path, manifest: str) -> tuple[str, ...]:
     """
     target = _inside(root, manifest)
     try:
-        payload = target.read_bytes()
+        with target.open("rb") as handle:
+            # One byte past the bound, so the limit is enforced by what is read
+            # rather than by what was already allocated. A staged package is
+            # not trusted yet, and a file large enough to matter must not be
+            # held in memory on the way to being refused.
+            payload = handle.read(MAX_REQUIREMENTS_BYTES + 1)
     except OSError as exc:
         raise StagedRequirementsError(
             "unreadable_requirements", "The staged requirements file could not be read"
