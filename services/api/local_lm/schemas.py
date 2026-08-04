@@ -57,6 +57,7 @@ class ProjectUpdate(ApiModel):
     description: str | None = Field(default=None, max_length=10_000)
     instructions: str | None = Field(default=None, max_length=100_000)
     archived: bool | None = None
+    pinned: bool | None = None
     image_workflow_revision_id: str | None = None
     video_workflow_revision_id: str | None = None
     generation_settings_json: GenerationSettingsByRole | None = None
@@ -69,6 +70,7 @@ class ProjectOut(ApiModel):
     description: str
     instructions: str
     archived: bool
+    pinned: bool
     image_workflow_revision_id: str | None
     video_workflow_revision_id: str | None
     generation_settings_json: GenerationSettingsByRole
@@ -90,6 +92,7 @@ class ChatUpdate(ApiModel):
     title: str | None = Field(default=None, min_length=1, max_length=240)
     project_id: str | None = None
     archived: bool | None = None
+    pinned: bool | None = None
     routing_mode: RoutingMode | None = None
     confirm_uncertain_media: bool | None = None
     active_chat_profile_id: str | None = None
@@ -217,6 +220,7 @@ class ChatOut(ApiModel):
     project_id: str | None
     title: str
     archived: bool
+    pinned: bool
     routing_mode: str
     confirm_uncertain_media: bool
     active_chat_profile_id: str | None

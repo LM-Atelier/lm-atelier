@@ -60,6 +60,7 @@ class Project(TimestampMixin, Base):
     description: Mapped[str] = mapped_column(Text, default="")
     instructions: Mapped[str] = mapped_column(Text, default="")
     archived: Mapped[bool] = mapped_column(Boolean, default=False, index=True)
+    pinned: Mapped[bool] = mapped_column(Boolean, default=False, index=True)
     image_workflow_revision_id: Mapped[str | None] = mapped_column(
         ForeignKey("workflow_revisions.id", ondelete="SET NULL"), nullable=True
     )
@@ -81,6 +82,7 @@ class Chat(TimestampMixin, Base):
     )
     title: Mapped[str] = mapped_column(String(240), default="New chat")
     archived: Mapped[bool] = mapped_column(Boolean, default=False, index=True)
+    pinned: Mapped[bool] = mapped_column(Boolean, default=False, index=True)
     scope: Mapped[str] = mapped_column(String(24), default="standard", index=True)
     draft_prompt: Mapped[str] = mapped_column(Text, default="")
     routing_mode: Mapped[str] = mapped_column(String(16), default=RoutingMode.AUTO.value)

@@ -1157,7 +1157,7 @@ async def list_projects(
     include_archived: bool = False,
     query: str = Query(default="", max_length=500),
 ) -> list[Project]:
-    statement = select(Project).order_by(Project.updated_at.desc())
+    statement = select(Project).order_by(Project.pinned.desc(), Project.updated_at.desc())
     if not include_archived:
         statement = statement.where(Project.archived.is_(False))
     if query.strip():
@@ -1374,7 +1374,9 @@ async def list_chats(
     query: str = Query(default="", max_length=500),
 ) -> list[Chat]:
     statement = (
-        select(Chat).where(Chat.scope == STANDARD_CHAT_SCOPE).order_by(Chat.updated_at.desc())
+        select(Chat)
+        .where(Chat.scope == STANDARD_CHAT_SCOPE)
+        .order_by(Chat.pinned.desc(), Chat.updated_at.desc())
     )
     if project_id:
         statement = statement.where(Chat.project_id == project_id)

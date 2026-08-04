@@ -26,6 +26,7 @@ import {
   Menu,
   MessageSquare,
   MoreHorizontal,
+  Pin,
   Paperclip,
   Pencil,
   Plus,
@@ -102,7 +103,7 @@ import { operationForTurn, revisionForTurn, schemaForRevision } from "./turnWork
 import type { WorkflowFamily, WorkflowSelection } from "./types";
 import { PromptDialog } from "./ConfirmDialog";
 import { CustomNodesPanel } from "./CustomNodesPanel";
-import { LoraStackControl } from "./LoraStackControl";
+import { SettingControl } from "./SettingControl";
 import { MediaLibraryView } from "./MediaLibraryView";
 import { MediaOutputPlan } from "./MediaOutputPlan";
 import { ModelCard } from "./ModelCard";
@@ -569,83 +570,6 @@ function MessageBubble({
         )}
       </div>
     </article>
-  );
-}
-
-function SettingControl({
-  field,
-  value,
-  onChange,
-}: {
-  field: SettingField;
-  value: unknown;
-  onChange: (value: unknown) => void;
-}) {
-  const fixed = field.choices.length === 1;
-  if (field.key === "loras") {
-    return <LoraStackControl value={value} onChange={onChange} />;
-  }
-  if (field.type === "boolean") {
-    return (
-      <label className="setting-row toggle-row">
-        <span><strong>{field.label}</strong>{field.help && <small>{field.help}</small>}</span>
-        <input type="checkbox" checked={Boolean(value)} disabled={fixed} onChange={(event) => onChange(event.target.checked)} />
-      </label>
-    );
-  }
-  if (field.type === "enum") {
-    return (
-      <label className="setting-row">
-        <span><strong>{field.label}</strong>{field.help && <small>{field.help}</small>}</span>
-        <select value={String(value ?? "")} disabled={fixed} onChange={(event) => onChange(event.target.value)}>
-          {field.choices.map((choice) => <option key={String(choice)}>{String(choice)}</option>)}
-        </select>
-      </label>
-    );
-  }
-  if (field.type === "number" || field.type === "integer") {
-    return (
-      <label className="setting-row">
-        <span><strong>{field.label}</strong>{field.help && <small>{field.help}</small>}</span>
-        <input
-          type="number"
-          value={Number(value ?? field.default)}
-          min={field.minimum ?? undefined}
-          max={field.maximum ?? undefined}
-          step={field.step ?? (field.type === "integer" ? 1 : 0.01)}
-          disabled={fixed}
-          onChange={(event) => onChange(field.type === "integer" ? Number.parseInt(event.target.value) : Number(event.target.value))}
-        />
-      </label>
-    );
-  }
-  if (field.type === "array" || field.type === "object") {
-    return (
-      <label className="setting-row">
-        <span><strong>{field.label}</strong>{field.help && <small>{field.help}</small>}</span>
-        <textarea
-          rows={3}
-          disabled={fixed}
-          defaultValue={JSON.stringify(value ?? field.default, null, 2)}
-          onBlur={(event) => {
-            try {
-              const parsed = JSON.parse(event.target.value) as unknown;
-              event.target.setCustomValidity("");
-              onChange(parsed);
-            } catch {
-              event.target.setCustomValidity("Enter valid JSON");
-              event.target.reportValidity();
-            }
-          }}
-        />
-      </label>
-    );
-  }
-  return (
-    <label className="setting-row">
-      <span><strong>{field.label}</strong>{field.help && <small>{field.help}</small>}</span>
-      <input value={String(value ?? "")} disabled={fixed} onChange={(event) => onChange(event.target.value)} />
-    </label>
   );
 }
 
@@ -3158,7 +3082,7 @@ function Sidebar({
   const visibleChats = chats.filter((chat) => (showArchived || !chat.archived) && (!normalizedSearch || chat.title.toLowerCase().includes(normalizedSearch)));
   const visibleProjects = projects.filter((project) => (showArchived || !project.archived) && (!normalizedSearch || project.name.toLowerCase().includes(normalizedSearch) || visibleChats.some((chat) => chat.project_id === project.id)));
   const unfiled = visibleChats.filter((chat) => !chat.project_id);
-  const chatRow = (chat: Chat) => <div className="sidebar-chat-row" key={chat.id}><button className={`chat-main ${view === "chat" && currentChatId === chat.id ? "active" : ""}`} aria-current={view === "chat" && currentChatId === chat.id ? "page" : undefined} onClick={() => { onChat(chat.id); setMobileOpen(false); }}><MessageSquare size={14} /><span>{chat.title}</span>{chat.archived && <small>Archived</small>}</button><button className="inline-add" aria-label={`Manage ${chat.title}`} onClick={() => setManagedChat(chat)}><MoreHorizontal size={13} /></button></div>;
+  const chatRow = (chat: Chat) => <div className="sidebar-chat-row" key={chat.id}><button className={`chat-main ${view === "chat" && currentChatId === chat.id ? "active" : ""}`} aria-current={view === "chat" && currentChatId === chat.id ? "page" : undefined} onClick={() => { onChat(chat.id); setMobileOpen(false); }}><MessageSquare size={14} /><span>{chat.title}</span>{chat.archived && <small>Archived</small>}</button><button className={`inline-add sidebar-pin ${chat.pinned ? "pinned" : ""}`} aria-label={chat.pinned ? `Unpin ${chat.title}` : `Pin ${chat.title}`} aria-pressed={chat.pinned} title={chat.pinned ? "Unpin" : "Pin"} onClick={() => onUpdateChat(chat.id, { pinned: !chat.pinned })}><Pin size={13} /></button><button className="inline-add" aria-label={`Manage ${chat.title}`} onClick={() => setManagedChat(chat)}><MoreHorizontal size={13} /></button></div>;
   return (
     <aside className={`sidebar ${mobileOpen ? "mobile-open" : ""}`}>
       <div className="brand"><div className="brand-mark"><AtelierMark /></div><span>LM Atelier<small>Local creative studio</small></span><button className="icon-button mobile-menu" aria-label="Toggle navigation" aria-expanded={mobileOpen} onClick={() => setMobileOpen((open) => !open)}><Menu /></button></div>
