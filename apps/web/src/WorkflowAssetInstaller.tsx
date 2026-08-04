@@ -24,7 +24,12 @@ type Selection = {
  * than one means the repository was ranked rather than the file being read,
  * and binding the first of several would quietly install the rest.
  */
-function exactArtifact(result: { selected_files: string[] }): string | null {
+function exactArtifact(result: {
+  selected_files: string[];
+  can_install: boolean;
+  install_plan?: { compatibility: string } | null;
+}): string | null {
+  if (!result.can_install || result.install_plan?.compatibility !== "supported") return null;
   return result.selected_files.length === 1 ? result.selected_files[0] : null;
 }
 

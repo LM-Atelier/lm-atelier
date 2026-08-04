@@ -16,7 +16,7 @@ from .domain import new_id
 from .model_manifests import ModelManifestInspection
 from .models import InstallPlan, ModelComponentManifest
 
-INSTALL_RESOLVER_VERSION = "install-resolver-v7"
+INSTALL_RESOLVER_VERSION = "install-resolver-v8"
 ACTIVATION_PROBE_VERSION = "activation-probe-v2"
 LAUNCH_CONTRACT_VERSION = "worker-launch-v1"
 
@@ -33,6 +33,39 @@ _WORKFLOW_COMPONENT_KINDS = {
     "embeddings": "embedding",
     "ipadapter": "ip_adapter",
 }
+_WORKFLOW_REFERENCE_ARTIFACT_KINDS: dict[str, frozenset[str]] = {
+    "checkpoint": frozenset(
+        {
+            "checkpoint",
+            "clip_vision",
+            "controlnet",
+            "diffusion_model",
+            "gguf_model",
+            "ip_adapter",
+            "text_encoder",
+        }
+    ),
+    "embedding": frozenset({"embedding"}),
+    "lora": frozenset({"lora"}),
+    "upscaler": frozenset({"upscaler"}),
+    "vae": frozenset({"vae"}),
+}
+_WORKFLOW_ARTIFACT_TARGET_FOLDERS: dict[str, frozenset[str]] = {
+    "checkpoint": frozenset({"checkpoints"}),
+    "clip_vision": frozenset({"clip_vision"}),
+    "controlnet": frozenset({"controlnet"}),
+    "diffusion_model": frozenset({"diffusion_models", "unet"}),
+    "embedding": frozenset({"embeddings"}),
+    "gguf_model": frozenset(
+        {"checkpoints", "clip_vision", "diffusion_models", "models", "text_encoders", "unet"}
+    ),
+    "ip_adapter": frozenset({"ipadapter"}),
+    "lora": frozenset({"loras"}),
+    "text_encoder": frozenset({"text_encoders"}),
+    "upscaler": frozenset({"upscale_models"}),
+    "vae": frozenset({"vae"}),
+}
+
 InstallCompatibility = Literal[
     "supported",
     "unsupported",
@@ -317,6 +350,7 @@ def resolve_install_plan(
     workflow_component_folders: dict[str, str] | None = None,
     source_remote_id: str | None = None,
     auxiliary_kind: str | None = None,
+    workflow_reference_kind: str | None = None,
     provider: str = "huggingface",
 ) -> ResolvedInstallPlan:
     metadata_by_path = {component.path: component for component in inspection.components}
@@ -389,7 +423,23 @@ def resolve_install_plan(
     compatibility: InstallCompatibility = "supported"
     failure_code = None
     failure_reason = None
-    if auxiliary_kind:
+    if auxiliary_kind and workflow_reference_kind:
+        compatibility = "unsupported"
+        failure_code = "conflicting_asset_ownership"
+        failure_reason = "A model asset cannot be both standalone and workflow-owned."
+    elif workflow_reference_kind:
+        workflow_failure = _workflow_asset_failure(
+            artifacts,
+            selected_files=selected_files,
+            reference_kind=workflow_reference_kind,
+            role=role,
+            engine=engine,
+            workflow_template_id=workflow_template_id,
+        )
+        if workflow_failure:
+            compatibility = "unsupported"
+            failure_code, failure_reason = workflow_failure
+    elif auxiliary_kind:
         inspected_kinds = {metadata_by_path[str(item["filename"])].kind for item in selected_files}
         if engine != "comfyui":
             compatibility = "unsupported"
@@ -468,6 +518,20 @@ def resolve_install_plan(
         "quantization": "modelopt" if engine == "vllm" else None,
         "model_layout": "transformers_snapshot" if engine == "vllm" else None,
     }
+    if workflow_reference_kind:
+        runtime_contract["workflow_reference_kind"] = workflow_reference_kind
+        if len(artifacts) == 1:
+            workflow_artifact = artifacts[0]
+            runtime_contract.update(
+                {
+                    "comfy_paths": {workflow_artifact.target_folder: "."},
+                    "workflow_component_folders": {
+                        workflow_artifact.path: workflow_artifact.target_folder
+                    },
+                    "workflow_asset_kind": workflow_artifact.kind,
+                }
+            )
+
     activation_probe = {
         "version": ACTIVATION_PROBE_VERSION,
         "kind": (
@@ -480,6 +544,9 @@ def resolve_install_plan(
         "timeout_seconds": 120 if role == "chat" else 300,
         "required": compatibility == "supported",
     }
+    if workflow_reference_kind:
+        activation_probe.update({"kind": "workflow_asset", "required": False})
+
     return ResolvedInstallPlan(
         provider=provider,
         remote_id=remote_id,
@@ -495,6 +562,69 @@ def resolve_install_plan(
         failure_code=failure_code,
         failure_reason=failure_reason,
     )
+
+
+def _workflow_asset_failure(
+    artifacts: tuple[PlannedArtifact, ...],
+    *,
+    selected_files: list[dict[str, Any]],
+    reference_kind: str,
+    role: str,
+    engine: str,
+    workflow_template_id: str | None,
+) -> tuple[str, str] | None:
+    """Validate one exact provider component as an inert workflow dependency."""
+
+    if engine != "comfyui" or role not in {"image", "video"}:
+        return (
+            "unsupported_workflow_asset_runtime",
+            "Workflow-owned model assets require a ComfyUI media plan.",
+        )
+    if workflow_template_id:
+        return (
+            "conflicting_workflow_contract",
+            "A workflow-owned asset cannot also select a standalone workflow template.",
+        )
+    if len(artifacts) != 1:
+        return (
+            "workflow_asset_selection_required",
+            "Choose one exact file for each workflow asset.",
+        )
+    artifact = artifacts[0]
+    admitted_kinds = _WORKFLOW_REFERENCE_ARTIFACT_KINDS.get(reference_kind)
+    if admitted_kinds is None or artifact.kind not in admitted_kinds:
+        return (
+            "workflow_asset_kind_mismatch",
+            "The selected file kind does not match the workflow reference.",
+        )
+    if artifact.target_folder not in _WORKFLOW_ARTIFACT_TARGET_FOLDERS.get(
+        artifact.kind, frozenset()
+    ):
+        return (
+            "workflow_asset_folder_mismatch",
+            "The selected file has no valid ComfyUI target folder.",
+        )
+    allowed_suffixes = (".gguf",) if artifact.kind == "gguf_model" else (".safetensors",)
+    if not artifact.path.casefold().endswith(allowed_suffixes):
+        return (
+            "unsafe_workflow_asset_format",
+            "Workflow-owned model assets must use a data-only weights format.",
+        )
+    digest = selected_files[0].get("sha256")
+    if (
+        not isinstance(artifact.size_bytes, int)
+        or isinstance(artifact.size_bytes, bool)
+        or artifact.size_bytes <= 0
+        or not isinstance(digest, str)
+        or len(digest) != 64
+        or digest != digest.lower()
+        or any(character not in "0123456789abcdef" for character in digest)
+    ):
+        return (
+            "unverified_workflow_asset",
+            "Workflow-owned model assets need an exact positive size and SHA-256.",
+        )
+    return None
 
 
 def _workflow_component_contract(

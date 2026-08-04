@@ -3232,6 +3232,7 @@ async def resolve_catalog_preflight(
             workflow_component_folders=workflow_component_folders,
             source_remote_id=result.source_remote_id,
             auxiliary_kind=payload.auxiliary_kind,
+            workflow_reference_kind=payload.workflow_reference_kind,
         )
         if inspection_error:
             resolved = resolved.blocked(
