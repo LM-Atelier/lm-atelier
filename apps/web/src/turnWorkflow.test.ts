@@ -31,6 +31,7 @@ function families(): WorkflowFamily[] {
     {
       id: "family-1",
       name: "Chosen",
+      preferences: [],
       variants: [
         {
           id: "v1",
@@ -62,15 +63,12 @@ function selection(mode: WorkflowSelection["mode"], extra: Partial<WorkflowSelec
 }
 
 describe("which revision a turn will run", () => {
-  it("follows a chosen family over a project's older pin", () => {
-    // The defect this exists for: the panel read the legacy pin while the
-    // executor honoured the family, so the controls on screen belonged to
-    // one workflow and the picture came from another.
+  it("follows a chosen chat family over a project's family", () => {
     const chosen = revisionForTurn(
-      workflows(),
       families(),
+      "image",
       selection("family", { workflow_family_id: "family-1" }),
-      "rev-legacy",
+      selection("revision", { workflow_revision_id: "rev-legacy" }),
       "text_to_image",
     );
 
@@ -78,42 +76,110 @@ describe("which revision a turn will run", () => {
     expect(schemaForRevision(workflows(), chosen, "text_to_image")).toEqual(FAMILY_SCHEMA);
   });
 
-  it("keeps a project pinned to an exact revision on that revision", () => {
+  it("lets a default chat inherit an exact project revision", () => {
     expect(
       revisionForTurn(
-        workflows(),
         families(),
+        "image",
+        selection("default"),
         selection("revision", { workflow_revision_id: "rev-legacy" }),
-        null,
         "text_to_image",
       ),
     ).toBe("rev-legacy");
   });
 
-  it("falls through when the chosen family cannot do this operation", () => {
-    // A family with no variant for this turn cannot answer it, so pinning
-    // one of its other variants would run the wrong thing confidently.
+  it("lets a default chat inherit the project's family variant", () => {
     expect(
       revisionForTurn(
-        workflows(),
         families(),
+        "image",
+        selection("default"),
         selection("family", { workflow_family_id: "family-1" }),
-        "rev-legacy",
+        "text_to_image",
+      ),
+    ).toBe("rev-family");
+  });
+
+  it("does not invent controls when the chosen family lacks the operation", () => {
+    expect(
+      revisionForTurn(
+        families(),
+        "video",
+        selection("family", { workflow_family_id: "family-1" }),
+        selection("revision", { workflow_revision_id: "rev-legacy" }),
         "text_to_video",
       ),
-    ).toBe("rev-legacy");
+    ).toBeNull();
   });
 
-  it("lets automatic mean automatic rather than the old pin", () => {
+  it("does not invent controls for an ambiguous family operation", () => {
+    const ambiguous = families();
+    ambiguous[0].variants.push({ ...ambiguous[0].variants[0], id: "v2" });
     expect(
-      revisionForTurn(workflows(), families(), selection("automatic"), "rev-legacy", "text_to_image"),
-    ).toBeUndefined();
+      revisionForTurn(
+        ambiguous,
+        "image",
+        selection("family", { workflow_family_id: "family-1" }),
+        null,
+        "text_to_image",
+      ),
+    ).toBeNull();
   });
 
-  it("still honours a legacy pin when nothing newer was chosen", () => {
+  it("keeps automatic and legacy profile choices unresolved", () => {
     expect(
-      revisionForTurn(workflows(), families(), undefined, "rev-legacy", "text_to_image"),
-    ).toBe("rev-legacy");
+      revisionForTurn(
+        families(),
+        "image",
+        selection("automatic"),
+        selection("revision", { workflow_revision_id: "rev-legacy" }),
+        "text_to_image",
+      ),
+    ).toBeNull();
+    expect(
+      revisionForTurn(
+        families(),
+        "image",
+        selection("legacy", { legacy_profile_id: "profile-1" }),
+        selection("revision", { workflow_revision_id: "rev-legacy" }),
+        "text_to_image",
+      ),
+    ).toBeNull();
+  });
+
+  it("uses the deterministic workspace default after both scopes inherit", () => {
+    const available = families();
+    available[0].preferences = [
+      { selector_capability: "image", enabled: true, is_default: true, sort_order: 0 },
+    ];
+    expect(
+      revisionForTurn(
+        available,
+        "image",
+        selection("default"),
+        selection("inherit"),
+        "text_to_image",
+      ),
+    ).toBe("rev-family");
+  });
+
+  it("fails closed until required selection responses load", () => {
+    expect(
+      revisionForTurn(families(), "image", undefined, null, "text_to_image"),
+    ).toBeNull();
+    expect(
+      revisionForTurn(
+        families(),
+        "image",
+        selection("default"),
+        undefined,
+        "text_to_image",
+      ),
+    ).toBeNull();
+  });
+
+  it("does not substitute the first workflow for an unresolved selection", () => {
+    expect(schemaForRevision(workflows(), null, "text_to_image")).toBeUndefined();
   });
 
   it("names the operation an attachment implies", () => {

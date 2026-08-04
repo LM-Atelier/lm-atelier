@@ -10,6 +10,9 @@ import type {
   WorkflowSelectorCapability,
 } from "./types";
 
+const LEGACY_VALUE = "compatibility:legacy";
+const REVISION_VALUE = "compatibility:revision";
+
 /** What a variant's readiness means in words, since "setup_required" is not
  *  a sentence and the reason the server gives is often a code. */
 function readinessNote(variant: WorkflowFamilyVariant): string | null {
@@ -73,6 +76,9 @@ export function WorkflowSelector({
   );
   const available = (families.data ?? []).filter((family) => servesCapability(family, capability));
   const ordered = orderFamilies(available, capability);
+  const selectedFamilyMissing = current?.mode === "family"
+    && Boolean(current.workflow_family_id)
+    && !ordered.some((family) => family.id === current.workflow_family_id);
 
   // "default" for a chat and "inherit" for a project are the same idea said
   // two ways: follow whatever the level above decided.
@@ -82,7 +88,11 @@ export function WorkflowSelector({
       ? current.workflow_family_id
       : current?.mode === "automatic"
         ? "automatic"
-        : followMode;
+        : current?.mode === "revision"
+          ? REVISION_VALUE
+          : current?.mode === "legacy"
+            ? LEGACY_VALUE
+            : followMode;
 
   return (
     <label className="workflow-selector">
@@ -92,6 +102,7 @@ export function WorkflowSelector({
         disabled={choose.isPending || families.isLoading || selections.isLoading}
         onChange={(event) => {
           const next = event.target.value;
+          if (next === REVISION_VALUE || next === LEGACY_VALUE) return;
           if (next === followMode) choose.mutate({ mode: followMode } as never);
           else if (next === "automatic") choose.mutate({ mode: "automatic" });
           else choose.mutate({ mode: "family", workflow_family_id: next });
@@ -101,6 +112,15 @@ export function WorkflowSelector({
           {scope === "chat" ? "Use the project's choice" : "Use the workspace default"}
         </option>
         <option value="automatic">Choose automatically</option>
+        {current?.mode === "revision" && (
+          <option value={REVISION_VALUE} disabled>Exact workflow revision (existing choice)</option>
+        )}
+        {current?.mode === "legacy" && (
+          <option value={LEGACY_VALUE} disabled>Existing model setup</option>
+        )}
+        {selectedFamilyMissing && (
+          <option value={current.workflow_family_id!} disabled>Selected workflow (unavailable)</option>
+        )}
         {ordered.map((family) => (
           <option key={family.id} value={family.id}>
             {family.name}
@@ -111,6 +131,11 @@ export function WorkflowSelector({
       {current?.mode === "revision" && (
         <small>
           Pinned to one exact revision. Choosing a family here replaces that pin.
+        </small>
+      )}
+      {current?.mode === "legacy" && (
+        <small>
+          Using the model previously configured here. Choosing a workflow replaces that choice.
         </small>
       )}
       {choose.error && <small role="alert">{(choose.error as Error).message}</small>}

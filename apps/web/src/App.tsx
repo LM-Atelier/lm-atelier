@@ -96,6 +96,7 @@ import { READING_ROOM_VIEWS, type View } from "./rooms";
 import { ThemeToggle } from "./ThemeToggle";
 import { roomFor, useThemeChoice, type ThemeChoice } from "./theme";
 import { WorkflowConsumers } from "./WorkflowConsumers";
+import { WorkflowFamilyPreferences } from "./WorkflowFamilyPreferences";
 import { WorkflowSelector } from "./WorkflowSelector";
 import { operationForTurn, revisionForTurn, schemaForRevision } from "./turnWorkflow";
 import type { WorkflowFamily, WorkflowSelection } from "./types";
@@ -1055,7 +1056,7 @@ function PromptHelperDialog({
       await api.updatePromptHelper(helperId, draft.trim());
       const role = roleForMode(mode);
       const engine = engines.find((item) => item.roles.includes(role));
-      const schema = workflowSchemaForTurn(workflows, undefined, mode, false);
+      const schema = workflowSchemaForTurn(workflows, mode, false);
       const fields = resolveWorkflowSettings(resolveCapabilitySettings(engine, role), schema);
       await api.sendTurn(
         helperId,
@@ -1308,6 +1309,8 @@ function Composer({
     queryFn: () => api.chatWorkflowSelections(chat!.id),
     enabled: Boolean(chat?.id),
   });
+  const projectSelections = useQuery({ queryKey: ["project", project?.id, "workflow-selections"],
+    queryFn: () => api.projectWorkflowSelections(project!.id), enabled: Boolean(project?.id) });
   const imageProfile = profiles.find((profile) => profile.id === chat.active_image_profile_id)
     ?? profiles.find((profile) => profile.role === "image" && profile.is_default);
   const profileValues = {
@@ -1316,11 +1319,11 @@ function Composer({
   };
   const workflowSchema = workflowSchemaForTurn(
     workflows,
-    project,
     mode,
     attachments.length > 0 || usePriorVisual,
     families.data ?? [],
-    selections.data ?? [],
+    selections.data?.find((one) => one.selector_capability === mode),
+    project ? projectSelections.data?.find((one) => one.selector_capability === mode) : null,
   );
 
   const submit = (stopCurrent = false) => {
@@ -1575,21 +1578,19 @@ function activeBranchMessages(chat: ChatDetail): Message[] {
 
 function workflowSchemaForTurn(
   workflows: Workflow[],
-  project: Project | undefined,
   mode: RoutingMode,
   hasAttachments: boolean,
   families: WorkflowFamily[] = [],
-  selections: WorkflowSelection[] = [],
+  chatSelection: WorkflowSelection | null | undefined = null,
+  projectSelection: WorkflowSelection | null | undefined = null,
 ): Record<string, unknown> | undefined {
   if (mode !== "image" && mode !== "video") return undefined;
   const operation = operationForTurn(mode, hasAttachments);
-  // The panel has to resolve the revision the same way the executor does,
-  // or it shows the settings of one workflow while another runs.
   const revisionId = revisionForTurn(
-    workflows,
     families,
-    selections.find((one) => one.selector_capability === mode),
-    mode === "image" ? project?.image_workflow_revision_id : project?.video_workflow_revision_id,
+    mode,
+    chatSelection,
+    projectSelection,
     operation,
   );
   return schemaForRevision(workflows, revisionId, operation);
@@ -2412,7 +2413,6 @@ function ModelsView({ initialRole }: { initialRole: EngineRole }) {
     </div>
   );
 }
-
 function WorkflowControls({ schema }: { schema: Record<string, unknown> }) {
   const properties = schema.properties && typeof schema.properties === "object"
     ? schema.properties as Record<string, Record<string, unknown>>
@@ -2458,12 +2458,11 @@ function WorkflowControls({ schema }: { schema: Record<string, unknown> }) {
     </div>
   );
 }
-
 function WorkflowsView() {
   const client = useQueryClient();
-  const workflows = useQuery({ queryKey: ["workflows"], queryFn: api.workflows });
+  const workflows = useQuery({ queryKey: ["workflows"], queryFn: api.workflows }); const families = useQuery({ queryKey: ["workflow-families"], queryFn: () => api.workflowFamilies() });
   const [selectedId, setSelectedId] = useState<string | null>(null);
-  const selected = workflows.data?.find((workflow) => workflow.id === selectedId) ?? null;
+  const selected = workflows.data?.find((workflow) => workflow.id === selectedId) ?? null; const selectedFamily = families.data?.find((family) => family.variants.some((variant) => variant.id === selectedId));
   const [selectedRevisionId, setSelectedRevisionId] = useState<string | null>(null);
   const [newOpen, setNewOpen] = useState(false);
   const [editing, setEditing] = useState(false);
@@ -2509,6 +2508,7 @@ function WorkflowsView() {
       {(importError || clone.error || restore.error || exportBundle.error || openInComfy.error) && <ErrorCallout message={(importError || clone.error || restore.error || exportBundle.error || openInComfy.error)?.message} />}
       {packageReview && <WorkflowPackageReview analysis={packageReview.analysis} fileName={packageReview.fileName} uiGraph={packageReview.uiGraph} onImported={() => { closePackageReview(); refresh(); }} onClose={closePackageReview} />}
       {selected && <div className="storage-actions"><button className="secondary" onClick={() => openInComfy.mutate(selected.id)}>Download UI graph and open in ComfyUI</button></div>}
+      {selectedFamily && <WorkflowFamilyPreferences family={selectedFamily} />}
       <div className="workflow-layout">
         <div className="workflow-list">{workflows.data?.map((workflow) => <button key={workflow.id} className={selected?.id === workflow.id ? "selected" : ""} onClick={() => { setSelectedId(workflow.id); setSelectedRevisionId(workflow.current_revision_id); }}><WorkflowIcon size={18} /><span><strong>{workflow.name}</strong><small>{workflow.operation} · {workflow.revisions.length} revision{workflow.revisions.length === 1 ? "" : "s"}</small></span></button>)}</div>
         <div className="workflow-detail">{selected && selectedRevision ? <><div className="detail-title"><div><small>{selected.operation}</small><h2>{selected.name}</h2><p>{selected.description}</p></div><div className="row-actions"><button className="secondary compact-button" onClick={openEdit}>New revision</button><button className="secondary compact-button" onClick={() => clone.mutate(selected.id)}>Duplicate</button><button className="secondary compact-button" onClick={() => exportBundle.mutate(selected.id)}>Export</button><button className="secondary compact-button" onClick={() => validate.mutate(selected.id)}>Validate</button></div></div><div className="workflow-revision-bar"><label>Revision<select value={selectedRevision.id} onChange={(event) => setSelectedRevisionId(event.target.value)}>{[...selected.revisions].sort((a, b) => b.version - a.version).map((revision) => <option key={revision.id} value={revision.id}>v{revision.version}{revision.id === selected.current_revision_id ? " · current" : ""}</option>)}</select></label>{selectedRevision.id !== selected.current_revision_id && <button className="secondary compact-button" onClick={() => restore.mutate({ id: selected.id, revisionId: selectedRevision.id })}>Restore as new revision</button>}<span className={`badge ${selectedRevision.trusted ? "likely" : "advanced_import"}`}>{selectedRevision.trusted ? "Trusted" : "Untrusted"}</span></div><section className="workflow-input-section"><h3>Declared controls</h3><WorkflowControls schema={selectedRevision.input_schema_json} /></section><details open><summary>Executable graph</summary><pre>{JSON.stringify(selectedRevision.api_graph_json, null, 2)}</pre></details><details><summary>Dependencies</summary><pre>{JSON.stringify(selectedRevision.dependencies_json, null, 2)}</pre></details>{currentRevision && currentRevision.id !== selectedRevision.id && <details><summary>Compare with current revision</summary><div className="workflow-compare"><pre>{JSON.stringify(selectedRevision.api_graph_json, null, 2)}</pre><pre>{JSON.stringify(currentRevision.api_graph_json, null, 2)}</pre></div></details>}{validate.data && <div className={`callout ${validate.data.valid ? "success" : "error"}`} role={validate.data.valid ? "status" : "alert"}>{validate.data.valid ? "Workflow and declared dependencies are valid for the active media engine." : validate.data.errors.join("\n")}{validate.data.warnings.map((warning) => `\nWarning: ${warning}`)}</div>}</> : <EmptyState icon={<WorkflowIcon />} title="Select a workflow" body="Review its revision, inputs, dependencies, and validation." />}</div>

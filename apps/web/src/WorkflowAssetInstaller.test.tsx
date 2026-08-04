@@ -63,7 +63,7 @@ describe("workflow asset installer", () => {
   });
 
   it("turns a filename into a searchable term", () => {
-    expect(searchTermFor("Krea2_HMNSFW_AIO.safetensors")).toBe("Krea2 HMNSFW AIO");
+    expect(searchTermFor("Atelier_Portrait_AIO.safetensors")).toBe("Atelier Portrait AIO");
     expect(searchTermFor("subdir/real_3d_krea2.safetensors")).toBe("real 3d krea2");
   });
 
