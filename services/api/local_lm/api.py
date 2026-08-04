@@ -6443,11 +6443,46 @@ async def shutdown_registry_preparations() -> None:
     _REGISTRY_PREPARE_TASKS.clear()
 
 
+_MAX_NODE_TYPE_CHARACTERS = 200
+
+
+def _prepared_node_types(values: list[str]) -> tuple[str, ...]:
+    """The exact node identities this package must provide, or a typed refusal.
+
+    Checked here rather than at the lifecycle because a job that must fail on
+    its first step is a worse answer than a 422. Persistence refuses an empty
+    or malformed set on purpose; nothing about that should be relaxed, so the
+    same rules are applied before anything is queued.
+    """
+    cleaned = [value.strip() for value in values]
+    if any(
+        not value or len(value) > _MAX_NODE_TYPE_CHARACTERS or _has_control_character(value)
+        for value in cleaned
+    ):
+        raise api_error(
+            422,
+            "workflow-package-node-type-invalid",
+            "A node type must be non-empty, printable, and within the length limit.",
+        )
+    if len(set(cleaned)) != len(cleaned):
+        raise api_error(
+            422,
+            "workflow-package-node-type-repeated",
+            "The same node type was named more than once. Send each exactly once.",
+        )
+    return tuple(cleaned)
+
+
+def _has_control_character(value: str) -> bool:
+    return any(character < " " or character == "\x7f" for character in value)
+
+
 async def _run_workflow_package_preparation(
     services: Services,
     job_id: str,
     package_id: str,
     version: str,
+    node_types: tuple[str, ...],
 ) -> None:
     """One durable preparation job: lease held, worker state told truthfully."""
 
@@ -6475,6 +6510,7 @@ async def _run_workflow_package_preparation(
                 SessionLocal,
                 package_id=package_id,
                 version=version,
+                node_types=node_types,
                 context=PreparationContext.from_settings(services.settings),
                 media_worker_stopped=media_stopped,
                 interpreter_probe=probe_comfy_registry_wheel_target,
@@ -6533,8 +6569,12 @@ async def prepare_workflow_package_endpoint(
     """Queue one package preparation; the result stays inactive and untrusted."""
 
     services = _services(request)
-    # Refuse before queueing when the machine cannot prepare at all - a job
-    # that must fail on its first step is a worse answer than a typed 422.
+    # The request is judged before the machine is. A malformed node identity is
+    # wrong on every machine, so answering it with a runtime complaint would
+    # send the caller to fix the wrong thing.
+    node_types = _prepared_node_types(payload.node_types)
+    # Then refuse when the machine cannot prepare at all - a job that must fail
+    # on its first step is a worse answer than a typed 422.
     try:
         PreparationContext.from_settings(services.settings)
     except WorkflowPackagePreparationError as exc:
@@ -6542,13 +6582,19 @@ async def prepare_workflow_package_endpoint(
     job = Job(
         kind=JobKind.REGISTRY_PREPARE.value,
         status=JobStatus.QUEUED.value,
-        payload_json={"package_id": payload.package_id, "version": payload.version},
+        payload_json={
+            "package_id": payload.package_id,
+            "version": payload.version,
+            "node_types": list(node_types),
+        },
         cancellable=True,
     )
     session.add(job)
     session.commit()
     task = asyncio.create_task(
-        _run_workflow_package_preparation(services, job.id, payload.package_id, payload.version),
+        _run_workflow_package_preparation(
+            services, job.id, payload.package_id, payload.version, node_types
+        ),
         name=f"registry-prepare-{job.id}",
     )
     _REGISTRY_PREPARE_TASKS[job.id] = task

@@ -3656,7 +3656,11 @@ describe("App", () => {
     vi.mocked(api.prepareWorkflowPackage).mockResolvedValue({ id: "job-prep" } as never);
     fireEvent.click(screen.getByRole("button", { name: "Prepare 1.2.3" }));
     await waitFor(() =>
-      expect(api.prepareWorkflowPackage).toHaveBeenCalledWith("rgthree-comfy", "1.2.3"),
+      // The node types the analysis showed travel with the request; without
+      // them the prepared package would claim to provide nothing.
+      expect(api.prepareWorkflowPackage).toHaveBeenCalledWith("rgthree-comfy", "1.2.3", [
+        "Power Lora Loader",
+      ]),
     );
     expect(await screen.findByText(/stays inactive and untrusted/)).toBeInTheDocument();
   });

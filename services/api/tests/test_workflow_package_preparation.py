@@ -105,6 +105,7 @@ async def test_composes_resolve_close_prepare_in_order(monkeypatch: pytest.Monke
     result = await prepare_workflow_package(
         _NullSessionFactory(),  # opened only around the prepare step
         package_id="example-pack",
+        node_types=("ExampleNode",),
         version="1.2.3",
         context=_CONTEXT,
         media_worker_stopped=True,
@@ -134,6 +135,7 @@ async def test_each_stage_refuses_with_its_own_code(monkeypatch: pytest.MonkeyPa
         await prepare_workflow_package(
             _NullSessionFactory(),
             package_id="example-pack",
+            node_types=("ExampleNode",),
             version=None,
             context=_CONTEXT,
             media_worker_stopped=True,
@@ -152,6 +154,7 @@ async def test_each_stage_refuses_with_its_own_code(monkeypatch: pytest.MonkeyPa
         await prepare_workflow_package(
             _NullSessionFactory(),
             package_id="example-pack",
+            node_types=("ExampleNode",),
             version=None,
             context=_CONTEXT,
             media_worker_stopped=True,
@@ -174,6 +177,7 @@ async def test_each_stage_refuses_with_its_own_code(monkeypatch: pytest.MonkeyPa
         await prepare_workflow_package(
             _NullSessionFactory(),
             package_id="example-pack",
+            node_types=("ExampleNode",),
             version=None,
             context=_CONTEXT,
             media_worker_stopped=False,
@@ -259,6 +263,7 @@ async def test_another_writer_progresses_while_preparation_awaits(
         prepare_workflow_package(
             SessionLocal,
             package_id="example-pack",
+            node_types=("ExampleNode",),
             version="1.2.3",
             context=_CONTEXT,
             media_worker_stopped=True,
@@ -301,6 +306,7 @@ async def test_the_probes_typed_refusals_keep_their_codes() -> None:
         await prepare_workflow_package(
             _NullSessionFactory(),
             package_id="example-pack",
+            node_types=("ExampleNode",),
             version="1.2.3",
             context=_CONTEXT,
             media_worker_stopped=True,

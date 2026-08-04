@@ -77,6 +77,7 @@ async def prepare_workflow_package(
     *,
     package_id: str,
     version: str | None,
+    node_types: tuple[str, ...],
     context: PreparationContext,
     media_worker_stopped: bool,
     interpreter_probe: InterpreterProbe,
@@ -103,7 +104,10 @@ async def prepare_workflow_package(
     requirement = WorkflowPackageRequirement(
         package_id=package_id,
         versions=(version,) if version else (),
-        node_types=(),
+        # The exact node identities the analyzed graph needs from this package.
+        # Sending none produced a prepared package that claimed to provide
+        # nothing, which persistence refused and no activation could use.
+        node_types=node_types,
         locally_resolved=False,
     )
     try:
