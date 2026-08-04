@@ -1521,6 +1521,24 @@ def _prompt_helper_query(helper_id: str) -> Select[tuple[Chat]]:
     )
 
 
+def _is_editable_image(artifact: Artifact) -> bool:
+    """Whether the studio can open this, judged by what it is.
+
+    `kind` records where an artifact came from, not what it holds: a generated
+    picture is `image` and an uploaded one is `input`. Asking `kind == image`
+    therefore asked "did we make this", and refused every picture a person
+    brought in themselves - which is most of the reason to open the studio at
+    all.
+
+    The media type is the fact about content, so that is what decides. `kind`
+    still rules out the things that are images only incidentally, like a
+    thumbnail standing in for a video.
+    """
+    if artifact.kind not in {ArtifactKind.IMAGE.value, ArtifactKind.INPUT.value}:
+        return False
+    return (artifact.media_type or "").casefold().startswith("image/")
+
+
 @router.post("/studio/sessions", response_model=ChatDetail)
 async def open_studio_session(
     payload: StudioSessionCreate, session: ConversationSessionDep
@@ -1534,7 +1552,7 @@ async def open_studio_session(
     artifact = session.get(Artifact, payload.source_artifact_id)
     if not artifact:
         raise api_error(404, "artifact-not-found", "This media item no longer exists")
-    if artifact.kind != ArtifactKind.IMAGE.value:
+    if not _is_editable_image(artifact):
         raise api_error(422, "studio-image-only", "The studio edits images")
     existing = find_studio_session(session, artifact.id)
     if existing:
