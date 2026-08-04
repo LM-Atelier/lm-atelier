@@ -5,6 +5,7 @@ import {
   LoaderCircle,
   Paperclip,
   Quote,
+  SlidersHorizontal,
   Star,
   Wand2,
 } from "lucide-react";
@@ -22,6 +23,7 @@ export function ArtifactPart({
   part,
   origin,
   onEditImage,
+  onOpenStudio,
   onAnimateImage,
   onReferenceMedia,
   onToggleFavorite,
@@ -31,6 +33,7 @@ export function ArtifactPart({
   part: MessagePart;
   origin: MediaOrigin | null;
   onEditImage?: (part: MessagePart, origin: MediaOrigin) => void;
+  onOpenStudio?: (part: MessagePart) => void;
   onAnimateImage?: (part: MessagePart, origin: MediaOrigin) => void;
   onReferenceMedia?: (part: MessagePart, origin: MediaOrigin) => void;
   onToggleFavorite?: (part: MessagePart) => void;
@@ -77,6 +80,17 @@ export function ArtifactPart({
               onClick={() => onEditImage(part, callbackOrigin)}
             >
               <Wand2 size={14} aria-hidden="true" />
+            </button>
+          )}
+          {!preview && onOpenStudio && (
+            <button
+              type="button"
+              className="icon-button"
+              aria-label="Open this image in the Image Studio"
+              title="Open in Image Studio"
+              onClick={() => onOpenStudio(part)}
+            >
+              <SlidersHorizontal size={14} aria-hidden="true" />
             </button>
           )}
           {!preview && onAnimateImage && (

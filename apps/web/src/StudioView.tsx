@@ -1,6 +1,5 @@
 import { useEffect, useMemo, useReducer, useState } from "react";
-import { Wand2 } from "lucide-react";
-import { EmptyState } from "./EmptyState";
+import { StudioOpenImage } from "./StudioOpenImage";
 import { ErrorCallout } from "./ErrorCallout";
 import { StudioCanvas } from "./StudioCanvas";
 import { StudioToolRail } from "./StudioToolRail";
@@ -23,9 +22,11 @@ import { useStudioSession, type StudioStep } from "./useStudioSession";
 export function StudioView({
   sourceArtifactId,
   sourceChatId = null,
+  onOpenArtifact,
 }: {
   sourceArtifactId: string | null;
   sourceChatId?: string | null;
+  onOpenArtifact: (artifactId: string) => void;
 }) {
   const { steps, busy, error, apply } = useStudioSession(sourceArtifactId, sourceChatId);
   const [selectedId, setSelectedId] = useState<string | null>(null);
@@ -77,11 +78,7 @@ export function StudioView({
     return (
       <div className="page-view studio-view">
         <header className="page-header"><div><h1>Image Studio</h1></div></header>
-        <EmptyState
-          icon={<Wand2 />}
-          title="Open an image to edit"
-          body="Choose Edit on any image in the Media library or a chat, and it opens here."
-        />
+        <StudioOpenImage onOpened={onOpenArtifact} />
       </div>
     );
   }

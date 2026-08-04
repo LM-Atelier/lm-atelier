@@ -173,7 +173,7 @@ def test_a_bypassed_node_is_routed_around_by_matching_type() -> None:
     assert {(str(link[1]), str(link[3])) for link in expanded["links"]} == {("1", "3")}
 
 
-def test_a_bypass_with_no_single_matching_input_is_refused() -> None:
+def test_two_inputs_of_one_type_resolve_by_slot_rather_than_refusing() -> None:
     workflow = {
         "nodes": [
             _node(1, "LoadImage", outputs=_slots("IMAGE")),
@@ -188,11 +188,75 @@ def test_a_bypass_with_no_single_matching_input_is_refused() -> None:
         ],
     }
 
-    # Two images arrive and one leaves. Which one the author meant is not in
-    # the file, and picking one would rebuild the graph rather than expand it.
+    # Two inputs of one type is an ordinary graph, and refusing it made
+    # ordinary files uncompilable. The frontend takes the input at the same
+    # slot index as the output, which is a rule rather than a guess.
+    expanded = expand_workflow(workflow)
+
+    assert {(str(link[1]), str(link[3])) for link in expanded["links"]} == {("1", "4")}
+
+
+def test_a_bypass_output_nothing_feeds_simply_ends() -> None:
+    workflow = {
+        "nodes": [
+            _node(1, "LoadImage", mode=4, inputs=[], outputs=_slots("IMAGE")),
+            _node(2, "SaveImage", inputs=_slots("IMAGE")),
+        ],
+        "links": [[10, 1, 0, 2, 0, "IMAGE"]],
+    }
+
+    # A bypassed loader has nothing to pass through. The route ends rather
+    # than the file being rejected, which is what the frontend does.
+    expanded = expand_workflow(workflow)
+
+    assert [str(node["id"]) for node in expanded["nodes"]] == ["2"]
+    assert expanded["links"] == []
+
+
+def test_a_stale_duplicate_link_loses_to_the_slot_its_own_record_names() -> None:
+    workflow = {
+        "nodes": [
+            _node(1, "First", outputs=_slots("IMAGE")),
+            _node(2, "Second", outputs=_slots("IMAGE")),
+            _node(3, "Switch", inputs=[{"type": "IMAGE", "link": 632}], outputs=[]),
+        ],
+        "links": [[607, 1, 0, 3, 0, "IMAGE"], [632, 2, 0, 3, 0, "IMAGE"]],
+    }
+    graph = {
+        "nodes": [_node(9, "Wrap", mode=0, inputs=[], outputs=[])],
+        "links": [],
+        "definitions": {"subgraphs": [{"id": "Wrap", **workflow}]},
+    }
+    graph["nodes"][0]["type"] = "Wrap"
+
+    expanded = expand_workflow(graph)
+
+    # The array carries a stale entry, but the input records which link it
+    # actually means. That record decides; last-link-wins never does.
+    kept = {str(link[0]) for link in expanded["links"]}
+    assert kept == {"9:632"}
+
+
+def test_duplicates_with_no_record_to_choose_between_them_still_refuse() -> None:
+    inner = {
+        "nodes": [
+            _node(1, "First", outputs=_slots("IMAGE")),
+            _node(2, "Second", outputs=_slots("IMAGE")),
+            # No recorded link on the input, so nothing says which feed is
+            # the real one.
+            _node(3, "Switch", inputs=_slots("IMAGE"), outputs=[]),
+        ],
+        "links": [[10, 1, 0, 3, 0, "IMAGE"], [11, 2, 0, 3, 0, "IMAGE"]],
+    }
+    graph = {
+        "nodes": [_node(9, "Wrap", mode=0, inputs=[], outputs=[])],
+        "links": [],
+        "definitions": {"subgraphs": [{"id": "Wrap", **inner}]},
+    }
+
     with pytest.raises(SubgraphExpansionError) as caught:
-        expand_workflow(workflow)
-    assert caught.value.code == "ambiguous_bypass"
+        expand_workflow(graph)
+    assert caught.value.code == "doubled_input"
 
 
 def test_only_mode_four_is_treated_as_a_bypass() -> None:

@@ -80,7 +80,7 @@ def expand_workflow(workflow: Mapping[str, Any]) -> dict[str, Any]:
     # own checks on inconsistent or doubled links still have something to
     # catch - repairing them here would hide a malformed file.
     if rewritten or bypassed:
-        nodes = _reconcile_slot_metadata(nodes, links)
+        nodes, links = _reconcile_slot_metadata(nodes, links)
 
     expanded = {key: value for key, value in workflow.items() if key != "definitions"}
     remaining = {
@@ -131,6 +131,7 @@ def _expand(
         # with a host id or with another instance of the same definition.
         for node in inner_nodes:
             node["id"] = f"{scope}{node['id']}"
+            _namespace_slot_links(node, scope)
         inner_links = [
             _Link(
                 link_id=f"{scope}{link.link_id}",
@@ -254,18 +255,15 @@ def _resolve_bypasses(
 
         replacements: list[_Link] = []
         for link in consuming:
-            produced = outputs.get(link.origin_slot)
-            candidates = [
-                slot
-                for slot, kind in inputs.items()
-                if kind is not None and kind == produced and slot in feeding
-            ]
-            if len(candidates) != 1:
-                raise SubgraphExpansionError(
-                    "ambiguous_bypass",
-                    "a bypassed node has no single input of the type it was passing through",
-                )
-            source = feeding[candidates[0]]
+            source = _bypass_source(
+                inputs, feeding, outputs.get(link.origin_slot), link.origin_slot
+            )
+            if source is None:
+                # No fed input carries what this output carried, so the route
+                # simply ends here. The frontend omits the connection rather
+                # than treating it as a problem, and a bypassed loader with
+                # nothing feeding it is the ordinary case, not a broken file.
+                continue
             replacements.append(
                 _Link(
                     link_id=link.link_id,
@@ -283,9 +281,60 @@ def _resolve_bypasses(
     return [node for node in nodes if str(node["id"]) not in bypassed], links, True
 
 
+def _slots_of(value: object) -> list[Any]:
+    if not isinstance(value, Sequence) or isinstance(value, str | bytes):
+        return []
+    return list(value)
+
+
+def _namespace_slot_links(node: dict[str, Any], scope: str) -> None:
+    """Carry a node's recorded link ids into the scope its links moved to."""
+    inputs = _slots_of(node.get("inputs"))
+    if inputs:
+        node["inputs"] = [
+            {**slot, "link": f"{scope}{slot['link']}"}
+            if isinstance(slot, Mapping) and slot.get("link") is not None
+            else slot
+            for slot in inputs
+        ]
+    outputs = _slots_of(node.get("outputs"))
+    if outputs:
+        node["outputs"] = [
+            {**slot, "links": [f"{scope}{one}" for one in slot["links"]]}
+            if isinstance(slot, Mapping) and isinstance(slot.get("links"), list)
+            else slot
+            for slot in outputs
+        ]
+
+
+def _bypass_source(
+    inputs: dict[int, str | None],
+    feeding: dict[int, _Link],
+    produced: str | None,
+    slot: int,
+) -> _Link | None:
+    """Which fed input a bypassed node's output passes through from.
+
+    The order is the frontend's own and is deliberate rather than a guess:
+    the input at the same slot index first, then the first exact type match,
+    then the first input that accepts anything. Uniqueness is not required -
+    two inputs of one type is a normal graph, and refusing it made ordinary
+    files uncompilable.
+    """
+    if produced is not None and inputs.get(slot) == produced and slot in feeding:
+        return feeding[slot]
+    for candidate, kind in sorted(inputs.items()):
+        if candidate in feeding and kind is not None and kind == produced:
+            return feeding[candidate]
+    for candidate, kind in sorted(inputs.items()):
+        if candidate in feeding and kind == "*":
+            return feeding[candidate]
+    return None
+
+
 def _reconcile_slot_metadata(
     nodes: list[dict[str, Any]], links: list[_Link]
-) -> list[dict[str, Any]]:
+) -> tuple[list[dict[str, Any]], list[_Link]]:
     """Point every slot at the links that actually exist now.
 
     A node records the link id feeding each input and leaving each output,
@@ -294,17 +343,39 @@ def _reconcile_slot_metadata(
     the result rather than maintained alongside it - bookkeeping that has to
     agree with a rewrite is bookkeeping that eventually does not.
     """
-    incoming: dict[tuple[str, int], str] = {}
+    seated: dict[tuple[str, int], list[str]] = {}
     outgoing: dict[tuple[str, int], list[str]] = {}
     for link in links:
-        seat = (link.target_id, link.target_slot)
-        if seat in incoming:
+        seated.setdefault((link.target_id, link.target_slot), []).append(link.link_id)
+        outgoing.setdefault((link.origin_id, link.origin_slot), []).append(link.link_id)
+
+    recorded = {
+        (str(node["id"]), index): slot.get("link")
+        for node in nodes
+        for index, slot in enumerate(_slots_of(node.get("inputs")))
+        if isinstance(slot, Mapping)
+    }
+    incoming: dict[tuple[str, int], str] = {}
+    for seat, candidates in seated.items():
+        if len(candidates) == 1:
+            incoming[seat] = candidates[0]
+            continue
+        # An input can only be fed once. A file can still carry stale entries
+        # in its link array, and the slot itself records which one it means -
+        # so that record decides, and only when it names exactly one of them.
+        # Anything less is guessing, and last-link-wins is the guess that
+        # looks most like working.
+        named = str(recorded.get(seat)) if recorded.get(seat) is not None else None
+        chosen = [candidate for candidate in candidates if candidate == named]
+        if len(chosen) != 1:
             raise SubgraphExpansionError(
                 "doubled_input",
-                "expansion left two links feeding one input, which cannot be executed",
+                "two links feed one input and its own record does not say which",
             )
-        incoming[seat] = link.link_id
-        outgoing.setdefault((link.origin_id, link.origin_slot), []).append(link.link_id)
+        incoming[seat] = chosen[0]
+    links = [
+        link for link in links if incoming.get((link.target_id, link.target_slot)) == link.link_id
+    ]
 
     reconciled: list[dict[str, Any]] = []
     for node in nodes:
@@ -327,7 +398,7 @@ def _reconcile_slot_metadata(
                 for index, slot in enumerate(outputs)
             ]
         reconciled.append(updated)
-    return reconciled
+    return reconciled, links
 
 
 def _subgraph_definitions(workflow: Mapping[str, Any]) -> dict[str, Mapping[str, Any]]:

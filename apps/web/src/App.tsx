@@ -93,6 +93,8 @@ import { ArtifactPart } from "./ArtifactPart";
 import { FirstRunSetup, SetupWizard } from "./SetupWizard";
 import { ChatManager } from "./ChatManager";
 import { READING_ROOM_VIEWS, type View } from "./rooms";
+import { ThemeToggle } from "./ThemeToggle";
+import { roomFor, useThemeChoice, type ThemeChoice } from "./theme";
 import { WorkflowConsumers } from "./WorkflowConsumers";
 import { PromptDialog } from "./ConfirmDialog";
 import { CustomNodesPanel } from "./CustomNodesPanel";
@@ -263,6 +265,7 @@ function PartView({
   markdown = false,
   origin,
   onEditImage,
+  onOpenStudio,
   onAnimateImage,
   onReferenceMedia,
   onToggleFavorite,
@@ -274,6 +277,7 @@ function PartView({
   markdown?: boolean;
   origin: MediaOrigin | null;
   onEditImage?: (part: MessagePart, origin: MediaOrigin) => void;
+  onOpenStudio?: (part: MessagePart) => void;
   onAnimateImage?: (part: MessagePart, origin: MediaOrigin) => void;
   onReferenceMedia?: (part: MessagePart, origin: MediaOrigin) => void;
   onToggleFavorite?: (part: MessagePart) => void;
@@ -285,7 +289,7 @@ function PartView({
     return markdown ? <MarkdownText text={text} /> : <div className="message-text">{text}</div>;
   }
   if (part.type === "image" || part.type === "video" || part.type === "attachment") {
-    return <ArtifactPart part={part} origin={origin} onEditImage={onEditImage} onAnimateImage={onAnimateImage} onReferenceMedia={onReferenceMedia} onToggleFavorite={onToggleFavorite} compareSourceUrl={compareSourceUrl} lineage={lineage} />;
+    return <ArtifactPart part={part} origin={origin} onEditImage={onEditImage} onOpenStudio={onOpenStudio} onAnimateImage={onAnimateImage} onReferenceMedia={onReferenceMedia} onToggleFavorite={onToggleFavorite} compareSourceUrl={compareSourceUrl} lineage={lineage} />;
   }
   if (part.type === "progress") {
     const progress = Number(part.metadata_json.progress ?? 0);
@@ -318,6 +322,7 @@ function MessageBubble({
   onSelectRevision,
   onCancelQueued,
   onEditImage,
+  onOpenStudio,
   onAnimateImage,
   onReferenceMedia,
   onToggleFavorite,
@@ -336,6 +341,7 @@ function MessageBubble({
   onSelectRevision?: (messageId: string, revisionId: string) => void;
   onCancelQueued?: () => void;
   onEditImage?: (part: MessagePart, origin: MediaOrigin) => void;
+  onOpenStudio?: (part: MessagePart) => void;
   onAnimateImage?: (part: MessagePart, origin: MediaOrigin) => void;
   onReferenceMedia?: (part: MessagePart, origin: MediaOrigin) => void;
   onToggleFavorite?: (part: MessagePart) => void;
@@ -427,7 +433,7 @@ function MessageBubble({
     <article className={`message ${message.role}`}>
       <div className="avatar">{message.role === "user" ? "You" : <Bot size={19} />}</div>
       <div className="message-content">
-        {editing ? <div className="message-edit"><textarea aria-label="Edit message" rows={4} value={draft} onChange={(event) => setDraft(event.target.value)} /><div><button onClick={() => { setDraft(userText); setEditing(false); }}>Cancel</button><button className="primary" disabled={!draft.trim()} onClick={() => { onEdit?.(message.id, draft.trim()); setEditing(false); }}>Send edited message</button></div></div> : renderedParts.map((part) => <PartView key={part.id} part={part} liveText={liveText} markdown={message.role === "assistant"} origin={mediaOriginForPart(part, operation, message.role === "assistant" ? "generated" : null)} onEditImage={onEditImage} onAnimateImage={onAnimateImage} onReferenceMedia={onReferenceMedia} onToggleFavorite={onToggleFavorite} compareSourceUrl={message.role === "assistant" ? compareSourceUrl : undefined} lineage={message.role === "assistant" ? lineage : undefined} />)}
+        {editing ? <div className="message-edit"><textarea aria-label="Edit message" rows={4} value={draft} onChange={(event) => setDraft(event.target.value)} /><div><button onClick={() => { setDraft(userText); setEditing(false); }}>Cancel</button><button className="primary" disabled={!draft.trim()} onClick={() => { onEdit?.(message.id, draft.trim()); setEditing(false); }}>Send edited message</button></div></div> : renderedParts.map((part) => <PartView key={part.id} part={part} liveText={liveText} markdown={message.role === "assistant"} origin={mediaOriginForPart(part, operation, message.role === "assistant" ? "generated" : null)} onEditImage={onEditImage} onOpenStudio={onOpenStudio} onAnimateImage={onAnimateImage} onReferenceMedia={onReferenceMedia} onToggleFavorite={onToggleFavorite} compareSourceUrl={message.role === "assistant" ? compareSourceUrl : undefined} lineage={message.role === "assistant" ? lineage : undefined} />)}
         {liveText && !visibleParts.some((part) => part.type === "text") && (
           <MarkdownText text={liveText} />
         )}
@@ -1581,6 +1587,7 @@ function workflowSchemaForTurn(
 }
 
 function ChatView({
+  onOpenStudio,
   chat,
   engines,
   profiles,
@@ -1609,6 +1616,7 @@ function ChatView({
   onForkThread,
   libraryEdit,
 }: {
+  onOpenStudio: (artifactId: string) => void;
   chat?: ChatDetail;
   engines: EngineCapabilities[];
   profiles: ModelProfile[];
@@ -1786,6 +1794,7 @@ function ChatView({
                     ? () => onCancelPlan(messagePlan.id)
                     : undefined
                 }
+                onOpenStudio={busy ? undefined : (part) => onOpenStudio(part.artifact_id!)}
                 onEditImage={busy ? undefined : (part, origin) => setVisualTarget({
                   attachment: {
                     id: part.artifact_id!,
@@ -3101,6 +3110,8 @@ function Sidebar({
   onDeleteChat,
   onUpdateProject,
   onDeleteProject,
+  theme,
+  onTheme,
 }: {
   projects: Project[];
   chats: Chat[];
@@ -3114,14 +3125,17 @@ function Sidebar({
   onSetup: () => void;
   onView: (view: View) => void;
   onNewChat: (projectId?: string | null) => void;
-  onNewProject: () => void;
+  onNewProject: (name: string) => void;
   onExportProject: (id: string, includeMedia?: boolean) => void;
   onImportProject: (file: File) => void;
   onUpdateChat: (id: string, values: Partial<Chat>) => void;
   onDeleteChat: (id: string, deleteGeneratedMedia: boolean) => void;
   onUpdateProject: (id: string, values: Partial<Project>) => void;
   onDeleteProject: (id: string) => void;
+  theme: ThemeChoice;
+  onTheme: (choice: ThemeChoice) => void;
 }) {
+  const [naming, setNaming] = useState(false);
   const [closedProjects, setClosedProjects] = useState<Set<string>>(new Set());
   const [search, setSearch] = useState("");
   const [showArchived, setShowArchived] = useState(false);
@@ -3142,7 +3156,7 @@ function Sidebar({
       <div className="workspace-search"><Search size={14} /><input aria-label="Search projects and chats" placeholder="Search workspace" value={search} onChange={(event) => setSearch(event.target.value)} /><button className={showArchived ? "active" : ""} aria-pressed={showArchived} onClick={() => setShowArchived((value) => !value)}>Archived</button></div>
       <div className="workspace-tree" role="region" aria-label="Projects and chats">
         <div className="sidebar-section">
-          <div className="section-title"><span>Projects</span><input ref={projectImport} hidden type="file" accept=".zip,.lm-atelier.zip,application/zip" onChange={(event) => { const file = event.target.files?.[0]; if (file) onImportProject(file); event.target.value = ""; }} /><button aria-label="Import project" onClick={() => projectImport.current?.click()}><Upload size={14} /></button><button aria-label="New project" onClick={onNewProject}><Plus size={15} /></button></div>
+          <div className="section-title"><span>Projects</span><input ref={projectImport} hidden type="file" accept=".zip,.lm-atelier.zip,application/zip" onChange={(event) => { const file = event.target.files?.[0]; if (file) onImportProject(file); event.target.value = ""; }} /><button aria-label="Import project" onClick={() => projectImport.current?.click()}><Upload size={14} /></button><button aria-label="New project" onClick={() => setNaming(true)}><Plus size={15} /></button></div>
           {visibleProjects.map((project) => {
             const open = !closedProjects.has(project.id);
             const projectMatches = normalizedSearch && project.name.toLowerCase().includes(normalizedSearch);
@@ -3171,7 +3185,9 @@ function Sidebar({
         </div>
         {unfiled.length > 0 && <div className="sidebar-section"><div className="section-title"><span>Chats</span></div><div className="chat-list standalone">{unfiled.map(chatRow)}</div></div>}
       </div>
+      {naming && <PromptDialog title="New project" label="Project name" confirmLabel="Create project" placeholder="Portrait studies" onCancel={() => setNaming(false)} onConfirm={(name) => { setNaming(false); onNewProject(name); }} />}
       <div className="sidebar-footer">
+        <ThemeToggle choice={theme} onChoose={onTheme} />
         <button onClick={() => { onSetup(); setMobileOpen(false); }}>
           <Sparkles />Setup
           {setupState && (
@@ -3191,7 +3207,7 @@ function Sidebar({
 export default function App() {
   const client = useQueryClient();
   const [view, setView] = useState<View>("chat");
-  const [namingProject, setNamingProject] = useState(false);
+  const [theme, chooseTheme] = useThemeChoice();
   const [libraryEdit, setLibraryEdit] = useState<VisualTarget | null>(null);
   const [studioSource, setStudioSource] = useState<{ artifactId: string; chatId: string | null } | null>(null);
   const [modelLibraryRole, setModelLibraryRole] = useState<EngineRole>("chat");
@@ -3455,6 +3471,7 @@ export default function App() {
         <StudioView
           sourceArtifactId={studioSource?.artifactId ?? null}
           sourceChatId={studioSource?.chatId ?? null}
+          onOpenArtifact={(artifactId) => setStudioSource({ artifactId, chatId: null })}
         />
       );
     }
@@ -3479,7 +3496,7 @@ export default function App() {
       ));
       updateChat.mutate({ id: displayedChat.id, values });
     };
-    return <ChatView key={displayedChat?.id ?? "empty-chat"} libraryEdit={libraryEdit} chat={displayedChat} engines={engines.data ?? []} profiles={profiles.data ?? []} presets={presets.data ?? []} workflows={workflows.data ?? []} project={allProjects.find((item) => item.id === displayedChat?.project_id)} liveText={liveText} pendingTurns={displayedChat ? pendingTurns[displayedChat.id] ?? [] : []} workPlans={workPlans.data ?? []} settings={scopedSettings} presetId={presetId} onSettings={(settings) => {
+    return <ChatView key={displayedChat?.id ?? "empty-chat"} onOpenStudio={(artifactId) => { setStudioSource({ artifactId, chatId: displayedChat?.id ?? null }); setView("studio"); focusMainContent(); }} libraryEdit={libraryEdit} chat={displayedChat} engines={engines.data ?? []} profiles={profiles.data ?? []} presets={presets.data ?? []} workflows={workflows.data ?? []} project={allProjects.find((item) => item.id === displayedChat?.project_id)} liveText={liveText} pendingTurns={displayedChat ? pendingTurns[displayedChat.id] ?? [] : []} workPlans={workPlans.data ?? []} settings={scopedSettings} presetId={presetId} onSettings={(settings) => {
       if (!displayedChat) return;
       const role = roleForMode(displayedChat.routing_mode);
       persistActiveChat({
@@ -3555,11 +3572,10 @@ export default function App() {
     return <FirstRunSetup report={setupReadiness.data} onExit={exitFirstRunSetup} onOpenModels={(role) => { exitFirstRunSetup(); setModelLibraryRole(role); setView("models"); }} onOpenWorkflows={() => { exitFirstRunSetup(); setView("workflows"); }} />;
   }
   return (
-    <div className="app-shell">
+    <div className="app-shell" data-room={theme === "light" ? "reading" : "making"}>
       <a className="skip-link" href="#main-content">Skip to main content</a>
-      <Sidebar projects={allProjects} chats={allChats} engines={engines.data ?? []} presets={presets.data ?? []} workflows={workflows.data ?? []} currentChatId={activeChatId} view={view} setupState={setupReadiness.data?.state} onSetup={() => setSetupOpen(true)} onChat={(id) => { setCurrentChatId(id); localStorage.setItem(CURRENT_CHAT_KEY, id); setView("chat"); focusMainContent(); }} onView={(nextView) => { setView(nextView); focusMainContent(); }} onNewChat={(projectId) => createChat.mutate(projectId)} onNewProject={() => setNamingProject(true)} onExportProject={(id, includeMedia) => exportProject.mutate({ id, includeMedia })} onImportProject={(file) => importProject.mutate(file)} onUpdateChat={(id, values) => manageChat.mutate({ id, values })} onDeleteChat={(id, deleteGeneratedMedia) => deleteChat.mutate({ id, deleteGeneratedMedia })} onUpdateProject={(id, values) => updateProject.mutate({ id, values })} onDeleteProject={(id) => deleteProject.mutate(id)} />
-      {namingProject && <PromptDialog title="New project" label="Project name" confirmLabel="Create project" placeholder="Portrait studies" onCancel={() => setNamingProject(false)} onConfirm={(name) => { setNamingProject(false); createProject.mutate(name); }} />}
-      <main id="main-content" tabIndex={-1} data-room={READING_ROOM_VIEWS.has(view) ? "reading" : undefined}>{activeContent}</main>
+      <Sidebar projects={allProjects} chats={allChats} engines={engines.data ?? []} presets={presets.data ?? []} workflows={workflows.data ?? []} currentChatId={activeChatId} view={view} setupState={setupReadiness.data?.state} onSetup={() => setSetupOpen(true)} onChat={(id) => { setCurrentChatId(id); localStorage.setItem(CURRENT_CHAT_KEY, id); setView("chat"); focusMainContent(); }} onView={(nextView) => { setView(nextView); focusMainContent(); }} onNewChat={(projectId) => createChat.mutate(projectId)} onNewProject={(name) => createProject.mutate(name)} onExportProject={(id, includeMedia) => exportProject.mutate({ id, includeMedia })} onImportProject={(file) => importProject.mutate(file)} onUpdateChat={(id, values) => manageChat.mutate({ id, values })} onDeleteChat={(id, deleteGeneratedMedia) => deleteChat.mutate({ id, deleteGeneratedMedia })} onUpdateProject={(id, values) => updateProject.mutate({ id, values })} onDeleteProject={(id) => deleteProject.mutate(id)} theme={theme} onTheme={chooseTheme} />
+      <main id="main-content" tabIndex={-1} data-room={roomFor(theme, READING_ROOM_VIEWS.has(view))}>{activeContent}</main>
       {setupOpen === true && !setupReadiness.data && (
         <AccessibleDialog
           title="Checking local setup"
