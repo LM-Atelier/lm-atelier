@@ -21,8 +21,11 @@ from .comfy_registry_dependencies import (
     plan_comfy_registry_dependencies,
 )
 
-MAX_PYPI_PROJECT_DOCUMENT_BYTES = 2 * 1024 * 1024
-MAX_PYPI_PROJECT_FILES = 4_096
+# Large, long-lived projects can legitimately exceed two MiB in PyPI's Simple
+# JSON format. Keep the document bounded while allowing the already-bounded
+# 8,192-file history to carry URLs, hashes, and compatibility metadata.
+MAX_PYPI_PROJECT_DOCUMENT_BYTES = 8 * 1024 * 1024
+MAX_PYPI_PROJECT_FILES = 8_192
 MAX_WHEEL_ARTIFACT_BYTES = 2 * 1024 * 1024 * 1024
 MAX_WHEEL_FILENAME_CHARACTERS = 500
 MAX_WHEEL_URL_CHARACTERS = 2_000

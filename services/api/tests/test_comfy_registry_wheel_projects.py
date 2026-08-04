@@ -209,6 +209,28 @@ async def test_mismatched_content_length_fails_closed() -> None:
     _assert_error("project_size_mismatch", raised)
 
 
+async def test_legitimate_project_document_can_exceed_the_former_two_mib_limit() -> None:
+    body = json.dumps(
+        {
+            "meta": {"api-version": "1.4"},
+            "name": "package",
+            "files": [],
+            "padding": "x" * (2 * 1024 * 1024),
+        }
+    ).encode()
+
+    documents = await _fetch(
+        ["package"],
+        lambda _request: _response(
+            200,
+            content=body,
+            headers={"content-length": str(len(body))},
+        ),
+    )
+
+    assert documents["package"]["name"] == "package"
+
+
 async def test_aggregate_project_size_is_bounded(monkeypatch: pytest.MonkeyPatch) -> None:
     body = _project("alpha")
     monkeypatch.setattr(

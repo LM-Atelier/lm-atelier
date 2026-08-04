@@ -103,6 +103,20 @@ def test_migrations_round_trip(tmp_path) -> None:  # type: ignore[no-untyped-def
             row[1]
             for row in connection.execute("PRAGMA index_list(workflow_preferences)").fetchall()
         }
+        workflow_install_offer_columns = {
+            row[1]
+            for row in connection.execute("PRAGMA table_info(workflow_install_offers)").fetchall()
+        }
+        workflow_install_offer_foreign_keys = {
+            (row[3], row[2], row[4], row[6])
+            for row in connection.execute(
+                "PRAGMA foreign_key_list(workflow_install_offers)"
+            ).fetchall()
+        }
+        workflow_install_offer_indexes = {
+            row[1]
+            for row in connection.execute("PRAGMA index_list(workflow_install_offers)").fetchall()
+        }
         workflow_default_index_sql = connection.execute(
             """
             SELECT sql
@@ -172,6 +186,7 @@ def test_migrations_round_trip(tmp_path) -> None:  # type: ignore[no-untyped-def
         "workflow_profile_compatibility",
         "chat_workflow_selections",
         "project_workflow_selections",
+        "workflow_install_offers",
     } <= tables
     assert {
         "active_head_message_id",
@@ -237,6 +252,30 @@ def test_migrations_round_trip(tmp_path) -> None:  # type: ignore[no-untyped-def
         "ix_workflow_preferences_selector_order",
         "uq_workflow_preferences_default_selector",
     } <= workflow_preference_indexes
+    assert {
+        "id",
+        "workflow_revision_id",
+        "workflow_artifact_sha256",
+        "dependency_contract_sha256",
+        "binding_plan_sha256",
+        "offer_sha256",
+        "selections_json",
+        "assets_json",
+        "plan_count",
+        "total_bytes",
+        "status",
+        "queued_at",
+        "completed_at",
+        "invalidated_at",
+        "invalidation_code",
+        "invalidation_reason",
+    } <= workflow_install_offer_columns
+    assert {
+        "ix_workflow_install_offers_workflow_revision_id",
+        "ix_workflow_install_offers_offer_sha256",
+        "ix_workflow_install_offers_status",
+        "ix_workflow_install_offer_revision_status",
+    } <= workflow_install_offer_indexes
     assert workflow_default_index_sql is not None
     assert "WHERE is_default = 1" in workflow_default_index_sql[0]
     assert (
@@ -251,6 +290,12 @@ def test_migrations_round_trip(tmp_path) -> None:  # type: ignore[no-untyped-def
         "id",
         "CASCADE",
     ) in workflow_preference_foreign_keys
+    assert (
+        "workflow_revision_id",
+        "workflow_revisions",
+        "id",
+        "CASCADE",
+    ) in workflow_install_offer_foreign_keys
     assert ("chat_id", "idempotency_key") in unique_run_indexes
     assert ("idempotency_key",) not in unique_run_indexes
     assert workflow_id_type == "VARCHAR(64)"

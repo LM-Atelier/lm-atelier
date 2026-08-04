@@ -1146,6 +1146,33 @@ class WorkflowAssetReviewOut(ApiModel):
     total_bytes: int
 
 
+class WorkflowInstallOfferCreate(ApiModel):
+    """Explicit plan choices for one persisted workflow revision."""
+
+    selections: list[WorkflowAssetSelectionIn] = Field(
+        min_length=1,
+        max_length=64,
+    )
+
+
+class WorkflowInstallOfferOut(ApiModel):
+    id: str
+    workflow_revision_id: str
+    workflow_artifact_sha256: str
+    dependency_contract_sha256: str
+    binding_plan_sha256: str
+    offer_sha256: str
+    assets: list[BoundWorkflowAssetOut]
+    plan_count: int
+    total_bytes: int
+    status: Literal["ready", "queued", "invalidated", "completed", "expired"]
+    queued_at: datetime | None
+    completed_at: datetime | None
+    invalidated_at: datetime | None
+    invalidation_code: str | None
+    invalidation_reason: str | None
+
+
 class WorkflowPackageImportRequest(ApiModel):
     """Import a fully resolved ComfyUI package as an untrusted workflow.
 
