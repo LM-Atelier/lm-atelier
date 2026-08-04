@@ -46,6 +46,7 @@ logger = logging.getLogger(__name__)
 
 MAX_REGISTRY_WHEEL_METADATA_TOTAL_BYTES = 64 * 1024 * 1024
 WHEEL_METADATA_DOWNLOAD_CHUNK_BYTES = 64 * 1024
+_COMMIT = re.compile(r"^[0-9a-f]{40}$")
 _PACKAGE_ID = re.compile(r"^[a-z0-9][a-z0-9._-]{0,99}$")
 _SEMANTIC_VERSION = re.compile(r"^[0-9]+\.[0-9]+\.[0-9]+(?:[-+][0-9A-Za-z.-]+)?$")
 
@@ -339,15 +340,19 @@ def _resolution_plan(
     if (
         not isinstance(resolution, ComfyNodeResolution)
         or not resolution.resolved
-        or resolution.install_kind != "registry_archive"
         or not isinstance(resolution.package_id, str)
         or _PACKAGE_ID.fullmatch(resolution.package_id) is None
         or not isinstance(resolution.declared_version, str)
-        or _SEMANTIC_VERSION.fullmatch(resolution.declared_version) is None
-        or not isinstance(resolution.registry_record_id, str)
-        or not resolution.registry_record_id
-        or len(resolution.registry_record_id) > 1_000
-        or _has_control(resolution.registry_record_id)
+        or not (
+            resolution.install_kind == "git_commit"
+            and _COMMIT.fullmatch(resolution.declared_version)
+            or resolution.install_kind == "registry_archive"
+            and _SEMANTIC_VERSION.fullmatch(resolution.declared_version)
+            and isinstance(resolution.registry_record_id, str)
+            and bool(resolution.registry_record_id)
+            and len(resolution.registry_record_id) <= 1_000
+            and not _has_control(resolution.registry_record_id)
+        )
     ):
         raise ComfyRegistryWheelClosureDriverError(
             "invalid_resolution",

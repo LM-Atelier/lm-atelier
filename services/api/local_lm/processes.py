@@ -20,6 +20,7 @@ from urllib.parse import urlparse
 import httpx
 import psutil
 
+from .comfy_editor_bridge import ComfyEditorBridgeError, prepare_comfy_editor_bridge
 from .config import Settings
 from .events import EventBroker
 from .gguf import GGUFSelectionError, automatic_mmproj_selection, validate_gguf_selection
@@ -488,6 +489,23 @@ class ProcessSupervisor:
                 self._scoped_comfy_registry_contract,
                 activation_scope,
             )
+        try:
+            editor_bridge = await asyncio.to_thread(
+                prepare_comfy_editor_bridge,
+                comfy_executable=executable,
+                comfy_directory=directory,
+                custom_node_root=self.settings.custom_node_dir,
+            )
+        except ComfyEditorBridgeError as exc:
+            logger.warning("Native workflow editing is unavailable: %s", exc)
+        else:
+            if editor_bridge.folder is not None:
+                trusted_custom_nodes.append(editor_bridge.folder.name)
+            elif editor_bridge.support.code != "workflow-editor-runtime-unavailable":
+                logger.debug(
+                    "Native workflow editing is unavailable: %s",
+                    editor_bridge.support.message,
+                )
         trusted_custom_nodes = sorted(
             {*trusted_custom_nodes, *registry_contract.custom_node_folders}
         )

@@ -58,6 +58,7 @@ path = "local_lm/__init__.py"
 
 [tool.hatch.build.targets.wheel]
 packages = ["local_lm"]
+artifacts = ["local_lm/comfy_editor_bridge_assets/**/*.js"]
 
 [tool.pytest.ini_options]
 addopts = "-q --strict-markers"

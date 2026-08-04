@@ -1010,6 +1010,12 @@ def test_frozen_installer_contracts_are_explicit() -> None:
     assert '"packaging" / "runtime-reviews"' in spec
     assert '"local_lm/migrations"' in spec
     assert '"local_lm" / "capability_packs"' in spec
+    assert '"local_lm" / "comfy_editor_bridge_assets"' in spec
+    assert "*editor_bridge_datas" in spec
+    assert (
+        'artifacts = ["local_lm/comfy_editor_bridge_assets/**/*.js"]'
+        in (ROOT / "services/api/pyproject.toml").read_text()
+    )
     assert '"__pycache__" not in source.parts' in spec
     assert 'source.suffix not in {".pyc", ".pyo"}' in spec
     assert '"PIL",' not in spec

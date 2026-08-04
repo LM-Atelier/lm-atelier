@@ -9,12 +9,18 @@ explicit steps.
 
 from __future__ import annotations
 
+import asyncio
 from collections.abc import Awaitable, Callable, Mapping, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 
 from sqlalchemy.orm import Session
 
+from .comfy_package_requirements import (
+    StagedRequirementsError,
+    read_staged_requirements,
+    select_requirements_manifest,
+)
 from .comfy_registry import ComfyRegistryClient
 from .comfy_registry_closure_driver import (
     ComfyRegistryWheelClosureDriverError,
@@ -26,7 +32,10 @@ from .comfy_registry_interpreter import ComfyRegistryInterpreterError
 from .comfy_registry_lifecycle import (
     ComfyRegistryLifecycleError,
     ComfyRegistryPreparation,
+    ComfyRegistryStagedArchive,
+    discard_comfy_registry_staged_archive,
     prepare_comfy_registry_install,
+    stage_comfy_registry_install_archive,
 )
 from .comfy_registry_wheel_downloads import ComfyRegistryWheelDownloader
 from .comfy_registry_wheel_projects import ComfyRegistryWheelProjectClient
@@ -77,6 +86,7 @@ async def prepare_workflow_package(
     *,
     package_id: str,
     version: str | None,
+    node_types: tuple[str, ...],
     context: PreparationContext,
     media_worker_stopped: bool,
     interpreter_probe: InterpreterProbe,
@@ -103,7 +113,10 @@ async def prepare_workflow_package(
     requirement = WorkflowPackageRequirement(
         package_id=package_id,
         versions=(version,) if version else (),
-        node_types=(),
+        # The exact node identities the analyzed graph needs from this package.
+        # Sending none produced a prepared package that claimed to provide
+        # nothing, which persistence refused and no activation could use.
+        node_types=node_types,
         locally_resolved=False,
     )
     try:
@@ -134,23 +147,70 @@ async def prepare_workflow_package(
             "The managed runtime's package target could not be determined.",
         ) from exc
 
+    async def _archive_progress(downloaded: int, total: int | None) -> None:
+        _phase("Downloading the node archive", downloaded, total)
+
+    staged_archive: ComfyRegistryStagedArchive | None = None
+    effective_resolution = resolution
+    if resolution.install_kind == "git_commit":
+        try:
+            staged_archive = await stage_comfy_registry_install_archive(
+                resolution=resolution,
+                archive_downloader=archive_downloader,
+                custom_node_root=context.custom_node_root,
+                media_worker_stopped=media_worker_stopped,
+                archive_progress=_archive_progress,
+            )
+            _phase("Reading package dependencies")
+            manifest = select_requirements_manifest(staged_archive.report.dependency_manifests)
+            dependencies = (
+                read_staged_requirements(staged_archive.destination, manifest)
+                if manifest is not None
+                else ()
+            )
+            effective_resolution = replace(
+                resolution,
+                pip_dependencies=dependencies,
+            )
+        except ComfyRegistryLifecycleError as exc:
+            raise WorkflowPackagePreparationError(exc.code, str(exc)) from exc
+        except StagedRequirementsError as exc:
+            if staged_archive is not None:
+                await discard_comfy_registry_staged_archive(
+                    resolution=resolution,
+                    staged_archive=staged_archive,
+                    custom_node_root=context.custom_node_root,
+                )
+            raise WorkflowPackagePreparationError(exc.code, str(exc)) from exc
+
     async def _closure_progress(name: str, round_number: int, items: tuple[str, ...]) -> None:
         _phase(f"Dependencies: {name.replace('_', ' ')} (round {round_number})", len(items), None)
 
     try:
         closure_result = await drive_comfy_registry_wheel_closure(
-            resolution,
+            effective_resolution,
             project_fetcher=project_client.fetch,
             metadata_fetcher=metadata_client.fetch,
             marker_environment=marker_environment,
             supported_tags=supported_tags,
             progress=_closure_progress,
         )
+    except asyncio.CancelledError:
+        if staged_archive is not None:
+            await discard_comfy_registry_staged_archive(
+                resolution=resolution,
+                staged_archive=staged_archive,
+                custom_node_root=context.custom_node_root,
+            )
+        raise
     except ComfyRegistryWheelClosureDriverError as exc:
+        if staged_archive is not None:
+            await discard_comfy_registry_staged_archive(
+                resolution=resolution,
+                staged_archive=staged_archive,
+                custom_node_root=context.custom_node_root,
+            )
         raise WorkflowPackagePreparationError(exc.code, str(exc)) from exc
-
-    async def _archive_progress(downloaded: int, total: int | None) -> None:
-        _phase("Downloading the node archive", downloaded, total)
 
     async def _wheel_progress(filename: str, downloaded: int, total: int | None) -> None:
         _phase(f"Downloading {filename}", downloaded, total)
@@ -161,9 +221,9 @@ async def prepare_workflow_package(
             # so it holds no SQLite lock while the lifecycle downloads and
             # assembles; the concurrency regression beside this proves another
             # writer makes progress mid-preparation.
-            return await prepare_comfy_registry_install(
+            preparation = await prepare_comfy_registry_install(
                 session,
-                resolution=resolution,
+                resolution=effective_resolution,
                 closure=closure_result.closure,
                 archive_downloader=archive_downloader,
                 wheel_downloader=wheel_downloader,
@@ -173,8 +233,17 @@ async def prepare_workflow_package(
                 media_worker_stopped=media_worker_stopped,
                 archive_progress=_archive_progress,
                 wheel_progress=_wheel_progress,
+                staged_archive=staged_archive,
             )
+            staged_archive = None
+            return preparation
     except ComfyRegistryLifecycleError as exc:
+        if staged_archive is not None:
+            await discard_comfy_registry_staged_archive(
+                resolution=resolution,
+                staged_archive=staged_archive,
+                custom_node_root=context.custom_node_root,
+            )
         raise WorkflowPackagePreparationError(exc.code, str(exc)) from exc
 
 
