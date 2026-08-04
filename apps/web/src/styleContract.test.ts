@@ -270,7 +270,7 @@ describe("moving between rooms", () => {
     // header bar floating over paper, or a light grain over nothing.
     const main = css.match(/(?:^|\n)main \{([^}]*)\}/)?.[1] ?? "";
     expect(main).toMatch(/var\(--surface-0\)/);
-    expect(main).toMatch(/var\(--grain\)/);
+    expect(main).toMatch(/var\(--tooth\)/);
     // The grain has to be part of the ground rather than a layer over it. As
     // an absolutely positioned pseudo-element it painted above in-flow
     // content, so the moment it became visible it became visible across
@@ -280,7 +280,6 @@ describe("moving between rooms", () => {
     for (const room of [':root {', '[data-room="reading"]']) {
       const at = css.indexOf(room);
       const block = css.slice(at, css.indexOf("}", at));
-      expect(block).toMatch(/--grain:/);
       expect(block).toMatch(/--scrim:/);
     }
   });
@@ -373,5 +372,48 @@ describe("every rule, in every room", () => {
     // them shipped that way, including every link in an assistant answer,
     // because nothing checked a rule against the room it would render in.
     expect(unreadable).toEqual([]);
+  });
+});
+
+describe("material character", () => {
+  const css = readFileSync(STYLESHEET, "utf8");
+
+  it("gives the surfaces tooth rather than graph paper", () => {
+    // A 28px grid reads as a drafting overlay laid on top. Fibrous noise
+    // reads as the surface itself, which is the difference between a page
+    // with lines on it and a page made of something.
+    const encoded = css.match(/--tooth: url\("data:image\/svg\+xml;base64,([^"]+)"\)/)?.[1] ?? "";
+    expect(encoded).not.toBe("");
+    // Decoded, because the texture being real is the whole claim: fibrous
+    // noise rather than a repeating rule.
+    expect(Buffer.from(encoded, "base64").toString()).toMatch(/feTurbulence[^>]*fractalNoise/);
+    // The same texture behaving as the material would: darkening the fibre
+    // on paper, lifting it on a dark ground.
+    expect(css).toMatch(/background-blend-mode: soft-light/);
+    expect(css).toMatch(/\[data-room="reading"\] main \{ background-blend-mode: multiply/);
+  });
+
+  it("keeps the cut corner for things that hold work", () => {
+    // The one shape idea the product has. It marked exactly two elements by
+    // accident before, which is not a language.
+    expect(css).toMatch(/--cut: /);
+    const holders = [".gallery-card", ".engine-card", ".studio-stage", ".recipe-card"];
+    for (const holder of holders) {
+      const at = css.indexOf(`\n${holder} {`);
+      const rule = at < 0 ? "" : css.slice(at, css.indexOf("}", at));
+      expect(rule).toMatch(/border-radius: var\(--cut\)/);
+    }
+    // A control is not a thing that holds work, so it keeps even corners.
+    const secondary = css.match(/\n\.secondary \{([^}]*)\}/)?.[1] ?? "";
+    expect(secondary).not.toMatch(/--cut/);
+  });
+
+  it("moves quickly and never overshoots", () => {
+    // An overshoot on every hover is what makes an interface feel like a
+    // toy rather than a bench.
+    expect(css).toMatch(/--ease: cubic-bezier\(\.2, \.8, \.2, 1\)/);
+    const easing = css.match(/--ease: ([^;]+);/)?.[1] ?? "";
+    const [, , third] = easing.match(/cubic-bezier\(([\d.]+), ([\d.]+), ([\d.]+), ([\d.]+)\)/) ?? [];
+    expect(Number(third)).toBeLessThanOrEqual(1);
   });
 });
