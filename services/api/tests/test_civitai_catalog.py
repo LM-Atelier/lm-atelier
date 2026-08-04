@@ -22,6 +22,7 @@ def _file(**updates: Any) -> dict[str, Any]:
         "hashes": {"SHA256": SHA256},
         "pickleScanResult": "Success",
         "virusScanResult": "Success",
+        "type": "Model",
         "metadata": {"format": "SafeTensor", "fp": "fp16"},
     }
     value.update(updates)
@@ -369,6 +370,8 @@ async def test_inspect_pins_version_and_preserves_recommendation_metadata(
     assert detail["revision"] == "202"
     assert detail["model"]["provider"] == "civitai"
     assert detail["files"][0]["sha256"] == SHA256
+    assert detail["files"][0]["source_file_type"] == "Model"
+    assert detail["files"][0]["source_file_precision"] == "fp16"
     metadata = detail["files"][0]["metadata"]
     assert metadata["content_rating"] == "general"
     assert metadata["source_model_id"] == "101"
