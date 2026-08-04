@@ -17,6 +17,7 @@ import psutil
 import pytest
 from sqlalchemy.orm import object_session
 
+from local_lm.comfy_editor_bridge import BRIDGE_DIRECTORY_NAME
 from local_lm.comfy_registry_installs import ComfyRegistryLaunchContract
 from local_lm.custom_nodes import CustomNodeManager
 from local_lm.db import SessionLocal
@@ -1450,6 +1451,64 @@ async def test_media_start_disables_unapproved_custom_nodes(
     assert command[command.index("--preview-method") + 1] == "latent2rgb"
     assert "--disable-all-custom-nodes" in command
     assert command[command.index("--whitelist-custom-nodes") + 1 :] == ["lm-atelier-node_reviewed"]
+
+
+async def test_media_start_whitelists_only_the_verified_first_party_editor_bridge(
+    settings,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,  # type: ignore[no-untyped-def]
+) -> None:
+    portable = tmp_path / "ComfyUI_windows_portable"
+    runtime = portable / "ComfyUI"
+    runtime.mkdir(parents=True)
+    (runtime / "main.py").touch()
+    executable = portable / "python_embeded" / "python.exe"
+    executable.parent.mkdir()
+    executable.touch()
+    dist_info = (
+        executable.parent / "Lib" / "site-packages" / "comfyui_frontend_package-1.45.21.dist-info"
+    )
+    dist_info.mkdir(parents=True)
+    (runtime / "comfyui_version.py").write_text(
+        '__version__ = "0.28.0"' + chr(10),
+        encoding="utf-8",
+    )
+    (dist_info / "METADATA").write_text(
+        chr(10).join(["Name: comfyui-frontend-package", "Version: 1.45.21", ""]),
+        encoding="utf-8",
+    )
+    model_paths = tmp_path / "extra-model-paths.yaml"
+    model_paths.touch()
+    settings.comfy_directory = runtime
+    settings.comfy_executable = executable
+    supervisor = ProcessSupervisor(settings)
+    captured: dict[str, list[str]] = {}
+
+    async def trusted_nodes() -> list[str]:
+        return []
+
+    async def replace(
+        _name: str,
+        command: list[str],
+        _health_url: str,
+        _profile_id: str | None = None,
+        *,
+        estimated_memory_bytes: int | None = None,
+    ) -> None:
+        assert estimated_memory_bytes is None
+        captured["command"] = command
+
+    monkeypatch.setattr(supervisor, "_trusted_comfy_node_folders", trusted_nodes)
+    monkeypatch.setattr(supervisor, "_write_comfy_model_paths", lambda: model_paths)
+    monkeypatch.setattr(supervisor, "_replace", replace)
+
+    await supervisor.start_media()
+
+    command = captured["command"]
+    assert command[command.index("--whitelist-custom-nodes") + 1 :] == [BRIDGE_DIRECTORY_NAME]
+    staged = runtime / "custom_nodes" / BRIDGE_DIRECTORY_NAME
+    assert (staged / "__init__.py").is_file()
+    assert (staged / "js" / "lm_atelier_workflow_editor.js").is_file()
 
 
 async def test_media_start_uses_only_the_exact_activation_scope(
