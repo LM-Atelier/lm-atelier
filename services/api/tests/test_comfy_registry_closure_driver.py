@@ -198,6 +198,38 @@ async def test_dependency_free_resolution_uses_no_network() -> None:
 
 
 @pytest.mark.asyncio
+async def test_staged_commit_dependencies_use_the_same_closure_driver() -> None:
+    revision = "a" * 40
+
+    async def unexpected_projects(names: Sequence[str]) -> Mapping[str, object]:
+        raise AssertionError(names)
+
+    async def unexpected_metadata(
+        manifest: ComfyRegistryWheelArtifactManifest,
+    ) -> Mapping[str, bytes]:
+        raise AssertionError(manifest)
+
+    result = await drive_comfy_registry_wheel_closure(
+        ComfyNodeResolution(
+            package_id="example-node",
+            declared_version=revision,
+            node_types=("ExampleNode",),
+            install_kind="git_commit",
+            repository_url="https://github.com/example/example-node.git",
+            pip_dependencies=(),
+        ),
+        project_fetcher=unexpected_projects,
+        metadata_fetcher=unexpected_metadata,
+        marker_environment=_environment(),
+        supported_tags=(_TAG,),
+    )
+
+    assert result.package_id == "example-node"
+    assert result.package_version == revision
+    assert result.closure.complete is True
+
+
+@pytest.mark.asyncio
 async def test_inactive_direct_marker_is_not_fetched() -> None:
     active, metadata = _project("active", [("2.0", [])])
     sources = _Sources({"active": active}, metadata)

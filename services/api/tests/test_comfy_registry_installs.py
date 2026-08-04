@@ -109,6 +109,33 @@ def test_persists_exact_identity_as_inert_and_untrusted(session: Session) -> Non
     }
 
 
+def test_persists_commit_source_and_observed_archive_identity(session: Session) -> None:
+    revision = "a" * 40
+    install = persist_comfy_registry_install(
+        session,
+        resolution=_resolution(
+            declared_version=revision,
+            install_kind="git_commit",
+            registry_record_id=None,
+            download_url=None,
+            warnings=(
+                "source_review_required",
+                "dependency_manifest_review_required",
+            ),
+        ),
+        archive=_archive(),
+        installed_path="lm-atelier-registry_commit",
+    )
+
+    assert install.package_version == revision
+    assert install.registry_record_id.startswith("github-commit:")
+    assert install.repository_url == "https://github.com/example/comfyui-example-node.git"
+    assert install.download_url == (
+        "https://codeload.github.com/example/comfyui-example-node/zip/" + revision
+    )
+    assert install.archive_sha256 == "a" * 64
+
+
 def test_exact_retry_is_idempotent(session: Session) -> None:
     first = persist_comfy_registry_install(
         session,
@@ -395,10 +422,10 @@ def test_managed_path_cannot_be_reused(session: Session) -> None:
 @pytest.mark.parametrize(
     ("resolution", "message"),
     [
-        (_resolution(install_kind="git_commit"), "exact Comfy Registry archive"),
-        (_resolution(error_code="registry_version_inactive"), "exact Comfy Registry archive"),
-        (_resolution(package_id="Invalid Package"), "invalid Registry package id"),
-        (_resolution(declared_version="latest"), "invalid Registry package version"),
+        (_resolution(install_kind="git_commit"), "invalid commit revision"),
+        (_resolution(error_code="registry_version_inactive"), "invalid identity"),
+        (_resolution(package_id="Invalid Package"), "invalid identity"),
+        (_resolution(declared_version="latest"), "invalid Registry version"),
         (_resolution(repository_url="https://example.com/node.git"), "repository URL"),
         (
             _resolution(repository_url="https://github.com/example/node"),

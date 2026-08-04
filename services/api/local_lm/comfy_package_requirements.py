@@ -31,12 +31,12 @@ class StagedRequirementsError(ValueError):
 def select_requirements_manifest(manifests: Sequence[str]) -> str | None:
     """Pick the package's own requirements file, or none if it declares nothing.
 
-    An archive carries more than one candidate. A commit archive from GitHub
-    wraps the tree in a single directory, so the package's own file sits one
-    level down, while anything deeper belongs to something the package
-    vendored rather than to the package itself. The shallowest wins for that
-    reason, and a genuine tie is refused rather than guessed: two files at the
-    same depth mean the archive does not say which one describes it.
+    An archive can carry more than one candidate. Staging may remove a
+    provider's synthetic repository wrapper, but the package's own file is
+    still the shallowest candidate while anything deeper belongs to something
+    it vendored. The shallowest wins for that reason, and a genuine tie is
+    refused rather than guessed: two files at the same depth mean the archive
+    does not say which one describes it.
     """
     candidates = [
         path
