@@ -27,7 +27,7 @@ def test_a_package_that_declares_nothing_has_no_manifest() -> None:
 
 
 def test_the_packages_own_file_wins_over_anything_it_vendored() -> None:
-    """A commit archive wraps the tree, so the package's own file is one level down."""
+    """The package's own file is shallower than a vendored dependency's."""
     selected = select_requirements_manifest(
         (
             "node-abc123/requirements.txt",

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
@@ -217,6 +218,70 @@ async def test_commit_pin_stages_reads_closes_and_prepares_the_same_tree(
     assert "Reading package dependencies" in phases
 
 
+async def test_commit_pin_cancellation_discards_the_staged_tree(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    revision = "a" * 40
+    order: list[str] = []
+    staged = ComfyRegistryStagedArchive(
+        "lm-atelier-registry_commit",
+        Path("C:/synthetic/custom_nodes/lm-atelier-registry_commit"),
+        ComfyRegistryArchiveReport(
+            archive_sha256="a" * 64,
+            manifest_sha256="b" * 64,
+            entry_count=1,
+            file_count=1,
+            expanded_bytes=20,
+            python_file_count=1,
+            dependency_manifests=(),
+            install_scripts=(),
+            startup_hooks=(),
+            native_files=(),
+            top_level_entries=("__init__.py",),
+        ),
+    )
+
+    async def fake_stage(**kwargs: Any) -> ComfyRegistryStagedArchive:
+        order.append("stage")
+        return staged
+
+    async def cancel_drive(*args: Any, **kwargs: Any) -> Any:
+        order.append("drive")
+        raise asyncio.CancelledError
+
+    async def fake_discard(**kwargs: Any) -> None:
+        order.append("discard")
+        assert kwargs["staged_archive"] is staged
+
+    monkeypatch.setattr(composition, "stage_comfy_registry_install_archive", fake_stage)
+    monkeypatch.setattr(composition, "drive_comfy_registry_wheel_closure", cancel_drive)
+    monkeypatch.setattr(
+        composition,
+        "discard_comfy_registry_staged_archive",
+        fake_discard,
+    )
+
+    with pytest.raises(asyncio.CancelledError):
+        await prepare_workflow_package(
+            _NullSessionFactory(),
+            package_id="example-pack",
+            version=revision,
+            context=_CONTEXT,
+            media_worker_stopped=True,
+            interpreter_probe=_probe,
+            registry_client=_Registry(
+                _resolution(
+                    declared_version=revision,
+                    install_kind="git_commit",
+                    repository_url="https://github.com/example/example-pack.git",
+                )
+            ),  # type: ignore[arg-type]
+            **_clients(),
+        )
+
+    assert order == ["stage", "drive", "discard"]
+
+
 async def test_each_stage_refuses_with_its_own_code(monkeypatch: pytest.MonkeyPatch) -> None:
     # Resolution error codes surface unchanged.
     registry = _Registry(_resolution(error_code="registry_record_missing"))
@@ -325,8 +390,6 @@ async def test_another_writer_progresses_while_preparation_awaits(
     and commits; if the preparation session entered the await holding a
     SQLite write lock, that insert would deadlock or fail.
     """
-
-    import asyncio
 
     from local_lm.db import SessionLocal
     from local_lm.models import EditTemplate
