@@ -2,11 +2,16 @@ from __future__ import annotations
 
 import hashlib
 import json
+import re
 from collections.abc import Sequence
 from dataclasses import dataclass
 
 from packaging.requirements import InvalidRequirement, Requirement
 from packaging.utils import canonicalize_name
+
+# A comment starts at a `#` that follows whitespace, matching how pip reads a
+# requirements file. A bare `#` inside a requirement is not a comment.
+_INLINE_COMMENT = re.compile(r"\s#")
 
 MAX_REGISTRY_PIP_DEPENDENCIES = 256
 MAX_REGISTRY_PIP_DEPENDENCY_CHARACTERS = 1_000
@@ -53,7 +58,10 @@ def plan_comfy_registry_dependencies(
     parsed: list[ComfyRegistryDependency] = []
     targets: set[tuple[str, str]] = set()
     for declaration in declarations:
-        dependency = _dependency(declaration)
+        requirement = _requirement_line(declaration)
+        if requirement is None:
+            continue
+        dependency = _dependency(requirement)
         target = (dependency.name, dependency.marker or "")
         if target in targets:
             raise ComfyRegistryDependencyError(
@@ -94,6 +102,39 @@ def plan_comfy_registry_dependencies(
         any(item.version_resolution_required for item in parsed),
         bool(parsed),
     )
+
+
+def _requirement_line(value: object) -> str | None:
+    """Separate what a requirements file carries from what it declares.
+
+    Publishers fill this field by dumping a requirements file, so it arrives
+    with that file's ordinary furniture: blank lines, comments, and inline
+    comments after a requirement. None of those name a dependency, and
+    refusing a package because it shipped a comment refuses almost every real
+    package.
+
+    Option lines are different and are not silently dropped. `-r`, `-e`, and
+    `--index-url` change what gets installed or where it comes from, so
+    ignoring one would install something other than what was declared. Those
+    refuse with their own code rather than being mistaken for a malformed
+    requirement.
+    """
+    if not isinstance(value, str):
+        raise ComfyRegistryDependencyError(
+            "invalid_dependency", "Registry version has an invalid pip dependency"
+        )
+    line = value.strip()
+    if line.startswith("#"):
+        return None
+    line = _INLINE_COMMENT.split(line, maxsplit=1)[0].strip()
+    if not line:
+        return None
+    if line.startswith("-"):
+        raise ComfyRegistryDependencyError(
+            "dependency_option_unsupported",
+            "Registry pip dependencies cannot set installer options or extra indexes",
+        )
+    return line
 
 
 def _dependency(value: object) -> ComfyRegistryDependency:

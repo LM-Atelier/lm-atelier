@@ -201,12 +201,18 @@ def resolve_comfy_registry_wheel_artifacts(
     marker_environment: Mapping[str, str],
     supported_tags: Sequence[str],
 ) -> ComfyRegistryWheelArtifactManifest:
-    """Bind exact active requirements to immutable compatible PyPI wheel records."""
-    if plan.version_resolution_required:
-        raise ComfyRegistryWheelArtifactError(
-            "version_resolution_required",
-            "Registry dependency versions must be exact before resolving wheel artifacts",
-        )
+    """Bind active requirements to immutable compatible PyPI wheel records.
+
+    A requirement need not arrive already pinned. Ordinary ranges are what
+    packages actually declare, so each one resolves to the newest version the
+    range admits and then to the best wheel within that version. Choosing the
+    version first is what makes a range sound to resolve: ranking wheels across
+    several versions at once would let a tag preference outvote the version.
+
+    The result is exact either way. Every selected wheel is recorded by URL and
+    hash in the returned manifest, so a range is resolved once here and pinned
+    from then on.
+    """
     environment, tags, ranks, target_sha256 = _wheel_target(
         marker_environment,
         supported_tags,
@@ -225,7 +231,14 @@ def resolve_comfy_registry_wheel_artifacts(
         )
 
     artifacts = tuple(
-        _resolve_dependency(dependency, documents[dependency.name], environment, tags, ranks)
+        _resolve_dependency(
+            dependency,
+            documents[dependency.name],
+            environment,
+            tags,
+            ranks,
+            prefer_latest_version=True,
+        )
         for dependency in active
     )
     return build_comfy_registry_wheel_artifact_manifest(

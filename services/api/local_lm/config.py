@@ -140,6 +140,7 @@ class Settings(BaseSettings):
             self.model_dir,
             self.workflow_dir,
             self.custom_node_dir,
+            self.registry_dir,
             self.export_dir,
             self.backup_dir,
             self.catalog_cache_dir,
@@ -176,6 +177,11 @@ class Settings(BaseSettings):
         if self.comfy_directory:
             return self.comfy_directory / "custom_nodes"
         return self.data_dir / "custom-nodes"
+
+    @property
+    def registry_dir(self) -> Path:
+        """Managed state for prepared Registry packages: environments and staging."""
+        return self.data_dir / "registry"
 
     @property
     def export_dir(self) -> Path:

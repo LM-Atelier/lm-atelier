@@ -197,11 +197,47 @@ def test_overlapping_active_markers_fail_closed() -> None:
     )
 
 
-def test_unresolved_version_constraint_cannot_select_an_artifact() -> None:
-    _assert_error(
-        "version_resolution_required",
+def test_a_version_range_resolves_to_the_newest_version_it_admits() -> None:
+    """Packages declare ranges, not pins, so a range must resolve rather than refuse."""
+    manifest = _resolve(
+        ["example-package>=1,<3"],
+        {
+            "example-package": _document(
+                _file("example_package-1.2.3-py3-none-any.whl"),
+                _file("example_package-2.0.0-py3-none-any.whl"),
+            )
+        },
+    )
+
+    assert [artifact.version for artifact in manifest.artifacts] == ["2.0.0"]
+
+
+def test_the_version_is_chosen_before_the_wheel_within_it() -> None:
+    """A tag preference must never outvote the version a range admits.
+
+    Ranking every candidate wheel across several versions at once would let a
+    better-matching tag on an older release win, so the newest eligible version
+    is selected first and wheels are ranked only inside it.
+    """
+    manifest = _resolve(
         ["example-package>=1"],
-        {"example-package": _document()},
+        {
+            "example-package": _document(
+                _file("example_package-1.0.0-py3-none-any.whl"),
+                _file("example_package-2.0.0-py3-none-any.whl"),
+            )
+        },
+        tags=("py3-none-any",),
+    )
+
+    assert [artifact.version for artifact in manifest.artifacts] == ["2.0.0"]
+
+
+def test_a_range_that_admits_no_compatible_wheel_still_refuses() -> None:
+    _assert_error(
+        "no_compatible_wheel",
+        ["example-package>=9"],
+        {"example-package": _document(_file("example_package-1.2.3-py3-none-any.whl"))},
     )
 
 
