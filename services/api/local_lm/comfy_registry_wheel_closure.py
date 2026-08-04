@@ -3,11 +3,17 @@ from __future__ import annotations
 import hashlib
 import hmac
 import json
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 
 from packaging.utils import canonicalize_name
 
+from .comfy_registry_runtime import (
+    ComfyRegistryRuntimeDistribution,
+    ComfyRegistryRuntimeError,
+    canonical_comfy_registry_runtime_distributions,
+    comfy_registry_runtime_distribution_payload,
+)
 from .comfy_registry_wheel_artifacts import (
     ComfyRegistryWheelArtifact,
     ComfyRegistryWheelArtifactError,
@@ -46,6 +52,7 @@ class ComfyRegistryWheelClosure:
     manifest_history: tuple[str, ...]
     complete: bool
     closure_sha256: str
+    runtime_distributions: tuple[ComfyRegistryRuntimeDistribution, ...] = ()
 
 
 def plan_comfy_registry_wheel_closure(
@@ -53,6 +60,7 @@ def plan_comfy_registry_wheel_closure(
     metadata_documents: Mapping[str, bytes],
     *,
     marker_environment: Mapping[str, str],
+    runtime_distributions: (Mapping[str, str] | Sequence[ComfyRegistryRuntimeDistribution]) = (),
 ) -> ComfyRegistryWheelClosure:
     """Plan the first inert dependency-closure round for an exact manifest."""
     return _plan_closure(
@@ -60,6 +68,7 @@ def plan_comfy_registry_wheel_closure(
         metadata_documents,
         marker_environment,
         prior_history=(),
+        runtime_distributions=runtime_distributions,
     )
 
 
@@ -119,6 +128,7 @@ def advance_comfy_registry_wheel_closure(
         metadata_documents,
         marker_environment,
         prior_history=closure.manifest_history,
+        runtime_distributions=closure.runtime_distributions,
     )
 
 
@@ -128,19 +138,26 @@ def _plan_closure(
     marker_environment: Mapping[str, str],
     *,
     prior_history: tuple[str, ...],
+    runtime_distributions: (Mapping[str, str] | Sequence[ComfyRegistryRuntimeDistribution]),
 ) -> ComfyRegistryWheelClosure:
     if len(prior_history) >= MAX_REGISTRY_WHEEL_CLOSURE_ROUNDS + 1:
         raise ComfyRegistryWheelClosureError(
             "closure_round_limit", "Wheel dependency closure exceeds the round limit"
         )
     try:
+        runtime = canonical_comfy_registry_runtime_distributions(runtime_distributions)
         validate_comfy_registry_wheel_artifact_manifest(manifest)
         metadata_plan = plan_comfy_registry_wheel_metadata(
             manifest,
             metadata_documents,
             marker_environment=marker_environment,
+            runtime_distributions=runtime,
         )
-    except (ComfyRegistryWheelArtifactError, ComfyRegistryWheelMetadataError) as exc:
+    except (
+        ComfyRegistryRuntimeError,
+        ComfyRegistryWheelArtifactError,
+        ComfyRegistryWheelMetadataError,
+    ) as exc:
         raise ComfyRegistryWheelClosureError(exc.code, str(exc)) from exc
     manifest_sha256 = manifest.manifest_sha256
     history = _history(prior_history)
@@ -169,8 +186,8 @@ def _plan_closure(
             "invalid_metadata_plan", "Wheel dependency resolution state is inconsistent"
         )
     resolved_history = (*history, manifest_sha256)
-    payload = {
-        "version": 1,
+    payload: dict[str, object] = {
+        "version": 2 if runtime else 1,
         "round_number": len(history),
         "manifest_sha256": manifest_sha256,
         "metadata_plan_sha256": metadata_plan.plan_sha256,
@@ -178,6 +195,8 @@ def _plan_closure(
         "manifest_history": list(resolved_history),
         "complete": complete,
     }
+    if runtime:
+        payload["runtime_distributions"] = comfy_registry_runtime_distribution_payload(runtime)
     return ComfyRegistryWheelClosure(
         round_number=len(history),
         manifest=manifest,
@@ -186,6 +205,7 @@ def _plan_closure(
         manifest_history=resolved_history,
         complete=complete,
         closure_sha256=_payload_sha256(payload),
+        runtime_distributions=runtime,
     )
 
 
@@ -203,6 +223,16 @@ def validate_comfy_registry_wheel_closure(
         raise ComfyRegistryWheelClosureError(
             "invalid_closure", "Wheel dependency closure manifest is invalid"
         ) from exc
+    try:
+        runtime = canonical_comfy_registry_runtime_distributions(closure.runtime_distributions)
+    except ComfyRegistryRuntimeError as exc:
+        raise ComfyRegistryWheelClosureError(
+            "invalid_closure", "Wheel dependency closure runtime baseline is invalid"
+        ) from exc
+    if runtime != closure.runtime_distributions:
+        raise ComfyRegistryWheelClosureError(
+            "invalid_closure", "Wheel dependency closure runtime baseline is not canonical"
+        )
     if not isinstance(closure.metadata_plan, ComfyRegistryWheelMetadataPlan):
         raise ComfyRegistryWheelClosureError(
             "invalid_closure", "Wheel dependency closure metadata plan is invalid"
@@ -231,8 +261,8 @@ def validate_comfy_registry_wheel_closure(
         raise ComfyRegistryWheelClosureError(
             "invalid_closure", "Wheel dependency closure state is inconsistent"
         )
-    payload = {
-        "version": 1,
+    payload: dict[str, object] = {
+        "version": 2 if runtime else 1,
         "round_number": closure.round_number,
         "manifest_sha256": closure.manifest.manifest_sha256,
         "metadata_plan_sha256": closure.metadata_plan.plan_sha256,
@@ -240,6 +270,8 @@ def validate_comfy_registry_wheel_closure(
         "manifest_history": list(history),
         "complete": complete,
     }
+    if runtime:
+        payload["runtime_distributions"] = comfy_registry_runtime_distribution_payload(runtime)
     closure_sha256 = _digest(closure.closure_sha256)
     if not hmac.compare_digest(_payload_sha256(payload), closure_sha256):
         raise ComfyRegistryWheelClosureError(

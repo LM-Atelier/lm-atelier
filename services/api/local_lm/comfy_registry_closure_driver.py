@@ -11,12 +11,20 @@ from typing import Literal
 
 import httpx
 from packaging.markers import Marker
+from packaging.requirements import Requirement
+from packaging.version import Version
 
 from .comfy_registry import ComfyNodeResolution
 from .comfy_registry_dependencies import (
     ComfyRegistryDependencyError,
     ComfyRegistryDependencyPlan,
     plan_comfy_registry_dependencies,
+)
+from .comfy_registry_runtime import (
+    ComfyRegistryRuntimeDistribution,
+    ComfyRegistryRuntimeError,
+    canonical_comfy_registry_runtime_distributions,
+    comfy_registry_runtime_distribution_map,
 )
 from .comfy_registry_wheel_artifacts import (
     ComfyRegistryWheelArtifact,
@@ -199,10 +207,16 @@ async def drive_comfy_registry_wheel_closure(
     metadata_fetcher: RegistryMetadataFetcher,
     marker_environment: Mapping[str, str],
     supported_tags: Sequence[str],
+    runtime_distributions: (Mapping[str, str] | Sequence[ComfyRegistryRuntimeDistribution]) = (),
     progress: RegistryClosureProgress | None = None,
 ) -> ComfyRegistryWheelClosureResult:
     """Resolve one Registry package to a complete, target-bound wheel closure."""
     package_id, package_version, dependency_plan = _resolution_plan(resolution)
+    try:
+        runtime = canonical_comfy_registry_runtime_distributions(runtime_distributions)
+        runtime_map = comfy_registry_runtime_distribution_map(runtime)
+    except ComfyRegistryRuntimeError as exc:
+        raise ComfyRegistryWheelClosureDriverError(exc.code, str(exc)) from exc
     try:
         target_sha256 = comfy_registry_wheel_target_sha256(
             marker_environment,
@@ -210,7 +224,11 @@ async def drive_comfy_registry_wheel_closure(
         )
     except ComfyRegistryWheelArtifactError as exc:
         raise _driver_error(exc) from exc
-    project_names = _active_project_names(dependency_plan, marker_environment)
+    project_names = _active_project_names(
+        dependency_plan,
+        marker_environment,
+        runtime_map,
+    )
     if project_names:
         await _publish_progress(progress, "fetching_projects", 0, project_names)
         project_documents = await _fetch_projects(project_fetcher, project_names)
@@ -221,6 +239,7 @@ async def drive_comfy_registry_wheel_closure(
                 project_documents,
                 marker_environment=marker_environment,
                 supported_tags=supported_tags,
+                runtime_distributions=runtime,
             )
         except ComfyRegistryWheelArtifactError as exc:
             raise _driver_error(exc) from exc
@@ -246,6 +265,7 @@ async def drive_comfy_registry_wheel_closure(
             manifest,
             metadata_documents,
             marker_environment=marker_environment,
+            runtime_distributions=runtime,
         )
     except ComfyRegistryWheelClosureError as exc:
         raise _driver_error(exc) from exc
@@ -368,6 +388,7 @@ def _resolution_plan(
 def _active_project_names(
     plan: ComfyRegistryDependencyPlan,
     marker_environment: Mapping[str, str],
+    runtime_distributions: Mapping[str, str],
 ) -> tuple[str, ...]:
     active: list[str] = []
     seen: set[str] = set()
@@ -382,6 +403,18 @@ def _active_project_names(
                 f"Multiple Registry requirements target active package {dependency.name}",
             )
         seen.add(dependency.name)
+        runtime_version = runtime_distributions.get(dependency.name)
+        if runtime_version is not None:
+            if Requirement(dependency.requirement).specifier.contains(
+                Version(runtime_version),
+                prereleases=True,
+            ):
+                continue
+            raise ComfyRegistryWheelClosureDriverError(
+                "managed_runtime_dependency_conflict",
+                f"Managed runtime {dependency.name} {runtime_version} does not satisfy "
+                f"{dependency.requirement}",
+            )
         active.append(dependency.name)
     return tuple(sorted(active))
 

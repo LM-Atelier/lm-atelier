@@ -37,16 +37,27 @@ from .comfy_registry_lifecycle import (
     prepare_comfy_registry_install,
     stage_comfy_registry_install_archive,
 )
+from .comfy_registry_runtime import ComfyRegistryRuntimeDistribution
 from .comfy_registry_wheel_downloads import ComfyRegistryWheelDownloader
 from .comfy_registry_wheel_projects import ComfyRegistryWheelProjectClient
 from .comfy_workflow_packages import WorkflowPackageRequirement
 from .config import Settings
 
-# One target interpreter probe: (marker_environment, supported_tags) for the
+# One target interpreter probe: markers, wheel tags, and installed distributions for the
 # managed ComfyUI python. Owned as its own contract because target-binding
 # correctness depends on it; until a real probe is wired the preparation
 # refuses rather than guessing the target.
-InterpreterProbe = Callable[[Path], Awaitable[tuple[Mapping[str, str], Sequence[str]]]]
+InterpreterProbe = Callable[
+    [Path],
+    Awaitable[
+        tuple[Mapping[str, str], Sequence[str]]
+        | tuple[
+            Mapping[str, str],
+            Sequence[str],
+            Sequence[ComfyRegistryRuntimeDistribution],
+        ]
+    ],
+]
 
 PreparationPhase = Callable[[str, int | None, int | None], None]
 
@@ -134,7 +145,12 @@ async def prepare_workflow_package(
 
     _phase("Probing the target runtime")
     try:
-        marker_environment, supported_tags = await interpreter_probe(context.python_executable)
+        probe_result = await interpreter_probe(context.python_executable)
+        if len(probe_result) == 2:
+            marker_environment, supported_tags = probe_result
+            runtime_distributions: Sequence[ComfyRegistryRuntimeDistribution] = ()
+        else:
+            marker_environment, supported_tags, runtime_distributions = probe_result
     except WorkflowPackagePreparationError:
         raise
     except ComfyRegistryInterpreterError as exc:
@@ -193,6 +209,7 @@ async def prepare_workflow_package(
             metadata_fetcher=metadata_client.fetch,
             marker_environment=marker_environment,
             supported_tags=supported_tags,
+            runtime_distributions=runtime_distributions,
             progress=_closure_progress,
         )
     except asyncio.CancelledError:
