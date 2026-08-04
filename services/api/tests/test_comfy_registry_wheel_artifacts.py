@@ -488,7 +488,18 @@ def test_bounds_project_documents_file_lists_wheels_and_targets(
         ["example-package==1.2.3"],
         {"example-package": _document()},
     )
-    monkeypatch.setattr(artifact_module, "MAX_PYPI_PROJECT_DOCUMENT_BYTES", 2 * 1024 * 1024)
+    monkeypatch.setattr(artifact_module, "MAX_PYPI_PROJECT_DOCUMENT_BYTES", 8 * 1024 * 1024)
+    monkeypatch.setattr(artifact_module, "MAX_PYPI_PROJECT_FILES", 1)
+    _assert_error(
+        "invalid_project_metadata",
+        ["example-package==1.2.3"],
+        {
+            "example-package": _document(
+                _file(),
+                _file("example_package-1.2.2-py3-none-any.whl"),
+            )
+        },
+    )
     monkeypatch.setattr(artifact_module, "MAX_WHEEL_ARTIFACT_BYTES", 10)
     _assert_error(
         "wheel_too_large",
@@ -511,6 +522,17 @@ def test_resolver_accepts_project_document_above_the_former_two_mib_limit() -> N
     manifest = _resolve(["example-package==1.2.3"], {"example-package": document})
 
     assert len(manifest.artifacts) == 1
+
+
+def test_resolver_accepts_a_current_large_project_file_history() -> None:
+    historical_files = [
+        _file(f"example_package-0.0.{index}-py3-none-any.whl") for index in range(4_099)
+    ]
+    document = _document(*historical_files, _file())
+
+    manifest = _resolve(["example-package==1.2.3"], {"example-package": document})
+
+    assert manifest.artifacts[0].version == "1.2.3"
 
 
 def test_target_requires_complete_environment_and_expanded_unique_tags() -> None:
