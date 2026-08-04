@@ -1152,13 +1152,9 @@ class WorkflowPackagePrepareRequest(ApiModel):
     # to verify against and the resolver refuses it anyway.
     package_id: str = Field(min_length=1, max_length=200)
     version: str = Field(min_length=1, max_length=200)
-    # The node types the analyzed workflow actually needs from this package.
-    # Preparation used to send none, so a prepared package reached the
-    # activation contract claiming to provide nothing and persistence rightly
-    # refused it. These come from the analysis the user was shown, not from
-    # the package name, because a name is a claim and a node type is what a
-    # graph will look for.
-    node_types: list[str] = Field(min_length=1, max_length=256)
+    # The server re-analyzes the source graph and derives the exact node types.
+    # A browser-provided node list would only be another unverified claim.
+    ui_graph: dict[str, Any]
 
 
 class WorkflowPackageAnalyzeRequest(ApiModel):

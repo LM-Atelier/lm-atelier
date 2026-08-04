@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from pathlib import Path
+
 import pytest
 from fastapi import FastAPI
 from httpx2 import AsyncClient
@@ -11,12 +13,28 @@ from local_lm.config import Settings
 pytestmark = pytest.mark.asyncio
 
 
+def _workflow() -> dict[str, object]:
+    return {
+        "version": 0.4,
+        "nodes": [
+            {
+                "id": 1,
+                "type": "ExampleNode",
+                "properties": {"cnr_id": "example-pack", "ver": "1.2.3"},
+                "widgets_values": [],
+            }
+        ],
+        "links": [],
+        "definitions": {"subgraphs": []},
+    }
+
+
 async def test_an_unconfigured_runtime_refuses_before_queueing(client: AsyncClient) -> None:
     """A job that must fail on its first step is worse than a typed 422."""
 
     response = await client.post(
         "/api/workflows/packages/prepare",
-        json={"package_id": "example-pack", "version": "1.2.3", "node_types": ["ExampleNode"]},
+        json={"package_id": "example-pack", "version": "1.2.3", "ui_graph": _workflow()},
     )
 
     assert response.status_code == 422
@@ -31,7 +49,7 @@ async def test_a_configured_runtime_queues_and_fails_closed_on_the_probe(
     app: FastAPI,
     settings: Settings,
     monkeypatch: pytest.MonkeyPatch,
-    tmp_path,
+    tmp_path: Path,
 ) -> None:
     """Until a verified target probe exists, preparation refuses with its code.
 
@@ -56,7 +74,7 @@ async def test_a_configured_runtime_queues_and_fails_closed_on_the_probe(
 
     response = await client.post(
         "/api/workflows/packages/prepare",
-        json={"package_id": "example-pack", "version": "1.2.3", "node_types": ["ExampleNode"]},
+        json={"package_id": "example-pack", "version": "1.2.3", "ui_graph": _workflow()},
     )
 
     assert response.status_code == 202
@@ -83,7 +101,7 @@ async def test_cancel_stops_a_blocking_preparation_for_good(
     app: FastAPI,
     settings: Settings,
     monkeypatch: pytest.MonkeyPatch,
-    tmp_path,
+    tmp_path: Path,
 ) -> None:
     """Cancellation reaches the live task, and nothing overwrites CANCELLED.
 
@@ -125,7 +143,7 @@ async def test_cancel_stops_a_blocking_preparation_for_good(
 
     queued = await client.post(
         "/api/workflows/packages/prepare",
-        json={"package_id": "example-pack", "version": "1.2.3", "node_types": ["ExampleNode"]},
+        json={"package_id": "example-pack", "version": "1.2.3", "ui_graph": _workflow()},
     )
     assert queued.status_code == 202
     job_id = queued.json()["id"]

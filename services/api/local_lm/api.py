@@ -6477,6 +6477,36 @@ def _has_control_character(value: str) -> bool:
     return any(character < " " or character == "\x7f" for character in value)
 
 
+def _analyzed_package_node_types(
+    ui_graph: dict[str, Any], package_id: str, version: str
+) -> tuple[str, ...]:
+    """Derive one exact package identity from the submitted source graph."""
+
+    try:
+        analysis = analyze_comfyui_workflow_package(ui_graph)
+    except WorkflowPackageError as exc:
+        raise api_error(422, exc.code, str(exc)) from exc
+    matches = [
+        requirement
+        for requirement in analysis.custom_packages
+        if requirement.package_id == package_id
+    ]
+    if len(matches) != 1:
+        raise api_error(
+            422,
+            "workflow-package-requirement-not-found",
+            "The workflow does not declare exactly one matching custom-node package.",
+        )
+    requirement = matches[0]
+    if requirement.versions != (version,):
+        raise api_error(
+            422,
+            "workflow-package-version-mismatch",
+            "The selected package version does not exactly match the workflow declaration.",
+        )
+    return _prepared_node_types(list(requirement.node_types))
+
+
 async def _run_workflow_package_preparation(
     services: Services,
     job_id: str,
@@ -6569,10 +6599,9 @@ async def prepare_workflow_package_endpoint(
     """Queue one package preparation; the result stays inactive and untrusted."""
 
     services = _services(request)
-    # The request is judged before the machine is. A malformed node identity is
-    # wrong on every machine, so answering it with a runtime complaint would
-    # send the caller to fix the wrong thing.
-    node_types = _prepared_node_types(payload.node_types)
+    # Re-analyze the source graph before judging the machine. The package name,
+    # version, and node closure have to agree independently of browser state.
+    node_types = _analyzed_package_node_types(payload.ui_graph, payload.package_id, payload.version)
     # Then refuse when the machine cannot prepare at all - a job that must fail
     # on its first step is a worse answer than a typed 422.
     try:

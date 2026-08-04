@@ -1,15 +1,9 @@
-"""The node identities a prepared package promises to provide.
-
-Preparation used to carry only a package id and a version. Composition then
-built a requirement providing no node types at all, persistence correctly
-refused an empty node identity, and so a prepared package could never reach
-the activation contract honestly. What the analysis showed the user has to
-survive the queue.
-"""
+"""Package identities are derived from fresh workflow analysis before queueing."""
 
 from __future__ import annotations
 
 from pathlib import Path
+from typing import Any
 
 import pytest
 from httpx2 import AsyncClient
@@ -18,11 +12,32 @@ from local_lm.config import Settings
 
 pytestmark = pytest.mark.asyncio
 
-_OVERLONG = "N" * 201
-_WITH_CONTROL = "Example\tNode"
+
+def _node(
+    identifier: int,
+    node_type: str,
+    *,
+    package: str = "example-pack",
+    version: str = "1.2.3",
+) -> dict[str, Any]:
+    return {
+        "id": identifier,
+        "type": node_type,
+        "properties": {"cnr_id": package, "ver": version},
+        "widgets_values": [],
+    }
 
 
-async def test_the_queued_job_keeps_the_node_types_it_was_given(
+def _workflow(nodes: list[dict[str, Any]]) -> dict[str, Any]:
+    return {
+        "version": 0.4,
+        "nodes": nodes,
+        "links": [],
+        "definitions": {"subgraphs": []},
+    }
+
+
+async def test_the_queued_job_uses_node_types_derived_from_the_graph(
     client: AsyncClient,
     settings: Settings,
     monkeypatch: pytest.MonkeyPatch,
@@ -42,56 +57,79 @@ async def test_the_queued_job_keeps_the_node_types_it_was_given(
         raise RuntimeError("captured; the job may fail after this")
 
     monkeypatch.setattr(api_module, "prepare_workflow_package", capture)
+    graph = _workflow([_node(1, "ExampleNode"), _node(2, "OtherNode")])
 
     queued = await client.post(
         "/api/workflows/packages/prepare",
-        json={
-            "package_id": "example-pack",
-            "version": "1.2.3",
-            "node_types": ["ExampleNode", "OtherNode"],
-        },
+        json={"package_id": "example-pack", "version": "1.2.3", "ui_graph": graph},
     )
 
     assert queued.status_code == 202
     job_id = queued.json()["id"]
     listed = await client.get("/api/jobs")
     payload = next(job for job in listed.json() if job["id"] == job_id)["payload_json"]
-
     assert payload["node_types"] == ["ExampleNode", "OtherNode"]
 
 
 @pytest.mark.parametrize(
-    ("node_types", "code"),
+    ("package_id", "version", "code"),
     [
-        ([""], "workflow-package-node-type-invalid"),
-        (["   "], "workflow-package-node-type-invalid"),
-        ([_WITH_CONTROL], "workflow-package-node-type-invalid"),
-        ([_OVERLONG], "workflow-package-node-type-invalid"),
-        (["ExampleNode", "ExampleNode"], "workflow-package-node-type-repeated"),
-        (["ExampleNode", "  ExampleNode  "], "workflow-package-node-type-repeated"),
+        ("different-pack", "1.2.3", "workflow-package-requirement-not-found"),
+        ("example-pack", "9.9.9", "workflow-package-version-mismatch"),
     ],
 )
-async def test_refuses_an_identity_persistence_would_reject(
-    client: AsyncClient, node_types: list[str], code: str
+async def test_refuses_a_selection_that_disagrees_with_the_graph(
+    client: AsyncClient, package_id: str, version: str, code: str
 ) -> None:
-    """The rules persistence enforces, applied before anything is queued.
-
-    A job that must fail on its first step is a worse answer than a typed 422,
-    and relaxing persistence to accept these instead would be worse still.
-    """
     response = await client.post(
         "/api/workflows/packages/prepare",
-        json={"package_id": "example-pack", "version": "1.2.3", "node_types": node_types},
+        json={
+            "package_id": package_id,
+            "version": version,
+            "ui_graph": _workflow([_node(1, "ExampleNode")]),
+        },
     )
 
     assert response.status_code == 422
     assert response.json()["code"] == code
+    jobs = (await client.get("/api/jobs")).json()
+    assert all(job["kind"] != "registry_prepare" for job in jobs)
 
 
-async def test_refuses_a_request_naming_no_node_types_at_all(client: AsyncClient) -> None:
+async def test_refuses_a_package_with_conflicting_workflow_versions(
+    client: AsyncClient,
+) -> None:
     response = await client.post(
         "/api/workflows/packages/prepare",
-        json={"package_id": "example-pack", "version": "1.2.3", "node_types": []},
+        json={
+            "package_id": "example-pack",
+            "version": "1.2.3",
+            "ui_graph": _workflow(
+                [
+                    _node(1, "ExampleNode"),
+                    _node(2, "OtherNode", version="2.0.0"),
+                ]
+            ),
+        },
     )
 
     assert response.status_code == 422
+    assert response.json()["code"] == "workflow-package-version-mismatch"
+
+
+async def test_refuses_browser_supplied_node_identities(client: AsyncClient) -> None:
+    response = await client.post(
+        "/api/workflows/packages/prepare",
+        json={
+            "package_id": "example-pack",
+            "version": "1.2.3",
+            "ui_graph": _workflow([_node(1, "ExampleNode")]),
+            "node_types": ["ClaimedByTheBrowser"],
+        },
+    )
+
+    assert response.status_code == 422
+    assert any(
+        error["type"] == "extra_forbidden" and error["loc"][-1] == "node_types"
+        for error in response.json()["detail"]
+    )
