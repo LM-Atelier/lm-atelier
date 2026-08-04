@@ -55,6 +55,10 @@ class Settings(BaseSettings):
     # contained an image paid for vision on every message afterwards -
     # "make it brighter" refers to something a turn or two ago, never to
     # something fifty messages back.
+    # Web access is off for the whole installation unless this is set, and
+    # a chat still has to be allowed individually. A deployment that must
+    # never egress pins this off and no conversation can override it.
+    web_access_enabled: bool = False
     vision_prior_visual_lookback: int = Field(default=4, ge=0, le=64)
     vision_max_video_frames: int = Field(default=6, ge=3, le=16)
     vision_max_video_duration_seconds: int = Field(default=3600, ge=1, le=86_400)
