@@ -6,7 +6,6 @@ import io
 import json
 import sys
 import zipfile
-from collections.abc import Callable
 from dataclasses import replace
 from pathlib import Path
 
@@ -398,31 +397,16 @@ async def test_cancellation_cleans_staging_and_preserves_cancellation(
     assert not list(tmp_path.glob(f".{destination.name}-*"))
 
 
-@pytest.mark.parametrize(
-    ("mutate", "expected_code"),
-    [
-        (
-            lambda target: (target / "unsafe.pth").write_text("import bad" + chr(10)),
-            "unsafe_environment_pth",
-        ),
-        (
-            lambda target: _installed_distribution(target, version="2.0"),
-            "distribution_set_mismatch",
-        ),
-    ],
-)
-async def test_post_install_audit_rejects_unsafe_or_unexpected_output(
+async def test_post_install_audit_rejects_unexpected_distribution(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
-    mutate: Callable[[Path], object],
-    expected_code: str,
 ) -> None:
     content = _wheel_content()
     closure = _closure(content)
     source = _wheel_file(tmp_path, content)
 
     async def fake_run_pip(_python: Path, _wheels: tuple[Path, ...], target: Path) -> None:
-        mutate(target)
+        _installed_distribution(target, version="2.0")
 
     monkeypatch.setattr(environment_module, "_run_pip", fake_run_pip)
 
@@ -434,7 +418,54 @@ async def test_post_install_audit_rejects_unsafe_or_unexpected_output(
             destination=_destination(tmp_path, closure),
             media_worker_stopped=True,
         )
-    assert raised.value.code == expected_code
+    assert raised.value.code == "distribution_set_mismatch"
+
+
+async def test_pth_content_is_inert_audited_and_tamper_evident(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    content = _wheel_content()
+    closure = _closure(content)
+    source = _wheel_file(tmp_path, content)
+    destination = _destination(tmp_path, closure)
+
+    async def fake_run_pip(_python: Path, _wheels: tuple[Path, ...], target: Path) -> None:
+        _installed_distribution(target)
+        (target / "runtime-hook.pth").write_text("import unreviewed_code\n", encoding="utf-8")
+
+    monkeypatch.setattr(environment_module, "_run_pip", fake_run_pip)
+
+    report = await assemble_comfy_registry_wheel_environment(
+        closure,
+        {source.name: source},
+        python_executable=Path(sys.executable),
+        destination=destination,
+        media_worker_stopped=True,
+    )
+
+    manifest = json.loads((destination / "environment-manifest.json").read_bytes())
+    pth = next(item for item in manifest["inventory"] if item["path"] == "runtime-hook.pth")
+    assert pth["kind"] == "file"
+    pth_path = destination / "site-packages" / "runtime-hook.pth"
+    assert pth["sha256"] == hashlib.sha256(pth_path.read_bytes()).hexdigest()
+    assert (
+        verify_comfy_registry_wheel_environment(
+            destination,
+            expected_closure_sha256=closure.closure_sha256,
+            expected_environment_sha256=report.environment_sha256,
+        )
+        == report
+    )
+
+    pth_path.write_text("import changed_code\n", encoding="utf-8")
+    with pytest.raises(ComfyRegistryWheelEnvironmentError) as raised:
+        verify_comfy_registry_wheel_environment(
+            destination,
+            expected_closure_sha256=closure.closure_sha256,
+            expected_environment_sha256=report.environment_sha256,
+        )
+    assert raised.value.code == "environment_inventory_mismatch"
 
 
 async def test_existing_lock_and_destination_are_never_replaced(
