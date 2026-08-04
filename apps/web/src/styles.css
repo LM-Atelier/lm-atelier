@@ -959,3 +959,8 @@ h1, h2, h3 { margin: 0; }
 .family-preferences h3 { margin: 0; color: var(--ink-muted); font-size: 10px; font-weight: 700; text-transform: uppercase; letter-spacing: .11em; }
 .family-preferences ul { display: grid; gap: 6px; margin: 0; padding: 0; list-style: none; }
 .family-preferences li { display: grid; gap: 4px; }
+.catalog-loading { display: grid; gap: 6px; margin-bottom: 12px; }
+.catalog-loading span { color: var(--ink-muted); font-size: 11px; }
+/* Results being replaced should look like it rather than sitting there as
+   though they answer the question that was just changed. */
+.model-grid.superseded { opacity: .45; transition: opacity var(--quick) var(--ease); }

@@ -2855,7 +2855,9 @@ class ConversationOrchestrator:
         messages, source_message_ids = self._context_messages_with_sources(session, run)
         self._commit_before_await(session)
         capabilities = await self.engines.chat_capabilities()
-        candidates = self._visual_context_artifacts(session, run)
+        candidates = self._visual_context_artifacts(
+            session, run, lookback=self.engines.settings.vision_prior_visual_lookback
+        )
         self._commit_before_await(session)
         direct_profile_selected = run.vision_profile_id == run.profile_id and bool(run.profile_id)
         if (
@@ -3071,7 +3073,9 @@ class ConversationOrchestrator:
         *,
         candidates: list[Artifact] | None = None,
     ) -> tuple[list[dict[str, Any]], dict[str, Any]]:
-        candidates = candidates or self._visual_context_artifacts(session, run)
+        candidates = candidates or self._visual_context_artifacts(
+            session, run, lookback=self.engines.settings.vision_prior_visual_lookback
+        )
         current = session.get(Message, run.user_message_id)
         strict_ids = {
             part.artifact_id
@@ -3300,7 +3304,9 @@ class ConversationOrchestrator:
             session.commit()
 
     @classmethod
-    def _visual_context_artifacts(cls, session: Session, run: Run) -> list[Artifact]:
+    def _visual_context_artifacts(
+        cls, session: Session, run: Run, *, lookback: int = 4
+    ) -> list[Artifact]:
         """Return explicit current inputs, then the newest prior branch visual."""
 
         current = session.get(Message, run.user_message_id)
@@ -3318,9 +3324,13 @@ class ConversationOrchestrator:
         ):
             return candidates
 
+        # Bounded on purpose. An unbounded climb meant any chat that had ever
+        # contained a picture attached it to every later message, so ordinary
+        # text turns paid to decode, resize, and re-send an image nobody was
+        # talking about any more.
         current_id = current.parent_id if current else None
         visited: set[str] = set()
-        while current_id and current_id not in visited:
+        while current_id and current_id not in visited and len(visited) < lookback:
             visited.add(current_id)
             message = session.scalar(
                 select(Message)

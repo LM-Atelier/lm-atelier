@@ -2378,10 +2378,19 @@ function ModelsView({ initialRole }: { initialRole: EngineRole }) {
         />
       )}
       {(download.error || confirmInstall.error || deleteModel.error || cleanupDownloads.error || updateUseCase.error || setDefaultModel.error || updateModelAsset.error || deleteModelAsset.error) && <ErrorCallout message={download.error?.message || confirmInstall.error?.message || deleteModel.error?.message || cleanupDownloads.error?.message || updateUseCase.error?.message || setDefaultModel.error?.message || updateModelAsset.error?.message || deleteModelAsset.error?.message} />}
-      {catalog.isLoading && <div className="loading-line" />}
+      {/* isFetching, not isLoading: the latter is only true the first
+          time, so changing a filter swapped the results with no sign
+          anything had happened - which reads as the page refreshing
+          itself for no reason. */}
+      {catalog.isFetching && !catalog.isFetchingNextPage && (
+        <div className="catalog-loading" role="status">
+          <div className="loading-line" />
+          <span>{catalogItems.length > 0 ? "Finding models…" : "Loading the catalogue…"}</span>
+        </div>
+      )}
       <ErrorCallout message={catalog.error?.message} action={<button className="secondary compact-button" disabled={catalog.isFetching} onClick={() => void catalog.refetch()}>Retry</button>} />
       {catalogIsStale && !catalog.error && <div className="callout warning action-callout" role="status"><span>Showing saved results while Hugging Face is unavailable.</span><button className="secondary compact-button" disabled={catalog.isFetching} onClick={() => void catalog.refetch()}>Refresh</button></div>}
-      <div className="model-grid">{catalogItems.map((model) => <ModelCard key={model.remote_id} model={model} role={role} runtime={runtimeFor(model)} status={statusFor(model)} onDownload={() => download.mutate({ model, selectedRole: role })} />)}</div>
+      <div className={`model-grid ${catalog.isFetching && !catalog.isFetchingNextPage ? "superseded" : ""}`}>{catalogItems.map((model) => <ModelCard key={model.remote_id} model={model} role={role} runtime={runtimeFor(model)} status={statusFor(model)} onDownload={() => download.mutate({ model, selectedRole: role })} />)}</div>
       {catalog.hasNextPage && <div className="load-more"><button className="secondary" disabled={catalog.isFetchingNextPage} onClick={() => void catalog.fetchNextPage()}>{catalog.isFetchingNextPage ? "Loading…" : "Load more models"}</button></div>}
       {importOpen && (
         <AccessibleDialog
