@@ -4,6 +4,7 @@ import asyncio
 import json
 import os
 import sys
+from importlib.metadata import version
 from pathlib import Path
 
 import pytest
@@ -11,6 +12,7 @@ import pytest
 import local_lm.comfy_registry_interpreter as interpreter_module
 from local_lm.comfy_registry_interpreter import (
     ComfyRegistryInterpreterError,
+    probe_comfy_registry_runtime_target,
     probe_comfy_registry_wheel_target,
 )
 from local_lm.comfy_registry_wheel_artifacts import (
@@ -97,6 +99,14 @@ async def test_real_interpreter_target_matches_the_current_process() -> None:
         environment,
         tags,
     ) == comfy_registry_wheel_target_sha256(expected_environment, expected_tags)
+
+
+async def test_runtime_probe_captures_canonical_installed_distributions() -> None:
+    _, _, distributions = await probe_comfy_registry_runtime_target(Path(sys.executable))
+
+    installed = {item.name: item.version for item in distributions}
+    assert installed["packaging"] == version("packaging")
+    assert tuple(installed) == tuple(sorted(installed))
 
 
 async def test_probe_uses_isolated_credential_free_process(

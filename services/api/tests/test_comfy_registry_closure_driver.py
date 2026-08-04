@@ -16,6 +16,7 @@ from local_lm.comfy_registry_closure_driver import (
     drive_comfy_registry_wheel_closure,
 )
 from local_lm.comfy_registry_dependencies import plan_comfy_registry_dependencies
+from local_lm.comfy_registry_runtime import ComfyRegistryRuntimeDistribution
 from local_lm.comfy_registry_wheel_artifacts import (
     ComfyRegistryWheelArtifactManifest,
     resolve_comfy_registry_wheel_artifacts,
@@ -195,6 +196,64 @@ async def test_dependency_free_resolution_uses_no_network() -> None:
 
     assert result.closure.complete is True
     assert result.closure.manifest.artifacts == ()
+
+
+@pytest.mark.asyncio
+async def test_managed_runtime_satisfies_direct_dependency_without_shadow_wheel() -> None:
+    alpha, alpha_metadata = _project("alpha", [("1.0", [])])
+    sources = _Sources({"alpha": alpha}, alpha_metadata)
+    runtime = (ComfyRegistryRuntimeDistribution("torch", "2.13.0+cu130"),)
+
+    result = await drive_comfy_registry_wheel_closure(
+        _resolution("alpha==1.0", "torch>=2.10"),
+        project_fetcher=sources.fetch_projects,
+        metadata_fetcher=sources.fetch_metadata,
+        marker_environment=_environment(),
+        supported_tags=(_TAG,),
+        runtime_distributions=runtime,
+    )
+
+    assert [item.name for item in result.closure.manifest.artifacts] == ["alpha"]
+    assert result.closure.runtime_distributions == runtime
+    assert sources.project_calls == [("alpha",)]
+
+
+@pytest.mark.asyncio
+async def test_managed_runtime_satisfies_transitive_dependency_without_shadow_wheel() -> None:
+    alpha, alpha_metadata = _project("alpha", [("1.0", ["torch>=2.10"])])
+    sources = _Sources({"alpha": alpha}, alpha_metadata)
+
+    result = await drive_comfy_registry_wheel_closure(
+        _resolution("alpha==1.0"),
+        project_fetcher=sources.fetch_projects,
+        metadata_fetcher=sources.fetch_metadata,
+        marker_environment=_environment(),
+        supported_tags=(_TAG,),
+        runtime_distributions={"torch": "2.13.0+cu130"},
+    )
+
+    assert result.closure.complete is True
+    assert result.closure.round_number == 0
+    assert [item.name for item in result.closure.manifest.artifacts] == ["alpha"]
+    assert sources.project_calls == [("alpha",)]
+
+
+@pytest.mark.asyncio
+async def test_incompatible_managed_runtime_dependency_refuses_replacement() -> None:
+    sources = _Sources({}, {})
+
+    with pytest.raises(ComfyRegistryWheelClosureDriverError) as captured:
+        await drive_comfy_registry_wheel_closure(
+            _resolution("torch>=3"),
+            project_fetcher=sources.fetch_projects,
+            metadata_fetcher=sources.fetch_metadata,
+            marker_environment=_environment(),
+            supported_tags=(_TAG,),
+            runtime_distributions={"torch": "2.13.0+cu130"},
+        )
+
+    assert captured.value.code == "managed_runtime_dependency_conflict"
+    assert sources.project_calls == []
 
 
 @pytest.mark.asyncio

@@ -14,6 +14,7 @@ from packaging.markers import default_environment
 
 import local_lm.comfy_registry_wheel_environments as environment_module
 from local_lm.comfy_registry_dependencies import plan_comfy_registry_dependencies
+from local_lm.comfy_registry_runtime import ComfyRegistryRuntimeDistribution
 from local_lm.comfy_registry_wheel_artifacts import resolve_comfy_registry_wheel_artifacts
 from local_lm.comfy_registry_wheel_closure import (
     ComfyRegistryWheelClosure,
@@ -90,17 +91,21 @@ def _closure(
     )
 
 
-def _empty_closure() -> ComfyRegistryWheelClosure:
+def _empty_closure(
+    runtime_distributions: tuple[ComfyRegistryRuntimeDistribution, ...] = (),
+) -> ComfyRegistryWheelClosure:
     manifest = resolve_comfy_registry_wheel_artifacts(
         plan_comfy_registry_dependencies([]),
         {},
         marker_environment=_marker_environment(),
+        runtime_distributions=runtime_distributions,
         supported_tags=(_TAG,),
     )
     return plan_comfy_registry_wheel_closure(
         manifest,
         {},
         marker_environment=_marker_environment(),
+        runtime_distributions=runtime_distributions,
     )
 
 
@@ -250,6 +255,36 @@ async def test_empty_complete_closure_publishes_without_invoking_pip(
     assert report.total_bytes == 0
     assert report.distributions == ()
     assert (destination / "site-packages").is_dir()
+
+
+async def test_environment_manifest_preserves_runtime_baseline(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    runtime = (ComfyRegistryRuntimeDistribution("torch", "2.13.0+cu130"),)
+    closure = _empty_closure(runtime)
+    destination = _destination(tmp_path, closure)
+
+    async def unexpected_pip(*_args: object, **_kwargs: object) -> None:
+        raise AssertionError("pip must not run for an empty closure")
+
+    monkeypatch.setattr(environment_module, "_run_pip", unexpected_pip)
+    assembled = await assemble_comfy_registry_wheel_environment(
+        closure,
+        {},
+        python_executable=Path(sys.executable),
+        destination=destination,
+        media_worker_stopped=True,
+    )
+    verified = verify_comfy_registry_wheel_environment(
+        destination,
+        expected_closure_sha256=closure.closure_sha256,
+        expected_environment_sha256=assembled.environment_sha256,
+    )
+
+    assert assembled.runtime_distributions == runtime
+    assert verified.runtime_distributions == runtime
+    assert json.loads((destination / "environment-manifest.json").read_text())["version"] == 2
 
 
 async def test_incomplete_closure_cannot_be_assembled(tmp_path: Path) -> None:

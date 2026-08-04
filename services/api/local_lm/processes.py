@@ -529,6 +529,26 @@ class ProcessSupervisor:
                 self._scoped_comfy_registry_contract,
                 activation_scope,
             )
+        if registry_contract.runtime_distributions:
+            await report_phase("Verifying media runtime packages")
+            from .comfy_registry_interpreter import (
+                ComfyRegistryInterpreterError,
+                probe_comfy_registry_runtime_target,
+            )
+
+            try:
+                _, _, current_runtime_distributions = await probe_comfy_registry_runtime_target(
+                    executable
+                )
+            except ComfyRegistryInterpreterError as exc:
+                raise RuntimeError(
+                    "The managed media runtime package baseline could not be verified."
+                ) from exc
+            if current_runtime_distributions != registry_contract.runtime_distributions:
+                raise RuntimeError(
+                    "The managed media runtime changed after workflow dependencies "
+                    "were prepared. Prepare the workflow package again."
+                )
         try:
             editor_bridge = await asyncio.to_thread(
                 prepare_comfy_editor_bridge,
