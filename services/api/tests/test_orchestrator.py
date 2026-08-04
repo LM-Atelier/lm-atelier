@@ -1168,6 +1168,9 @@ async def test_chat_phase_advances_when_the_first_token_arrives() -> None:
         id="run-phase",
         assistant_message_id="assistant-phase",
         provenance_json={},
+        # The turn reads its chat to learn whether web access was granted.
+        # This fake session returns nothing for a Chat, so the gate stays shut.
+        chat_id="chat-phase",
     )
 
     class FakeSession:
