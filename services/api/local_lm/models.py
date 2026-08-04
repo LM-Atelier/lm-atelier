@@ -1213,6 +1213,62 @@ class WorkflowDependencyBinding(TimestampMixin, Base):
     )
 
 
+class WorkflowInstallOffer(TimestampMixin, Base):
+    """One reviewed, content-bound way to make a workflow locally installable."""
+
+    __tablename__ = "workflow_install_offers"
+    __table_args__ = (
+        CheckConstraint(
+            _lowercase_sha256_check("workflow_artifact_sha256"),
+            name="ck_workflow_install_offer_artifact_sha256",
+        ),
+        CheckConstraint(
+            _lowercase_sha256_check("dependency_contract_sha256"),
+            name="ck_workflow_install_offer_contract_sha256",
+        ),
+        CheckConstraint(
+            _lowercase_sha256_check("binding_plan_sha256"),
+            name="ck_workflow_install_offer_binding_sha256",
+        ),
+        CheckConstraint(
+            _lowercase_sha256_check("offer_sha256"),
+            name="ck_workflow_install_offer_sha256",
+        ),
+        CheckConstraint(
+            "status IN ('ready', 'queued', 'invalidated', 'completed', 'expired')",
+            name="ck_workflow_install_offer_status",
+        ),
+        CheckConstraint("plan_count > 0", name="ck_workflow_install_offer_plan_count"),
+        CheckConstraint("total_bytes > 0", name="ck_workflow_install_offer_total_bytes"),
+        Index(
+            "ix_workflow_install_offer_revision_status",
+            "workflow_revision_id",
+            "status",
+        ),
+    )
+
+    id: Mapped[str] = mapped_column(String(40), primary_key=True, default=lambda: new_id("wfoffer"))
+    workflow_revision_id: Mapped[str] = mapped_column(
+        ForeignKey("workflow_revisions.id", ondelete="CASCADE"), index=True
+    )
+    workflow_artifact_sha256: Mapped[str] = mapped_column(String(64))
+    dependency_contract_sha256: Mapped[str] = mapped_column(String(64))
+    binding_plan_sha256: Mapped[str] = mapped_column(String(64))
+    offer_sha256: Mapped[str] = mapped_column(String(64), index=True)
+    selections_json: Mapped[list[dict[str, Any]]] = mapped_column(JSON, default=list)
+    assets_json: Mapped[list[dict[str, Any]]] = mapped_column(JSON, default=list)
+    plan_count: Mapped[int] = mapped_column(Integer)
+    total_bytes: Mapped[int] = mapped_column(Integer)
+    status: Mapped[str] = mapped_column(
+        String(16), default="ready", server_default=text("'ready'"), index=True
+    )
+    queued_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    completed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    invalidated_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    invalidation_code: Mapped[str | None] = mapped_column(String(80), nullable=True)
+    invalidation_reason: Mapped[str | None] = mapped_column(Text, nullable=True)
+
+
 class Job(TimestampMixin, Base):
     __tablename__ = "jobs"
 

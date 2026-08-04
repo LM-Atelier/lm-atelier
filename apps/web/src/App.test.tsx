@@ -3239,6 +3239,34 @@ describe("App", () => {
     await waitFor(() => expect(vi.mocked(api.catalog).mock.calls.at(-1)?.[3]).toContain("cursor=next"));
   });
 
+  it("says the catalogue is loading rather than looking like it refreshed", async () => {
+    // Reported as "the page keeps refreshing": changing a filter swapped the
+    // results with no sign anything had happened. The wording differs between
+    // the first load and a later one, because "loading the catalogue" is a
+    // lie once results are already on screen.
+    let release: (value: { items: never[]; next_cursor: null }) => void = () => {};
+    vi.mocked(api.catalog).mockImplementation(
+      () => new Promise((resolve) => { release = resolve; }),
+    );
+    const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+    render(
+      <QueryClientProvider client={client}>
+        <App />
+      </QueryClientProvider>,
+    );
+    fireEvent.click(await screen.findByText("Model library"));
+
+    const loading = await screen.findByText(/Loading the catalogue/);
+    // A status region, so a screen reader announces it rather than the results
+    // silently changing underneath.
+    expect(loading.closest("[role='status']")).not.toBeNull();
+
+    release({ items: [], next_cursor: null });
+    await waitFor(() =>
+      expect(screen.queryByText(/Loading the catalogue/)).not.toBeInTheDocument(),
+    );
+  });
+
   it("preflights and queues a safe catalog model from one click", async () => {
     const model = {
       provider: "huggingface",
