@@ -9,7 +9,7 @@ from httpx2 import AsyncClient
 
 pytestmark = pytest.mark.asyncio
 
-LENOVO = "https://civitai.com/models/1662740/lenovo?modelVersionId=3075606"
+PORTRAIT = "https://civitai.com/models/1662740/portrait?modelVersionId=3075606"
 QWEN_VAE = (
     "https://huggingface.co/Comfy-Org/Qwen/resolve/main/split_files/vae/qwen_image_vae.safetensors"
 )
@@ -25,7 +25,7 @@ def _graph() -> dict[str, Any]:
                 "mode": 0,
                 "inputs": [],
                 "outputs": [],
-                "widgets_values": ["lenovo_krea2.safetensors", 1.0, 1.0],
+                "widgets_values": ["portrait_finish.safetensors", 1.0, 1.0],
             },
             {
                 "id": 2,
@@ -44,7 +44,7 @@ def _graph() -> dict[str, Any]:
                 # The realistic pair: one note names the model by its display
                 # name, the other happens to name the file.
                 "widgets_values": [
-                    f"Lenovo UltraReal\n{LENOVO}\n\nVAE qwen_image_vae.safetensors {QWEN_VAE}"
+                    f"Portrait Finish\n{PORTRAIT}\n\nVAE qwen_image_vae.safetensors {QWEN_VAE}"
                 ],
             },
             {
@@ -53,7 +53,9 @@ def _graph() -> dict[str, Any]:
                 "mode": 0,
                 "inputs": [],
                 "outputs": [],
-                "widgets_values": ["Mirror: https://files.example.test/lenovo_krea2.safetensors"],
+                "widgets_values": [
+                    "Mirror: https://files.example.test/portrait_finish.safetensors"
+                ],
             },
         ],
         "links": [],
@@ -75,7 +77,7 @@ async def test_a_named_file_carries_its_source_and_the_rest_are_offered(
     assert vae[0]["filename"] == "split_files/vae/qwen_image_vae.safetensors"
 
     # The LoRA is named only by its display name, so nothing is bound to it...
-    assert assets["lenovo_krea2.safetensors"]["source_candidates"] == []
+    assert assets["portrait_finish.safetensors"]["source_candidates"] == []
     # ...but the link is still offered rather than discarded.
     assert [candidate["remote_id"] for candidate in body["source_candidates"]] == ["3075606"]
 

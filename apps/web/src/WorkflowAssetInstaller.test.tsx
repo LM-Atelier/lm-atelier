@@ -18,13 +18,13 @@ vi.mock("./api", () => ({
 const uiGraph = { nodes: [] };
 
 const missing: WorkflowAssetReference[] = [
-  { filename: "Detailer-KREA2.safetensors", suffix: ".safetensors", policy: "supported", kind: "lora", source_url: null, present_locally: false , source_candidates: [] },
+  { filename: "detail-slider.safetensors", suffix: ".safetensors", policy: "supported", kind: "lora", source_url: null, present_locally: false , source_candidates: [] },
 ];
 
 const candidate = {
   provider: "civitai",
   remote_id: "3102245",
-  name: "Detailer KREA2",
+  name: "Detail slider",
   author: "creator",
   total_size_bytes: 1024,
   required_runtime: "comfyui",
@@ -45,13 +45,13 @@ describe("workflow asset installer", () => {
     vi.mocked(api.catalog).mockResolvedValue({ items: [candidate], next_cursor: null } as never);
     vi.mocked(api.catalogPreflight).mockResolvedValue({
       install_plan: { id: "plan-1", plan_hash: "a".repeat(64), compatibility: "supported" },
-      selected_files: ["Detailer-KREA2.safetensors"],
+      selected_files: ["detail-slider.safetensors"],
       can_install: true,
       checks: [],
     } as never);
     vi.mocked(api.reviewWorkflowAssets).mockResolvedValue({
       binding_plan_hash: "b".repeat(64),
-      assets: [{ reference_filename: "Detailer-KREA2.safetensors", size_bytes: 1024 } as never],
+      assets: [{ reference_filename: "detail-slider.safetensors", size_bytes: 1024 } as never],
       download_count: 1,
       total_bytes: 1024,
     } as never);
@@ -64,7 +64,7 @@ describe("workflow asset installer", () => {
 
   it("turns a filename into a searchable term", () => {
     expect(searchTermFor("Atelier_Portrait_AIO.safetensors")).toBe("Atelier Portrait AIO");
-    expect(searchTermFor("subdir/real_3d_krea2.safetensors")).toBe("real 3d krea2");
+    expect(searchTermFor("subdir/studio_lighting.safetensors")).toBe("studio lighting");
   });
 
   it("walks search, preflight, review, and queue without guessing", async () => {
@@ -74,7 +74,7 @@ describe("workflow asset installer", () => {
     expect(screen.getByRole("button", { name: /Review 0 selected/ })).toBeDisabled();
 
     fireEvent.click(screen.getByRole("button", { name: /Search/ }));
-    fireEvent.click(await screen.findByRole("button", { name: "Detailer KREA2" }));
+    fireEvent.click(await screen.findByRole("button", { name: "Detail slider" }));
 
     // The preflight's plan - not the browser - supplies the binding.
     await waitFor(() => expect(screen.getByText("Selected")).toBeInTheDocument());
@@ -83,9 +83,9 @@ describe("workflow asset installer", () => {
     await waitFor(() =>
       expect(api.reviewWorkflowAssets).toHaveBeenCalledWith(uiGraph, [
         {
-          reference_filename: "Detailer-KREA2.safetensors",
+          reference_filename: "detail-slider.safetensors",
           install_plan_id: "plan-1",
-          artifact_path: "Detailer-KREA2.safetensors",
+          artifact_path: "detail-slider.safetensors",
         },
       ]));
     expect(await screen.findByText(/1 download/)).toBeInTheDocument();
@@ -104,7 +104,7 @@ describe("workflow asset installer", () => {
   it("cannot queue without a fresh review of the current selection", async () => {
     renderInstaller();
     fireEvent.click(screen.getByRole("button", { name: /Search/ }));
-    fireEvent.click(await screen.findByRole("button", { name: "Detailer KREA2" }));
+    fireEvent.click(await screen.findByRole("button", { name: "Detail slider" }));
     await waitFor(() => expect(screen.getByText("Selected")).toBeInTheDocument());
 
     // Install stays disabled until a review produces a hash to confirm.
