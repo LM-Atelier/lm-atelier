@@ -10,7 +10,7 @@ import os
 import re
 import shutil
 import stat
-from collections.abc import AsyncGenerator, AsyncIterator, Callable
+from collections.abc import AsyncGenerator, AsyncIterator, Callable, Mapping
 from contextlib import suppress
 from pathlib import Path, PurePosixPath
 from typing import TYPE_CHECKING, Annotated, Any, Literal, cast
@@ -229,6 +229,7 @@ from .schemas import (
     ReferenceRecipe,
     RegenerateRequest,
     RegistryInstallOut,
+    RegistryInstallReviewOut,
     RegistryInstallReviewRequest,
     ResolvedSetup,
     ResponseFeedbackOut,
@@ -1157,7 +1158,7 @@ async def list_projects(
     include_archived: bool = False,
     query: str = Query(default="", max_length=500),
 ) -> list[Project]:
-    statement = select(Project).order_by(Project.updated_at.desc())
+    statement = select(Project).order_by(Project.pinned.desc(), Project.updated_at.desc())
     if not include_archived:
         statement = statement.where(Project.archived.is_(False))
     if query.strip():
@@ -1374,7 +1375,9 @@ async def list_chats(
     query: str = Query(default="", max_length=500),
 ) -> list[Chat]:
     statement = (
-        select(Chat).where(Chat.scope == STANDARD_CHAT_SCOPE).order_by(Chat.updated_at.desc())
+        select(Chat)
+        .where(Chat.scope == STANDARD_CHAT_SCOPE)
+        .order_by(Chat.pinned.desc(), Chat.updated_at.desc())
     )
     if project_id:
         statement = statement.where(Chat.project_id == project_id)
@@ -2996,7 +2999,15 @@ async def resolve_catalog_preflight(
 
     catalog = services.catalog_sources.get(source)
     try:
-        inspection_role = "lora" if payload.auxiliary_kind == "lora" else payload.role
+        # A LoRA is inspected through the LoRA catalog role however it was
+        # asked for. A provider shown a LoRA card under an image role
+        # classifies it as unsupported, which is correct of the provider and
+        # useless to us.
+        inspection_role = (
+            "lora"
+            if "lora" in {payload.auxiliary_kind, payload.workflow_reference_kind}
+            else payload.role
+        )
         raw_detail = await catalog.inspect(remote_id, payload.revision, inspection_role)
         detail = CatalogDetail.model_validate(raw_detail)
         # CivitAI identities live under each normalized file's metadata; hoist
@@ -3272,6 +3283,25 @@ async def resolve_catalog_preflight(
                     "comfy_paths": {COMFY_AUXILIARY_FOLDERS[payload.auxiliary_kind]: "."},
                 }
             ),
+            detail,
+        )
+
+    if payload.workflow_reference_kind:
+        # A workflow named one exact file. Template ranking exists to guess
+        # what a repository is for, and there is nothing left to guess here.
+        # Letting it run is how asking for one 4GB text encoder planned the
+        # repository's official four-file bundle instead: a diffusion model, an
+        # unrelated LoRA, the encoder actually wanted, and a VAE already on
+        # disk, together over 19GB.
+        if len(payload.selected_files) != 1:
+            raise api_error(
+                422,
+                "workflow-asset-file-not-exact",
+                "A workflow asset install must name exactly one file. "
+                "Run the install check again with the exact file the workflow needs.",
+            )
+        return await finalize(
+            assess_catalog_install(detail, payload, services.settings, system),
             detail,
         )
 
@@ -6559,7 +6589,40 @@ def _registry_install_out(install: ComfyRegistryInstall) -> RegistryInstallOut:
         active=install.active,
         reviewed_at=reviewed_at if isinstance(reviewed_at, str) else None,
         activated_at=activated_at if isinstance(activated_at, str) else None,
+        review=_registry_review_out(review),
     )
+
+
+def _registry_review_out(review: Mapping[str, object]) -> RegistryInstallReviewOut | None:
+    """Report what staging recorded, or nothing rather than a reassuring zero.
+
+    An install prepared before this record existed has no findings to show.
+    Rendering that as an empty list would read as "nothing to worry about",
+    which is a different claim from "we did not look".
+    """
+    if not review.get("review_required"):
+        return None
+    return RegistryInstallReviewOut(
+        file_count=_review_count(review.get("file_count")),
+        expanded_bytes=_review_count(review.get("expanded_bytes")),
+        python_file_count=_review_count(review.get("python_file_count")),
+        install_scripts=_review_paths(review.get("install_scripts")),
+        startup_hooks=_review_paths(review.get("startup_hooks")),
+        native_files=_review_paths(review.get("native_files")),
+        dependency_manifests=_review_paths(review.get("dependency_manifests")),
+        top_level_entries=_review_paths(review.get("top_level_entries")),
+        registry_warnings=_review_paths(review.get("registry_warnings")),
+    )
+
+
+def _review_count(value: object) -> int:
+    return value if isinstance(value, int) and not isinstance(value, bool) and value >= 0 else 0
+
+
+def _review_paths(value: object) -> list[str]:
+    if not isinstance(value, list):
+        return []
+    return [item for item in value if isinstance(item, str)][:64]
 
 
 def _loaded_registry_install(session: Session, install_id: str) -> ComfyRegistryInstall:

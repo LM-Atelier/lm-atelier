@@ -57,6 +57,7 @@ class ProjectUpdate(ApiModel):
     description: str | None = Field(default=None, max_length=10_000)
     instructions: str | None = Field(default=None, max_length=100_000)
     archived: bool | None = None
+    pinned: bool | None = None
     image_workflow_revision_id: str | None = None
     video_workflow_revision_id: str | None = None
     generation_settings_json: GenerationSettingsByRole | None = None
@@ -69,6 +70,7 @@ class ProjectOut(ApiModel):
     description: str
     instructions: str
     archived: bool
+    pinned: bool
     image_workflow_revision_id: str | None
     video_workflow_revision_id: str | None
     generation_settings_json: GenerationSettingsByRole
@@ -90,6 +92,7 @@ class ChatUpdate(ApiModel):
     title: str | None = Field(default=None, min_length=1, max_length=240)
     project_id: str | None = None
     archived: bool | None = None
+    pinned: bool | None = None
     routing_mode: RoutingMode | None = None
     confirm_uncertain_media: bool | None = None
     active_chat_profile_id: str | None = None
@@ -217,6 +220,7 @@ class ChatOut(ApiModel):
     project_id: str | None
     title: str
     archived: bool
+    pinned: bool
     routing_mode: str
     confirm_uncertain_media: bool
     active_chat_profile_id: str | None
@@ -1036,6 +1040,29 @@ class EditTemplateOut(ApiModel):
     enabled: bool
 
 
+class RegistryInstallReviewOut(ApiModel):
+    """What staging found, so that trusting a package can be an informed act.
+
+    Trust is what lets this code run. Asking someone to confirm they reviewed
+    a package while showing them nothing to review makes the confirmation a
+    formality, so these are the things that decide the answer: code that runs
+    on install, code that runs at startup, compiled binaries, and the files
+    that declare what else gets pulled in.
+    """
+
+    file_count: int
+    expanded_bytes: int
+    python_file_count: int
+    install_scripts: list[str] = Field(default_factory=list, max_length=64)
+    startup_hooks: list[str] = Field(default_factory=list, max_length=64)
+    native_files: list[str] = Field(default_factory=list, max_length=64)
+    dependency_manifests: list[str] = Field(default_factory=list, max_length=64)
+    top_level_entries: list[str] = Field(default_factory=list, max_length=64)
+    # Carried from the resolution: why this package needs looking at, in the
+    # resolver's words rather than restated here.
+    registry_warnings: list[str] = Field(default_factory=list, max_length=32)
+
+
 class RegistryInstallOut(ApiModel):
     """One prepared package and the two explicit decisions it is waiting for."""
 
@@ -1051,6 +1078,7 @@ class RegistryInstallOut(ApiModel):
     active: bool
     reviewed_at: str | None
     activated_at: str | None
+    review: RegistryInstallReviewOut | None = None
 
 
 class RegistryInstallReviewRequest(ApiModel):
@@ -1152,11 +1180,16 @@ class WorkflowSourceCandidateOut(ApiModel):
     url: str
 
 
+# What the workflow analyzer can say a referenced file is. One definition, so
+# a caller naming an exact file cannot name a kind the analyzer never emits.
+WorkflowAssetKind = Literal["checkpoint", "configuration", "embedding", "lora", "upscaler", "vae"]
+
+
 class WorkflowAssetReferenceOut(ApiModel):
     filename: str
     suffix: str
     policy: Literal["supported", "blocked", "unsupported"]
-    kind: Literal["checkpoint", "configuration", "embedding", "lora", "upscaler", "vae"]
+    kind: WorkflowAssetKind
     source_url: str | None
     present_locally: bool
     # Populated only when the author's own text names this exact file; a link
@@ -1294,6 +1327,12 @@ class CatalogPreflightRequest(ApiModel):
     # The exact workflow variant the user chose from the catalog. Absent for
     # repository-only callers, which keep the ranked fallback.
     workflow_template_id: str | None = Field(default=None, max_length=200)
+    # A workflow named this exact file, so plan that file and nothing else.
+    # Absent means an ordinary repository install, which keeps template
+    # ranking. Present means the caller already knows what it needs, and
+    # ranking a repository's official bundle over it would install several
+    # gigabytes nobody asked for.
+    workflow_reference_kind: WorkflowAssetKind | None = None
     auxiliary_kind: (
         Literal[
             "lora",

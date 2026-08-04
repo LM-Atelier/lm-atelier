@@ -1,10 +1,12 @@
 import { useState } from "react";
+import type { ReactNode } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { api } from "./api";
 import { ConfirmDialog } from "./ConfirmDialog";
 import { ErrorCallout } from "./ErrorCallout";
+import { formatBytes } from "./format";
 import { activationErrorDescription } from "./registryPreparationErrors";
-import type { RegistryInstall } from "./types";
+import type { RegistryInstall, RegistryInstallReview } from "./types";
 
 /** Prepared Registry packages and the two decisions each one waits for.
  *
@@ -118,6 +120,7 @@ export function RegistryInstallsPanel() {
                   <code>{trusting.archive_sha256}</code>
                 </dd>
               </div>
+              {reviewFacts(trusting.review)}
             </dl>
           }
           confirmLabel="I reviewed this package - trust it"
@@ -131,6 +134,59 @@ export function RegistryInstallsPanel() {
         />
       )}
     </section>
+  );
+}
+
+/** The findings that decide the answer, and silence when there are none.
+ *
+ * Trust is what lets this code run, so the dialog names the things that
+ * actually change the decision: code that runs on install, code that runs at
+ * startup, and compiled binaries nobody can read. A package with none of
+ * those says so once rather than listing three empty rows, and a package
+ * prepared before this record existed says nothing at all - "not looked at"
+ * is a different claim from "nothing found".
+ */
+function reviewFacts(review: RegistryInstallReview | null): ReactNode {
+  if (!review) return null;
+  const findings: [string, string[]][] = [
+    ["Runs on install", review.install_scripts],
+    ["Runs at startup", review.startup_hooks],
+    ["Compiled binaries", review.native_files],
+    ["Declares dependencies", review.dependency_manifests],
+  ];
+  const present = findings.filter(([, paths]) => paths.length > 0);
+  return (
+    <>
+      <div>
+        <dt>Contents</dt>
+        <dd>
+          {review.file_count} files, {formatBytes(review.expanded_bytes)},{" "}
+          {review.python_file_count} of them Python
+        </dd>
+      </div>
+      {present.length === 0 && (
+        <div>
+          <dt>Findings</dt>
+          <dd>No install scripts, startup hooks, or compiled binaries.</dd>
+        </div>
+      )}
+      {present.map(([label, paths]) => (
+        <div key={label}>
+          <dt>{label}</dt>
+          <dd>
+            {paths.map((path) => (
+              <code key={path}>{path}</code>
+            ))}
+          </dd>
+        </div>
+      ))}
+      {review.registry_warnings.length > 0 && (
+        <div>
+          <dt>Needs review because</dt>
+          <dd>{review.registry_warnings.map((warning) => warning.replaceAll("_", " ")).join(", ")}</dd>
+        </div>
+      )}
+    </>
   );
 }
 
