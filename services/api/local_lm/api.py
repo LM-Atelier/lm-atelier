@@ -133,6 +133,7 @@ from .models import (
     WorkflowActivation,
     WorkflowDefinition,
     WorkflowFamily,
+    WorkflowInstallOffer,
     WorkflowPreference,
     WorkflowProfileCompatibility,
     WorkflowRevision,
@@ -268,6 +269,8 @@ from .schemas import (
     WorkflowFamilyRemovalImpactOut,
     WorkflowFamilyUpdate,
     WorkflowFamilyVariantOut,
+    WorkflowInstallOfferCreate,
+    WorkflowInstallOfferOut,
     WorkflowMissingNodeOut,
     WorkflowOpenTarget,
     WorkflowOut,
@@ -335,6 +338,13 @@ from .workflow_compatibility import (
     retire_legacy_profile_workflow,
 )
 from .workflow_edit_calibration import validate_workflow_edit_calibration
+from .workflow_install_offers import (
+    WorkflowInstallOfferError,
+    create_workflow_install_offer,
+    invalidate_workflow_install_offer,
+    mark_workflow_install_offer_queued,
+    revalidate_workflow_install_offer,
+)
 from .workflow_library import (
     WorkflowFamilyRemovalImpact,
     workflow_family_removal_impact,
@@ -6893,6 +6903,61 @@ def _asset_review_out(binding: WorkflowAssetBindingPlan) -> WorkflowAssetReviewO
     )
 
 
+def _workflow_install_offer_out(offer: WorkflowInstallOffer) -> WorkflowInstallOfferOut:
+    return WorkflowInstallOfferOut(
+        id=offer.id,
+        workflow_revision_id=offer.workflow_revision_id,
+        workflow_artifact_sha256=offer.workflow_artifact_sha256,
+        dependency_contract_sha256=offer.dependency_contract_sha256,
+        binding_plan_sha256=offer.binding_plan_sha256,
+        offer_sha256=offer.offer_sha256,
+        assets=[BoundWorkflowAssetOut.model_validate(asset) for asset in offer.assets_json],
+        plan_count=offer.plan_count,
+        total_bytes=offer.total_bytes,
+        status=cast(
+            "Literal['ready', 'queued', 'invalidated', 'completed', 'expired']",
+            offer.status,
+        ),
+        queued_at=offer.queued_at,
+        completed_at=offer.completed_at,
+        invalidated_at=offer.invalidated_at,
+        invalidation_code=offer.invalidation_code,
+        invalidation_reason=offer.invalidation_reason,
+    )
+
+
+async def _workflow_install_inventory(
+    request: Request,
+    session: Session,
+) -> tuple[set[str], set[str], dict[str, set[str]]]:
+    describe_nodes = getattr(_services(request).engines.media, "object_info", None)
+    if not callable(describe_nodes):
+        raise api_error(
+            503,
+            "media-runtime-unavailable",
+            "Start the media worker to review workflow downloads.",
+        )
+    try:
+        object_info = await describe_nodes()
+    except Exception as exc:  # noqa: BLE001 - any runtime failure means unavailable
+        raise api_error(
+            503,
+            "media-runtime-unavailable",
+            "Start the media worker to review workflow downloads.",
+        ) from exc
+    if not isinstance(object_info, Mapping):
+        raise api_error(
+            503,
+            "media-runtime-unavailable",
+            "The media worker returned an invalid node inventory.",
+        )
+    return (
+        {str(node_type) for node_type in object_info},
+        _local_asset_filenames(session),
+        _installed_package_versions(session),
+    )
+
+
 @router.post("/workflows/packages/assets/review", response_model=WorkflowAssetReviewOut)
 async def review_workflow_assets(
     payload: WorkflowAssetReviewRequest, session: SessionDep
@@ -6935,6 +7000,94 @@ async def install_workflow_assets(
     except ValueError as exc:
         raise api_error(422, "asset-download-refused", str(exc)) from exc
     jobs = [manager.create(session, download) for download in validated]
+    session.commit()
+    return jobs
+
+
+@router.post(
+    "/workflows/{workflow_id}/revisions/{revision_id}/install-offers",
+    response_model=WorkflowInstallOfferOut,
+    status_code=201,
+)
+async def review_workflow_install_offer(
+    workflow_id: str,
+    revision_id: str,
+    payload: WorkflowInstallOfferCreate,
+    request: Request,
+    session: SessionDep,
+) -> WorkflowInstallOfferOut:
+    """Persist one complete offer without accepting graph or digest claims."""
+
+    node_types, asset_filenames, package_versions = await _workflow_install_inventory(
+        request,
+        session,
+    )
+    selections = [
+        WorkflowAssetPlanSelection(
+            reference_filename=selection.reference_filename,
+            install_plan_id=selection.install_plan_id,
+            artifact_path=selection.artifact_path,
+        )
+        for selection in payload.selections
+    ]
+    try:
+        offer = create_workflow_install_offer(
+            session,
+            workflow_id=workflow_id,
+            revision_id=revision_id,
+            selections=selections,
+            available_node_types=node_types,
+            available_asset_filenames=asset_filenames,
+            installed_package_versions=package_versions,
+        )
+    except WorkflowInstallOfferError as exc:
+        raise api_error(422, exc.code, str(exc)) from exc
+    session.commit()
+    session.refresh(offer)
+    return _workflow_install_offer_out(offer)
+
+
+@router.post(
+    "/workflow-install-offers/{offer_id}/install",
+    response_model=list[JobOut],
+    status_code=202,
+)
+async def install_workflow_offer(
+    offer_id: str,
+    request: Request,
+    session: SessionDep,
+) -> list[Job]:
+    """Queue only an opaque offer after rebuilding every server-owned identity."""
+
+    node_types, asset_filenames, package_versions = await _workflow_install_inventory(
+        request,
+        session,
+    )
+    try:
+        offer, downloads = revalidate_workflow_install_offer(
+            session,
+            offer_id,
+            available_node_types=node_types,
+            available_asset_filenames=asset_filenames,
+            installed_package_versions=package_versions,
+        )
+    except WorkflowInstallOfferError as exc:
+        session.commit()
+        raise api_error(422, exc.code, str(exc)) from exc
+
+    manager: DownloadManager = _services(request).downloads
+    try:
+        validated = [manager.validated_request(session, download) for download in downloads]
+    except ValueError as exc:
+        invalidate_workflow_install_offer(
+            offer,
+            code="asset-download-refused",
+            reason=str(exc),
+        )
+        session.commit()
+        raise api_error(422, "asset-download-refused", str(exc)) from exc
+    jobs = [manager.create(session, download) for download in validated]
+    mark_workflow_install_offer_queued(offer)
     session.commit()
     return jobs
 
