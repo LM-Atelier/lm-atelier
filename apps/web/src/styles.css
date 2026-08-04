@@ -964,3 +964,7 @@ h1, h2, h3 { margin: 0; }
 /* Results being replaced should look like it rather than sitting there as
    though they answer the question that was just changed. */
 .model-grid.superseded { opacity: .45; transition: opacity var(--quick) var(--ease); }
+/* A pin is quiet until it means something, then it stays lit. */
+.sidebar-pin { opacity: 0; transition: opacity var(--quick) var(--ease); }
+.sidebar-chat-row:hover .sidebar-pin, .sidebar-pin:focus-visible { opacity: 1; }
+.sidebar-pin.pinned { opacity: 1; color: var(--accent-warm-text); }

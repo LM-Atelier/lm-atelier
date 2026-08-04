@@ -883,11 +883,11 @@ describe("App", () => {
 
   it("searches and manages chats from the workspace sidebar", async () => {
     const stamp = "2026-07-22T00:00:00Z";
-    vi.mocked(api.projects).mockResolvedValue([{ id: "project-1", name: "Research", description: "", instructions: "", archived: false, image_workflow_revision_id: null, video_workflow_revision_id: null, created_at: stamp, updated_at: stamp }]);
-    const chat = { id: "chat-1", project_id: "project-1", title: "Model notes", archived: false, routing_mode: "auto" as const, confirm_uncertain_media: false, active_chat_profile_id: null, active_image_profile_id: null, active_video_profile_id: null, active_head_message_id: null, vision_settings_json: { max_images: 4 }, created_at: stamp, updated_at: stamp };
+    vi.mocked(api.projects).mockResolvedValue([{ id: "project-1", name: "Research", description: "", instructions: "", pinned: false, archived: false, image_workflow_revision_id: null, video_workflow_revision_id: null, created_at: stamp, updated_at: stamp }]);
+    const chat = { id: "chat-1", project_id: "project-1", title: "Model notes", pinned: false, archived: false, routing_mode: "auto" as const, confirm_uncertain_media: false, active_chat_profile_id: null, active_image_profile_id: null, active_video_profile_id: null, active_head_message_id: null, vision_settings_json: { max_images: 4 }, created_at: stamp, updated_at: stamp };
     vi.mocked(api.chats).mockResolvedValue([chat]);
     vi.mocked(api.chat).mockResolvedValue({ ...chat, messages: [] });
-    vi.mocked(api.updateChat).mockResolvedValue({ id: "chat-1", project_id: null, title: "Renamed notes", archived: true, routing_mode: "auto", confirm_uncertain_media: false, active_chat_profile_id: null, active_image_profile_id: null, active_video_profile_id: null, active_head_message_id: null, created_at: stamp, updated_at: stamp });
+    vi.mocked(api.updateChat).mockResolvedValue({ id: "chat-1", project_id: null, title: "Renamed notes", pinned: false, archived: true, routing_mode: "auto", confirm_uncertain_media: false, active_chat_profile_id: null, active_image_profile_id: null, active_video_profile_id: null, active_head_message_id: null, created_at: stamp, updated_at: stamp });
     const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
     render(
       <QueryClientProvider client={client}>
@@ -920,7 +920,7 @@ describe("App", () => {
       project_id: null,
       title: "Vision selector",
       archived: false,
-      routing_mode: "text" as const,
+      pinned: false, routing_mode: "text" as const,
       confirm_uncertain_media: false,
       active_chat_profile_id: null,
       active_vision_profile_id: "__auto__",
@@ -995,7 +995,7 @@ describe("App", () => {
       project_id: null,
       title,
       archived: false,
-      routing_mode: "auto" as const,
+      pinned: false, routing_mode: "auto" as const,
       confirm_uncertain_media: false,
       active_chat_profile_id: null,
       active_image_profile_id: null,
@@ -1046,7 +1046,7 @@ describe("App", () => {
         project_id: null,
         title: `Diagnostic chat ${index + 1}`,
         archived: false,
-        routing_mode: "auto" as const,
+        pinned: false, routing_mode: "auto" as const,
         confirm_uncertain_media: false,
         active_chat_profile_id: null,
         active_image_profile_id: null,
@@ -1073,7 +1073,7 @@ describe("App", () => {
 
   it("imports portable project archives from the workspace sidebar", async () => {
     const stamp = "2026-07-22T00:00:00Z";
-    vi.mocked(api.importProject).mockResolvedValue({ id: "project-imported", name: "Imported", description: "", instructions: "", archived: false, image_workflow_revision_id: null, video_workflow_revision_id: null, created_at: stamp, updated_at: stamp });
+    vi.mocked(api.importProject).mockResolvedValue({ id: "project-imported", name: "Imported", description: "", instructions: "", pinned: false, archived: false, image_workflow_revision_id: null, video_workflow_revision_id: null, created_at: stamp, updated_at: stamp });
     const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
     const { container } = render(
       <QueryClientProvider client={client}>
@@ -1092,8 +1092,8 @@ describe("App", () => {
     // timeout. A refetch slower than that left the user on nothing, with no
     // error and nothing to retry - so this delays the refetch past that window.
     const stamp = "2026-07-22T00:00:00Z";
-    const project = { id: "project-imported", name: "Imported", description: "", instructions: "", archived: false, image_workflow_revision_id: null, video_workflow_revision_id: null, created_at: stamp, updated_at: stamp };
-    const importedChat = { id: "chat-imported", project_id: project.id, title: "Imported chat", archived: false, routing_mode: "auto" as const, confirm_uncertain_media: false, active_chat_profile_id: null, active_image_profile_id: null, active_video_profile_id: null, active_head_message_id: null, created_at: stamp, updated_at: stamp };
+    const project = { id: "project-imported", name: "Imported", description: "", instructions: "", pinned: false, archived: false, image_workflow_revision_id: null, video_workflow_revision_id: null, created_at: stamp, updated_at: stamp };
+    const importedChat = { id: "chat-imported", project_id: project.id, title: "Imported chat", pinned: false, archived: false, routing_mode: "auto" as const, confirm_uncertain_media: false, active_chat_profile_id: null, active_image_profile_id: null, active_video_profile_id: null, active_head_message_id: null, created_at: stamp, updated_at: stamp };
     vi.mocked(api.importProject).mockResolvedValue(project);
     vi.mocked(api.projects).mockResolvedValue([project]);
     let served = false;
@@ -1124,7 +1124,7 @@ describe("App", () => {
   it("exports projects with or without embedded media", async () => {
     const click = vi.spyOn(HTMLAnchorElement.prototype, "click").mockImplementation(() => undefined);
     const stamp = "2026-07-22T00:00:00Z";
-    vi.mocked(api.projects).mockResolvedValue([{ id: "project-1", name: "Portable", description: "", instructions: "", archived: false, image_workflow_revision_id: null, video_workflow_revision_id: null, created_at: stamp, updated_at: stamp }]);
+    vi.mocked(api.projects).mockResolvedValue([{ id: "project-1", name: "Portable", description: "", instructions: "", pinned: false, archived: false, image_workflow_revision_id: null, video_workflow_revision_id: null, created_at: stamp, updated_at: stamp }]);
     vi.mocked(api.exportProject).mockResolvedValue({ url: "/api/artifacts/export/content" });
     const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
     render(
@@ -1145,7 +1145,7 @@ describe("App", () => {
       name: "Creative work",
       description: "",
       instructions: "",
-      archived: false,
+      pinned: false, archived: false,
       image_workflow_revision_id: null,
       video_workflow_revision_id: null,
       generation_settings_json: {
@@ -1230,7 +1230,7 @@ describe("App", () => {
       name: "Reset scopes",
       description: "",
       instructions: "",
-      archived: false,
+      pinned: false, archived: false,
       image_workflow_revision_id: null,
       video_workflow_revision_id: null,
       generation_settings_json: {
@@ -1313,7 +1313,7 @@ describe("App", () => {
       name: "Inherited defaults",
       description: "",
       instructions: "",
-      archived: false,
+      pinned: false, archived: false,
       image_workflow_revision_id: null,
       video_workflow_revision_id: null,
       generation_settings_json: { image: { negative_prompt: "project value" } },
@@ -1326,7 +1326,7 @@ describe("App", () => {
       project_id: project.id,
       title: "Inherited chat",
       archived: false,
-      routing_mode: "image" as const,
+      pinned: false, routing_mode: "image" as const,
       confirm_uncertain_media: false,
       active_chat_profile_id: null,
       active_image_profile_id: null,
@@ -1385,7 +1385,7 @@ describe("App", () => {
       id: "chat-dialog",
       project_id: null,
       title: "Keyboard dialog",
-      archived: false,
+      pinned: false, archived: false,
       routing_mode: "auto" as const,
       confirm_uncertain_media: false,
       active_chat_profile_id: null,
@@ -1430,7 +1430,7 @@ describe("App", () => {
       id: "chat-settings-dialog",
       project_id: null,
       title: "Settings dialog",
-      archived: false,
+      pinned: false, archived: false,
       routing_mode: "auto" as const,
       confirm_uncertain_media: false,
       active_chat_profile_id: null,
@@ -1467,7 +1467,7 @@ describe("App", () => {
       project_id: null,
       title: "LoRA controls",
       archived: false,
-      routing_mode: "image" as const,
+      pinned: false, routing_mode: "image" as const,
       confirm_uncertain_media: false,
       active_chat_profile_id: null,
       active_vision_profile_id: null,
@@ -2205,7 +2205,7 @@ describe("App", () => {
       id: "chat-1",
       project_id: null,
       title: "Branches",
-      archived: false,
+      pinned: false, archived: false,
       routing_mode: "auto",
       confirm_uncertain_media: false,
       active_chat_profile_id: null,
@@ -2247,7 +2247,7 @@ describe("App", () => {
       id: "chat-cancelled",
       project_id: null,
       title: "Cancelled stream",
-      archived: false,
+      pinned: false, archived: false,
       routing_mode: "text" as const,
       confirm_uncertain_media: false,
       active_chat_profile_id: null,
@@ -2302,7 +2302,7 @@ describe("App", () => {
       id: "chat-failed",
       project_id: null,
       title: "Failed stream",
-      archived: false,
+      pinned: false, archived: false,
       routing_mode: "text" as const,
       confirm_uncertain_media: false,
       active_chat_profile_id: null,
@@ -2360,7 +2360,7 @@ describe("App", () => {
       project_id: null,
       title: "Preview",
       archived: false,
-      routing_mode: "auto",
+      pinned: false, routing_mode: "auto",
       confirm_uncertain_media: false,
       active_chat_profile_id: null,
       active_image_profile_id: null,
@@ -2432,7 +2432,7 @@ describe("App", () => {
       project_id: null,
       title: "Scroll intent",
       archived: false,
-      routing_mode: "auto",
+      pinned: false, routing_mode: "auto",
       confirm_uncertain_media: false,
       active_chat_profile_id: null,
       active_image_profile_id: null,
@@ -2533,7 +2533,7 @@ describe("App", () => {
       id: "chat-copy",
       project_id: null,
       title: "Copy text",
-      archived: false,
+      pinned: false, archived: false,
       routing_mode: "text",
       confirm_uncertain_media: false,
       active_chat_profile_id: null,
@@ -2548,7 +2548,7 @@ describe("App", () => {
       project_id: null,
       title: "Copy text",
       archived: false,
-      routing_mode: "text",
+      pinned: false, routing_mode: "text",
       confirm_uncertain_media: false,
       active_chat_profile_id: null,
       active_image_profile_id: null,
@@ -2606,7 +2606,7 @@ describe("App", () => {
       id: "chat-starting",
       project_id: null,
       title: "Starting response",
-      archived: false,
+      pinned: false, archived: false,
       routing_mode: "text" as const,
       confirm_uncertain_media: false,
       active_chat_profile_id: null,
@@ -3752,7 +3752,7 @@ describe("App", () => {
       id: "chat-library-edit",
       project_id: null,
       title: "Library edit",
-      archived: false,
+      pinned: false, archived: false,
       routing_mode: "auto",
       confirm_uncertain_media: false,
       active_chat_profile_id: null,
@@ -3807,7 +3807,7 @@ describe("App", () => {
       id: "chat-batch-edit",
       project_id: null,
       title: "Batch edit",
-      archived: false,
+      pinned: false, archived: false,
       routing_mode: "image",
       confirm_uncertain_media: false,
       active_chat_profile_id: null,
@@ -3865,7 +3865,7 @@ describe("App", () => {
       id: "chat-feedback",
       project_id: null,
       title: "Feedback",
-      archived: false,
+      pinned: false, archived: false,
       routing_mode: "text",
       confirm_uncertain_media: false,
       active_chat_profile_id: null,
@@ -4081,7 +4081,7 @@ describe("App", () => {
       id: "chat-role-settings",
       project_id: null,
       title: "Role settings",
-      archived: false,
+      pinned: false, archived: false,
       routing_mode: "auto" as const,
       confirm_uncertain_media: false,
       active_chat_profile_id: null,
@@ -4124,7 +4124,7 @@ describe("App", () => {
       id: "chat-workshop",
       project_id: null,
       title: "Workshop source",
-      archived: false,
+      pinned: false, archived: false,
       routing_mode: "text",
       confirm_uncertain_media: false,
       active_chat_profile_id: null,
@@ -4209,7 +4209,7 @@ describe("App", () => {
       id: "chat-batch-studio",
       project_id: null,
       title: "Batch studio",
-      archived: false,
+      pinned: false, archived: false,
       routing_mode: "image",
       confirm_uncertain_media: false,
       active_chat_profile_id: null,
@@ -4281,7 +4281,7 @@ describe("App", () => {
       id: "chat-studio",
       project_id: null,
       title: "Studio source",
-      archived: false,
+      pinned: false, archived: false,
       routing_mode: "image",
       confirm_uncertain_media: false,
       active_chat_profile_id: null,
@@ -4369,7 +4369,7 @@ describe("App", () => {
       id: "chat-edit-workshop",
       project_id: null,
       title: "Edit workshop source",
-      archived: false,
+      pinned: false, archived: false,
       routing_mode: "image",
       confirm_uncertain_media: false,
       active_chat_profile_id: null,
@@ -4384,7 +4384,7 @@ describe("App", () => {
       id: "chat-edit-helper",
       title: "Prompt workshop",
       archived: true,
-      routing_mode: "text" as const,
+      pinned: false, routing_mode: "text" as const,
       draft_prompt: "Make the mug burgundy",
       active_head_message_id: "helper-grounded-assistant",
       messages: [
@@ -4460,7 +4460,7 @@ describe("App", () => {
       id: "chat-blind-workshop",
       project_id: null,
       title: "Blind workshop source",
-      archived: false,
+      pinned: false, archived: false,
       routing_mode: "image",
       confirm_uncertain_media: false,
       active_chat_profile_id: null,
@@ -4475,7 +4475,7 @@ describe("App", () => {
       id: "chat-blind-helper",
       title: "Prompt workshop",
       archived: true,
-      routing_mode: "text" as const,
+      pinned: false, routing_mode: "text" as const,
       draft_prompt: "Make the mug burgundy",
       active_head_message_id: "helper-blind-assistant",
       messages: [
@@ -4547,7 +4547,7 @@ describe("App", () => {
       id: "chat-preview-workshop",
       project_id: null,
       title: "Preview workshop source",
-      archived: false,
+      pinned: false, archived: false,
       routing_mode: "image",
       confirm_uncertain_media: false,
       active_chat_profile_id: null,
@@ -4561,7 +4561,7 @@ describe("App", () => {
       ...chat,
       id: "chat-preview-helper",
       title: "Prompt workshop",
-      archived: true,
+      pinned: false, archived: true,
       routing_mode: "text" as const,
       draft_prompt: "A copper kettle",
       messages: [],
@@ -4668,7 +4668,7 @@ describe("App", () => {
       project_id: null,
       title: "Auto routing",
       archived: false,
-      routing_mode: "auto" as const,
+      pinned: false, routing_mode: "auto" as const,
       confirm_uncertain_media: false,
       active_chat_profile_id: null,
       active_image_profile_id: null,
@@ -4713,7 +4713,7 @@ describe("App", () => {
       id: "chat-continuous",
       project_id: null,
       title: "Continuous submission",
-      archived: false,
+      pinned: false, archived: false,
       routing_mode: "text" as const,
       confirm_uncertain_media: false,
       active_chat_profile_id: null,
@@ -4756,7 +4756,7 @@ describe("App", () => {
       id: "chat-stop-and-send",
       project_id: null,
       title: "Stop controls",
-      archived: false,
+      pinned: false, archived: false,
       routing_mode: "text" as const,
       confirm_uncertain_media: false,
       active_chat_profile_id: null,
@@ -4845,7 +4845,7 @@ describe("App", () => {
       id: "chat-media-batch",
       project_id: null,
       title: "Media batch",
-      archived: false,
+      pinned: false, archived: false,
       routing_mode: "image" as const,
       confirm_uncertain_media: false,
       active_chat_profile_id: null,
@@ -4981,7 +4981,7 @@ describe("App", () => {
       id,
       project_id: null,
       title,
-      archived: false,
+      pinned: false, archived: false,
       routing_mode: "text",
       confirm_uncertain_media: false,
       active_chat_profile_id: null,
@@ -5094,7 +5094,7 @@ describe("App", () => {
       name: "Video project",
       description: "",
       instructions: "",
-      archived: false,
+      pinned: false, archived: false,
       image_workflow_revision_id: null,
       video_workflow_revision_id: "revision-video",
       created_at: stamp,
@@ -5104,7 +5104,7 @@ describe("App", () => {
       id: "chat-workflow-controls",
       project_id: project.id,
       title: "Workflow controls",
-      archived: false,
+      pinned: false, archived: false,
       routing_mode: "video" as const,
       confirm_uncertain_media: false,
       active_chat_profile_id: null,
@@ -5162,7 +5162,7 @@ describe("App", () => {
       id: "chat-media-origins",
       project_id: null,
       title: "Media origins",
-      archived: false,
+      pinned: false, archived: false,
       routing_mode: "image",
       confirm_uncertain_media: false,
       active_chat_profile_id: null,
@@ -5266,7 +5266,7 @@ describe("App", () => {
       id: "chat-prior-image-controls",
       project_id: null,
       title: "Prior image controls",
-      archived: false,
+      pinned: false, archived: false,
       routing_mode: "image" as const,
       confirm_uncertain_media: false,
       active_chat_profile_id: null,
@@ -5428,7 +5428,7 @@ describe("App", () => {
     }));
     fireEvent.click(screen.getByRole("button", { name: "Close settings" }));
     fireEvent.click(screen.getByRole("button", { name: "Edit this image" }));
-    await waitFor(() => expect(api.updateChat).toHaveBeenCalledWith(chat.id, { routing_mode: "image" }));
+    await waitFor(() => expect(api.updateChat).toHaveBeenCalledWith(chat.id, { pinned: false, routing_mode: "image" }));
     expect(screen.getByText("sha256:prior")).toBeInTheDocument();
     expect(composer).toHaveFocus();
   });
@@ -5439,7 +5439,7 @@ describe("App", () => {
       id: "chat-draft-first",
       project_id: null,
       title: "Draft first",
-      archived: false,
+      pinned: false, archived: false,
       routing_mode: "image",
       confirm_uncertain_media: false,
       active_chat_profile_id: null,
@@ -5453,7 +5453,7 @@ describe("App", () => {
       ...first,
       id: "chat-draft-second",
       title: "Draft second",
-      routing_mode: "auto",
+      pinned: false, routing_mode: "auto",
       active_head_message_id: null,
     };
     const firstDetail: ChatDetail = {
@@ -5528,7 +5528,7 @@ describe("App", () => {
       id: "chat-animate-image",
       project_id: null,
       title: "Animate image",
-      archived: false,
+      pinned: false, archived: false,
       routing_mode: "image",
       confirm_uncertain_media: false,
       active_chat_profile_id: null,
@@ -5605,7 +5605,7 @@ describe("App", () => {
     );
 
     fireEvent.click(await screen.findByRole("button", { name: "Animate this image" }));
-    await waitFor(() => expect(api.updateChat).toHaveBeenCalledWith(chat.id, { routing_mode: "video" }));
+    await waitFor(() => expect(api.updateChat).toHaveBeenCalledWith(chat.id, { pinned: false, routing_mode: "video" }));
     const composer = screen.getByRole("textbox", { name: "Message" });
     // The prefill lands after the routing mutation settles, not with it.
     await waitFor(() => expect(composer).toHaveValue("Animate this image"));
@@ -5643,7 +5643,7 @@ describe("App", () => {
       id: "chat-new-image-edit",
       project_id: null,
       title: "New image edit",
-      archived: false,
+      pinned: false, archived: false,
       routing_mode: "image" as const,
       confirm_uncertain_media: false,
       active_chat_profile_id: null,
@@ -5675,7 +5675,7 @@ describe("App", () => {
       created_at: stamp,
       url: "/api/artifacts/sha256%3Auploaded-image/content",
     });
-    vi.mocked(api.updateChat).mockResolvedValue({ ...chat, routing_mode: "image" });
+    vi.mocked(api.updateChat).mockResolvedValue({ ...chat, pinned: false, routing_mode: "image" });
     const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
     render(
       <QueryClientProvider client={client}>
@@ -5698,7 +5698,7 @@ describe("App", () => {
     fireEvent.click(await screen.findByRole("button", { name: "Edit attached image" }));
 
     await waitFor(() => expect(api.updateChat).toHaveBeenCalledWith(chat.id, {
-      routing_mode: "image",
+      pinned: false, routing_mode: "image",
     }));
     expect(composer).toHaveFocus();
     const sourcePreview = screen.getByRole("link", { name: "Preview source.png" });
@@ -5717,7 +5717,7 @@ describe("App", () => {
       id: "chat-turn-overrides",
       project_id: null,
       title: "Turn overrides",
-      archived: false,
+      pinned: false, archived: false,
       routing_mode: "text" as const,
       confirm_uncertain_media: false,
       active_chat_profile_id: null,
@@ -5833,7 +5833,7 @@ describe("App", () => {
       id: "chat-revisions",
       project_id: null,
       title: "Response revisions",
-      archived: false,
+      pinned: false, archived: false,
       routing_mode: "text" as const,
       confirm_uncertain_media: false,
       active_chat_profile_id: null,
@@ -5944,7 +5944,7 @@ describe("App", () => {
       id,
       project_id: null,
       title,
-      archived: false,
+      pinned: false, archived: false,
       routing_mode: "text" as const,
       confirm_uncertain_media: false,
       active_chat_profile_id: null,
@@ -6016,7 +6016,7 @@ describe("App", () => {
       project_id: null,
       title: "Persisted image chat",
       archived: false,
-      routing_mode: "text" as const,
+      pinned: false, routing_mode: "text" as const,
       confirm_uncertain_media: false,
       active_chat_profile_id: null,
       active_image_profile_id: null,
@@ -6031,7 +6031,7 @@ describe("App", () => {
       ...firstChat,
       id: "chat-persisted-video",
       title: "Persisted video chat",
-      routing_mode: "video" as const,
+      pinned: false, routing_mode: "video" as const,
       generation_settings_json: { video: { frames: 81 } },
     };
     const storedChats = new Map<string, Chat>([
@@ -6062,7 +6062,7 @@ describe("App", () => {
     fireEvent.change(mode, { target: { value: "image" } });
     await waitFor(() => expect(api.updateChat).toHaveBeenCalledWith(
       firstChat.id,
-      { routing_mode: "image" },
+      { pinned: false, routing_mode: "image" },
     ));
     fireEvent.click(screen.getByRole("button", { name: "Turn settings" }));
     fireEvent.change(screen.getByRole("combobox", { name: "image preset" }), {
@@ -6104,7 +6104,7 @@ describe("App", () => {
       project_id: null,
       title: "Quoting",
       archived: false,
-      routing_mode: "auto",
+      pinned: false, routing_mode: "auto",
       confirm_uncertain_media: false,
       active_chat_profile_id: null,
       active_image_profile_id: null,
@@ -6168,7 +6168,7 @@ describe("App", () => {
       id: "chat-drop",
       project_id: null,
       title: "Dropping",
-      archived: false,
+      pinned: false, archived: false,
       routing_mode: "auto",
       confirm_uncertain_media: false,
       active_chat_profile_id: null,
@@ -6209,7 +6209,7 @@ describe("App", () => {
     // The skipped file is named, not silently dropped.
     expect(screen.getByRole("alert")).toHaveTextContent("Only images and videos can be attached.");
     fireEvent.click(screen.getByRole("button", { name: "Animate attached image" }));
-    await waitFor(() => expect(api.updateChat).toHaveBeenCalledWith("chat-drop", { routing_mode: "video" }));
+    await waitFor(() => expect(api.updateChat).toHaveBeenCalledWith("chat-drop", { pinned: false, routing_mode: "video" }));
     // The prefill lands after the routing mutation settles, not with it.
     await waitFor(() => expect(textarea).toHaveValue("Animate this image"));
     expect(textarea).toHaveFocus();

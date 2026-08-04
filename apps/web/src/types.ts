@@ -9,6 +9,7 @@ export interface Project {
   description: string;
   instructions: string;
   archived: boolean;
+  pinned: boolean;
   image_workflow_revision_id: string | null;
   video_workflow_revision_id: string | null;
   generation_settings_json?: GenerationSettingsByRole;
@@ -114,6 +115,7 @@ export interface Chat {
   project_id: string | null;
   title: string;
   archived: boolean;
+  pinned: boolean;
   routing_mode: RoutingMode;
   confirm_uncertain_media: boolean;
   active_chat_profile_id: string | null;
