@@ -163,6 +163,7 @@ def install_plan_download_request(plan: InstallPlan) -> DownloadRequest:
             workflow_template_id=runtime.get("workflow_template_id"),
             workflow_template_sha256=runtime.get("workflow_template_sha256"),
             auxiliary_kind=runtime.get("auxiliary_kind"),
+            workflow_asset_kind=runtime.get("workflow_asset_kind"),
         )
     except ValueError as exc:
         raise WorkflowAssetDownloadError(
