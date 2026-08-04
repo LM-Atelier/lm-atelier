@@ -121,6 +121,36 @@ describe("workflow asset installer", () => {
     expect(api.installWorkflowAssets).not.toHaveBeenCalled();
   });
 
+  it("names the exact file and its kind rather than letting a bundle be ranked", async () => {
+    renderInstaller();
+    fireEvent.click(screen.getByRole("button", { name: /Search/ }));
+    fireEvent.click(await screen.findByRole("button", { name: "Detail slider" }));
+
+    await waitFor(() => expect(api.catalogPreflight).toHaveBeenCalled());
+    const call = vi.mocked(api.catalogPreflight).mock.calls[0];
+    expect(call[4]).toEqual(["detail-slider.safetensors"]);
+    expect(call[8]).toBe("lora");
+  });
+
+  it("refuses a plan holding more than the one file the workflow named", async () => {
+    // A repository ranked into its official bundle answers with several files.
+    // Binding the first would quietly install the rest.
+    vi.mocked(api.catalogPreflight).mockResolvedValue({
+      install_plan: { id: "plan-1", plan_hash: "a".repeat(64), compatibility: "supported" },
+      selected_files: ["detail-slider.safetensors", "unrelated-vae.safetensors"],
+      can_install: true,
+      checks: [],
+    } as never);
+    renderInstaller();
+
+    fireEvent.click(screen.getByRole("button", { name: /Search/ }));
+    fireEvent.click(await screen.findByRole("button", { name: "Detail slider" }));
+
+    await waitFor(() => expect(api.catalogPreflight).toHaveBeenCalled());
+    expect(screen.queryByText("Selected")).not.toBeInTheDocument();
+    expect(screen.getByRole("button", { name: /Review 0 selected/ })).toBeDisabled();
+  });
+
   it("says nothing at all when every file is present", () => {
     const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
     const { container } = render(

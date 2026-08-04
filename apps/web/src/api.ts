@@ -560,6 +560,7 @@ export const api = {
     auxiliaryKind: string | null = null,
     workflowTemplateId: string | null = null,
     provider = "huggingface",
+    workflowReferenceKind: string | null = null,
   ) => {
     const body = JSON.stringify({
       role,
@@ -568,6 +569,7 @@ export const api = {
       selected_files: selectedFiles,
       auxiliary_kind: auxiliaryKind,
       workflow_template_id: workflowTemplateId,
+      workflow_reference_kind: workflowReferenceKind,
     });
     if (provider !== "huggingface") {
       const parameters = new URLSearchParams({ source: provider, id: remoteId });

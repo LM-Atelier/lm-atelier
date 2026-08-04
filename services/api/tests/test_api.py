@@ -7352,6 +7352,47 @@ async def test_comfy_catalog_preflight_pins_a_multirepository_official_bundle(
     assert artifacts["vae.safetensors"]["source_revision"] == revisions["owner/vae"]
     assert artifacts["vae.safetensors"]["target_folder"] == "vae"
 
+    # The same repository, the same matching official template, but this time a
+    # workflow named one exact file. Ranking that bundle is how asking for a
+    # single text encoder planned a diffusion model, an unrelated LoRA, the
+    # encoder wanted, and an already-present VAE - over 19GB for one file.
+    exact = await client.post(
+        "/api/catalog/owner/primary/preflight",
+        json={
+            "revision": "main",
+            "role": "image",
+            "engine": "comfyui",
+            "selected_files": ["model.safetensors"],
+            "workflow_reference_kind": "checkpoint",
+        },
+    )
+
+    assert exact.status_code == 200
+    named = exact.json()
+    assert named["selected_files"] == ["model.safetensors"]
+    assert named["download_bytes"] == 2_048
+    assert named["workflow_template_id"] is None
+    assert named["file_sources"] == {}
+    assert [item["path"] for item in named["install_plan"]["artifacts_json"]] == [
+        "model.safetensors"
+    ]
+
+    # Naming no file, or several, is refused rather than resolved. A workflow
+    # reference answers to exactly one artifact.
+    for selection in ([], ["model.safetensors", "vae.safetensors"]):
+        refused = await client.post(
+            "/api/catalog/owner/primary/preflight",
+            json={
+                "revision": "main",
+                "role": "image",
+                "engine": "comfyui",
+                "selected_files": selection,
+                "workflow_reference_kind": "checkpoint",
+            },
+        )
+        assert refused.status_code == 422
+        assert refused.json()["code"] == "workflow-asset-file-not-exact"
+
 
 async def test_comfy_catalog_preflight_blocks_an_unreviewed_managed_runtime(
     client: AsyncClient,
