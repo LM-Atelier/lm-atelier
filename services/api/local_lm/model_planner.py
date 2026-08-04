@@ -16,7 +16,7 @@ from .domain import new_id
 from .model_manifests import ModelManifestInspection
 from .models import InstallPlan, ModelComponentManifest
 
-INSTALL_RESOLVER_VERSION = "install-resolver-v7"
+INSTALL_RESOLVER_VERSION = "install-resolver-v8"
 ACTIVATION_PROBE_VERSION = "activation-probe-v2"
 LAUNCH_CONTRACT_VERSION = "worker-launch-v1"
 
