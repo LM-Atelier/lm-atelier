@@ -75,6 +75,16 @@
   --state-success: #6fa88b;
   --state-success-text: #6fa88b;
   --focus-ring: #86a5d2;
+  /* Status surfaces and the ink that belongs on them. Folding the palette
+     onto neutral surfaces took the tint off these and left dark-room text
+     behind, so a warning became unreadable rather than merely quiet. */
+  --danger-surface: #3b2025;
+  --danger-ink-on-surface: #ffbbc0;
+  --warning-surface: #332812;
+  --warning-ink: #e7c86b;
+  --success-surface: #18362a;
+  --success-ink: #8be0ba;
+  --link: #86a5d2;
   /* Grain and scrim belong to the room: a light grain reads on a dark
      ground and disappears on paper, and the reverse. */
   --grain: #c8c8d21a;
@@ -146,6 +156,13 @@
   --state-success: #2f6b4e;
   --state-success-text: #2d674b;
   --focus-ring: #1f4fa8;
+  --danger-surface: #f7e2e0;
+  --danger-ink-on-surface: #8e2f2a;
+  --warning-surface: #f6ecd6;
+  --warning-ink: #6f4a0f;
+  --success-surface: #e2efe6;
+  --success-ink: #245a40;
+  --link: #28497e;
   --grain: #4a422f14;
   --scrim: #f6f2e9d6;
   /* Paper does not cast the same shadow a dark room does; the same depth
@@ -232,8 +249,18 @@ button:focus-visible, a:focus-visible, input:focus-visible, textarea:focus-visib
 .status-dot.healthy { background: var(--success); box-shadow: 0 0 0 3px #60d7a71f; }
 .status-dot.offline { background: var(--danger); }
 
-main { min-width: 0; height: 100%; overflow: hidden; position: relative; background: var(--surface-0); color: var(--ink-primary); }
-main::before { content: ""; position: absolute; inset: 0; pointer-events: none; background-image: linear-gradient(var(--grain) 1px, transparent 1px), linear-gradient(90deg, var(--grain) 1px, transparent 1px); background-size: 28px 28px; mask-image: linear-gradient(to bottom, #000, transparent 55%); }
+/* The grain is part of the ground, not a layer over it. It used to be an
+   absolutely positioned pseudo-element, which paints above in-flow
+   content - so the moment the grain became visible at all, it became
+   visible across every image on the page. */
+main {
+  min-width: 0; height: 100%; overflow: hidden; position: relative;
+  color: var(--ink-primary);
+  background:
+    linear-gradient(var(--grain) 1px, transparent 1px) 0 0 / 28px 28px,
+    linear-gradient(90deg, var(--grain) 1px, transparent 1px) 0 0 / 28px 28px,
+    var(--surface-0);
+}
 .chat-view { min-width: 0; height: 100%; display: grid; grid-template-rows: auto 1fr auto; }
 .chat-header { min-width: 0; height: 76px; display: flex; align-items: center; justify-content: space-between; padding: 0 30px; border-bottom: 1px solid var(--border); background: var(--scrim); backdrop-filter: blur(16px); }
 .chat-header small, .page-header small, .detail-title small, .settings-drawer header small { color: var(--accent-2); font-size: 11px; font-weight: 700; text-transform: uppercase; letter-spacing: .11em; }
@@ -254,7 +281,7 @@ h1, h2, h3 { margin: 0; }
 .media-output-plan li > span { display: grid; flex: 1; gap: 2px; min-width: 0; }
 .media-output-plan li strong { font-size: 11px; }
 .media-output-plan li small { color: var(--muted); font-size: 10px; text-transform: capitalize; }
-.media-output-plan .error-text { color: #ffabb2; overflow-wrap: anywhere; text-transform: none; }
+.media-output-plan .error-text { color: var(--state-danger-text); overflow-wrap: anywhere; text-transform: none; }
 .message { display: grid; grid-template-columns: 36px minmax(0, 1fr); gap: 16px; margin: 0 0 30px; }
 .avatar { width: 32px; height: 32px; display: grid; place-items: center; border-radius: 10px; background: var(--panel-3); color: var(--ink-primary); font-size: 11px; font-weight: 700; }
 .message.assistant .avatar { background: linear-gradient(135deg, var(--blue), var(--terracotta)); color: var(--cream); }
@@ -280,7 +307,7 @@ h1, h2, h3 { margin: 0; }
 .block-copy:hover { border-color: var(--line); color: var(--ink-primary); }
 .markdown blockquote { border-left: 3px solid var(--blue); color: var(--ink-secondary); padding-left: 12px; }
 .markdown table { border-collapse: collapse; }.markdown th, .markdown td { border: 1px solid var(--border); padding: 6px 9px; text-align: left; }
-.markdown a { color: #9cb6db; }
+.markdown a { color: var(--link); }
 .message-edit textarea { width: 100%; resize: vertical; border: 1px solid var(--border); border-radius: 10px; background: var(--panel); color: var(--ink-primary); padding: 10px; line-height: 1.5; }
 .message-edit > div { display: flex; justify-content: flex-end; gap: 6px; margin-top: 7px; }
 .message-edit > div > button:not(.primary) { border: 0; background: transparent; color: var(--ink-3); cursor: pointer; }
@@ -470,8 +497,8 @@ h1, h2, h3 { margin: 0; }
 .workflow-package-review li { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; }
 .workflow-package-review li small, .package-review-note { color: var(--muted); }
 .package-review-summary { display: flex; gap: 12px; align-items: flex-start; }
-.package-review-summary svg.ready { color: #7fbf7f; }
-.package-review-summary svg.unresolved { color: var(--amber); }
+.package-review-summary svg.ready { color: var(--success-ink); }
+.package-review-summary svg.unresolved { color: var(--warning-ink); }
 .package-review-summary small { color: var(--muted); display: block; margin: 2px 0 6px; }
 .custom-nodes { margin-top: 22px; }
 .custom-node-install { display: grid; grid-template-columns: 0.8fr 1.4fr 1.2fr auto; gap: 8px; margin: 12px 0; }
@@ -480,7 +507,7 @@ h1, h2, h3 { margin: 0; }
 .custom-node-list small { color: var(--muted); overflow-wrap: anywhere; }.custom-node-list details pre { max-width: 420px; max-height: 180px; overflow: auto; }
 .callout { border: 1px solid var(--line); border-radius: 10px; padding: 10px 12px; margin: 12px 0; color: var(--ink-secondary); }
 .callout.success { border-color: #34694f; background: #183126; color: #9ee4c3; }
-.callout.warning { border-color: var(--warning-line); background: var(--surface-1); color: #e5c38f; }
+.callout.warning { border-color: var(--warning-line); background: var(--warning-surface); color: var(--warning-ink); }
 .action-callout { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
 
 .modal-backdrop { position: fixed; inset: 0; z-index: 30; display: grid; place-items: center; padding: 20px; background: #000a; backdrop-filter: blur(6px); }
@@ -549,10 +576,10 @@ h1, h2, h3 { margin: 0; }
 .worker-metrics { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 12px; }
 .worker-metrics span { display: grid; gap: 2px; border: 1px solid var(--border); border-radius: 6px; background: var(--panel-2); color: var(--muted); padding: 6px 8px; font-size: 9px; }
 .worker-metrics strong { color: var(--ink-primary); font-size: 11px; }
-.worker-failure { display: grid; gap: 6px; margin-top: 10px; border: 1px solid #673337; border-radius: 10px; background: var(--surface-2); color: #e8b6b5; padding: 9px 10px; font-size: 11px; }
+.worker-failure { display: grid; gap: 6px; margin-top: 10px; border: 1px solid #673337; border-radius: 10px; background: var(--danger-surface); color: var(--danger-ink-on-surface); padding: 9px 10px; font-size: 11px; }
 .worker-failure pre { max-height: 92px; overflow: auto; margin: 0; white-space: pre-wrap; overflow-wrap: anywhere; color: var(--ink-secondary); font: 10px/1.45 "JetBrains Mono", ui-monospace, SFMono-Regular, Consolas, monospace; }
 .worker-failure small { color: var(--ink-muted); overflow-wrap: anywhere; }
-.worker-remedy { margin: 0; color: #dfc7c6; font-size: 11px; line-height: 1.55; }
+.worker-remedy { margin: 0; color: var(--ink-secondary); font-size: 11px; line-height: 1.55; }
 .worker-failure details > summary { cursor: pointer; color: var(--ink-secondary); font-size: 10px; }
 .worker-failure details[open] > summary { margin-bottom: 6px; }
 .runtime-note { margin: 10px 2px 0; font-size: 10px; line-height: 1.5; }
@@ -674,12 +701,12 @@ h1, h2, h3 { margin: 0; }
 .job-row { display: grid; grid-template-columns: 1fr auto; gap: 8px; align-items: center; padding: 8px; border-radius: 10px; background: var(--panel-2); margin-top: 5px; }
 .job-row > div { min-width: 0; }.job-row strong, .job-row small { display: block; font-size: 11px; text-transform: capitalize; }.job-row small { color: var(--ink-muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .job-row.unsuccessful { border: 1px solid var(--line); background: var(--surface-2); }
-.job-row small.job-error { display: -webkit-box; overflow: hidden; color: #d99ba0; line-height: 1.35; text-transform: none; white-space: normal; -webkit-box-orient: vertical; -webkit-line-clamp: 2; }
+.job-row small.job-error { display: -webkit-box; overflow: hidden; color: var(--state-danger-text); line-height: 1.35; text-transform: none; white-space: normal; -webkit-box-orient: vertical; -webkit-line-clamp: 2; }
 .job-actions { display: flex; align-items: center; gap: 2px; }
 .jobs-subheading { color: var(--ink-secondary); font-size: 10px; font-weight: 700; letter-spacing: .06em; margin: 10px 3px 2px; text-transform: uppercase; }
-.jobs-error { color: #ffbbc0; font-size: 11px; line-height: 1.4; padding: 8px 3px 1px; }
+.jobs-error { color: var(--danger-ink-on-surface); font-size: 11px; line-height: 1.4; padding: 8px 3px 1px; }
 .toast { position: fixed; top: 18px; right: 18px; z-index: 40; display: flex; align-items: center; gap: 8px; max-width: 420px; border-radius: 10px; padding: 11px 14px; box-shadow: 0 16px 40px var(--shadow); }
-.toast.error { background: #3b2025; border: 1px solid #75414a; color: #ffbbc0; }
+.toast.error { background: var(--danger-surface); border: 1px solid var(--state-danger); color: var(--danger-ink-on-surface); }
 .muted { color: var(--muted); }
 
 @media (prefers-reduced-motion: reduce) {
@@ -772,7 +799,7 @@ h1, h2, h3 { margin: 0; }
 .install-confirm .install-facts dt { color: var(--ink-2); font-size: 12px; margin-bottom: 3px; }
 .install-confirm .install-facts dd { margin: 0; font-size: 16px; font-variant-numeric: tabular-nums; }
 .install-confirm .install-facts dd small { color: var(--ink-2); font-size: 12px; }
-.install-confirm .install-warning { color: #e7c86b; line-height: 1.5; margin: 0 0 12px; }
+.install-confirm .install-warning { color: var(--warning-ink); line-height: 1.5; margin: 0 0 12px; }
 .install-confirm footer { display: flex; justify-content: flex-end; gap: 12px; margin-top: 20px; }
 .first-run-shell { min-height: 100vh; display: grid; place-items: center; background: var(--bg); }
 .editing-studio { width: min(680px, 96vw); }
@@ -905,3 +932,6 @@ h1, h2, h3 { margin: 0; }
 .workflow-consumers h4 { margin: 0; color: var(--ink-primary); font-size: 12px; }
 .workflow-consumers ul { display: grid; gap: 2px; margin: 0; padding-left: 16px; color: var(--ink-secondary); font-size: 12px; }
 .workflow-consumers small { color: var(--ink-muted); font-size: 11px; }
+.app-shell { background: var(--surface-0); color: var(--ink-primary); }
+.theme-toggle { display: flex; gap: 2px; padding: 4px 0 6px; }
+.theme-toggle .icon-button { width: 28px; height: 28px; }

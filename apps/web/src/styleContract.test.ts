@@ -250,9 +250,11 @@ describe("moving between rooms", () => {
   it("puts the work surface in a room and leaves the building alone", () => {
     const app = readFileSync(join(SOURCE_DIR, "App.tsx"), "utf8");
     const rooms = readFileSync(join(SOURCE_DIR, "rooms.ts"), "utf8");
-    // The sidebar staying constant is what makes this read as moving
-    // between rooms rather than as the page repainting itself.
-    expect(app).toMatch(/data-room=\{READING_ROOM_VIEWS\.has\(view\)/);
+    // The work surface follows the room, and a fixed appearance choice
+    // overrides the rooms entirely - someone working at night wants the
+    // whole thing dark whatever prose prefers.
+    expect(app).toMatch(/data-room=\{roomFor\(theme, READING_ROOM_VIEWS\.has\(view\)\)\}/);
+    expect(app).toMatch(/className="app-shell" data-room=/);
     const reading = rooms.match(/READING_ROOM_VIEWS[^=]*=\s*new Set<View>\(\[([^\]]*)\]\)/)?.[1] ?? "";
     expect(reading).toContain('"chat"');
     expect(reading).toContain('"settings"');
@@ -266,8 +268,14 @@ describe("moving between rooms", () => {
     const css = readFileSync(STYLESHEET, "utf8");
     // Any of these left as a literal would half-flip the page: a dark
     // header bar floating over paper, or a light grain over nothing.
-    expect(css).toMatch(/^main \{[^}]*background:\s*var\(--surface-0\)/m);
-    expect(css).toMatch(/main::before \{[^}]*var\(--grain\)/);
+    const main = css.match(/(?:^|\n)main \{([^}]*)\}/)?.[1] ?? "";
+    expect(main).toMatch(/var\(--surface-0\)/);
+    expect(main).toMatch(/var\(--grain\)/);
+    // The grain has to be part of the ground rather than a layer over it. As
+    // an absolutely positioned pseudo-element it painted above in-flow
+    // content, so the moment it became visible it became visible across
+    // every image on the page.
+    expect(css).not.toMatch(/main::before/);
     expect(css).toMatch(/\.chat-header \{[^}]*background:\s*var\(--scrim\)/);
     for (const room of [':root {', '[data-room="reading"]']) {
       const at = css.indexOf(room);
@@ -317,5 +325,53 @@ describe("action hierarchy", () => {
       );
       expect(contrast(tokens["accent-ink"], tokens["accent-fill"])).toBeGreaterThanOrEqual(4.5);
     }
+  });
+});
+
+describe("every rule, in every room", () => {
+  const css = readFileSync(STYLESHEET, "utf8");
+
+  function resolve(value: string, tokens: Record<string, string>): string | null {
+    let current: string | undefined = value.trim();
+    for (let hop = 0; hop < 6 && current?.startsWith("var("); hop += 1) {
+      current = tokens[current.slice(4, current.indexOf(")")).trim().replace(/^--/, "")];
+    }
+    return current?.startsWith("#") ? current : null;
+  }
+
+  const ROOMS = [
+    { name: "making", tokens: room(":root {") },
+    { name: "reading", tokens: room('[data-room="reading"]') },
+  ];
+
+  it.each(ROOMS)("leaves no unreadable text in the $name room", ({ tokens }) => {
+    const surfaces = ["surface-0", "surface-1", "surface-2", "surface-3"].map((k) => tokens[k]);
+    const unreadable: string[] = [];
+
+    for (const match of css.matchAll(/([^{}]+)\{([^}]*)\}/g)) {
+      const selector = match[1].trim();
+      const body = match[2];
+      if (selector.startsWith("@") || selector.includes("--")) continue;
+      const ink = /(?<!-)\bcolor:\s*([^;]+);/.exec(body);
+      if (!ink) continue;
+      const foreground = resolve(ink[1], tokens);
+      if (!foreground) continue;
+
+      // A rule that paints its own ground is judged against that ground;
+      // everything else has to survive any surface it might inherit.
+      const own = /\bbackground(?:-color)?:\s*([^;]+);/.exec(body);
+      const ownFill =
+        own && !own[1].includes("gradient")
+          ? resolve(own[1].trim().split(/\s+/).at(-1)!, tokens)
+          : null;
+      const grounds = ownFill ? [ownFill] : surfaces;
+      const worst = Math.min(...grounds.map((ground) => contrast(foreground, ground)));
+      if (worst < 4.5) unreadable.push(`${selector.slice(0, 60)} (${worst.toFixed(2)})`);
+    }
+
+    // Status colours built for a dark room turn invisible on paper. Nine of
+    // them shipped that way, including every link in an assistant answer,
+    // because nothing checked a rule against the room it would render in.
+    expect(unreadable).toEqual([]);
   });
 });
