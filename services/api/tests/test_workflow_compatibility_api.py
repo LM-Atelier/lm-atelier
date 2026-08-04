@@ -232,7 +232,7 @@ async def test_automatic_chat_selection_ranks_ready_workflow_families(
     assert "architectural" in selected["matched_terms"]
 
 
-async def test_project_family_overrides_the_chat_family_without_changing_its_revision(
+async def test_chat_family_overrides_the_project_family_without_changing_its_revision(
     client: AsyncClient,
 ) -> None:
     project = (await client.post("/api/projects", json={"name": "Family project"})).json()
@@ -247,7 +247,7 @@ async def test_project_family_overrides_the_chat_family_without_changing_its_rev
             session,
             name="Project workflow",
         )
-        chat_family, _chat_revision = _ready_image_family(
+        chat_family, chat_revision = _ready_image_family(
             session,
             name="Chat workflow",
         )
@@ -255,6 +255,7 @@ async def test_project_family_overrides_the_chat_family_without_changing_its_rev
         project_family_id = project_family.id
         project_revision_id = project_revision.id
         chat_family_id = chat_family.id
+        chat_revision_id = chat_revision.id
     chat_selected = await client.put(
         f"/api/chats/{chat['id']}/workflow-selections/image",
         json={"mode": "family", "workflow_family_id": chat_family_id},
@@ -273,8 +274,26 @@ async def test_project_family_overrides_the_chat_family_without_changing_its_rev
 
     assert accepted.status_code == 202, accepted.json()
     run = accepted.json()["run"]
-    assert run["workflow_revision_id"] == project_revision_id
-    assert run["provenance_json"]["model_selection"]["workflow_family_id"] == (project_family_id)
+    assert run["workflow_revision_id"] == chat_revision_id
+    assert run["workflow_revision_id"] != project_revision_id
+    assert run["provenance_json"]["model_selection"]["workflow_family_id"] == chat_family_id
+
+    chat_inherited = await client.put(
+        f"/api/chats/{chat['id']}/workflow-selections/image",
+        json={"mode": "default"},
+    )
+    assert chat_inherited.status_code == 200, chat_inherited.json()
+    inherited = await client.post(
+        f"/api/chats/{chat['id']}/turns",
+        json={"text": "Draw the inherited project diagram", "mode": "image"},
+    )
+    assert inherited.status_code == 202, inherited.json()
+    inherited_run = inherited.json()["run"]
+    assert inherited_run["workflow_revision_id"] == project_revision_id
+    assert (
+        inherited_run["provenance_json"]["model_selection"]["workflow_family_id"]
+        == project_family_id
+    )
 
     text_accepted = await client.post(
         f"/api/chats/{chat['id']}/turns",

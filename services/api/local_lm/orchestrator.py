@@ -5600,44 +5600,47 @@ class ConversationOrchestrator:
 
         mode: WorkflowSelectionMode
         workflow_family_id: str | None
-        project = (
-            session.get(Project, chat.project_id)
-            if chat.project_id and operation != Operation.TEXT
-            else None
-        )
-        if project is not None:
-            project_capability: ProjectSelectorCapability = (
-                "video" if capability == "video" else "image"
+        chat_selection = resolve_chat_workflow_selection(session, chat, capability)
+        if chat_selection.mode == "family":
+            mode = "explicit"
+            workflow_family_id = chat_selection.workflow_family_id
+        elif chat_selection.mode == "automatic":
+            mode = "automatic"
+            workflow_family_id = None
+        elif chat_selection.profile_id is not None:
+            # A legacy per-chat profile is still an explicit chat choice
+            # during the compatibility window. Let the legacy resolver keep
+            # honoring it instead of replacing it with a project choice.
+            return None
+        else:
+            project = (
+                session.get(Project, chat.project_id)
+                if chat.project_id and operation != Operation.TEXT
+                else None
             )
-            project_selection = resolve_project_workflow_selection(
-                session,
-                project,
-                project_capability,
-            )
-            if project_selection.workflow_revision_id:
-                return None
-            if project_selection.mode == "family":
-                mode = "explicit"
-                workflow_family_id = project_selection.workflow_family_id
-            elif project_selection.mode == "automatic":
-                mode = "automatic"
-                workflow_family_id = None
-            else:
-                project = None
-
-        if project is None:
-            chat_selection = resolve_chat_workflow_selection(session, chat, capability)
-            if chat_selection.mode == "family":
-                mode = "explicit"
-                workflow_family_id = chat_selection.workflow_family_id
-            elif chat_selection.mode == "automatic":
-                mode = "automatic"
-                workflow_family_id = None
-            elif chat_selection.profile_id is None:
+            if project is None:
                 mode = "default"
                 workflow_family_id = None
             else:
-                return None
+                project_capability: ProjectSelectorCapability = (
+                    "video" if capability == "video" else "image"
+                )
+                project_selection = resolve_project_workflow_selection(
+                    session,
+                    project,
+                    project_capability,
+                )
+                if project_selection.workflow_revision_id:
+                    return None
+                if project_selection.mode == "family":
+                    mode = "explicit"
+                    workflow_family_id = project_selection.workflow_family_id
+                elif project_selection.mode == "automatic":
+                    mode = "automatic"
+                    workflow_family_id = None
+                else:
+                    mode = "default"
+                    workflow_family_id = None
 
         engine = (
             self.engines.settings.chat_engine

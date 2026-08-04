@@ -1102,6 +1102,8 @@ async def test_project_v3_round_trip_remaps_portable_dependencies_in_a_fresh_dat
         json={"text": "Create an image of a portable archive", "mode": "image"},
     )
     assert image_turn.status_code == 202
+    selected_image_revision_id = image_turn.json()["run"]["workflow_revision_id"]
+    assert selected_image_revision_id
     await wait_for_run(client, image_turn.json()["run"]["id"])
 
     exported = (
@@ -1122,6 +1124,18 @@ async def test_project_v3_round_trip_remaps_portable_dependencies_in_a_fresh_dat
     assert portable_workflow["source_id"] == workflow["id"]
     assert [item["source_version"] for item in portable_workflow["revisions"]] == [1, 2]
     assert portable_workflow["current_revision_source_id"] == revision_two["id"]
+    selected_portable_workflow = next(
+        item
+        for item in manifest["dependencies"]["workflows"]
+        if any(
+            revision["source_id"] == selected_image_revision_id for revision in item["revisions"]
+        )
+    )
+    selected_portable_revision = next(
+        revision
+        for revision in selected_portable_workflow["revisions"]
+        if revision["source_id"] == selected_image_revision_id
+    )
     with zipfile.ZipFile(io.BytesIO(archive.content)) as metadata_archive:
         assert not any(name.startswith("artifacts/") for name in metadata_archive.namelist())
 
@@ -1261,7 +1275,22 @@ async def test_project_v3_round_trip_remaps_portable_dependencies_in_a_fresh_dat
                 }
                 image_run = next(run for run in imported_runs if run.operation == "text_to_image")
                 assert image_run.profile_id == imported_image_profile.id
-                assert image_run.workflow_revision_id == pinned.id
+                imported_image_revision = target_session.get(
+                    WorkflowRevision, image_run.workflow_revision_id
+                )
+                assert imported_image_revision
+                assert imported_image_revision.id != pinned.id
+                assert (
+                    imported_image_revision.version == selected_portable_revision["source_version"]
+                )
+                assert (
+                    imported_image_revision.api_graph_json
+                    == selected_portable_revision["api_graph"]
+                )
+                assert (
+                    imported_image_revision.input_schema_json
+                    == selected_portable_revision["input_schema"]
+                )
 
             repeated = await target.post(
                 "/api/projects/import",
@@ -4446,6 +4475,7 @@ async def test_a_project_pin_that_cannot_run_is_named_rather_than_replaced(
     chat = (
         await client.post("/api/chats", json={"title": "Broken pin", "project_id": project["id"]})
     ).json()
+    await _inherit_project_image_workflow(client, chat["id"])
 
     turn = await client.post(
         f"/api/chats/{chat['id']}/turns",
@@ -4511,6 +4541,14 @@ async def _project_pin(client: AsyncClient, project_id: str) -> str | None:
     return match["image_workflow_revision_id"]
 
 
+async def _inherit_project_image_workflow(client: AsyncClient, chat_id: str) -> None:
+    inherited = await client.put(
+        f"/api/chats/{chat_id}/workflow-selections/image",
+        json={"mode": "default"},
+    )
+    assert inherited.status_code == 200, inherited.json()
+
+
 async def test_a_pin_follows_only_an_artifact_identical_recompile(client: AsyncClient) -> None:
     """The lockfile property: same contract migrates, changed contract does not.
 
@@ -4542,6 +4580,7 @@ async def test_a_pin_follows_only_an_artifact_identical_recompile(client: AsyncC
     chat = (
         await client.post("/api/chats", json={"title": "Recompiled", "project_id": project["id"]})
     ).json()
+    await _inherit_project_image_workflow(client, chat["id"])
 
     # A recompile that executes exactly the same thing.
     identical = (
@@ -5167,6 +5206,7 @@ async def test_pinned_workflow_revision_keeps_dynamic_capability_constraints(
             json={"title": "Pinned dynamic turn", "project_id": project["id"]},
         )
     ).json()
+    await _inherit_project_image_workflow(client, chat["id"])
     turn = await client.post(
         f"/api/chats/{chat['id']}/turns",
         json={
