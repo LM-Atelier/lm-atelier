@@ -20,7 +20,7 @@ import socket
 from dataclasses import dataclass, field
 from html.parser import HTMLParser
 from typing import Any
-from urllib.parse import urlparse
+from urllib.parse import urljoin, urlparse
 
 MAX_REDIRECTS = 3
 MAX_URL_CHARACTERS = 2_000
@@ -199,3 +199,59 @@ def extract_source(url: str, final_url: str, content_type: str, body: bytes) -> 
         byte_count=len(body),
         truncated=truncated,
     )
+
+
+async def fetch_source(
+    url: str,
+    *,
+    request: Any,
+    resolve: Any = socket.getaddrinfo,
+) -> RetrievedSource:
+    """Retrieve one page, revalidating every hop it is sent to.
+
+    Redirects are followed by hand rather than by the client, because a
+    permitted host that redirects to a forbidden one is the obvious way past a
+    check that runs once. Each hop is validated exactly as the original address
+    was, so a redirect to localhost is refused at the redirect.
+
+    `request` is injected so the transport can be exercised without a network.
+    It is called with one absolute https address and returns an object with
+    `status_code`, `headers`, and `content`.
+    """
+    current = validate_target(url, resolve=resolve)
+    seen = {current}
+    for _ in range(MAX_REDIRECTS + 1):
+        response = await request(current)
+        location = _redirect_target(response)
+        if location is None:
+            body = bytes(getattr(response, "content", b"") or b"")
+            content_type = str(_header(response, "content-type") or "")
+            return extract_source(url, current, content_type, body[: MAX_CONTENT_BYTES + 1])
+        nxt = urljoin(current, location)
+        if nxt in seen:
+            raise WebRetrievalError("web-redirect-loop", "That address redirects to itself.")
+        # Validated again, not trusted because the previous hop was.
+        current = validate_target(nxt, resolve=resolve)
+        seen.add(current)
+    raise WebRetrievalError("web-too-many-redirects", "That address redirects too many times.")
+
+
+def _redirect_target(response: Any) -> str | None:
+    status = int(getattr(response, "status_code", 0) or 0)
+    if status not in {301, 302, 303, 307, 308}:
+        return None
+    location = _header(response, "location")
+    if not location or not isinstance(location, str):
+        raise WebRetrievalError("web-redirect-invalid", "That address redirects to nowhere.")
+    return location
+
+
+def _header(response: Any, name: str) -> str | None:
+    headers = getattr(response, "headers", None)
+    if headers is None:
+        return None
+    try:
+        value = headers.get(name)
+    except AttributeError:
+        return None
+    return value if isinstance(value, str) else None
