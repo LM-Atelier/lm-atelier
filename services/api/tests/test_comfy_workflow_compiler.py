@@ -227,12 +227,82 @@ def test_a_subgraph_that_cannot_be_expanded_exactly_still_refuses() -> None:
     _assert_error("unconnected_subgraph_input", workflow, _object_info())
 
 
-def test_rejects_virtual_nodes() -> None:
+def test_compiles_a_fixed_primitive_widget_value() -> None:
+    workflow = _workflow()
+    workflow["nodes"][0]["inputs"] = [
+        {
+            "name": "label",
+            "type": "STRING",
+            "widget": {"name": "label"},
+            "link": 8,
+        }
+    ]
+    workflow["nodes"].append(
+        {
+            "id": 3,
+            "type": "PrimitiveNode",
+            "mode": 0,
+            "properties": {"Run widget replace on values": False},
+            "inputs": [],
+            "outputs": [
+                {
+                    "name": "STRING",
+                    "type": "STRING",
+                    "widget": {"name": "label"},
+                    "links": [8],
+                }
+            ],
+            "widgets_values": ["from primitive"],
+        }
+    )
+    workflow["links"].append([8, 3, 0, 1, 0, "STRING"])
+
+    compiled = compile_comfyui_ui_graph(workflow, _object_info())
+
+    assert compiled.execution_order == ("1", "2")
+    assert compiled.api_graph["1"]["inputs"]["label"] == "from primitive"
+    assert "3" not in compiled.api_graph
+
+
+def test_rejects_malformed_primitive_nodes() -> None:
     workflow = _workflow()
     workflow["nodes"].append(
         {"id": 3, "type": "PrimitiveNode", "inputs": [], "outputs": [], "widgets_values": [1]}
     )
-    _assert_error("unsupported_frontend_node", workflow, _object_info())
+    _assert_error("unsupported_primitive_node", workflow, _object_info())
+
+
+@pytest.mark.parametrize(
+    ("properties", "values"),
+    [
+        ({"Run widget replace on values": True}, ["value"]),
+        ({"Run widget replace on values": False}, [1, "randomize"]),
+    ],
+)
+def test_rejects_dynamic_primitive_widget_values(
+    properties: dict[str, bool],
+    values: list[object],
+) -> None:
+    workflow = _workflow()
+    workflow["nodes"].append(
+        {
+            "id": 3,
+            "type": "PrimitiveNode",
+            "properties": properties,
+            "inputs": [],
+            "outputs": [
+                {
+                    "name": "STRING",
+                    "type": "STRING",
+                    "widget": {"name": "label"},
+                    "links": [],
+                }
+            ],
+            "widgets_values": values,
+        }
+    )
+
+    _assert_error("unsupported_primitive_node", workflow, _object_info())
 
 
 @pytest.mark.parametrize("mode", [1, 2, 3])

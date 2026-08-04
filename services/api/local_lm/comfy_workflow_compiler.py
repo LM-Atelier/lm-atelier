@@ -12,7 +12,7 @@ from .comfy_workflow_packages import (
 
 _SUPPORTED_WIDGET_TYPES = frozenset({"BOOLEAN", "COMBO", "FLOAT", "INT", "STRING"})
 _CONTROL_AFTER_GENERATE = frozenset({"decrement", "fixed", "increment", "randomize"})
-_IGNORED_FRONTEND_NODE_TYPES = frozenset({"MarkdownNote", "Note"})
+_IGNORED_FRONTEND_NODE_TYPES = frozenset({"MarkdownNote", "Note", "PrimitiveNode"})
 
 
 class WorkflowCompilationError(WorkflowPackageError):
@@ -94,7 +94,20 @@ def compile_comfyui_ui_graph(
         )
     slots = {node_id: _node_slots(node_id, node) for node_id, node in nodes.items()}
     links = tuple(_parse_link(value) for value in _sequence(workflow.get("links"), "links"))
-    connections, successors = _validate_links(nodes, runtime_nodes, slots, links)
+    primitive_values, primitive_link_ids = _primitive_widget_values(
+        nodes,
+        runtime_nodes,
+        slots,
+        links,
+        object_info,
+    )
+    connections, successors = _validate_links(
+        nodes,
+        runtime_nodes,
+        slots,
+        links,
+        primitive_link_ids,
+    )
     order = _topological_order(tuple(runtime_nodes), successors)
 
     api_graph: dict[str, dict[str, object]] = {}
@@ -112,6 +125,7 @@ def compile_comfyui_ui_graph(
             node_info,
             slots[node_id][0],
             connections,
+            primitive_values,
         )
         title = node.get("title") or node_info.get("display_name") or node_type
         api_graph[node_id] = {
@@ -203,6 +217,7 @@ def _validate_links(
         tuple[tuple[Mapping[str, object], ...], tuple[Mapping[str, object], ...]],
     ],
     links: Sequence[_Link],
+    primitive_link_ids: frozenset[str],
 ) -> tuple[dict[tuple[str, str], list[object]], dict[str, set[str]]]:
     by_id: dict[str, _Link] = {}
     connections: dict[tuple[str, str], list[object]] = {}
@@ -213,6 +228,8 @@ def _validate_links(
         by_id[link.identifier] = link
         if link.origin not in nodes or link.target not in nodes:
             raise WorkflowCompilationError("dangling_link", "workflow has a dangling link")
+        if link.identifier in primitive_link_ids:
+            continue
         if link.origin not in runtime_nodes or link.target not in runtime_nodes:
             raise WorkflowCompilationError(
                 "frontend_node_link",
@@ -283,6 +300,162 @@ def _validate_links(
     return connections, successors
 
 
+def _primitive_widget_values(
+    nodes: Mapping[str, Mapping[str, object]],
+    runtime_nodes: Mapping[str, Mapping[str, object]],
+    slots: Mapping[
+        str,
+        tuple[tuple[Mapping[str, object], ...], tuple[Mapping[str, object], ...]],
+    ],
+    links: Sequence[_Link],
+    object_info: Mapping[str, object],
+) -> tuple[dict[tuple[str, str], object], frozenset[str]]:
+    """Resolve the pinned frontend's fixed PrimitiveNode widget propagation."""
+
+    primitive_ids = {
+        node_id for node_id, node in nodes.items() if node.get("type") == "PrimitiveNode"
+    }
+    if not primitive_ids:
+        return {}, frozenset()
+
+    links_by_origin: dict[str, list[_Link]] = {node_id: [] for node_id in primitive_ids}
+    target_counts: dict[tuple[str, int], int] = {}
+    for link in links:
+        if link.origin in primitive_ids:
+            links_by_origin[link.origin].append(link)
+        target_key = (link.target, link.target_slot)
+        target_counts[target_key] = target_counts.get(target_key, 0) + 1
+
+    resolved: dict[tuple[str, str], object] = {}
+    consumed_links: set[str] = set()
+    for node_id in sorted(primitive_ids):
+        node = nodes[node_id]
+        mode = node.get("mode", 0)
+        if isinstance(mode, bool) or not isinstance(mode, int) or mode != 0:
+            raise WorkflowCompilationError(
+                "unsupported_primitive_node",
+                f"primitive node {node_id} uses an unsupported execution mode",
+            )
+        properties = node.get("properties", {})
+        if not isinstance(properties, Mapping):
+            raise WorkflowCompilationError(
+                "unsupported_primitive_node",
+                f"primitive node {node_id} has invalid properties",
+            )
+        replace_value = properties.get("Run widget replace on values", False)
+        if not isinstance(replace_value, bool) or replace_value:
+            raise WorkflowCompilationError(
+                "unsupported_primitive_node",
+                f"primitive node {node_id} requires frontend text replacement",
+            )
+
+        inputs, outputs = slots[node_id]
+        if inputs or len(outputs) != 1:
+            raise WorkflowCompilationError(
+                "unsupported_primitive_node",
+                f"primitive node {node_id} has an unsupported slot shape",
+            )
+        output = outputs[0]
+        widget = output.get("widget")
+        if not isinstance(widget, Mapping):
+            raise WorkflowCompilationError(
+                "unsupported_primitive_node",
+                f"primitive node {node_id} has no widget contract",
+            )
+        widget_name = widget.get("name")
+        if not isinstance(widget_name, str) or not widget_name:
+            raise WorkflowCompilationError(
+                "unsupported_primitive_node",
+                f"primitive node {node_id} has an invalid widget contract",
+            )
+
+        raw_values = node.get("widgets_values", [])
+        if not isinstance(raw_values, Sequence) or isinstance(raw_values, str | bytes):
+            raise WorkflowCompilationError(
+                "invalid_widget_values",
+                f"primitive node {node_id} widget values must be an array",
+            )
+        values = list(raw_values)
+        if not values or len(values) > 2:
+            raise WorkflowCompilationError(
+                "unsupported_widget_values",
+                f"primitive node {node_id} has widget values that cannot be mapped safely",
+            )
+        if len(values) == 2 and (not isinstance(values[1], str) or values[1].casefold() != "fixed"):
+            raise WorkflowCompilationError(
+                "unsupported_primitive_node",
+                f"primitive node {node_id} uses a changing widget value",
+            )
+
+        for link in links_by_origin[node_id]:
+            if link.origin_slot != 0 or link.target not in runtime_nodes:
+                raise WorkflowCompilationError(
+                    "unsupported_primitive_node",
+                    f"primitive node {node_id} has an unsupported connection",
+                )
+            if target_counts[(link.target, link.target_slot)] != 1:
+                raise WorkflowCompilationError(
+                    "unsupported_primitive_node",
+                    f"primitive node {node_id} feeds an ambiguous input",
+                )
+            target_inputs = slots[link.target][0]
+            if link.target_slot >= len(target_inputs):
+                raise WorkflowCompilationError(
+                    "invalid_link_slot", "workflow link uses a missing slot"
+                )
+            target_slot = target_inputs[link.target_slot]
+            target_name = str(target_slot["name"])
+            target_widget = target_slot.get("widget")
+            if (
+                not isinstance(target_widget, Mapping)
+                or target_widget.get("name") != target_name
+                or widget_name != target_name
+            ):
+                raise WorkflowCompilationError(
+                    "unsupported_primitive_node",
+                    f"primitive node {node_id} does not feed a matching widget",
+                )
+
+            target_type = str(runtime_nodes[link.target]["type"])
+            node_info = object_info.get(target_type)
+            if not isinstance(node_info, Mapping):
+                raise WorkflowCompilationError(
+                    "invalid_node_definition",
+                    f"ComfyUI definition for {target_type} is invalid",
+                )
+            definitions = {
+                definition.name: definition
+                for definition in _input_definitions(target_type, node_info)
+            }
+            definition = definitions.get(target_name)
+            if definition is None or not _is_widget_spec(definition.spec):
+                raise WorkflowCompilationError(
+                    "unsupported_primitive_node",
+                    f"primitive node {node_id} does not feed a serializable widget",
+                )
+            kind = definition.spec[0]
+            expected_type = (
+                "COMBO"
+                if isinstance(kind, Sequence) and not isinstance(kind, str | bytes)
+                else kind
+            )
+            if output.get("type") != expected_type:
+                raise WorkflowCompilationError(
+                    "unsupported_primitive_node",
+                    f"primitive node {node_id} has incompatible widget metadata",
+                )
+
+            resolved_key = (link.target, target_name)
+            resolved[resolved_key] = _serialize_widget_value(
+                link.target,
+                target_name,
+                definition.spec,
+                values[0],
+            )
+            consumed_links.add(link.identifier)
+    return resolved, frozenset(consumed_links)
+
+
 def _topological_order(
     node_ids: tuple[str, ...],
     successors: Mapping[str, set[str]],
@@ -312,6 +485,7 @@ def _compile_node_inputs(
     node_info: Mapping[str, object],
     input_slots: Sequence[Mapping[str, object]],
     connections: Mapping[tuple[str, str], list[object]],
+    primitive_values: Mapping[tuple[str, str], object],
 ) -> dict[str, object]:
     definitions = _input_definitions(str(node["type"]), node_info)
     by_name = {definition.name: definition for definition in definitions}
@@ -383,6 +557,9 @@ def _compile_node_inputs(
                     "unknown_input_slot", f"node {node_id} uses unknown input {name}"
                 )
             result[name] = list(connection)
+    for (target, name), value in primitive_values.items():
+        if target == node_id:
+            result[name] = value
     return result
 
 
