@@ -141,7 +141,12 @@ from .setup_verification import (
     recover_terminal_setup_verifications,
     setup_verification_for_chat,
 )
-from .studio_masks import MASK_SETTING_KEY, MaskContractError, parse_mask_setting
+from .studio_masks import (
+    MASK_SETTING_KEY,
+    MaskContractError,
+    parse_mask_setting,
+    split_mask_setting,
+)
 from .vision import PreparedVisualContext, VisionContextService, VisionInputError
 from .visual_prompt_compiler import (
     compilation_provenance,
@@ -934,7 +939,16 @@ class ConversationOrchestrator:
             workflow_revision.input_schema_json if workflow_revision else None,
         )
         request_fields = [field for field in fields if field.scope != "load"]
-        request_settings = validate_settings(request.settings, request_fields)
+        # A selection is not a tunable, so it is not in the workflow's setting
+        # schema and the generic validator would refuse it as unknown - which
+        # is what made every masked edit fail with "unsupported settings: mask".
+        # It travels in settings because that is how it reaches the run record,
+        # and it is checked against its own contract a few lines below, where
+        # the workflow is known and can say whether it accepts one at all.
+        mask, tunables = split_mask_setting(request.settings)
+        request_settings = validate_settings(tunables, request_fields)
+        if mask is not None:
+            request_settings[MASK_SETTING_KEY] = mask
         project = session.get(Project, chat.project_id) if chat.project_id else None
         default_preset = self._default_preset(session, plan.operation)
         project_preset = self._bound_preset(session, project, role)

@@ -15,6 +15,7 @@ adapter resizes deterministically from these recorded terms.
 from __future__ import annotations
 
 import re
+from collections.abc import Mapping
 from dataclasses import dataclass
 from typing import Any
 
@@ -203,3 +204,21 @@ def mask_provenance(
         # regardless of what resolution the selection was drawn at.
         "coverage": coverage,
     }
+
+
+def split_mask_setting(settings: Mapping[str, Any]) -> tuple[Any, dict[str, Any]]:
+    """Separate the selection from the things a workflow declares as tunable.
+
+    A mask travels in settings because that is how it reaches the run record,
+    but it is not a setting in the sense the schema means: no workflow lists
+    it among its fields, so validating it against them refuses it as unknown.
+    That is what made every masked edit fail with "unsupported settings: mask"
+    while the orchestrator was, a few lines later, waiting to read exactly
+    that key.
+
+    The selection is checked instead by `parse_mask_setting`, where the
+    workflow is known and can say whether it accepts one at all.
+    """
+    mask = settings.get(MASK_SETTING_KEY)
+    tunables = {key: value for key, value in settings.items() if key != MASK_SETTING_KEY}
+    return mask, tunables
