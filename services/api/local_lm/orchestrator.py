@@ -895,7 +895,12 @@ class ConversationOrchestrator:
             chat,
             plan.operation,
             f"{request.text}\n{plan.standalone_prompt}",
-            preferred_revision_id=self._setup_verification_workflow_id(session, chat),
+            # A recipe's recorded workflow wins over selection, and setup
+            # verification wins over both: it is the run that decides whether
+            # anything works at all.
+            preferred_revision_id=(
+                self._setup_verification_workflow_id(session, chat) or request.workflow_revision_id
+            ),
         )
         profile_id = profile.id if profile else None
         vision_profile = (
