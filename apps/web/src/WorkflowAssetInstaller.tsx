@@ -1,4 +1,5 @@
 import { useState } from "react";
+import { CatalogVariantChoice } from "./CatalogVariantChoice";
 import { useMutation } from "@tanstack/react-query";
 import { Download, Search } from "lucide-react";
 import { api } from "./api";
@@ -6,6 +7,8 @@ import { ErrorCallout } from "./ErrorCallout";
 import { formatBytes } from "./format";
 import { catalogRoleFor, searchTermFor } from "./workflowAssetSearch";
 import type {
+  CatalogFileVariant,
+  CatalogPreflight,
   CatalogModel,
   WorkflowAssetReference,
   WorkflowAssetReview,
@@ -156,6 +159,12 @@ function AssetRow({
   const [query, setQuery] = useState(() => searchTermFor(asset.filename));
   const [results, setResults] = useState<CatalogModel[]>([]);
   const [source, setSource] = useState("civitai");
+  // A blocked preflight that named more than one file behind the requested
+  // name. Kept with the candidate that produced it, so choosing re-runs the
+  // same check with the choice rather than starting over.
+  const [ambiguous, setAmbiguous] = useState<
+    { candidate: WorkflowSourceCandidate; variants: CatalogFileVariant[] } | null
+  >(null);
 
   const search = useMutation({
     mutationFn: () => api.catalog(query, catalogRoleFor(asset.kind), "downloads", null, {}, source),
@@ -164,6 +173,37 @@ function AssetRow({
 
   // Preflighting a candidate produces the immutable plan the binding needs;
   // the plan is what carries hashes and sizes, never the browser.
+  /** What every preflight result means, whichever path asked for it.
+   *
+   * An ambiguous version is not an error: the version is fine and the request
+   * was under-specified, which is answerable right where it was refused. Both
+   * the searched result and the author's recorded candidate arrive here so a
+   * manually found version is as answerable as a recorded one.
+   */
+  const handlePreflight = ({
+    result,
+    candidate,
+  }: {
+    result: CatalogPreflight;
+    candidate: WorkflowSourceCandidate;
+  }) => {
+    const wanted = candidate.filename || asset.filename;
+    const variants = result.file_variants?.[wanted] ?? [];
+    if (!result.can_install && variants.length > 1) {
+      setAmbiguous({ candidate, variants });
+      return;
+    }
+    setAmbiguous(null);
+    const planId = result.install_plan?.id;
+    const artifact = exactArtifact(result);
+    if (!planId || !artifact) return;
+    onChoose({
+      reference_filename: asset.filename,
+      install_plan_id: planId,
+      artifact_path: artifact,
+    });
+  };
+
   const preflight = useMutation({
     mutationFn: (model: CatalogModel) =>
       api.catalogPreflight(
@@ -179,17 +219,19 @@ function AssetRow({
         null,
         model.provider,
         asset.kind,
-      ),
-    onSuccess: (result) => {
-      const planId = result.install_plan?.id;
-      const artifact = exactArtifact(result);
-      if (!planId || !artifact) return;
-      onChoose({
-        reference_filename: asset.filename,
-        install_plan_id: planId,
-        artifact_path: artifact,
-      });
-    },
+      ).then((result) => ({
+        result,
+        // A searched result stands in for a candidate so both paths answer an
+        // ambiguous version the same way. Nothing else distinguishes them.
+        candidate: {
+          provider: model.provider,
+          remote_id: model.remote_id,
+          revision: model.provider === "civitai" ? model.remote_id : "main",
+          filename: asset.filename,
+          url: model.remote_id,
+        } as WorkflowSourceCandidate,
+      })),
+    onSuccess: (payload) => handlePreflight(payload),
   });
 
   // The author recorded where this exact file came from. Searching a catalog
@@ -199,7 +241,13 @@ function AssetRow({
   const recorded = asset.source_candidates;
 
   const preflightCandidate = useMutation({
-    mutationFn: (candidate: WorkflowSourceCandidate) =>
+    mutationFn: ({
+      candidate,
+      fileIds = [],
+    }: {
+      candidate: WorkflowSourceCandidate;
+      fileIds?: string[];
+    }) =>
       api.catalogPreflight(
         candidate.remote_id,
         catalogRoleFor(asset.kind),
@@ -207,22 +255,17 @@ function AssetRow({
         candidate.revision ?? "main",
         // Naming the file the author pointed at keeps a multi-file repository
         // from resolving to whichever file the catalog would have picked.
-        candidate.filename ? [candidate.filename] : [asset.filename],
+        // Exactly one identity, in exactly one form: the server refuses a
+        // request that names a file both ways, and an exact id is the answer
+        // to a filename that could not settle the choice.
+        fileIds.length > 0 ? [] : [candidate.filename || asset.filename],
         asset.kind === "lora" ? "lora" : null,
         null,
         candidate.provider,
         asset.kind,
-      ),
-    onSuccess: (result) => {
-      const planId = result.install_plan?.id;
-      const artifact = exactArtifact(result);
-      if (!planId || !artifact) return;
-      onChoose({
-        reference_filename: asset.filename,
-        install_plan_id: planId,
-        artifact_path: artifact,
-      });
-    },
+        fileIds,
+      ).then((result) => ({ result, candidate })),
+    onSuccess: (payload) => handlePreflight(payload),
   });
 
   return (
@@ -250,7 +293,7 @@ function AssetRow({
                     <button
                       className="secondary compact-button"
                       disabled={preflightCandidate.isPending}
-                      onClick={() => preflightCandidate.mutate(candidate)}
+                      onClick={() => preflightCandidate.mutate({ candidate })}
                     >
                       {candidate.filename ?? candidate.remote_id}
                     </button>
@@ -259,6 +302,19 @@ function AssetRow({
                 ))}
               </ul>
             </div>
+          )}
+          {ambiguous && (
+            <CatalogVariantChoice
+              filename={ambiguous.candidate.filename || asset.filename}
+              variants={ambiguous.variants}
+              busy={preflightCandidate.isPending}
+              onChoose={(sourceFileId) =>
+                preflightCandidate.mutate({
+                  candidate: ambiguous.candidate,
+                  fileIds: [sourceFileId],
+                })
+              }
+            />
           )}
           <select
             aria-label={`Source for ${asset.filename}`}

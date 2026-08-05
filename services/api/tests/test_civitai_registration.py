@@ -15,6 +15,56 @@ pytestmark = pytest.mark.asyncio
 SHA256 = "a" * 64
 
 
+def _lora_detail() -> dict[str, Any]:
+    """One CivitAI version publishing a single LoRA file under one name."""
+    return {
+        "model": {
+            "provider": "civitai",
+            "remote_id": "201",
+            "name": "Portrait",
+            "author": "creator",
+            "pipeline_tag": "lora",
+            "tags": [],
+            "downloads": 0,
+            "likes": 0,
+            "created_at": None,
+            "last_modified": None,
+            "gated": False,
+            "private": False,
+            "architecture": "SDXL 1.0",
+            "formats": ["safetensors"],
+            "quantizations": [],
+            "license_id": None,
+            "total_size_bytes": 1024,
+            "compatibility": "supported",
+            "compatibility_reasons": [],
+            "required_runtime": "comfyui",
+            "content_rating": "general",
+        },
+        "revision": "201",
+        "files": [
+            {
+                "filename": "portrait.safetensors",
+                "size": 1024,
+                "sha256": SHA256,
+                "source_file_id": "301",
+                "source_version_id": "201",
+                "format": "SafeTensor",
+                "pickle_scan_result": "Success",
+                "virus_scan_result": "Success",
+                "metadata": {
+                    "provider": "civitai",
+                    "source_model_id": "101",
+                    "source_version_id": "201",
+                    "model_type": "LORA",
+                    "base_model": "SDXL 1.0",
+                    "trained_words": ["portrait-style"],
+                },
+            }
+        ],
+    }
+
+
 async def test_the_civitai_source_is_registered_beside_hugging_face(
     client: AsyncClient, app: FastAPI
 ) -> None:
@@ -534,3 +584,365 @@ async def test_installed_asset_manifests_feed_the_workflow_inventory(
 
     assert "portrait-style-v1.safetensors" in names
     assert "subdir/portrait-style-v1.safetensors" in names
+
+
+async def test_an_ambiguous_filename_comes_back_with_its_choices(
+    client: AsyncClient,
+    app: FastAPI,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A refusal that says "choose a variant" must say which variants.
+
+    One CivitAI version can publish the same safetensors name several times at
+    different precisions. Preflight rightly refuses to guess, and used to give
+    the caller no way to answer - an instruction that could not be followed.
+    """
+
+    def _file(file_id: str, precision: str, size: int) -> dict[str, Any]:
+        return {
+            "filename": "lustify.safetensors",
+            "size": size,
+            "sha256": f"{file_id}" + "0" * (64 - len(file_id)),
+            "source_file_id": file_id,
+            "source_version_id": "201",
+            "format": "SafeTensor",
+            "pickle_scan_result": "Success",
+            "virus_scan_result": "Success",
+            "source_file_precision": precision,
+            "metadata": {
+                "provider": "civitai",
+                "source_model_id": "101",
+                "source_version_id": "201",
+                "model_type": "Checkpoint",
+            },
+        }
+
+    detail: dict[str, Any] = {
+        "model": {
+            "provider": "civitai",
+            "remote_id": "201",
+            "name": "Lustify",
+            "author": "creator",
+            "pipeline_tag": "checkpoint",
+            "tags": [],
+            "downloads": 0,
+            "likes": 0,
+            "created_at": None,
+            "last_modified": None,
+            "gated": False,
+            "private": False,
+            "architecture": "SDXL 1.0",
+            "formats": ["safetensors"],
+            "quantizations": [],
+            "license_id": None,
+            "total_size_bytes": 3,
+            "compatibility": "supported",
+            "compatibility_reasons": [],
+            "required_runtime": "comfyui",
+            "content_rating": "general",
+        },
+        "revision": "201",
+        "files": [_file("301", "fp16", 2), _file("302", "fp8", 1)],
+    }
+
+    async def canned_inspect(
+        self: CivitaiCatalog, item_id: str, revision: str = "main", role: str | None = None
+    ) -> dict[str, Any]:
+        return detail
+
+    monkeypatch.setattr(CivitaiCatalog, "inspect", canned_inspect)
+    monkeypatch.setattr(app.state.services.settings, "civitai_token", "vaulted-token")
+
+    response = await client.post(
+        "/api/catalog/preflight",
+        params={"source": "civitai", "id": "201"},
+        json={
+            "revision": "201",
+            "role": "image",
+            "engine": "comfyui",
+            "selected_files": ["lustify.safetensors"],
+        },
+    )
+
+    assert response.status_code == 200, response.text
+    assert response.json()["can_install"] is False
+    offered = response.json()["file_variants"]["lustify.safetensors"]
+    # The resolver's own order, preferred variant first, so the chooser
+    # presents what selection would have picked at the top.
+    assert [item["source_file_id"] for item in offered] == ["302", "301"]
+    assert [item["precision"] for item in offered] == ["fp8", "fp16"]
+    assert [item["size_bytes"] for item in offered] == [1, 2]
+    # Naming a choice, not asserting a fact: no hash and no URL travel back.
+    assert all(
+        set(item) == {"source_file_id", "filename", "size_bytes", "precision"} for item in offered
+    )
+
+
+async def test_a_version_with_one_file_per_name_offers_no_choices(
+    client: AsyncClient,
+    app: FastAPI,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Offering a list of one would make every install a decision."""
+    detail = _lora_detail()
+
+    async def canned_inspect(
+        self: CivitaiCatalog, item_id: str, revision: str = "main", role: str | None = None
+    ) -> dict[str, Any]:
+        return detail
+
+    monkeypatch.setattr(CivitaiCatalog, "inspect", canned_inspect)
+    monkeypatch.setattr(app.state.services.settings, "civitai_token", "vaulted-token")
+
+    response = await client.post(
+        "/api/catalog/preflight",
+        params={"source": "civitai", "id": "201"},
+        json={
+            "revision": "201",
+            "role": "image",
+            "engine": "comfyui",
+            "selected_files": ["portrait.safetensors"],
+            "auxiliary_kind": "lora",
+        },
+    )
+
+    assert response.status_code == 200
+    assert response.json()["file_variants"] == {}
+
+
+async def test_choosing_an_exact_variant_plans_that_row_and_not_the_preferred_one(
+    client: AsyncClient,
+    app: FastAPI,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The two-step exchange the chooser actually performs.
+
+    Listing the choices proves nothing about answering with one. The retry
+    names an exact provider id and no filename at all - the two forms are
+    mutually exclusive - and it travels the workflow-owned path, where an
+    earlier guard counted filenames and refused a request that correctly
+    supplied none.
+
+    The requested id is the one ranking would not have chosen. Asking for the
+    preferred row proves nothing: it comes back whether or not anything
+    resolved the id, which is how an earlier version of this test passed while
+    the binding did not exist.
+    """
+
+    def _file(file_id: str, precision: str, size: int) -> dict[str, Any]:
+        return {
+            "filename": "lustify.safetensors",
+            "size": size,
+            "sha256": file_id[0] * 64,
+            "source_file_id": file_id,
+            "source_version_id": "201",
+            "format": "SafeTensor",
+            "pickle_scan_result": "Success",
+            "virus_scan_result": "Success",
+            "source_file_precision": precision,
+            "metadata": {
+                "provider": "civitai",
+                "source_model_id": "101",
+                "source_version_id": "201",
+                "model_type": "LORA",
+            },
+        }
+
+    detail = _lora_detail()
+    detail["files"] = [_file("301", "fp16", 2048), _file("302", "fp8", 1024)]
+
+    async def canned_inspect(
+        self: CivitaiCatalog, item_id: str, revision: str = "main", role: str | None = None
+    ) -> dict[str, Any]:
+        return detail
+
+    monkeypatch.setattr(CivitaiCatalog, "inspect", canned_inspect)
+    monkeypatch.setattr(app.state.services.settings, "civitai_token", "vaulted-token")
+
+    listed = await client.post(
+        "/api/catalog/preflight",
+        params={"source": "civitai", "id": "201"},
+        json={
+            "revision": "201",
+            "role": "image",
+            "engine": "comfyui",
+            "selected_files": ["lustify.safetensors"],
+            "workflow_reference_kind": "lora",
+        },
+    )
+    assert listed.status_code == 200, listed.text
+    offered = listed.json()["file_variants"]["lustify.safetensors"]
+    assert sorted(item["source_file_id"] for item in offered) == ["301", "302"]
+
+    chosen = await client.post(
+        "/api/catalog/preflight",
+        params={"source": "civitai", "id": "201"},
+        json={
+            "revision": "201",
+            "role": "image",
+            "engine": "comfyui",
+            "selected_files": [],
+            "selected_file_ids": ["301"],
+            "workflow_reference_kind": "lora",
+        },
+    )
+
+    assert chosen.status_code == 200, chosen.text
+    plan = chosen.json()["install_plan"]
+    assert plan is not None
+    (artifact,) = plan["artifacts_json"]
+    # The requested variant, not the one ranking prefers. Asking for the
+    # preferred row would pass whether or not anything resolved the id.
+    assert artifact["source_file_id"] == "301"
+    assert artifact["sha256"] == "3" * 64
+    assert artifact["size_bytes"] == 2048
+    # An answered request has nothing left to choose.
+    assert chosen.json()["file_variants"] == {}
+
+
+async def test_naming_a_file_both_ways_is_refused(
+    client: AsyncClient,
+    app: FastAPI,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """One identity in one form; naming it twice is a request nobody meant."""
+    detail = _lora_detail()
+
+    async def canned_inspect(
+        self: CivitaiCatalog, item_id: str, revision: str = "main", role: str | None = None
+    ) -> dict[str, Any]:
+        return detail
+
+    monkeypatch.setattr(CivitaiCatalog, "inspect", canned_inspect)
+    monkeypatch.setattr(app.state.services.settings, "civitai_token", "vaulted-token")
+
+    response = await client.post(
+        "/api/catalog/preflight",
+        params={"source": "civitai", "id": "201"},
+        json={
+            "revision": "201",
+            "role": "image",
+            "engine": "comfyui",
+            "selected_files": ["portrait.safetensors"],
+            "selected_file_ids": ["301"],
+            "workflow_reference_kind": "lora",
+        },
+    )
+
+    assert response.status_code == 422
+    assert response.json()["code"] == "workflow-asset-file-not-exact"
+
+
+async def test_an_unsafe_variant_is_never_offered_as_a_choice(
+    client: AsyncClient,
+    app: FastAPI,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A chooser that lists a row selection would refuse hands out dead ends."""
+
+    def _file(file_id: str, size: int, **overrides: Any) -> dict[str, Any]:
+        return {
+            "filename": "lustify.safetensors",
+            "size": size,
+            "sha256": file_id[0] * 64,
+            "source_file_id": file_id,
+            "source_version_id": "201",
+            "format": "SafeTensor",
+            "pickle_scan_result": "Success",
+            "virus_scan_result": "Success",
+            "source_file_precision": "fp16",
+            "metadata": {"provider": "civitai", "source_version_id": "201"},
+            **overrides,
+        }
+
+    detail = _lora_detail()
+    detail["files"] = [
+        _file("301", 2048),
+        _file("302", 1024),
+        _file("303", 512, pickle_scan_result="Danger"),
+        _file("304", 256, virus_scan_result="Infected"),
+        _file("305", 128, sha256=""),
+    ]
+
+    async def canned_inspect(
+        self: CivitaiCatalog, item_id: str, revision: str = "main", role: str | None = None
+    ) -> dict[str, Any]:
+        return detail
+
+    monkeypatch.setattr(CivitaiCatalog, "inspect", canned_inspect)
+    monkeypatch.setattr(app.state.services.settings, "civitai_token", "vaulted-token")
+
+    response = await client.post(
+        "/api/catalog/preflight",
+        params={"source": "civitai", "id": "201"},
+        json={
+            "revision": "201",
+            "role": "image",
+            "engine": "comfyui",
+            "selected_files": ["lustify.safetensors"],
+            "workflow_reference_kind": "lora",
+        },
+    )
+
+    assert response.status_code == 200, response.text
+    offered = response.json()["file_variants"]["lustify.safetensors"]
+    assert sorted(item["source_file_id"] for item in offered) == ["301", "302"]
+
+
+async def test_the_repository_path_honors_an_exact_id_too(
+    client: AsyncClient,
+    app: FastAPI,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Every assessment path carries the ids, not only the workflow-owned one.
+
+    This is the branch that resolves without a workflow template. It used to
+    call the assessor directly and would have dropped the id silently, which
+    looks exactly like a successful install of the provider's primary variant.
+    """
+
+    def _file(file_id: str, size: int) -> dict[str, Any]:
+        return {
+            "filename": "lustify.safetensors",
+            "size": size,
+            "sha256": file_id[0] * 64,
+            "source_file_id": file_id,
+            "source_version_id": "201",
+            "format": "SafeTensor",
+            "pickle_scan_result": "Success",
+            "virus_scan_result": "Success",
+            "source_file_precision": "fp16",
+            "metadata": {"provider": "civitai", "source_version_id": "201"},
+        }
+
+    detail = _lora_detail()
+    detail["files"] = [_file("301", 2048), _file("302", 1024)]
+
+    async def canned_inspect(
+        self: CivitaiCatalog, item_id: str, revision: str = "main", role: str | None = None
+    ) -> dict[str, Any]:
+        return detail
+
+    monkeypatch.setattr(CivitaiCatalog, "inspect", canned_inspect)
+    monkeypatch.setattr(app.state.services.settings, "civitai_token", "vaulted-token")
+
+    response = await client.post(
+        "/api/catalog/preflight",
+        params={"source": "civitai", "id": "201"},
+        json={
+            "revision": "201",
+            "role": "image",
+            "engine": "comfyui",
+            "selected_files": [],
+            # The row ranking would not have chosen.
+            "selected_file_ids": ["301"],
+            "auxiliary_kind": "lora",
+        },
+    )
+
+    assert response.status_code == 200, response.text
+    plan = response.json()["install_plan"]
+    assert plan is not None
+    (artifact,) = plan["artifacts_json"]
+    assert artifact["source_file_id"] == "301"
+    assert artifact["size_bytes"] == 2048
