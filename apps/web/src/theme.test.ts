@@ -1,27 +1,31 @@
-/** Who decides the light, and what wins. */
-
 import { describe, expect, it } from "vitest";
-import { isThemeChoice, roomFor } from "./theme";
 
-describe("appearance choice", () => {
-  it("lets each surface pick its own room by default", () => {
-    // The design's own answer: paper where you read, dark where you judge
-    // pictures, because neither is right for the other's work.
-    expect(roomFor("by-room", true)).toBe("reading");
-    expect(roomFor("by-room", false)).toBe("making");
+import { ROOMS, ROOM_LABELS, isMode, isRoom, type Room } from "./theme";
+
+describe("rooms and modes", () => {
+  it("treats the room and the light as separate questions", () => {
+    // The old design derived the room from the view, so a dark sidebar sat
+    // beside a paper chat and read as one interface disagreeing with itself.
+    // Neither axis may be inferred from the other, or from what is on screen.
+    expect(isRoom("north-light")).toBe(true);
+    expect(isMode("light")).toBe(true);
+    expect(isMode("dark")).toBe(true);
+    expect(isMode("by-room")).toBe(false);
+    expect(isRoom("light")).toBe(false);
   });
 
-  it("lets a person overrule the design", () => {
-    // Someone working at night wants the whole thing dark whatever prose
-    // prefers, and picking light means the studio is on paper too - worse
-    // for judging colour, and still what was asked for.
-    expect(roomFor("dark", true)).toBe("making");
-    expect(roomFor("light", false)).toBe("reading");
+  it("names every room it offers", () => {
+    // A room with no label cannot be chosen by anyone who is not reading
+    // the source.
+    for (const room of ROOMS) {
+      expect(ROOM_LABELS[room as Room]).toBeTruthy();
+    }
+    expect(Object.keys(ROOM_LABELS).sort()).toEqual([...ROOMS].sort());
   });
 
-  it("falls back to the default rather than trusting stored junk", () => {
-    expect(isThemeChoice("light")).toBe(true);
-    expect(isThemeChoice("sepia")).toBe(false);
-    expect(isThemeChoice(null)).toBe(false);
+  it("refuses anything that is not a room it ships", () => {
+    expect(isRoom("solarized")).toBe(false);
+    expect(isRoom("")).toBe(false);
+    expect(isRoom(null)).toBe(false);
   });
 });

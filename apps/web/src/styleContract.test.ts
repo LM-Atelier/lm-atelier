@@ -132,7 +132,7 @@ describe("the token layer", () => {
     const offenders: string[] = [];
     for (const rule of css.matchAll(/([^{}\n][^{}]*)\{([^}]*)\}/g)) {
       const [, selector, body] = rule;
-      if (selector.trim().startsWith("[data-room=")) continue;
+      if (/^:?root|^\[data-(room|mode)=/.test(selector.trim())) continue;
       const declarations = body.matchAll(
         /(?<![-\w])(background|background-color|color|border-color):\s*([^;]+);/g,
       );
@@ -226,7 +226,7 @@ function room(selector: string): Record<string, string> {
 describe("the two rooms", () => {
   const ROOMS = [
     { name: "making", tokens: room(":root {") },
-    { name: "reading", tokens: room('[data-room="reading"]') },
+    { name: "reading", tokens: room(':root[data-mode="light"]') },
   ];
 
   it.each(ROOMS)("keeps $name readable on every one of its surfaces", ({ tokens }) => {
@@ -269,28 +269,25 @@ describe("the two rooms", () => {
     // A token missing from one room silently inherits the other's value,
     // which is how a dark ink ends up on paper.
     const making = room(":root {");
-    const reading = room('[data-room="reading"]');
+    const reading = room(':root[data-mode="light"]');
     const themed = Object.keys(reading);
     expect(themed.filter((key) => !(key in making))).toEqual([]);
   });
 });
 
 describe("moving between rooms", () => {
-  it("puts the work surface in a room and leaves the building alone", () => {
+  it("puts the whole document in one room, and never a view in its own", () => {
     const app = readFileSync(join(SOURCE_DIR, "App.tsx"), "utf8");
-    const rooms = readFileSync(join(SOURCE_DIR, "rooms.ts"), "utf8");
-    // The work surface follows the room, and a fixed appearance choice
-    // overrides the rooms entirely - someone working at night wants the
-    // whole thing dark whatever prose prefers.
-    expect(app).toMatch(/data-room=\{roomFor\(theme, READING_ROOM_VIEWS\.has\(view\)\)\}/);
-    expect(app).toMatch(/className="app-shell" data-room=/);
-    const reading = rooms.match(/READING_ROOM_VIEWS[^=]*=\s*new Set<View>\(\[([^\]]*)\]\)/)?.[1] ?? "";
-    expect(reading).toContain('"chat"');
-    expect(reading).toContain('"settings"');
-    // Colour cannot be judged against a warm ground, so the surfaces where
-    // the work is looked at must not become paper.
-    expect(reading).not.toContain('"studio"');
-    expect(reading).not.toContain('"media"');
+    const theme = readFileSync(join(SOURCE_DIR, "theme.ts"), "utf8");
+    // A dark sidebar beside a paper chat is not "two rooms" to anyone who
+    // did not design it; it reads as one interface disagreeing with itself.
+    // Both axes go on the document, so a dialog rendered through a portal is
+    // in the same room as everything else.
+    expect(theme).toMatch(/document\.documentElement\.dataset\.room = room/);
+    expect(theme).toMatch(/document\.documentElement\.dataset\.mode = mode/);
+    // No surface may put itself in a room. The view does not get a vote.
+    expect(app).not.toMatch(/data-room=\{[^}]*view/);
+    expect(app).not.toContain("READING_ROOM_VIEWS");
   });
 
   it("gives the ground, the grain, and the header scrim to the room", () => {
@@ -306,7 +303,7 @@ describe("moving between rooms", () => {
     // every image on the page.
     expect(css).not.toMatch(/main::before/);
     expect(css).toMatch(/\.chat-header \{[^}]*background:\s*var\(--scrim\)/);
-    for (const room of [':root {', '[data-room="reading"]']) {
+    for (const room of [':root {', ':root[data-mode="light"]']) {
       const at = css.indexOf(room);
       const block = css.slice(at, css.indexOf("}", at));
       expect(block).toMatch(/--scrim:/);
@@ -344,7 +341,7 @@ describe("action hierarchy", () => {
     // 3.61 against the label sitting on it - so whether a primary button
     // passed depended on where the text fell across the sweep.
     expect(rule(".primary")).not.toMatch(/gradient/);
-    for (const room of [":root {", '[data-room="reading"]']) {
+    for (const room of [":root {", ':root[data-mode="light"]']) {
       const at = css.indexOf(room);
       const tokens = Object.fromEntries(
         [...css.slice(at, css.indexOf("}", at)).matchAll(/--([\w-]+):\s*(#[0-9a-f]{6});/g)].map(
@@ -369,7 +366,7 @@ describe("every rule, in every room", () => {
 
   const ROOMS = [
     { name: "making", tokens: room(":root {") },
-    { name: "reading", tokens: room('[data-room="reading"]') },
+    { name: "reading", tokens: room(':root[data-mode="light"]') },
   ];
 
   it.each(ROOMS)("leaves no unreadable text in the $name room", ({ tokens }) => {
@@ -419,7 +416,7 @@ describe("material character", () => {
     // The same texture behaving as the material would: darkening the fibre
     // on paper, lifting it on a dark ground.
     expect(css).toMatch(/background-blend-mode: soft-light/);
-    expect(css).toMatch(/\[data-room="reading"\] main \{ background-blend-mode: multiply/);
+    expect(css).toMatch(/\[data-mode="light"\] main \{ background-blend-mode: multiply/);
   });
 
   it("keeps the cut corner for things that hold work", () => {

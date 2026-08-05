@@ -1,53 +1,99 @@
-import { useState } from "react";
+import { useEffect, useState } from "react";
 
-/** Which light the workspace is in, and who decides it.
+/** Which room you are working in, and whether its light is on.
  *
- * The two rooms - paper for reading, dark for making - are a property of
- * what a surface is for. This is a different question: what the person at
- * the keyboard prefers, which overrides the rooms entirely when they say
- * so. Someone working at night wants the whole thing dark no matter how
- * good paper is for prose, and that is not a preference to argue with.
+ * Two independent axes. The **room** is the theme - one complete, cohesive
+ * palette - and the **mode** is whether that room is lit or dark. Every room
+ * supplies both, so changing one never changes the other.
  *
- * "By room" is the default because it is the design's own answer. The two
- * fixed choices exist because a default is not the same as a decision.
+ * An earlier design made the room a property of the view: prose on paper,
+ * the studio in the dark, on the theory that colour cannot be judged against
+ * a warm ground. It read as one interface disagreeing with itself, because a
+ * dark sidebar beside a paper chat is not "two rooms" to anyone who did not
+ * design it. Changing room is now something a person does, not something a
+ * screen does to them.
  */
-export type ThemeChoice = "by-room" | "light" | "dark";
+export type ThemeMode = "light" | "dark";
 
-export const THEME_KEY = "local-lm-theme";
+/** A room is a whole palette. Adding one means adding a block of custom
+ * properties and a name here; no rule in the stylesheet changes. */
+export const ROOMS = ["north-light"] as const;
+export type Room = (typeof ROOMS)[number];
 
-export function isThemeChoice(value: unknown): value is ThemeChoice {
-  return value === "by-room" || value === "light" || value === "dark";
+export const ROOM_LABELS: Record<Room, string> = {
+  "north-light": "North Light",
+};
+
+export const ROOM_KEY = "local-lm-room";
+export const MODE_KEY = "local-lm-mode";
+
+export function isRoom(value: unknown): value is Room {
+  return typeof value === "string" && (ROOMS as readonly string[]).includes(value);
 }
 
-export function storedTheme(): ThemeChoice {
-  const stored = localStorage.getItem(THEME_KEY);
-  return isThemeChoice(stored) ? stored : "by-room";
+export function isMode(value: unknown): value is ThemeMode {
+  return value === "light" || value === "dark";
 }
 
-/** The room a surface should render in, once the person has had their say.
- *
- * A fixed choice wins over the surface's own nature: picking "light" means
- * the studio is on paper too, which is worse for judging colour and is
- * still what was asked for.
- */
-export function roomFor(choice: ThemeChoice, prefersReading: boolean): "reading" | "making" {
-  if (choice === "light") return "reading";
-  if (choice === "dark") return "making";
-  return prefersReading ? "reading" : "making";
+export function storedRoom(): Room {
+  const stored = localStorage.getItem(ROOM_KEY);
+  return isRoom(stored) ? stored : "north-light";
 }
 
-/** The appearance choice, remembered across sessions.
+/** Dark unless asked otherwise, and asked once rather than guessed each time.
  *
- * Kept here rather than in the component so the storage key and the
- * fallback live with the type that defines them.
+ * The system preference seeds the first answer; after that the choice is the
+ * person's, because an interface that flips itself at sunset is one that
+ * changed without being asked.
  */
-export function useThemeChoice(): [ThemeChoice, (choice: ThemeChoice) => void] {
-  const [choice, setChoice] = useState<ThemeChoice>(storedTheme);
+export function storedMode(): ThemeMode {
+  const stored = localStorage.getItem(MODE_KEY);
+  if (isMode(stored)) return stored;
+  const prefersLight =
+    typeof matchMedia === "function" && matchMedia("(prefers-color-scheme: light)").matches;
+  return prefersLight ? "light" : "dark";
+}
+
+export function useRoom(): [Room, (room: Room) => void] {
+  const [room, setRoom] = useState<Room>(storedRoom);
   return [
-    choice,
+    room,
     (next) => {
-      setChoice(next);
-      localStorage.setItem(THEME_KEY, next);
+      setRoom(next);
+      localStorage.setItem(ROOM_KEY, next);
     },
   ];
+}
+
+export function useThemeMode(): [ThemeMode, (mode: ThemeMode) => void] {
+  const [mode, setMode] = useState<ThemeMode>(storedMode);
+  return [
+    mode,
+    (next) => {
+      setMode(next);
+      localStorage.setItem(MODE_KEY, next);
+    },
+  ];
+}
+
+/** The room and its light, remembered and applied to the document.
+ *
+ * Both attributes go on the document element rather than on a wrapper, so a
+ * dialog rendered through a portal is in the same room as everything else.
+ */
+export interface Appearance {
+  room: Room;
+  mode: ThemeMode;
+  setRoom: (room: Room) => void;
+  setMode: (mode: ThemeMode) => void;
+}
+
+export function useAppearance(): Appearance {
+  const [room, setRoom] = useRoom();
+  const [mode, setMode] = useThemeMode();
+  useEffect(() => {
+    document.documentElement.dataset.room = room;
+    document.documentElement.dataset.mode = mode;
+  }, [room, mode]);
+  return { room, mode, setRoom, setMode };
 }
