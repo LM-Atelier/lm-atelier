@@ -122,3 +122,59 @@ def _evidence(requirement: OmissionRequirement) -> dict[str, Any]:
         "workflow_revision_id": requirement.workflow_revision_id,
         "required_node_types": sorted(set(requirement.required_node_types)),
     }
+
+
+PENDING_KEY = "pending_source_omission"
+
+
+def record_pending_omission(
+    review: dict[str, Any],
+    *,
+    manifest_sha256: str,
+    omitted_declarations: tuple[str, ...],
+    workflow_revision_id: str,
+    required_node_types: tuple[str, ...],
+) -> dict[str, Any]:
+    """Write the candidate a later activation will be held to.
+
+    Written at preparation, when the package, the declarations, and the
+    workflow that authorized looking at them are all in hand. Activation reads
+    it rather than being told: a caller that could name its own manifest hash
+    or workflow could prove anything about anything.
+    """
+    return {
+        **review,
+        PENDING_KEY: {
+            "manifest_sha256": manifest_sha256,
+            "omitted_declarations": sorted(omitted_declarations),
+            "workflow_revision_id": workflow_revision_id,
+            "required_node_types": sorted(set(required_node_types)),
+        },
+    }
+
+
+def pending_omission_requirement(
+    install_id: str, review: dict[str, Any]
+) -> OmissionRequirement | None:
+    """The candidate stored against this install, or None when there is none.
+
+    A malformed candidate is None rather than an error: it cannot authorize
+    anything, and an activation with no omission to prove is an ordinary one.
+    """
+    candidate = review.get(PENDING_KEY)
+    if not isinstance(candidate, dict):
+        return None
+    try:
+        return OmissionRequirement(
+            install_id=install_id,
+            manifest_sha256=str(candidate.get("manifest_sha256") or ""),
+            omitted_declarations=tuple(
+                str(value) for value in candidate.get("omitted_declarations") or ()
+            ),
+            workflow_revision_id=str(candidate.get("workflow_revision_id") or ""),
+            required_node_types=tuple(
+                str(value) for value in candidate.get("required_node_types") or ()
+            ),
+        )
+    except OmissionProofError:
+        return None

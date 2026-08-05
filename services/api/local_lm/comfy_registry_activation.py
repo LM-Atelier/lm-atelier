@@ -20,8 +20,8 @@ from .domain import utcnow
 from .models import ComfyRegistryInstall
 from .source_omission_proof import (
     OmissionProofError,
-    OmissionRequirement,
     evidence_digest,
+    pending_omission_requirement,
     prove_omission,
 )
 
@@ -89,16 +89,16 @@ async def activate_comfy_registry_install(
     environment_root: Path,
     media_worker_stopped: bool,
     start_media: MediaStarter,
-    omission: OmissionRequirement | None = None,
     read_node_inventory: NodeInventoryReader | None = None,
 ) -> ComfyRegistryActivationState:
     """Activate one trusted package and restore the prior runtime if startup fails.
 
-    When `omission` is given, this activation is a trial: the package declares
-    a source dependency that was left out, and starting is not enough to
-    conclude it was unnecessary. The authorized workflow's exact required node
-    types must be present afterwards, and a runtime that cannot show them is
-    rolled back like any other failed activation.
+    When preparation recorded a pending omission against this install, the
+    activation is a trial: the package declares a source dependency that was
+    left out, and starting is not enough to conclude it was unnecessary. The
+    authorized workflow's exact required node types must be present
+    afterwards, and a runtime that cannot show them is rolled back like any
+    other failed activation.
     """
     _require_stopped(media_worker_stopped)
     install = _install(session, install_id)
@@ -163,6 +163,10 @@ async def activate_comfy_registry_install(
             "the prior media runtime was restored",
         ) from exc
     proof: dict[str, Any] | None = None
+    # From what preparation recorded against this install, never from what
+    # the caller asked for: a request that could name its own manifest hash or
+    # workflow could prove anything about anything.
+    omission = pending_omission_requirement(install_id, _install(session, install_id).review_json)
     if omission is not None:
         # After startup and after the file contract, because both of those
         # can restore on their own terms; this one restores the same way.
@@ -191,11 +195,12 @@ async def activate_comfy_registry_install(
         "activated_at": utcnow().isoformat(),
         "activation_failure_code": None,
         "runtime_files": comfy_registry_runtime_files_json(runtime_files),
-        **(
-            {"source_omission_proof": proof, "source_omission_digest": evidence_digest(proof)}
-            if proof is not None
-            else {}
-        ),
+        # Written every time, both ways. A spread that only added the keys
+        # would leave a previous activation's evidence standing on an
+        # ordinary one, which reads as a proof about a run that never
+        # happened.
+        "source_omission_proof": proof,
+        "source_omission_digest": evidence_digest(proof) if proof is not None else None,
     }
     session.commit()
     session.refresh(activated)

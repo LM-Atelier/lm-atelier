@@ -7061,6 +7061,9 @@ async def activate_registry_install(
                 environment_root=context.state_root / "registry-wheel-environments",
                 media_worker_stopped=_media_worker_truly_stopped(services),
                 start_media=services.processes.start_media,
+                # The same read startup verifies against, so a proof cannot be
+                # made about an inventory nobody else saw.
+                read_node_inventory=services.processes.comfy_node_inventory,
             )
         except ComfyRegistryActivationError as exc:
             raise _registry_activation_failure(exc) from exc
