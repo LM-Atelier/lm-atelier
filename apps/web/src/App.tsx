@@ -90,13 +90,14 @@ import { MessageField } from "./MessageField";
 import { useConfirm } from "./useConfirm";
 import { focusMainContent, roleForMode } from "./viewHelpers";
 import { ArtifactPart } from "./ArtifactPart";
-import { FirstRunSetup, SetupWizard } from "./SetupWizard";
+import { FirstRunSetup } from "./SetupWizard";
 import { ChatManager } from "./ChatManager";
 import { type View } from "./rooms";
-import type { Appearance } from "./theme";
 import { useWorkspaceChrome, type SidebarLayout } from "./sidebarLayout";
 import { SidebarResizer } from "./SidebarResizer";
 import { SidebarFooter } from "./SidebarFooter";
+import { SetupSurface } from "./SetupSurface";
+import { ThemeToggle } from "./ThemeToggle";
 import { WorkflowConsumers } from "./WorkflowConsumers";
 import { WorkflowSelector } from "./WorkflowSelector";
 import { operationForTurn, revisionForTurn, schemaForRevision } from "./turnWorkflow";
@@ -2924,7 +2925,6 @@ function Sidebar({
   onDeleteChat,
   onUpdateProject,
   onDeleteProject,
-  appearance,
   sidebar,
 }: {
   projects: Project[];
@@ -2945,7 +2945,6 @@ function Sidebar({
   onDeleteChat: (id: string, deleteGeneratedMedia: boolean) => void;
   onUpdateProject: (id: string, values: Partial<Project>) => void;
   onDeleteProject: (id: string) => void;
-  appearance: Appearance;
   sidebar: SidebarLayout;
 }) {
   const [naming, setNaming] = useState(false);
@@ -3000,7 +2999,7 @@ function Sidebar({
         {unfiled.length > 0 && <div className="sidebar-section"><div className="section-title"><span>Chats</span></div><div className="chat-list standalone">{unfiled.map(chatRow)}</div></div>}
       </div>
       {naming && <PromptDialog title="New project" label="Project name" confirmLabel="Create project" placeholder="Portrait studies" onCancel={() => setNaming(false)} onConfirm={(name) => { setNaming(false); onNewProject(name); }} />}
-      <SidebarFooter appearance={appearance} setupState={setupState} view={view} onSetup={onSetup} onView={onView} onNavigate={() => setMobileOpen(false)} />
+      <SidebarFooter setupState={setupState} view={view} onSetup={onSetup} onView={onView} onNavigate={() => setMobileOpen(false)} />
       {managedChat && <ChatManager chat={managedChat} projects={projects} onClose={() => setManagedChat(null)} onSave={(values) => { onUpdateChat(managedChat.id, values); setManagedChat(null); }} onDelete={(deleteGeneratedMedia) => { onDeleteChat(managedChat.id, deleteGeneratedMedia); setManagedChat(null); }} />}
       {managedProject && <ProjectManager project={managedProject} engines={engines} presets={presets} onClose={() => setManagedProject(null)} onSave={(values) => { onUpdateProject(managedProject.id, values); setManagedProject(null); }} onDelete={() => { onDeleteProject(managedProject.id); setManagedProject(null); }} onExport={(includeMedia) => onExportProject(managedProject.id, includeMedia)} />}
     </aside>
@@ -3379,45 +3378,32 @@ export default function App() {
   return (
     <div className="app-shell">
       <a className="skip-link" href="#main-content">Skip to main content</a>
-      <Sidebar projects={allProjects} chats={allChats} engines={engines.data ?? []} presets={presets.data ?? []} currentChatId={activeChatId} view={view} setupState={setupReadiness.data?.state} onSetup={() => setSetupOpen(true)} onChat={(id) => { setCurrentChatId(id); localStorage.setItem(CURRENT_CHAT_KEY, id); setView("chat"); focusMainContent(); }} onView={(nextView) => { setView(nextView); focusMainContent(); }} onNewChat={(projectId) => createChat.mutate(projectId)} onNewProject={(name) => createProject.mutate(name)} onExportProject={(id, includeMedia) => exportProject.mutate({ id, includeMedia })} onImportProject={(file) => importProject.mutate(file)} onUpdateChat={(id, values) => manageChat.mutate({ id, values })} onDeleteChat={(id, deleteGeneratedMedia) => deleteChat.mutate({ id, deleteGeneratedMedia })} onUpdateProject={(id, values) => updateProject.mutate({ id, values })} onDeleteProject={(id) => deleteProject.mutate(id)} appearance={appearance} sidebar={sidebar} />
+      <Sidebar projects={allProjects} chats={allChats} engines={engines.data ?? []} presets={presets.data ?? []} currentChatId={activeChatId} view={view} setupState={setupReadiness.data?.state} onSetup={() => setSetupOpen(true)} onChat={(id) => { setCurrentChatId(id); localStorage.setItem(CURRENT_CHAT_KEY, id); setView("chat"); focusMainContent(); }} onView={(nextView) => { setView(nextView); focusMainContent(); }} onNewChat={(projectId) => createChat.mutate(projectId)} onNewProject={(name) => createProject.mutate(name)} onExportProject={(id, includeMedia) => exportProject.mutate({ id, includeMedia })} onImportProject={(file) => importProject.mutate(file)} onUpdateChat={(id, values) => manageChat.mutate({ id, values })} onDeleteChat={(id, deleteGeneratedMedia) => deleteChat.mutate({ id, deleteGeneratedMedia })} onUpdateProject={(id, values) => updateProject.mutate({ id, values })} onDeleteProject={(id) => deleteProject.mutate(id)} sidebar={sidebar} />
       <main id="main-content" tabIndex={-1}>{activeContent}</main>
-      {setupOpen === true && !setupReadiness.data && (
-        <AccessibleDialog
-          title="Checking local setup"
-          eyebrow="Local models"
-          closeLabel="Close setup"
-          onClose={() => {
-            sessionStorage.setItem(SETUP_DISMISSED_KEY, "1");
-            setSetupOpen(false);
-          }}
-          className="setup-wizard"
-        >
-          {setupReadiness.error
-            ? <ErrorCallout message={setupReadiness.error.message} action={<button className="secondary compact-button" onClick={() => void setupReadiness.refetch()}>Retry</button>} />
-            : <div className="submission-progress"><LoaderCircle size={17} /><span>Checking models and runtimes…</span></div>}
-          <footer><button className="secondary" onClick={() => setSetupOpen(false)}>Not now</button></footer>
-        </AccessibleDialog>
-      )}
-      {setupVisible && setupReadiness.data && (
-        <SetupWizard
-          report={setupReadiness.data}
-          onClose={() => {
-            sessionStorage.setItem(SETUP_DISMISSED_KEY, "1");
-            setSetupOpen(false);
-          }}
-          onOpenModels={(role) => {
-            setModelLibraryRole(role);
-            setView("models");
-            setSetupOpen(false);
-            focusMainContent();
-          }}
-          onOpenWorkflows={() => {
-            setView("workflows");
-            setSetupOpen(false);
-            focusMainContent();
-          }}
-        />
-      )}
+      <ThemeToggle appearance={appearance} />
+      <SetupSurface
+        open={setupOpen}
+        visible={setupVisible}
+        report={setupReadiness.data}
+        error={setupReadiness.error}
+        onRetry={() => void setupReadiness.refetch()}
+        onDismiss={() => {
+          sessionStorage.setItem(SETUP_DISMISSED_KEY, "1");
+          setSetupOpen(false);
+        }}
+        onClose={() => setSetupOpen(false)}
+        onOpenModels={(role) => {
+          setModelLibraryRole(role);
+          setView("models");
+          setSetupOpen(false);
+          focusMainContent();
+        }}
+        onOpenWorkflows={() => {
+          setView("workflows");
+          setSetupOpen(false);
+          focusMainContent();
+        }}
+      />
       <JobsPanel />
       <GlobalNotices connected={eventsConnected} mutations={[send, regenerate, selectResponseRevision, branch, stop, cancelWorkPlan, cancelWorkStep, retryWorkStep, updateChat, createChat, createProject, exportProject, importProject, manageChat, deleteChat, updateProject, deleteProject]} />
     </div>
