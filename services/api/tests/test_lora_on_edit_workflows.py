@@ -221,3 +221,102 @@ async def test_an_edit_turn_resolves_the_stack_and_records_its_trigger_words(
     assert auxiliary["model_trigger_words_applied"] == ["portrait-style"]
     assert auxiliary["lora_trigger_words_applied"] == ["ink wash"]
     assert auxiliary["trigger_words_applied"] == ["portrait-style", "ink wash"]
+
+
+async def test_a_turn_runs_the_workflow_a_recipe_recorded(client: AsyncClient) -> None:
+    """A recipe that stores a workflow and ignores it is not a recipe.
+
+    Two edit workflows are installed. Selection would pick the newer one; the
+    turn names the other, and the run records that it used the named one.
+    """
+    from local_lm.models import WorkflowDefinition, WorkflowRevision
+
+    def _install(name: str) -> str:
+        with SessionLocal() as session:
+            definition = WorkflowDefinition(name=name, operation="image_to_image")
+            session.add(definition)
+            session.flush()
+            revision = WorkflowRevision(
+                workflow_id=definition.id,
+                version=1,
+                engine="mock",
+                api_graph_json={"1": {"class_type": "KSampler", "inputs": {}}},
+                input_schema_json={"type": "object", "properties": {}},
+                dependencies_json={},
+                trusted=True,
+            )
+            session.add(revision)
+            session.flush()
+            definition.current_revision_id = revision.id
+            session.commit()
+            return revision.id
+
+    recorded = _install("Recorded editor")
+    _install("Newer editor")
+
+    source = (
+        await client.post(
+            "/api/artifacts",
+            files={"file": ("recipe.png", b"source-image", "image/png")},
+        )
+    ).json()
+    chat = (await client.post("/api/chats", json={"title": "Recipe run"})).json()
+    response = await client.post(
+        f"/api/chats/{chat['id']}/turns",
+        json={
+            "text": "make it a watercolor",
+            "mode": "image",
+            "input_artifact_ids": [source["id"]],
+            "workflow_revision_id": recorded,
+        },
+    )
+
+    assert response.status_code == 202, response.text
+    run = await wait_for_run(client, response.json()["run"]["id"])
+    assert run["provenance_json"]["workflow"]["revision_id"] == recorded
+
+
+async def test_a_turn_naming_a_workflow_for_another_operation_refuses(
+    client: AsyncClient,
+) -> None:
+    """Quietly substituting one would be worse than saying no."""
+    from local_lm.models import WorkflowDefinition, WorkflowRevision
+
+    with SessionLocal() as session:
+        definition = WorkflowDefinition(name="Video maker", operation="text_to_video")
+        session.add(definition)
+        session.flush()
+        revision = WorkflowRevision(
+            workflow_id=definition.id,
+            version=1,
+            engine="mock",
+            api_graph_json={"1": {"class_type": "KSampler", "inputs": {}}},
+            input_schema_json={},
+            dependencies_json={},
+            trusted=True,
+        )
+        session.add(revision)
+        session.flush()
+        definition.current_revision_id = revision.id
+        session.commit()
+        wrong = revision.id
+
+    source = (
+        await client.post(
+            "/api/artifacts",
+            files={"file": ("recipe.png", b"source-image", "image/png")},
+        )
+    ).json()
+    chat = (await client.post("/api/chats", json={"title": "Wrong workflow"})).json()
+    response = await client.post(
+        f"/api/chats/{chat['id']}/turns",
+        json={
+            "text": "make it a watercolor",
+            "mode": "image",
+            "input_artifact_ids": [source["id"]],
+            "workflow_revision_id": wrong,
+        },
+    )
+
+    assert response.status_code == 422, response.text
+    assert "workflow" in response.json()["detail"].casefold()
