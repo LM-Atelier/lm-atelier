@@ -284,6 +284,20 @@ def test_trusted_launch_contract_revalidates_node_code_and_overlay(
     install.wheel_environment_path = environment.name
     install.trusted = True
     install.active = True
+    runtime_content = b'{"style": "natural"}\n'
+    runtime_path = folder / "styles" / "defaults.json"
+    runtime_path.parent.mkdir()
+    runtime_path.write_bytes(runtime_content)
+    install.review_json = {
+        **install.review_json,
+        "runtime_files": [
+            {
+                "path": "styles/defaults.json",
+                "size": len(runtime_content),
+                "sha256": hashlib.sha256(runtime_content).hexdigest(),
+            }
+        ],
+    }
     session.flush()
     report = ComfyRegistryWheelEnvironmentReport(
         closure_sha256,
@@ -354,6 +368,15 @@ def test_trusted_launch_contract_revalidates_node_code_and_overlay(
             custom_node_root=node_root,
             environment_root=environment_root,
         )
+
+    runtime_path.write_bytes(b'{"style": "changed"}\n')
+    with pytest.raises(ComfyRegistryInstallError, match="node files failed verification"):
+        trusted_comfy_registry_launch_contract(
+            session,
+            custom_node_root=node_root,
+            environment_root=environment_root,
+        )
+    runtime_path.write_bytes(runtime_content)
 
     (folder / "node.py").write_bytes(b"changed")
     with pytest.raises(ComfyRegistryInstallError, match="node files failed verification"):
