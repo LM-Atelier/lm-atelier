@@ -1025,3 +1025,7 @@ h1, h2, h3 { margin: 0; }
 .studio-extend-handle.left { left: 0; top: 12%; bottom: 12%; }
 .studio-extend-handle.right { right: 0; top: 12%; bottom: 12%; }
 .studio-tool-options { display: flex; flex-direction: column; gap: 6px; }
+/* A refusal that carries its own answer: the variants behind one filename. */
+.catalog-variant-choice { display: flex; flex-direction: column; gap: 6px; padding: 8px 10px; border: 1px solid var(--line); border-radius: 10px; background: var(--surface-2); font-size: 12px; }
+.catalog-variant-choice p { margin: 0; color: var(--ink-secondary); }
+.catalog-variant-choice ul { display: flex; flex-wrap: wrap; gap: 6px; margin: 0; padding: 0; list-style: none; }

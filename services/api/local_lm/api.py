@@ -148,7 +148,13 @@ from .orchestrator import (
 )
 from .ordered_planning import OrderedPlanConfirmationRequired
 from .platforms import list_platform_matrix
-from .preflight import assess_catalog_install, catalog_file_index
+from .preflight import (
+    ExactCivitaiFileSelectionError,
+    assess_catalog_install,
+    catalog_file_index,
+    safe_civitai_file_variants,
+    selected_catalog_file_metadata,
+)
 from .profile_service import (
     AUTO_PROFILE_ID,
     LAST_CHAT_PROFILE_KEY,
@@ -177,6 +183,7 @@ from .schemas import (
     BackupInfo,
     BoundWorkflowAssetOut,
     CatalogDetail,
+    CatalogFileVariant,
     CatalogModel,
     CatalogPage,
     CatalogPreflight,
@@ -3205,6 +3212,28 @@ async def resolve_catalog_preflight(
         ) from exc
     system = collect_system_info(services.settings)
 
+    def assess(
+        target: CatalogDetail, request: CatalogPreflightRequest | None = None
+    ) -> CatalogPreflight:
+        """Assess with the request's exact ids, every time.
+
+        A wrapper rather than the same argument at every call site: one that
+        forgets it silently plans the provider's primary variant, which looks
+        exactly like a successful install of something else.
+
+        A caller that rewrote the request - to pin a revision, or to substitute
+        template-selected filenames - passes its own version, and the ids ride
+        along with it. Dropping them there would be the same silent fallback in
+        a place nobody was looking.
+        """
+        return assess_catalog_install(
+            target,
+            request or payload,
+            services.settings,
+            system,
+            selected_file_ids=payload.selected_file_ids,
+        )
+
     async def finalize(
         result: CatalogPreflight,
         resolved_detail: CatalogDetail,
@@ -3228,11 +3257,42 @@ async def resolve_catalog_preflight(
             if path.casefold().endswith((".gguf", ".safetensors"))
         ][:8]
 
-        file_metadata, _ambiguous_files = catalog_file_index(
+        file_metadata, ambiguous_files = catalog_file_index(
             resolved_detail.files,
             provider=source,
             prefer_duplicate_variants=not payload.selected_files,
         )
+        # Offered from the resolver's own safety predicate, never a second
+        # opinion beside it: a chooser that lists a row exact selection would
+        # refuse is a chooser that hands out dead ends.
+        #
+        # Only for a request that named files and could not settle one. An
+        # answered request has nothing left to choose, and returning the
+        # chooser again would ask the same question twice.
+        variants = (
+            {
+                filename: [
+                    CatalogFileVariant(
+                        source_file_id=str(item.get("source_file_id") or ""),
+                        filename=filename,
+                        size_bytes=item.get("size") if isinstance(item.get("size"), int) else None,
+                        precision=(
+                            str(item["source_file_precision"])
+                            if isinstance(item.get("source_file_precision"), str)
+                            else None
+                        ),
+                    )
+                    for item in safe_civitai_file_variants(resolved_detail.files, filename)
+                ]
+                # Only names this request asked for. A version can publish
+                # duplicate attachments nobody selected, and offering a choice
+                # about those turns an install that succeeded into a question.
+                for filename in sorted(ambiguous_files & set(payload.selected_files))
+            }
+            if source == "civitai" and not payload.selected_file_ids
+            else {}
+        )
+        variants = {name: rows for name, rows in variants.items() if len(rows) > 1}
 
         async def fetch_prefix(path: str) -> tuple[str, bytes] | None:
             if not callable(inspect_prefix):
@@ -3328,22 +3388,20 @@ async def resolve_catalog_preflight(
                         for component in inspection.components
                     ),
                 )
-        files, _ambiguous_files = catalog_file_index(
-            resolved_detail.files,
-            provider=source,
-            prefer_duplicate_variants=not payload.selected_files,
-        )
-        selected_metadata = [
-            files.get(
-                filename,
-                {
-                    "filename": filename,
-                    "size": None,
-                    "sha256": result.expected_sha256.get(filename),
-                },
+        # The chosen row, not whichever row shares its destination. A filename
+        # index re-resolves an answered choice back to the provider's primary
+        # variant, which is the whole failure the exact id exists to prevent.
+        try:
+            selected_metadata = selected_catalog_file_metadata(
+                resolved_detail.files,
+                result.selected_files,
+                provider=source,
+                prefer_duplicate_variants=not payload.selected_files,
+                selected_file_ids=payload.selected_file_ids,
+                expected_sha256=result.expected_sha256,
             )
-            for filename in result.selected_files
-        ]
+        except ExactCivitaiFileSelectionError as exc:
+            raise api_error(422, "catalog-file-variant-invalid", str(exc)) from exc
         workflow_component_folders: dict[str, str] = {}
         workflow_contract_error: str | None = None
         if result.workflow_template_id:
@@ -3406,11 +3464,11 @@ async def resolve_catalog_preflight(
             validate_resolved(resolved)
         plan = persist_install_plan(session, resolved)
         session.commit()
-        return result.model_copy(update={"install_plan": plan})
+        return result.model_copy(update={"install_plan": plan, "file_variants": variants})
 
     if payload.auxiliary_kind:
         if payload.role != "image":
-            result = assess_catalog_install(detail, payload, services.settings, system)
+            result = assess(detail)
             return await finalize(
                 result.model_copy(
                     update={
@@ -3429,7 +3487,7 @@ async def resolve_catalog_preflight(
                 detail,
             )
         return await finalize(
-            assess_catalog_install(detail, payload, services.settings, system).model_copy(
+            assess(detail).model_copy(
                 update={
                     "comfy_paths": {COMFY_AUXILIARY_FOLDERS[payload.auxiliary_kind]: "."},
                 }
@@ -3444,15 +3502,21 @@ async def resolve_catalog_preflight(
         # repository's official four-file bundle instead: a diffusion model, an
         # unrelated LoRA, the encoder actually wanted, and a VAE already on
         # disk, together over 19GB.
-        if len(payload.selected_files) != 1:
+        # One identity, in exactly one form. A retry that answers an ambiguous
+        # filename supplies the exact provider id and no filename at all, so
+        # counting filenames alone refused the very request the refusal asked
+        # for.
+        named = len(payload.selected_files) + len(payload.selected_file_ids)
+        if named != 1:
             raise api_error(
                 422,
                 "workflow-asset-file-not-exact",
-                "A workflow asset install must name exactly one file. "
-                "Run the install check again with the exact file the workflow needs.",
+                "A workflow asset install must name exactly one file, by name or by "
+                "exact provider id. Run the install check again with the exact file "
+                "the workflow needs.",
             )
         return await finalize(
-            assess_catalog_install(detail, payload, services.settings, system),
+            assess(detail),
             detail,
         )
 
@@ -3462,13 +3526,13 @@ async def resolve_catalog_preflight(
         or services.settings.media_engine != "comfyui"
     ):
         return await finalize(
-            assess_catalog_install(detail, payload, services.settings, system),
+            assess(detail),
             detail,
         )
 
     runtime_status = services.runtimes.status("comfyui")
     if runtime_status.security_status == "blocked" and runtime_status.state != "ready":
-        result = assess_catalog_install(detail, payload, services.settings, system)
+        result = assess(detail)
         checks = [
             *[check for check in result.checks if check.id != "runtime"],
             CatalogPreflightCheck(
@@ -3499,12 +3563,7 @@ async def resolve_catalog_preflight(
             )
     if not candidates:
         resolved_payload = payload.model_copy(update={"revision": detail.revision})
-        result = assess_catalog_install(
-            detail,
-            resolved_payload,
-            services.settings,
-            system,
-        )
+        result = assess(detail, resolved_payload)
         adaptive = registry.adaptive_checkpoint(
             detail.model.remote_id,
             detail.revision,
@@ -3639,7 +3698,7 @@ async def resolve_catalog_preflight(
         size = sum(int(item.get("size") or 0) for item in bundled_files)
         viable.append((candidate.score, size, candidate, bundled_detail))
     if not viable:
-        result = assess_catalog_install(detail, payload, services.settings, system)
+        result = assess(detail)
         checks = [
             *[check for check in result.checks if check.id != "selection"],
             CatalogPreflightCheck(
@@ -3676,12 +3735,18 @@ async def resolve_catalog_preflight(
             "selected_files": template.selected_files,
         }
     )
-    result = assess_catalog_install(
-        resolved_detail,
-        resolved_payload,
-        services.settings,
-        system,
-    )
+    if payload.selected_file_ids:
+        # The template chose the files here, so an exact id was answering a
+        # question this path never asked. Refused rather than dropped: silently
+        # ignoring it would install the template's bundle while the caller
+        # believed it had named one exact variant.
+        raise api_error(
+            422,
+            "catalog-file-variant-not-applicable",
+            "This install resolves its files from a workflow template, so it cannot "
+            "also name an exact provider file. Run the install check again without one.",
+        )
+    result = assess(resolved_detail, resolved_payload)
     checks = [
         *[
             (
