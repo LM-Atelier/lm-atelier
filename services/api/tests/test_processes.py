@@ -1781,6 +1781,50 @@ async def test_media_start_uses_only_verified_registry_overlay_contract(
     assert callable(captured["ready_check"])
 
 
+def test_registry_launch_contracts_use_the_managed_registry_root(
+    settings,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:  # type: ignore[no-untyped-def]
+    supervisor = ProcessSupervisor(settings)
+    expected_root = settings.registry_dir / "registry-wheel-environments"
+    observed: list[Path] = []
+
+    def trusted_contract(_session, *, custom_node_root, environment_root):  # type: ignore[no-untyped-def]
+        assert custom_node_root == settings.custom_node_dir
+        observed.append(environment_root)
+        return ComfyRegistryLaunchContract((), (), ())
+
+    def scoped_contract(  # type: ignore[no-untyped-def]
+        _session,
+        bindings,
+        *,
+        custom_node_root,
+        environment_root,
+    ):
+        assert tuple(bindings) == scope.registry_packages
+        assert custom_node_root == settings.custom_node_dir
+        observed.append(environment_root)
+        return ComfyRegistryLaunchContract((), (), ())
+
+    monkeypatch.setattr(
+        "local_lm.comfy_registry_installs.trusted_comfy_registry_launch_contract",
+        trusted_contract,
+    )
+    monkeypatch.setattr(
+        "local_lm.comfy_registry_installs.scoped_comfy_registry_launch_contract",
+        scoped_contract,
+    )
+    scope = SimpleNamespace(
+        registry_install_ids=("registry_example",),
+        registry_packages=(SimpleNamespace(registry_install_id="registry_example"),),
+    )
+
+    supervisor._trusted_comfy_registry_contract()
+    supervisor._scoped_comfy_registry_contract(scope)  # type: ignore[arg-type]
+
+    assert observed == [expected_root, expected_root]
+
+
 async def test_media_start_refuses_registry_overlay_after_runtime_drift(
     settings,
     monkeypatch: pytest.MonkeyPatch,

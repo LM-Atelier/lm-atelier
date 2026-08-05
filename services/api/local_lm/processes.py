@@ -641,7 +641,7 @@ class ProcessSupervisor:
                 session,
                 scope.registry_packages,
                 custom_node_root=self.settings.custom_node_dir,
-                environment_root=self.settings.state_dir / "registry-wheel-environments",
+                environment_root=self.settings.registry_dir / "registry-wheel-environments",
             )
 
     def _trusted_comfy_registry_contract(self) -> ComfyRegistryLaunchContract:
@@ -652,7 +652,7 @@ class ProcessSupervisor:
             return trusted_comfy_registry_launch_contract(
                 session,
                 custom_node_root=self.settings.custom_node_dir,
-                environment_root=self.settings.state_dir / "registry-wheel-environments",
+                environment_root=self.settings.registry_dir / "registry-wheel-environments",
             )
 
     async def _verify_comfy_node_types(self, expected: tuple[str, ...]) -> None:
