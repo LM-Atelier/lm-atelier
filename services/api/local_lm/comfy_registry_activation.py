@@ -7,6 +7,13 @@ from pathlib import Path
 
 from sqlalchemy.orm import Session
 
+from .comfy_registry_archives import (
+    ComfyRegistryArchiveError,
+    capture_staged_comfy_registry_runtime_files,
+    comfy_registry_runtime_files_json,
+    parse_comfy_registry_runtime_files,
+    snapshot_staged_comfy_registry_files,
+)
 from .comfy_registry_installs import trusted_comfy_registry_launch_contract
 from .domain import utcnow
 from .models import ComfyRegistryInstall
@@ -86,6 +93,8 @@ async def activate_comfy_registry_install(
         custom_node_root=custom_node_root,
         environment_root=environment_root,
     )
+    archive_path = _archive_path(custom_node_root, install.installed_path)
+    before_start = snapshot_staged_comfy_registry_files(archive_path)
     install.active = True
     session.commit()
     try:
@@ -108,10 +117,37 @@ async def activate_comfy_registry_install(
             "Registry activation failed; the prior media runtime was restored",
         ) from exc
     activated = _install(session, install_id)
+    try:
+        review = activated.review_json
+        runtime_files = capture_staged_comfy_registry_runtime_files(
+            archive_path,
+            before_start=before_start,
+            expected_manifest_sha256=activated.manifest_sha256,
+            expected_file_count=_review_count(review, "file_count"),
+            expected_expanded_bytes=_review_count(review, "expanded_bytes"),
+            runtime_files=parse_comfy_registry_runtime_files(review.get("runtime_files")),
+        )
+    except (ComfyRegistryArchiveError, OSError, ValueError) as exc:
+        _deactivate(session, install_id, failure_code="activation_runtime_files_failed")
+        try:
+            await start_media()
+        except (Exception, asyncio.CancelledError) as restore_exc:
+            raise ComfyRegistryActivationError(
+                "activation_restore_failed",
+                "Registry activation changed its package files and the prior media "
+                "runtime could not be restored",
+            ) from restore_exc
+        raise ComfyRegistryActivationError(
+            "activation_runtime_files_failed",
+            "Registry activation changed package files outside the bounded data contract; "
+            "the prior media runtime was restored",
+        ) from exc
+    activated = _install(session, install_id)
     activated.review_json = {
         **activated.review_json,
         "activated_at": utcnow().isoformat(),
         "activation_failure_code": None,
+        "runtime_files": comfy_registry_runtime_files_json(runtime_files),
     }
     session.commit()
     session.refresh(activated)
@@ -190,6 +226,30 @@ def _deactivate(session: Session, install_id: str, *, failure_code: str) -> None
         "activation_failure_code": failure_code,
     }
     session.commit()
+
+
+def _archive_path(root: Path, installed_path: str) -> Path:
+    try:
+        managed_root = root.resolve(strict=True)
+        path = (managed_root / installed_path).resolve(strict=True)
+    except OSError as exc:
+        raise ComfyRegistryActivationError(
+            "registry_install_verification_failed",
+            "Registry package files failed verification",
+        ) from exc
+    if path.parent != managed_root:
+        raise ComfyRegistryActivationError(
+            "registry_install_verification_failed",
+            "Registry package files failed verification",
+        )
+    return path
+
+
+def _review_count(review: object, key: str) -> int:
+    value = review.get(key) if isinstance(review, dict) else None
+    if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+        raise ComfyRegistryArchiveError("invalid staged Registry archive identity")
+    return value
 
 
 async def _restore_after_cancellation(start_media: MediaStarter) -> None:

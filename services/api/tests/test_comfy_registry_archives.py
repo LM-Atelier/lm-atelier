@@ -14,6 +14,8 @@ from local_lm.comfy_registry_archives import (
     MAX_ARCHIVE_ENTRIES,
     ComfyRegistryArchiveError,
     _safe_member_path,
+    capture_staged_comfy_registry_runtime_files,
+    snapshot_staged_comfy_registry_files,
     stage_comfy_registry_archive,
     verify_staged_comfy_registry_archive,
 )
@@ -113,6 +115,106 @@ def test_runtime_python_cache_does_not_invalidate_reviewed_source(tmp_path: Path
     with pytest.raises(ComfyRegistryArchiveError, match="contents have changed"):
         verify_staged_comfy_registry_archive(
             destination,
+            expected_manifest_sha256=report.manifest_sha256,
+            expected_file_count=report.file_count,
+            expected_expanded_bytes=report.expanded_bytes,
+        )
+
+
+def test_bounded_runtime_data_is_captured_and_reverified(tmp_path: Path) -> None:
+    source = write_archive(tmp_path / "node.zip", [("main.py", b"value = 1\n")])
+    destination = tmp_path / "staged"
+    report = stage_comfy_registry_archive(source, destination)
+    before = snapshot_staged_comfy_registry_files(destination)
+    (destination / "styles").mkdir()
+    (destination / "styles" / "your_styles.json.example").write_text(
+        '{"example": true}\n', encoding="utf-8"
+    )
+    (destination / "wildcards").mkdir()
+    (destination / "wildcards" / "example.txt").write_text("blue\n", encoding="utf-8")
+
+    runtime_files = capture_staged_comfy_registry_runtime_files(
+        destination,
+        before_start=before,
+        expected_manifest_sha256=report.manifest_sha256,
+        expected_file_count=report.file_count,
+        expected_expanded_bytes=report.expanded_bytes,
+    )
+
+    assert [item.path for item in runtime_files] == [
+        "styles/your_styles.json.example",
+        "wildcards/example.txt",
+    ]
+    verify_staged_comfy_registry_archive(
+        destination,
+        expected_manifest_sha256=report.manifest_sha256,
+        expected_file_count=report.file_count,
+        expected_expanded_bytes=report.expanded_bytes,
+        runtime_files=runtime_files,
+    )
+
+    before_second_start = snapshot_staged_comfy_registry_files(destination)
+    (destination / "profiles").mkdir()
+    (destination / "profiles" / "defaults.json").write_bytes(b"{}\n")
+    runtime_files = capture_staged_comfy_registry_runtime_files(
+        destination,
+        before_start=before_second_start,
+        expected_manifest_sha256=report.manifest_sha256,
+        expected_file_count=report.file_count,
+        expected_expanded_bytes=report.expanded_bytes,
+        runtime_files=runtime_files,
+    )
+    assert [item.path for item in runtime_files] == [
+        "profiles/defaults.json",
+        "styles/your_styles.json.example",
+        "wildcards/example.txt",
+    ]
+
+    (destination / "wildcards" / "example.txt").write_text("red\n", encoding="utf-8")
+    with pytest.raises(ComfyRegistryArchiveError, match="runtime file has changed"):
+        verify_staged_comfy_registry_archive(
+            destination,
+            expected_manifest_sha256=report.manifest_sha256,
+            expected_file_count=report.file_count,
+            expected_expanded_bytes=report.expanded_bytes,
+            runtime_files=runtime_files,
+        )
+
+
+@pytest.mark.parametrize(
+    ("name", "payload"),
+    [("added.py", b"pass\n"), ("native.dll", b"binary"), ("data.txt", b"\xff")],
+)
+def test_runtime_capture_rejects_code_native_and_non_utf8_files(
+    tmp_path: Path, name: str, payload: bytes
+) -> None:
+    source = write_archive(tmp_path / "node.zip", [("main.py", b"value = 1\n")])
+    destination = tmp_path / "staged"
+    report = stage_comfy_registry_archive(source, destination)
+    before = snapshot_staged_comfy_registry_files(destination)
+    (destination / name).write_bytes(payload)
+
+    with pytest.raises(ComfyRegistryArchiveError, match="bounded"):
+        capture_staged_comfy_registry_runtime_files(
+            destination,
+            before_start=before,
+            expected_manifest_sha256=report.manifest_sha256,
+            expected_file_count=report.file_count,
+            expected_expanded_bytes=report.expanded_bytes,
+        )
+
+
+def test_runtime_capture_rejects_reviewed_source_changes(tmp_path: Path) -> None:
+    source = write_archive(tmp_path / "node.zip", [("main.py", b"value = 1\n")])
+    destination = tmp_path / "staged"
+    report = stage_comfy_registry_archive(source, destination)
+    before = snapshot_staged_comfy_registry_files(destination)
+    (destination / "main.py").write_text("value = 2\n", encoding="utf-8")
+
+    with pytest.raises(ComfyRegistryArchiveError, match="changed during startup"):
+        capture_staged_comfy_registry_runtime_files(
+            destination,
+            before_start=before,
             expected_manifest_sha256=report.manifest_sha256,
             expected_file_count=report.file_count,
             expected_expanded_bytes=report.expanded_bytes,
