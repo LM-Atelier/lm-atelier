@@ -249,6 +249,7 @@ export const api = {
     settings: Record<string, unknown>,
     idempotencyKey: string = crypto.randomUUID(),
     endpoint: string = "turns",
+    workflowRevisionId?: string,
   ) => {
     const submit = (selectedMode: RoutingMode, confirmed = false) => request<TurnAccepted>(`/api/chats/${chatId}/${endpoint}`, {
       method: "POST",
@@ -257,6 +258,7 @@ export const api = {
         mode: selectedMode,
         input_artifact_ids: inputArtifactIds,
         settings,
+        workflow_revision_id: workflowRevisionId,
         confirm_media: confirmed,
         idempotency_key: idempotencyKey,
       }),
