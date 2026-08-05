@@ -22,6 +22,11 @@ AUDITED_AWAITS = {
         "prepare_workflow_package",
         "prepare_comfy_registry_install",
     ),
+    (
+        "workflow_package_preparation.py",
+        "prepare_workflow_package",
+        "renew_comfy_registry_install_environment",
+    ),
 }
 
 

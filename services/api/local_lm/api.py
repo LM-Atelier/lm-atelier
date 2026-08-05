@@ -6543,6 +6543,7 @@ async def _run_workflow_package_preparation(
     package_id: str,
     version: str,
     node_types: tuple[str, ...],
+    renew_install_id: str | None = None,
 ) -> None:
     """One durable preparation job: lease held, worker state told truthfully."""
 
@@ -6580,6 +6581,7 @@ async def _run_workflow_package_preparation(
                 archive_downloader=ComfyRegistryArchiveDownloader(),
                 wheel_downloader=ComfyRegistryWheelDownloader(),
                 phase=report,
+                renew_install_id=renew_install_id,
             )
             with SessionLocal() as session:
                 job = session.get(Job, job_id)
@@ -6598,7 +6600,14 @@ async def _run_workflow_package_preparation(
                             "reused_wheel_environment": preparation.reused_wheel_environment,
                         },
                     }
-                    update_job_progress(job, stage="Prepared, inactive and untrusted")
+                    update_job_progress(
+                        job,
+                        stage=(
+                            "Dependencies refreshed; trust unchanged"
+                            if renew_install_id is not None
+                            else "Prepared, inactive and untrusted"
+                        ),
+                    )
                 session.commit()
     except asyncio.CancelledError:
         raise
@@ -6622,6 +6631,50 @@ async def _run_workflow_package_preparation(
     await services.scheduler.publish_job(job_id)
 
 
+def _queue_registry_preparation(
+    session: Session,
+    services: Services,
+    *,
+    package_id: str,
+    version: str,
+    node_types: tuple[str, ...],
+    renew_install_id: str | None = None,
+) -> Job:
+    payload: dict[str, Any] = {
+        "package_id": package_id,
+        "version": version,
+        "node_types": list(node_types),
+    }
+    if renew_install_id is not None:
+        payload["renew_install_id"] = renew_install_id
+    job = Job(
+        kind=JobKind.REGISTRY_PREPARE.value,
+        status=JobStatus.QUEUED.value,
+        payload_json=payload,
+        cancellable=True,
+    )
+    session.add(job)
+    session.commit()
+    task = asyncio.create_task(
+        _run_workflow_package_preparation(
+            services,
+            job.id,
+            package_id,
+            version,
+            node_types,
+            renew_install_id,
+        ),
+        name=f"registry-prepare-{job.id}",
+    )
+    _REGISTRY_PREPARE_TASKS[job.id] = task
+
+    def _discard(done: asyncio.Task[None], key: str = job.id) -> None:
+        _REGISTRY_PREPARE_TASKS.pop(key, None)
+
+    task.add_done_callback(_discard)
+    return job
+
+
 @router.post("/workflows/packages/prepare", response_model=JobOut, status_code=202)
 async def prepare_workflow_package_endpoint(
     payload: WorkflowPackagePrepareRequest, request: Request, session: SessionDep
@@ -6638,31 +6691,13 @@ async def prepare_workflow_package_endpoint(
         PreparationContext.from_settings(services.settings)
     except WorkflowPackagePreparationError as exc:
         raise api_error(422, exc.code, str(exc)) from exc
-    job = Job(
-        kind=JobKind.REGISTRY_PREPARE.value,
-        status=JobStatus.QUEUED.value,
-        payload_json={
-            "package_id": payload.package_id,
-            "version": payload.version,
-            "node_types": list(node_types),
-        },
-        cancellable=True,
+    return _queue_registry_preparation(
+        session,
+        services,
+        package_id=payload.package_id,
+        version=payload.version,
+        node_types=node_types,
     )
-    session.add(job)
-    session.commit()
-    task = asyncio.create_task(
-        _run_workflow_package_preparation(
-            services, job.id, payload.package_id, payload.version, node_types
-        ),
-        name=f"registry-prepare-{job.id}",
-    )
-    _REGISTRY_PREPARE_TASKS[job.id] = task
-
-    def _discard(done: asyncio.Task[None], key: str = job.id) -> None:
-        _REGISTRY_PREPARE_TASKS.pop(key, None)
-
-    task.add_done_callback(_discard)
-    return job
 
 
 _REGISTRY_ACTIVATION_STATUS: dict[str, int] = {
@@ -6766,6 +6801,43 @@ async def list_registry_installs(session: SessionDep) -> list[RegistryInstallOut
         )
     ).all()
     return [_registry_install_out(install) for install in installs]
+
+
+@router.post(
+    "/workflows/packages/installs/{install_id}/renew",
+    response_model=JobOut,
+    status_code=202,
+)
+async def renew_registry_install(install_id: str, request: Request, session: SessionDep) -> Job:
+    """Rebuild an inactive package's dependencies for the current media runtime."""
+
+    services = _services(request)
+    install = _loaded_registry_install(session, install_id)
+    if install.active:
+        raise api_error(
+            409,
+            "registry-install-active",
+            "Deactivate the Registry package before refreshing its dependencies",
+        )
+    if not _media_worker_truly_stopped(services):
+        raise api_error(
+            409,
+            "media-worker-running",
+            "Stop the media worker before refreshing Registry dependencies",
+        )
+    try:
+        PreparationContext.from_settings(services.settings)
+    except WorkflowPackagePreparationError as exc:
+        raise api_error(422, exc.code, str(exc)) from exc
+    node_types = _prepared_node_types(list(install.node_types_json))
+    return _queue_registry_preparation(
+        session,
+        services,
+        package_id=install.package_id,
+        version=install.package_version,
+        node_types=node_types,
+        renew_install_id=install.id,
+    )
 
 
 @router.post(
