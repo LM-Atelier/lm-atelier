@@ -1,8 +1,6 @@
 import { Settings, Sparkles } from "lucide-react";
-import { ThemeToggle } from "./ThemeToggle";
 import type { SetupReadinessReport } from "./types";
 import type { View } from "./rooms";
-import type { Appearance } from "./theme";
 
 const SETUP_LABEL: Record<string, string> = {
   ready: "Ready",
@@ -15,14 +13,12 @@ const SETUP_LABEL: Record<string, string> = {
  * tree above answers "what am I working on"; this answers "how".
  */
 export function SidebarFooter({
-  appearance,
   setupState,
   view,
   onSetup,
   onView,
   onNavigate,
 }: {
-  appearance: Appearance;
   setupState?: SetupReadinessReport["state"] | undefined;
   view: View;
   onSetup: () => void;
@@ -31,7 +27,6 @@ export function SidebarFooter({
 }) {
   return (
     <div className="sidebar-footer">
-      <ThemeToggle appearance={appearance} />
       <button onClick={() => { onSetup(); onNavigate(); }}>
         <Sparkles />Setup
         {setupState && (
