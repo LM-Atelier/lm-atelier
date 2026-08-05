@@ -1025,3 +1025,8 @@ h1, h2, h3 { margin: 0; }
 .studio-extend-handle.left { left: 0; top: 12%; bottom: 12%; }
 .studio-extend-handle.right { right: 0; top: 12%; bottom: 12%; }
 .studio-tool-options { display: flex; flex-direction: column; gap: 6px; }
+/* Recipes offered where the edit is being made, rather than in a dialog that
+   predates this view. */
+.studio-recipes { display: flex; flex-direction: column; gap: 6px; }
+.studio-recipes ul { display: flex; flex-wrap: wrap; gap: 6px; margin: 0; padding: 0; list-style: none; }
+.studio-recipes li { display: flex; align-items: center; gap: 4px; }
