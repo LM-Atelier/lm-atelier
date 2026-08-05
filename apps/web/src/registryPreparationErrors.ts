@@ -14,6 +14,10 @@ export const PREPARATION_ERROR_DESCRIPTIONS: Record<string, string> = {
   wheel_stage_identity_mismatch: "Staged wheels do not match their manifest",
   binding_incomplete: "The install record could not be completed",
   cleanup_failed: "Preparation failed and cleanup also failed; check the logs",
+  registry_install_active: "Deactivate the package before refreshing its dependencies",
+  registry_install_identity_changed: "The package changed upstream; remove and review it again",
+  registry_install_review_missing: "Review the package again before refreshing its dependencies",
+  renewal_cleanup_pending: "A previous dependency refresh still needs cleanup",
 };
 
 export function preparationErrorDescription(code: string): string {
