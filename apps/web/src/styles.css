@@ -195,6 +195,98 @@
   --danger-ink: var(--state-danger-text);
 }
 
+/* Blue Hour: the second room, and the reason the two-axis system exists.
+   North Light is a warm studio at midday; this is the same studio in the
+   half hour after sunset, when the window has gone cool and the lamps have
+   not won yet. Terracotta becomes verdigris, because a warm accent on a cool
+   ground is the clash the room concept was meant to end.
+
+   A whole palette, both modes, declared after the base so document order
+   resolves it - not specificity, which is how a half-applied room ends up
+   with one wrong surface nobody can find. Every token the base declares is
+   declared here too: a missing one silently inherits the other room's value,
+   which is exactly how a dark ink ends up on paper. */
+:root[data-room="blue-hour"] {
+  --surface-0: #0d1017;
+  --surface-1: #141926;
+  --surface-2: #1d2434;
+  --surface-3: #272f42;
+  --ink-primary: #e8ecf5;
+  --ink-secondary: #bfc7d8;
+  --ink-muted: #98a2b8;
+  --line: #333c52;
+  --line-control: #8590a8;
+  --accent-warm: #5f9ea0;
+  --accent-warm-text: #7fb8ba;
+  --accent-warm-soft: #8cc4c6;
+  --accent-fill: #3c6f8f;
+  --accent-ink: #e8ecf5;
+  --info: #6f8fd0;
+  --info-soft: #9db2e0;
+  --state-danger: #d9707d;
+  --state-danger-text: #dd7d89;
+  --state-success: #67ad92;
+  --state-success-text: #72b79c;
+  --focus-ring: #9db2e0;
+  --danger-surface: #38202a;
+  --danger-ink-on-surface: #ffbcc4;
+  --warning-surface: #33291a;
+  --warning-ink: #e6c982;
+  --info-surface: #172438;
+  --info-ink: #b3c4e6;
+  --success-surface: #16302a;
+  --success-ink: #8fdcc0;
+  --link: #9db2e0;
+  --scrim: #0d1017c7;
+  --blue: #3c6f8f;
+}
+
+:root[data-room="blue-hour"][data-mode="light"] {
+  --surface-0: #eef1f6;
+  --surface-1: #e5eaf2;
+  --surface-2: #d9e0ea;
+  --surface-3: #ccd5e2;
+  --ink-primary: #141a24;
+  --ink-secondary: #39404d;
+  --ink-muted: #525a68;
+  --line: #b6c0ce;
+  --line-control: #6c7688;
+  --accent-warm: #286a6c;
+  --accent-warm-text: #245f61;
+  --accent-warm-soft: #2f7d80;
+  --accent-fill: #25566f;
+  --accent-ink: #eef1f6;
+  --info: #2f5490;
+  --info-soft: #26456f;
+  --state-danger: #a33a34;
+  --state-danger-text: #9c352f;
+  --state-success: #2b6349;
+  --state-success-text: #295e45;
+  --focus-ring: #1f4fa8;
+  --danger-surface: #f6e0df;
+  --danger-ink-on-surface: #8e2f2a;
+  --warning-surface: #f3ead7;
+  --warning-ink: #6b4712;
+  --info-surface: #dce5f3;
+  --info-ink: #24405f;
+  --success-surface: #dfeee7;
+  --success-ink: #21563f;
+  --link: #28497e;
+  --scrim: #eef1f6d6;
+  --blue: #25566f;
+  /* Paper casts a different shadow than a dark room, in this room too. */
+  --shadow: #1a243026;
+  --edge-light: #ffffffb3;
+  --well: #d9e0ea;
+  --amber: #7a5410;
+  --warning-line: #a5854a;
+  --lift: 0 8px 20px #1a24301f, inset 0 1px 0 var(--edge-light);
+  --ink: var(--ink-primary);
+  --ink-2: var(--ink-muted);
+  --ink-3: var(--ink-muted);
+  --danger-ink: var(--state-danger-text);
+}
+
 * { box-sizing: border-box; }
 html, body, #root { width: 100%; height: 100%; margin: 0; }
 body {
