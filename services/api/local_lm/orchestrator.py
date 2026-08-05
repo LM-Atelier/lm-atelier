@@ -147,6 +147,7 @@ from .studio_masks import (
     parse_mask_setting,
     split_mask_setting,
 )
+from .media_references import exceeds_capacity
 from .vision import PreparedVisualContext, VisionContextService, VisionInputError
 from .visual_prompt_compiler import (
     compilation_provenance,
@@ -1043,6 +1044,22 @@ class ConversationOrchestrator:
                 parse_mask_setting(effective_settings, workflow_revision.input_schema_json)
             except MaskContractError as exc:
                 raise ValueError(str(exc)) from exc
+        # Same reasoning as the mask above: the workflow is known here, so a
+        # turn handing over more references than the graph can consume refuses
+        # now rather than producing a picture conditioned on the first and
+        # saying nothing. Silently using one of four is indistinguishable from
+        # a bad model, which is the worst kind of failure to debug.
+        if plan.operation != Operation.TEXT and workflow_revision:
+            over = exceeds_capacity(
+                workflow_revision.api_graph_json, len(resolved_input_ids)
+            )
+            if over is not None:
+                raise ValueError(
+                    f"This workflow uses {over or 'no'} reference image"
+                    f"{'' if over == 1 else 's'}, and {len(resolved_input_ids)} were "
+                    "attached. Choose a workflow built for multiple references, or "
+                    "attach fewer."
+                )
         lora_resolution = None
         if plan.operation != Operation.TEXT and effective_settings.get("loras"):
             if not workflow_revision:
