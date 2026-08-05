@@ -1,4 +1,4 @@
-import { PanelLeftClose, Settings, Sparkles } from "lucide-react";
+import { Settings, Sparkles } from "lucide-react";
 import { ThemeToggle } from "./ThemeToggle";
 import type { SetupReadinessReport } from "./types";
 import type { View } from "./rooms";
@@ -16,7 +16,6 @@ const SETUP_LABEL: Record<string, string> = {
  */
 export function SidebarFooter({
   appearance,
-  onToggleSidebar,
   setupState,
   view,
   onSetup,
@@ -24,7 +23,6 @@ export function SidebarFooter({
   onNavigate,
 }: {
   appearance: Appearance;
-  onToggleSidebar: () => void;
   setupState?: SetupReadinessReport["state"] | undefined;
   view: View;
   onSetup: () => void;
@@ -34,14 +32,6 @@ export function SidebarFooter({
   return (
     <div className="sidebar-footer">
       <ThemeToggle appearance={appearance} />
-      <button
-        className="icon-button"
-        aria-label="Hide sidebar"
-        title="Hide sidebar"
-        onClick={onToggleSidebar}
-      >
-        <PanelLeftClose size={15} aria-hidden="true" />
-      </button>
       <button onClick={() => { onSetup(); onNavigate(); }}>
         <Sparkles />Setup
         {setupState && (

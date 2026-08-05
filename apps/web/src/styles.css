@@ -214,9 +214,12 @@ button:focus-visible, a:focus-visible, input:focus-visible, textarea:focus-visib
 .sidebar-resizer:hover, .sidebar-resizer:focus-visible { background: var(--accent-warm); border-left-color: var(--accent-warm); outline: none; }
 /* While dragging, nothing else should decide it is being selected. */
 body.resizing-sidebar { user-select: none; cursor: col-resize; }
-[data-sidebar="collapsed"] .sidebar { display: none; }
-/* The way back cannot live inside the thing that is hidden. */
-.reveal-sidebar { position: fixed; top: 12px; left: 10px; z-index: 5; background: var(--surface-2); border: 1px solid var(--line); }
+/* Zero width, not `display: none`. Removing it from the grid shifted every
+   remaining child one track left, so `main` landed in the `auto` column and
+   collapsed to nothing - a blank page instead of a hidden sidebar. */
+[data-sidebar="collapsed"] .sidebar { padding-left: 0; padding-right: 0; border-right: 0; }
+/* Collapsed, the edge is the only way back, so it is easier to hit. */
+[data-sidebar="collapsed"] .sidebar-resizer { width: 9px; background: var(--surface-2); }
 .sidebar { background: var(--surface-1); border-right: 1px solid var(--border); display: flex; flex-direction: column; min-width: 0; padding: 18px 14px 14px; overflow: hidden; }
 .brand { display: flex; align-items: center; gap: 12px; padding: 0 7px 20px; font-size: 20px; font-weight: 700; letter-spacing: -.02em; }
 .brand > span { display: grid; line-height: 1.05; font-family: "Source Serif 4", "Iowan Old Style", "Palatino Linotype", Charter, Georgia, "Times New Roman", serif; }
@@ -988,3 +991,12 @@ h1, h2, h3 { margin: 0; }
 .sidebar-pin { opacity: 0; transition: opacity var(--quick) var(--ease); }
 .sidebar-chat-row:hover .sidebar-pin, .sidebar-pin:focus-visible { opacity: 1; }
 .sidebar-pin.pinned { opacity: 1; color: var(--accent-warm-text); }
+
+/* Choosing which version of a model to install. The rows are the decision,
+   so they get the room; the dialog only frames them. */
+.version-chooser { width: min(640px, 92vw); }
+.version-list { display: grid; gap: 8px; list-style: none; padding: 0; margin: 0; }
+.version-list > li { display: grid; grid-template-columns: minmax(0, 1fr) auto auto; align-items: center; gap: 12px; padding: 11px 13px; border: 1px solid var(--line); border-radius: var(--cut-small); background: var(--surface-1); }
+.version-list strong { display: block; }
+.version-list small { color: var(--ink-muted); }
+.version-changelog { margin: 6px 0 0; color: var(--ink-secondary); font-size: 13px; }
