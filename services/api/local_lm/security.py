@@ -5,10 +5,11 @@ import hmac
 import secrets
 from pathlib import Path
 
-from fastapi import HTTPException, Request, Response, WebSocket, status
+from fastapi import Request, Response, WebSocket, status
 from fastapi.responses import JSONResponse
 from starlette.types import ASGIApp, Message, Receive, Scope, Send
 
+from .api_errors import api_error
 from .config import Settings
 
 SESSION_COOKIE = "local_lm_session"
@@ -280,9 +281,10 @@ class SessionSecurity:
 
     def validate_origin(self, origin: str | None) -> None:
         if not self._valid_origin(origin):
-            raise HTTPException(
-                status_code=status.HTTP_403_FORBIDDEN,
-                detail="untrusted browser origin",
+            raise api_error(
+                status.HTTP_403_FORBIDDEN,
+                "origin-untrusted",
+                "untrusted browser origin",
             )
 
     def validate_request(self, request: Request) -> None:
@@ -290,13 +292,11 @@ class SessionSecurity:
             return
         self.validate_origin(request.headers.get("origin"))
         if not self._valid_cookie(request.cookies.get(SESSION_COOKIE)):
-            raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="session required")
+            raise api_error(status.HTTP_401_UNAUTHORIZED, "session-required", "session required")
         if request.method not in {"GET", "HEAD", "OPTIONS"}:
             csrf = request.headers.get(CSRF_HEADER)
             if not csrf or not hmac.compare_digest(csrf, self.csrf_token):
-                raise HTTPException(
-                    status_code=status.HTTP_403_FORBIDDEN, detail="CSRF check failed"
-                )
+                raise api_error(status.HTTP_403_FORBIDDEN, "csrf-invalid", "CSRF check failed")
 
     async def validate_websocket(self, websocket: WebSocket) -> bool:
         if self.settings.dev and websocket.client and websocket.client.host == "testclient":
