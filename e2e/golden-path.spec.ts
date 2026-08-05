@@ -128,16 +128,19 @@ test("persists a streamed text and contextual image golden path", async ({
     });
   }
 
-  // From the document body, explicitly. The assertion is that the first tab
-  // stop is the skip link, and that only means something if the starting
-  // point is known: dismissing the setup dialog leaves focus wherever the
-  // dialog put it back, and any late re-render can move it again. Pressing
-  // Tab from "whatever settled" tested the render timing, not the tab order,
-  // and it passed for a long time by winning that race rather than by being
-  // right.
-  await page.locator("body").evaluate((body: HTMLElement) => {
+  // Tab resumes from the sequential focus navigation starting point, which a
+  // blur does not reset: after the setup dialog closes, that point is wherever
+  // the dialog left it, and Tab walks forward from there. The assertion is
+  // that the first tab stop is the skip link, so the walk has to start at the
+  // top of the document.
+  //
+  // Focusing the root element is what moves it. It passed for a long time
+  // because the elements after that point happened to be exhausted, so Tab
+  // wrapped around to the beginning - adding one control anywhere later was
+  // enough to stop the wrap and land on it instead.
+  await page.evaluate(() => {
     (document.activeElement as HTMLElement | null)?.blur();
-    body.focus();
+    document.documentElement.focus();
   });
   await page.keyboard.press("Tab");
   await expect(page.getByRole("link", { name: "Skip to main content" })).toBeFocused();
