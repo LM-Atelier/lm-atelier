@@ -302,6 +302,12 @@ class TurnRequest(ApiModel):
     settings: dict[str, Any] = Field(default_factory=dict)
     ordered_settings: dict[str, dict[str, Any]] = Field(default_factory=dict, max_length=3)
     output_count: int | None = Field(default=None, ge=1, le=16)
+    # The workflow a recipe recorded. A recipe that stored which workflow made
+    # a result and then ran against whichever one happens to be current is not
+    # a recipe; it is the instruction with extra fields. An id that does not
+    # match this operation, engine, or install is not honored - the turn
+    # refuses rather than quietly substituting.
+    workflow_revision_id: str | None = Field(default=None, max_length=40)
     confirm_media: bool = False
     idempotency_key: str | None = Field(default=None, max_length=200)
 
