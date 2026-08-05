@@ -23,10 +23,10 @@ from .adapters.base import ChatRequest, MediaEvent, MediaRequest
 from .artifacts import ArtifactStore
 from .auxiliary_assets import (
     LORA_GRAPH_TRANSFORM_VERSION,
+    prompt_trigger_word_provenance,
     resolve_lora_stack,
     select_automatic_lora_stack,
     transform_lora_graph,
-    trigger_words_to_apply,
     workflow_lora_extension,
 )
 from .capability_evidence import (
@@ -85,6 +85,7 @@ from .image_edit_verification import (
     image_edit_verification_job_id,
     parse_image_edit_verification_assessment,
 )
+from .media_references import exceeds_capacity
 from .model_planner import revision_accepts_install, revision_declares_a_model
 from .models import (
     Artifact,
@@ -894,7 +895,12 @@ class ConversationOrchestrator:
             chat,
             plan.operation,
             f"{request.text}\n{plan.standalone_prompt}",
-            preferred_revision_id=self._setup_verification_workflow_id(session, chat),
+            # A recipe's recorded workflow wins over selection, and setup
+            # verification wins over both: it is the run that decides whether
+            # anything works at all.
+            preferred_revision_id=(
+                self._setup_verification_workflow_id(session, chat) or request.workflow_revision_id
+            ),
         )
         profile_id = profile.id if profile else None
         vision_profile = (
@@ -947,8 +953,6 @@ class ConversationOrchestrator:
         # the workflow is known and can say whether it accepts one at all.
         mask, tunables = split_mask_setting(request.settings)
         request_settings = validate_settings(tunables, request_fields)
-        if mask is not None:
-            request_settings[MASK_SETTING_KEY] = mask
         project = session.get(Project, chat.project_id) if chat.project_id else None
         default_preset = self._default_preset(session, plan.operation)
         project_preset = self._bound_preset(session, project, role)
@@ -980,6 +984,15 @@ class ConversationOrchestrator:
             ),
             turn_overrides=request_settings,
         )
+        # After resolution, not before. The hierarchy validates its turn layer
+        # a second time on the way through, so a selection put back into the
+        # request settings is refused there as unknown even though it was
+        # correctly split out a few lines above - which is what kept every
+        # masked edit failing with "unsupported settings: mask". A selection
+        # has no defaults to inherit and no scope to resolve, so it belongs
+        # to the resolved settings rather than to the layers being resolved.
+        if mask is not None:
+            effective_settings[MASK_SETTING_KEY] = mask
         lora_selection = None
         lora_setting_layers = (
             profile.load_settings_json if profile else {},
@@ -1043,6 +1056,20 @@ class ConversationOrchestrator:
                 parse_mask_setting(effective_settings, workflow_revision.input_schema_json)
             except MaskContractError as exc:
                 raise ValueError(str(exc)) from exc
+        # Same reasoning as the mask above: the workflow is known here, so a
+        # turn handing over more references than the graph can consume refuses
+        # now rather than producing a picture conditioned on the first and
+        # saying nothing. Silently using one of four is indistinguishable from
+        # a bad model, which is the worst kind of failure to debug.
+        if plan.operation != Operation.TEXT and workflow_revision:
+            over = exceeds_capacity(workflow_revision.api_graph_json, len(resolved_input_ids))
+            if over is not None:
+                raise ValueError(
+                    f"This workflow uses {over or 'no'} reference image"
+                    f"{'' if over == 1 else 's'}, and {len(resolved_input_ids)} were "
+                    "attached. Choose a workflow built for multiple references, or "
+                    "attach fewer."
+                )
         lora_resolution = None
         if plan.operation != Operation.TEXT and effective_settings.get("loras"):
             if not workflow_revision:
@@ -1345,6 +1372,11 @@ class ConversationOrchestrator:
                         depends_on_step_id=pending_dependency_step_id,
                     )
                 )
+            trigger_word_provenance = prompt_trigger_word_provenance(
+                model_provenance if plan.operation != Operation.TEXT else None,
+                lora_resolution.provenance if lora_resolution else [],
+                per_output_prompt,
+            )
             provenance: dict[str, Any] = {
                 "routing": plan.model_dump(mode="json"),
                 **({"visual_prompt": visual_prompt} if visual_prompt else {}),
@@ -1386,18 +1418,23 @@ class ConversationOrchestrator:
                 ),
                 "auxiliary_assets": (
                     {
-                        "lora_stack": lora_resolution.provenance,
-                        "selection": (
-                            lora_selection.provenance if lora_selection else {"mode": "explicit"}
+                        **(
+                            {
+                                "lora_stack": lora_resolution.provenance,
+                                "selection": (
+                                    lora_selection.provenance
+                                    if lora_selection
+                                    else {"mode": "explicit"}
+                                ),
+                                "graph_transform_version": LORA_GRAPH_TRANSFORM_VERSION,
+                                "effective_graph_sha256": lora_resolution.graph_sha256,
+                            }
+                            if lora_resolution
+                            else {}
                         ),
-                        "graph_transform_version": LORA_GRAPH_TRANSFORM_VERSION,
-                        "effective_graph_sha256": lora_resolution.graph_sha256,
-                        "trigger_words_applied": trigger_words_to_apply(
-                            lora_resolution.provenance,
-                            plan.standalone_prompt,
-                        ),
+                        **trigger_word_provenance,
                     }
-                    if lora_resolution
+                    if lora_resolution or trigger_word_provenance["trigger_words_applied"]
                     else None
                 ),
                 **(
@@ -1990,6 +2027,11 @@ class ConversationOrchestrator:
                 else None
             )
             effective_preset = resolved["effective_preset"]
+            trigger_word_provenance = prompt_trigger_word_provenance(
+                model_provenance if operation != Operation.TEXT else None,
+                (resolved["lora_resolution"].provenance if resolved["lora_resolution"] else []),
+                step_intent.prompt,
+            )
             run = Run(
                 idempotency_key=request.idempotency_key if ordinal == 1 else None,
                 chat_id=chat.id,
@@ -2040,20 +2082,26 @@ class ConversationOrchestrator:
                     ),
                     "auxiliary_assets": (
                         {
-                            "lora_stack": resolved["lora_resolution"].provenance,
-                            "selection": (
-                                resolved["lora_selection"].provenance
-                                if resolved["lora_selection"]
-                                else {"mode": "explicit"}
+                            **(
+                                {
+                                    "lora_stack": resolved["lora_resolution"].provenance,
+                                    "selection": (
+                                        resolved["lora_selection"].provenance
+                                        if resolved["lora_selection"]
+                                        else {"mode": "explicit"}
+                                    ),
+                                    "graph_transform_version": LORA_GRAPH_TRANSFORM_VERSION,
+                                    "effective_graph_sha256": resolved[
+                                        "lora_resolution"
+                                    ].graph_sha256,
+                                }
+                                if resolved["lora_resolution"]
+                                else {}
                             ),
-                            "graph_transform_version": LORA_GRAPH_TRANSFORM_VERSION,
-                            "effective_graph_sha256": resolved["lora_resolution"].graph_sha256,
-                            "trigger_words_applied": trigger_words_to_apply(
-                                resolved["lora_resolution"].provenance,
-                                step_intent.prompt,
-                            ),
+                            **trigger_word_provenance,
                         }
                         if resolved["lora_resolution"]
+                        or trigger_word_provenance["trigger_words_applied"]
                         else None
                     ),
                 },
@@ -6299,6 +6347,28 @@ class ConversationOrchestrator:
                 continue
             generic.append(revision)
         return generic[0] if generic else None
+
+    def installed_edit_input_schemas(self, session: Session) -> list[dict[str, Any] | None]:
+        """Input schemas of every edit workflow this engine could actually run.
+
+        Every installed one rather than the single one selection would pick:
+        the question a tool asks is whether anything here can honor it, and a
+        workflow that is not first in line is still installed.
+        """
+
+        definitions = session.scalars(
+            select(WorkflowDefinition).where(
+                WorkflowDefinition.operation == Operation.IMAGE_TO_IMAGE.value
+            )
+        ).all()
+        schemas: list[dict[str, Any] | None] = []
+        for definition in definitions:
+            if not definition.current_revision_id:
+                continue
+            revision = session.get(WorkflowRevision, definition.current_revision_id)
+            if revision and self._workflow_matches_engine(revision):
+                schemas.append(revision.input_schema_json)
+        return schemas
 
     def legacy_workflow_revision(
         self,

@@ -195,6 +195,98 @@
   --danger-ink: var(--state-danger-text);
 }
 
+/* Blue Hour: the second room, and the reason the two-axis system exists.
+   North Light is a warm studio at midday; this is the same studio in the
+   half hour after sunset, when the window has gone cool and the lamps have
+   not won yet. Terracotta becomes verdigris, because a warm accent on a cool
+   ground is the clash the room concept was meant to end.
+
+   A whole palette, both modes, declared after the base so document order
+   resolves it - not specificity, which is how a half-applied room ends up
+   with one wrong surface nobody can find. Every token the base declares is
+   declared here too: a missing one silently inherits the other room's value,
+   which is exactly how a dark ink ends up on paper. */
+:root[data-room="blue-hour"] {
+  --surface-0: #0d1017;
+  --surface-1: #141926;
+  --surface-2: #1d2434;
+  --surface-3: #272f42;
+  --ink-primary: #e8ecf5;
+  --ink-secondary: #bfc7d8;
+  --ink-muted: #98a2b8;
+  --line: #333c52;
+  --line-control: #8590a8;
+  --accent-warm: #5f9ea0;
+  --accent-warm-text: #7fb8ba;
+  --accent-warm-soft: #8cc4c6;
+  --accent-fill: #3c6f8f;
+  --accent-ink: #e8ecf5;
+  --info: #6f8fd0;
+  --info-soft: #9db2e0;
+  --state-danger: #d9707d;
+  --state-danger-text: #dd7d89;
+  --state-success: #67ad92;
+  --state-success-text: #72b79c;
+  --focus-ring: #9db2e0;
+  --danger-surface: #38202a;
+  --danger-ink-on-surface: #ffbcc4;
+  --warning-surface: #33291a;
+  --warning-ink: #e6c982;
+  --info-surface: #172438;
+  --info-ink: #b3c4e6;
+  --success-surface: #16302a;
+  --success-ink: #8fdcc0;
+  --link: #9db2e0;
+  --scrim: #0d1017c7;
+  --blue: #3c6f8f;
+}
+
+:root[data-room="blue-hour"][data-mode="light"] {
+  --surface-0: #eef1f6;
+  --surface-1: #e5eaf2;
+  --surface-2: #d9e0ea;
+  --surface-3: #ccd5e2;
+  --ink-primary: #141a24;
+  --ink-secondary: #39404d;
+  --ink-muted: #525a68;
+  --line: #b6c0ce;
+  --line-control: #6c7688;
+  --accent-warm: #286a6c;
+  --accent-warm-text: #245f61;
+  --accent-warm-soft: #2f7d80;
+  --accent-fill: #25566f;
+  --accent-ink: #eef1f6;
+  --info: #2f5490;
+  --info-soft: #26456f;
+  --state-danger: #a33a34;
+  --state-danger-text: #9c352f;
+  --state-success: #2b6349;
+  --state-success-text: #295e45;
+  --focus-ring: #1f4fa8;
+  --danger-surface: #f6e0df;
+  --danger-ink-on-surface: #8e2f2a;
+  --warning-surface: #f3ead7;
+  --warning-ink: #6b4712;
+  --info-surface: #dce5f3;
+  --info-ink: #24405f;
+  --success-surface: #dfeee7;
+  --success-ink: #21563f;
+  --link: #28497e;
+  --scrim: #eef1f6d6;
+  --blue: #25566f;
+  /* Paper casts a different shadow than a dark room, in this room too. */
+  --shadow: #1a243026;
+  --edge-light: #ffffffb3;
+  --well: #d9e0ea;
+  --amber: #7a5410;
+  --warning-line: #a5854a;
+  --lift: 0 8px 20px #1a24301f, inset 0 1px 0 var(--edge-light);
+  --ink: var(--ink-primary);
+  --ink-2: var(--ink-muted);
+  --ink-3: var(--ink-muted);
+  --danger-ink: var(--state-danger-text);
+}
+
 * { box-sizing: border-box; }
 html, body, #root { width: 100%; height: 100%; margin: 0; }
 body {
@@ -371,7 +463,12 @@ h1, h2, h3 { margin: 0; }
 @keyframes spin { to { transform: rotate(360deg); } }
 @keyframes progress-indeterminate { from { transform: translateX(-110%); } to { transform: translateX(300%); } }
 .media-card { max-width: 720px; margin: 8px 0; border: 1px solid var(--border); background: var(--surface-0); border-radius: 14px; overflow: hidden; }
-.media-card img, .media-card video { width: 100%; max-height: 620px; display: block; object-fit: contain; background: var(--surface-0); }
+.media-card img, .media-card video { width: 100%; max-height: 620px; display: block; object-fit: contain; background: transparent; }
+/* The frame stacks a blurred copy under the picture, so a portrait in a wide
+   card is bounded by its own colours rather than by flat bars. */
+.media-frame { position: relative; overflow: hidden; background: var(--surface-0); }
+.media-frame > img:not(.media-backdrop) { position: relative; z-index: 1; }
+.media-backdrop { position: absolute; inset: 0; width: 100%; height: 100%; object-fit: cover; filter: blur(28px) saturate(1.15); transform: scale(1.15); opacity: .55; }
 .media-card.preview { border-color: var(--accent); opacity: .82; }
 .media-card.preview img { filter: saturate(.82); }
 .media-card figcaption { display: flex; align-items: center; gap: 6px; padding: 9px 12px; color: var(--ink-secondary); font-size: 12px; }
@@ -969,6 +1066,10 @@ h1, h2, h3 { margin: 0; }
 .workflow-consumers ul { display: grid; gap: 2px; margin: 0; padding-left: 16px; color: var(--ink-secondary); font-size: 12px; }
 .workflow-consumers small { color: var(--ink-muted); font-size: 11px; }
 .app-shell { background: var(--surface-0); color: var(--ink-primary); }
+/* Floats over the work rather than living in a panel that can be hidden:
+   the light is a property of the whole workspace, so its control belongs to
+   the screen rather than to the sidebar. */
+.theme-toggle { position: fixed; right: 14px; bottom: 14px; z-index: 6; background: var(--surface-2); border: 1px solid var(--line); border-radius: 999px; padding: 4px; box-shadow: var(--lift); }
 .theme-toggle { display: flex; gap: 2px; padding: 4px 0 6px; }
 .theme-toggle .icon-button { width: 28px; height: 28px; }
 .studio-open-image { display: grid; gap: 8px; justify-items: center; text-align: center; align-content: center; height: 100%; border: 2px dashed var(--line-control); border-radius: 14px; background: var(--surface-1); color: var(--ink-muted); padding: 24px; }
@@ -1000,3 +1101,28 @@ h1, h2, h3 { margin: 0; }
 .version-list strong { display: block; }
 .version-list small { color: var(--ink-muted); }
 .version-changelog { margin: 6px 0 0; color: var(--ink-secondary); font-size: 13px; }
+/* A tool that cannot run says so where the work would have gone. */
+.studio-tool-guidance { margin: 0; padding: 8px 10px; border: 1px solid var(--line); border-radius: 10px; background: var(--surface-2); color: var(--ink-secondary); font-size: 12px; }
+.icon-button.unavailable { opacity: .55; }
+/* A button that reads as part of the sentence it sits in, because the way out
+   of a guidance line is the line itself. */
+.link-button { display: inline; padding: 0; border: 0; background: none; color: var(--accent); font: inherit; text-decoration: underline; cursor: pointer; }
+/* Extend's control is the frame itself: four edges of the picture, dragged
+   outward. They sit over the stage because that is where the frame is. */
+.studio-extend-handles { position: absolute; inset: 0; pointer-events: none; }
+.studio-extend-handle { position: absolute; pointer-events: auto; border: 1px dashed var(--accent); background: color-mix(in srgb, var(--accent) 14%, transparent); border-radius: 6px; padding: 0; cursor: grab; }
+.studio-extend-handle.dragging { cursor: grabbing; background: color-mix(in srgb, var(--accent) 26%, transparent); }
+.studio-extend-handle.top { top: 0; left: 12%; right: 12%; }
+.studio-extend-handle.bottom { bottom: 0; left: 12%; right: 12%; }
+.studio-extend-handle.left { left: 0; top: 12%; bottom: 12%; }
+.studio-extend-handle.right { right: 0; top: 12%; bottom: 12%; }
+.studio-tool-options { display: flex; flex-direction: column; gap: 6px; }
+/* Recipes offered where the edit is being made, rather than in a dialog that
+   predates this view. */
+.studio-recipes { display: flex; flex-direction: column; gap: 6px; }
+.studio-recipes ul { display: flex; flex-wrap: wrap; gap: 6px; margin: 0; padding: 0; list-style: none; }
+.studio-recipes li { display: flex; align-items: center; gap: 4px; }
+/* A refusal that carries its own answer: the variants behind one filename. */
+.catalog-variant-choice { display: flex; flex-direction: column; gap: 6px; padding: 8px 10px; border: 1px solid var(--line); border-radius: 10px; background: var(--surface-2); font-size: 12px; }
+.catalog-variant-choice p { margin: 0; color: var(--ink-secondary); }
+.catalog-variant-choice ul { display: flex; flex-wrap: wrap; gap: 6px; margin: 0; padding: 0; list-style: none; }

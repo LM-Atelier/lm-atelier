@@ -81,6 +81,25 @@ describe("style contract", () => {
     expect(css).toMatch(/\.studio-canvas\s*\{[^}]*position:\s*relative/);
     expect(css).toMatch(/\.studio-canvas-layers\s*>\s*canvas\s*\{[^}]*position:\s*absolute/);
   });
+
+  it("floats the light control over the workspace rather than inside a panel", () => {
+    const css = readFileSync(STYLESHEET, "utf8");
+    const rule = /\.theme-toggle\s*\{[^}]*\}/.exec(css)?.[0] ?? "";
+    // The light is a property of the whole workspace, so hiding the sidebar
+    // must not take its control away with it.
+    expect(rule).toMatch(/position:\s*fixed/);
+    expect(rule).toMatch(/z-index:/);
+    const footer = readFileSync(join(SOURCE_DIR, "SidebarFooter.tsx"), "utf8");
+    expect(footer).not.toContain("ThemeToggle");
+  });
+
+  it("fills a letterboxed picture with itself rather than with a flat bar", () => {
+    const css = readFileSync(STYLESHEET, "utf8");
+    expect(css).toMatch(/\.media-frame\s*\{[^}]*position:\s*relative/);
+    const backdrop = /\.media-backdrop\s*\{[^}]*\}/.exec(css)?.[0] ?? "";
+    expect(backdrop).toMatch(/object-fit:\s*cover/);
+    expect(backdrop).toMatch(/filter:\s*blur/);
+  });
 });
 
 describe("contrast and state", () => {
@@ -223,10 +242,18 @@ function room(selector: string): Record<string, string> {
   );
 }
 
-describe("the two rooms", () => {
+describe("every room", () => {
+  // Each room, both modes. A room nobody checks is how an unreadable light
+  // mode shipped once already: every rule used tokens, so the contract passed
+  // while the values behind them had never been looked at.
   const ROOMS = [
-    { name: "making", tokens: room(":root {") },
-    { name: "reading", tokens: room(':root[data-mode="light"]') },
+    { name: "north light, dark", tokens: room(":root {") },
+    { name: "north light, lit", tokens: room(':root[data-mode="light"]') },
+    { name: "blue hour, dark", tokens: room(':root[data-room="blue-hour"] {') },
+    {
+      name: "blue hour, lit",
+      tokens: room(':root[data-room="blue-hour"][data-mode="light"]'),
+    },
   ];
 
   it.each(ROOMS)("keeps $name readable on every one of its surfaces", ({ tokens }) => {
@@ -265,13 +292,20 @@ describe("the two rooms", () => {
     }
   });
 
-  it("declares the same tokens in both rooms", () => {
+  it("declares the same tokens in every room", () => {
     // A token missing from one room silently inherits the other's value,
-    // which is how a dark ink ends up on paper.
+    // which is how a dark ink ends up on paper. A second room multiplies the
+    // chances, so each one is checked against the base rather than the base
+    // against itself.
     const making = room(":root {");
     const reading = room(':root[data-mode="light"]');
-    const themed = Object.keys(reading);
-    expect(themed.filter((key) => !(key in making))).toEqual([]);
+    expect(Object.keys(reading).filter((key) => !(key in making))).toEqual([]);
+    // Only the lit blocks. A room's dark block inheriting the base's dark
+    // values is correct - that is what a default is for. A room's lit block
+    // inheriting anything is not: what it would inherit is its own dark
+    // values, which is the dark-ink-on-paper failure exactly.
+    const lit = room(':root[data-room="blue-hour"][data-mode="light"]');
+    expect(Object.keys(reading).filter((key) => !(key in lit))).toEqual([]);
   });
 });
 
@@ -365,8 +399,13 @@ describe("every rule, in every room", () => {
   }
 
   const ROOMS = [
-    { name: "making", tokens: room(":root {") },
-    { name: "reading", tokens: room(':root[data-mode="light"]') },
+    { name: "north light, dark", tokens: room(":root {") },
+    { name: "north light, lit", tokens: room(':root[data-mode="light"]') },
+    { name: "blue hour, dark", tokens: room(':root[data-room="blue-hour"] {') },
+    {
+      name: "blue hour, lit",
+      tokens: room(':root[data-room="blue-hour"][data-mode="light"]'),
+    },
   ];
 
   it.each(ROOMS)("leaves no unreadable text in the $name room", ({ tokens }) => {

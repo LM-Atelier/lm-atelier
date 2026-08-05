@@ -64,4 +64,23 @@ describe("media action row", () => {
     expect(screen.queryByRole("button", { name: "Edit this image" })).toBeNull();
     expect(screen.queryByRole("button", { name: "Animate this image" })).toBeNull();
   });
+
+  it("backs a picture with a blurred copy of itself, hidden from screen readers", () => {
+    // A picture narrower than the card used to sit between flat bars. The
+    // backdrop is the same picture, so it must not be announced twice.
+    const { container } = render(
+      <ArtifactPart
+        part={imagePart()}
+        origin="generated"
+        onEditImage={vi.fn()}
+        onAnimateImage={vi.fn()}
+      />,
+    );
+
+    const backdrop = container.querySelector(".media-backdrop")!;
+    const shown = screen.getByRole("img");
+    expect(backdrop).toHaveAttribute("aria-hidden", "true");
+    expect(backdrop.getAttribute("src")).toBe(shown.getAttribute("src"));
+    expect(screen.getAllByRole("img")).toHaveLength(1);
+  });
 });

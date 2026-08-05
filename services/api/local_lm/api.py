@@ -81,6 +81,7 @@ from .domain import (
     utcnow,
 )
 from .downloads import DownloadManager
+from .edit_recipes import capture_recipe
 from .engines import (
     EngineNotConfiguredError,
     EngineRegistry,
@@ -147,7 +148,13 @@ from .orchestrator import (
 )
 from .ordered_planning import OrderedPlanConfirmationRequired
 from .platforms import list_platform_matrix
-from .preflight import assess_catalog_install, catalog_file_index
+from .preflight import (
+    ExactCivitaiFileSelectionError,
+    assess_catalog_install,
+    catalog_file_index,
+    safe_civitai_file_variants,
+    selected_catalog_file_metadata,
+)
 from .profile_service import (
     AUTO_PROFILE_ID,
     LAST_CHAT_PROFILE_KEY,
@@ -176,6 +183,7 @@ from .schemas import (
     BackupInfo,
     BoundWorkflowAssetOut,
     CatalogDetail,
+    CatalogFileVariant,
     CatalogModel,
     CatalogPage,
     CatalogPreflight,
@@ -243,7 +251,9 @@ from .schemas import (
     SetupReadinessReport,
     SetupVerificationOut,
     StorageCleanupResult,
+    StudioCapabilityReport,
     StudioSessionCreate,
+    StudioToolCapability,
     SystemInfo,
     ToolCapabilityProbe,
     TrustDerivation,
@@ -311,6 +321,7 @@ from .setup_verification import (
     setup_verification_settings,
     verification_evidence_key,
 )
+from .studio_capabilities import tool_capabilities
 from .studio_sessions import (
     STUDIO_SCOPE,
     find_studio_session,
@@ -406,9 +417,9 @@ async def _engine_role_fields(
             allow_inactive=allow_inactive,
         )
     except EngineNotConfiguredError as exc:
-        raise HTTPException(409, str(exc)) from exc
+        raise api_error(409, "engine-not-configured", str(exc)) from exc
     except EngineSchemaUnavailableError as exc:
-        raise HTTPException(503, str(exc)) from exc
+        raise api_error(503, "engine-schema-unavailable", str(exc)) from exc
 
 
 @router.post("/session")
@@ -455,7 +466,7 @@ def _provider(value: str) -> CredentialProvider:
     try:
         return credential_provider(value)
     except ValueError as exc:
-        raise HTTPException(404, str(exc)) from exc
+        raise api_error(404, "credential-provider-unknown", str(exc)) from exc
 
 
 def _credential_status(provider: CredentialProvider, request: Request) -> CredentialStatus:
@@ -499,9 +510,9 @@ async def set_credential(
     try:
         services.credentials.set_token(payload.token, selected)
     except ValueError as exc:
-        raise HTTPException(409, str(exc)) from exc
+        raise api_error(409, "credential-rejected", str(exc)) from exc
     except CredentialVaultUnavailable as exc:
-        raise HTTPException(503, str(exc)) from exc
+        raise api_error(503, "credential-vault-unavailable", str(exc)) from exc
     _refresh_credential_clients(services, selected, services.credentials.token(selected))
     return _credential_status(selected, request)
 
@@ -513,9 +524,9 @@ async def delete_credential(provider: str, request: Request) -> CredentialStatus
     try:
         services.credentials.delete_token(selected)
     except ValueError as exc:
-        raise HTTPException(409, str(exc)) from exc
+        raise api_error(409, "credential-rejected", str(exc)) from exc
     except CredentialVaultUnavailable as exc:
-        raise HTTPException(503, str(exc)) from exc
+        raise api_error(503, "credential-vault-unavailable", str(exc)) from exc
     _refresh_credential_clients(services, selected, None)
     return _credential_status(selected, request)
 
@@ -569,9 +580,9 @@ async def verify_backup(name: str, request: Request) -> BackupInfo:
     try:
         return await asyncio.to_thread(_services(request).backups.verify, name)
     except FileNotFoundError as exc:
-        raise HTTPException(404, "backup not found") from exc
+        raise api_error(404, "backup-not-found", "That backup no longer exists.") from exc
     except ValueError as exc:
-        raise HTTPException(422, str(exc)) from exc
+        raise api_error(422, "backup-invalid", str(exc)) from exc
 
 
 @router.post("/backups/{name}/restore", response_model=BackupInfo)
@@ -579,9 +590,9 @@ async def restore_backup(name: str, request: Request) -> BackupInfo:
     try:
         return await asyncio.to_thread(_services(request).backups.request_restore, name)
     except FileNotFoundError as exc:
-        raise HTTPException(404, "backup not found") from exc
+        raise api_error(404, "backup-not-found", "That backup no longer exists.") from exc
     except ValueError as exc:
-        raise HTTPException(422, str(exc)) from exc
+        raise api_error(422, "backup-invalid", str(exc)) from exc
 
 
 @router.delete("/backups/{name}", status_code=204)
@@ -589,9 +600,9 @@ async def delete_backup(name: str, request: Request) -> Response:
     try:
         await asyncio.to_thread(_services(request).backups.delete, name)
     except FileNotFoundError as exc:
-        raise HTTPException(404, "backup not found") from exc
+        raise api_error(404, "backup-not-found", "That backup no longer exists.") from exc
     except ValueError as exc:
-        raise HTTPException(422, str(exc)) from exc
+        raise api_error(422, "backup-invalid", str(exc)) from exc
     return Response(status_code=204)
 
 
@@ -729,7 +740,7 @@ def export_verified_setup(
     install = session.get(ModelInstall, readiness.install_id) if readiness.install_id else None
     profile = session.get(ModelProfile, readiness.profile_id) if readiness.profile_id else None
     if not install or not profile:
-        raise HTTPException(409, "This role has no verified setup to export yet.")
+        raise api_error(409, "setup-not-verified", "This role has no verified setup to export yet.")
     workflow = (
         session.get(WorkflowRevision, readiness.workflow_revision_id)
         if readiness.workflow_revision_id
@@ -742,11 +753,14 @@ def export_verified_setup(
         services.runtimes,
     )
     if not evidence:
-        raise HTTPException(409, "This setup has no current activation evidence.")
+        raise api_error(
+            409, "setup-evidence-missing", "This setup has no current activation evidence."
+        )
     verification = current_setup_verification(session, role, install, profile, workflow, evidence)
     if not verification or verification.state != "verified":
-        raise HTTPException(
+        raise api_error(
             409,
+            "setup-not-verified",
             "Run setup verification for this role first - an exported setup has to "
             "carry proof that a real generation succeeded.",
         )
@@ -791,9 +805,9 @@ async def start_setup_verification(
         if check.status != "pass" and not check.code.startswith("generation_verification")
     ]
     if blocking:
-        raise HTTPException(409, blocking[0].message)
+        raise api_error(409, "setup-incomplete", blocking[0].message)
     if not readiness.install_id or not readiness.profile_id:
-        raise HTTPException(409, "Finish model activation and profile setup first.")
+        raise api_error(409, "setup-incomplete", "Finish model activation and profile setup first.")
 
     install = session.get(ModelInstall, readiness.install_id)
     profile = session.get(ModelProfile, readiness.profile_id)
@@ -803,7 +817,7 @@ async def start_setup_verification(
         else None
     )
     if not install or not profile:
-        raise HTTPException(409, "The selected setup changed. Refresh and try again.")
+        raise api_error(409, "setup-changed", "The selected setup changed. Refresh and try again.")
     capability_evidence = current_capability_evidence(
         session,
         install,
@@ -811,7 +825,11 @@ async def start_setup_verification(
         services.runtimes,
     )
     if not capability_evidence:
-        raise HTTPException(409, "The model activation evidence changed. Refresh and try again.")
+        raise api_error(
+            409,
+            "setup-evidence-changed",
+            "The model activation evidence changed. Refresh and try again.",
+        )
 
     existing = current_setup_verification(
         session,
@@ -920,7 +938,7 @@ async def start_setup_verification(
     session.expire_all()
     current = session.get(SetupVerification, verification.id)
     if not current:
-        raise HTTPException(500, "Setup verification state was lost.")
+        raise api_error(500, "setup-verification-lost", "Setup verification state was lost.")
     job = session.scalar(select(Job).where(Job.run_id == accepted.run.id))
     if current.state in ACTIVE_VERIFICATION_STATES:
         current.run_id = accepted.run.id
@@ -938,12 +956,12 @@ async def start_setup_verification(
 @router.post("/runtimes/{engine}/install", response_model=RuntimeStatus, status_code=202)
 async def install_runtime(engine: str, request: Request) -> RuntimeStatus:
     if engine not in {"llama.cpp", "vllm", "comfyui"}:
-        raise HTTPException(422, "runtime must be llama.cpp, vllm, or comfyui")
+        raise api_error(422, "runtime-unknown", "runtime must be llama.cpp, vllm, or comfyui")
     status = _services(request).runtimes.start(
         cast(Literal["llama.cpp", "vllm", "comfyui"], engine)
     )
     if status.state == "unsupported":
-        raise HTTPException(422, status.message)
+        raise api_error(422, "runtime-unavailable", status.message)
     return status
 
 
@@ -991,9 +1009,9 @@ def _validated_profile_install(
             engine=engine,
         )
     except LookupError as exc:
-        raise HTTPException(404, str(exc)) from exc
+        raise api_error(404, "profile-install-missing", str(exc)) from exc
     except ValueError as exc:
-        raise HTTPException(422, str(exc)) from exc
+        raise api_error(422, "profile-install-invalid", str(exc)) from exc
 
 
 @router.post("/workers/chat/load/{profile_id}", response_model=WorkerStatus)
@@ -1011,9 +1029,9 @@ async def load_chat_worker(profile_id: str, request: Request, session: SessionDe
 async def _load_chat_profile(services: Services, session: Session, profile_id: str) -> WorkerStatus:
     profile = session.get(ModelProfile, profile_id)
     if not profile or not profile.model_install_id:
-        raise HTTPException(404, "profile with a model install not found")
+        raise api_error(404, "profile-install-missing", "profile with a model install not found")
     if profile.role != ModelRole.CHAT.value:
-        raise HTTPException(422, "chat worker requires a chat profile")
+        raise api_error(422, "profile-role-mismatch", "chat worker requires a chat profile")
     install = _validated_profile_install(
         session,
         model_install_id=profile.model_install_id,
@@ -1021,7 +1039,7 @@ async def _load_chat_profile(services: Services, session: Session, profile_id: s
         engine=profile.engine,
     )
     if not install:
-        raise HTTPException(404, "profile with a model install not found")
+        raise api_error(404, "profile-install-missing", "profile with a model install not found")
     try:
         status = await services.processes.load_chat(profile, install)
     except (OSError, RuntimeError, ValueError, TimeoutError) as exc:
@@ -1043,7 +1061,7 @@ async def start_media_worker(request: Request, session: SessionDep) -> WorkerSta
         session.expire_all()
         _ensure_worker_idle(session, "media")
         if services.settings.media_engine != "comfyui":
-            raise HTTPException(422, "The ComfyUI media engine is not active.")
+            raise api_error(422, "media-engine-inactive", "The ComfyUI media engine is not active.")
         try:
             return await services.processes.start_media()
         except (OSError, RuntimeError, ValueError, TimeoutError) as exc:
@@ -1090,7 +1108,11 @@ async def restart_worker(name: str, request: Request, session: SessionDep) -> Wo
             setting = session.get(AppSetting, LAST_CHAT_PROFILE_KEY)
             profile_id = setting.value_json if setting else None
         if not isinstance(profile_id, str) or not profile_id:
-            raise HTTPException(409, "no chat model has been loaded yet; load a profile first")
+            raise api_error(
+                409,
+                "chat-model-not-loaded",
+                "no chat model has been loaded yet; load a profile first",
+            )
         return await _load_chat_profile(services, session, profile_id)
 
 
@@ -1197,9 +1219,17 @@ def _validate_project_workflow_pins(session: Session, values: dict[str, Any]) ->
         revision = session.get(WorkflowRevision, revision_id)
         definition = session.get(WorkflowDefinition, revision.workflow_id) if revision else None
         if not revision or not definition:
-            raise HTTPException(422, f"{field} does not identify a workflow revision")
+            raise api_error(
+                422,
+                "workflow-revision-unknown",
+                f"{field} does not identify a workflow revision",
+            )
         if definition.operation not in operations:
-            raise HTTPException(422, f"{field} has an incompatible workflow operation")
+            raise api_error(
+                422,
+                "workflow-operation-mismatch",
+                f"{field} has an incompatible workflow operation",
+            )
 
 
 async def _validate_generation_defaults(
@@ -1214,13 +1244,18 @@ async def _validate_generation_defaults(
     if scoped:
         for role, settings in scoped.items():
             if len(settings) > 256 or any(len(key) > 200 for key in settings):
-                raise HTTPException(422, f"{role} generation defaults are too large")
+                raise api_error(
+                    422,
+                    "generation-defaults-too-large",
+                    f"{role} generation defaults are too large",
+                )
             request_settings = settings
             if STRENGTH_MODE_PARAMETER in settings:
                 mode = settings[STRENGTH_MODE_PARAMETER]
                 if role != ModelRole.IMAGE.value or mode not in {"auto", "manual"}:
-                    raise HTTPException(
+                    raise api_error(
                         422,
+                        "strength-mode-invalid",
                         "image edit strength mode must be auto or manual for image defaults",
                     )
                 request_settings = {
@@ -1231,15 +1266,16 @@ async def _validate_generation_defaults(
             load_keys = {field.key for field in fields if field.scope == "load"}
             disallowed = sorted(load_keys & set(request_settings))
             if disallowed:
-                raise HTTPException(
+                raise api_error(
                     422,
+                    "generation-defaults-load-settings",
                     f"{role} generation defaults cannot include load settings: "
                     f"{', '.join(disallowed)}",
                 )
             try:
                 validate_settings(request_settings, request_fields)
             except ValueError as exc:
-                raise HTTPException(422, str(exc)) from exc
+                raise api_error(422, "generation-defaults-invalid", str(exc)) from exc
 
     bindings = values.get("generation_preset_ids_json")
     if bindings is None and "generation_preset_ids_json" in values:
@@ -1539,6 +1575,32 @@ def _is_editable_image(artifact: Artifact) -> bool:
     if artifact.kind not in {ArtifactKind.IMAGE.value, ArtifactKind.INPUT.value}:
         return False
     return (artifact.media_type or "").casefold().startswith("image/")
+
+
+@router.get("/studio/capabilities", response_model=StudioCapabilityReport)
+async def studio_capabilities(
+    request: Request, session: ConversationSessionDep
+) -> StudioCapabilityReport:
+    """What the studio's tools can do on this machine, asked before the click.
+
+    A tool that needs a workflow nobody has installed is answered here rather
+    than at apply time, so a carefully drawn selection is never the thing that
+    discovers the gap.
+    """
+
+    orchestrator: ConversationOrchestrator = _services(request).orchestrator
+    schemas = orchestrator.installed_edit_input_schemas(session)
+    return StudioCapabilityReport(
+        tools=[
+            StudioToolCapability(
+                kind=capability.kind,
+                workflow_class=capability.workflow_class,
+                available=capability.available,
+                reason=capability.reason,
+            )
+            for capability in tool_capabilities(edit_input_schemas=schemas)
+        ]
+    )
 
 
 @router.post("/studio/sessions", response_model=ChatDetail)
@@ -3175,6 +3237,28 @@ async def resolve_catalog_preflight(
         ) from exc
     system = collect_system_info(services.settings)
 
+    def assess(
+        target: CatalogDetail, request: CatalogPreflightRequest | None = None
+    ) -> CatalogPreflight:
+        """Assess with the request's exact ids, every time.
+
+        A wrapper rather than the same argument at every call site: one that
+        forgets it silently plans the provider's primary variant, which looks
+        exactly like a successful install of something else.
+
+        A caller that rewrote the request - to pin a revision, or to substitute
+        template-selected filenames - passes its own version, and the ids ride
+        along with it. Dropping them there would be the same silent fallback in
+        a place nobody was looking.
+        """
+        return assess_catalog_install(
+            target,
+            request or payload,
+            services.settings,
+            system,
+            selected_file_ids=payload.selected_file_ids,
+        )
+
     async def finalize(
         result: CatalogPreflight,
         resolved_detail: CatalogDetail,
@@ -3198,11 +3282,42 @@ async def resolve_catalog_preflight(
             if path.casefold().endswith((".gguf", ".safetensors"))
         ][:8]
 
-        file_metadata, _ambiguous_files = catalog_file_index(
+        file_metadata, ambiguous_files = catalog_file_index(
             resolved_detail.files,
             provider=source,
             prefer_duplicate_variants=not payload.selected_files,
         )
+        # Offered from the resolver's own safety predicate, never a second
+        # opinion beside it: a chooser that lists a row exact selection would
+        # refuse is a chooser that hands out dead ends.
+        #
+        # Only for a request that named files and could not settle one. An
+        # answered request has nothing left to choose, and returning the
+        # chooser again would ask the same question twice.
+        variants = (
+            {
+                filename: [
+                    CatalogFileVariant(
+                        source_file_id=str(item.get("source_file_id") or ""),
+                        filename=filename,
+                        size_bytes=item.get("size") if isinstance(item.get("size"), int) else None,
+                        precision=(
+                            str(item["source_file_precision"])
+                            if isinstance(item.get("source_file_precision"), str)
+                            else None
+                        ),
+                    )
+                    for item in safe_civitai_file_variants(resolved_detail.files, filename)
+                ]
+                # Only names this request asked for. A version can publish
+                # duplicate attachments nobody selected, and offering a choice
+                # about those turns an install that succeeded into a question.
+                for filename in sorted(ambiguous_files & set(payload.selected_files))
+            }
+            if source == "civitai" and not payload.selected_file_ids
+            else {}
+        )
+        variants = {name: rows for name, rows in variants.items() if len(rows) > 1}
 
         async def fetch_prefix(path: str) -> tuple[str, bytes] | None:
             if not callable(inspect_prefix):
@@ -3266,12 +3381,22 @@ async def resolve_catalog_preflight(
                 result.selected_files,
                 role=payload.role,
             )
-        if source == "civitai" and payload.auxiliary_kind == "lora":
+        if source == "civitai" and "lora" in {
+            payload.auxiliary_kind,
+            payload.workflow_reference_kind,
+        }:
             # CivitAI file-prefix inspection is deliberately unavailable, so a
             # bare safetensors would inspect as "checkpoint" and block as a
             # kind mismatch. The provider's own typed declaration substitutes
             # for planning; the manager's mandatory staged-byte LoRA
             # inspection still gates activation after download.
+            #
+            # Either ownership field, matching the role selection above. A
+            # workflow-owned LoRA sends `workflow_reference_kind` and must not
+            # also send `auxiliary_kind` - the planner refuses that as
+            # conflicting ownership - so naming only the auxiliary field made
+            # every workflow-owned CivitAI LoRA fail as a kind mismatch, for
+            # having declared its ownership correctly.
             declared_loras = {
                 str(item.get("filename") or "")
                 for item in resolved_detail.files
@@ -3288,22 +3413,20 @@ async def resolve_catalog_preflight(
                         for component in inspection.components
                     ),
                 )
-        files, _ambiguous_files = catalog_file_index(
-            resolved_detail.files,
-            provider=source,
-            prefer_duplicate_variants=not payload.selected_files,
-        )
-        selected_metadata = [
-            files.get(
-                filename,
-                {
-                    "filename": filename,
-                    "size": None,
-                    "sha256": result.expected_sha256.get(filename),
-                },
+        # The chosen row, not whichever row shares its destination. A filename
+        # index re-resolves an answered choice back to the provider's primary
+        # variant, which is the whole failure the exact id exists to prevent.
+        try:
+            selected_metadata = selected_catalog_file_metadata(
+                resolved_detail.files,
+                result.selected_files,
+                provider=source,
+                prefer_duplicate_variants=not payload.selected_files,
+                selected_file_ids=payload.selected_file_ids,
+                expected_sha256=result.expected_sha256,
             )
-            for filename in result.selected_files
-        ]
+        except ExactCivitaiFileSelectionError as exc:
+            raise api_error(422, "catalog-file-variant-invalid", str(exc)) from exc
         workflow_component_folders: dict[str, str] = {}
         workflow_contract_error: str | None = None
         if result.workflow_template_id:
@@ -3366,11 +3489,11 @@ async def resolve_catalog_preflight(
             validate_resolved(resolved)
         plan = persist_install_plan(session, resolved)
         session.commit()
-        return result.model_copy(update={"install_plan": plan})
+        return result.model_copy(update={"install_plan": plan, "file_variants": variants})
 
     if payload.auxiliary_kind:
         if payload.role != "image":
-            result = assess_catalog_install(detail, payload, services.settings, system)
+            result = assess(detail)
             return await finalize(
                 result.model_copy(
                     update={
@@ -3389,7 +3512,7 @@ async def resolve_catalog_preflight(
                 detail,
             )
         return await finalize(
-            assess_catalog_install(detail, payload, services.settings, system).model_copy(
+            assess(detail).model_copy(
                 update={
                     "comfy_paths": {COMFY_AUXILIARY_FOLDERS[payload.auxiliary_kind]: "."},
                 }
@@ -3404,15 +3527,21 @@ async def resolve_catalog_preflight(
         # repository's official four-file bundle instead: a diffusion model, an
         # unrelated LoRA, the encoder actually wanted, and a VAE already on
         # disk, together over 19GB.
-        if len(payload.selected_files) != 1:
+        # One identity, in exactly one form. A retry that answers an ambiguous
+        # filename supplies the exact provider id and no filename at all, so
+        # counting filenames alone refused the very request the refusal asked
+        # for.
+        named = len(payload.selected_files) + len(payload.selected_file_ids)
+        if named != 1:
             raise api_error(
                 422,
                 "workflow-asset-file-not-exact",
-                "A workflow asset install must name exactly one file. "
-                "Run the install check again with the exact file the workflow needs.",
+                "A workflow asset install must name exactly one file, by name or by "
+                "exact provider id. Run the install check again with the exact file "
+                "the workflow needs.",
             )
         return await finalize(
-            assess_catalog_install(detail, payload, services.settings, system),
+            assess(detail),
             detail,
         )
 
@@ -3422,13 +3551,13 @@ async def resolve_catalog_preflight(
         or services.settings.media_engine != "comfyui"
     ):
         return await finalize(
-            assess_catalog_install(detail, payload, services.settings, system),
+            assess(detail),
             detail,
         )
 
     runtime_status = services.runtimes.status("comfyui")
     if runtime_status.security_status == "blocked" and runtime_status.state != "ready":
-        result = assess_catalog_install(detail, payload, services.settings, system)
+        result = assess(detail)
         checks = [
             *[check for check in result.checks if check.id != "runtime"],
             CatalogPreflightCheck(
@@ -3459,12 +3588,7 @@ async def resolve_catalog_preflight(
             )
     if not candidates:
         resolved_payload = payload.model_copy(update={"revision": detail.revision})
-        result = assess_catalog_install(
-            detail,
-            resolved_payload,
-            services.settings,
-            system,
-        )
+        result = assess(detail, resolved_payload)
         adaptive = registry.adaptive_checkpoint(
             detail.model.remote_id,
             detail.revision,
@@ -3599,7 +3723,7 @@ async def resolve_catalog_preflight(
         size = sum(int(item.get("size") or 0) for item in bundled_files)
         viable.append((candidate.score, size, candidate, bundled_detail))
     if not viable:
-        result = assess_catalog_install(detail, payload, services.settings, system)
+        result = assess(detail)
         checks = [
             *[check for check in result.checks if check.id != "selection"],
             CatalogPreflightCheck(
@@ -3636,12 +3760,18 @@ async def resolve_catalog_preflight(
             "selected_files": template.selected_files,
         }
     )
-    result = assess_catalog_install(
-        resolved_detail,
-        resolved_payload,
-        services.settings,
-        system,
-    )
+    if payload.selected_file_ids:
+        # The template chose the files here, so an exact id was answering a
+        # question this path never asked. Refused rather than dropped: silently
+        # ignoring it would install the template's bundle while the caller
+        # believed it had named one exact variant.
+        raise api_error(
+            422,
+            "catalog-file-variant-not-applicable",
+            "This install resolves its files from a workflow template, so it cannot "
+            "also name an exact provider file. Run the install check again without one.",
+        )
+    result = assess(resolved_detail, resolved_payload)
     checks = [
         *[
             (
@@ -3813,14 +3943,26 @@ async def create_edit_template(payload: EditTemplateCreate, session: SessionDep)
         raise api_error(
             409, "edit-template-name-taken", "A template with this name already exists."
         )
+    # Saved from a result someone liked, so the record of what produced it is
+    # the run's, not the machine's current state - those differ the moment a
+    # profile is switched between the edit and the save.
+    capture = None
+    if payload.from_run_id:
+        run = session.get(Run, payload.from_run_id)
+        if not run:
+            raise api_error(404, "run-not-found", "That run no longer exists.")
+        capture = capture_recipe(run.provenance_json)
     template = EditTemplate(
         name=payload.name,
         description=payload.description,
         instruction=payload.instruction,
         operation="image_to_image",
-        settings_json=payload.settings_json,
+        settings_json=capture.settings if capture else payload.settings_json,
         trigger_words_json=[],
         content_rating="general",
+        workflow_revision_id=capture.workflow_revision_id if capture else None,
+        model_profile_id=capture.model_profile_id if capture else None,
+        mask_mode=capture.mask_mode if capture else "none",
         builtin=False,
         enabled=True,
     )
@@ -6680,6 +6822,67 @@ def _analyzed_package_node_types(
     return _prepared_node_types(list(requirement.node_types))
 
 
+#: A comparison is only worth doing if it is bounded; a graph larger than this
+#: is refused rather than serialized twice to find out it did not match.
+MAX_COMPARED_GRAPH_CHARACTERS = 8_000_000
+
+
+def _canonical_graph(graph: dict[str, Any]) -> str:
+    """One bounded string for a graph, so two of them can be compared exactly.
+
+    Node-type names alone are not the graph. Two workflows can require the
+    same class names while declaring different packages, versions, or links -
+    which is exactly the substitution this comparison exists to catch.
+    """
+    encoded = json.dumps(
+        graph, sort_keys=True, separators=(",", ":"), ensure_ascii=False, allow_nan=False
+    )
+    if len(encoded) > MAX_COMPARED_GRAPH_CHARACTERS:
+        raise api_error(
+            422,
+            "workflow-graph-too-large",
+            "That workflow is too large to compare against the stored revision.",
+        )
+    return encoded
+
+
+def _authorized_workflow_context(
+    session: Session, payload: WorkflowPackagePrepareRequest
+) -> tuple[str, tuple[str, ...], dict[str, Any]] | None:
+    """The revision an omission candidate is about, its node set, and its graph.
+
+    Everything downstream comes from the stored graph. Re-analyzing what a
+    caller sends proves that graph is internally consistent; it does not bind
+    it to anything this machine saved, and a proof about a graph nobody stored
+    is a proof about nothing.
+
+    A submitted graph is compared whole rather than by the node types it needs.
+    Comparing type names would let a caller submit one package's metadata for a
+    class the stored graph attributes to another, prepare the first, and bind
+    the proof to the second.
+    """
+    if not payload.workflow_revision_id:
+        return None
+    revision = session.get(WorkflowRevision, payload.workflow_revision_id)
+    if not revision:
+        raise api_error(404, "workflow-revision-not-found", "That workflow revision is unknown.")
+    stored = revision.ui_graph_json
+    if payload.ui_graph and _canonical_graph(payload.ui_graph) != _canonical_graph(stored):
+        raise api_error(
+            422,
+            "workflow-graph-mismatch",
+            "The submitted workflow does not match the stored revision it names.",
+        )
+    try:
+        analysis = analyze_comfyui_workflow_package(stored)
+    except WorkflowPackageError as exc:
+        raise api_error(422, exc.code, str(exc)) from exc
+    # The analyzer's complete set, not the selected package's declared subset:
+    # the proof is that the workflow runs, and every type it needs is part of
+    # that whether or not this package supplies it.
+    return revision.id, tuple(sorted(set(analysis.required_node_types))), stored
+
+
 async def _run_workflow_package_preparation(
     services: Services,
     job_id: str,
@@ -6687,6 +6890,7 @@ async def _run_workflow_package_preparation(
     version: str,
     node_types: tuple[str, ...],
     renew_install_id: str | None = None,
+    authorized_workflow: tuple[str, tuple[str, ...]] | None = None,
 ) -> None:
     """One durable preparation job: lease held, worker state told truthfully."""
 
@@ -6725,6 +6929,7 @@ async def _run_workflow_package_preparation(
                 wheel_downloader=ComfyRegistryWheelDownloader(),
                 phase=report,
                 renew_install_id=renew_install_id,
+                authorized_workflow=authorized_workflow,
             )
             with SessionLocal() as session:
                 job = session.get(Job, job_id)
@@ -6782,12 +6987,19 @@ def _queue_registry_preparation(
     version: str,
     node_types: tuple[str, ...],
     renew_install_id: str | None = None,
+    authorized_workflow: tuple[str, tuple[str, ...]] | None = None,
 ) -> Job:
     payload: dict[str, Any] = {
         "package_id": package_id,
         "version": version,
         "node_types": list(node_types),
     }
+    if authorized_workflow is not None:
+        revision_id, required_node_types = authorized_workflow
+        payload["authorized_workflow"] = {
+            "workflow_revision_id": revision_id,
+            "required_node_types": list(required_node_types),
+        }
     if renew_install_id is not None:
         payload["renew_install_id"] = renew_install_id
     job = Job(
@@ -6806,6 +7018,7 @@ def _queue_registry_preparation(
             version,
             node_types,
             renew_install_id,
+            authorized_workflow,
         ),
         name=f"registry-prepare-{job.id}",
     )
@@ -6827,7 +7040,17 @@ async def prepare_workflow_package_endpoint(
     services = _services(request)
     # Re-analyze the source graph before judging the machine. The package name,
     # version, and node closure have to agree independently of browser state.
-    node_types = _analyzed_package_node_types(payload.ui_graph, payload.package_id, payload.version)
+    # Resolved before queueing so an unknown or mismatched revision is a typed
+    # refusal rather than a job that fails on its first step.
+    authorized = _authorized_workflow_context(session, payload)
+    # The stored graph chooses the package requirement as well as the node set.
+    # Letting the submitted graph choose it would let a caller prepare one
+    # package while binding the proof to a graph that names another.
+    node_types = _analyzed_package_node_types(
+        authorized[2] if authorized else payload.ui_graph,
+        payload.package_id,
+        payload.version,
+    )
     # Then refuse when the machine cannot prepare at all - a job that must fail
     # on its first step is a worse answer than a typed 422.
     try:
@@ -6840,6 +7063,7 @@ async def prepare_workflow_package_endpoint(
         package_id=payload.package_id,
         version=payload.version,
         node_types=node_types,
+        authorized_workflow=(authorized[0], authorized[1]) if authorized else None,
     )
 
 
@@ -7032,6 +7256,9 @@ async def activate_registry_install(
                 environment_root=context.state_root / "registry-wheel-environments",
                 media_worker_stopped=_media_worker_truly_stopped(services),
                 start_media=services.processes.start_media,
+                # The same read startup verifies against, so a proof cannot be
+                # made about an inventory nobody else saw.
+                read_node_inventory=services.processes.comfy_node_inventory,
             )
         except ComfyRegistryActivationError as exc:
             raise _registry_activation_failure(exc) from exc

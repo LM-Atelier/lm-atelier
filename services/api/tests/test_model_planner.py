@@ -122,6 +122,97 @@ def test_static_inspector_distinguishes_lora_from_primary_checkpoint() -> None:
     assert plan.failure_code == "auxiliary_asset_not_primary"
 
 
+def test_install_plan_freezes_bounded_provider_trigger_words() -> None:
+    inspection = inspect_repository_metadata(
+        {"model.safetensors": _safetensors(["model.diffusion_model.input_blocks.0.weight"])},
+        ["model.safetensors"],
+        role="image",
+    )
+    plan = resolve_install_plan(
+        remote_id="synthetic/trigger-model",
+        revision="a" * 40,
+        role="image",
+        engine="comfyui",
+        selected_files=[
+            {
+                "filename": "model.safetensors",
+                "size": 1_024,
+                "sha256": "b" * 64,
+                "metadata": {
+                    "trained_words": [
+                        " portrait-style ",
+                        "Portrait-Style",
+                        "soft light",
+                    ],
+                    "trigger_words": ["phone candid"],
+                },
+            }
+        ],
+        inspection=inspection,
+        workflow_template_id="synthetic-template",
+        workflow_template_sha256="c" * 64,
+    )
+
+    assert plan.runtime_contract["trigger_words"] == [
+        "portrait-style",
+        "soft light",
+        "phone candid",
+    ]
+
+
+def test_static_inspector_recognizes_nextdit_diffusion_tensor_layout() -> None:
+    inspection = inspect_repository_metadata(
+        {
+            "Krea2_Raw_convrot_int8mixed.safetensors": _safetensors(
+                [
+                    "blocks.0.attn.qkv.weight",
+                    "first.weight",
+                    "last.weight",
+                    "tmlp.0.weight",
+                    "tproj.weight",
+                    "txtfusion.0.attn.qkv.weight",
+                ],
+                {"_quantization_metadata": "{}"},
+            )
+        },
+        ["Krea2_Raw_convrot_int8mixed.safetensors"],
+        role="image",
+    )
+
+    assert inspection.components[0].kind == "diffusion_model"
+    assert inspection.components[0].target_folder == "diffusion_models"
+
+
+def test_static_inspector_uses_verified_component_folder_for_unknown_weights() -> None:
+    inspection = inspect_repository_metadata(
+        {
+            "text_encoders/qwen3vl_4b_fp8_scaled.safetensors": _safetensors(
+                [
+                    "model.embed_tokens.weight",
+                    "model.layers.0.self_attn.q_proj.weight",
+                    "model.visual.blocks.0.attn.qkv.weight",
+                ]
+            )
+        },
+        ["text_encoders/qwen3vl_4b_fp8_scaled.safetensors"],
+        role="image",
+    )
+
+    assert inspection.components[0].kind == "text_encoder"
+    assert inspection.components[0].target_folder == "text_encoders"
+
+
+def test_static_inspector_leaves_ambiguous_tensor_layout_unknown() -> None:
+    inspection = inspect_repository_metadata(
+        {"weights.safetensors": _safetensors(["blocks.0.attn.qkv.weight"])},
+        ["weights.safetensors"],
+        role="image",
+    )
+
+    assert inspection.components[0].kind == "unknown_safetensors"
+    assert inspection.components[0].target_folder == "checkpoints"
+
+
 def test_official_workflow_plan_accepts_a_required_lora_with_primary_weights() -> None:
     selected = ["model.safetensors", "lightning.safetensors"]
     inspection = inspect_repository_metadata(

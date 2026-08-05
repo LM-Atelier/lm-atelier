@@ -16,12 +16,16 @@ import {
 } from "./studioMasks";
 import { BrushTool, LassoTool, RectTool, type PointerTool } from "./studioTools";
 
-export type StudioToolKind = "instruct" | "brush" | "eraser" | "rect" | "lasso";
+export type StudioToolKind = "instruct" | "brush" | "eraser" | "rect" | "lasso" | "enhance" | "extend";
 
 export type StudioToolState = {
   readonly kind: StudioToolKind;
   readonly brushRadius: number;
   readonly featherPx: number;
+  /** How much larger Enhance should make the picture. */
+  readonly upscaleFactor: number;
+  /** How far past each edge to paint, as a fraction of the picture. */
+  readonly margins: { top: number; right: number; bottom: number; left: number };
   readonly mask: MaskRaster | null;
   /** Bumped whenever the raster changes so the canvas repaints its tint. */
   readonly maskVersion: number;
@@ -32,6 +36,9 @@ export type StudioToolAction =
   | { type: "select-tool"; kind: StudioToolKind }
   | { type: "set-brush-radius"; radius: number }
   | { type: "set-feather"; px: number }
+  | { type: "set-upscale-factor"; factor: number }
+  | { type: "set-margin"; side: "top" | "right" | "bottom" | "left"; fraction: number }
+  | { type: "clear-margins" }
   | { type: "image-changed"; width: number; height: number }
   | { type: "gesture-start" }
   | { type: "stroke-end" }
@@ -46,6 +53,8 @@ export function initialToolState(): StudioToolState {
     kind: "instruct",
     brushRadius: 24,
     featherPx: 4,
+    upscaleFactor: 2,
+    margins: { top: 0, right: 0, bottom: 0, left: 0 },
     mask: null,
     maskVersion: 0,
     history: new MaskHistory(),
@@ -63,6 +72,15 @@ export function studioToolReducer(
       return { ...state, brushRadius: clamp(action.radius, 1, 512) };
     case "set-feather":
       return { ...state, featherPx: clamp(action.px, 0, 128) };
+    case "set-upscale-factor":
+      return { ...state, upscaleFactor: clamp(action.factor, 1, 8) };
+    case "set-margin":
+      return {
+        ...state,
+        margins: { ...state.margins, [action.side]: clamp(action.fraction, 0, 2) },
+      };
+    case "clear-margins":
+      return { ...state, margins: { top: 0, right: 0, bottom: 0, left: 0 } };
     case "image-changed": {
       // A new image invalidates the mask entirely; carrying it over would
       // silently apply a selection drawn on different pixels.
@@ -130,6 +148,15 @@ export function toolFor(state: StudioToolState): PointerTool | null {
     case "lasso":
       return new LassoTool(state.mask);
     case "instruct":
+      return null;
+    // Enhance points at nothing: the whole picture is the subject and the only
+    // choice is how much larger. A tool that could be a number never becomes a
+    // gesture.
+    case "enhance":
+      return null;
+    // Extend is a drag on the frame, not a gesture on the picture: the whole
+    // point is pointing at where the picture is not.
+    case "extend":
       return null;
   }
 }

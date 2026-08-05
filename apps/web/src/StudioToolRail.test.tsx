@@ -64,4 +64,79 @@ describe("StudioToolRail", () => {
     expect(screen.getByRole("button", { name: "Brush a selection" })).toBeDisabled();
     expect(screen.getByRole("button", { name: "Undo the selection change" })).toBeDisabled();
   });
+
+  it("guides a tool whose workflow is not installed instead of hiding it", () => {
+    // The defect: every selection tool looked ready, and the refusal arrived
+    // only after a selection had been drawn and an instruction written.
+    render(
+      <StudioToolRail
+        active="instruct"
+        onSelect={vi.fn()}
+        onUndo={vi.fn()}
+        onRedo={vi.fn()}
+        canUndo={false}
+        canRedo={false}
+        capabilities={[
+          { kind: "instruct", workflow_class: "image_to_image", available: true, reason: null },
+          {
+            kind: "brush",
+            workflow_class: "inpaint",
+            available: false,
+            reason: "Install an inpainting workflow to edit part of a picture.",
+          },
+        ]}
+      />,
+    );
+
+    expect(screen.getByRole("button", { name: /Brush a selection - Install an inpainting/ })).
+      toBeInTheDocument();
+    // Still clickable: the way out is an install, and a dead button says
+    // nothing about that.
+    expect(screen.getByRole("button", { name: /Brush a selection -/ })).toBeEnabled();
+    expect(screen.getByRole("button", { name: "Instruct the whole image" })).toBeInTheDocument();
+  });
+
+  it("offers Enhance as a tool of its own", () => {
+    render(
+      <StudioToolRail
+        active="enhance"
+        onSelect={vi.fn()}
+        onUndo={vi.fn()}
+        onRedo={vi.fn()}
+        canUndo={false}
+        canRedo={false}
+        capabilities={[
+          { kind: "enhance", workflow_class: "upscale", available: true, reason: null },
+        ]}
+      />,
+    );
+
+    const enhance = screen.getByRole("button", { name: "Enlarge and restore detail" });
+    expect(enhance).toHaveAttribute("aria-pressed", "true");
+  });
+
+  it("guides Enhance toward an upscaler when none is installed", () => {
+    render(
+      <StudioToolRail
+        active="instruct"
+        onSelect={vi.fn()}
+        onUndo={vi.fn()}
+        onRedo={vi.fn()}
+        canUndo={false}
+        canRedo={false}
+        capabilities={[
+          {
+            kind: "enhance",
+            workflow_class: "upscale",
+            available: false,
+            reason: "Install an upscaling workflow to enlarge a picture.",
+          },
+        ]}
+      />,
+    );
+
+    expect(
+      screen.getByRole("button", { name: /Enlarge and restore detail - Install an upscaling/ }),
+    ).toBeEnabled();
+  });
 });

@@ -1,4 +1,5 @@
 import type {
+  StudioCapabilityReport,
   ApplicationInfo,
   AppEvent,
   Artifact,
@@ -118,10 +119,21 @@ async function ensureSession(): Promise<void> {
   }
 }
 
-/** Whether a 403 is the CSRF guard rather than a genuine refusal. */
+/** Whether a 403 is the CSRF guard rather than a genuine refusal.
+ *
+ * The code first, the prose second. Matching on "CSRF check failed" made this
+ * retry depend on wording nobody thought of as contract: rephrasing that
+ * sentence would silently turn a recoverable stale token into a hard refusal,
+ * and the sentence would have looked entirely safe to change.
+ *
+ * The prose check stays as a fallback rather than being deleted, because it
+ * costs nothing and a response that predates the code still means the same
+ * thing.
+ */
 async function isCsrfFailure(response: Response): Promise<boolean> {
   try {
-    const payload = (await response.clone().json()) as { detail?: unknown };
+    const payload = (await response.clone().json()) as { detail?: unknown; code?: unknown };
+    if (payload.code === "csrf-invalid") return true;
     return payload.detail === "CSRF check failed";
   } catch {
     return false;
@@ -239,6 +251,7 @@ export const api = {
     ),
   deletePromptHelper: (id: string) =>
     request<void>(`/api/prompt-helpers/${id}`, { method: "DELETE" }),
+  studioCapabilities: () => request<StudioCapabilityReport>("/api/studio/capabilities"),
   sendTurn: async (
     chatId: string,
     text: string,
@@ -247,6 +260,7 @@ export const api = {
     settings: Record<string, unknown>,
     idempotencyKey: string = crypto.randomUUID(),
     endpoint: string = "turns",
+    workflowRevisionId?: string,
   ) => {
     const submit = (selectedMode: RoutingMode, confirmed = false) => request<TurnAccepted>(`/api/chats/${chatId}/${endpoint}`, {
       method: "POST",
@@ -255,6 +269,7 @@ export const api = {
         mode: selectedMode,
         input_artifact_ids: inputArtifactIds,
         settings,
+        workflow_revision_id: workflowRevisionId,
         confirm_media: confirmed,
         idempotency_key: idempotencyKey,
       }),
@@ -562,12 +577,16 @@ export const api = {
     workflowTemplateId: string | null = null,
     provider = "huggingface",
     workflowReferenceKind: string | null = null,
+    // Named when a filename cannot settle the choice: one version can publish
+    // the same safetensors name several times at different precisions.
+    selectedFileIds: string[] = [],
   ) => {
     const body = JSON.stringify({
       role,
       engine,
       revision,
       selected_files: selectedFiles,
+      selected_file_ids: selectedFileIds,
       auxiliary_kind: auxiliaryKind,
       workflow_template_id: workflowTemplateId,
       workflow_reference_kind: workflowReferenceKind,

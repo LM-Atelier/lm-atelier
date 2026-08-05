@@ -2,12 +2,15 @@ import {
   Brush,
   Eraser,
   Lasso,
+  Maximize2,
   Redo2,
+  Sparkles,
   Square,
   Type,
   Undo2,
 } from "lucide-react";
 import type { StudioToolKind } from "./studioToolState";
+import type { StudioToolCapability } from "./types";
 
 const TOOLS: Array<{ kind: StudioToolKind; label: string; icon: typeof Brush }> = [
   { kind: "instruct", label: "Instruct the whole image", icon: Type },
@@ -15,6 +18,8 @@ const TOOLS: Array<{ kind: StudioToolKind; label: string; icon: typeof Brush }> 
   { kind: "eraser", label: "Erase from the selection", icon: Eraser },
   { kind: "rect", label: "Select a rectangle", icon: Square },
   { kind: "lasso", label: "Lasso a selection", icon: Lasso },
+  { kind: "enhance", label: "Enlarge and restore detail", icon: Sparkles },
+  { kind: "extend", label: "Extend past the edge", icon: Maximize2 },
 ];
 
 /** The studio's left rail: pick how you point at the image.
@@ -32,6 +37,7 @@ export function StudioToolRail({
   canUndo,
   canRedo,
   disabled = false,
+  capabilities = [],
 }: {
   active: StudioToolKind;
   onSelect: (kind: StudioToolKind) => void;
@@ -40,23 +46,36 @@ export function StudioToolRail({
   canUndo: boolean;
   canRedo: boolean;
   disabled?: boolean;
+  /** What each tool can do here. Empty until the report arrives, which reads
+   * as "nothing known against it" rather than as a rail full of warnings. */
+  capabilities?: StudioToolCapability[];
 }) {
+  const blocked = new Map(
+    capabilities.filter((tool) => !tool.available).map((tool) => [tool.kind, tool.reason]),
+  );
   return (
     <nav className="studio-tool-rail" aria-label="Editing tools">
-      {TOOLS.map(({ kind, label, icon: Icon }) => (
-        <button
-          key={kind}
-          type="button"
-          className={`icon-button ${active === kind ? "selected" : ""}`}
-          aria-label={label}
-          aria-pressed={active === kind}
-          title={label}
-          disabled={disabled}
-          onClick={() => onSelect(kind)}
-        >
-          <Icon size={18} aria-hidden="true" />
-        </button>
-      ))}
+      {TOOLS.map(({ kind, label, icon: Icon }) => {
+        // Enabled but guided, never greyed out: a disabled button explains
+        // nothing, and the thing that would fix it is a install away.
+        const unavailable = blocked.get(kind);
+        return (
+          <button
+            key={kind}
+            type="button"
+            className={`icon-button ${active === kind ? "selected" : ""} ${unavailable ? "unavailable" : ""}`}
+            aria-label={unavailable ? `${label} - ${unavailable}` : label}
+            aria-pressed={active === kind}
+            aria-describedby={unavailable ? "studio-tool-guidance" : undefined}
+            title={unavailable ? `${label}
+${unavailable}` : label}
+            disabled={disabled}
+            onClick={() => onSelect(kind)}
+          >
+            <Icon size={18} aria-hidden="true" />
+          </button>
+        );
+      })}
       <span className="studio-rail-divider" aria-hidden="true" />
       <button
         type="button"

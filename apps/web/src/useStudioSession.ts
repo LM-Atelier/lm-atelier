@@ -23,6 +23,11 @@ type StudioApply = {
   instruction: string;
   artifactId: string;
   mask?: StudioMaskUpload;
+  /** What the active tool asks for beyond words - a scale factor, say. */
+  settings?: Record<string, unknown>;
+  /** The workflow a recipe recorded, so applying one reproduces its run
+   * rather than running its words against whatever is current. */
+  workflowRevisionId?: string;
 };
 
 export type StudioStep = {
@@ -63,12 +68,30 @@ export function useStudioSession(sourceArtifactId: string | null, sourceChatId: 
   });
 
   const apply = useMutation({
-    mutationFn: async ({ instruction, artifactId, mask }: StudioApply) => {
+    mutationFn: async ({
+      instruction,
+      artifactId,
+      mask,
+      settings,
+      workflowRevisionId,
+    }: StudioApply) => {
       // The mask uploads as its own artifact and travels in settings, not in
       // input_artifact_ids: a selection is instruction, not content, so it
       // must never render as an attachment or count toward edit lineage.
-      const settings = mask ? { mask: await uploadMask(mask) } : {};
-      return api.sendTurn(sessionId!, instruction, "image", [artifactId], settings);
+      const turnSettings = {
+        ...settings,
+        ...(mask ? { mask: await uploadMask(mask) } : {}),
+      };
+      return api.sendTurn(
+        sessionId!,
+        instruction,
+        "image",
+        [artifactId],
+        turnSettings,
+        undefined,
+        undefined,
+        workflowRevisionId,
+      );
     },
     onSuccess: () => void client.invalidateQueries({ queryKey: ["studio-session", sessionId] }),
   });
@@ -79,8 +102,13 @@ export function useStudioSession(sourceArtifactId: string | null, sourceChatId: 
     steps: session.data ? studioSteps(session.data, sourceArtifactId) : [],
     busy: apply.isPending || hasPendingWork(session.data),
     error: open.error ?? session.error ?? apply.error,
-    apply: (instruction: string, artifactId: string, mask?: StudioMaskUpload) =>
-      apply.mutate({ instruction, artifactId, mask }),
+    apply: (
+      instruction: string,
+      artifactId: string,
+      mask?: StudioMaskUpload,
+      settings?: Record<string, unknown>,
+      workflowRevisionId?: string,
+    ) => apply.mutate({ instruction, artifactId, mask, settings, workflowRevisionId }),
   };
 }
 

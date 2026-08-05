@@ -50,6 +50,7 @@ from .comfy_registry_wheel_environments import (
     verify_comfy_registry_wheel_environment,
 )
 from .models import ComfyRegistryInstall
+from .source_omission_proof import PendingOmission, record_pending_omission
 
 _REPARSE_POINT = getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0x400)
 logger = logging.getLogger(__name__)
@@ -177,8 +178,15 @@ async def prepare_comfy_registry_install(
     wheel_progress: WheelDownloadProgress | None = None,
     staged_archive: ComfyRegistryStagedArchive | None = None,
     environment_assembler: EnvironmentAssembler = assemble_comfy_registry_wheel_environment,
+    pending_omission: PendingOmission | None = None,
 ) -> ComfyRegistryPreparation:
-    """Prepare one exact Registry package without trusting or activating it."""
+    """Prepare one exact Registry package without trusting or activating it.
+
+    A pending omission is written in the same commit as the install it is
+    about. Persisting it afterwards would leave a window - a cancellation, a
+    process death, a failed second commit - in which an install whose
+    dependencies were skipped exists with nothing recording that they were.
+    """
     if media_worker_stopped is not True:
         raise ComfyRegistryLifecycleError(
             "media_worker_running",
@@ -257,6 +265,14 @@ async def prepare_comfy_registry_install(
         )
         install.trusted = False
         install.active = False
+        if pending_omission is not None:
+            install.review_json = record_pending_omission(
+                install.review_json,
+                manifest_sha256=install.manifest_sha256,
+                omitted_declarations=pending_omission.omitted_declarations,
+                workflow_revision_id=pending_omission.workflow_revision_id,
+                required_node_types=pending_omission.required_node_types,
+            )
         if not (
             install.wheel_environment_path
             and install.wheel_closure_sha256

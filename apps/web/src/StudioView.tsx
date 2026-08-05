@@ -1,7 +1,12 @@
 import { useEffect, useMemo, useReducer, useState } from "react";
+import { useQuery } from "@tanstack/react-query";
+import { api } from "./api";
 import { StudioOpenImage } from "./StudioOpenImage";
 import { ErrorCallout } from "./ErrorCallout";
 import { StudioCanvas } from "./StudioCanvas";
+import { StudioExtendHandles } from "./StudioExtendHandles";
+import { StudioRecipes } from "./StudioRecipes";
+import { StudioToolGuidance } from "./StudioToolGuidance";
 import { StudioToolRail } from "./StudioToolRail";
 import { coverage, encodeMaskPng, isEmpty } from "./studioMasks";
 import {
@@ -11,6 +16,7 @@ import {
   type StudioToolKind,
 } from "./studioToolState";
 import { useStudioSession, type StudioStep } from "./useStudioSession";
+import type { EditTemplate } from "./types";
 
 /** The Image Studio: a canvas-first editing surface, not a conversation.
  *
@@ -23,14 +29,21 @@ export function StudioView({
   sourceArtifactId,
   sourceChatId = null,
   onOpenArtifact,
+  onOpenWorkflows,
 }: {
   sourceArtifactId: string | null;
   sourceChatId?: string | null;
   onOpenArtifact: (artifactId: string) => void;
+  /** Where a tool that needs an uninstalled workflow sends you. */
+  onOpenWorkflows: () => void;
 }) {
   const { steps, busy, error, apply } = useStudioSession(sourceArtifactId, sourceChatId);
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [instruction, setInstruction] = useState("");
+  // The recipe an apply should run under. Cleared whenever the instruction is
+  // edited by hand: at that point the words are no longer the recipe's, and
+  // running its workflow would attribute a result to something it did not do.
+  const [recipe, setRecipe] = useState<EditTemplate | null>(null);
   const [bitmap, setBitmap] = useState<ImageBitmap | null>(null);
   const [tools, dispatch] = useReducer(studioToolReducer, undefined, initialToolState);
   // The pointer tool is rebuilt whenever the mode or brush changes; each one
@@ -41,6 +54,15 @@ export function StudioView({
     [tools.kind, tools.brushRadius, tools.mask],
   );
   const selectionCoverage = tools.mask ? coverage(tools.mask) : 0;
+  // Asked once per visit rather than per apply: installing a workflow is not
+  // something that happens while a picture is open.
+  const capabilities = useQuery({
+    queryKey: ["studio-capabilities"],
+    queryFn: api.studioCapabilities,
+    staleTime: 60_000,
+  });
+  const activeTool = capabilities.data?.tools.find((tool) => tool.kind === tools.kind);
+  const unavailable = activeTool && !activeTool.available ? activeTool.reason : null;
 
   // Derived, never synced: with nothing chosen the studio shows the newest
   // result, so a finished apply lands on the canvas without an effect.
@@ -98,6 +120,7 @@ export function StudioView({
           canUndo={tools.history.canUndo}
           canRedo={tools.history.canRedo}
           disabled={!bitmap}
+          capabilities={capabilities.data?.tools ?? []}
         />
         <div className="studio-stage">
           {bitmap ? (
@@ -116,6 +139,15 @@ export function StudioView({
               <div className="loading-line" />
               <p>Loading the image…</p>
             </div>
+          )}
+          {bitmap && tools.kind === "extend" && (
+            // Over the picture rather than beside it: the frame is the
+            // control, so it has to be where the frame is.
+            <StudioExtendHandles
+              tools={tools}
+              dispatch={dispatch}
+              size={{ width: bitmap.width, height: bitmap.height }}
+            />
           )}
         </div>
         <aside className="studio-panel">
@@ -159,22 +191,83 @@ export function StudioView({
               </small>
             </div>
           )}
-          <label>
-            <span>
-              <strong>
-                {tools.kind === "instruct" ? "Describe the edit" : "Describe the change here"}
-              </strong>
-            </span>
-            <textarea
-              rows={4}
-              value={instruction}
-              placeholder="e.g. make it a watercolor painting"
-              onChange={(event) => setInstruction(event.target.value)}
-            />
-          </label>
+          {tools.kind === "extend" ? (
+            <div className="studio-tool-options">
+              <span>
+                <strong>Extend by</strong>
+              </span>
+              <small>
+                {Object.values(tools.margins).some(Boolean)
+                  ? (["top", "right", "bottom", "left"] as const)
+                      .filter((side) => tools.margins[side] > 0)
+                      .map((side) => `${side} ${Math.round(tools.margins[side] * 100)}%`)
+                      .join(", ")
+                  : "Drag an edge of the picture outward, or use the arrow keys on one."}
+              </small>
+              <button
+                className="secondary compact-button"
+                onClick={() => dispatch({ type: "clear-margins" })}
+              >
+                Reset edges
+              </button>
+            </div>
+          ) : tools.kind === "enhance" ? (
+            <label>
+              <span>
+                <strong>Enlarge by</strong> {tools.upscaleFactor}x
+              </span>
+              <input
+                type="range"
+                min={1}
+                max={8}
+                step={1}
+                value={tools.upscaleFactor}
+                onChange={(event) =>
+                  dispatch({ type: "set-upscale-factor", factor: Number(event.target.value) })
+                }
+              />
+            </label>
+          ) : (
+            <label>
+              <span>
+                <strong>
+                  {tools.kind === "instruct" ? "Describe the edit" : "Describe the change here"}
+                </strong>
+              </span>
+              <textarea
+                rows={4}
+                value={instruction}
+                placeholder="e.g. make it a watercolor painting"
+                onChange={(event) => {
+                  setInstruction(event.target.value);
+                  setRecipe(null);
+                }}
+              />
+            </label>
+          )}
+          <StudioRecipes
+            disabled={busy || !current}
+            onApply={(chosen) => {
+              setRecipe(chosen);
+              setInstruction(chosen.instruction);
+            }}
+          />
+          {unavailable && (
+            // Beside the button that would fail, and named by the tools that
+            // cannot run, so the sentence arrives before the drawing does.
+            <StudioToolGuidance reason={unavailable} onOpenWorkflows={onOpenWorkflows} />
+          )}
           <button
             className="primary"
-            disabled={!instruction.trim() || busy || !current}
+            // Enhance asks for no words: the whole picture is the subject and
+            // the size is the whole instruction.
+            disabled={
+              (tools.kind === "extend" && !Object.values(tools.margins).some(Boolean)) ||
+              (tools.kind !== "enhance" && tools.kind !== "extend" && !instruction.trim()) ||
+              busy ||
+              !current ||
+              Boolean(unavailable)
+            }
             onClick={() => {
               if (!current) return;
               const selection = tools.kind !== "instruct" && tools.mask && !isEmpty(tools.mask)
@@ -185,6 +278,14 @@ export function StudioView({
                   instruction.trim(),
                   current.artifactId,
                   mask ? { blob: mask, featherPx: tools.featherPx, invert: false } : undefined,
+                  tools.kind === "enhance"
+                    ? { upscale_factor: tools.upscaleFactor }
+                    : tools.kind === "extend"
+                      ? { outpaint_margins: tools.margins }
+                      : recipe
+                        ? recipe.settings_json
+                        : undefined,
+                  recipe?.workflow_revision_id ?? undefined,
                 );
                 setInstruction("");
                 setSelectedId(null);
@@ -195,9 +296,13 @@ export function StudioView({
           >
             {busy
               ? "Applying…"
-              : tools.kind !== "instruct" && selectionCoverage > 0
-                ? "Apply to selection"
-                : "Apply edit"}
+              : tools.kind === "extend"
+                ? "Extend"
+                : tools.kind === "enhance"
+                  ? `Enlarge ${tools.upscaleFactor}x`
+                : tools.kind !== "instruct" && selectionCoverage > 0
+                  ? "Apply to selection"
+                  : "Apply edit"}
           </button>
         </aside>
       </div>

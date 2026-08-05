@@ -14,7 +14,6 @@ import {
   ChevronLeft,
   ChevronRight,
   CircleStop,
-  Cpu,
   Download,
   Film,
   Folder,
@@ -46,23 +45,12 @@ import {
 } from "lucide-react";
 import { AccessibleDialog } from "./AccessibleDialog";
 import { CopyTextButton } from "./CopyTextButton";
-import { CredentialSettingsCard } from "./CredentialSettingsCard";
 import { InstallConfirmDialog } from "./InstallConfirmDialog";
 import { api } from "./api";
 import {
-  supportLinks,
-  downloadJson,
   formatBytes,
-  formatDate,
 } from "./format";
 import {
-  calibratedImageEditStrength,
-  estimateImageEditStrength,
-  IMAGE_EDIT_STRENGTH_MODE_KEY,
-  resolveImageEditStrengthMode,
-  type ImageEditStrengthMode,
-  type WorkflowImageEditCalibration,
-  workflowImageEditCalibration,
 } from "./imageEditStrength";
 import { GlobalNotices } from "./GlobalNotices";
 import {
@@ -77,8 +65,6 @@ import {
   type MediaOrigin,
 } from "./messageMedia";
 import { useLiveEvents } from "./useLiveEvents";
-import { DownloadDiagnosticsButton } from "./DownloadDiagnosticsButton";
-import { StatusDot } from "./StatusDot";
 import { ErrorCallout } from "./ErrorCallout";
 import { EmptyState } from "./EmptyState";
 import { AtelierMark } from "./AtelierMark";
@@ -90,19 +76,21 @@ import { MessageField } from "./MessageField";
 import { useConfirm } from "./useConfirm";
 import { focusMainContent, roleForMode } from "./viewHelpers";
 import { ArtifactPart } from "./ArtifactPart";
-import { FirstRunSetup, SetupWizard } from "./SetupWizard";
+import { FirstRunSetup } from "./SetupWizard";
 import { ChatManager } from "./ChatManager";
 import { type View } from "./rooms";
-import type { Appearance } from "./theme";
 import { useWorkspaceChrome, type SidebarLayout } from "./sidebarLayout";
 import { SidebarResizer } from "./SidebarResizer";
 import { SidebarFooter } from "./SidebarFooter";
+import { SetupSurface } from "./SetupSurface";
+import { ThemeToggle } from "./ThemeToggle";
 import { WorkflowConsumers } from "./WorkflowConsumers";
-import { WorkflowSelector } from "./WorkflowSelector";
 import { operationForTurn, revisionForTurn, schemaForRevision } from "./turnWorkflow";
 import type { WorkflowFamily, WorkflowSelection } from "./types";
 import { PromptDialog } from "./ConfirmDialog";
-import { SettingControl } from "./SettingControl";
+import { GenerationSettingsPanel } from "./GenerationSettingsPanel";
+import { ProjectManager } from "./ProjectManager";
+import { SettingsView } from "./SettingsView";
 import { MediaLibraryView } from "./MediaLibraryView";
 import { MediaOutputPlan } from "./MediaOutputPlan";
 import { ModelCard } from "./ModelCard";
@@ -111,12 +99,9 @@ import { VersionChooser } from "./VersionChooser";
 import { StudioView } from "./StudioView";
 import { RecipeCard } from "./RecipeCard";
 import { ModelUpdatesPanel } from "./ModelUpdatesPanel";
-import { RuntimeSetupCard } from "./RuntimeSetupCard";
 import { useProjectMutations } from "./useProjectMutations";
 import { JobsPanel } from "./JobsPanel";
 import { editVisionNote, workshopTranscript } from "./promptWorkshop";
-import { WorkerLogFolderButton, WorkerStartupLimit } from "./WorkerStartupLimit";
-import { WorkerStatusCard } from "./WorkerStatusCard";
 import { useComposerUploads } from "./useComposerUploads";
 import type { ComposerAttachment } from "./useComposerUploads";
 import { useDraftClassification } from "./useDraftClassification";
@@ -130,9 +115,7 @@ import {
   resolveWorkflowSettings,
 } from "./settings";
 import type {
-  ApplicationInfo,
   ArtifactLibraryItem,
-  BackupInfo,
   CatalogModel,
   CatalogPreflight,
   Chat,
@@ -140,25 +123,19 @@ import type {
   EngineCapabilities,
   EngineRole,
   GenerationPreset,
-  GenerationPresetBundle,
   Message,
   MessagePart,
   ModelAssetInstall,
   ModelInstall,
   ModelProfile,
-  ModelProfileBundle,
   Project,
   RoutingMode,
-  RuntimeStatus,
   SetupReadinessReport,
-  SettingField,
-  SystemInfo,
   TurnAccepted,
   Workflow,
   WorkPlan,
 } from "./types";
 
-type Visibility = "basic" | "advanced" | "expert";
 type PendingTurn = { id: string; text: string; mode: RoutingMode };
 type VisualTarget = {
   attachment: ComposerAttachment;
@@ -181,46 +158,10 @@ type SendTurnVariables = PendingTurn & {
   stopCurrent?: boolean;
 };
 
-const visibilityRank: Record<Visibility, number> = { basic: 0, advanced: 1, expert: 2 };
 const AUTO_PROFILE_ID = "__auto__";
 const SETUP_DISMISSED_KEY = "lm-atelier-setup-dismissed";
 const CURRENT_CHAT_KEY = "local-lm-chat";
 
-function formatTechnicalDetails(
-  application: ApplicationInfo,
-  system: SystemInfo,
-  engines: EngineCapabilities[],
-): string {
-  const devices = system.devices.length
-    ? [
-        "Devices:",
-        ...system.devices.map((device) => {
-          const facts = [
-            device.kind,
-            device.backend,
-            device.total_memory_bytes == null ? null : formatBytes(device.total_memory_bytes),
-          ].filter(Boolean);
-          return `- ${device.name}${facts.length ? ` (${facts.join("; ")})` : ""}`;
-        }),
-      ]
-    : ["Devices: None detected"];
-  const runtimes = engines.length
-    ? [
-        "Engines:",
-        ...engines.map(
-          (engine) => `- ${engine.engine} ${engine.version} (${engine.roles.join(", ")})`,
-        ),
-      ]
-    : ["Engines: None reported"];
-  return [
-    `LM Atelier: ${application.version}`,
-    `Platform: ${system.distribution} ${system.distribution_version} (${system.platform} ${system.platform_release}; ${system.architecture})`,
-    `Runtime: Python ${system.python_version}`,
-    `CPU: ${system.cpu_model}`,
-    ...devices,
-    ...runtimes,
-  ].join("\n");
-}
 
 /** The library's Edit action: attach the selection in the chat composer,
  * switch to image mode, and open the studio. */
@@ -571,247 +512,6 @@ function MessageBubble({
   );
 }
 
-function ImageEditStrengthControl({
-  field,
-  parameter,
-  calibration,
-  resolvedSteps,
-  prompt,
-  layers,
-  numericManualLayers,
-  values,
-  onValues,
-}: {
-  field: SettingField;
-  parameter: string;
-  calibration: WorkflowImageEditCalibration | null;
-  resolvedSteps: unknown;
-  prompt: string;
-  layers: Array<Record<string, unknown> | undefined>;
-  numericManualLayers: boolean[];
-  values: Record<string, unknown>;
-  onValues: (values: Record<string, unknown>) => void;
-}) {
-  const mode: ImageEditStrengthMode = resolveImageEditStrengthMode(
-    parameter,
-    layers,
-    numericManualLayers,
-  );
-  const activeCalibration = calibration ? {
-    ...calibration,
-    minimum: field.minimum ?? calibration.minimum,
-    maximum: field.maximum ?? calibration.maximum,
-  } : null;
-  const estimate = activeCalibration
-    ? calibratedImageEditStrength(prompt, activeCalibration, resolvedSteps)
-    : estimateImageEditStrength(prompt, field.minimum ?? 0, field.maximum ?? 1);
-  let manualValue = estimate.value;
-  for (const layer of layers) {
-    if (typeof layer?.[parameter] === "number") manualValue = layer[parameter];
-  }
-  const selectAuto = () => {
-    const next: Record<string, unknown> = {
-      ...values,
-      [IMAGE_EDIT_STRENGTH_MODE_KEY]: "auto",
-    };
-    delete next[parameter];
-    onValues(next);
-  };
-  const selectManual = () => onValues({
-    ...values,
-    [IMAGE_EDIT_STRENGTH_MODE_KEY]: "manual",
-    [parameter]: typeof values[parameter] === "number" ? values[parameter] : manualValue,
-  });
-  return (
-    <div className="setting-row image-edit-strength-control">
-      <span>
-        <strong>Change strength</strong>
-        <small>{mode === "auto" ? `Predicted: ${estimate.scope}` : "Set for this chat"}</small>
-      </span>
-      <div className="image-edit-strength-inputs">
-        <div className="segmented compact" role="group" aria-label="Image edit change strength mode">
-          <button type="button" aria-pressed={mode === "auto"} className={mode === "auto" ? "active" : ""} onClick={selectAuto}>Auto</button>
-          <button type="button" aria-pressed={mode === "manual"} className={mode === "manual" ? "active" : ""} onClick={selectManual}>Manual</button>
-        </div>
-        {mode === "manual" && (
-          <input
-            aria-label="Manual change strength"
-            type="number"
-            value={manualValue}
-            min={field.minimum ?? undefined}
-            max={field.maximum ?? undefined}
-            step={field.step ?? 0.01}
-            onChange={(event) => onValues({
-              ...values,
-              [IMAGE_EDIT_STRENGTH_MODE_KEY]: "manual",
-              [parameter]: Number(event.target.value),
-            })}
-          />
-        )}
-      </div>
-    </div>
-  );
-}
-function GenerationSettingsPanel({
-  role,
-  engines,
-  values,
-  onValues,
-  presets,
-  presetId,
-  onPreset,
-  workflowSchema,
-  inheritedValues = {},
-  inheritedPresetId = null,
-  profileValues = {},
-  imageEdit = false,
-  imageEditPrompt = "",
-  presetLabel = `${role} preset`,
-  resetLabel,
-  onReset,
-}: {
-  role: EngineRole;
-  engines: EngineCapabilities[];
-  values: Record<string, unknown>;
-  onValues: (values: Record<string, unknown>) => void;
-  presets: GenerationPreset[];
-  presetId: string | null;
-  onPreset: (presetId: string | null) => void;
-  workflowSchema?: Record<string, unknown>;
-  inheritedValues?: Record<string, unknown>;
-  inheritedPresetId?: string | null;
-  profileValues?: Record<string, unknown>;
-  imageEdit?: boolean;
-  imageEditPrompt?: string;
-  presetLabel?: string;
-  resetLabel: string;
-  onReset: () => void;
-}) {
-  const [visibility, setVisibility] = useState<Visibility>("basic");
-  const engine = engines.find((item) => item.roles.includes(role));
-  const rolePresets = presets.filter((preset) => preset.role === role);
-  const defaultPreset = rolePresets.find((preset) => preset.is_default);
-  const inheritedPreset = rolePresets.find((preset) => preset.id === inheritedPresetId);
-  const selectedPreset = rolePresets.find((preset) => preset.id === presetId);
-  const inheritedName = inheritedPreset?.name ?? defaultPreset?.name;
-  const allFields = resolveWorkflowSettings(
-    resolveCapabilitySettings(engine, role),
-    workflowSchema,
-  );
-  const editCalibration = workflowImageEditCalibration(workflowSchema);
-  const strengthParameter = editCalibration?.parameter ?? "denoise";
-  const strengthField = allFields.find(
-    (field) => field.key === strengthParameter && field.available,
-  );
-  const visibleFields = allFields.filter(
-    (field) =>
-      field.scope !== "load"
-      && visibilityRank[field.visibility] <= visibilityRank[visibility]
-      && field.available
-      && field.key !== strengthParameter,
-  );
-  // LoRAs are a list of assets with their own strengths, not one more number
-  // among steps and guidance. They get their own section so choosing one is a
-  // deliberate act rather than scrolling past it.
-  const loraField = visibleFields.find((field) => field.key === "loras");
-  const fields = visibleFields.filter((field) => field.key !== "loras");
-  const effectiveValue = (field: SettingField): unknown => {
-    let value = field.default;
-    for (const layer of [
-      profileValues,
-      defaultPreset?.settings_json,
-      inheritedPreset?.settings_json,
-      inheritedValues,
-      selectedPreset?.settings_json,
-      values,
-    ]) {
-      if (layer && Object.prototype.hasOwnProperty.call(layer, field.key)) {
-        value = layer[field.key];
-      }
-    }
-    return value;
-  };
-  const stepsField = editCalibration?.stepsParameter
-    ? allFields.find((field) => field.key === editCalibration.stepsParameter)
-    : undefined;
-  const resolvedEditSteps = stepsField ? effectiveValue(stepsField) : undefined;
-  return (
-    <div className="generation-settings-panel">
-      <div className="segmented compact">
-        {(["basic", "advanced", "expert"] as Visibility[]).map((level) => (
-          <button
-            key={level}
-            type="button"
-            className={visibility === level ? "active" : ""}
-            aria-pressed={visibility === level}
-            onClick={() => setVisibility(level)}
-          >
-            {level}
-          </button>
-        ))}
-      </div>
-      <div className="settings-list">
-        <label className="setting-row">
-          <span><strong>Preset</strong></span>
-          <select
-            aria-label={presetLabel}
-            value={presetId ?? ""}
-            onChange={(event) => onPreset(event.target.value || null)}
-          >
-            <option value="">{inheritedName ? `Inherit · ${inheritedName}` : "Inherit default"}</option>
-            {rolePresets.map((preset) => (
-              <option key={preset.id} value={preset.id}>{preset.name}</option>
-            ))}
-          </select>
-        </label>
-        {imageEdit && strengthField && (
-          <ImageEditStrengthControl
-            field={strengthField}
-            parameter={strengthParameter}
-            calibration={editCalibration}
-            resolvedSteps={resolvedEditSteps}
-            prompt={imageEditPrompt}
-            layers={[
-              profileValues,
-              defaultPreset?.settings_json,
-              inheritedPreset?.settings_json,
-              inheritedValues,
-              selectedPreset?.settings_json,
-              values,
-            ]}
-            numericManualLayers={[false, false, true, true, true, true]}
-            values={values}
-            onValues={onValues}
-          />
-        )}
-        {fields.map((field) => (
-          <SettingControl
-            key={`${field.scope}:${field.key}:${JSON.stringify(values[field.key])}`}
-            field={field}
-            value={effectiveValue(field)}
-            onChange={(value) => onValues({ ...values, [field.key]: value })}
-          />
-        ))}
-        {!engine && <p className="muted">No {role} engine is configured.</p>}
-      </div>
-      {loraField && (
-        <section className="settings-section" aria-label="LoRAs">
-          <h4>LoRAs</h4>
-          <div className="settings-list">
-            <SettingControl
-              field={loraField}
-              value={effectiveValue(loraField)}
-              onChange={(value) => onValues({ ...values, [loraField.key]: value })}
-            />
-          </div>
-        </section>
-      )}
-      <div className="generation-settings-actions">
-        <button className="secondary" type="button" onClick={onReset}>{resetLabel}</button>
-      </div>
-    </div>
-  );
-}
 
 function SettingsDrawer({
   open,
@@ -2341,569 +2041,9 @@ function ModelsView({ initialRole }: { initialRole: EngineRole }) {
     </div>
   );
 }
-function ProfileEditor({
-  profile,
-  engines,
-  onClose,
-}: {
-  profile: ModelProfile;
-  engines: EngineCapabilities[];
-  onClose: () => void;
-}) {
-  const client = useQueryClient();
-  const [name, setName] = useState(profile.name);
-  const [useCase, setUseCase] = useState(profile.use_case);
-  const [isDefault, setIsDefault] = useState(profile.is_default);
-  const [loadSettings, setLoadSettings] = useState(profile.load_settings_json);
-  const [requestSettings, setRequestSettings] = useState(profile.request_settings_json);
-  const [visibility, setVisibility] = useState<Visibility>("basic");
-  const refresh = () => void client.invalidateQueries({ queryKey: ["profiles"] });
-  const save = useMutation({
-    mutationFn: () => api.updateProfile(profile.id, {
-      name,
-      use_case: useCase,
-      is_default: isDefault,
-      load_settings: loadSettings,
-      request_settings: requestSettings,
-    }),
-    onSuccess: () => { refresh(); onClose(); },
-  });
-  const clone = useMutation({
-    mutationFn: () => api.cloneProfile(profile.id),
-    onSuccess: () => { refresh(); onClose(); },
-  });
-  const reset = useMutation({
-    mutationFn: () => api.resetProfile(profile.id),
-    onSuccess: (value) => {
-      setLoadSettings(value.load_settings_json);
-      setRequestSettings(value.request_settings_json);
-      refresh();
-    },
-  });
-  const remove = useMutation({
-    mutationFn: () => api.deleteProfile(profile.id),
-    onSuccess: () => { refresh(); onClose(); },
-  });
-  const exportBundle = useMutation({
-    mutationFn: () => api.exportProfile(profile.id),
-    onSuccess: (bundle) => downloadJson(bundle, `${profile.name.replaceAll(/[^a-z0-9]+/gi, "-").toLowerCase()}.lm-atelier-profile.json`),
-  });
-  const engine = engines.find((item) => item.engine === profile.engine && item.roles.includes(profile.role))
-    ?? engines.find((item) => item.roles.includes(profile.role));
-  const fields = resolveCapabilitySettings(engine, profile.role).filter(
-    (field) => visibilityRank[field.visibility] <= visibilityRank[visibility] && field.available,
-  );
-  const error = save.error ?? clone.error ?? reset.error ?? remove.error ?? exportBundle.error;
-  return (
-    <AccessibleDialog
-      title="Edit profile"
-      eyebrow={`${profile.role} profile · ${profile.engine}`}
-      closeLabel="Close profile editor"
-      onClose={onClose}
-      className="settings-editor"
-    >
-      <label>Profile name<input value={name} onChange={(event) => setName(event.target.value)} /></label>
-      <label>Best used for<textarea rows={3} value={useCase} onChange={(event) => setUseCase(event.target.value)} placeholder="Programming, code review, technical explanations" /></label>
-      <label className="toggle-row"><span><strong>Default {profile.role} model</strong><small>Used by chats set to Default. Auto uses it when no use case matches.</small></span><input type="checkbox" checked={isDefault} onChange={(event) => setIsDefault(event.target.checked)} /></label>
-      <div className="segmented compact" role="group" aria-label="Profile setting detail">
-        {(["basic", "advanced", "expert"] as Visibility[]).map((level) => <button type="button" key={level} className={visibility === level ? "active" : ""} aria-pressed={visibility === level} onClick={() => setVisibility(level)}>{level}</button>)}
-      </div>
-      <div className="settings-list embedded">
-        {fields.map((field) => {
-          const target = field.scope === "load" ? loadSettings : requestSettings;
-          return <div className="scoped-setting" key={`${field.scope}:${field.key}:${JSON.stringify(target[field.key])}`}><span className="scope-label">{field.scope}{field.restart_required ? " · restart required" : ""}</span><SettingControl field={field} value={target[field.key] ?? field.default} onChange={(value) => field.scope === "load" ? setLoadSettings({ ...loadSettings, [field.key]: value }) : setRequestSettings({ ...requestSettings, [field.key]: value })} /></div>;
-        })}
-        {!engine && <p className="muted">No capability schema is available for this profile engine.</p>}
-      </div>
-      {error && <ErrorCallout message={error.message} />}
-      <footer className="editor-actions"><button className="secondary danger" onClick={() => remove.mutate()} disabled={remove.isPending}>Delete profile</button><button className="secondary" onClick={() => reset.mutate()} disabled={reset.isPending}>Reset settings</button><button className="secondary" onClick={() => exportBundle.mutate()}>Export</button><button className="secondary" onClick={() => clone.mutate()}>Clone</button><button className="primary" onClick={() => save.mutate()} disabled={!name.trim() || save.isPending}>Save profile</button></footer>
-    </AccessibleDialog>
-  );
-}
 
-function PresetEditor({
-  preset,
-  engines,
-  onClose,
-}: {
-  preset: GenerationPreset;
-  engines: EngineCapabilities[];
-  onClose: () => void;
-}) {
-  const client = useQueryClient();
-  const [name, setName] = useState(preset.name);
-  const [isDefault, setIsDefault] = useState(preset.is_default);
-  const [settings, setSettings] = useState(preset.settings_json);
-  const [visibility, setVisibility] = useState<Visibility>("basic");
-  const refresh = () => void client.invalidateQueries({ queryKey: ["presets"] });
-  const save = useMutation({ mutationFn: () => api.updatePreset(preset.id, { name, is_default: isDefault, settings }), onSuccess: () => { refresh(); onClose(); } });
-  const clone = useMutation({ mutationFn: () => api.clonePreset(preset.id), onSuccess: () => { refresh(); onClose(); } });
-  const reset = useMutation({ mutationFn: () => api.resetPreset(preset.id), onSuccess: (value) => { setSettings(value.settings_json); refresh(); } });
-  const remove = useMutation({ mutationFn: () => api.deletePreset(preset.id), onSuccess: () => { refresh(); onClose(); } });
-  const exportBundle = useMutation({ mutationFn: () => api.exportPreset(preset.id), onSuccess: (bundle) => downloadJson(bundle, `${preset.name.replaceAll(/[^a-z0-9]+/gi, "-").toLowerCase()}.lm-atelier-preset.json`) });
-  const engine = engines.find((item) => item.roles.includes(preset.role));
-  const fields = resolveCapabilitySettings(engine, preset.role).filter((field) => field.scope !== "load" && visibilityRank[field.visibility] <= visibilityRank[visibility] && field.available);
-  const error = save.error ?? clone.error ?? reset.error ?? remove.error ?? exportBundle.error;
-  return (
-    <AccessibleDialog
-      title="Edit preset"
-      eyebrow={`${preset.role} generation preset`}
-      closeLabel="Close preset editor"
-      onClose={onClose}
-      className="settings-editor"
-    >
-      <label>Preset name<input value={name} onChange={(event) => setName(event.target.value)} /></label>
-      <label className="toggle-row"><span><strong>Default {preset.role} preset</strong></span><input type="checkbox" checked={isDefault} onChange={(event) => setIsDefault(event.target.checked)} /></label>
-      <div className="segmented compact" role="group" aria-label="Preset setting detail">{(["basic", "advanced", "expert"] as Visibility[]).map((level) => <button type="button" key={level} className={visibility === level ? "active" : ""} aria-pressed={visibility === level} onClick={() => setVisibility(level)}>{level}</button>)}</div>
-      <div className="settings-list embedded">{fields.map((field) => <div className="scoped-setting" key={`${field.scope}:${field.key}:${JSON.stringify(settings[field.key])}`}><span className="scope-label">{field.scope}</span><SettingControl field={field} value={settings[field.key] ?? field.default} onChange={(value) => setSettings({ ...settings, [field.key]: value })} /></div>)}</div>
-      {error && <ErrorCallout message={error.message} />}
-      <footer className="editor-actions"><button className="secondary danger" onClick={() => remove.mutate()}>Delete</button><button className="secondary" onClick={() => reset.mutate()}>Reset</button><button className="secondary" onClick={() => exportBundle.mutate()}>Export</button><button className="secondary" onClick={() => clone.mutate()}>Clone</button><button className="primary" onClick={() => save.mutate()} disabled={!name.trim() || save.isPending}>Save preset</button></footer>
-    </AccessibleDialog>
-  );
-}
 
-function ProjectManager({
-  project,
-  engines,
-  presets,
-  onClose,
-  onSave,
-  onDelete,
-  onExport,
-}: {
-  project: Project;
-  engines: EngineCapabilities[];
-  presets: GenerationPreset[];
-  onClose: () => void;
-  onSave: (values: Partial<Project>) => void;
-  onDelete: () => void;
-  onExport: (includeMedia: boolean) => void;
-}) {
-  const [confirmDialog, confirm] = useConfirm();
-  const [name, setName] = useState(project.name);
-  const [description, setDescription] = useState(project.description);
-  const [instructions, setInstructions] = useState(project.instructions);
-  const [archived, setArchived] = useState(project.archived);
-  const [settingsRole, setSettingsRole] = useState<EngineRole>("chat");
-  const [generationSettings, setGenerationSettings] = useState<
-    NonNullable<Project["generation_settings_json"]>
-  >(() => Object.fromEntries(
-    Object.entries(project.generation_settings_json ?? {}).map(([role, settings]) => [
-      role,
-      { ...settings },
-    ]),
-  ));
-  const [generationPresetIds, setGenerationPresetIds] = useState<
-    NonNullable<Project["generation_preset_ids_json"]>
-  >({ ...(project.generation_preset_ids_json ?? {}) });
-  const setRoleSettings = (values: Record<string, unknown>) => {
-    setGenerationSettings((current) => {
-      const next = { ...current };
-      if (Object.keys(values).length) next[settingsRole] = values;
-      else delete next[settingsRole];
-      return next;
-    });
-  };
-  const setRolePreset = (presetId: string | null) => {
-    setGenerationPresetIds((current) => {
-      const next = { ...current };
-      if (presetId) next[settingsRole] = presetId;
-      else delete next[settingsRole];
-      return next;
-    });
-  };
-  const clearRoleDefaults = () => {
-    setRoleSettings({});
-    setRolePreset(null);
-  };
-  const clearAllDefaults = () => {
-    setGenerationSettings({});
-    setGenerationPresetIds({});
-  };
-  return (
-    <AccessibleDialog
-      title="Manage project"
-      eyebrow="Workspace"
-      closeLabel="Close project manager"
-      onClose={onClose}
-      className="workspace-editor project-editor"
-    >
-      <label>Name<input value={name} onChange={(event) => setName(event.target.value)} /></label>
-      <label>Description<textarea rows={3} value={description} onChange={(event) => setDescription(event.target.value)} /></label>
-      <label>Project instructions<textarea rows={5} value={instructions} onChange={(event) => setInstructions(event.target.value)} /></label>
-      <section className="project-generation-defaults" aria-labelledby="project-generation-defaults-heading">
-        <div className="project-defaults-heading">
-          <div>
-            <h3 id="project-generation-defaults-heading">Generation defaults</h3>
-            <p>Chats inherit these settings; chat and turn choices override them.</p>
-          </div>
-          <button className="secondary compact-button" type="button" onClick={clearAllDefaults}>Clear all</button>
-        </div>
-        <div className="segmented project-role-tabs" aria-label="Project generation role">
-          {(["chat", "image", "video"] as EngineRole[]).map((role) => (
-            <button
-              key={role}
-              type="button"
-              className={settingsRole === role ? "active" : ""}
-              aria-pressed={settingsRole === role}
-              onClick={() => setSettingsRole(role)}
-            >
-              {role}
-            </button>
-          ))}
-        </div>
-        <GenerationSettingsPanel
-          key={settingsRole}
-          role={settingsRole}
-          engines={engines}
-          values={generationSettings[settingsRole] ?? {}}
-          onValues={setRoleSettings}
-          presets={presets}
-          presetId={generationPresetIds[settingsRole] ?? null}
-          onPreset={setRolePreset}
-          presetLabel={`${settingsRole} project preset`}
-          resetLabel="Clear role defaults"
-          onReset={clearRoleDefaults}
-        />
-      </section>
-      {/* A project's choice is what its chats fall back to, which is why
-          "inherit" and "use the project's choice" are the same idea seen
-          from two levels. */}
-      <section className="workflow-selectors">
-        <h3>Workflows for this project</h3>
-        <div>
-          <WorkflowSelector scope="project" scopeId={project.id} capability="image" label="Images" />
-          <WorkflowSelector scope="project" scopeId={project.id} capability="video" label="Video" />
-        </div>
-      </section>
-      <label className="toggle-row"><span><strong>Archived</strong><small>Hide this project while preserving its chats and media.</small></span><input type="checkbox" checked={archived} onChange={(event) => setArchived(event.target.checked)} /></label>
-      <div className="project-export-actions"><button className="secondary" onClick={() => onExport(false)}>Export metadata only</button><button className="secondary" onClick={() => onExport(true)}>Export with media</button></div>
-      <footer className="editor-actions">
-        <button className="secondary danger" onClick={() => void confirm({ title: `Delete ${project.name}?`, question: "The chats inside it are kept, but become unfiled.", confirmLabel: "Delete project" }).then((ok) => ok && onDelete())}>Delete project</button>
-        <button className="secondary" onClick={onClose}>Cancel</button>
-        <button
-          className="primary"
-          disabled={!name.trim()}
-          onClick={() => onSave({
-            name: name.trim(),
-            description,
-            instructions,
-            archived,
-            generation_settings_json: generationSettings,
-            generation_preset_ids_json: generationPresetIds,
-          })}
-        >
-          Save project
-        </button>
-      </footer>
-      {confirmDialog}
-    </AccessibleDialog>
-  );
-}
 
-function SettingsView({ engines }: { engines: EngineCapabilities[] }) {
-  const [confirmDialog, confirm] = useConfirm();
-  const client = useQueryClient();
-  const [selectedProfile, setSelectedProfile] = useState<ModelProfile | null>(null);
-  const [selectedPreset, setSelectedPreset] = useState<GenerationPreset | null>(null);
-  const [presetName, setPresetName] = useState("");
-  const [presetRole, setPresetRole] = useState<GenerationPreset["role"]>("chat");
-  const [importError, setImportError] = useState("");
-  const [backupFeedback, setBackupFeedback] = useState<{
-    kind: "success" | "error";
-    message: string;
-  } | null>(null);
-  const profileImport = useRef<HTMLInputElement>(null);
-  const presetImport = useRef<HTMLInputElement>(null);
-  const system = useQuery({ queryKey: ["system"], queryFn: api.system });
-  const about = useQuery({ queryKey: ["about"], queryFn: api.about });
-  const profiles = useQuery({ queryKey: ["profiles"], queryFn: api.profiles });
-  const presets = useQuery({ queryKey: ["presets"], queryFn: api.presets });
-  const workers = useQuery({ queryKey: ["workers"], queryFn: api.workers, refetchInterval: 3_000 });
-  const runtimes = useQuery({
-    queryKey: ["runtimes"],
-    queryFn: api.runtimes,
-    refetchInterval: (query) => query.state.data?.some((runtime) => runtime.state === "installing") ? 2_000 : false,
-  });
-  const backups = useQuery({ queryKey: ["backups"], queryFn: api.backups });
-  const refreshWorkers = () => void client.invalidateQueries({ queryKey: ["workers"] });
-  const loadChat = useMutation({ mutationFn: api.loadChatWorker, onSettled: refreshWorkers });
-  const startMedia = useMutation({ mutationFn: api.startMediaWorker, onSettled: refreshWorkers });
-  const stopWorker = useMutation({ mutationFn: api.stopWorker, onSettled: refreshWorkers });
-  const installRuntime = useMutation({
-    mutationFn: (engine: RuntimeStatus["engine"]) => api.installRuntime(engine),
-    onSuccess: (value: RuntimeStatus) => {
-      client.setQueryData<RuntimeStatus[]>(["runtimes"], (current = []) =>
-        current.map((item) => item.engine === value.engine ? value : item)
-      );
-    },
-  });
-  const storeBackup = (backup: BackupInfo) => {
-    client.setQueryData<BackupInfo[]>(["backups"], (current = []) => {
-      const existing = current.find((item) => item.name === backup.name);
-      const stored = backup.restore_pending
-        ? backup
-        : { ...backup, restore_pending: existing?.restore_pending ?? false };
-      const remaining = current
-        .filter((item) => item.name !== backup.name)
-        .map((item) => backup.restore_pending ? { ...item, restore_pending: false } : item);
-      return [stored, ...remaining].sort(
-        (left, right) => Date.parse(right.created_at) - Date.parse(left.created_at),
-      );
-    });
-  };
-  const showBackupError = (error: Error) =>
-    setBackupFeedback({ kind: "error", message: error.message });
-  const createBackup = useMutation({
-    mutationFn: api.createBackup,
-    onMutate: () => setBackupFeedback(null),
-    onSuccess: (backup) => {
-      storeBackup(backup);
-      setBackupFeedback({ kind: "success", message: "Backup created." });
-    },
-    onError: showBackupError,
-  });
-  const verifyBackup = useMutation({
-    mutationFn: api.verifyBackup,
-    onMutate: () => setBackupFeedback(null),
-    onSuccess: (backup) => {
-      storeBackup(backup);
-      setBackupFeedback({ kind: "success", message: "Backup verified." });
-    },
-    onError: showBackupError,
-  });
-  const restoreBackup = useMutation({
-    mutationFn: api.restoreBackup,
-    onMutate: () => setBackupFeedback(null),
-    onSuccess: (backup) => {
-      storeBackup(backup);
-      setBackupFeedback({
-        kind: "success",
-        message: "Restore scheduled. Restart LM Atelier to apply this backup.",
-      });
-    },
-    onError: showBackupError,
-  });
-  const deleteBackup = useMutation({
-    mutationFn: api.deleteBackup,
-    onMutate: () => setBackupFeedback(null),
-    onSuccess: (_value, name) => {
-      client.setQueryData<BackupInfo[]>(["backups"], (current = []) =>
-        current.filter((backup) => backup.name !== name)
-      );
-      setBackupFeedback({ kind: "success", message: "Backup deleted." });
-    },
-    onError: showBackupError,
-  });
-  const toolProbe = useMutation({ mutationFn: api.probeChatTools });
-  const chatWorker = workers.data?.find((worker) => worker.name === "chat");
-  const chatWorkerBusy = Boolean(
-    chatWorker && chatWorker.active_jobs + chatWorker.queued_jobs > 0
-  );
-  const createPreset = useMutation({
-    mutationFn: () => api.createPreset(presetRole, presetName),
-    onSuccess: () => {
-      setPresetName("");
-      void client.invalidateQueries({ queryKey: ["presets"] });
-    },
-  });
-  const setDefaultProfile = useMutation({
-    mutationFn: (profile: ModelProfile) =>
-      api.updateProfile(profile.id, { is_default: true }),
-    onSuccess: () => void client.invalidateQueries({ queryKey: ["profiles"] }),
-  });
-  const importBundle = async (file: File | undefined, kind: "profile" | "preset") => {
-    if (!file) return;
-    setImportError("");
-    try {
-      const value = JSON.parse(await file.text()) as ModelProfileBundle | GenerationPresetBundle;
-      if (kind === "profile") {
-        if (value.format !== "lm-atelier-profile") throw new Error("This is not an LM Atelier profile bundle.");
-        await api.importProfile(value as ModelProfileBundle);
-        await client.invalidateQueries({ queryKey: ["profiles"] });
-      } else {
-        if (value.format !== "lm-atelier-preset") throw new Error("This is not an LM Atelier preset bundle.");
-        await api.importPreset(value as GenerationPresetBundle);
-        await client.invalidateQueries({ queryKey: ["presets"] });
-      }
-    } catch (error) {
-      setImportError(error instanceof Error ? error.message : "Could not import the bundle.");
-    }
-  };
-  const technicalDetails = about.data && system.data
-    ? formatTechnicalDetails(about.data, system.data, engines)
-    : "";
-  return (
-    <div className="page-view settings-page">
-      <header className="page-header"><div><h1>Settings</h1></div></header>
-      <CredentialSettingsCard
-        provider="huggingface"
-        providerLabel="Hugging Face"
-        description="Access private and gated models. The token stays in your operating-system credential vault and is never displayed after saving."
-        environmentVariable="LOCAL_LM_HF_TOKEN"
-        placeholder="hf_..."
-      />
-      <CredentialSettingsCard
-        provider="civitai"
-        providerLabel="CivitAI"
-        description="Store a CivitAI API token securely for authenticated catalog downloads."
-        environmentVariable="LOCAL_LM_CIVITAI_TOKEN"
-        placeholder="CivitAI API token"
-      />
-      <section><h2>Engines</h2><div className="engine-grid">{engines.map((engine) => <article className="engine-card" key={`${engine.engine}:${engine.roles.join()}`}><header><div className="model-icon"><Cpu /></div><div><h3>{engine.engine}</h3><p>{engine.roles.join(" · ")} · {engine.version}</p></div><StatusDot healthy={engine.healthy} label={`${engine.engine} engine`} /></header>{engine.roles.includes("chat") && <div className="capability-list"><button className="secondary compact-button" onClick={() => toolProbe.mutate()} disabled={toolProbe.isPending}>{toolProbe.isPending ? "Testing…" : "Test structured tools"}</button></div>}</article>)}</div>{toolProbe.data && <div className={`callout ${toolProbe.data.passed ? "success" : "error"}`} role={toolProbe.data.passed ? "status" : "alert"}>{toolProbe.data.passed ? `Structured tool schema passed on ${toolProbe.data.engine} ${toolProbe.data.version}.` : `Structured tool schema failed: ${toolProbe.data.error || "unknown response"}`}</div>}{toolProbe.error && <ErrorCallout message={toolProbe.error.message} />}<div className="runtime-setup-grid">{runtimes.data?.map((runtime) => <RuntimeSetupCard key={runtime.engine} runtime={runtime} installPending={installRuntime.isPending} onInstall={(engine) => installRuntime.mutate(engine)} />)}</div>{(runtimes.error || installRuntime.error) && <ErrorCallout message={(runtimes.error || installRuntime.error)?.message} />}</section>
-      <section><h2>Machine</h2>{system.data && <div className="metric-grid"><div className="cpu-metric"><Cpu /><span><strong>{system.data.cpu_model}</strong><small>CPU model</small></span></div><div><HardDrive /><span><strong>{formatBytes(system.data.disk_free_bytes)}</strong> disk free</span></div></div>}<div className="device-list">{system.data?.devices.filter((device) => device.kind !== "cpu").map((device) => <div key={device.id}><span className="device-icon"><Cpu size={18} /></span><span><strong>{device.name}</strong><small>{device.backend}</small></span></div>)}</div></section>
-      <section>
-        <div className="detail-title"><div><h2>Model profiles</h2></div><button className="secondary" onClick={() => profileImport.current?.click()}>Import profile</button></div>
-        <input ref={profileImport} hidden type="file" accept="application/json,.json" onChange={(event) => { void importBundle(event.target.files?.[0], "profile"); event.target.value = ""; }} />
-        <div className="profile-table interactive">{profiles.data?.map((profile: ModelProfile) => <div key={profile.id}><span className="badge">{profile.role}</span><strong>{profile.name}{profile.is_default ? " · default" : ""}</strong><span title={profile.use_case}>{profile.use_case || "No Auto use case yet"}</span><span className="row-actions">{!profile.is_default && <button className="secondary compact-button" aria-label={`Set ${profile.name} as default ${profile.role} model`} disabled={setDefaultProfile.isPending} onClick={() => setDefaultProfile.mutate(profile)}>Set default</button>}{profile.role === "chat" && profile.model_install_id && <button className="secondary compact-button" aria-label={`Load profile: ${profile.name}`} disabled={chatWorkerBusy || loadChat.isPending} title={chatWorkerBusy ? "Wait for active and queued jobs before changing the worker" : "Load this chat profile"} onClick={() => loadChat.mutate(profile.id)}>Load</button>}<button className="secondary compact-button" aria-label={`Edit profile: ${profile.name}`} onClick={() => setSelectedProfile(profile)}>Edit</button></span></div>)}</div>
-        {setDefaultProfile.error && <ErrorCallout message={setDefaultProfile.error.message} />}
-      </section>
-      <section>
-        <div className="detail-title"><div><h2>Generation presets</h2><p>Reuse response length, sampling, image size, video length, and seed settings.</p></div><button className="secondary" onClick={() => presetImport.current?.click()}>Import preset</button></div>
-        <input ref={presetImport} hidden type="file" accept="application/json,.json" onChange={(event) => { void importBundle(event.target.files?.[0], "preset"); event.target.value = ""; }} />
-        <div className="preset-create"><input aria-label="New preset name" placeholder="New preset name" value={presetName} onChange={(event) => setPresetName(event.target.value)} /><select aria-label="New preset role" value={presetRole} onChange={(event) => setPresetRole(event.target.value as GenerationPreset["role"])}><option value="chat">Chat</option><option value="image">Image</option><option value="video">Video</option></select><button className="primary" disabled={!presetName.trim() || createPreset.isPending} onClick={() => createPreset.mutate()}><Plus size={15} />Create preset</button></div>
-        <div className="profile-table interactive">{presets.data?.map((preset) => <div key={preset.id}><span className="badge">{preset.role}</span><strong>{preset.name}{preset.is_default ? " · default" : ""}</strong><span>{Object.keys(preset.settings_json).length} overrides</span><button className="secondary compact-button" aria-label={`Edit preset: ${preset.name}`} onClick={() => setSelectedPreset(preset)}>Edit</button></div>)}</div>
-        {(createPreset.error || importError) && <ErrorCallout message={createPreset.error?.message || importError} />}
-      </section>
-      <section>
-        <div className="detail-title">
-          <div><h2>Workers</h2><p>A model must finish loading within the startup time limit. Large models on slow disks can need more than the default 60 seconds.</p></div>
-          <div className="row-actions">
-            <WorkerLogFolderButton />
-            <WorkerStartupLimit />
-          </div>
-        </div>
-        <div className="engine-grid">
-          {workers.data?.map((worker) => (
-            <WorkerStatusCard
-              key={worker.name}
-              worker={worker}
-              startPending={startMedia.isPending}
-              stopPending={stopWorker.isPending}
-              onStart={() => startMedia.mutate()}
-              onStop={() => stopWorker.mutate(worker.name)}
-            />
-          ))}
-        </div>
-        <ErrorCallout
-          message={(loadChat.error || startMedia.error || stopWorker.error)?.message}
-        />
-      </section>
-      <section>
-        <div className="detail-title">
-          <div><h2>Recovery backups</h2></div>
-          <div className="row-actions">
-            <DownloadDiagnosticsButton />
-            <button
-              className="secondary"
-              disabled={createBackup.isPending}
-              onClick={() => createBackup.mutate(false)}
-            >
-              {createBackup.isPending && createBackup.variables === false ? "Backing up…" : "Back up state"}
-            </button>
-            <button
-              className="secondary"
-              disabled={createBackup.isPending}
-              onClick={() => createBackup.mutate(true)}
-            >
-              {createBackup.isPending && createBackup.variables === true ? "Backing up…" : "Back up with media"}
-            </button>
-          </div>
-        </div>
-        {backups.data?.some((backup) => backup.restore_pending) && (
-          <div className="callout success" role="status">
-            Restore scheduled. Restart LM Atelier to apply the selected backup.
-          </div>
-        )}
-        {backups.data?.length ? (
-          <div className="backup-list">
-            {backups.data.map((backup) => {
-              const verifying = verifyBackup.isPending && verifyBackup.variables === backup.name;
-              const restoring = restoreBackup.isPending && restoreBackup.variables === backup.name;
-              const deleting = deleteBackup.isPending && deleteBackup.variables === backup.name;
-              return (
-                <article className="backup-row" key={backup.name}>
-                  <div className="backup-copy">
-                    <strong>{formatDate(backup.created_at)}</strong>
-                    <small>
-                      {formatBytes(backup.size_bytes + backup.media_size_bytes)}
-                      {" · "}
-                      {backup.media_included ? "State + media" : "State only"}
-                      {" · "}
-                      {backup.verified ? "Verified" : "Not verified"}
-                    </small>
-                    <code title={backup.name}>{backup.name}</code>
-                  </div>
-                  <div className="row-actions">
-                    <button
-                      className="secondary compact-button"
-                      aria-label={`Verify backup ${backup.name}`}
-                      disabled={verifying || restoring || deleting}
-                      onClick={() => verifyBackup.mutate(backup.name)}
-                    >
-                      {verifying ? "Verifying…" : "Verify"}
-                    </button>
-                    <button
-                      className="secondary compact-button"
-                      aria-label={`Restore backup ${backup.name} on restart`}
-                      disabled={backup.restore_pending || verifying || restoring || deleting}
-                      onClick={() => void confirm({ title: "Restore this backup on restart?", question: "The next time LM Atelier starts it will replace the current data with this backup. Anything created since the backup was taken is lost.", confirmLabel: "Restore on restart" }).then((ok) => ok && restoreBackup.mutate(backup.name))}
-                    >
-                      {restoring ? "Scheduling…" : backup.restore_pending ? "Restore scheduled" : "Restore on restart"}
-                    </button>
-                    <button
-                      className="secondary compact-button danger"
-                      aria-label={`Delete backup ${backup.name}`}
-                      disabled={backup.restore_pending || verifying || restoring || deleting}
-                      onClick={() => void confirm({ title: `Delete backup ${backup.name}?`, question: "This is a recovery point. Deleting it cannot be undone and it cannot be recreated from the current data.", confirmLabel: "Delete backup" }).then((ok) => ok && deleteBackup.mutate(backup.name))}
-                    >
-                      {deleting ? "Deleting…" : "Delete"}
-                    </button>
-                  </div>
-                </article>
-              );
-            })}
-          </div>
-        ) : (
-          !backups.isLoading && <p className="muted">No recovery backups yet.</p>
-        )}
-        {backupFeedback && (
-          <div
-            className={`callout ${backupFeedback.kind}`}
-            role={backupFeedback.kind === "error" ? "alert" : "status"}
-          >
-            {backupFeedback.message}
-          </div>
-        )}
-        {backups.error && <ErrorCallout message={backups.error.message} />}
-      </section>
-      <section>
-        <div className="detail-title">
-          <div><h2>About &amp; support</h2></div>
-          {about.data && <span className="badge">Version {about.data.version}</span>}
-        </div>
-        {about.data && <div className="about-support">
-          <div className="about-paths">
-            <div><Folder size={17} /><span><small>Data folder</small><code>{about.data.data_directory}</code></span><CopyTextButton text={about.data.data_directory} label="Copy data folder" buttonText="Copy data folder" className="secondary compact-button" /></div>
-            <div><Folder size={17} /><span><small>Log folder</small><code>{about.data.log_directory}</code></span><CopyTextButton text={about.data.log_directory} label="Copy log folder" buttonText="Copy log folder" className="secondary compact-button" /></div>
-          </div>
-          <div className="about-actions">
-            {technicalDetails && <CopyTextButton text={technicalDetails} label="Copy technical details" buttonText="Copy technical details" className="secondary" />}
-            <nav aria-label="Support resources">
-              {supportLinks(about.data.version).map(([label, href]) => (
-                <a key={label} href={href} target="_blank" rel="noreferrer">{label}</a>
-              ))}
-            </nav>
-          </div>
-        </div>}
-        {(about.error || system.error) && <ErrorCallout message="About information is unavailable." />}
-      </section>
-      {selectedProfile && <ProfileEditor profile={selectedProfile} engines={engines} onClose={() => setSelectedProfile(null)} />}
-      {selectedPreset && <PresetEditor preset={selectedPreset} engines={engines} onClose={() => setSelectedPreset(null)} />}
-      {confirmDialog}
-    </div>
-  );
-}
 
 function Sidebar({
   projects,
@@ -2924,7 +2064,6 @@ function Sidebar({
   onDeleteChat,
   onUpdateProject,
   onDeleteProject,
-  appearance,
   sidebar,
 }: {
   projects: Project[];
@@ -2945,7 +2084,6 @@ function Sidebar({
   onDeleteChat: (id: string, deleteGeneratedMedia: boolean) => void;
   onUpdateProject: (id: string, values: Partial<Project>) => void;
   onDeleteProject: (id: string) => void;
-  appearance: Appearance;
   sidebar: SidebarLayout;
 }) {
   const [naming, setNaming] = useState(false);
@@ -3000,7 +2138,7 @@ function Sidebar({
         {unfiled.length > 0 && <div className="sidebar-section"><div className="section-title"><span>Chats</span></div><div className="chat-list standalone">{unfiled.map(chatRow)}</div></div>}
       </div>
       {naming && <PromptDialog title="New project" label="Project name" confirmLabel="Create project" placeholder="Portrait studies" onCancel={() => setNaming(false)} onConfirm={(name) => { setNaming(false); onNewProject(name); }} />}
-      <SidebarFooter appearance={appearance} setupState={setupState} view={view} onSetup={onSetup} onView={onView} onNavigate={() => setMobileOpen(false)} />
+      <SidebarFooter setupState={setupState} view={view} onSetup={onSetup} onView={onView} onNavigate={() => setMobileOpen(false)} />
       {managedChat && <ChatManager chat={managedChat} projects={projects} onClose={() => setManagedChat(null)} onSave={(values) => { onUpdateChat(managedChat.id, values); setManagedChat(null); }} onDelete={(deleteGeneratedMedia) => { onDeleteChat(managedChat.id, deleteGeneratedMedia); setManagedChat(null); }} />}
       {managedProject && <ProjectManager project={managedProject} engines={engines} presets={presets} onClose={() => setManagedProject(null)} onSave={(values) => { onUpdateProject(managedProject.id, values); setManagedProject(null); }} onDelete={() => { onDeleteProject(managedProject.id); setManagedProject(null); }} onExport={(includeMedia) => onExportProject(managedProject.id, includeMedia)} />}
     </aside>
@@ -3270,6 +2408,9 @@ export default function App() {
 
   const allChats = useMemo(() => chats.data ?? [], [chats.data]);
   const allProjects = useMemo(() => projects.data ?? [], [projects.data]);
+  // One place that knows what opening the library means, since three
+  // different surfaces send people there.
+  const openWorkflows = () => { setView("workflows"); focusMainContent(); };
   const activeContent = useMemo(() => {
     if (view === "studio") {
       return (
@@ -3277,6 +2418,7 @@ export default function App() {
           sourceArtifactId={studioSource?.artifactId ?? null}
           sourceChatId={studioSource?.chatId ?? null}
           onOpenArtifact={(artifactId) => setStudioSource({ artifactId, chatId: null })}
+          onOpenWorkflows={openWorkflows}
         />
       );
     }
@@ -3379,45 +2521,28 @@ export default function App() {
   return (
     <div className="app-shell">
       <a className="skip-link" href="#main-content">Skip to main content</a>
-      <Sidebar projects={allProjects} chats={allChats} engines={engines.data ?? []} presets={presets.data ?? []} currentChatId={activeChatId} view={view} setupState={setupReadiness.data?.state} onSetup={() => setSetupOpen(true)} onChat={(id) => { setCurrentChatId(id); localStorage.setItem(CURRENT_CHAT_KEY, id); setView("chat"); focusMainContent(); }} onView={(nextView) => { setView(nextView); focusMainContent(); }} onNewChat={(projectId) => createChat.mutate(projectId)} onNewProject={(name) => createProject.mutate(name)} onExportProject={(id, includeMedia) => exportProject.mutate({ id, includeMedia })} onImportProject={(file) => importProject.mutate(file)} onUpdateChat={(id, values) => manageChat.mutate({ id, values })} onDeleteChat={(id, deleteGeneratedMedia) => deleteChat.mutate({ id, deleteGeneratedMedia })} onUpdateProject={(id, values) => updateProject.mutate({ id, values })} onDeleteProject={(id) => deleteProject.mutate(id)} appearance={appearance} sidebar={sidebar} />
+      <Sidebar projects={allProjects} chats={allChats} engines={engines.data ?? []} presets={presets.data ?? []} currentChatId={activeChatId} view={view} setupState={setupReadiness.data?.state} onSetup={() => setSetupOpen(true)} onChat={(id) => { setCurrentChatId(id); localStorage.setItem(CURRENT_CHAT_KEY, id); setView("chat"); focusMainContent(); }} onView={(nextView) => { setView(nextView); focusMainContent(); }} onNewChat={(projectId) => createChat.mutate(projectId)} onNewProject={(name) => createProject.mutate(name)} onExportProject={(id, includeMedia) => exportProject.mutate({ id, includeMedia })} onImportProject={(file) => importProject.mutate(file)} onUpdateChat={(id, values) => manageChat.mutate({ id, values })} onDeleteChat={(id, deleteGeneratedMedia) => deleteChat.mutate({ id, deleteGeneratedMedia })} onUpdateProject={(id, values) => updateProject.mutate({ id, values })} onDeleteProject={(id) => deleteProject.mutate(id)} sidebar={sidebar} />
       <main id="main-content" tabIndex={-1}>{activeContent}</main>
-      {setupOpen === true && !setupReadiness.data && (
-        <AccessibleDialog
-          title="Checking local setup"
-          eyebrow="Local models"
-          closeLabel="Close setup"
-          onClose={() => {
-            sessionStorage.setItem(SETUP_DISMISSED_KEY, "1");
-            setSetupOpen(false);
-          }}
-          className="setup-wizard"
-        >
-          {setupReadiness.error
-            ? <ErrorCallout message={setupReadiness.error.message} action={<button className="secondary compact-button" onClick={() => void setupReadiness.refetch()}>Retry</button>} />
-            : <div className="submission-progress"><LoaderCircle size={17} /><span>Checking models and runtimes…</span></div>}
-          <footer><button className="secondary" onClick={() => setSetupOpen(false)}>Not now</button></footer>
-        </AccessibleDialog>
-      )}
-      {setupVisible && setupReadiness.data && (
-        <SetupWizard
-          report={setupReadiness.data}
-          onClose={() => {
-            sessionStorage.setItem(SETUP_DISMISSED_KEY, "1");
-            setSetupOpen(false);
-          }}
-          onOpenModels={(role) => {
-            setModelLibraryRole(role);
-            setView("models");
-            setSetupOpen(false);
-            focusMainContent();
-          }}
-          onOpenWorkflows={() => {
-            setView("workflows");
-            setSetupOpen(false);
-            focusMainContent();
-          }}
-        />
-      )}
+      <ThemeToggle appearance={appearance} />
+      <SetupSurface
+        open={setupOpen}
+        visible={setupVisible}
+        report={setupReadiness.data}
+        error={setupReadiness.error}
+        onRetry={() => void setupReadiness.refetch()}
+        onDismiss={() => {
+          sessionStorage.setItem(SETUP_DISMISSED_KEY, "1");
+          setSetupOpen(false);
+        }}
+        onClose={() => setSetupOpen(false)}
+        onOpenModels={(role) => {
+          setModelLibraryRole(role);
+          setView("models");
+          setSetupOpen(false);
+          focusMainContent();
+        }}
+        onOpenWorkflows={() => { setSetupOpen(false); openWorkflows(); }}
+      />
       <JobsPanel />
       <GlobalNotices connected={eventsConnected} mutations={[send, regenerate, selectResponseRevision, branch, stop, cancelWorkPlan, cancelWorkStep, retryWorkStep, updateChat, createChat, createProject, exportProject, importProject, manageChat, deleteChat, updateProject, deleteProject]} />
     </div>

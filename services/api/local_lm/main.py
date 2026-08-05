@@ -381,20 +381,35 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     @app.middleware("http")
     async def local_session(request: Request, call_next):  # type: ignore[no-untyped-def]
         public = {"/api/session", "/api/health", "/api/ready"}
+
+        def refusal(exc: Exception, fallback_status: int, fallback_detail: str) -> JSONResponse:
+            """Answer a refused request the same way the rest of the API does.
+
+            Middleware runs outside the app's exception handlers, so a typed
+            error raised here reaches no handler and its code is lost unless
+            this carries it. Three refusals live here - untrusted origin, no
+            session, failed CSRF - and they are exactly the three a client has
+            to tell apart to know whether to stop, authenticate, or refetch a
+            token.
+            """
+            body: dict[str, object] = {
+                "detail": getattr(exc, "detail", fallback_detail),
+            }
+            code = getattr(exc, "code", None)
+            if isinstance(code, str):
+                body["code"] = code
+            return JSONResponse(body, status_code=getattr(exc, "status_code", fallback_status))
+
         if request.url.path.startswith("/api"):
             try:
                 services.security.validate_origin(request.headers.get("origin"))
             except Exception as exc:
-                status_code = getattr(exc, "status_code", 403)
-                detail = getattr(exc, "detail", "untrusted browser origin")
-                return JSONResponse({"detail": detail}, status_code=status_code)
+                return refusal(exc, 403, "untrusted browser origin")
         if request.url.path.startswith("/api") and request.url.path not in public:
             try:
                 services.security.validate_request(request)
             except Exception as exc:
-                status_code = getattr(exc, "status_code", 401)
-                detail = getattr(exc, "detail", "authentication failed")
-                return JSONResponse({"detail": detail}, status_code=status_code)
+                return refusal(exc, 401, "authentication failed")
         response = await call_next(request)
         if request.url.path == "/api/ready":
             response.headers[INSTANCE_ID_HEADER] = instance_identity

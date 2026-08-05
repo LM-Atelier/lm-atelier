@@ -668,6 +668,14 @@ class EditTemplate(TimestampMixin, Base):
     settings_json: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
     trigger_words_json: Mapped[list[str]] = mapped_column(JSON, default=list)
     content_rating: Mapped[str] = mapped_column(String(16), default="general", index=True)
+    # What produced the result this recipe was saved from. Nullable because a
+    # template saved before recipes recorded none of it, and guessing a
+    # binding would claim knowledge the record does not have.
+    workflow_revision_id: Mapped[str | None] = mapped_column(String(40), nullable=True)
+    model_profile_id: Mapped[str | None] = mapped_column(String(40), nullable=True)
+    # "none", "selection", or "inverse": whether the recipe expects a mask,
+    # which decides whether applying it can be one click at all.
+    mask_mode: Mapped[str] = mapped_column(String(16), default="none")
     # Seeded templates ship with the app and may be refreshed on upgrade;
     # user-saved ones never are.
     builtin: Mapped[bool] = mapped_column(Boolean, default=False)

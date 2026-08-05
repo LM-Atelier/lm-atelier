@@ -302,6 +302,12 @@ class TurnRequest(ApiModel):
     settings: dict[str, Any] = Field(default_factory=dict)
     ordered_settings: dict[str, dict[str, Any]] = Field(default_factory=dict, max_length=3)
     output_count: int | None = Field(default=None, ge=1, le=16)
+    # The workflow a recipe recorded. A recipe that stored which workflow made
+    # a result and then ran against whichever one happens to be current is not
+    # a recipe; it is the instruction with extra fields. An id that does not
+    # match this operation, engine, or install is not honored - the turn
+    # refuses rather than quietly substituting.
+    workflow_revision_id: str | None = Field(default=None, max_length=40)
     confirm_media: bool = False
     idempotency_key: str | None = Field(default=None, max_length=200)
 
@@ -823,6 +829,19 @@ class WorkflowBundle(ApiModel):
     source_revision: int | None = None
 
 
+class StudioToolCapability(ApiModel):
+    """Whether one studio tool can run here, and what would fix it."""
+
+    kind: str
+    workflow_class: str
+    available: bool
+    reason: str | None
+
+
+class StudioCapabilityReport(ApiModel):
+    tools: list[StudioToolCapability]
+
+
 class WorkflowRevisionOut(ApiModel):
     id: str
     workflow_id: str
@@ -1037,6 +1056,9 @@ class EditTemplateCreate(ApiModel):
     description: str = Field(default="", max_length=2_000)
     instruction: str = Field(min_length=1, max_length=20_000)
     settings_json: dict[str, Any] = Field(default_factory=dict)
+    # When given, the recipe is read from what this run actually did rather
+    # than from whatever is current when Save is pressed.
+    from_run_id: str | None = Field(default=None, max_length=40)
 
 
 class EditTemplateOut(ApiModel):
@@ -1046,6 +1068,9 @@ class EditTemplateOut(ApiModel):
     instruction: str
     operation: str
     settings_json: dict[str, Any]
+    workflow_revision_id: str | None
+    model_profile_id: str | None
+    mask_mode: str
     trigger_words_json: list[str]
     content_rating: ContentRating
     builtin: bool
@@ -1194,6 +1219,11 @@ class WorkflowPackagePrepareRequest(ApiModel):
     # The server re-analyzes the source graph and derives the exact node types.
     # A browser-provided node list would only be another unverified claim.
     ui_graph: dict[str, Any]
+    # Required before an omitted source dependency can be recorded against the
+    # install. Re-analyzing a submitted graph proves that graph is internally
+    # consistent; it does not bind it to anything stored, and a proof about a
+    # graph nobody saved is a proof about nothing.
+    workflow_revision_id: str | None = Field(default=None, max_length=40)
 
 
 class WorkflowPackageAnalyzeRequest(ApiModel):
@@ -1402,11 +1432,32 @@ class CatalogDetail(ApiModel):
     files: list[dict[str, Any]]
 
 
+class CatalogFileVariant(ApiModel):
+    """One immutable choice behind an ambiguous filename.
+
+    Everything here is the server's: the identity, the name, and the size come
+    from a freshly fetched version detail. No URL and no hash, because the
+    browser has no business carrying either - it names a choice, and the
+    planner re-resolves it.
+    """
+
+    source_file_id: str
+    filename: str
+    size_bytes: int | None
+    precision: str | None
+
+
 class CatalogPreflightRequest(ApiModel):
     revision: str = Field(default="main", min_length=1, max_length=200)
     role: Literal["chat", "image", "video"]
     engine: str = Field(min_length=1, max_length=32)
     selected_files: list[str] = Field(default_factory=list, max_length=512)
+    # Immutable provider file identities, for the case a filename cannot
+    # settle: one CivitAI version can publish the same safetensors name five
+    # times at different precisions, and preflight rightly refuses to guess.
+    # It used to ask the caller to choose a variant and give it no way to say
+    # which. Filename-only callers are unchanged.
+    selected_file_ids: list[str] = Field(default_factory=list, max_length=512)
     # The exact workflow variant the user chose from the catalog. Absent for
     # repository-only callers, which keep the ranked fallback.
     workflow_template_id: str | None = Field(default=None, max_length=200)
@@ -1466,6 +1517,11 @@ class CatalogPreflight(ApiModel):
     checks: list[CatalogPreflightCheck]
     install_plan: InstallPlanOut | None = None
     auxiliary_kind: str | None = None
+    # The choices behind any filename this version could not settle, so a
+    # refusal arrives with the answer to it. Asking someone to pick a variant
+    # and then making them go and find the variants is not a choice, it is a
+    # riddle.
+    file_variants: dict[str, list[CatalogFileVariant]] = Field(default_factory=dict)
     # Copied server-side from the catalog detail, never client-supplied.
     content_rating: ContentRating = "unknown"
 
