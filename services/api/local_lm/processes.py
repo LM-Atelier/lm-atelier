@@ -571,6 +571,9 @@ class ProcessSupervisor:
         )
         output_directory = self.settings.comfy_output_dir.resolve()
         output_directory.mkdir(parents=True, exist_ok=True)
+        environment_overrides = (
+            {"PYTHONDONTWRITEBYTECODE": "1"} if registry_contract.site_packages else None
+        )
         if activation_scope is not None:
             model_paths_config = self._write_scoped_comfy_model_paths(activation_scope)
         else:
@@ -608,6 +611,7 @@ class ProcessSupervisor:
                 "media",
                 command,
                 self.settings.comfy_url + "/system_stats",
+                environment_overrides=environment_overrides,
                 ready_check=(
                     (lambda: self._verify_comfy_node_types(expected_node_types))
                     if expected_node_types
@@ -620,6 +624,7 @@ class ProcessSupervisor:
                 "media",
                 command,
                 self.settings.comfy_url + "/system_stats",
+                environment_overrides=environment_overrides,
                 ready_check=lambda: self._verify_comfy_node_types(registry_contract.node_types),
             )
         else:
