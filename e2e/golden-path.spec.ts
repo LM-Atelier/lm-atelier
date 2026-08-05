@@ -128,31 +128,17 @@ test("persists a streamed text and contextual image golden path", async ({
     });
   }
 
-  // Tab resumes from the sequential focus navigation starting point, which a
-  // blur does not reset: after the setup dialog closes, that point is wherever
-  // the dialog left it, and Tab walks forward from there. The assertion is
-  // that the first tab stop is the skip link, so the walk has to start at the
-  // top of the document.
+  // The page has to hold document focus for Tab to navigate at all. With
+  // hasFocus() false the key is delivered and does nothing, and the failure
+  // reads exactly like a tab-order bug: the skip link is still first in the
+  // document and still focusable, and nothing is focused instead of it.
   //
-  // Focusing the root element is what moves it. It passed for a long time
-  // because the elements after that point happened to be exhausted, so Tab
-  // wrapped around to the beginning - adding one control anywhere later was
-  // enough to stop the wrap and land on it instead.
-  await page.evaluate(() => {
-    (document.activeElement as HTMLElement | null)?.blur();
-    document.documentElement.focus();
-  });
+  // This asserted keyboard order while depending on a focus state it never
+  // established. It held until the appearance control gained a second child,
+  // which was enough to change whether this environment left the page focused.
+  await page.bringToFront();
   await page.keyboard.press("Tab");
-  // Reported rather than assumed: two plausible explanations for this failing
-  // both turned out to be wrong, and the cheapest way to stop guessing is to
-  // make the failure say what actually holds focus.
-  const focused = await page.evaluate(() => {
-    const active = document.activeElement as HTMLElement | null;
-    if (!active) return "nothing";
-    const label = active.getAttribute("aria-label") ?? active.textContent?.trim().slice(0, 40);
-    return `${active.tagName}.${active.className} [${label ?? ""}]`;
-  });
-  expect(focused, "the first tab stop should be the skip link").toContain("skip-link");
+  await expect(page.getByRole("link", { name: "Skip to main content" })).toBeFocused();
   await page.keyboard.press("Enter");
   await expect(page.locator("#main-content")).toBeFocused();
 
