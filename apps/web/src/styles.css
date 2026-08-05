@@ -41,7 +41,7 @@
      two rooms rather than one skin. Reading and writing happen on paper;
      making happens in a dark room, because colour cannot be judged
      against a warm ground and prose cannot be read for an hour against a
-     near-black one. A surface opts in with data-room; everything below it
+     near-black one. The document carries data-room and data-mode; everything
      follows, because every colour resolves through this layer.
 
      The making room is the default, so nothing changes until a surface
@@ -146,7 +146,9 @@
    Every value here clears its floor against ALL THREE paper surfaces, not
    just the page. Checking only against the lightest is how a muted ink
    ends up at 4.38 on a pressed row and passes review anyway. */
-[data-room="reading"] {
+/* North Light, lit. A room supplies both modes; nothing outside the
+   palette blocks knows which one is on. */
+:root[data-mode="light"] {
   color-scheme: light;
   --surface-0: #f6f2e9;
   --surface-1: #efeadd;
@@ -205,7 +207,16 @@ button:focus-visible, a:focus-visible, input:focus-visible, textarea:focus-visib
 .skip-link { position: fixed; left: 12px; top: -60px; z-index: 100; border-radius: 10px; padding: 9px 12px; background: var(--cream); color: var(--bg); }
 .skip-link:focus { top: 12px; }
 
-.app-shell { display: grid; grid-template-columns: 272px 1fr; height: 100%; }
+.app-shell { display: grid; grid-template-columns: var(--sidebar-width, 272px) auto 1fr; height: 100%; }
+/* A real edge between the sidebar and the work: draggable, focusable, and
+   wide enough to grab without being wide enough to notice. */
+.sidebar-resizer { width: 5px; cursor: col-resize; background: transparent; border-left: 1px solid var(--line); }
+.sidebar-resizer:hover, .sidebar-resizer:focus-visible { background: var(--accent-warm); border-left-color: var(--accent-warm); outline: none; }
+/* While dragging, nothing else should decide it is being selected. */
+body.resizing-sidebar { user-select: none; cursor: col-resize; }
+[data-sidebar="collapsed"] .sidebar { display: none; }
+/* The way back cannot live inside the thing that is hidden. */
+.reveal-sidebar { position: fixed; top: 12px; left: 10px; z-index: 5; background: var(--surface-2); border: 1px solid var(--line); }
 .sidebar { background: var(--surface-1); border-right: 1px solid var(--border); display: flex; flex-direction: column; min-width: 0; padding: 18px 14px 14px; overflow: hidden; }
 .brand { display: flex; align-items: center; gap: 12px; padding: 0 7px 20px; font-size: 20px; font-weight: 700; letter-spacing: -.02em; }
 .brand > span { display: grid; line-height: 1.05; font-family: "Source Serif 4", "Iowan Old Style", "Palatino Linotype", Charter, Georgia, "Times New Roman", serif; }
@@ -243,7 +254,7 @@ button:focus-visible, a:focus-visible, input:focus-visible, textarea:focus-visib
 .project-main + .inline-add { margin-left: auto; }
 .chat-list { padding-left: 17px; }
 .chat-list.standalone { padding-left: 0; }
-.sidebar-chat-row { display: grid; grid-template-columns: minmax(0, 1fr) auto; align-items: center; }
+.sidebar-chat-row { display: grid; grid-template-columns: minmax(0, 1fr) auto auto; align-items: center; }
 .chat-main { width: 100%; display: flex; align-items: center; gap: 8px; border: 0; background: transparent; color: var(--ink-secondary); padding: 7px 6px 7px 10px; border-radius: 10px; cursor: pointer; min-width: 0; text-align: left; }
 .chat-main span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 /* Flex items shrink by default, so a long title squeezed these icons and the
@@ -282,7 +293,7 @@ main {
      it. The same texture, behaving the way the material would. */
   background-blend-mode: soft-light;
 }
-[data-room="reading"] main { background-blend-mode: multiply; }
+[data-mode="light"] main { background-blend-mode: multiply; }
 .chat-view { min-width: 0; height: 100%; display: grid; grid-template-rows: auto 1fr auto; }
 .chat-header { min-width: 0; height: 76px; display: flex; align-items: center; justify-content: space-between; padding: 0 30px; border-bottom: 1px solid var(--border); background: var(--scrim); backdrop-filter: blur(16px); }
 .chat-header small, .page-header small, .detail-title small, .settings-drawer header small { color: var(--accent-2); font-size: 11px; font-weight: 700; text-transform: uppercase; letter-spacing: .11em; }
@@ -316,7 +327,7 @@ h1, h2, h3 { margin: 0; }
    text face rather than the interface one. This is the whole reason the
    reading room exists, and it applies only there - the same passage set
    in serif on a near-black ground is harder to read, not easier. */
-[data-room="reading"] .message-text.markdown { font-family: "Source Serif 4", Charter, Georgia, serif; font-size: 16px; line-height: 1.6; }
+[data-mode="light"] .message-text.markdown { font-family: "Source Serif 4", Charter, Georgia, serif; font-size: 16px; line-height: 1.6; }
 .markdown > :first-child { margin-top: 0; }.markdown > :last-child { margin-bottom: 0; }
 .markdown p, .markdown ul, .markdown ol, .markdown blockquote, .markdown pre, .markdown table { margin: .65em 0; }
 .markdown h1, .markdown h2, .markdown h3 { margin: 1em 0 .45em; line-height: 1.25; }
