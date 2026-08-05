@@ -1012,3 +1012,6 @@ h1, h2, h3 { margin: 0; }
 /* A tool that cannot run says so where the work would have gone. */
 .studio-tool-guidance { margin: 0; padding: 8px 10px; border: 1px solid var(--line); border-radius: 10px; background: var(--surface-2); color: var(--ink-secondary); font-size: 12px; }
 .icon-button.unavailable { opacity: .55; }
+/* A button that reads as part of the sentence it sits in, because the way out
+   of a guidance line is the line itself. */
+.link-button { display: inline; padding: 0; border: 0; background: none; color: var(--accent); font: inherit; text-decoration: underline; cursor: pointer; }

@@ -3269,6 +3269,9 @@ export default function App() {
 
   const allChats = useMemo(() => chats.data ?? [], [chats.data]);
   const allProjects = useMemo(() => projects.data ?? [], [projects.data]);
+  // One place that knows what opening the library means, since three
+  // different surfaces send people there.
+  const openWorkflows = () => { setView("workflows"); focusMainContent(); };
   const activeContent = useMemo(() => {
     if (view === "studio") {
       return (
@@ -3276,6 +3279,7 @@ export default function App() {
           sourceArtifactId={studioSource?.artifactId ?? null}
           sourceChatId={studioSource?.chatId ?? null}
           onOpenArtifact={(artifactId) => setStudioSource({ artifactId, chatId: null })}
+          onOpenWorkflows={openWorkflows}
         />
       );
     }
@@ -3398,11 +3402,7 @@ export default function App() {
           setSetupOpen(false);
           focusMainContent();
         }}
-        onOpenWorkflows={() => {
-          setView("workflows");
-          setSetupOpen(false);
-          focusMainContent();
-        }}
+        onOpenWorkflows={() => { setSetupOpen(false); openWorkflows(); }}
       />
       <JobsPanel />
       <GlobalNotices connected={eventsConnected} mutations={[send, regenerate, selectResponseRevision, branch, stop, cancelWorkPlan, cancelWorkStep, retryWorkStep, updateChat, createChat, createProject, exportProject, importProject, manageChat, deleteChat, updateProject, deleteProject]} />
