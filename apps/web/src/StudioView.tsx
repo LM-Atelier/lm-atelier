@@ -5,6 +5,7 @@ import { StudioOpenImage } from "./StudioOpenImage";
 import { ErrorCallout } from "./ErrorCallout";
 import { StudioCanvas } from "./StudioCanvas";
 import { StudioExtendHandles } from "./StudioExtendHandles";
+import { StudioToolGuidance } from "./StudioToolGuidance";
 import { StudioToolRail } from "./StudioToolRail";
 import { coverage, encodeMaskPng, isEmpty } from "./studioMasks";
 import {
@@ -26,10 +27,13 @@ export function StudioView({
   sourceArtifactId,
   sourceChatId = null,
   onOpenArtifact,
+  onOpenWorkflows,
 }: {
   sourceArtifactId: string | null;
   sourceChatId?: string | null;
   onOpenArtifact: (artifactId: string) => void;
+  /** Where a tool that needs an uninstalled workflow sends you. */
+  onOpenWorkflows: () => void;
 }) {
   const { steps, busy, error, apply } = useStudioSession(sourceArtifactId, sourceChatId);
   const [selectedId, setSelectedId] = useState<string | null>(null);
@@ -235,9 +239,7 @@ export function StudioView({
           {unavailable && (
             // Beside the button that would fail, and named by the tools that
             // cannot run, so the sentence arrives before the drawing does.
-            <p className="studio-tool-guidance" id="studio-tool-guidance" role="status">
-              {unavailable}
-            </p>
+            <StudioToolGuidance reason={unavailable} onOpenWorkflows={onOpenWorkflows} />
           )}
           <button
             className="primary"
