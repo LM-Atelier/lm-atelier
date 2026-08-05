@@ -207,3 +207,18 @@ export function promptPreviewSettings(fields: SettingField[]): Record<string, un
   }
   return settings;
 }
+
+
+/** How much of a workflow's settings a person has asked to see.
+ *
+ * Lived in App.tsx while two different panels filtered by it, which meant the
+ * shell owned a fact about settings. It belongs here, with the settings whose
+ * visibility it decides.
+ */
+export type Visibility = "basic" | "advanced" | "expert";
+
+export const visibilityRank: Record<Visibility, number> = {
+  basic: 0,
+  advanced: 1,
+  expert: 2,
+};
