@@ -74,6 +74,51 @@ def test_archive_is_staged_inertly_with_a_deterministic_report(tmp_path: Path) -
         )
 
 
+def test_orphaned_python_cache_invalidates_reviewed_source(tmp_path: Path) -> None:
+    source = write_archive(tmp_path / "node.zip", [("node/main.py", b"value = 1\n")])
+    destination = tmp_path / "staged"
+    report = stage_comfy_registry_archive(source, destination)
+    cache = destination / "node" / "__pycache__" / "other.cpython-313.pyc"
+    cache.parent.mkdir()
+    cache.write_bytes(b"unreviewed bytecode")
+
+    with pytest.raises(ComfyRegistryArchiveError, match="contents have changed"):
+        verify_staged_comfy_registry_archive(
+            destination,
+            expected_manifest_sha256=report.manifest_sha256,
+            expected_file_count=report.file_count,
+            expected_expanded_bytes=report.expanded_bytes,
+        )
+
+
+def test_runtime_python_cache_does_not_invalidate_reviewed_source(tmp_path: Path) -> None:
+    source = write_archive(
+        tmp_path / "node.zip",
+        [("node/prestartup_script.py", b"NODE_CLASS_MAPPINGS = {}\n")],
+    )
+    destination = tmp_path / "staged"
+    report = stage_comfy_registry_archive(source, destination)
+    cache = destination / "node" / "__pycache__" / "prestartup_script.cpython-313.pyc"
+    cache.parent.mkdir()
+    cache.write_bytes(b"runtime bytecode")
+
+    verify_staged_comfy_registry_archive(
+        destination,
+        expected_manifest_sha256=report.manifest_sha256,
+        expected_file_count=report.file_count,
+        expected_expanded_bytes=report.expanded_bytes,
+    )
+
+    (cache.parent / "unexpected.txt").write_text("not runtime bytecode", encoding="utf-8")
+    with pytest.raises(ComfyRegistryArchiveError, match="contents have changed"):
+        verify_staged_comfy_registry_archive(
+            destination,
+            expected_manifest_sha256=report.manifest_sha256,
+            expected_file_count=report.file_count,
+            expected_expanded_bytes=report.expanded_bytes,
+        )
+
+
 def test_manifest_hash_is_independent_of_zip_entry_order(tmp_path: Path) -> None:
     files = [("node/a.py", b"a"), ("node/b.py", b"b")]
     first = write_archive(tmp_path / "first.zip", files)
