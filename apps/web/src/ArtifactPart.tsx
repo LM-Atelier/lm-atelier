@@ -65,7 +65,15 @@ export function ArtifactPart({
   if (part.type === "image") {
     return (
       <figure className={`media-card ${preview ? "preview" : ""}`}>
-        <img src={source} alt={label} loading="lazy" />
+        {/* A picture narrower than the card used to sit between flat bars.
+            The bars are now the picture itself, blurred and overscaled, so
+            the frame reads as full without cropping anything or pretending
+            the image is a shape it is not. Decorative, so it is hidden from
+            assistive technology - the real image carries the description. */}
+        <div className="media-frame">
+          <img className="media-backdrop" src={source} alt="" aria-hidden="true" loading="lazy" />
+          <img src={source} alt={label} loading="lazy" />
+        </div>
         <figcaption>
           <ImageIcon size={14} /> {label}
           {/* Icons, not labels - but each operation stays distinct: Edit

@@ -81,6 +81,25 @@ describe("style contract", () => {
     expect(css).toMatch(/\.studio-canvas\s*\{[^}]*position:\s*relative/);
     expect(css).toMatch(/\.studio-canvas-layers\s*>\s*canvas\s*\{[^}]*position:\s*absolute/);
   });
+
+  it("floats the light control over the workspace rather than inside a panel", () => {
+    const css = readFileSync(STYLESHEET, "utf8");
+    const rule = /\.theme-toggle\s*\{[^}]*\}/.exec(css)?.[0] ?? "";
+    // The light is a property of the whole workspace, so hiding the sidebar
+    // must not take its control away with it.
+    expect(rule).toMatch(/position:\s*fixed/);
+    expect(rule).toMatch(/z-index:/);
+    const footer = readFileSync(join(SOURCE_DIR, "SidebarFooter.tsx"), "utf8");
+    expect(footer).not.toContain("ThemeToggle");
+  });
+
+  it("fills a letterboxed picture with itself rather than with a flat bar", () => {
+    const css = readFileSync(STYLESHEET, "utf8");
+    expect(css).toMatch(/\.media-frame\s*\{[^}]*position:\s*relative/);
+    const backdrop = /\.media-backdrop\s*\{[^}]*\}/.exec(css)?.[0] ?? "";
+    expect(backdrop).toMatch(/object-fit:\s*cover/);
+    expect(backdrop).toMatch(/filter:\s*blur/);
+  });
 });
 
 describe("contrast and state", () => {
