@@ -660,9 +660,13 @@ class ProcessSupervisor:
                 environment_root=self.settings.registry_dir / "registry-wheel-environments",
             )
 
-    async def _verify_comfy_node_types(self, expected: tuple[str, ...]) -> None:
-        if not expected:
-            return
+    async def comfy_node_inventory(self) -> frozenset[str]:
+        """Every node type the running worker loaded.
+
+        One read for two callers. Startup verification and an omission proof
+        must never parse different inventories, because the whole force of the
+        proof is that it saw what startup saw.
+        """
         payload = bytearray()
         async with (
             httpx.AsyncClient(
@@ -686,7 +690,12 @@ class ProcessSupervisor:
             raise RuntimeError("ComfyUI returned an invalid node inventory") from exc
         if not isinstance(inventory, dict):
             raise RuntimeError("ComfyUI returned an invalid node inventory")
-        missing = sorted(set(expected) - set(inventory))
+        return frozenset(str(key) for key in inventory)
+
+    async def _verify_comfy_node_types(self, expected: tuple[str, ...]) -> None:
+        if not expected:
+            return
+        missing = sorted(set(expected) - await self.comfy_node_inventory())
         if missing:
             raise RuntimeError(f"ComfyUI did not load required node type {missing[0]}")
 

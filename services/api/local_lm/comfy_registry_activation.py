@@ -4,6 +4,7 @@ import asyncio
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Any
 
 from sqlalchemy.orm import Session
 
@@ -17,8 +18,18 @@ from .comfy_registry_archives import (
 from .comfy_registry_installs import trusted_comfy_registry_launch_contract
 from .domain import utcnow
 from .models import ComfyRegistryInstall
+from .source_omission_proof import (
+    OmissionProofError,
+    evidence_digest,
+    pending_omission_requirement,
+    prove_omission,
+)
 
 MediaStarter = Callable[[], Awaitable[object]]
+#: Reads the running worker's loaded node types. Injected rather than imported
+#: so the proof can be tested without a worker, and so this module keeps
+#: knowing nothing about how the runtime is reached.
+NodeInventoryReader = Callable[[], Awaitable[frozenset[str]]]
 
 
 class ComfyRegistryActivationError(ValueError):
@@ -78,8 +89,17 @@ async def activate_comfy_registry_install(
     environment_root: Path,
     media_worker_stopped: bool,
     start_media: MediaStarter,
+    read_node_inventory: NodeInventoryReader | None = None,
 ) -> ComfyRegistryActivationState:
-    """Activate one trusted package and restore the prior runtime if startup fails."""
+    """Activate one trusted package and restore the prior runtime if startup fails.
+
+    When preparation recorded a pending omission against this install, the
+    activation is a trial: the package declares a source dependency that was
+    left out, and starting is not enough to conclude it was unnecessary. The
+    authorized workflow's exact required node types must be present
+    afterwards, and a runtime that cannot show them is rolled back like any
+    other failed activation.
+    """
     _require_stopped(media_worker_stopped)
     install = _install(session, install_id)
     if not install.trusted:
@@ -93,6 +113,17 @@ async def activate_comfy_registry_install(
         custom_node_root=custom_node_root,
         environment_root=environment_root,
     )
+    # Read before anything is marked active or started. A record that exists
+    # and cannot be read must stop the activation rather than be discovered
+    # after the worker is already running with the dependency omitted.
+    #
+    # From what preparation recorded against this install, never from what the
+    # caller asked for: a request that could name its own manifest hash or
+    # workflow could prove anything about anything.
+    try:
+        omission = pending_omission_requirement(install_id, install.review_json)
+    except OmissionProofError as exc:
+        raise ComfyRegistryActivationError(exc.code, str(exc)) from exc
     archive_path = _archive_path(custom_node_root, install.installed_path)
     before_start = snapshot_staged_comfy_registry_files(archive_path)
     install.active = True
@@ -142,16 +173,62 @@ async def activate_comfy_registry_install(
             "Registry activation changed package files outside the bounded data contract; "
             "the prior media runtime was restored",
         ) from exc
+    proof: dict[str, Any] | None = None
+    if omission is not None:
+        # After startup and after the file contract, because both of those
+        # can restore on their own terms; this one restores the same way.
+        if read_node_inventory is None:
+            await _roll_back(session, install_id, start_media, "omission_unverifiable")
+            raise ComfyRegistryActivationError(
+                "omission_unverifiable",
+                "An omitted source dependency cannot be proven unnecessary without "
+                "reading the runtime's node inventory; the prior runtime was restored",
+            )
+        try:
+            observed = await read_node_inventory()
+            proof = prove_omission(omission, observed_node_types=observed)
+        except Exception as exc:
+            # A reader that fails is not a proof either, and it fails the same
+            # way a refused proof does rather than leaving the trial standing.
+            code = exc.code if isinstance(exc, OmissionProofError) else "omission_unverifiable"
+            await _roll_back(session, install_id, start_media, code)
+            raise ComfyRegistryActivationError(
+                code,
+                f"{exc} - the prior media runtime was restored",
+            ) from exc
     activated = _install(session, install_id)
     activated.review_json = {
         **activated.review_json,
         "activated_at": utcnow().isoformat(),
         "activation_failure_code": None,
         "runtime_files": comfy_registry_runtime_files_json(runtime_files),
+        # Written every time, both ways. A spread that only added the keys
+        # would leave a previous activation's evidence standing on an
+        # ordinary one, which reads as a proof about a run that never
+        # happened.
+        "source_omission_proof": proof,
+        "source_omission_digest": evidence_digest(proof) if proof is not None else None,
     }
     session.commit()
     session.refresh(activated)
     return _state(activated)
+
+
+async def _roll_back(
+    session: Session,
+    install_id: str,
+    start_media: MediaStarter,
+    failure_code: str,
+) -> None:
+    """Undo a trial activation, restoring exactly what was running before."""
+    _deactivate(session, install_id, failure_code=failure_code)
+    try:
+        await start_media()
+    except (Exception, asyncio.CancelledError) as restore_exc:
+        raise ComfyRegistryActivationError(
+            "activation_restore_failed",
+            "The trial activation was undone but the prior media runtime could not be restored",
+        ) from restore_exc
 
 
 async def deactivate_comfy_registry_install(

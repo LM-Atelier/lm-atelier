@@ -229,6 +229,9 @@ async def test_dependency_renewal_queues_the_exact_inactive_install(
         "1.2.3",
         ("ExampleNode",),
         install_id,
+        # Renewal never carries an authorized workflow: it refreshes an
+        # install's dependencies and is not the act that could set one aside.
+        None,
     )
 
 

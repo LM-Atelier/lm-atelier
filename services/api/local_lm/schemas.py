@@ -1213,6 +1213,11 @@ class WorkflowPackagePrepareRequest(ApiModel):
     # The server re-analyzes the source graph and derives the exact node types.
     # A browser-provided node list would only be another unverified claim.
     ui_graph: dict[str, Any]
+    # Required before an omitted source dependency can be recorded against the
+    # install. Re-analyzing a submitted graph proves that graph is internally
+    # consistent; it does not bind it to anything stored, and a proof about a
+    # graph nobody saved is a proof about nothing.
+    workflow_revision_id: str | None = Field(default=None, max_length=40)
 
 
 class WorkflowPackageAnalyzeRequest(ApiModel):
