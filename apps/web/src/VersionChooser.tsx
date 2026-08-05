@@ -12,6 +12,11 @@ import type { CatalogVersionRow } from "./types";
  * because a version is what actually lands on disk and what the download path
  * is bound to.
  *
+ * The versions endpoint is CivitAI's, so this is only offered for CivitAI
+ * cards. A second provider with a parent identity would need its own route
+ * before its cards could open this, and offering it early would send a model
+ * id to a source that has never heard of it.
+ *
  * Installed state has three answers. Where a kind records no provider version
  * - checkpoints today - the row says so plainly instead of claiming the
  * version is absent, since "not installed" about something we cannot see is
