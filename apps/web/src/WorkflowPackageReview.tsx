@@ -61,12 +61,25 @@ export function WorkflowPackageReview({
       ? (loadsImage ? "image_to_video" : "text_to_video")
       : (loadsImage ? "image_to_image" : "text_to_image"),
   );
+  const ensureDraft = () => api.ensureWorkflowPackageDraft({
+    ui_graph: uiGraph ?? {},
+    name: importName.trim(),
+    operation,
+  });
   const importWorkflow = useMutation({
-    mutationFn: () => api.importWorkflowPackage({
-      ui_graph: uiGraph ?? {},
-      name: importName.trim(),
-      operation,
-    }),
+    mutationFn: async () => {
+      const draft = await ensureDraft();
+      if (!draft.current_revision_id) {
+        throw new Error("The workflow draft has no current revision.");
+      }
+      return api.importWorkflowPackage({
+        ui_graph: uiGraph ?? {},
+        name: importName.trim(),
+        operation,
+        draft_workflow_id: draft.id,
+        draft_revision_id: draft.current_revision_id,
+      });
+    },
     onSuccess: () => onImported?.(),
   });
   const prepare = useMutation({
@@ -74,7 +87,17 @@ export function WorkflowPackageReview({
       packageId: string;
       version: string;
       sourceGraph: Record<string, unknown>;
-    }) => api.prepareWorkflowPackage(packageId, version, sourceGraph),
+    }) => ensureDraft().then((draft) => {
+      if (!draft.current_revision_id) {
+        throw new Error("The workflow draft has no current revision.");
+      }
+      return api.prepareWorkflowPackage(
+        packageId,
+        version,
+        sourceGraph,
+        draft.current_revision_id,
+      );
+    }),
     onSuccess: (_job, variables) =>
       setQueuedPackages((current) => [...current, variables.packageId]),
   });

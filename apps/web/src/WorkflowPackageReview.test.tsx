@@ -7,6 +7,7 @@ import type { Workflow, WorkflowPackageAnalysis } from "./types";
 
 vi.mock("./api", () => ({
   api: {
+    ensureWorkflowPackageDraft: vi.fn(),
     prepareWorkflowPackage: vi.fn(),
     importWorkflowPackage: vi.fn(),
   },
@@ -58,6 +59,10 @@ describe("WorkflowPackageReview import", () => {
   });
 
   it("imports a ready package under a confirmed name and operation", async () => {
+    vi.mocked(api.ensureWorkflowPackageDraft).mockResolvedValue({
+      id: "draft-1",
+      current_revision_id: "draft-revision-1",
+    } as Workflow);
     vi.mocked(api.importWorkflowPackage).mockResolvedValue({ id: "wf-1" } as Workflow);
     const onImported = renderReview(analysis());
 
@@ -72,6 +77,8 @@ describe("WorkflowPackageReview import", () => {
       ui_graph: { nodes: [] },
       name: "harbor-motion",
       operation: "text_to_video",
+      draft_workflow_id: "draft-1",
+      draft_revision_id: "draft-revision-1",
     }));
     await waitFor(() => expect(onImported).toHaveBeenCalled());
   });
@@ -83,7 +90,43 @@ describe("WorkflowPackageReview import", () => {
     expect(api.importWorkflowPackage).not.toHaveBeenCalled();
   });
 
+  it("persists the exact graph before preparing an unresolved package", async () => {
+    vi.mocked(api.ensureWorkflowPackageDraft).mockResolvedValue({
+      id: "draft-1",
+      current_revision_id: "draft-revision-1",
+    } as Workflow);
+    vi.mocked(api.prepareWorkflowPackage).mockResolvedValue({ id: "job-1" } as never);
+    renderReview(analysis({
+      ready: false,
+      dependencies_resolved: false,
+      custom_packages: [{
+        package_id: "rgthree-comfy",
+        versions: ["1.2.3"],
+        node_types: ["Power Lora Loader"],
+        locally_resolved: false,
+      }],
+    }));
+
+    fireEvent.click(screen.getByRole("button", { name: "Prepare 1.2.3" }));
+
+    await waitFor(() => expect(api.ensureWorkflowPackageDraft).toHaveBeenCalledWith({
+      ui_graph: { nodes: [] },
+      name: "harbor-motion",
+      operation: "image_to_video",
+    }));
+    await waitFor(() => expect(api.prepareWorkflowPackage).toHaveBeenCalledWith(
+      "rgthree-comfy",
+      "1.2.3",
+      { nodes: [] },
+      "draft-revision-1",
+    ));
+  });
+
   it("keeps the server's refusal visible instead of closing over it", async () => {
+    vi.mocked(api.ensureWorkflowPackageDraft).mockResolvedValue({
+      id: "draft-1",
+      current_revision_id: "draft-revision-1",
+    } as Workflow);
     vi.mocked(api.importWorkflowPackage).mockRejectedValue(
       new Error("Start the media worker to compile workflows"),
     );

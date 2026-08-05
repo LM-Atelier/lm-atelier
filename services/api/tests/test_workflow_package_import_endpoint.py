@@ -8,6 +8,8 @@ import pytest
 from fastapi import FastAPI
 from httpx2 import AsyncClient
 
+from local_lm import api as api_module
+
 pytestmark = pytest.mark.asyncio
 
 
@@ -113,6 +115,143 @@ async def test_an_unresolved_package_refuses_with_the_analyzer_verdict(
     assert response.json()["code"] == "package-not-resolved"
     listed = (await client.get("/api/workflows")).json()
     assert all(workflow["name"] != "Unresolved" for workflow in listed)
+
+
+async def test_an_unresolved_package_can_be_persisted_as_an_exact_non_executable_draft(
+    client: AsyncClient,
+) -> None:
+    payload = {
+        "ui_graph": _ui_graph(),
+        "name": "Package draft",
+        "operation": "image_to_image",
+    }
+
+    first = await client.post("/api/workflows/packages/drafts", json=payload)
+    second = await client.post(
+        "/api/workflows/packages/drafts",
+        json={**payload, "name": "Renamed draft", "operation": "text_to_video"},
+    )
+
+    assert first.status_code == 201
+    assert second.status_code == 201
+    assert first.json()["id"] == second.json()["id"]
+    draft = second.json()
+    assert draft["name"] == "Renamed draft"
+    # A revision's operation participates in its artifact identity. The final
+    # import may choose another operation by creating a new revision, but
+    # reopening the same draft must not mutate this one in place.
+    assert draft["operation"] == "image_to_image"
+    assert len(draft["revisions"]) == 1
+    (revision,) = draft["revisions"]
+    assert revision["id"] == draft["current_revision_id"]
+    assert revision["trusted"] is False
+    assert revision["api_graph_json"] == {}
+    assert revision["dependencies_json"]["workflow_package_draft"]["graph_sha256"]
+    listed = (await client.get("/api/workflows")).json()
+    assert all(workflow["id"] != draft["id"] for workflow in listed)
+
+
+async def test_a_draft_identity_collision_refuses_instead_of_reusing_another_graph(
+    client: AsyncClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(
+        api_module,
+        "_workflow_package_draft_identity",
+        lambda _canonical: ("wfpkgdraft_collision", "wfpkgdrev_collision", "a" * 64),
+    )
+    first = await client.post(
+        "/api/workflows/packages/drafts",
+        json={"ui_graph": _ui_graph(), "name": "First", "operation": "text_to_image"},
+    )
+    changed = _ui_graph()
+    changed["nodes"][0]["widgets_values"][0] = "different"
+
+    second = await client.post(
+        "/api/workflows/packages/drafts",
+        json={"ui_graph": changed, "name": "Second", "operation": "text_to_image"},
+    )
+
+    assert first.status_code == 201
+    assert second.status_code == 409
+    assert second.json()["code"] == "workflow-package-draft-collision"
+
+
+async def test_a_ready_draft_finalizes_in_place_and_retry_is_idempotent(
+    client: AsyncClient, app: FastAPI, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _wire_runtime(app, monkeypatch)
+    graph = _ui_graph()
+    draft_response = await client.post(
+        "/api/workflows/packages/drafts",
+        json={"ui_graph": graph, "name": "Draft", "operation": "text_to_image"},
+    )
+    draft = draft_response.json()
+    import_payload = {
+        "ui_graph": graph,
+        "name": "Final workflow",
+        "operation": "image_to_image",
+        "draft_workflow_id": draft["id"],
+        "draft_revision_id": draft["current_revision_id"],
+    }
+
+    finalized_response = await client.post("/api/workflows/packages/import", json=import_payload)
+
+    assert finalized_response.status_code == 201, finalized_response.json()
+    finalized = finalized_response.json()
+    assert finalized["id"] == draft["id"]
+    assert finalized["operation"] == "image_to_image"
+    assert len(finalized["revisions"]) == 2
+    assert finalized["revisions"][0]["api_graph_json"] == {}
+    current = next(
+        revision
+        for revision in finalized["revisions"]
+        if revision["id"] == finalized["current_revision_id"]
+    )
+    assert current["trusted"] is False
+    assert current["api_graph_json"]["1"]["class_type"] == "Source"
+    listed = (await client.get("/api/workflows")).json()
+    assert any(workflow["id"] == draft["id"] for workflow in listed)
+
+    retry_response = await client.post(
+        "/api/workflows/packages/import",
+        json={
+            **import_payload,
+            "draft_revision_id": finalized["current_revision_id"],
+        },
+    )
+
+    assert retry_response.status_code == 201
+    assert retry_response.json()["id"] == draft["id"]
+    assert len(retry_response.json()["revisions"]) == 2
+
+
+async def test_a_draft_cannot_authorize_a_different_graph(
+    client: AsyncClient, app: FastAPI, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _wire_runtime(app, monkeypatch)
+    graph = _ui_graph()
+    draft = (
+        await client.post(
+            "/api/workflows/packages/drafts",
+            json={"ui_graph": graph, "name": "Draft", "operation": "text_to_image"},
+        )
+    ).json()
+    changed = _ui_graph()
+    changed["nodes"][0]["widgets_values"][0] = "substituted"
+
+    response = await client.post(
+        "/api/workflows/packages/import",
+        json={
+            "ui_graph": changed,
+            "name": "Substituted",
+            "operation": "text_to_image",
+            "draft_workflow_id": draft["id"],
+            "draft_revision_id": draft["current_revision_id"],
+        },
+    )
+
+    assert response.status_code == 422
+    assert response.json()["code"] == "workflow-package-draft-identity-mismatch"
 
 
 async def test_a_ready_package_imports_as_an_untrusted_workflow(

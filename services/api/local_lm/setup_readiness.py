@@ -25,6 +25,7 @@ from .schemas import (
     WorkerStatus,
 )
 from .setup_verification import current_setup_verification
+from .workflow_package_drafts import is_workflow_package_draft
 
 if TYPE_CHECKING:
     from .runtime_provisioning import RuntimeProvisioner
@@ -439,7 +440,7 @@ def _workflow_check(
         if not definition.current_revision_id:
             continue
         revision = session.get(WorkflowRevision, definition.current_revision_id)
-        if not revision or revision.engine != install.engine:
+        if not revision or revision.engine != install.engine or is_workflow_package_draft(revision):
             continue
         if not revision_accepts_install(session, revision.dependencies_json, install.id):
             continue
