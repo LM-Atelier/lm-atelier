@@ -369,3 +369,48 @@ def test_non_finite_numbers_are_refused() -> None:
     with pytest.raises(WorkflowPackageError) as captured:
         analyze_comfyui_workflow_package(value)
     assert captured.value.code == "non_finite_number"
+
+
+def test_rgthree_group_controls_are_frontend_even_with_their_links() -> None:
+    """The live PhotoFlow blockers, in the shape the graph actually carries.
+
+    These three set other nodes' modes while a graph is being edited and have
+    no runtime existence. They omit `cnr_id`, the bypasser exposes only an
+    `OPT_CONNECTION` output, and the relay and repeater form a virtual
+    `REPEATER` chain between themselves - so a name-only assertion would not
+    have exercised the links that made them look like real dependencies.
+    """
+    bypasser = node(10, "Fast Groups Bypasser (rgthree)")
+    bypasser["outputs"] = [{"name": "OPT_CONNECTION", "type": "OPT_CONNECTION", "links": [1]}]
+    relay = node(11, "Mute / Bypass Relay (rgthree)")
+    relay["inputs"] = [{"name": "OPT_CONNECTION", "type": "OPT_CONNECTION", "link": 1}]
+    relay["outputs"] = [{"name": "REPEATER", "type": "REPEATER", "links": [2]}]
+    repeater = node(12, "Mute / Bypass Repeater (rgthree)")
+    repeater["inputs"] = [{"name": "REPEATER", "type": "REPEATER", "link": 2}]
+
+    analysis = analyze_comfyui_workflow_package(
+        workflow(
+            nodes=[bypasser, relay, repeater, node(1, "KSampler")],
+            links=[
+                [1, 10, 0, 11, 0, "OPT_CONNECTION"],
+                [2, 11, 0, 12, 0, "REPEATER"],
+            ],
+        ),
+        available_node_types={"KSampler"},
+    )
+
+    assert analysis.missing_node_types == ()
+    for control in (
+        "Fast Groups Bypasser (rgthree)",
+        "Mute / Bypass Relay (rgthree)",
+        "Mute / Bypass Repeater (rgthree)",
+    ):
+        assert control in analysis.frontend_node_types
+    # Narrow on purpose: a node with no package is usually one whose package
+    # we failed to identify, and treating that class as furniture would drop
+    # real dependencies silently.
+    unknown = analyze_comfyui_workflow_package(
+        workflow(nodes=[node(20, "SomeOtherUnpackagedNode"), node(1, "KSampler")]),
+        available_node_types={"KSampler"},
+    )
+    assert unknown.missing_node_types == ("SomeOtherUnpackagedNode",)

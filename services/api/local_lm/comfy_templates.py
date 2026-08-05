@@ -10,6 +10,7 @@ from pathlib import Path, PurePosixPath
 from typing import Any, cast
 from urllib.parse import unquote, urlparse
 
+from .comfy_workflow_packages import FRONTEND_SYSTEM_NODE_TYPES
 from .config import Settings
 from .workflow_edit_calibration import (
     EDIT_CALIBRATION_SCHEMA_KEY,
@@ -1682,7 +1683,11 @@ def _compile_ui_graph(
             class_type = "SaveImage"
         node_info = object_info.get(class_type)
         if not isinstance(node_info, dict):
-            if class_type not in {"MarkdownNote", "Note"}:
+            # The shared contract, not a second smaller list. The analyzer
+            # already knew these are frontend-only; the compiler kept its own
+            # pair and refused the rest as missing runtime types, so a graph
+            # the analyzer accepted could still fail to compile.
+            if class_type not in FRONTEND_SYSTEM_NODE_TYPES:
                 raise ValueError(f"ComfyUI template requires missing node type {class_type}")
             continue
         if int(node.get("mode") or 0) in {2, 4}:
