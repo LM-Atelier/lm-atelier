@@ -1,29 +1,42 @@
 import { useCallback, useEffect, useRef } from "react";
-import { PanelLeftOpen } from "lucide-react";
 import { MAX_SIDEBAR_WIDTH, MIN_SIDEBAR_WIDTH, type SidebarLayout } from "./sidebarLayout";
 
 const KEYBOARD_STEP = 16;
+/** Below this, a pointer press was a click rather than a drag. */
+const DRAG_THRESHOLD = 3;
 
-/** The edge between the sidebar and the work, draggable and focusable.
+/** The edge between the sidebar and the work: drag it, or click it to hide.
  *
- * A separator is a real control, not decoration, so it carries the separator
- * role and its bounds - and it answers the arrow keys, because a width that
- * can only be set by dragging cannot be set by everyone.
+ * One control rather than two. A separate hide button is a second thing to
+ * find and put somewhere, when the edge is already exactly where the hand is
+ * and already means "this is the boundary".
+ *
+ * A click and a drag are told apart by distance, not by timing: a press that
+ * never moves is a click however long it lasts, which is what someone who
+ * pauses mid-gesture expects.
  */
 export function SidebarResizer({ layout }: { layout: SidebarLayout }) {
   const dragging = useRef(false);
+  const startedAt = useRef(0);
+  const moved = useRef(false);
 
   const onMove = useCallback(
     (event: PointerEvent) => {
-      if (dragging.current) layout.setWidth(event.clientX);
+      if (!dragging.current) return;
+      if (Math.abs(event.clientX - startedAt.current) > DRAG_THRESHOLD) moved.current = true;
+      if (moved.current) layout.setWidth(event.clientX);
     },
     [layout],
   );
 
   const onUp = useCallback(() => {
+    if (!dragging.current) return;
     dragging.current = false;
     document.body.classList.remove("resizing-sidebar");
-  }, []);
+    // A press that went nowhere was a click, and a click on the edge hides or
+    // shows what it is the edge of.
+    if (!moved.current) layout.toggle();
+  }, [layout]);
 
   useEffect(() => {
     window.addEventListener("pointermove", onMove);
@@ -34,20 +47,7 @@ export function SidebarResizer({ layout }: { layout: SidebarLayout }) {
     };
   }, [onMove, onUp]);
 
-  if (layout.collapsed) {
-    // The way back cannot live inside the thing that is hidden.
-    return (
-      <button
-        type="button"
-        className="icon-button reveal-sidebar"
-        aria-label="Show sidebar"
-        title="Show sidebar"
-        onClick={layout.toggle}
-      >
-        <PanelLeftOpen size={16} aria-hidden="true" />
-      </button>
-    );
-  }
+  const label = layout.collapsed ? "Show sidebar" : "Hide sidebar, or drag to resize";
   return (
     // A focusable separator with aria-valuenow is a widget in ARIA - the
     // standard pattern for a splitter. The rule models `separator` as
@@ -58,7 +58,8 @@ export function SidebarResizer({ layout }: { layout: SidebarLayout }) {
       className="sidebar-resizer"
       role="separator"
       aria-orientation="vertical"
-      aria-label="Resize sidebar"
+      aria-label={label}
+      title={label}
       aria-valuenow={layout.width}
       aria-valuemin={MIN_SIDEBAR_WIDTH}
       aria-valuemax={MAX_SIDEBAR_WIDTH}
@@ -66,11 +67,13 @@ export function SidebarResizer({ layout }: { layout: SidebarLayout }) {
       onPointerDown={(event) => {
         event.preventDefault();
         dragging.current = true;
+        moved.current = false;
+        startedAt.current = event.clientX;
         document.body.classList.add("resizing-sidebar");
       }}
-      onDoubleClick={layout.toggle}
       onKeyDown={(event) => {
-        if (event.key === "ArrowLeft") layout.setWidth(layout.width - KEYBOARD_STEP);
+        if (event.key === "Enter" || event.key === " ") layout.toggle();
+        else if (event.key === "ArrowLeft") layout.setWidth(layout.width - KEYBOARD_STEP);
         else if (event.key === "ArrowRight") layout.setWidth(layout.width + KEYBOARD_STEP);
         else return;
         event.preventDefault();
