@@ -119,10 +119,21 @@ async function ensureSession(): Promise<void> {
   }
 }
 
-/** Whether a 403 is the CSRF guard rather than a genuine refusal. */
+/** Whether a 403 is the CSRF guard rather than a genuine refusal.
+ *
+ * The code first, the prose second. Matching on "CSRF check failed" made this
+ * retry depend on wording nobody thought of as contract: rephrasing that
+ * sentence would silently turn a recoverable stale token into a hard refusal,
+ * and the sentence would have looked entirely safe to change.
+ *
+ * The prose check stays as a fallback rather than being deleted, because it
+ * costs nothing and a response that predates the code still means the same
+ * thing.
+ */
 async function isCsrfFailure(response: Response): Promise<boolean> {
   try {
-    const payload = (await response.clone().json()) as { detail?: unknown };
+    const payload = (await response.clone().json()) as { detail?: unknown; code?: unknown };
+    if (payload.code === "csrf-invalid") return true;
     return payload.detail === "CSRF check failed";
   } catch {
     return false;

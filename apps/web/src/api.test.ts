@@ -783,3 +783,76 @@ it("routes a CivitAI preflight through the source-aware endpoint", async () => {
   await api.catalogPreflight("owner/name", "chat", "llama.cpp", "main", []);
   expect(fetchMock.mock.calls[2][0]).toBe("/api/catalog/owner/name/preflight");
 });
+
+it("retries a stale token when the refusal carries the csrf code", async () => {
+  // The retry used to key on the exact sentence "CSRF check failed". Rewording
+  // it would have turned a recoverable stale token into a hard refusal, and
+  // the sentence looked entirely safe to change.
+  const fetchMock = vi.fn()
+    .mockResolvedValueOnce(
+      new Response(JSON.stringify({ csrf_token: "first" }), {
+        status: 200,
+        headers: { "content-type": "application/json" },
+      }),
+    )
+    .mockResolvedValueOnce(
+      new Response(JSON.stringify({ detail: "reworded entirely", code: "csrf-invalid" }), {
+        status: 403,
+        headers: { "content-type": "application/json" },
+      }),
+    )
+    .mockResolvedValueOnce(
+      new Response(JSON.stringify({ csrf_token: "second" }), {
+        status: 200,
+        headers: { "content-type": "application/json" },
+      }),
+    )
+    .mockResolvedValueOnce(
+      new Response(JSON.stringify([]), {
+        status: 200,
+        headers: { "content-type": "application/json" },
+      }),
+    );
+  vi.stubGlobal("fetch", fetchMock);
+
+  const { api } = await import("./api");
+  await expect(api.editTemplates()).resolves.toEqual([]);
+
+  // Session, refused request, fresh session, replay. A GET carries no CSRF
+  // header, so the replay is what proves the retry rather than the header.
+  expect(fetchMock).toHaveBeenCalledTimes(4);
+  expect(fetchMock.mock.calls[2][0]).toBe("/api/session");
+  expect(fetchMock.mock.calls[3][0]).toBe("/api/edit-templates");
+});
+
+it("still recognizes the older wording, for a server that predates the code", async () => {
+  const fetchMock = vi.fn()
+    .mockResolvedValueOnce(
+      new Response(JSON.stringify({ csrf_token: "first" }), {
+        status: 200,
+        headers: { "content-type": "application/json" },
+      }),
+    )
+    .mockResolvedValueOnce(
+      new Response(JSON.stringify({ detail: "CSRF check failed" }), {
+        status: 403,
+        headers: { "content-type": "application/json" },
+      }),
+    )
+    .mockResolvedValueOnce(
+      new Response(JSON.stringify({ csrf_token: "second" }), {
+        status: 200,
+        headers: { "content-type": "application/json" },
+      }),
+    )
+    .mockResolvedValueOnce(
+      new Response(JSON.stringify([]), {
+        status: 200,
+        headers: { "content-type": "application/json" },
+      }),
+    );
+  vi.stubGlobal("fetch", fetchMock);
+
+  const { api } = await import("./api");
+  await expect(api.editTemplates()).resolves.toEqual([]);
+});
