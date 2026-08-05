@@ -1347,6 +1347,10 @@ class CatalogModel(ApiModel):
     # parent renders exactly as it does now.
     parent_model_id: str | None = None
     parent_model_name: str | None = None
+    # How many versions this card stands for. One means the card is the whole
+    # story; more means it must open a chooser rather than install, because
+    # the point of version identity is that the person picked one.
+    version_count: int = 1
     # Set only on workflow catalog cards: one repository can ship several
     # official workflows, and the card must say which one it is.
     workflow_template_id: str | None = None

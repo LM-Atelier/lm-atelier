@@ -6,12 +6,15 @@ export function ModelCard({
   model,
   role,
   onDownload,
+  onChooseVersion,
   status,
   runtime,
 }: {
   model: CatalogModel;
   role: string;
   onDownload: () => void;
+  /** Opened instead of installing when this card stands for several versions. */
+  onChooseVersion?: () => void;
   status: "idle" | "preparing" | "downloading" | "installed";
   runtime?: RuntimeStatus;
 }) {
@@ -35,11 +38,18 @@ export function ModelCard({
       ? "Needs vLLM"
       : "Automatic test available"
     : compatibilityLabel;
-  const actionLabel = status === "idle" && model.compatibility === "unsupported"
-    ? "No workflow"
-    : status === "idle" && runtimeUnavailable
-      ? "Needs vLLM"
-      : label;
+  // A card standing for several versions must not install one. The point of
+  // version identity is that the person picked it, so the action becomes the
+  // chooser and the count says why.
+  const versions = model.version_count ?? 1;
+  const choosing = versions > 1 && status === "idle" && Boolean(onChooseVersion);
+  const actionLabel = choosing
+    ? `Choose from ${versions} versions`
+    : status === "idle" && model.compatibility === "unsupported"
+      ? "No workflow"
+      : status === "idle" && runtimeUnavailable
+        ? "Needs vLLM"
+        : label;
   return (
     <article className="model-card">
       <div className="model-icon">{role === "video" ? <Film /> : role === "image" || role === "lora" ? <ImageIcon /> : <Bot />}</div>
@@ -48,7 +58,7 @@ export function ModelCard({
         <div className="badges"><span className={`badge ${model.compatibility}`}>{displayCompatibility}</span>{model.gated && <span className="badge">Gated</span>}{model.formats.slice(0, 2).map((format) => <span className="badge" key={format}>{format}</span>)}{model.quantizations.slice(0, 2).map((value) => <span className="badge" key={value}>{value}</span>)}</div>
         <small>{model.total_size_bytes != null ? `${formatBytes(model.total_size_bytes)} · ` : ""}{formatDate(model.last_modified)}{model.compatibility_reasons.length ? ` · ${model.compatibility_reasons.join(" · ")}` : ""}</small>
       </div>
-      <div className="model-stats">{model.trending_score != null && <span title="Hugging Face trending score"><Sparkles size={14} />{model.trending_score.toLocaleString()}</span>}<span><Download size={14} />{model.downloads?.toLocaleString() ?? "—"}</span><button className="primary compact-button" title={model.compatibility === "unsupported" || runtimeUnavailable ? model.compatibility_reasons.join(" ") : undefined} onClick={onDownload} disabled={status !== "idle" || model.compatibility === "unsupported" || runtimeUnavailable}>{actionLabel}</button></div>
+      <div className="model-stats">{model.trending_score != null && <span title="Hugging Face trending score"><Sparkles size={14} />{model.trending_score.toLocaleString()}</span>}<span><Download size={14} />{model.downloads?.toLocaleString() ?? "—"}</span><button className="primary compact-button" title={model.compatibility === "unsupported" || runtimeUnavailable ? model.compatibility_reasons.join(" ") : undefined} onClick={choosing ? onChooseVersion : onDownload} disabled={status !== "idle" || model.compatibility === "unsupported" || runtimeUnavailable}>{actionLabel}</button></div>
     </article>
   );
 }

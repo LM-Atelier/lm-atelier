@@ -2790,6 +2790,42 @@ async def artifact_content(
     )
 
 
+def _grouped_by_parent(items: list[CatalogModel]) -> list[CatalogModel]:
+    """One card per model, where the provider says a card is a version of one.
+
+    A CivitAI card is a version, because a version is what installs. Listing
+    every version as its own card buries a model with twelve releases under
+    twelve rows that differ only in a suffix. The card becomes the model, and
+    keeps the newest version's identity so it still names something real.
+
+    `version_count` is what stops this from silently installing the latest: a
+    card offering more than one has to open the chooser rather than act, and
+    the count is how the browser knows which card that is.
+
+    Order is preserved - the first card seen for a parent keeps its place, so
+    whatever the provider's ranking meant still holds.
+    """
+    grouped: dict[str, CatalogModel] = {}
+    ordered: list[CatalogModel] = []
+    for item in items:
+        parent = item.parent_model_id
+        if not parent:
+            ordered.append(item)
+            continue
+        existing = grouped.get(parent)
+        if existing is None:
+            card = item.model_copy(
+                update={"name": item.parent_model_name or item.name, "version_count": 1}
+            )
+            grouped[parent] = card
+            ordered.append(card)
+            continue
+        merged = existing.model_copy(update={"version_count": existing.version_count + 1})
+        grouped[parent] = merged
+        ordered[ordered.index(existing)] = merged
+    return ordered
+
+
 @router.get("/catalog", response_model=CatalogPage)
 async def catalog_search(
     request: Request,
@@ -2835,7 +2871,7 @@ async def catalog_search(
             updated_within_days=updated_within_days,
         )
         if not media_catalog or role is None:
-            return page
+            return page.model_copy(update={"items": _grouped_by_parent(page.items)})
         registry = ComfyTemplateRegistry(services.settings)
         items = []
         for item in page.items:
@@ -2872,7 +2908,7 @@ async def catalog_search(
                     -(item.downloads or 0),
                 )
             )
-        return page.model_copy(update={"items": items})
+        return page.model_copy(update={"items": _grouped_by_parent(items)})
     except ValueError as exc:
         raise HTTPException(422, f"invalid catalog request: {exc}") from exc
     except Exception as exc:

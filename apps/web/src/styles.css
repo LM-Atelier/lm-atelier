@@ -988,3 +988,12 @@ h1, h2, h3 { margin: 0; }
 .sidebar-pin { opacity: 0; transition: opacity var(--quick) var(--ease); }
 .sidebar-chat-row:hover .sidebar-pin, .sidebar-pin:focus-visible { opacity: 1; }
 .sidebar-pin.pinned { opacity: 1; color: var(--accent-warm-text); }
+
+/* Choosing which version of a model to install. The rows are the decision,
+   so they get the room; the dialog only frames them. */
+.version-chooser { width: min(640px, 92vw); }
+.version-list { display: grid; gap: 8px; list-style: none; padding: 0; margin: 0; }
+.version-list > li { display: grid; grid-template-columns: minmax(0, 1fr) auto auto; align-items: center; gap: 12px; padding: 11px 13px; border: 1px solid var(--line); border-radius: var(--cut-small); background: var(--surface-1); }
+.version-list strong { display: block; }
+.version-list small { color: var(--ink-muted); }
+.version-changelog { margin: 6px 0 0; color: var(--ink-secondary); font-size: 13px; }

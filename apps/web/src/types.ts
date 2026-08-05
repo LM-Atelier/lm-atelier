@@ -554,6 +554,10 @@ export interface CatalogModel {
    */
   parent_model_id?: string | null;
   parent_model_name?: string | null;
+  /** How many versions this card stands for. More than one means the card
+   * must open a chooser rather than install, because the point of version
+   * identity is that the person picked one. */
+  version_count?: number;
   workflow_template_id?: string | null;
   operation?: string | null;
   content_rating?: ContentRating;

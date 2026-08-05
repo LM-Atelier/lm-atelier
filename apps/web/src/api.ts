@@ -11,6 +11,7 @@ import type {
   CatalogPage,
   CatalogDetail,
   CatalogPreflight,
+  CatalogVersions,
   Chat,
   ContentRating,
   ExchangeDeletion,
@@ -725,6 +726,8 @@ export const api = {
       method: "POST",
       body: JSON.stringify({ package_id: packageId, version, ui_graph: uiGraph }),
     }),
+  catalogVersions: (modelId: string) =>
+    request<CatalogVersions>(`/api/catalog/civitai/${encodeURIComponent(modelId)}/versions`),
   registryInstalls: () => request<RegistryInstall[]>("/api/workflows/packages/installs"),
   reviewRegistryInstall: (installId: string, trusted: boolean) =>
     request<RegistryInstall>(`/api/workflows/packages/installs/${installId}/review`, {
