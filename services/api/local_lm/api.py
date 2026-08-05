@@ -740,7 +740,7 @@ def export_verified_setup(
     install = session.get(ModelInstall, readiness.install_id) if readiness.install_id else None
     profile = session.get(ModelProfile, readiness.profile_id) if readiness.profile_id else None
     if not install or not profile:
-        raise HTTPException(409, "This role has no verified setup to export yet.")
+        raise api_error(409, "setup-not-verified", "This role has no verified setup to export yet.")
     workflow = (
         session.get(WorkflowRevision, readiness.workflow_revision_id)
         if readiness.workflow_revision_id
@@ -753,11 +753,14 @@ def export_verified_setup(
         services.runtimes,
     )
     if not evidence:
-        raise HTTPException(409, "This setup has no current activation evidence.")
+        raise api_error(
+            409, "setup-evidence-missing", "This setup has no current activation evidence."
+        )
     verification = current_setup_verification(session, role, install, profile, workflow, evidence)
     if not verification or verification.state != "verified":
-        raise HTTPException(
+        raise api_error(
             409,
+            "setup-not-verified",
             "Run setup verification for this role first - an exported setup has to "
             "carry proof that a real generation succeeded.",
         )
@@ -802,9 +805,9 @@ async def start_setup_verification(
         if check.status != "pass" and not check.code.startswith("generation_verification")
     ]
     if blocking:
-        raise HTTPException(409, blocking[0].message)
+        raise api_error(409, "setup-incomplete", blocking[0].message)
     if not readiness.install_id or not readiness.profile_id:
-        raise HTTPException(409, "Finish model activation and profile setup first.")
+        raise api_error(409, "setup-incomplete", "Finish model activation and profile setup first.")
 
     install = session.get(ModelInstall, readiness.install_id)
     profile = session.get(ModelProfile, readiness.profile_id)
@@ -814,7 +817,7 @@ async def start_setup_verification(
         else None
     )
     if not install or not profile:
-        raise HTTPException(409, "The selected setup changed. Refresh and try again.")
+        raise api_error(409, "setup-changed", "The selected setup changed. Refresh and try again.")
     capability_evidence = current_capability_evidence(
         session,
         install,
@@ -822,7 +825,11 @@ async def start_setup_verification(
         services.runtimes,
     )
     if not capability_evidence:
-        raise HTTPException(409, "The model activation evidence changed. Refresh and try again.")
+        raise api_error(
+            409,
+            "setup-evidence-changed",
+            "The model activation evidence changed. Refresh and try again.",
+        )
 
     existing = current_setup_verification(
         session,
@@ -931,7 +938,7 @@ async def start_setup_verification(
     session.expire_all()
     current = session.get(SetupVerification, verification.id)
     if not current:
-        raise HTTPException(500, "Setup verification state was lost.")
+        raise api_error(500, "setup-verification-lost", "Setup verification state was lost.")
     job = session.scalar(select(Job).where(Job.run_id == accepted.run.id))
     if current.state in ACTIVE_VERIFICATION_STATES:
         current.run_id = accepted.run.id
@@ -949,7 +956,7 @@ async def start_setup_verification(
 @router.post("/runtimes/{engine}/install", response_model=RuntimeStatus, status_code=202)
 async def install_runtime(engine: str, request: Request) -> RuntimeStatus:
     if engine not in {"llama.cpp", "vllm", "comfyui"}:
-        raise HTTPException(422, "runtime must be llama.cpp, vllm, or comfyui")
+        raise api_error(422, "runtime-unknown", "runtime must be llama.cpp, vllm, or comfyui")
     status = _services(request).runtimes.start(
         cast(Literal["llama.cpp", "vllm", "comfyui"], engine)
     )
@@ -1022,7 +1029,7 @@ async def load_chat_worker(profile_id: str, request: Request, session: SessionDe
 async def _load_chat_profile(services: Services, session: Session, profile_id: str) -> WorkerStatus:
     profile = session.get(ModelProfile, profile_id)
     if not profile or not profile.model_install_id:
-        raise HTTPException(404, "profile with a model install not found")
+        raise api_error(404, "profile-install-missing", "profile with a model install not found")
     if profile.role != ModelRole.CHAT.value:
         raise HTTPException(422, "chat worker requires a chat profile")
     install = _validated_profile_install(
