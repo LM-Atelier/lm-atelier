@@ -594,6 +594,7 @@ async def test_chat_plan_downloads_a_pinned_projector_from_a_companion_repo(
                 "filename": model_name,
                 "size": len(model_content),
                 "sha256": model_digest,
+                "metadata": {"trained_words": ["visionary-style"]},
             },
             {
                 "filename": projector_name,
@@ -732,6 +733,7 @@ async def test_chat_plan_downloads_a_pinned_projector_from_a_companion_repo(
         assert job and job.status == JobStatus.COMPLETE.value, job.error if job else None
         assert install.active is True
         assert install.manifest_json["file_sources"][projector_name]["remote_id"] == "author/model"
+        assert install.manifest_json["trigger_words"] == ["visionary-style"]
         # The declared rating travels into the manifest so provenance is honest.
         assert install.manifest_json["content_rating"] == "general"
         components = {
@@ -800,6 +802,7 @@ async def test_lora_plan_installs_as_a_verified_auxiliary_asset(
                 "filename": "adapter.safetensors",
                 "size": len(content),
                 "sha256": digest,
+                "metadata": {"trained_words": ["provider ink"]},
             }
         ],
         inspection=inspection,
@@ -894,6 +897,10 @@ async def test_lora_plan_installs_as_a_verified_auxiliary_asset(
         assert asset.kind == "lora"
         assert asset.manifest_json["sha256"] == digest
         assert asset.manifest_json["comfy_name"] == "adapter.safetensors"
+        assert asset.manifest_json["metadata"]["trigger_words"] == [
+            "atelier ink",
+            "provider ink",
+        ]
         # A request that declares no rating stores the explicit unknown.
         assert asset.manifest_json["content_rating"] == "unknown"
         assert stored_plan and stored_plan.status == "activated"

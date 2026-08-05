@@ -122,6 +122,44 @@ def test_static_inspector_distinguishes_lora_from_primary_checkpoint() -> None:
     assert plan.failure_code == "auxiliary_asset_not_primary"
 
 
+def test_install_plan_freezes_bounded_provider_trigger_words() -> None:
+    inspection = inspect_repository_metadata(
+        {"model.safetensors": _safetensors(["model.diffusion_model.input_blocks.0.weight"])},
+        ["model.safetensors"],
+        role="image",
+    )
+    plan = resolve_install_plan(
+        remote_id="synthetic/trigger-model",
+        revision="a" * 40,
+        role="image",
+        engine="comfyui",
+        selected_files=[
+            {
+                "filename": "model.safetensors",
+                "size": 1_024,
+                "sha256": "b" * 64,
+                "metadata": {
+                    "trained_words": [
+                        " portrait-style ",
+                        "Portrait-Style",
+                        "soft light",
+                    ],
+                    "trigger_words": ["phone candid"],
+                },
+            }
+        ],
+        inspection=inspection,
+        workflow_template_id="synthetic-template",
+        workflow_template_sha256="c" * 64,
+    )
+
+    assert plan.runtime_contract["trigger_words"] == [
+        "portrait-style",
+        "soft light",
+        "phone candid",
+    ]
+
+
 def test_static_inspector_recognizes_nextdit_diffusion_tensor_layout() -> None:
     inspection = inspect_repository_metadata(
         {
