@@ -823,6 +823,19 @@ class WorkflowBundle(ApiModel):
     source_revision: int | None = None
 
 
+class StudioToolCapability(ApiModel):
+    """Whether one studio tool can run here, and what would fix it."""
+
+    kind: str
+    workflow_class: str
+    available: bool
+    reason: str | None
+
+
+class StudioCapabilityReport(ApiModel):
+    tools: list[StudioToolCapability]
+
+
 class WorkflowRevisionOut(ApiModel):
     id: str
     workflow_id: str

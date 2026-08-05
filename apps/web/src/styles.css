@@ -371,7 +371,12 @@ h1, h2, h3 { margin: 0; }
 @keyframes spin { to { transform: rotate(360deg); } }
 @keyframes progress-indeterminate { from { transform: translateX(-110%); } to { transform: translateX(300%); } }
 .media-card { max-width: 720px; margin: 8px 0; border: 1px solid var(--border); background: var(--surface-0); border-radius: 14px; overflow: hidden; }
-.media-card img, .media-card video { width: 100%; max-height: 620px; display: block; object-fit: contain; background: var(--surface-0); }
+.media-card img, .media-card video { width: 100%; max-height: 620px; display: block; object-fit: contain; background: transparent; }
+/* The frame stacks a blurred copy under the picture, so a portrait in a wide
+   card is bounded by its own colours rather than by flat bars. */
+.media-frame { position: relative; overflow: hidden; background: var(--surface-0); }
+.media-frame > img:not(.media-backdrop) { position: relative; z-index: 1; }
+.media-backdrop { position: absolute; inset: 0; width: 100%; height: 100%; object-fit: cover; filter: blur(28px) saturate(1.15); transform: scale(1.15); opacity: .55; }
 .media-card.preview { border-color: var(--accent); opacity: .82; }
 .media-card.preview img { filter: saturate(.82); }
 .media-card figcaption { display: flex; align-items: center; gap: 6px; padding: 9px 12px; color: var(--ink-secondary); font-size: 12px; }
@@ -969,6 +974,10 @@ h1, h2, h3 { margin: 0; }
 .workflow-consumers ul { display: grid; gap: 2px; margin: 0; padding-left: 16px; color: var(--ink-secondary); font-size: 12px; }
 .workflow-consumers small { color: var(--ink-muted); font-size: 11px; }
 .app-shell { background: var(--surface-0); color: var(--ink-primary); }
+/* Floats over the work rather than living in a panel that can be hidden:
+   the light is a property of the whole workspace, so its control belongs to
+   the screen rather than to the sidebar. */
+.theme-toggle { position: fixed; right: 14px; bottom: 14px; z-index: 6; background: var(--surface-2); border: 1px solid var(--line); border-radius: 999px; padding: 4px; box-shadow: var(--lift); }
 .theme-toggle { display: flex; gap: 2px; padding: 4px 0 6px; }
 .theme-toggle .icon-button { width: 28px; height: 28px; }
 .studio-open-image { display: grid; gap: 8px; justify-items: center; text-align: center; align-content: center; height: 100%; border: 2px dashed var(--line-control); border-radius: 14px; background: var(--surface-1); color: var(--ink-muted); padding: 24px; }
@@ -1000,3 +1009,6 @@ h1, h2, h3 { margin: 0; }
 .version-list strong { display: block; }
 .version-list small { color: var(--ink-muted); }
 .version-changelog { margin: 6px 0 0; color: var(--ink-secondary); font-size: 13px; }
+/* A tool that cannot run says so where the work would have gone. */
+.studio-tool-guidance { margin: 0; padding: 8px 10px; border: 1px solid var(--line); border-radius: 10px; background: var(--surface-2); color: var(--ink-secondary); font-size: 12px; }
+.icon-button.unavailable { opacity: .55; }
