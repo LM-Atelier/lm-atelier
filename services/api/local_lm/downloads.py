@@ -1470,6 +1470,7 @@ class DownloadManager:
                             "a model asset install must contain one verified component"
                         )
                     component = inspection.components[0]
+                    planned_trigger_words = self._planned_trigger_words(plan)
                     with SessionLocal() as session:
                         model_source = session.scalar(
                             select(ModelSource).where(
@@ -1502,7 +1503,13 @@ class DownloadManager:
                                 "expected_sha256": resolved_sha256,
                                 "sha256": resolved_sha256[component.path],
                                 "comfy_name": component.path,
-                                "metadata": component.metadata,
+                                "metadata": {
+                                    **component.metadata,
+                                    "trigger_words": self._normalized_trigger_words(
+                                        component.metadata.get("trigger_words"),
+                                        planned_trigger_words,
+                                    ),
+                                },
                                 "comfy_paths": request.comfy_paths,
                                 "workflow_asset_kind": request.workflow_asset_kind,
                                 "content_rating": request.content_rating,
@@ -1627,6 +1634,7 @@ class DownloadManager:
                             "content_rating": request.content_rating,
                             "default_settings": default_settings,
                             "family": inspection.family if inspection else None,
+                            "trigger_words": self._planned_trigger_words(plan),
                         },
                         active=compiled_template is None and not request.install_plan_id,
                     )
@@ -2740,6 +2748,33 @@ class DownloadManager:
         if provider != "huggingface":
             raise ValueError(f"unsupported download provider: {provider}")
         return await self._huggingface_download_sources(request)
+
+    @staticmethod
+    def _planned_trigger_words(plan: InstallPlan | None) -> list[str]:
+        if not plan:
+            return []
+        declared = plan.runtime_contract_json.get("trigger_words")
+        return DownloadManager._normalized_trigger_words(declared)
+
+    @staticmethod
+    def _normalized_trigger_words(*groups: object) -> list[str]:
+        words: list[str] = []
+        seen: set[str] = set()
+        for group in groups:
+            if not isinstance(group, list):
+                continue
+            for value in group:
+                if not isinstance(value, str):
+                    continue
+                word = value.strip()[:200]
+                key = word.casefold()
+                if not word or key in seen:
+                    continue
+                seen.add(key)
+                words.append(word)
+                if len(words) == 100:
+                    return words
+        return words
 
     def _civitai_download_sources(
         self,
