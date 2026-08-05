@@ -9,6 +9,8 @@ from dataclasses import dataclass
 from packaging.requirements import InvalidRequirement, Requirement
 from packaging.utils import canonicalize_name
 
+from .package_sources import classify_source_url, source_refusal
+
 # A comment starts at a `#` that follows whitespace, matching how pip reads a
 # requirements file. A bare `#` inside a requirement is not a comment.
 _INLINE_COMMENT = re.compile(r"\s#")
@@ -154,10 +156,12 @@ def _dependency(value: object) -> ComfyRegistryDependency:
             "invalid_dependency", "Registry version has an invalid pip dependency"
         ) from exc
     if parsed.url is not None:
-        raise ComfyRegistryDependencyError(
-            "direct_dependency_url",
-            "Registry pip dependencies cannot use direct, local, or VCS URLs",
-        )
+        # Still refused, every one of them. What changed is that the refusal
+        # says which situation the package is in: an exact commit that a later
+        # slice could resolve, a branch that no slice can make exact, or a URL
+        # that was never allowed.
+        code, message = source_refusal(classify_source_url(parsed.url))
+        raise ComfyRegistryDependencyError(code, message)
     name = canonicalize_name(parsed.name)
     extras = tuple(sorted(canonicalize_name(value) for value in parsed.extras))
     if len(extras) > MAX_REGISTRY_DEPENDENCY_EXTRAS:

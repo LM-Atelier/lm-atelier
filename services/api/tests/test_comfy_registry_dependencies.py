@@ -101,11 +101,34 @@ def test_duplicate_environment_target_is_ambiguous() -> None:
     [
         "example @ https://example.com/example.whl",
         "example @ file:///tmp/example.whl",
-        "example @ git+https://github.com/example/example.git@main",
+        "example @ git+https://gitlab.com/example/example.git@main",
     ],
 )
 def test_rejects_direct_local_and_vcs_urls(declaration: str) -> None:
     _assert_error("direct_dependency_url", [declaration])
+
+
+@pytest.mark.parametrize(
+    ("declaration", "code"),
+    [
+        ("example @ git+https://github.com/example/example.git@main", "unpinned_source_dependency"),
+        ("example @ git+https://github.com/example/example", "unpinned_source_dependency"),
+        (
+            "example @ git+https://github.com/example/example@" + "a" * 40,
+            "unresolved_source_dependency",
+        ),
+    ],
+)
+def test_an_allowed_source_host_is_refused_by_what_would_fix_it(
+    declaration: str, code: str
+) -> None:
+    """Still refused, every one. The code is what tells them apart.
+
+    A branch cannot be made exact by any later machinery, so the package has
+    to pin it; an exact commit is refused only until its source can be bound
+    to a reviewed artifact. One blanket code said neither.
+    """
+    _assert_error(code, [declaration])
 
 
 @pytest.mark.parametrize(
