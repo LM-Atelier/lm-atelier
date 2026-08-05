@@ -9,6 +9,7 @@ from local_lm.auxiliary_assets import (
     LORA_GRAPH_TRANSFORM_VERSION,
     checkpoint_lora_extension,
     detect_lora_extension,
+    prompt_trigger_word_provenance,
     resolve_lora_stack,
     select_automatic_lora_stack,
     transform_lora_graph,
@@ -388,3 +389,26 @@ def test_trigger_words_apply_once_and_never_repeat_the_prompt() -> None:
     assert applied == ["m1ssi0nary", "film grain"]
     assert trigger_words_to_apply(provenance, "m1ssi0nary shot on film grain in Soft Light") == []
     assert trigger_words_to_apply([], "anything") == []
+
+
+def test_model_and_lora_trigger_words_share_one_deduplicated_snapshot() -> None:
+    model = {
+        "manifest": {"trigger_words": ["portrait-style", "soft light"]},
+        "source": {"metadata": {"trained_words": ["Portrait-Style", "film grain"]}},
+    }
+    loras = [
+        {"enabled": True, "trigger_words": ["soft light", "atelier ink"]},
+        {"enabled": False, "trigger_words": ["disabled-word"]},
+    ]
+
+    provenance = prompt_trigger_word_provenance(
+        model,
+        loras,
+        "A candid portrait with film grain",
+    )
+
+    assert provenance == {
+        "model_trigger_words_applied": ["portrait-style", "soft light"],
+        "lora_trigger_words_applied": ["atelier ink"],
+        "trigger_words_applied": ["portrait-style", "soft light", "atelier ink"],
+    }

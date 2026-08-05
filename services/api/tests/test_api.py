@@ -7379,7 +7379,7 @@ async def test_comfy_catalog_preflight_pins_a_multirepository_official_bundle(
     assert [item["path"] for item in named["install_plan"]["artifacts_json"]] == [
         "model.safetensors"
     ]
-    assert named["install_plan"]["resolver_version"] == "install-resolver-v8"
+    assert named["install_plan"]["resolver_version"] == "install-resolver-v9"
     runtime_contract = named["install_plan"]["runtime_contract_json"]
     assert runtime_contract["workflow_reference_kind"] == "checkpoint"
     assert runtime_contract["workflow_asset_kind"] == "checkpoint"

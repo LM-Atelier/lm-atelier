@@ -1015,3 +1015,13 @@ h1, h2, h3 { margin: 0; }
 /* A button that reads as part of the sentence it sits in, because the way out
    of a guidance line is the line itself. */
 .link-button { display: inline; padding: 0; border: 0; background: none; color: var(--accent); font: inherit; text-decoration: underline; cursor: pointer; }
+/* Extend's control is the frame itself: four edges of the picture, dragged
+   outward. They sit over the stage because that is where the frame is. */
+.studio-extend-handles { position: absolute; inset: 0; pointer-events: none; }
+.studio-extend-handle { position: absolute; pointer-events: auto; border: 1px dashed var(--accent); background: color-mix(in srgb, var(--accent) 14%, transparent); border-radius: 6px; padding: 0; cursor: grab; }
+.studio-extend-handle.dragging { cursor: grabbing; background: color-mix(in srgb, var(--accent) 26%, transparent); }
+.studio-extend-handle.top { top: 0; left: 12%; right: 12%; }
+.studio-extend-handle.bottom { bottom: 0; left: 12%; right: 12%; }
+.studio-extend-handle.left { left: 0; top: 12%; bottom: 12%; }
+.studio-extend-handle.right { right: 0; top: 12%; bottom: 12%; }
+.studio-tool-options { display: flex; flex-direction: column; gap: 6px; }

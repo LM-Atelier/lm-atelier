@@ -70,6 +70,11 @@ from .models import (
     WorkflowDefinition,
     WorkflowRevision,
 )
+from .outpaint_workflows import (
+    OUTPAINT_SCHEMA_KIND,
+    OUTPAINT_SETTING_KEY,
+    graph_can_outpaint,
+)
 from .profile_service import (
     build_profile_for_install,
     ensure_profile_for_install,
@@ -1465,6 +1470,7 @@ class DownloadManager:
                             "a model asset install must contain one verified component"
                         )
                     component = inspection.components[0]
+                    planned_trigger_words = self._planned_trigger_words(plan)
                     with SessionLocal() as session:
                         model_source = session.scalar(
                             select(ModelSource).where(
@@ -1497,7 +1503,13 @@ class DownloadManager:
                                 "expected_sha256": resolved_sha256,
                                 "sha256": resolved_sha256[component.path],
                                 "comfy_name": component.path,
-                                "metadata": component.metadata,
+                                "metadata": {
+                                    **component.metadata,
+                                    "trigger_words": self._normalized_trigger_words(
+                                        component.metadata.get("trigger_words"),
+                                        planned_trigger_words,
+                                    ),
+                                },
                                 "comfy_paths": request.comfy_paths,
                                 "workflow_asset_kind": request.workflow_asset_kind,
                                 "content_rating": request.content_rating,
@@ -1622,6 +1634,7 @@ class DownloadManager:
                             "content_rating": request.content_rating,
                             "default_settings": default_settings,
                             "family": inspection.family if inspection else None,
+                            "trigger_words": self._planned_trigger_words(plan),
                         },
                         active=compiled_template is None and not request.install_plan_id,
                     )
@@ -2453,6 +2466,16 @@ class DownloadManager:
         # setting is declared only where the graph carries an upscale node, so
         # the studio's Enhance tool is offered exactly when something installed
         # can honor it.
+        if graph_can_outpaint(compiled.api_graph):
+            properties = input_schema.setdefault("properties", {})
+            if isinstance(properties, dict):
+                properties[OUTPAINT_SETTING_KEY] = {
+                    "type": "object",
+                    "title": "Extend by",
+                    "description": "How far past each edge to paint, as a fraction.",
+                    "x-lm-atelier-kind": OUTPAINT_SCHEMA_KIND,
+                    "default": {"top": 0, "right": 0, "bottom": 0, "left": 0},
+                }
         if upscale_capability(compiled.api_graph):
             properties = input_schema.setdefault("properties", {})
             if isinstance(properties, dict):
@@ -2725,6 +2748,33 @@ class DownloadManager:
         if provider != "huggingface":
             raise ValueError(f"unsupported download provider: {provider}")
         return await self._huggingface_download_sources(request)
+
+    @staticmethod
+    def _planned_trigger_words(plan: InstallPlan | None) -> list[str]:
+        if not plan:
+            return []
+        declared = plan.runtime_contract_json.get("trigger_words")
+        return DownloadManager._normalized_trigger_words(declared)
+
+    @staticmethod
+    def _normalized_trigger_words(*groups: object) -> list[str]:
+        words: list[str] = []
+        seen: set[str] = set()
+        for group in groups:
+            if not isinstance(group, list):
+                continue
+            for value in group:
+                if not isinstance(value, str):
+                    continue
+                word = value.strip()[:200]
+                key = word.casefold()
+                if not word or key in seen:
+                    continue
+                seen.add(key)
+                words.append(word)
+                if len(words) == 100:
+                    return words
+        return words
 
     def _civitai_download_sources(
         self,
