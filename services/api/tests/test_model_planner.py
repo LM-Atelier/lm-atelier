@@ -122,6 +122,59 @@ def test_static_inspector_distinguishes_lora_from_primary_checkpoint() -> None:
     assert plan.failure_code == "auxiliary_asset_not_primary"
 
 
+def test_static_inspector_recognizes_nextdit_diffusion_tensor_layout() -> None:
+    inspection = inspect_repository_metadata(
+        {
+            "Krea2_Raw_convrot_int8mixed.safetensors": _safetensors(
+                [
+                    "blocks.0.attn.qkv.weight",
+                    "first.weight",
+                    "last.weight",
+                    "tmlp.0.weight",
+                    "tproj.weight",
+                    "txtfusion.0.attn.qkv.weight",
+                ],
+                {"_quantization_metadata": "{}"},
+            )
+        },
+        ["Krea2_Raw_convrot_int8mixed.safetensors"],
+        role="image",
+    )
+
+    assert inspection.components[0].kind == "diffusion_model"
+    assert inspection.components[0].target_folder == "diffusion_models"
+
+
+def test_static_inspector_uses_verified_component_folder_for_unknown_weights() -> None:
+    inspection = inspect_repository_metadata(
+        {
+            "text_encoders/qwen3vl_4b_fp8_scaled.safetensors": _safetensors(
+                [
+                    "model.embed_tokens.weight",
+                    "model.layers.0.self_attn.q_proj.weight",
+                    "model.visual.blocks.0.attn.qkv.weight",
+                ]
+            )
+        },
+        ["text_encoders/qwen3vl_4b_fp8_scaled.safetensors"],
+        role="image",
+    )
+
+    assert inspection.components[0].kind == "text_encoder"
+    assert inspection.components[0].target_folder == "text_encoders"
+
+
+def test_static_inspector_leaves_ambiguous_tensor_layout_unknown() -> None:
+    inspection = inspect_repository_metadata(
+        {"weights.safetensors": _safetensors(["blocks.0.attn.qkv.weight"])},
+        ["weights.safetensors"],
+        role="image",
+    )
+
+    assert inspection.components[0].kind == "unknown_safetensors"
+    assert inspection.components[0].target_folder == "checkpoints"
+
+
 def test_official_workflow_plan_accepts_a_required_lora_with_primary_weights() -> None:
     selected = ["model.safetensors", "lightning.safetensors"]
     inspection = inspect_repository_metadata(
