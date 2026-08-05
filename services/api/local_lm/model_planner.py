@@ -16,7 +16,7 @@ from .domain import new_id
 from .model_manifests import ModelManifestInspection
 from .models import InstallPlan, ModelComponentManifest
 
-INSTALL_RESOLVER_VERSION = "install-resolver-v8"
+INSTALL_RESOLVER_VERSION = "install-resolver-v9"
 ACTIVATION_PROBE_VERSION = "activation-probe-v2"
 LAUNCH_CONTRACT_VERSION = "worker-launch-v1"
 
@@ -336,6 +336,33 @@ class ResolvedInstallPlan:
         return hashlib.sha256(encoded.encode()).hexdigest()
 
 
+def _declared_trigger_words(selected_files: list[dict[str, Any]]) -> list[str]:
+    # Provider metadata is external input. Freeze one bounded, canonical list
+    # into the immutable plan so installation never trusts a later response.
+    words: list[str] = []
+    seen: set[str] = set()
+    for item in selected_files:
+        metadata = item.get("metadata")
+        if not isinstance(metadata, Mapping):
+            continue
+        for key_name in ("trained_words", "trigger_words"):
+            declared = metadata.get(key_name)
+            if not isinstance(declared, list):
+                continue
+            for value in declared:
+                if not isinstance(value, str):
+                    continue
+                word = value.strip()[:200]
+                key = word.casefold()
+                if not word or key in seen:
+                    continue
+                seen.add(key)
+                words.append(word)
+                if len(words) == 100:
+                    return words
+    return words
+
+
 def resolve_install_plan(
     *,
     remote_id: str,
@@ -503,6 +530,7 @@ def resolve_install_plan(
         )
 
     runtime_contract = {
+        "trigger_words": _declared_trigger_words(selected_files),
         "engine": engine,
         "adapter_contract_version": ADAPTER_CONTRACT_VERSION,
         "launch_contract_version": LAUNCH_CONTRACT_VERSION,
