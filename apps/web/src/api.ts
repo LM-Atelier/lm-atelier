@@ -566,12 +566,16 @@ export const api = {
     workflowTemplateId: string | null = null,
     provider = "huggingface",
     workflowReferenceKind: string | null = null,
+    // Named when a filename cannot settle the choice: one version can publish
+    // the same safetensors name several times at different precisions.
+    selectedFileIds: string[] = [],
   ) => {
     const body = JSON.stringify({
       role,
       engine,
       revision,
       selected_files: selectedFiles,
+      selected_file_ids: selectedFileIds,
       auxiliary_kind: auxiliaryKind,
       workflow_template_id: workflowTemplateId,
       workflow_reference_kind: workflowReferenceKind,

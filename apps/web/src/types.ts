@@ -615,6 +615,13 @@ export interface CatalogDetail {
   files: Array<{ filename: string; size: number | null; sha256: string | null }>;
 }
 
+export interface CatalogFileVariant {
+  source_file_id: string;
+  filename: string;
+  size_bytes: number | null;
+  precision: string | null;
+}
+
 export interface CatalogPreflight {
   remote_id: string;
   source_remote_id: string | null;
@@ -636,6 +643,10 @@ export interface CatalogPreflight {
   estimated_ram_bytes: number | null;
   estimated_vram_bytes: number | null;
   can_install: boolean;
+  /** The choices behind a filename this version could not settle. Present
+   * only for names that are genuinely ambiguous, so a list of one never
+   * turns an ordinary install into a decision. */
+  file_variants?: Record<string, CatalogFileVariant[]>;
   auxiliary_kind?: string | null;
   content_rating?: ContentRating;
   install_plan: {
