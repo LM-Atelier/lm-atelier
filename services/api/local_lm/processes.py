@@ -27,7 +27,7 @@ from .gguf import GGUFSelectionError, automatic_mmproj_selection, validate_gguf_
 from .models import ModelAssetInstall, ModelInstall, ModelProfile
 from .network import shared_tls_context
 from .schemas import WorkerStatus
-from .subprocess_env import subprocess_environment
+from .subprocess_env import python_subprocess_environment
 from .worker_failures import WorkerFailure, WorkerFailureCode, classify_worker_failure
 
 if TYPE_CHECKING:
@@ -943,7 +943,7 @@ class ProcessSupervisor:
             log_path = self.settings.log_dir / f"{name}-worker.log"
             worker_log = _RotatingWorkerLog(log_path)
             try:
-                environment = subprocess_environment(overrides=environment_overrides)
+                environment = python_subprocess_environment(overrides=environment_overrides)
                 if os.name == "nt":
                     process = await asyncio.create_subprocess_exec(
                         *command,
