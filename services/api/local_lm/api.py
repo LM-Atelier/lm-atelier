@@ -2556,7 +2556,9 @@ async def retry_job(
     if not job:
         raise api_error(404, "job-not-found", "job not found")
     if job.status not in {"failed", "cancelled", "interrupted"}:
-        raise HTTPException(409, "only terminal unsuccessful jobs can be retried")
+        raise api_error(
+            409, "job-not-retryable-state", "only terminal unsuccessful jobs can be retried"
+        )
     if job.kind == JobKind.DOWNLOAD.value:
         job.status = "queued"
         job.progress = 0
@@ -2578,10 +2580,10 @@ async def retry_job(
         session.refresh(job)
         return job
     if not job.run_id:
-        raise HTTPException(422, "job has no retryable operation")
+        raise api_error(422, "job-not-retryable", "job has no retryable operation")
     run = session.get(Run, job.run_id)
     if not run:
-        raise HTTPException(422, "job has no retryable operation")
+        raise api_error(422, "job-not-retryable", "job has no retryable operation")
 
     orchestrator = _services(request).orchestrator
     async with orchestrator.chat_guard(run.chat_id):
@@ -2590,12 +2592,14 @@ async def retry_job(
         if not job:
             raise api_error(404, "job-not-found", "job not found")
         if job.status not in {"failed", "cancelled", "interrupted"}:
-            raise HTTPException(409, "only terminal unsuccessful jobs can be retried")
+            raise api_error(
+                409, "job-not-retryable-state", "only terminal unsuccessful jobs can be retried"
+            )
         if not job.run_id:
-            raise HTTPException(422, "job has no retryable operation")
+            raise api_error(422, "job-not-retryable", "job has no retryable operation")
         run = session.get(Run, job.run_id)
         if not run:
-            raise HTTPException(422, "job has no retryable operation")
+            raise api_error(422, "job-not-retryable", "job has no retryable operation")
         job.status = "queued"
         job.progress = 0
         job.error = None
@@ -2794,7 +2798,7 @@ async def delete_artifact(
 ) -> ArtifactDeleteResult:
     artifact = session.get(Artifact, artifact_id)
     if not artifact:
-        raise HTTPException(404, "artifact not found")
+        raise api_error(404, "artifact-not-found", "artifact not found")
     try:
         references, removed, reclaimed = _services(request).artifacts.delete_library_artifact(
             session, artifact
@@ -2817,7 +2821,7 @@ async def get_artifact(
 ) -> ArtifactOut:
     artifact = session.get(Artifact, artifact_id)
     if not artifact:
-        raise HTTPException(404, "artifact not found")
+        raise api_error(404, "artifact-not-found", "artifact not found")
     result = ArtifactOut.model_validate(artifact)
     result.url = f"/api/artifacts/{artifact.id}/content"
     return result
@@ -2831,7 +2835,7 @@ async def artifact_content(
 ) -> Response:
     artifact = session.get(Artifact, artifact_id)
     if not artifact:
-        raise HTTPException(404, "artifact not found")
+        raise api_error(404, "artifact-not-found", "artifact not found")
     try:
         path, media_type, disposition = _services(request).artifacts.delivery_metadata(artifact)
     except (FileNotFoundError, ValueError) as exc:
@@ -4529,7 +4533,7 @@ async def activate_model(model_id: str, request: Request, session: SessionDep) -
 
     install = session.get(ModelInstall, model_id)
     if not install:
-        raise HTTPException(404, "model not found")
+        raise api_error(404, "model-not-found", "model not found")
     try:
         return _services(request).downloads.reactivate(session, install)
     except ValueError as exc:
@@ -4547,7 +4551,7 @@ async def delete_model(
     async with services.scheduler.lease("primary"):
         install = session.get(ModelInstall, model_id)
         if not install:
-            raise HTTPException(404, "model not found")
+            raise api_error(404, "model-not-found", "model not found")
         worker_name = "chat" if install.role == ModelRole.CHAT.value else "media"
         _ensure_worker_idle(session, worker_name)
         if worker_name == "media" and any(
@@ -4582,7 +4586,7 @@ def _delete_model_locked(
 ) -> Path | None:
     install = session.get(ModelInstall, model_id)
     if not install:
-        raise HTTPException(404, "model not found")
+        raise api_error(404, "model-not-found", "model not found")
     model_root = _services(request).settings.model_dir.resolve()
     try:
         path = _managed_model_path(model_root, install.local_path)
@@ -5593,7 +5597,7 @@ async def update_custom_node(
 ) -> CustomNodeInstall:
     install = session.get(CustomNodeInstall, node_id)
     if not install:
-        raise HTTPException(404, "custom node install not found")
+        raise api_error(404, "custom-node-install-not-found", "custom node install not found")
     try:
         await _services(request).custom_nodes.update(install, payload.revision)
     except (OSError, RuntimeError, ValueError, TimeoutError) as exc:
@@ -5614,7 +5618,7 @@ async def trust_custom_node(
 ) -> CustomNodeInstall:
     install = session.get(CustomNodeInstall, node_id)
     if not install:
-        raise HTTPException(404, "custom node install not found")
+        raise api_error(404, "custom-node-install-not-found", "custom node install not found")
     if payload.trusted:
         try:
             await _services(request).custom_nodes.verify(install)
@@ -5640,7 +5644,7 @@ async def rollback_custom_node(
 ) -> CustomNodeInstall:
     install = session.get(CustomNodeInstall, node_id)
     if not install:
-        raise HTTPException(404, "custom node install not found")
+        raise api_error(404, "custom-node-install-not-found", "custom node install not found")
     try:
         await _services(request).custom_nodes.rollback(install)
     except (OSError, RuntimeError, ValueError, TimeoutError) as exc:
@@ -5660,7 +5664,7 @@ async def remove_custom_node(
 ) -> Response:
     install = session.get(CustomNodeInstall, node_id)
     if not install:
-        raise HTTPException(404, "custom node install not found")
+        raise api_error(404, "custom-node-install-not-found", "custom node install not found")
     _services(request).custom_nodes.remove(install)
     session.delete(install)
     session.commit()
@@ -6508,7 +6512,7 @@ async def create_workflow(payload: WorkflowCreate, session: SessionDep) -> Workf
         .where(WorkflowDefinition.id == definition.id)
     )
     if not created:
-        raise HTTPException(500, "workflow could not be reloaded")
+        raise api_error(500, "workflow-reload-failed", "workflow could not be reloaded")
     return created
 
 
@@ -6528,7 +6532,7 @@ async def update_workflow(
         .where(WorkflowDefinition.id == workflow_id)
     )
     if not updated:
-        raise HTTPException(500, "workflow could not be reloaded")
+        raise api_error(500, "workflow-reload-failed", "workflow could not be reloaded")
     return updated
 
 
@@ -7818,7 +7822,7 @@ async def restore_workflow_revision(
 ) -> WorkflowRevision:
     source = session.get(WorkflowRevision, revision_id)
     if not source or source.workflow_id != workflow_id:
-        raise HTTPException(404, "workflow revision not found")
+        raise api_error(404, "workflow-revision-not-found", "workflow revision not found")
     return await create_workflow_revision(
         workflow_id,
         WorkflowRevisionCreate(
@@ -7842,7 +7846,7 @@ async def validate_workflow(
         raise api_error(404, "workflow-not-found", "workflow not found")
     revision = session.get(WorkflowRevision, definition.current_revision_id)
     if not revision:
-        raise HTTPException(404, "workflow revision not found")
+        raise api_error(404, "workflow-revision-not-found", "workflow revision not found")
     errors = await _services(request).engines.media.validate_workflow(revision.api_graph_json)
     warnings: list[str] = []
     if revision.engine == "comfyui" and not revision.trusted:
@@ -7924,7 +7928,7 @@ def _workflow_and_revision(
         raise api_error(404, "workflow-not-found", "workflow not found")
     revision = session.get(WorkflowRevision, definition.current_revision_id)
     if not revision:
-        raise HTTPException(404, "workflow revision not found")
+        raise api_error(404, "workflow-revision-not-found", "workflow revision not found")
     return definition, revision
 
 
