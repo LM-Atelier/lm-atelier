@@ -83,7 +83,14 @@ export function StudioCanvas({
     context.drawImage(image, 0, 0);
   }, [image, size]);
 
-  useEffect(() => {
+  /** Repaint the tint from the raster as it stands right now.
+   *
+   * Separate from the effect below because a brush writes into the raster
+   * without React seeing it: the version only bumps when the stroke ends, so
+   * an effect alone left the selection invisible until the pointer lifted.
+   * Painting is the same work either way, just triggered from two places.
+   */
+  const paintMask = useCallback(() => {
     const layer = maskLayer.current;
     const context = layer?.getContext("2d");
     if (!layer || !context) return;
@@ -91,7 +98,11 @@ export function StudioCanvas({
     if (!mask) return;
     const tint = new ImageData(toAlphaImageData(mask, [80, 170, 255]), mask.width, mask.height);
     context.putImageData(tint, 0, 0);
-  }, [mask, maskVersion, size]);
+  }, [mask]);
+
+  useEffect(() => {
+    paintMask();
+  }, [paintMask, maskVersion, size]);
 
   const drawPreview = useCallback(() => {
     const layer = interactionLayer.current;
@@ -174,6 +185,7 @@ export function StudioCanvas({
       // hover otherwise, so this both extends a live selection and shows
       // the caret when there is none.
       tool.move(moved);
+      if (tool.appliesWhileMoving) paintMask();
       drawPreview();
       return;
     }
@@ -190,6 +202,7 @@ export function StudioCanvas({
         onGestureStart?.();
         keyboardStroke.current = true;
         tool.down(at);
+        if (tool.appliesWhileMoving) paintMask();
         drawPreview();
       }
       return;
@@ -261,6 +274,7 @@ export function StudioCanvas({
     drawingPointer.current = event.pointerId;
     onGestureStart?.();
     tool.down(toImagePoint(viewport, screen));
+    if (tool.appliesWhileMoving) paintMask();
     drawPreview();
   };
 
@@ -284,6 +298,7 @@ export function StudioCanvas({
       return;
     }
     tool?.move(toImagePoint(viewport, screen));
+    if (tool?.appliesWhileMoving) paintMask();
     drawPreview();
   };
 
