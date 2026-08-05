@@ -181,6 +181,8 @@ from .schemas import (
     CatalogPreflight,
     CatalogPreflightCheck,
     CatalogPreflightRequest,
+    CatalogVersionRow,
+    CatalogVersions,
     ChatCreate,
     ChatDetail,
     ChatOut,
@@ -4148,6 +4150,68 @@ async def model_storage(request: Request, session: SessionDep) -> ModelStorageIn
             or 0
         ),
         partial_download_count=len(partials),
+    )
+
+
+@router.get("/catalog/civitai/{model_id}/versions", response_model=CatalogVersions)
+async def catalog_model_versions(
+    model_id: str, request: Request, session: SessionDep
+) -> CatalogVersions:
+    """Every installable version of one model, and which are already here.
+
+    A version is what installs, so a card that groups them still has to let
+    someone choose one deliberately. This is the list that choice is made
+    from; picking a row goes back through the ordinary preflight and install
+    for that exact version, and nothing about the verified path changes.
+
+    Installed state is read from the same manifest field update checks use.
+    Where a kind does not record a provider version - checkpoints today - the
+    answer is `null` rather than `false`: saying "not installed" about
+    something we cannot see is how a person ends up with a second copy.
+    """
+
+    services = _services(request)
+    source = services.catalog_sources.get("civitai")
+    if not isinstance(source, CivitaiCatalog):
+        raise api_error(503, "provider-unavailable", "CivitAI catalog is not available")
+    if not source.validate_item_id(model_id):
+        raise api_error(422, "catalog-item-id-invalid", "That is not a CivitAI model id.")
+    try:
+        summary = await source.versions(model_id)
+    except CatalogUnavailableError as exc:
+        raise api_error(503, "catalog-unavailable", str(exc)) from exc
+    except ValueError as exc:
+        raise api_error(404, "catalog-item-not-found", str(exc)) from exc
+
+    installed = {
+        identity.version_id: identity
+        for identity in installed_civitai_identities(session)
+        if identity.model_id == model_id
+    }
+    rows = []
+    for version in summary.get("versions") or []:
+        version_id = str(version.get("version_id") or "")
+        match = installed.get(version_id)
+        rows.append(
+            CatalogVersionRow(
+                version_id=version_id,
+                version_name=version.get("version_name"),
+                published_at=version.get("published_at"),
+                base_model=version.get("base_model"),
+                size_bytes=int(version.get("size_bytes") or 0),
+                changelog=version.get("changelog"),
+                # `False` is only safe once this model has proved it records
+                # versions at all - which one recorded identity demonstrates.
+                # With none, silence is the honest answer: an install that
+                # stores no version is indistinguishable from no install.
+                installed=True if match else (False if installed else None),
+                installed_as=match.name if match else None,
+            )
+        )
+    return CatalogVersions(
+        model_id=str(summary.get("model_id") or model_id),
+        model_name=summary.get("model_name"),
+        versions=rows,
     )
 
 

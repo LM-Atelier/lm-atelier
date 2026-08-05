@@ -573,6 +573,27 @@ export interface ExchangeDeletion {
   new_head_message_id: string | null;
 }
 
+export interface CatalogVersionRow {
+  version_id: string;
+  version_name?: string | null;
+  published_at?: string | null;
+  base_model?: string | null;
+  size_bytes: number;
+  changelog?: string | null;
+  /** True, false, or unknown - and unknown is a real answer, not a default.
+   * Checkpoint installs record no provider version, so for those we cannot
+   * tell. Rendering unknown as "not installed" is how someone installs a
+   * second copy of what they already have. */
+  installed?: boolean | null;
+  installed_as?: string | null;
+}
+
+export interface CatalogVersions {
+  model_id: string;
+  model_name?: string | null;
+  versions: CatalogVersionRow[];
+}
+
 export interface CatalogPage {
   items: CatalogModel[];
   next_cursor: string | null;

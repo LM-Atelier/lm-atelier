@@ -1357,6 +1357,30 @@ class CatalogModel(ApiModel):
     content_rating: ContentRating = "unknown"
 
 
+class CatalogVersionRow(ApiModel):
+    """One installable version of a catalogue model, as the chooser sees it."""
+
+    version_id: str
+    version_name: str | None = None
+    published_at: str | None = None
+    base_model: str | None = None
+    size_bytes: int = 0
+    changelog: str | None = None
+    # True, false, or unknown - and unknown is a real answer. Checkpoint
+    # installs do not record a provider version, so for those we cannot tell
+    # whether this exact version is on disk. Reporting `false` there would be
+    # a claim we cannot support, and the one that would make someone install
+    # a second copy of what they already have.
+    installed: bool | None = None
+    installed_as: str | None = None
+
+
+class CatalogVersions(ApiModel):
+    model_id: str
+    model_name: str | None = None
+    versions: list[CatalogVersionRow] = Field(default_factory=list)
+
+
 class CatalogPage(ApiModel):
     items: list[CatalogModel]
     next_cursor: str | None = None
