@@ -55,6 +55,38 @@ _ACCELERATOR_KEYS = (
 )
 
 
+#: A spawned Python worker writes its own startup messages, and those are not
+#: ours to predict: a custom node printing an emoji is ordinary, and on Windows
+#: the hidden worker's standard streams are the system code page, so printing
+#: one raises UnicodeEncodeError. ComfyUI then tries to log that traceback,
+#: hits the same error, and aborts - which reached the API as nothing more
+#: informative than "activation failed to start".
+#:
+#: Set for every Python worker rather than for the packages that happen to
+#: print emoji, because the general fact is that a subprocess should be able to
+#: write text without the parent's console encoding deciding whether it starts.
+_PYTHON_STDIO_KEYS = {
+    "PYTHONUTF8": "1",
+    "PYTHONIOENCODING": "utf-8",
+}
+
+
+def python_subprocess_environment(
+    *,
+    overrides: Mapping[str, str] | None = None,
+    source: Mapping[str, str] | None = None,
+) -> dict[str, str]:
+    """A sanitized environment for a Python worker, with text that survives.
+
+    An explicit override wins: these are defaults for workers that say nothing
+    about their encoding, never a rewrite of a caller that chose one.
+    """
+    merged: dict[str, str] = dict(_PYTHON_STDIO_KEYS)
+    if overrides:
+        merged.update(overrides)
+    return subprocess_environment(overrides=merged, source=source)
+
+
 def subprocess_environment(
     *,
     overrides: Mapping[str, str] | None = None,

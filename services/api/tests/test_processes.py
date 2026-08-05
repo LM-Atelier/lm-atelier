@@ -2198,3 +2198,50 @@ async def test_supervisor_fails_closed_when_monitor_itself_errors(
         "chat worker supervision failed: probe exploded."
     )
     await supervisor.close()
+
+
+def test_a_python_worker_can_write_text_whatever_the_console_encoding_is() -> None:
+    """The rgthree failure: a startup message with an emoji aborted the worker.
+
+    The hidden Windows worker's standard streams are the system code page, so
+    a custom node printing U+1F389 raised UnicodeEncodeError; ComfyUI then
+    tried to log that traceback, hit the same error, and aborted. The API saw
+    only that activation failed to start.
+    """
+    from local_lm.subprocess_env import python_subprocess_environment
+
+    environment = python_subprocess_environment(source={"PATH": "/usr/bin"})
+
+    assert environment["PYTHONUTF8"] == "1"
+    assert environment["PYTHONIOENCODING"] == "utf-8"
+
+
+def test_an_explicit_encoding_choice_is_not_rewritten() -> None:
+    """These are defaults for workers that say nothing, not a policy."""
+    from local_lm.subprocess_env import python_subprocess_environment
+
+    environment = python_subprocess_environment(
+        overrides={"PYTHONIOENCODING": "utf-8:backslashreplace"},
+        source={"PATH": "/usr/bin"},
+    )
+
+    assert environment["PYTHONIOENCODING"] == "utf-8:backslashreplace"
+    assert environment["PYTHONUTF8"] == "1"
+
+
+def test_the_encoding_defaults_do_not_reach_other_subprocesses() -> None:
+    """Git and the like keep the environment they had; this is a worker fact."""
+    from local_lm.subprocess_env import git_subprocess_environment
+
+    assert "PYTHONUTF8" not in git_subprocess_environment()
+
+
+def test_a_worker_environment_still_inherits_nothing_it_should_not() -> None:
+    from local_lm.subprocess_env import python_subprocess_environment
+
+    environment = python_subprocess_environment(
+        source={"PATH": "/usr/bin", "AWS_SECRET_ACCESS_KEY": "leaked", "HF_TOKEN": "leaked"},
+    )
+
+    assert "AWS_SECRET_ACCESS_KEY" not in environment
+    assert "HF_TOKEN" not in environment

@@ -89,11 +89,20 @@ def inspect_repository_metadata(
     for selected_path in sorted(selected):
         component = by_path.get(selected_path)
         if component:
+            target_folder = declared_folders.get(
+                selected_path,
+                _target_folder(selected_path, role)
+                if component.kind == "unknown_safetensors"
+                else component.target_folder,
+            )
+            kind = component.kind
+            if kind == "unknown_safetensors":
+                kind = _kind_from_comfy_folder(target_folder) or kind
             resolved.append(
                 InspectedComponent(
                     path=component.path,
-                    kind=component.kind,
-                    target_folder=declared_folders.get(selected_path, component.target_folder),
+                    kind=kind,
+                    target_folder=target_folder,
                     architecture=component.architecture or architecture,
                     family=component.family or family,
                     metadata=component.metadata,
@@ -271,6 +280,19 @@ def _safetensors_kind(tensor_names: list[str], metadata: Mapping[str, Any]) -> s
     if has_diffusion and (has_conditioning or has_vae):
         return "checkpoint"
     if has_diffusion:
+        return "diffusion_model"
+    roots = {name.partition(".")[0] for name in lowered}
+    # Krea 2 and related NextDiT-style diffusion weights do not use the
+    # historical model.diffusion_model/transformer prefixes. Require the
+    # distinctive collection of image and text-fusion roots so an arbitrary
+    # blocks.* tensor set cannot be mistaken for a media model.
+    if {
+        "blocks",
+        "first",
+        "last",
+        "tproj",
+        "txtfusion",
+    }.issubset(roots) and {"tmlp", "txtmlp"}.intersection(roots):
         return "diffusion_model"
     if has_vae:
         return "vae"
@@ -506,6 +528,18 @@ def _target_folder_for_kind(kind: str) -> str:
         "clip_vision": "clip_vision",
         "lora": "loras",
     }.get(kind, "checkpoints")
+
+
+def _kind_from_comfy_folder(folder: str) -> str | None:
+    """Recover a component role from a verified ComfyUI component folder."""
+
+    return {
+        "diffusion_models": "diffusion_model",
+        "text_encoders": "text_encoder",
+        "vae": "vae",
+        "clip_vision": "clip_vision",
+        "loras": "lora",
+    }.get(folder.casefold())
 
 
 def _printable_metadata(value: Any) -> str | None:
