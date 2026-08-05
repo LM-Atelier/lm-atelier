@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 from collections.abc import Generator
 from pathlib import Path
 
@@ -28,6 +29,11 @@ def session() -> Generator[Session]:
         yield value
 
 
+@pytest.fixture(autouse=True)
+def registry_source_folder(tmp_path: Path) -> None:
+    (tmp_path / "lm-atelier-registry_example").mkdir()
+
+
 def _install(session: Session, *, trusted: bool = False, active: bool = False) -> str:
     install = ComfyRegistryInstall(
         package_id="comfyui-example-node",
@@ -36,11 +42,11 @@ def _install(session: Session, *, trusted: bool = False, active: bool = False) -
         repository_url="https://github.com/example/comfyui-example-node.git",
         download_url="https://cdn.comfy.org/example/1.2.3.zip",
         archive_sha256="a" * 64,
-        manifest_sha256="b" * 64,
+        manifest_sha256=hashlib.sha256(b"").hexdigest(),
         installed_path="lm-atelier-registry_example",
         node_types_json=["ExampleNode"],
         pip_dependencies_json=[],
-        review_json={"review_required": True},
+        review_json={"review_required": True, "file_count": 0, "expanded_bytes": 0},
         wheel_closure_sha256="c" * 64,
         wheel_environment_sha256="d" * 64,
         wheel_environment_path=f"registry-wheels-{'c' * 64}",
@@ -170,6 +176,83 @@ async def test_activation_starts_media_only_after_verified_state_is_committed(
     assert state.trusted is True
     assert state.active is True
     assert state.activated_at
+
+
+async def test_activation_records_exact_bounded_runtime_files(
+    session: Session,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    install_id = _install(session, trusted=True)
+    monkeypatch.setattr(
+        activation_module,
+        "trusted_comfy_registry_launch_contract",
+        lambda current, **_kwargs: _verified_contract(current, install_id),
+    )
+
+    async def start_media() -> object:
+        styles = tmp_path / "lm-atelier-registry_example" / "styles"
+        styles.mkdir(exist_ok=True)
+        (styles / "defaults.json").write_bytes(b'{"style": "natural"}\n')
+        return object()
+
+    await activate_comfy_registry_install(
+        session,
+        install_id=install_id,
+        custom_node_root=tmp_path,
+        environment_root=tmp_path,
+        media_worker_stopped=True,
+        start_media=start_media,
+    )
+
+    stored = session.get(ComfyRegistryInstall, install_id)
+    assert stored is not None
+    assert stored.review_json["runtime_files"] == [
+        {
+            "path": "styles/defaults.json",
+            "size": 21,
+            "sha256": hashlib.sha256(b'{"style": "natural"}\n').hexdigest(),
+        }
+    ]
+
+
+async def test_activation_restores_prior_runtime_after_unsafe_runtime_addition(
+    session: Session,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    install_id = _install(session, trusted=True)
+    monkeypatch.setattr(
+        activation_module,
+        "trusted_comfy_registry_launch_contract",
+        lambda current, **_kwargs: _verified_contract(current, install_id),
+    )
+    observed: list[bool] = []
+
+    async def start_media() -> object:
+        stored = session.get(ComfyRegistryInstall, install_id)
+        assert stored is not None
+        observed.append(stored.active)
+        if stored.active:
+            (tmp_path / "lm-atelier-registry_example" / "added.py").write_text(
+                "pass\n", encoding="utf-8"
+            )
+        return object()
+
+    with pytest.raises(ComfyRegistryActivationError) as raised:
+        await activate_comfy_registry_install(
+            session,
+            install_id=install_id,
+            custom_node_root=tmp_path,
+            environment_root=tmp_path,
+            media_worker_stopped=True,
+            start_media=start_media,
+        )
+
+    assert raised.value.code == "activation_runtime_files_failed"
+    assert observed == [True, False]
+    stored = session.get(ComfyRegistryInstall, install_id)
+    assert stored is not None and stored.active is False
 
 
 async def test_untrusted_install_cannot_start_or_reach_runtime_verification(

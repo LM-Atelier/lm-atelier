@@ -16,6 +16,9 @@ MAX_ARCHIVE_EXPANDED_BYTES = 256 * 1024 * 1024
 MAX_ARCHIVE_FILE_BYTES = 64 * 1024 * 1024
 MAX_ARCHIVE_PATH_CHARACTERS = 1_024
 MAX_ARCHIVE_COMPONENT_CHARACTERS = 255
+MAX_RUNTIME_FILE_COUNT = 256
+MAX_RUNTIME_FILE_BYTES = 1024 * 1024
+MAX_RUNTIME_FILES_BYTES = 8 * 1024 * 1024
 
 _ARCHIVE_HASH = re.compile(r"^[0-9a-fA-F]{64}$")
 _NATIVE_SUFFIXES = {".dll", ".dylib", ".exe", ".pyd", ".so"}
@@ -28,6 +31,20 @@ _RESERVED_WINDOWS_NAMES = {
     *(f"LPT{number}" for number in range(1, 10)),
 }
 _SUPPORTED_COMPRESSION = {zipfile.ZIP_STORED, zipfile.ZIP_DEFLATED}
+_RUNTIME_DATA_SUFFIXES = {
+    ".cfg",
+    ".conf",
+    ".csv",
+    ".example",
+    ".ini",
+    ".json",
+    ".md",
+    ".toml",
+    ".tsv",
+    ".txt",
+    ".yaml",
+    ".yml",
+}
 _REPARSE_POINT = getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0x400)
 
 
@@ -49,6 +66,13 @@ class ComfyRegistryArchiveReport:
     native_files: tuple[str, ...]
     top_level_entries: tuple[str, ...]
     review_required: bool = True
+
+
+@dataclass(frozen=True)
+class ComfyRegistryRuntimeFile:
+    path: str
+    size: int
+    sha256: str
 
 
 @dataclass(frozen=True)
@@ -131,6 +155,7 @@ def verify_staged_comfy_registry_archive(
     expected_manifest_sha256: str,
     expected_file_count: int,
     expected_expanded_bytes: int,
+    runtime_files: tuple[ComfyRegistryRuntimeFile, ...] = (),
 ) -> None:
     """Re-hash inert staged node code before it is allowed into a launch."""
     if (
@@ -143,9 +168,41 @@ def verify_staged_comfy_registry_archive(
         or expected_expanded_bytes < 0
     ):
         raise ComfyRegistryArchiveError("invalid staged Registry archive identity")
+    expected_runtime = _validated_runtime_files(runtime_files)
+    observed = snapshot_staged_comfy_registry_files(destination)
+    runtime_by_path = {item.path: item for item in expected_runtime}
+    files: list[tuple[str, int, str]] = []
+    expanded_bytes = 0
+    seen_runtime: set[str] = set()
+    for item in observed:
+        runtime = runtime_by_path.get(item.path)
+        if runtime is not None:
+            if item != runtime:
+                raise ComfyRegistryArchiveError("staged Registry runtime file has changed")
+            seen_runtime.add(item.path)
+            continue
+        files.append((item.path, item.size, item.sha256))
+        expanded_bytes += item.size
+    if seen_runtime != set(runtime_by_path):
+        raise ComfyRegistryArchiveError("staged Registry runtime file is missing")
+    manifest = "".join(
+        f"{path}{chr(0)}{size}{chr(0)}{digest}{chr(10)}" for path, size, digest in sorted(files)
+    )
+    if (
+        len(files) != expected_file_count
+        or expanded_bytes != expected_expanded_bytes
+        or hashlib.sha256(manifest.encode()).hexdigest() != expected_manifest_sha256.lower()
+    ):
+        raise ComfyRegistryArchiveError("staged Registry archive contents have changed")
+
+
+def snapshot_staged_comfy_registry_files(
+    destination: Path,
+) -> tuple[ComfyRegistryRuntimeFile, ...]:
+    """Capture exact non-cache file identities without trusting their contents."""
     if _is_link_or_reparse(destination) or not destination.is_dir():
         raise ComfyRegistryArchiveError("staged Registry archive is missing or unsafe")
-    files: list[tuple[str, int, str]] = []
+    files: list[ComfyRegistryRuntimeFile] = []
     expanded_bytes = 0
     try:
         for path in sorted(destination.rglob("*")):
@@ -158,27 +215,151 @@ def verify_staged_comfy_registry_archive(
             relative_path = path.relative_to(destination)
             if _is_runtime_python_cache(destination, relative_path):
                 continue
-            relative = relative_path.as_posix()
             size = path.stat().st_size
             expanded_bytes += size
-            if len(files) >= MAX_ARCHIVE_ENTRIES or expanded_bytes > MAX_ARCHIVE_EXPANDED_BYTES:
+            if (
+                len(files) >= MAX_ARCHIVE_ENTRIES + MAX_RUNTIME_FILE_COUNT
+                or expanded_bytes > MAX_ARCHIVE_EXPANDED_BYTES + MAX_RUNTIME_FILES_BYTES
+            ):
                 raise ComfyRegistryArchiveError("staged Registry archive exceeds its limits")
             digest = hashlib.sha256()
             with path.open("rb") as source:
                 while chunk := source.read(1024 * 1024):
                     digest.update(chunk)
-            files.append((relative, size, digest.hexdigest()))
+            files.append(
+                ComfyRegistryRuntimeFile(
+                    relative_path.as_posix(),
+                    size,
+                    digest.hexdigest(),
+                )
+            )
     except OSError as exc:
         raise ComfyRegistryArchiveError("could not verify staged Registry archive") from exc
-    manifest = "".join(
-        f"{path}{chr(0)}{size}{chr(0)}{digest}{chr(10)}" for path, size, digest in sorted(files)
+    return tuple(sorted(files, key=lambda item: item.path))
+
+
+def capture_staged_comfy_registry_runtime_files(
+    destination: Path,
+    *,
+    before_start: tuple[ComfyRegistryRuntimeFile, ...],
+    expected_manifest_sha256: str,
+    expected_file_count: int,
+    expected_expanded_bytes: int,
+    runtime_files: tuple[ComfyRegistryRuntimeFile, ...] = (),
+) -> tuple[ComfyRegistryRuntimeFile, ...]:
+    """Record only bounded inert files added by one successful trusted startup."""
+    before = _validated_snapshot(before_start)
+    existing_runtime = _validated_runtime_files(runtime_files)
+    after = snapshot_staged_comfy_registry_files(destination)
+    after_by_path = {item.path: item for item in after}
+    for item in before:
+        if after_by_path.get(item.path) != item:
+            raise ComfyRegistryArchiveError("staged Registry files changed during startup")
+    before_paths = {item.path for item in before}
+    additions = tuple(item for item in after if item.path not in before_paths)
+    combined = _validated_runtime_files(
+        tuple(sorted((*existing_runtime, *additions), key=lambda item: item.path)),
+        destination=destination,
     )
+    verify_staged_comfy_registry_archive(
+        destination,
+        expected_manifest_sha256=expected_manifest_sha256,
+        expected_file_count=expected_file_count,
+        expected_expanded_bytes=expected_expanded_bytes,
+        runtime_files=combined,
+    )
+    return combined
+
+
+def parse_comfy_registry_runtime_files(value: object) -> tuple[ComfyRegistryRuntimeFile, ...]:
+    if value is None:
+        return ()
+    if not isinstance(value, list):
+        raise ComfyRegistryArchiveError("invalid staged Registry runtime evidence")
+    files: list[ComfyRegistryRuntimeFile] = []
+    for item in value:
+        if not isinstance(item, dict) or set(item) != {"path", "size", "sha256"}:
+            raise ComfyRegistryArchiveError("invalid staged Registry runtime evidence")
+        files.append(ComfyRegistryRuntimeFile(item["path"], item["size"], item["sha256"]))
+    return _validated_runtime_files(tuple(files))
+
+
+def comfy_registry_runtime_files_json(
+    files: tuple[ComfyRegistryRuntimeFile, ...],
+) -> list[dict[str, object]]:
+    return [
+        {"path": item.path, "size": item.size, "sha256": item.sha256}
+        for item in _validated_runtime_files(files)
+    ]
+
+
+def _validated_snapshot(
+    files: tuple[ComfyRegistryRuntimeFile, ...],
+) -> tuple[ComfyRegistryRuntimeFile, ...]:
+    if not isinstance(files, tuple):
+        raise ComfyRegistryArchiveError("invalid staged Registry startup snapshot")
+    result = tuple(_validated_file_identity(item) for item in files)
+    if not _identities_are_sorted_and_unique(result):
+        raise ComfyRegistryArchiveError("invalid staged Registry startup snapshot")
+    return result
+
+
+def _validated_runtime_files(
+    files: tuple[ComfyRegistryRuntimeFile, ...],
+    *,
+    destination: Path | None = None,
+) -> tuple[ComfyRegistryRuntimeFile, ...]:
+    if not isinstance(files, tuple) or len(files) > MAX_RUNTIME_FILE_COUNT:
+        raise ComfyRegistryArchiveError("invalid staged Registry runtime evidence")
+    result: list[ComfyRegistryRuntimeFile] = []
+    total = 0
+    for value in files:
+        item = _validated_file_identity(value)
+        suffix = PurePosixPath(item.path).suffix.casefold()
+        if suffix not in _RUNTIME_DATA_SUFFIXES or item.size > MAX_RUNTIME_FILE_BYTES:
+            raise ComfyRegistryArchiveError("Registry runtime file is not bounded inert data")
+        total += item.size
+        if total > MAX_RUNTIME_FILES_BYTES:
+            raise ComfyRegistryArchiveError("Registry runtime files exceed their size limit")
+        if destination is not None:
+            try:
+                payload = destination.joinpath(*PurePosixPath(item.path).parts).read_bytes()
+                payload.decode("utf-8")
+            except (OSError, UnicodeDecodeError) as exc:
+                raise ComfyRegistryArchiveError(
+                    "Registry runtime file is not bounded UTF-8 data"
+                ) from exc
+        result.append(item)
+    if not _identities_are_sorted_and_unique(tuple(result)):
+        raise ComfyRegistryArchiveError("invalid staged Registry runtime evidence")
+    return tuple(result)
+
+
+def _validated_file_identity(value: object) -> ComfyRegistryRuntimeFile:
+    if not isinstance(value, ComfyRegistryRuntimeFile):
+        raise ComfyRegistryArchiveError("invalid staged Registry file identity")
+    try:
+        path, _ = _safe_member_path(value.path)
+    except ComfyRegistryArchiveError as exc:
+        raise ComfyRegistryArchiveError("invalid staged Registry file identity") from exc
     if (
-        len(files) != expected_file_count
-        or expanded_bytes != expected_expanded_bytes
-        or hashlib.sha256(manifest.encode()).hexdigest() != expected_manifest_sha256.lower()
+        path.as_posix() != value.path
+        or isinstance(value.size, bool)
+        or not isinstance(value.size, int)
+        or value.size < 0
+        or not isinstance(value.sha256, str)
+        or not _ARCHIVE_HASH.fullmatch(value.sha256)
     ):
-        raise ComfyRegistryArchiveError("staged Registry archive contents have changed")
+        raise ComfyRegistryArchiveError("invalid staged Registry file identity")
+    return ComfyRegistryRuntimeFile(value.path, value.size, value.sha256.lower())
+
+
+def _identities_are_sorted_and_unique(
+    files: tuple[ComfyRegistryRuntimeFile, ...],
+) -> bool:
+    paths = tuple(item.path for item in files)
+    keys = tuple(_safe_member_path(item.path)[1] for item in files)
+    return paths == tuple(sorted(paths)) and len(keys) == len(set(keys))
 
 
 def _is_runtime_python_cache(destination: Path, path: Path) -> bool:
