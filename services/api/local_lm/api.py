@@ -6783,6 +6783,67 @@ def _analyzed_package_node_types(
     return _prepared_node_types(list(requirement.node_types))
 
 
+#: A comparison is only worth doing if it is bounded; a graph larger than this
+#: is refused rather than serialized twice to find out it did not match.
+MAX_COMPARED_GRAPH_CHARACTERS = 8_000_000
+
+
+def _canonical_graph(graph: dict[str, Any]) -> str:
+    """One bounded string for a graph, so two of them can be compared exactly.
+
+    Node-type names alone are not the graph. Two workflows can require the
+    same class names while declaring different packages, versions, or links -
+    which is exactly the substitution this comparison exists to catch.
+    """
+    encoded = json.dumps(
+        graph, sort_keys=True, separators=(",", ":"), ensure_ascii=False, allow_nan=False
+    )
+    if len(encoded) > MAX_COMPARED_GRAPH_CHARACTERS:
+        raise api_error(
+            422,
+            "workflow-graph-too-large",
+            "That workflow is too large to compare against the stored revision.",
+        )
+    return encoded
+
+
+def _authorized_workflow_context(
+    session: Session, payload: WorkflowPackagePrepareRequest
+) -> tuple[str, tuple[str, ...], dict[str, Any]] | None:
+    """The revision an omission candidate is about, its node set, and its graph.
+
+    Everything downstream comes from the stored graph. Re-analyzing what a
+    caller sends proves that graph is internally consistent; it does not bind
+    it to anything this machine saved, and a proof about a graph nobody stored
+    is a proof about nothing.
+
+    A submitted graph is compared whole rather than by the node types it needs.
+    Comparing type names would let a caller submit one package's metadata for a
+    class the stored graph attributes to another, prepare the first, and bind
+    the proof to the second.
+    """
+    if not payload.workflow_revision_id:
+        return None
+    revision = session.get(WorkflowRevision, payload.workflow_revision_id)
+    if not revision:
+        raise api_error(404, "workflow-revision-not-found", "That workflow revision is unknown.")
+    stored = revision.ui_graph_json
+    if payload.ui_graph and _canonical_graph(payload.ui_graph) != _canonical_graph(stored):
+        raise api_error(
+            422,
+            "workflow-graph-mismatch",
+            "The submitted workflow does not match the stored revision it names.",
+        )
+    try:
+        analysis = analyze_comfyui_workflow_package(stored)
+    except WorkflowPackageError as exc:
+        raise api_error(422, exc.code, str(exc)) from exc
+    # The analyzer's complete set, not the selected package's declared subset:
+    # the proof is that the workflow runs, and every type it needs is part of
+    # that whether or not this package supplies it.
+    return revision.id, tuple(sorted(set(analysis.required_node_types))), stored
+
+
 async def _run_workflow_package_preparation(
     services: Services,
     job_id: str,
@@ -6790,6 +6851,7 @@ async def _run_workflow_package_preparation(
     version: str,
     node_types: tuple[str, ...],
     renew_install_id: str | None = None,
+    authorized_workflow: tuple[str, tuple[str, ...]] | None = None,
 ) -> None:
     """One durable preparation job: lease held, worker state told truthfully."""
 
@@ -6828,6 +6890,7 @@ async def _run_workflow_package_preparation(
                 wheel_downloader=ComfyRegistryWheelDownloader(),
                 phase=report,
                 renew_install_id=renew_install_id,
+                authorized_workflow=authorized_workflow,
             )
             with SessionLocal() as session:
                 job = session.get(Job, job_id)
@@ -6885,12 +6948,19 @@ def _queue_registry_preparation(
     version: str,
     node_types: tuple[str, ...],
     renew_install_id: str | None = None,
+    authorized_workflow: tuple[str, tuple[str, ...]] | None = None,
 ) -> Job:
     payload: dict[str, Any] = {
         "package_id": package_id,
         "version": version,
         "node_types": list(node_types),
     }
+    if authorized_workflow is not None:
+        revision_id, required_node_types = authorized_workflow
+        payload["authorized_workflow"] = {
+            "workflow_revision_id": revision_id,
+            "required_node_types": list(required_node_types),
+        }
     if renew_install_id is not None:
         payload["renew_install_id"] = renew_install_id
     job = Job(
@@ -6909,6 +6979,7 @@ def _queue_registry_preparation(
             version,
             node_types,
             renew_install_id,
+            authorized_workflow,
         ),
         name=f"registry-prepare-{job.id}",
     )
@@ -6930,7 +7001,17 @@ async def prepare_workflow_package_endpoint(
     services = _services(request)
     # Re-analyze the source graph before judging the machine. The package name,
     # version, and node closure have to agree independently of browser state.
-    node_types = _analyzed_package_node_types(payload.ui_graph, payload.package_id, payload.version)
+    # Resolved before queueing so an unknown or mismatched revision is a typed
+    # refusal rather than a job that fails on its first step.
+    authorized = _authorized_workflow_context(session, payload)
+    # The stored graph chooses the package requirement as well as the node set.
+    # Letting the submitted graph choose it would let a caller prepare one
+    # package while binding the proof to a graph that names another.
+    node_types = _analyzed_package_node_types(
+        authorized[2] if authorized else payload.ui_graph,
+        payload.package_id,
+        payload.version,
+    )
     # Then refuse when the machine cannot prepare at all - a job that must fail
     # on its first step is a worse answer than a typed 422.
     try:
@@ -6943,6 +7024,7 @@ async def prepare_workflow_package_endpoint(
         package_id=payload.package_id,
         version=payload.version,
         node_types=node_types,
+        authorized_workflow=(authorized[0], authorized[1]) if authorized else None,
     )
 
 
@@ -7135,6 +7217,9 @@ async def activate_registry_install(
                 environment_root=context.state_root / "registry-wheel-environments",
                 media_worker_stopped=_media_worker_truly_stopped(services),
                 start_media=services.processes.start_media,
+                # The same read startup verifies against, so a proof cannot be
+                # made about an inventory nobody else saw.
+                read_node_inventory=services.processes.comfy_node_inventory,
             )
         except ComfyRegistryActivationError as exc:
             raise _registry_activation_failure(exc) from exc
