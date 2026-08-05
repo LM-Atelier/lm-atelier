@@ -135,7 +135,63 @@ def test_provenance_carries_the_whole_story() -> None:
     assert raised.value.code == "mask-coverage-invalid"
 
 
-def test_the_turn_contract_holds_end_to_end(client) -> None:
+async def test_a_masked_edit_is_accepted_by_the_real_turn_route(client) -> None:
+    """The defect this file previously claimed to cover, exercised for real.
+
+    Splitting the selection out of the tunables was necessary and not
+    sufficient: the settings hierarchy validates its turn layer a second time
+    while resolving, so putting the mask back before resolution refused it
+    again as unknown. Every masked edit still failed with "unsupported
+    settings: mask" while the unit tests below all passed, because none of
+    them posted a turn. This one does, and would have caught it.
+    """
+    from local_lm.db import SessionLocal
+    from local_lm.models import WorkflowDefinition, WorkflowRevision
+
+    with SessionLocal() as session:
+        definition = WorkflowDefinition(name="Inpainter", operation="image_to_image")
+        session.add(definition)
+        session.flush()
+        revision = WorkflowRevision(
+            workflow_id=definition.id,
+            version=1,
+            # The suite runs the mock media engine; selection skips any
+            # revision built for a different one.
+            engine="mock",
+            api_graph_json={"nodes": [{"inputs": {"image": "${input_image}"}}]},
+            input_schema_json=MASK_SCHEMA,
+            dependencies_json={},
+            trusted=True,
+        )
+        session.add(revision)
+        session.flush()
+        # Selection only ever considers a definition's current revision, so a
+        # revision that is not pointed at is not a workflow anyone can reach.
+        definition.current_revision_id = revision.id
+        session.commit()
+
+    source = (
+        await client.post(
+            "/api/artifacts",
+            files={"file": ("studio-source.png", b"source-image", "image/png")},
+        )
+    ).json()
+    chat = (await client.post("/api/chats", json={"title": "Masked edit"})).json()
+    response = await client.post(
+        f"/api/chats/{chat['id']}/turns",
+        json={
+            "text": "Repaint the selected area",
+            "mode": "image",
+            "input_artifact_ids": [source["id"]],
+            "settings": {"mask": {"artifact_id": ARTIFACT, "feather_px": 4, "invert": False}},
+        },
+    )
+
+    assert "unsupported settings" not in response.text
+    assert response.status_code == 202, response.text
+
+
+def test_the_mask_contract_refuses_a_workflow_without_one(client) -> None:
     """A masked edit must refuse before acceptance, not after execution."""
 
     from local_lm.db import SessionLocal
