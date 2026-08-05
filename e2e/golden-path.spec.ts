@@ -128,7 +128,33 @@ test("persists a streamed text and contextual image golden path", async ({
     });
   }
 
-  await page.keyboard.press("Tab");
+  // The skip link's contract in two parts, neither depending on whether the
+  // page holds document focus. Pressing Tab required that, and whether this
+  // environment grants it varies by platform: the same run passes on Windows
+  // and fails on Ubuntu, with the link still first in the document, still
+  // focusable, and nothing focused instead of it.
+  //
+  // First: it is the first thing a Tab would reach. Asserted from the document
+  // rather than by tabbing, so it measures the order rather than the runner's
+  // focus state.
+  const firstFocusable = await page.evaluate(() => {
+    const candidates = Array.from(
+      document.querySelectorAll<HTMLElement>(
+        'a[href], button:not([disabled]), select, input, textarea, [tabindex]:not([tabindex="-1"])',
+      ),
+    );
+    for (const element of candidates) {
+      const style = getComputedStyle(element);
+      if (style.display === "none" || style.visibility === "hidden") continue;
+      return element.className;
+    }
+    return "none";
+  });
+  expect(firstFocusable, "the skip link must be the first tab stop").toContain("skip-link");
+
+  // Second: activating it moves focus to the main region. This is the part
+  // that has to be the browser's own behaviour rather than a DOM assertion.
+  await page.getByRole("link", { name: "Skip to main content" }).focus();
   await expect(page.getByRole("link", { name: "Skip to main content" })).toBeFocused();
   await page.keyboard.press("Enter");
   await expect(page.locator("#main-content")).toBeFocused();
