@@ -934,6 +934,11 @@ export interface EditTemplate {
   instruction: string;
   operation: string;
   settings_json: Record<string, unknown>;
+  /** What produced the result this was saved from. Null on anything saved
+   * before recipes: nobody recorded it, and today's binding is not it. */
+  workflow_revision_id: string | null;
+  model_profile_id: string | null;
+  mask_mode: string;
   trigger_words_json: string[];
   content_rating: "general" | "mature" | "unknown";
   builtin: boolean;
