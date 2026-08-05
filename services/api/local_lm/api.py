@@ -148,7 +148,13 @@ from .orchestrator import (
 )
 from .ordered_planning import OrderedPlanConfirmationRequired
 from .platforms import list_platform_matrix
-from .preflight import assess_catalog_install, catalog_file_index
+from .preflight import (
+    ExactCivitaiFileSelectionError,
+    assess_catalog_install,
+    catalog_file_index,
+    safe_civitai_file_variants,
+    selected_catalog_file_metadata,
+)
 from .profile_service import (
     AUTO_PROFILE_ID,
     LAST_CHAT_PROFILE_KEY,
@@ -3051,55 +3057,6 @@ async def catalog_item_detail(
         ) from exc
 
 
-#: A variant is only offerable if it is safe to install unexamined: scanned
-#: clean, hash-pinned, and a weights file rather than an attachment.
-_OFFERABLE_SCANS = frozenset({"success", "skipped"})
-
-
-def _catalog_file_variants(
-    files: list[dict[str, Any]], ambiguous: frozenset[str]
-) -> dict[str, list[CatalogFileVariant]]:
-    """The choices behind each filename this version could not settle.
-
-    Only for names that are genuinely ambiguous: a version publishing one file
-    per name has nothing to choose between, and offering a list of one would
-    make every install a decision.
-    """
-    grouped: dict[str, list[CatalogFileVariant]] = {}
-    for item in files:
-        filename = str(item.get("filename") or "")
-        if filename not in ambiguous:
-            continue
-        source_file_id = str(item.get("source_file_id") or "")
-        if not source_file_id or not str(item.get("sha256") or ""):
-            continue
-        if not filename.casefold().endswith(".safetensors"):
-            continue
-        scans = (
-            str(item.get("pickle_scan_result") or "").casefold(),
-            str(item.get("virus_scan_result") or "").casefold(),
-        )
-        if any(scan not in _OFFERABLE_SCANS for scan in scans):
-            continue
-        size = item.get("size")
-        metadata = item.get("metadata")
-        precision = metadata.get("precision") if isinstance(metadata, dict) else None
-        grouped.setdefault(filename, []).append(
-            CatalogFileVariant(
-                source_file_id=source_file_id,
-                filename=filename,
-                size_bytes=size if isinstance(size, int) else None,
-                precision=str(precision) if isinstance(precision, str) else None,
-            )
-        )
-    # Sorted by identity so the same version always offers the same order; a
-    # list that reshuffles between checks is a list nobody can point at.
-    return {
-        name: sorted(items, key=lambda variant: variant.source_file_id)
-        for name, items in grouped.items()
-    }
-
-
 @router.post("/catalog/preflight", response_model=CatalogPreflight)
 async def catalog_item_preflight(
     payload: CatalogPreflightRequest,
@@ -3255,6 +3212,21 @@ async def resolve_catalog_preflight(
         ) from exc
     system = collect_system_info(services.settings)
 
+    def assess(target: CatalogDetail) -> CatalogPreflight:
+        """Assess with the request's exact ids, every time.
+
+        A wrapper rather than the same argument at six call sites: one that
+        forgets it silently plans the provider's primary variant, which looks
+        exactly like a successful install of something else.
+        """
+        return assess_catalog_install(
+            target,
+            payload,
+            services.settings,
+            system,
+            selected_file_ids=payload.selected_file_ids,
+        )
+
     async def finalize(
         result: CatalogPreflight,
         resolved_detail: CatalogDetail,
@@ -3283,7 +3255,34 @@ async def resolve_catalog_preflight(
             provider=source,
             prefer_duplicate_variants=not payload.selected_files,
         )
-        variants = _catalog_file_variants(resolved_detail.files, ambiguous_files)
+        # Offered from the resolver's own safety predicate, never a second
+        # opinion beside it: a chooser that lists a row exact selection would
+        # refuse is a chooser that hands out dead ends.
+        #
+        # Only for a request that named files and could not settle one. An
+        # answered request has nothing left to choose, and returning the
+        # chooser again would ask the same question twice.
+        variants = (
+            {
+                filename: [
+                    CatalogFileVariant(
+                        source_file_id=str(item.get("source_file_id") or ""),
+                        filename=filename,
+                        size_bytes=item.get("size") if isinstance(item.get("size"), int) else None,
+                        precision=(
+                            str(item["source_file_precision"])
+                            if isinstance(item.get("source_file_precision"), str)
+                            else None
+                        ),
+                    )
+                    for item in safe_civitai_file_variants(resolved_detail.files, filename)
+                ]
+                for filename in sorted(ambiguous_files)
+            }
+            if source == "civitai" and not payload.selected_file_ids
+            else {}
+        )
+        variants = {name: rows for name, rows in variants.items() if len(rows) > 1}
 
         async def fetch_prefix(path: str) -> tuple[str, bytes] | None:
             if not callable(inspect_prefix):
@@ -3384,17 +3383,20 @@ async def resolve_catalog_preflight(
             provider=source,
             prefer_duplicate_variants=not payload.selected_files,
         )
-        selected_metadata = [
-            files.get(
-                filename,
-                {
-                    "filename": filename,
-                    "size": None,
-                    "sha256": result.expected_sha256.get(filename),
-                },
+        # The chosen row, not whichever row shares its destination. A filename
+        # index re-resolves an answered choice back to the provider's primary
+        # variant, which is the whole failure the exact id exists to prevent.
+        try:
+            selected_metadata = selected_catalog_file_metadata(
+                resolved_detail.files,
+                result.selected_files,
+                provider=source,
+                prefer_duplicate_variants=not payload.selected_files,
+                selected_file_ids=payload.selected_file_ids,
+                expected_sha256=result.expected_sha256,
             )
-            for filename in result.selected_files
-        ]
+        except ExactCivitaiFileSelectionError as exc:
+            raise api_error(422, "catalog-file-variant-invalid", str(exc)) from exc
         workflow_component_folders: dict[str, str] = {}
         workflow_contract_error: str | None = None
         if result.workflow_template_id:
@@ -3461,7 +3463,7 @@ async def resolve_catalog_preflight(
 
     if payload.auxiliary_kind:
         if payload.role != "image":
-            result = assess_catalog_install(detail, payload, services.settings, system)
+            result = assess(detail)
             return await finalize(
                 result.model_copy(
                     update={
@@ -3480,7 +3482,7 @@ async def resolve_catalog_preflight(
                 detail,
             )
         return await finalize(
-            assess_catalog_install(detail, payload, services.settings, system).model_copy(
+            assess(detail).model_copy(
                 update={
                     "comfy_paths": {COMFY_AUXILIARY_FOLDERS[payload.auxiliary_kind]: "."},
                 }
@@ -3509,7 +3511,7 @@ async def resolve_catalog_preflight(
                 "the workflow needs.",
             )
         return await finalize(
-            assess_catalog_install(detail, payload, services.settings, system),
+            assess(detail),
             detail,
         )
 
@@ -3519,13 +3521,13 @@ async def resolve_catalog_preflight(
         or services.settings.media_engine != "comfyui"
     ):
         return await finalize(
-            assess_catalog_install(detail, payload, services.settings, system),
+            assess(detail),
             detail,
         )
 
     runtime_status = services.runtimes.status("comfyui")
     if runtime_status.security_status == "blocked" and runtime_status.state != "ready":
-        result = assess_catalog_install(detail, payload, services.settings, system)
+        result = assess(detail)
         checks = [
             *[check for check in result.checks if check.id != "runtime"],
             CatalogPreflightCheck(
@@ -3696,7 +3698,7 @@ async def resolve_catalog_preflight(
         size = sum(int(item.get("size") or 0) for item in bundled_files)
         viable.append((candidate.score, size, candidate, bundled_detail))
     if not viable:
-        result = assess_catalog_install(detail, payload, services.settings, system)
+        result = assess(detail)
         checks = [
             *[check for check in result.checks if check.id != "selection"],
             CatalogPreflightCheck(

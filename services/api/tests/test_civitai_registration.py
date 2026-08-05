@@ -608,12 +608,12 @@ async def test_an_ambiguous_filename_comes_back_with_its_choices(
             "format": "SafeTensor",
             "pickle_scan_result": "Success",
             "virus_scan_result": "Success",
+            "source_file_precision": precision,
             "metadata": {
                 "provider": "civitai",
                 "source_model_id": "101",
                 "source_version_id": "201",
                 "model_type": "Checkpoint",
-                "precision": precision,
             },
         }
 
@@ -667,9 +667,11 @@ async def test_an_ambiguous_filename_comes_back_with_its_choices(
     assert response.status_code == 200, response.text
     assert response.json()["can_install"] is False
     offered = response.json()["file_variants"]["lustify.safetensors"]
-    assert [item["source_file_id"] for item in offered] == ["301", "302"]
-    assert [item["precision"] for item in offered] == ["fp16", "fp8"]
-    assert [item["size_bytes"] for item in offered] == [2, 1]
+    # The resolver's own order, preferred variant first, so the chooser
+    # presents what selection would have picked at the top.
+    assert [item["source_file_id"] for item in offered] == ["302", "301"]
+    assert [item["precision"] for item in offered] == ["fp8", "fp16"]
+    assert [item["size_bytes"] for item in offered] == [1, 2]
     # Naming a choice, not asserting a fact: no hash and no URL travel back.
     assert all(
         set(item) == {"source_file_id", "filename", "size_bytes", "precision"} for item in offered
@@ -708,7 +710,7 @@ async def test_a_version_with_one_file_per_name_offers_no_choices(
     assert response.json()["file_variants"] == {}
 
 
-async def test_an_id_only_retry_is_accepted_by_the_workflow_owned_path(
+async def test_choosing_an_exact_variant_plans_that_row_and_not_the_preferred_one(
     client: AsyncClient,
     app: FastAPI,
     monkeypatch: pytest.MonkeyPatch,
@@ -721,12 +723,10 @@ async def test_an_id_only_retry_is_accepted_by_the_workflow_owned_path(
     earlier guard counted filenames and refused a request that correctly
     supplied none.
 
-    Deliberately not asserted here: that the plan binds the chosen id's exact
-    metadata. It does not yet. Asking for the first variant still returns the
-    second, because nothing resolves an id to its row - the index simply ranks.
-    An assertion on the artifact's identity would pass today for the wrong
-    reason and read as proof of a binding that does not exist. It belongs with
-    the resolution work, not here.
+    The requested id is the one ranking would not have chosen. Asking for the
+    preferred row proves nothing: it comes back whether or not anything
+    resolved the id, which is how an earlier version of this test passed while
+    the binding did not exist.
     """
 
     def _file(file_id: str, precision: str, size: int) -> dict[str, Any]:
@@ -739,12 +739,12 @@ async def test_an_id_only_retry_is_accepted_by_the_workflow_owned_path(
             "format": "SafeTensor",
             "pickle_scan_result": "Success",
             "virus_scan_result": "Success",
+            "source_file_precision": precision,
             "metadata": {
                 "provider": "civitai",
                 "source_model_id": "101",
                 "source_version_id": "201",
                 "model_type": "LORA",
-                "precision": precision,
             },
         }
 
@@ -771,12 +771,8 @@ async def test_an_id_only_retry_is_accepted_by_the_workflow_owned_path(
         },
     )
     assert listed.status_code == 200, listed.text
-    assert [
-        item["source_file_id"] for item in listed.json()["file_variants"]["lustify.safetensors"]
-    ] == [
-        "301",
-        "302",
-    ]
+    offered = listed.json()["file_variants"]["lustify.safetensors"]
+    assert sorted(item["source_file_id"] for item in offered) == ["301", "302"]
 
     chosen = await client.post(
         "/api/catalog/preflight",
@@ -786,16 +782,22 @@ async def test_an_id_only_retry_is_accepted_by_the_workflow_owned_path(
             "role": "image",
             "engine": "comfyui",
             "selected_files": [],
-            "selected_file_ids": ["302"],
+            "selected_file_ids": ["301"],
             "workflow_reference_kind": "lora",
         },
     )
 
-    # What this half guarantees: the answer is accepted. An id-only retry
-    # reaches assessment and produces a plan, where before it was refused by a
-    # guard that counted filenames and found none.
     assert chosen.status_code == 200, chosen.text
-    assert chosen.json()["install_plan"] is not None
+    plan = chosen.json()["install_plan"]
+    assert plan is not None
+    (artifact,) = plan["artifacts_json"]
+    # The requested variant, not the one ranking prefers. Asking for the
+    # preferred row would pass whether or not anything resolved the id.
+    assert artifact["source_file_id"] == "301"
+    assert artifact["sha256"] == "3" * 64
+    assert artifact["size_bytes"] == 2048
+    # An answered request has nothing left to choose.
+    assert chosen.json()["file_variants"] == {}
 
 
 async def test_naming_a_file_both_ways_is_refused(
@@ -829,3 +831,59 @@ async def test_naming_a_file_both_ways_is_refused(
 
     assert response.status_code == 422
     assert response.json()["code"] == "workflow-asset-file-not-exact"
+
+
+async def test_an_unsafe_variant_is_never_offered_as_a_choice(
+    client: AsyncClient,
+    app: FastAPI,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A chooser that lists a row selection would refuse hands out dead ends."""
+
+    def _file(file_id: str, size: int, **overrides: Any) -> dict[str, Any]:
+        return {
+            "filename": "lustify.safetensors",
+            "size": size,
+            "sha256": file_id[0] * 64,
+            "source_file_id": file_id,
+            "source_version_id": "201",
+            "format": "SafeTensor",
+            "pickle_scan_result": "Success",
+            "virus_scan_result": "Success",
+            "source_file_precision": "fp16",
+            "metadata": {"provider": "civitai", "source_version_id": "201"},
+            **overrides,
+        }
+
+    detail = _lora_detail()
+    detail["files"] = [
+        _file("301", 2048),
+        _file("302", 1024),
+        _file("303", 512, pickle_scan_result="Danger"),
+        _file("304", 256, virus_scan_result="Infected"),
+        _file("305", 128, sha256=""),
+    ]
+
+    async def canned_inspect(
+        self: CivitaiCatalog, item_id: str, revision: str = "main", role: str | None = None
+    ) -> dict[str, Any]:
+        return detail
+
+    monkeypatch.setattr(CivitaiCatalog, "inspect", canned_inspect)
+    monkeypatch.setattr(app.state.services.settings, "civitai_token", "vaulted-token")
+
+    response = await client.post(
+        "/api/catalog/preflight",
+        params={"source": "civitai", "id": "201"},
+        json={
+            "revision": "201",
+            "role": "image",
+            "engine": "comfyui",
+            "selected_files": ["lustify.safetensors"],
+            "workflow_reference_kind": "lora",
+        },
+    )
+
+    assert response.status_code == 200, response.text
+    offered = response.json()["file_variants"]["lustify.safetensors"]
+    assert sorted(item["source_file_id"] for item in offered) == ["301", "302"]
