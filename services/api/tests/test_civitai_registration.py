@@ -15,6 +15,56 @@ pytestmark = pytest.mark.asyncio
 SHA256 = "a" * 64
 
 
+def _lora_detail() -> dict[str, Any]:
+    """One CivitAI version publishing a single LoRA file under one name."""
+    return {
+        "model": {
+            "provider": "civitai",
+            "remote_id": "201",
+            "name": "Portrait",
+            "author": "creator",
+            "pipeline_tag": "lora",
+            "tags": [],
+            "downloads": 0,
+            "likes": 0,
+            "created_at": None,
+            "last_modified": None,
+            "gated": False,
+            "private": False,
+            "architecture": "SDXL 1.0",
+            "formats": ["safetensors"],
+            "quantizations": [],
+            "license_id": None,
+            "total_size_bytes": 1024,
+            "compatibility": "supported",
+            "compatibility_reasons": [],
+            "required_runtime": "comfyui",
+            "content_rating": "general",
+        },
+        "revision": "201",
+        "files": [
+            {
+                "filename": "portrait.safetensors",
+                "size": 1024,
+                "sha256": SHA256,
+                "source_file_id": "301",
+                "source_version_id": "201",
+                "format": "SafeTensor",
+                "pickle_scan_result": "Success",
+                "virus_scan_result": "Success",
+                "metadata": {
+                    "provider": "civitai",
+                    "source_model_id": "101",
+                    "source_version_id": "201",
+                    "model_type": "LORA",
+                    "base_model": "SDXL 1.0",
+                    "trained_words": ["portrait-style"],
+                },
+            }
+        ],
+    }
+
+
 async def test_the_civitai_source_is_registered_beside_hugging_face(
     client: AsyncClient, app: FastAPI
 ) -> None:
@@ -534,3 +584,124 @@ async def test_installed_asset_manifests_feed_the_workflow_inventory(
 
     assert "portrait-style-v1.safetensors" in names
     assert "subdir/portrait-style-v1.safetensors" in names
+
+
+async def test_an_ambiguous_filename_comes_back_with_its_choices(
+    client: AsyncClient,
+    app: FastAPI,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A refusal that says "choose a variant" must say which variants.
+
+    One CivitAI version can publish the same safetensors name several times at
+    different precisions. Preflight rightly refuses to guess, and used to give
+    the caller no way to answer - an instruction that could not be followed.
+    """
+
+    def _file(file_id: str, precision: str, size: int) -> dict[str, Any]:
+        return {
+            "filename": "lustify.safetensors",
+            "size": size,
+            "sha256": f"{file_id}" + "0" * (64 - len(file_id)),
+            "source_file_id": file_id,
+            "source_version_id": "201",
+            "format": "SafeTensor",
+            "pickle_scan_result": "Success",
+            "virus_scan_result": "Success",
+            "metadata": {
+                "provider": "civitai",
+                "source_model_id": "101",
+                "source_version_id": "201",
+                "model_type": "Checkpoint",
+                "precision": precision,
+            },
+        }
+
+    detail: dict[str, Any] = {
+        "model": {
+            "provider": "civitai",
+            "remote_id": "201",
+            "name": "Lustify",
+            "author": "creator",
+            "pipeline_tag": "checkpoint",
+            "tags": [],
+            "downloads": 0,
+            "likes": 0,
+            "created_at": None,
+            "last_modified": None,
+            "gated": False,
+            "private": False,
+            "architecture": "SDXL 1.0",
+            "formats": ["safetensors"],
+            "quantizations": [],
+            "license_id": None,
+            "total_size_bytes": 3,
+            "compatibility": "supported",
+            "compatibility_reasons": [],
+            "required_runtime": "comfyui",
+            "content_rating": "general",
+        },
+        "revision": "201",
+        "files": [_file("301", "fp16", 2), _file("302", "fp8", 1)],
+    }
+
+    async def canned_inspect(
+        self: CivitaiCatalog, item_id: str, revision: str = "main", role: str | None = None
+    ) -> dict[str, Any]:
+        return detail
+
+    monkeypatch.setattr(CivitaiCatalog, "inspect", canned_inspect)
+    monkeypatch.setattr(app.state.services.settings, "civitai_token", "vaulted-token")
+
+    response = await client.post(
+        "/api/catalog/preflight",
+        params={"source": "civitai", "id": "201"},
+        json={
+            "revision": "201",
+            "role": "image",
+            "engine": "comfyui",
+            "selected_files": ["lustify.safetensors"],
+        },
+    )
+
+    assert response.status_code == 200, response.text
+    offered = response.json()["file_variants"]["lustify.safetensors"]
+    assert [item["source_file_id"] for item in offered] == ["301", "302"]
+    assert [item["precision"] for item in offered] == ["fp16", "fp8"]
+    assert [item["size_bytes"] for item in offered] == [2, 1]
+    # Naming a choice, not asserting a fact: no hash and no URL travel back.
+    assert all(
+        set(item) == {"source_file_id", "filename", "size_bytes", "precision"} for item in offered
+    )
+
+
+async def test_a_version_with_one_file_per_name_offers_no_choices(
+    client: AsyncClient,
+    app: FastAPI,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Offering a list of one would make every install a decision."""
+    detail = _lora_detail()
+
+    async def canned_inspect(
+        self: CivitaiCatalog, item_id: str, revision: str = "main", role: str | None = None
+    ) -> dict[str, Any]:
+        return detail
+
+    monkeypatch.setattr(CivitaiCatalog, "inspect", canned_inspect)
+    monkeypatch.setattr(app.state.services.settings, "civitai_token", "vaulted-token")
+
+    response = await client.post(
+        "/api/catalog/preflight",
+        params={"source": "civitai", "id": "201"},
+        json={
+            "revision": "201",
+            "role": "image",
+            "engine": "comfyui",
+            "selected_files": ["portrait.safetensors"],
+            "auxiliary_kind": "lora",
+        },
+    )
+
+    assert response.status_code == 200
+    assert response.json()["file_variants"] == {}

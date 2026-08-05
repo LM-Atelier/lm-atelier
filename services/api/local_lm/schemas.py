@@ -1421,11 +1421,32 @@ class CatalogDetail(ApiModel):
     files: list[dict[str, Any]]
 
 
+class CatalogFileVariant(ApiModel):
+    """One immutable choice behind an ambiguous filename.
+
+    Everything here is the server's: the identity, the name, and the size come
+    from a freshly fetched version detail. No URL and no hash, because the
+    browser has no business carrying either - it names a choice, and the
+    planner re-resolves it.
+    """
+
+    source_file_id: str
+    filename: str
+    size_bytes: int | None
+    precision: str | None
+
+
 class CatalogPreflightRequest(ApiModel):
     revision: str = Field(default="main", min_length=1, max_length=200)
     role: Literal["chat", "image", "video"]
     engine: str = Field(min_length=1, max_length=32)
     selected_files: list[str] = Field(default_factory=list, max_length=512)
+    # Immutable provider file identities, for the case a filename cannot
+    # settle: one CivitAI version can publish the same safetensors name five
+    # times at different precisions, and preflight rightly refuses to guess.
+    # It used to ask the caller to choose a variant and give it no way to say
+    # which. Filename-only callers are unchanged.
+    selected_file_ids: list[str] = Field(default_factory=list, max_length=512)
     # The exact workflow variant the user chose from the catalog. Absent for
     # repository-only callers, which keep the ranked fallback.
     workflow_template_id: str | None = Field(default=None, max_length=200)
@@ -1485,6 +1506,11 @@ class CatalogPreflight(ApiModel):
     checks: list[CatalogPreflightCheck]
     install_plan: InstallPlanOut | None = None
     auxiliary_kind: str | None = None
+    # The choices behind any filename this version could not settle, so a
+    # refusal arrives with the answer to it. Asking someone to pick a variant
+    # and then making them go and find the variants is not a choice, it is a
+    # riddle.
+    file_variants: dict[str, list[CatalogFileVariant]] = Field(default_factory=dict)
     # Copied server-side from the catalog detail, never client-supplied.
     content_rating: ContentRating = "unknown"
 

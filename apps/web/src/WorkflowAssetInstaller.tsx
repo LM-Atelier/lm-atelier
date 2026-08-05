@@ -1,4 +1,5 @@
 import { useState } from "react";
+import { CatalogVariantChoice } from "./CatalogVariantChoice";
 import { useMutation } from "@tanstack/react-query";
 import { Download, Search } from "lucide-react";
 import { api } from "./api";
@@ -6,6 +7,7 @@ import { ErrorCallout } from "./ErrorCallout";
 import { formatBytes } from "./format";
 import { catalogRoleFor, searchTermFor } from "./workflowAssetSearch";
 import type {
+  CatalogFileVariant,
   CatalogModel,
   WorkflowAssetReference,
   WorkflowAssetReview,
@@ -156,6 +158,12 @@ function AssetRow({
   const [query, setQuery] = useState(() => searchTermFor(asset.filename));
   const [results, setResults] = useState<CatalogModel[]>([]);
   const [source, setSource] = useState("civitai");
+  // A blocked preflight that named more than one file behind the requested
+  // name. Kept with the candidate that produced it, so choosing re-runs the
+  // same check with the choice rather than starting over.
+  const [ambiguous, setAmbiguous] = useState<
+    { candidate: WorkflowSourceCandidate; variants: CatalogFileVariant[] } | null
+  >(null);
 
   const search = useMutation({
     mutationFn: () => api.catalog(query, catalogRoleFor(asset.kind), "downloads", null, {}, source),
@@ -199,7 +207,13 @@ function AssetRow({
   const recorded = asset.source_candidates;
 
   const preflightCandidate = useMutation({
-    mutationFn: (candidate: WorkflowSourceCandidate) =>
+    mutationFn: ({
+      candidate,
+      fileIds = [],
+    }: {
+      candidate: WorkflowSourceCandidate;
+      fileIds?: string[];
+    }) =>
       api.catalogPreflight(
         candidate.remote_id,
         catalogRoleFor(asset.kind),
@@ -212,8 +226,18 @@ function AssetRow({
         null,
         candidate.provider,
         asset.kind,
-      ),
-    onSuccess: (result) => {
+        fileIds,
+      ).then((result) => ({ result, candidate })),
+    onSuccess: ({ result, candidate }) => {
+      const wanted = candidate.filename || asset.filename;
+      const variants = result.file_variants?.[wanted] ?? [];
+      if (!result.can_install && variants.length > 1) {
+        // Not an error state: the version is fine and the request was
+        // under-specified, which is answerable right here.
+        setAmbiguous({ candidate, variants });
+        return;
+      }
+      setAmbiguous(null);
       const planId = result.install_plan?.id;
       const artifact = exactArtifact(result);
       if (!planId || !artifact) return;
@@ -250,7 +274,7 @@ function AssetRow({
                     <button
                       className="secondary compact-button"
                       disabled={preflightCandidate.isPending}
-                      onClick={() => preflightCandidate.mutate(candidate)}
+                      onClick={() => preflightCandidate.mutate({ candidate })}
                     >
                       {candidate.filename ?? candidate.remote_id}
                     </button>
@@ -259,6 +283,19 @@ function AssetRow({
                 ))}
               </ul>
             </div>
+          )}
+          {ambiguous && (
+            <CatalogVariantChoice
+              filename={ambiguous.candidate.filename || asset.filename}
+              variants={ambiguous.variants}
+              busy={preflightCandidate.isPending}
+              onChoose={(sourceFileId) =>
+                preflightCandidate.mutate({
+                  candidate: ambiguous.candidate,
+                  fileIds: [sourceFileId],
+                })
+              }
+            />
           )}
           <select
             aria-label={`Source for ${asset.filename}`}

@@ -177,6 +177,7 @@ from .schemas import (
     BackupInfo,
     BoundWorkflowAssetOut,
     CatalogDetail,
+    CatalogFileVariant,
     CatalogModel,
     CatalogPage,
     CatalogPreflight,
@@ -3050,6 +3051,55 @@ async def catalog_item_detail(
         ) from exc
 
 
+#: A variant is only offerable if it is safe to install unexamined: scanned
+#: clean, hash-pinned, and a weights file rather than an attachment.
+_OFFERABLE_SCANS = frozenset({"success", "skipped"})
+
+
+def _catalog_file_variants(
+    files: list[dict[str, Any]], ambiguous: frozenset[str]
+) -> dict[str, list[CatalogFileVariant]]:
+    """The choices behind each filename this version could not settle.
+
+    Only for names that are genuinely ambiguous: a version publishing one file
+    per name has nothing to choose between, and offering a list of one would
+    make every install a decision.
+    """
+    grouped: dict[str, list[CatalogFileVariant]] = {}
+    for item in files:
+        filename = str(item.get("filename") or "")
+        if filename not in ambiguous:
+            continue
+        source_file_id = str(item.get("source_file_id") or "")
+        if not source_file_id or not str(item.get("sha256") or ""):
+            continue
+        if not filename.casefold().endswith(".safetensors"):
+            continue
+        scans = (
+            str(item.get("pickle_scan_result") or "").casefold(),
+            str(item.get("virus_scan_result") or "").casefold(),
+        )
+        if any(scan not in _OFFERABLE_SCANS for scan in scans):
+            continue
+        size = item.get("size")
+        metadata = item.get("metadata")
+        precision = metadata.get("precision") if isinstance(metadata, dict) else None
+        grouped.setdefault(filename, []).append(
+            CatalogFileVariant(
+                source_file_id=source_file_id,
+                filename=filename,
+                size_bytes=size if isinstance(size, int) else None,
+                precision=str(precision) if isinstance(precision, str) else None,
+            )
+        )
+    # Sorted by identity so the same version always offers the same order; a
+    # list that reshuffles between checks is a list nobody can point at.
+    return {
+        name: sorted(items, key=lambda variant: variant.source_file_id)
+        for name, items in grouped.items()
+    }
+
+
 @router.post("/catalog/preflight", response_model=CatalogPreflight)
 async def catalog_item_preflight(
     payload: CatalogPreflightRequest,
@@ -3228,11 +3278,12 @@ async def resolve_catalog_preflight(
             if path.casefold().endswith((".gguf", ".safetensors"))
         ][:8]
 
-        file_metadata, _ambiguous_files = catalog_file_index(
+        file_metadata, ambiguous_files = catalog_file_index(
             resolved_detail.files,
             provider=source,
             prefer_duplicate_variants=not payload.selected_files,
         )
+        variants = _catalog_file_variants(resolved_detail.files, ambiguous_files)
 
         async def fetch_prefix(path: str) -> tuple[str, bytes] | None:
             if not callable(inspect_prefix):
@@ -3406,7 +3457,7 @@ async def resolve_catalog_preflight(
             validate_resolved(resolved)
         plan = persist_install_plan(session, resolved)
         session.commit()
-        return result.model_copy(update={"install_plan": plan})
+        return result.model_copy(update={"install_plan": plan, "file_variants": variants})
 
     if payload.auxiliary_kind:
         if payload.role != "image":
