@@ -1639,7 +1639,7 @@ async def test_media_start_uses_only_the_exact_activation_scope(
     ]
     assert command[:4] == [str(executable.resolve()), "-c", command[2], "1"]
     assert command[4:6] == [str(site_packages.resolve()), str((runtime / "main.py").resolve())]
-    assert captured["environment_overrides"] is None
+    assert captured["environment_overrides"] == {"PYTHONDONTWRITEBYTECODE": "1"}
     assert callable(captured["ready_check"])
     assert captured["launch_scope_sha256"] == digest
 
@@ -1777,7 +1777,7 @@ async def test_media_start_uses_only_verified_registry_overlay_contract(
     ]
     assert command[:4] == [str(executable.resolve()), "-c", command[2], "1"]
     assert command[4:6] == [str(site_packages.resolve()), str((runtime / "main.py").resolve())]
-    assert captured["environment_overrides"] is None
+    assert captured["environment_overrides"] == {"PYTHONDONTWRITEBYTECODE": "1"}
     assert callable(captured["ready_check"])
 
 

@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from local_lm.api import _grouped_by_parent
+from local_lm.api import _grouped_by_parent, _with_installed_counts
 
 
 def _card(version_id: str, parent: str | None, name: str) -> Any:
@@ -56,3 +56,22 @@ def test_grouping_keeps_the_order_the_provider_ranked() -> None:
     )
 
     assert [card.remote_id for card in grouped] == ["7001", "9002"]
+
+
+def test_counts_installed_versions_where_that_is_knowable() -> None:
+    counted = _with_installed_counts(
+        [_card("9002", "4201", "Lustify"), _card("7001", "3300", "Other")],
+        {"4201": 2},
+    )
+
+    assert counted[0].installed_version_count == 2
+    # A model with no recorded identity is unknown, not zero. The two look
+    # alike and mean opposite things: "none installed" versus "this kind does
+    # not record which version it is, so nothing can be matched".
+    assert counted[1].installed_version_count is None
+
+
+def test_a_card_with_no_parent_is_never_given_a_count() -> None:
+    plain = _card("owner/model", None, "owner/model")
+
+    assert _with_installed_counts([plain], {"4201": 2}) == [plain]
