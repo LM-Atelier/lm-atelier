@@ -118,7 +118,12 @@ async def test_an_edit_turn_resolves_the_stack_and_records_its_trigger_words(
     """
     from local_lm.auxiliary_assets import checkpoint_lora_extension
     from local_lm.domain import utcnow
-    from local_lm.models import ModelAssetInstall, WorkflowDefinition, WorkflowRevision
+    from local_lm.models import (
+        ModelAssetInstall,
+        ModelProfile,
+        WorkflowDefinition,
+        WorkflowRevision,
+    )
 
     graph = {
         "1": {"class_type": "CheckpointLoaderSimple", "inputs": {"ckpt_name": "mock.safetensors"}},
@@ -162,6 +167,18 @@ async def test_an_edit_turn_resolves_the_stack_and_records_its_trigger_words(
             verified_at=utcnow(),
         )
         session.add(lora)
+        profile = session.query(ModelProfile).filter_by(role="image", is_default=True).one()
+        install = ModelInstall(
+            name="Trigger-aware editor",
+            role="image",
+            engine="mock",
+            local_path="C:/managed/trigger-aware-editor",
+            manifest_json={"trigger_words": ["portrait-style"]},
+            active=True,
+        )
+        session.add(install)
+        session.flush()
+        profile.model_install_id = install.id
         session.commit()
         lora_id = lora.id
 
@@ -201,4 +218,6 @@ async def test_an_edit_turn_resolves_the_stack_and_records_its_trigger_words(
     # added on the user's behalf - and the record says which, which is the
     # whole point of the field. Asserting the empty case would have proved
     # nothing about the mechanism.
-    assert auxiliary["trigger_words_applied"] == ["ink wash"]
+    assert auxiliary["model_trigger_words_applied"] == ["portrait-style"]
+    assert auxiliary["lora_trigger_words_applied"] == ["ink wash"]
+    assert auxiliary["trigger_words_applied"] == ["portrait-style", "ink wash"]

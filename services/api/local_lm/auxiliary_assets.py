@@ -436,6 +436,43 @@ def trigger_words_to_apply(provenance: list[dict[str, Any]], prompt: str) -> lis
     return applied
 
 
+def prompt_trigger_word_provenance(
+    model: dict[str, Any] | None,
+    lora_provenance: list[dict[str, Any]],
+    prompt: str,
+) -> dict[str, list[str]]:
+    """Freeze model and LoRA trigger words into one transparent prompt snapshot."""
+
+    manifest = model.get("manifest") if isinstance(model, dict) else None
+    source = model.get("source") if isinstance(model, dict) else None
+    source_metadata = source.get("metadata") if isinstance(source, dict) else None
+    declared: list[str] = []
+    for container, key in (
+        (manifest, "trigger_words"),
+        (manifest, "trained_words"),
+        (source_metadata, "trained_words"),
+        (source_metadata, "trigger_words"),
+    ):
+        values = container.get(key) if isinstance(container, dict) else None
+        if isinstance(values, list):
+            declared.extend(value[:200] for value in values[:100] if isinstance(value, str))
+        if len(declared) >= 100:
+            declared = declared[:100]
+            break
+
+    model_applied = trigger_words_to_apply(
+        [{"enabled": True, "trigger_words": declared}],
+        prompt,
+    )
+    prompt_with_model_words = f"{prompt}, {', '.join(model_applied)}" if model_applied else prompt
+    lora_applied = trigger_words_to_apply(lora_provenance, prompt_with_model_words)
+    return {
+        "model_trigger_words_applied": model_applied,
+        "lora_trigger_words_applied": lora_applied,
+        "trigger_words_applied": [*model_applied, *lora_applied],
+    }
+
+
 def transform_lora_graph(
     graph: dict[str, Any],
     extension: dict[str, Any],

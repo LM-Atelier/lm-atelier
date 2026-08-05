@@ -23,10 +23,10 @@ from .adapters.base import ChatRequest, MediaEvent, MediaRequest
 from .artifacts import ArtifactStore
 from .auxiliary_assets import (
     LORA_GRAPH_TRANSFORM_VERSION,
+    prompt_trigger_word_provenance,
     resolve_lora_stack,
     select_automatic_lora_stack,
     transform_lora_graph,
-    trigger_words_to_apply,
     workflow_lora_extension,
 )
 from .capability_evidence import (
@@ -1367,6 +1367,11 @@ class ConversationOrchestrator:
                         depends_on_step_id=pending_dependency_step_id,
                     )
                 )
+            trigger_word_provenance = prompt_trigger_word_provenance(
+                model_provenance if plan.operation != Operation.TEXT else None,
+                lora_resolution.provenance if lora_resolution else [],
+                per_output_prompt,
+            )
             provenance: dict[str, Any] = {
                 "routing": plan.model_dump(mode="json"),
                 **({"visual_prompt": visual_prompt} if visual_prompt else {}),
@@ -1408,18 +1413,23 @@ class ConversationOrchestrator:
                 ),
                 "auxiliary_assets": (
                     {
-                        "lora_stack": lora_resolution.provenance,
-                        "selection": (
-                            lora_selection.provenance if lora_selection else {"mode": "explicit"}
+                        **(
+                            {
+                                "lora_stack": lora_resolution.provenance,
+                                "selection": (
+                                    lora_selection.provenance
+                                    if lora_selection
+                                    else {"mode": "explicit"}
+                                ),
+                                "graph_transform_version": LORA_GRAPH_TRANSFORM_VERSION,
+                                "effective_graph_sha256": lora_resolution.graph_sha256,
+                            }
+                            if lora_resolution
+                            else {}
                         ),
-                        "graph_transform_version": LORA_GRAPH_TRANSFORM_VERSION,
-                        "effective_graph_sha256": lora_resolution.graph_sha256,
-                        "trigger_words_applied": trigger_words_to_apply(
-                            lora_resolution.provenance,
-                            plan.standalone_prompt,
-                        ),
+                        **trigger_word_provenance,
                     }
-                    if lora_resolution
+                    if lora_resolution or trigger_word_provenance["trigger_words_applied"]
                     else None
                 ),
                 **(
@@ -2012,6 +2022,11 @@ class ConversationOrchestrator:
                 else None
             )
             effective_preset = resolved["effective_preset"]
+            trigger_word_provenance = prompt_trigger_word_provenance(
+                model_provenance if operation != Operation.TEXT else None,
+                (resolved["lora_resolution"].provenance if resolved["lora_resolution"] else []),
+                step_intent.prompt,
+            )
             run = Run(
                 idempotency_key=request.idempotency_key if ordinal == 1 else None,
                 chat_id=chat.id,
@@ -2062,20 +2077,26 @@ class ConversationOrchestrator:
                     ),
                     "auxiliary_assets": (
                         {
-                            "lora_stack": resolved["lora_resolution"].provenance,
-                            "selection": (
-                                resolved["lora_selection"].provenance
-                                if resolved["lora_selection"]
-                                else {"mode": "explicit"}
+                            **(
+                                {
+                                    "lora_stack": resolved["lora_resolution"].provenance,
+                                    "selection": (
+                                        resolved["lora_selection"].provenance
+                                        if resolved["lora_selection"]
+                                        else {"mode": "explicit"}
+                                    ),
+                                    "graph_transform_version": LORA_GRAPH_TRANSFORM_VERSION,
+                                    "effective_graph_sha256": resolved[
+                                        "lora_resolution"
+                                    ].graph_sha256,
+                                }
+                                if resolved["lora_resolution"]
+                                else {}
                             ),
-                            "graph_transform_version": LORA_GRAPH_TRANSFORM_VERSION,
-                            "effective_graph_sha256": resolved["lora_resolution"].graph_sha256,
-                            "trigger_words_applied": trigger_words_to_apply(
-                                resolved["lora_resolution"].provenance,
-                                step_intent.prompt,
-                            ),
+                            **trigger_word_provenance,
                         }
                         if resolved["lora_resolution"]
+                        or trigger_word_provenance["trigger_words_applied"]
                         else None
                     ),
                 },
