@@ -2790,6 +2790,36 @@ async def artifact_content(
     )
 
 
+def _with_installed_counts(items: list[CatalogModel], counts: dict[str, int]) -> list[CatalogModel]:
+    """Say how many versions are here, and say nothing when that is unknown.
+
+    A model with no recorded identity gets `None` rather than `0`. The two
+    look alike and mean opposite things: one is "none of these are installed",
+    the other is "this kind does not record which version it is, so nothing on
+    disk can be matched against these". Rendering the second as the first is
+    how someone reinstalls a checkpoint they already have.
+    """
+    return [
+        item
+        if not item.parent_model_id
+        else item.model_copy(update={"installed_version_count": counts.get(item.parent_model_id)})
+        for item in items
+    ]
+
+
+def _installed_counts_by_parent(session: Session) -> dict[str, int]:
+    """How many versions of each model are already here, where that is knowable.
+
+    Built from the same manifest field update checks read. A model absent from
+    this map has no recorded identity at all, which is not the same as having
+    none installed - see `_grouped_by_parent`.
+    """
+    counts: dict[str, int] = {}
+    for identity in installed_civitai_identities(session):
+        counts[identity.model_id] = counts.get(identity.model_id, 0) + 1
+    return counts
+
+
 def _grouped_by_parent(items: list[CatalogModel]) -> list[CatalogModel]:
     """One card per model, where the provider says a card is a version of one.
 
@@ -2829,6 +2859,7 @@ def _grouped_by_parent(items: list[CatalogModel]) -> list[CatalogModel]:
 @router.get("/catalog", response_model=CatalogPage)
 async def catalog_search(
     request: Request,
+    session: SessionDep,
     source: str = Query(default="huggingface", min_length=1, max_length=32),
     query: str = "",
     role: str | None = None,
@@ -2871,7 +2902,13 @@ async def catalog_search(
             updated_within_days=updated_within_days,
         )
         if not media_catalog or role is None:
-            return page.model_copy(update={"items": _grouped_by_parent(page.items)})
+            return page.model_copy(
+                update={
+                    "items": _with_installed_counts(
+                        _grouped_by_parent(page.items), _installed_counts_by_parent(session)
+                    )
+                }
+            )
         registry = ComfyTemplateRegistry(services.settings)
         items = []
         for item in page.items:
@@ -2908,7 +2945,13 @@ async def catalog_search(
                     -(item.downloads or 0),
                 )
             )
-        return page.model_copy(update={"items": _grouped_by_parent(items)})
+        return page.model_copy(
+            update={
+                "items": _with_installed_counts(
+                    _grouped_by_parent(items), _installed_counts_by_parent(session)
+                )
+            }
+        )
     except ValueError as exc:
         raise HTTPException(422, f"invalid catalog request: {exc}") from exc
     except Exception as exc:

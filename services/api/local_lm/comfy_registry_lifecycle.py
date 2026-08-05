@@ -17,6 +17,7 @@ from .comfy_registry import ComfyNodeResolution
 from .comfy_registry_archives import (
     ComfyRegistryArchiveError,
     ComfyRegistryArchiveReport,
+    parse_comfy_registry_runtime_files,
     verify_staged_comfy_registry_archive,
 )
 from .comfy_registry_dependencies import (
@@ -576,6 +577,7 @@ def _verify_existing_archive(install: ComfyRegistryInstall, destination: Path) -
             expected_manifest_sha256=install.manifest_sha256,
             expected_file_count=file_count,
             expected_expanded_bytes=expanded_bytes,
+            runtime_files=parse_comfy_registry_runtime_files(review.get("runtime_files")),
         )
     except ComfyRegistryArchiveError as exc:
         raise ComfyRegistryLifecycleError(

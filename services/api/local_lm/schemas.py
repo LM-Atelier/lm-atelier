@@ -1351,6 +1351,11 @@ class CatalogModel(ApiModel):
     # story; more means it must open a chooser rather than install, because
     # the point of version identity is that the person picked one.
     version_count: int = 1
+    # How many of them are already here, or `None` when that cannot be known.
+    # Only kinds that record a provider version can answer; a checkpoint
+    # install stores none, so "how many are installed" has no truthful number
+    # and a guess of zero invites reinstalling what is already on disk.
+    installed_version_count: int | None = None
     # Set only on workflow catalog cards: one repository can ship several
     # official workflows, and the card must say which one it is.
     workflow_template_id: str | None = None

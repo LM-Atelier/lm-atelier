@@ -558,6 +558,11 @@ export interface CatalogModel {
    * must open a chooser rather than install, because the point of version
    * identity is that the person picked one. */
   version_count?: number;
+  /** How many of them are already here, or absent when that cannot be known.
+   * Not zero: a kind that records no provider version cannot be matched
+   * against these at all, and "0 of 12" would be a claim the data cannot
+   * support. */
+  installed_version_count?: number | null;
   workflow_template_id?: string | null;
   operation?: string | null;
   content_rating?: ContentRating;

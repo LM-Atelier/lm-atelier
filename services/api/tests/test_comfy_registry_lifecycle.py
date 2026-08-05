@@ -821,6 +821,44 @@ async def test_renewal_rebinds_dependencies_without_changing_reviewed_node_code(
     assert (custom_nodes / result.installed_path / "__init__.py").read_bytes() == node_bytes
 
 
+async def test_renewal_accepts_exact_recorded_runtime_files(
+    session: Session,
+    tmp_path: Path,
+) -> None:
+    result, _, _, custom_nodes, state = await _prepare(session, tmp_path)
+    install = session.get(ComfyRegistryInstall, result.install_id)
+    assert install is not None
+    content = b"generated default"
+    runtime_path = custom_nodes / result.installed_path / "styles" / "defaults.json"
+    runtime_path.parent.mkdir()
+    runtime_path.write_bytes(content)
+    install.review_json = {
+        **install.review_json,
+        "runtime_files": [
+            {
+                "path": "styles/defaults.json",
+                "size": len(content),
+                "sha256": hashlib.sha256(content).hexdigest(),
+            }
+        ],
+    }
+    session.commit()
+    renewed = await renew_comfy_registry_install_environment(
+        session,
+        install_id=result.install_id,
+        resolution=_resolution(),
+        closure=_closure(_resolution()),
+        wheel_downloader=_WheelDownloader(),
+        python_executable=Path(sys.executable),
+        custom_node_root=custom_nodes,
+        state_root=state,
+        media_worker_stopped=True,
+    )
+
+    assert renewed.install_id == result.install_id
+    assert runtime_path.read_bytes() == content
+
+
 async def test_renewal_refuses_an_active_or_changed_package(
     session: Session,
     tmp_path: Path,
