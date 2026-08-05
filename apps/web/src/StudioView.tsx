@@ -5,6 +5,7 @@ import { StudioOpenImage } from "./StudioOpenImage";
 import { ErrorCallout } from "./ErrorCallout";
 import { StudioCanvas } from "./StudioCanvas";
 import { StudioExtendHandles } from "./StudioExtendHandles";
+import { StudioRecipes } from "./StudioRecipes";
 import { StudioToolGuidance } from "./StudioToolGuidance";
 import { StudioToolRail } from "./StudioToolRail";
 import { coverage, encodeMaskPng, isEmpty } from "./studioMasks";
@@ -15,6 +16,7 @@ import {
   type StudioToolKind,
 } from "./studioToolState";
 import { useStudioSession, type StudioStep } from "./useStudioSession";
+import type { EditTemplate } from "./types";
 
 /** The Image Studio: a canvas-first editing surface, not a conversation.
  *
@@ -38,6 +40,10 @@ export function StudioView({
   const { steps, busy, error, apply } = useStudioSession(sourceArtifactId, sourceChatId);
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [instruction, setInstruction] = useState("");
+  // The recipe an apply should run under. Cleared whenever the instruction is
+  // edited by hand: at that point the words are no longer the recipe's, and
+  // running its workflow would attribute a result to something it did not do.
+  const [recipe, setRecipe] = useState<EditTemplate | null>(null);
   const [bitmap, setBitmap] = useState<ImageBitmap | null>(null);
   const [tools, dispatch] = useReducer(studioToolReducer, undefined, initialToolState);
   // The pointer tool is rebuilt whenever the mode or brush changes; each one
@@ -232,10 +238,20 @@ export function StudioView({
                 rows={4}
                 value={instruction}
                 placeholder="e.g. make it a watercolor painting"
-                onChange={(event) => setInstruction(event.target.value)}
+                onChange={(event) => {
+                  setInstruction(event.target.value);
+                  setRecipe(null);
+                }}
               />
             </label>
           )}
+          <StudioRecipes
+            disabled={busy || !current}
+            onApply={(chosen) => {
+              setRecipe(chosen);
+              setInstruction(chosen.instruction);
+            }}
+          />
           {unavailable && (
             // Beside the button that would fail, and named by the tools that
             // cannot run, so the sentence arrives before the drawing does.
@@ -266,7 +282,10 @@ export function StudioView({
                     ? { upscale_factor: tools.upscaleFactor }
                     : tools.kind === "extend"
                       ? { outpaint_margins: tools.margins }
-                      : undefined,
+                      : recipe
+                        ? recipe.settings_json
+                        : undefined,
+                  recipe?.workflow_revision_id ?? undefined,
                 );
                 setInstruction("");
                 setSelectedId(null);

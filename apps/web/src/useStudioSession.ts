@@ -25,6 +25,9 @@ type StudioApply = {
   mask?: StudioMaskUpload;
   /** What the active tool asks for beyond words - a scale factor, say. */
   settings?: Record<string, unknown>;
+  /** The workflow a recipe recorded, so applying one reproduces its run
+   * rather than running its words against whatever is current. */
+  workflowRevisionId?: string;
 };
 
 export type StudioStep = {
@@ -65,7 +68,13 @@ export function useStudioSession(sourceArtifactId: string | null, sourceChatId: 
   });
 
   const apply = useMutation({
-    mutationFn: async ({ instruction, artifactId, mask, settings }: StudioApply) => {
+    mutationFn: async ({
+      instruction,
+      artifactId,
+      mask,
+      settings,
+      workflowRevisionId,
+    }: StudioApply) => {
       // The mask uploads as its own artifact and travels in settings, not in
       // input_artifact_ids: a selection is instruction, not content, so it
       // must never render as an attachment or count toward edit lineage.
@@ -73,7 +82,16 @@ export function useStudioSession(sourceArtifactId: string | null, sourceChatId: 
         ...settings,
         ...(mask ? { mask: await uploadMask(mask) } : {}),
       };
-      return api.sendTurn(sessionId!, instruction, "image", [artifactId], turnSettings);
+      return api.sendTurn(
+        sessionId!,
+        instruction,
+        "image",
+        [artifactId],
+        turnSettings,
+        undefined,
+        undefined,
+        workflowRevisionId,
+      );
     },
     onSuccess: () => void client.invalidateQueries({ queryKey: ["studio-session", sessionId] }),
   });
@@ -89,7 +107,8 @@ export function useStudioSession(sourceArtifactId: string | null, sourceChatId: 
       artifactId: string,
       mask?: StudioMaskUpload,
       settings?: Record<string, unknown>,
-    ) => apply.mutate({ instruction, artifactId, mask, settings }),
+      workflowRevisionId?: string,
+    ) => apply.mutate({ instruction, artifactId, mask, settings, workflowRevisionId }),
   };
 }
 
