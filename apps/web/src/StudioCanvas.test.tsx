@@ -10,6 +10,7 @@ import type { ImagePoint, PointerTool, ToolPreview } from "./studioTools";
 class SpyTool implements PointerTool {
   calls: Array<[string, ImagePoint]> = [];
   changed = true;
+  appliesWhileMoving = false;
 
   down(point: ImagePoint): void {
     this.calls.push(["down", point]);
@@ -36,7 +37,11 @@ class SpyTool implements PointerTool {
 const image = { width: 400, height: 200 } as ImageBitmap;
 
 describe("StudioCanvas", () => {
-  afterEach(cleanup);
+  afterEach(() => {
+    cleanup();
+    vi.restoreAllMocks();
+    vi.unstubAllGlobals();
+  });
 
   it("renders the three layers sized to the image", () => {
     const { container } = render(
@@ -249,4 +254,59 @@ describe("StudioCanvas", () => {
     expect(tool.calls.map(([kind]) => kind)).toEqual(["down", "cancel", "move"]);
   });
 
+
+  /** jsdom has neither a 2D context nor ImageData, so the tint is observed
+   * through the paint call rather than through pixels. */
+  function recordPaints() {
+    const painted: string[] = [];
+    const context = new Proxy(
+      { putImageData: () => painted.push("mask") },
+      {
+        get: (target: Record<string, unknown>, key: string) =>
+          key in target ? target[key] : () => undefined,
+        set: () => true,
+      },
+    );
+    vi.stubGlobal("ImageData", class {});
+    vi.spyOn(HTMLCanvasElement.prototype, "getContext").mockReturnValue(
+      context as unknown as CanvasRenderingContext2D,
+    );
+    return painted;
+  }
+
+  function strokeAcross(tool: SpyTool) {
+    const { container } = render(
+      <StudioCanvas image={image} mask={createMask(400, 200)} tool={tool} />,
+    );
+    const surface = container.querySelector(".studio-canvas")!;
+    return () => {
+      fireEvent.pointerDown(surface, { pointerType: "mouse", clientX: 10, clientY: 10, button: 0 });
+      fireEvent.pointerMove(surface, { pointerType: "mouse", clientX: 40, clientY: 30 });
+    };
+  }
+
+  it("paints the selection as the brush travels, not when it stops", () => {
+    // The defect: a brush writes straight into the raster and the version
+    // only bumps at stroke end, so the tint arrived after the pointer lifted
+    // and drawing felt like guessing.
+    const painted = recordPaints();
+    const tool = new SpyTool();
+    tool.appliesWhileMoving = true;
+    const stroke = strokeAcross(tool);
+    painted.length = 0;
+
+    stroke();
+
+    expect(painted.length).toBeGreaterThanOrEqual(2);
+  });
+
+  it("leaves the tint alone for a gesture that commits nothing until it closes", () => {
+    const painted = recordPaints();
+    const stroke = strokeAcross(new SpyTool());
+    painted.length = 0;
+
+    stroke();
+
+    expect(painted).toHaveLength(0);
+  });
 });
