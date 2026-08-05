@@ -19,6 +19,9 @@ from local_lm.preflight import (
     _automatic_selection,
     _automatic_vllm_selection,
     assess_catalog_install,
+    exact_civitai_file_selection,
+    safe_civitai_file_variants,
+    selected_catalog_file_metadata,
 )
 from local_lm.schemas import (
     CatalogDetail,
@@ -35,6 +38,188 @@ class Sibling:
         self.rfilename = name
         self.size = size
         self.lfs = {"sha256": sha256} if sha256 else None
+
+
+def _civitai_variant(
+    *,
+    file_id: str,
+    sha256: str,
+    filename: str = "duplicate.safetensors",
+    size: int = 12_000,
+    pickle_scan_result: str = "Success",
+) -> dict[str, object]:
+    return {
+        "filename": filename,
+        "size": size,
+        "sha256": sha256,
+        "source_file_id": file_id,
+        "pickle_scan_result": pickle_scan_result,
+        "virus_scan_result": "Success",
+    }
+
+
+def test_exact_civitai_file_selection_uses_the_immutable_id_not_the_display_name() -> None:
+    first = _civitai_variant(file_id="301", sha256="a" * 64)
+    second = _civitai_variant(file_id="302", sha256="b" * 64)
+
+    assert exact_civitai_file_selection([first, second], ["302"]) == [second]
+
+
+def test_safe_civitai_file_variants_offers_only_choices_the_resolver_accepts() -> None:
+    first = {
+        **_civitai_variant(file_id="301", sha256="a" * 64),
+        "source_file_precision": "fp8",
+    }
+    duplicate_record = dict(first)
+    second = {
+        **_civitai_variant(file_id="302", sha256="b" * 64, size=24_000),
+        "source_file_precision": "bf16",
+    }
+    unsafe = _civitai_variant(
+        file_id="303",
+        sha256="c" * 64,
+        pickle_scan_result="Danger",
+    )
+    other_name = _civitai_variant(
+        file_id="304",
+        sha256="d" * 64,
+        filename="other.safetensors",
+    )
+
+    assert safe_civitai_file_variants(
+        [second, duplicate_record, unsafe, other_name, first],
+        "duplicate.safetensors",
+    ) == [first, second]
+
+
+def test_safe_civitai_file_variants_refuses_a_contradictory_identity() -> None:
+    files = [
+        _civitai_variant(file_id="301", sha256="a" * 64),
+        _civitai_variant(
+            file_id="301",
+            sha256="b" * 64,
+            filename="different.safetensors",
+        ),
+    ]
+
+    with pytest.raises(ValueError, match="different artifacts"):
+        safe_civitai_file_variants(files, "duplicate.safetensors")
+
+
+def test_finalizer_metadata_keeps_the_exact_variant_instead_of_the_primary() -> None:
+    primary = _civitai_variant(file_id="301", sha256="a" * 64)
+    selected = _civitai_variant(file_id="302", sha256="b" * 64, size=24_000)
+
+    assert selected_catalog_file_metadata(
+        [primary, selected],
+        ["duplicate.safetensors"],
+        provider="civitai",
+        prefer_duplicate_variants=True,
+        selected_file_ids=["302"],
+    ) == [selected]
+
+
+def test_finalizer_metadata_refuses_an_exact_id_destination_mismatch() -> None:
+    selected = _civitai_variant(file_id="302", sha256="b" * 64)
+
+    with pytest.raises(ValueError, match="assessed destinations"):
+        selected_catalog_file_metadata(
+            [selected],
+            ["different.safetensors"],
+            provider="civitai",
+            prefer_duplicate_variants=True,
+            selected_file_ids=["302"],
+        )
+
+
+@pytest.mark.parametrize(
+    ("files", "selected_ids", "message"),
+    [
+        ([_civitai_variant(file_id="301", sha256="a" * 64)], ["latest"], "ID is invalid"),
+        ([_civitai_variant(file_id="301", sha256="a" * 64)], ["302"], "not part"),
+        ([_civitai_variant(file_id="301", sha256="a" * 64)], ["301", "301"], "twice"),
+        (
+            [
+                _civitai_variant(file_id="301", sha256="a" * 64),
+                _civitai_variant(file_id="302", sha256="b" * 64),
+            ],
+            ["301", "302"],
+            "overwrite",
+        ),
+        (
+            [
+                _civitai_variant(
+                    file_id="301",
+                    sha256="a" * 64,
+                    pickle_scan_result="Danger",
+                )
+            ],
+            ["301"],
+            "scan-cleared",
+        ),
+        (
+            [
+                _civitai_variant(file_id="301", sha256="a" * 64),
+                _civitai_variant(
+                    file_id="301",
+                    sha256="b" * 64,
+                    filename="different.safetensors",
+                ),
+            ],
+            ["301"],
+            "different artifacts",
+        ),
+    ],
+)
+def test_exact_civitai_file_selection_refuses_ambiguous_or_unsafe_identity(
+    files: list[dict[str, object]],
+    selected_ids: list[str],
+    message: str,
+) -> None:
+    with pytest.raises(ValueError, match=message):
+        exact_civitai_file_selection(files, selected_ids)
+
+
+def test_preflight_uses_the_exact_civitai_variant_through_every_file_lookup(
+    tmp_path: Path,
+) -> None:
+    first = _civitai_variant(file_id="301", sha256="a" * 64)
+    second = _civitai_variant(file_id="302", sha256="b" * 64, size=24_000)
+    detail = CatalogDetail(
+        model=CatalogModel(
+            provider="civitai",
+            remote_id="201",
+            name="Duplicate variants",
+            compatibility="supported",
+            required_runtime="comfyui",
+            content_rating="general",
+        ),
+        revision="201",
+        files=[first, second],
+    )
+    system = SystemInfo.model_construct(
+        memory_total_bytes=16 * 1024**3,
+        disk_free_bytes=100 * 1024**3,
+        devices=[],
+    )
+
+    result = assess_catalog_install(
+        detail,
+        CatalogPreflightRequest(
+            revision="201",
+            role="image",
+            engine="comfyui",
+            auxiliary_kind="lora",
+        ),
+        Settings(data_dir=tmp_path, civitai_token="configured"),
+        system,
+        selected_file_ids=["302"],
+    )
+
+    assert result.can_install is True
+    assert result.selected_files == ["duplicate.safetensors"]
+    assert result.expected_sha256 == {"duplicate.safetensors": "b" * 64}
+    assert result.download_bytes == 24_000
 
 
 def test_gguf_catalog_entry_is_likely_compatible() -> None:

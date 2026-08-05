@@ -95,6 +95,154 @@ def _safe_civitai_file(item: dict[str, Any]) -> bool:
     )
 
 
+class ExactCivitaiFileSelectionError(ValueError):
+    """An immutable provider file ID could not name one safe local artifact."""
+
+
+def _exact_civitai_files_by_id(
+    files: list[dict[str, Any]],
+) -> dict[str, dict[str, Any]]:
+    """Index immutable identities, refusing a contradictory provider record."""
+
+    by_id: dict[str, dict[str, Any]] = {}
+    for item in files:
+        source_file_id = str(item.get("source_file_id") or "")
+        if not source_file_id:
+            continue
+        previous = by_id.get(source_file_id)
+        if previous is not None and (
+            str(previous.get("filename") or "") != str(item.get("filename") or "")
+            or str(previous.get("sha256") or "").casefold()
+            != str(item.get("sha256") or "").casefold()
+            or previous.get("size") != item.get("size")
+        ):
+            raise ExactCivitaiFileSelectionError(
+                "the provider returned one file ID for different artifacts"
+            )
+        by_id[source_file_id] = item
+    return by_id
+
+
+def safe_civitai_file_variants(
+    files: list[dict[str, Any]],
+    filename: str,
+) -> list[dict[str, Any]]:
+    """Safe exact choices for one ambiguous provider destination.
+
+    The caller may render identity, size, and precision from these fresh rows,
+    but must submit only the immutable ID. Reusing the resolver's index and
+    safety predicate keeps the offered choices identical to what selection can
+    actually accept.
+    """
+
+    if not filename:
+        return []
+    candidates = [
+        item
+        for item in _exact_civitai_files_by_id(files).values()
+        if str(item.get("filename") or "") == filename and _safe_civitai_file(item)
+    ]
+    return sorted(candidates, key=_civitai_variant_rank)
+
+
+def selected_catalog_file_metadata(
+    files: list[dict[str, Any]],
+    selected_filenames: list[str],
+    *,
+    provider: str,
+    prefer_duplicate_variants: bool,
+    selected_file_ids: list[str] | None = None,
+    expected_sha256: dict[str, str] | None = None,
+) -> list[dict[str, Any]]:
+    """Fresh metadata rows that must feed the immutable install planner.
+
+    Preflight returns destination filenames for every provider, but a CivitAI
+    destination is not an identity when several variants share it. If exact IDs
+    were used, resolve them again against the same fresh detail and prove their
+    destinations still equal the assessed result. This prevents the finalizer
+    from silently falling back to the provider-primary variant by filename.
+    """
+
+    if selected_file_ids:
+        if provider != "civitai":
+            raise ExactCivitaiFileSelectionError(
+                "exact provider file variants are available only for CivitAI"
+            )
+        exact_files = exact_civitai_file_selection(files, selected_file_ids)
+        if [str(item.get("filename") or "") for item in exact_files] != selected_filenames:
+            raise ExactCivitaiFileSelectionError(
+                "the exact file variants do not match the assessed destinations"
+            )
+        return exact_files
+
+    indexed, _ambiguous = catalog_file_index(
+        files,
+        provider=provider,
+        prefer_duplicate_variants=prefer_duplicate_variants,
+    )
+    digests = expected_sha256 or {}
+    return [
+        indexed.get(
+            filename,
+            {
+                "filename": filename,
+                "size": None,
+                "sha256": digests.get(filename),
+            },
+        )
+        for filename in selected_filenames
+    ]
+
+
+def exact_civitai_file_selection(
+    files: list[dict[str, Any]],
+    selected_file_ids: list[str],
+) -> list[dict[str, Any]]:
+    """Resolve exact CivitAI IDs without trusting a client-supplied filename.
+
+    A CivitAI version can publish several different objects under one display
+    filename. The filename is therefore a destination, not an identity. IDs
+    are matched only against the freshly fetched version detail, while hashes,
+    sizes, scans, and destination names continue to come from that server-side
+    record.
+    """
+
+    if not selected_file_ids:
+        return []
+    if len(selected_file_ids) > 512:
+        raise ExactCivitaiFileSelectionError("too many exact file variants were selected")
+
+    by_id = _exact_civitai_files_by_id(files)
+
+    resolved: list[dict[str, Any]] = []
+    seen_ids: set[str] = set()
+    destinations: set[str] = set()
+    for source_file_id in selected_file_ids:
+        if not _CIVITAI_ID.fullmatch(source_file_id):
+            raise ExactCivitaiFileSelectionError("an exact file variant ID is invalid")
+        if source_file_id in seen_ids:
+            raise ExactCivitaiFileSelectionError("an exact file variant was selected twice")
+        seen_ids.add(source_file_id)
+        selected_item = by_id.get(source_file_id)
+        if selected_item is None:
+            raise ExactCivitaiFileSelectionError(
+                "an exact file variant is not part of this model version"
+            )
+        if not _safe_civitai_file(selected_item):
+            raise ExactCivitaiFileSelectionError(
+                "an exact file variant is not a scan-cleared, hash-pinned safetensors file"
+            )
+        destination = str(selected_item.get("filename") or "")
+        destination_key = destination.casefold()
+        if destination_key in destinations:
+            raise ExactCivitaiFileSelectionError(
+                "two exact file variants would overwrite the same destination"
+            )
+        destinations.add(destination_key)
+        resolved.append(selected_item)
+    return resolved
+
+
 def _civitai_variant_rank(item: dict[str, Any]) -> tuple[int, int, int, str, str]:
     size = item.get("size")
     provider_primary = str(item.get("source_file_type") or "").casefold() == "model"
@@ -212,6 +360,8 @@ def assess_catalog_install(
     request: CatalogPreflightRequest,
     settings: Settings,
     system: SystemInfo,
+    *,
+    selected_file_ids: list[str] | None = None,
 ) -> CatalogPreflight:
     resolved_revision = detail.revision
     provider = detail.model.provider or "huggingface"
@@ -224,9 +374,22 @@ def assess_catalog_install(
     selected = list(dict.fromkeys(requested_selected))
     checks: list[CatalogPreflightCheck] = []
     selection_error: str | None = None
+    exact_file_ids = list(selected_file_ids or [])
 
     normalized_requested = [name.casefold() for name in requested_selected]
-    if len(normalized_requested) != len(set(normalized_requested)):
+    if exact_file_ids and provider != "civitai":
+        selection_error = "Exact provider file variants are available only for CivitAI."
+    elif exact_file_ids and requested_selected:
+        selection_error = "Choose files by name or exact provider ID, not both."
+    elif exact_file_ids:
+        try:
+            exact_files = exact_civitai_file_selection(detail.files, exact_file_ids)
+        except ExactCivitaiFileSelectionError as exc:
+            selection_error = str(exc)
+        else:
+            selected = [str(item["filename"]) for item in exact_files]
+            files.update({str(item["filename"]): item for item in exact_files})
+    elif len(normalized_requested) != len(set(normalized_requested)):
         selection_error = (
             "The file selection contains duplicate paths. Run the install check again."
         )
