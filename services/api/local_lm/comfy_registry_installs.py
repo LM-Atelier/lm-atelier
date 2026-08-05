@@ -13,6 +13,8 @@ from sqlalchemy.orm import Session
 from .comfy_registry import ComfyNodeResolution
 from .comfy_registry_archives import (
     ComfyRegistryArchiveReport,
+    ComfyRegistryRuntimeFile,
+    parse_comfy_registry_runtime_files,
     verify_staged_comfy_registry_archive,
 )
 from .comfy_registry_dependencies import (
@@ -67,6 +69,13 @@ class ComfyRegistryLaunchContract:
     site_packages: tuple[Path, ...]
     node_types: tuple[str, ...]
     runtime_distributions: tuple[ComfyRegistryRuntimeDistribution, ...] = ()
+
+
+@dataclass(frozen=True)
+class _ActivationReview:
+    file_count: int
+    expanded_bytes: int
+    runtime_files: tuple[ComfyRegistryRuntimeFile, ...]
 
 
 def installed_comfy_registry_versions(session: Session) -> dict[str, set[str]]:
@@ -271,8 +280,9 @@ def _verified_comfy_registry_launch_contract(
             verify_staged_comfy_registry_archive(
                 folder,
                 expected_manifest_sha256=install.manifest_sha256,
-                expected_file_count=review["file_count"],
-                expected_expanded_bytes=review["expanded_bytes"],
+                expected_file_count=review.file_count,
+                expected_expanded_bytes=review.expanded_bytes,
+                runtime_files=review.runtime_files,
             )
         except ValueError as exc:
             raise ComfyRegistryInstallError("Registry node files failed verification") from exc
@@ -496,13 +506,18 @@ def _registry_node_path(root: Path, value: object) -> Path:
     return path
 
 
-def _activation_review(value: object) -> dict[str, int]:
+def _activation_review(value: object) -> _ActivationReview:
     if not isinstance(value, dict) or value.get("review_required") is not True:
         raise ComfyRegistryInstallError("Registry install review evidence is invalid")
-    return {
-        "file_count": _count(value.get("file_count"), "archive file count"),
-        "expanded_bytes": _count(value.get("expanded_bytes"), "archive expanded size"),
-    }
+    try:
+        runtime_files = parse_comfy_registry_runtime_files(value.get("runtime_files"))
+    except ValueError as exc:
+        raise ComfyRegistryInstallError("Registry install runtime evidence is invalid") from exc
+    return _ActivationReview(
+        _count(value.get("file_count"), "archive file count"),
+        _count(value.get("expanded_bytes"), "archive expanded size"),
+        runtime_files,
+    )
 
 
 def _node_types(value: object) -> tuple[str, ...]:
