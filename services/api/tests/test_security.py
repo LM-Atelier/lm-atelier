@@ -363,3 +363,43 @@ async def test_security_headers_block_remote_active_content_and_preserve_stricte
     assert response.headers["cross-origin-resource-policy"] == "same-origin"
     assert "camera=()" in response.headers["permissions-policy"]
     assert artifact_response.headers["content-security-policy"] == "sandbox; default-src 'none'"
+
+
+async def test_each_refusal_says_which_one_it_was(tmp_path) -> None:  # type: ignore[no-untyped-def]
+    """Three refusals a caller must tell apart to know what to do next.
+
+    An untrusted origin means the request came from somewhere it should not.
+    A missing session means authenticate. A failed CSRF check means the token
+    is stale and should be fetched again. All three were 401 or 403 with prose,
+    so a client could only match on wording the next improvement would break.
+
+    They are raised in middleware, which runs outside the app's exception
+    handlers, so the codes reach nobody unless the middleware carries them.
+    That is what this pins.
+    """
+    settings = Settings(data_dir=tmp_path / "codes", dev=False, port=12340)
+    app = create_app(settings)
+    async with app.router.lifespan_context(app):
+        transport = ASGITransport(app=app)
+        async with AsyncClient(transport=transport, base_url="http://127.0.0.1") as client:
+            no_session = await client.get("/api/projects")
+            assert no_session.status_code == 401
+            assert no_session.json()["code"] == "session-required"
+
+            session = await client.post("/api/session")
+            csrf = session.json()["csrf_token"]
+
+            no_csrf = await client.post("/api/projects", json={"name": "Denied"})
+            assert no_csrf.status_code == 403
+            assert no_csrf.json()["code"] == "csrf-invalid"
+
+            bad_origin = await client.post(
+                "/api/projects",
+                json={"name": "Denied"},
+                headers={"origin": "https://malicious.example", "x-local-lm-csrf": csrf},
+            )
+            assert bad_origin.status_code == 403
+            assert bad_origin.json()["code"] == "origin-untrusted"
+            # The prose is unchanged, so anything already matching on it keeps
+            # working; the code is a sibling rather than a replacement.
+            assert bad_origin.json()["detail"] == "untrusted browser origin"
