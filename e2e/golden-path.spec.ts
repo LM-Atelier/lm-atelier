@@ -143,7 +143,16 @@ test("persists a streamed text and contextual image golden path", async ({
     document.documentElement.focus();
   });
   await page.keyboard.press("Tab");
-  await expect(page.getByRole("link", { name: "Skip to main content" })).toBeFocused();
+  // Reported rather than assumed: two plausible explanations for this failing
+  // both turned out to be wrong, and the cheapest way to stop guessing is to
+  // make the failure say what actually holds focus.
+  const focused = await page.evaluate(() => {
+    const active = document.activeElement as HTMLElement | null;
+    if (!active) return "nothing";
+    const label = active.getAttribute("aria-label") ?? active.textContent?.trim().slice(0, 40);
+    return `${active.tagName}.${active.className} [${label ?? ""}]`;
+  });
+  expect(focused, "the first tab stop should be the skip link").toContain("skip-link");
   await page.keyboard.press("Enter");
   await expect(page.locator("#main-content")).toBeFocused();
 
