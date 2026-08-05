@@ -948,8 +948,6 @@ class ConversationOrchestrator:
         # the workflow is known and can say whether it accepts one at all.
         mask, tunables = split_mask_setting(request.settings)
         request_settings = validate_settings(tunables, request_fields)
-        if mask is not None:
-            request_settings[MASK_SETTING_KEY] = mask
         project = session.get(Project, chat.project_id) if chat.project_id else None
         default_preset = self._default_preset(session, plan.operation)
         project_preset = self._bound_preset(session, project, role)
@@ -981,6 +979,15 @@ class ConversationOrchestrator:
             ),
             turn_overrides=request_settings,
         )
+        # After resolution, not before. The hierarchy validates its turn layer
+        # a second time on the way through, so a selection put back into the
+        # request settings is refused there as unknown even though it was
+        # correctly split out a few lines above - which is what kept every
+        # masked edit failing with "unsupported settings: mask". A selection
+        # has no defaults to inherit and no scope to resolve, so it belongs
+        # to the resolved settings rather than to the layers being resolved.
+        if mask is not None:
+            effective_settings[MASK_SETTING_KEY] = mask
         lora_selection = None
         lora_setting_layers = (
             profile.load_settings_json if profile else {},
