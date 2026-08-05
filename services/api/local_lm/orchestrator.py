@@ -85,6 +85,7 @@ from .image_edit_verification import (
     image_edit_verification_job_id,
     parse_image_edit_verification_assessment,
 )
+from .media_references import exceeds_capacity
 from .model_planner import revision_accepts_install, revision_declares_a_model
 from .models import (
     Artifact,
@@ -147,7 +148,6 @@ from .studio_masks import (
     parse_mask_setting,
     split_mask_setting,
 )
-from .media_references import exceeds_capacity
 from .vision import PreparedVisualContext, VisionContextService, VisionInputError
 from .visual_prompt_compiler import (
     compilation_provenance,
@@ -1057,9 +1057,7 @@ class ConversationOrchestrator:
         # saying nothing. Silently using one of four is indistinguishable from
         # a bad model, which is the worst kind of failure to debug.
         if plan.operation != Operation.TEXT and workflow_revision:
-            over = exceeds_capacity(
-                workflow_revision.api_graph_json, len(resolved_input_ids)
-            )
+            over = exceeds_capacity(workflow_revision.api_graph_json, len(resolved_input_ids))
             if over is not None:
                 raise ValueError(
                     f"This workflow uses {over or 'no'} reference image"
