@@ -243,7 +243,9 @@ from .schemas import (
     SetupReadinessReport,
     SetupVerificationOut,
     StorageCleanupResult,
+    StudioCapabilityReport,
     StudioSessionCreate,
+    StudioToolCapability,
     SystemInfo,
     ToolCapabilityProbe,
     TrustDerivation,
@@ -311,6 +313,7 @@ from .setup_verification import (
     setup_verification_settings,
     verification_evidence_key,
 )
+from .studio_capabilities import tool_capabilities
 from .studio_sessions import (
     STUDIO_SCOPE,
     find_studio_session,
@@ -1539,6 +1542,32 @@ def _is_editable_image(artifact: Artifact) -> bool:
     if artifact.kind not in {ArtifactKind.IMAGE.value, ArtifactKind.INPUT.value}:
         return False
     return (artifact.media_type or "").casefold().startswith("image/")
+
+
+@router.get("/studio/capabilities", response_model=StudioCapabilityReport)
+async def studio_capabilities(
+    request: Request, session: ConversationSessionDep
+) -> StudioCapabilityReport:
+    """What the studio's tools can do on this machine, asked before the click.
+
+    A tool that needs a workflow nobody has installed is answered here rather
+    than at apply time, so a carefully drawn selection is never the thing that
+    discovers the gap.
+    """
+
+    orchestrator: ConversationOrchestrator = _services(request).orchestrator
+    schemas = orchestrator.installed_edit_input_schemas(session)
+    return StudioCapabilityReport(
+        tools=[
+            StudioToolCapability(
+                kind=capability.kind,
+                workflow_class=capability.workflow_class,
+                available=capability.available,
+                reason=capability.reason,
+            )
+            for capability in tool_capabilities(edit_input_schemas=schemas)
+        ]
+    )
 
 
 @router.post("/studio/sessions", response_model=ChatDetail)

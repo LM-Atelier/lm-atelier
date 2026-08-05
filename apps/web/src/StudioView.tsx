@@ -1,4 +1,6 @@
 import { useEffect, useMemo, useReducer, useState } from "react";
+import { useQuery } from "@tanstack/react-query";
+import { api } from "./api";
 import { StudioOpenImage } from "./StudioOpenImage";
 import { ErrorCallout } from "./ErrorCallout";
 import { StudioCanvas } from "./StudioCanvas";
@@ -41,6 +43,15 @@ export function StudioView({
     [tools.kind, tools.brushRadius, tools.mask],
   );
   const selectionCoverage = tools.mask ? coverage(tools.mask) : 0;
+  // Asked once per visit rather than per apply: installing a workflow is not
+  // something that happens while a picture is open.
+  const capabilities = useQuery({
+    queryKey: ["studio-capabilities"],
+    queryFn: api.studioCapabilities,
+    staleTime: 60_000,
+  });
+  const activeTool = capabilities.data?.tools.find((tool) => tool.kind === tools.kind);
+  const unavailable = activeTool && !activeTool.available ? activeTool.reason : null;
 
   // Derived, never synced: with nothing chosen the studio shows the newest
   // result, so a finished apply lands on the canvas without an effect.
@@ -98,6 +109,7 @@ export function StudioView({
           canUndo={tools.history.canUndo}
           canRedo={tools.history.canRedo}
           disabled={!bitmap}
+          capabilities={capabilities.data?.tools ?? []}
         />
         <div className="studio-stage">
           {bitmap ? (
@@ -172,9 +184,16 @@ export function StudioView({
               onChange={(event) => setInstruction(event.target.value)}
             />
           </label>
+          {unavailable && (
+            // Beside the button that would fail, and named by the tools that
+            // cannot run, so the sentence arrives before the drawing does.
+            <p className="studio-tool-guidance" id="studio-tool-guidance" role="status">
+              {unavailable}
+            </p>
+          )}
           <button
             className="primary"
-            disabled={!instruction.trim() || busy || !current}
+            disabled={!instruction.trim() || busy || !current || Boolean(unavailable)}
             onClick={() => {
               if (!current) return;
               const selection = tools.kind !== "instruct" && tools.mask && !isEmpty(tools.mask)
