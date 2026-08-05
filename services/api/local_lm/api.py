@@ -3295,12 +3295,22 @@ async def resolve_catalog_preflight(
                 result.selected_files,
                 role=payload.role,
             )
-        if source == "civitai" and payload.auxiliary_kind == "lora":
+        if source == "civitai" and "lora" in {
+            payload.auxiliary_kind,
+            payload.workflow_reference_kind,
+        }:
             # CivitAI file-prefix inspection is deliberately unavailable, so a
             # bare safetensors would inspect as "checkpoint" and block as a
             # kind mismatch. The provider's own typed declaration substitutes
             # for planning; the manager's mandatory staged-byte LoRA
             # inspection still gates activation after download.
+            #
+            # Either ownership field, matching the role selection above. A
+            # workflow-owned LoRA sends `workflow_reference_kind` and must not
+            # also send `auxiliary_kind` - the planner refuses that as
+            # conflicting ownership - so naming only the auxiliary field made
+            # every workflow-owned CivitAI LoRA fail as a kind mismatch, for
+            # having declared its ownership correctly.
             declared_loras = {
                 str(item.get("filename") or "")
                 for item in resolved_detail.files
