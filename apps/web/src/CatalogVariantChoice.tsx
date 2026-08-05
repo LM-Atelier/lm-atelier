@@ -45,6 +45,14 @@ export function CatalogVariantChoice({
             >
               {variant.precision ?? "Unlabelled"}
               {gigabytes(variant.size_bytes) ? ` · ${gigabytes(variant.size_bytes)}` : ""}
+              {" · "}
+              {/* Publishers ship variants that differ in nothing a person can
+                  see: two rows can share a precision and a byte count exactly.
+                  The id is the only thing guaranteed to tell them apart, so
+                  every label carries it rather than only the colliding ones -
+                  a label that changes shape when a duplicate appears is a
+                  label nobody can learn. */}
+              #{variant.source_file_id.slice(-6)}
             </button>
           </li>
         ))}

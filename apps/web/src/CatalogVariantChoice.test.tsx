@@ -49,6 +49,30 @@ describe("CatalogVariantChoice", () => {
       />,
     );
 
-    expect(screen.getByRole("button", { name: "Unlabelled" })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: /^Unlabelled · #/ })).toBeInTheDocument();
+  });
+
+  it("tells apart two variants that differ in nothing a person can see", () => {
+    // The live case: two rows sharing a precision and an exact byte count.
+    // Without the identity in the label both buttons carry the same name and
+    // neither can be pointed at.
+    const onChoose = vi.fn();
+    render(
+      <CatalogVariantChoice
+        filename="lustify.safetensors"
+        variants={[
+          variant("2996235", "bf16", 13_148_974_712),
+          variant("2997070", "bf16", 13_148_974_712),
+        ]}
+        onChoose={onChoose}
+      />,
+    );
+
+    const names = screen.getAllByRole("button").map((button) => button.textContent);
+    expect(new Set(names).size).toBe(2);
+
+    fireEvent.click(screen.getByRole("button", { name: /997070/ }));
+
+    expect(onChoose).toHaveBeenCalledWith("2997070");
   });
 });

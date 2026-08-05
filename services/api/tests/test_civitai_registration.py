@@ -665,6 +665,7 @@ async def test_an_ambiguous_filename_comes_back_with_its_choices(
     )
 
     assert response.status_code == 200, response.text
+    assert response.json()["can_install"] is False
     offered = response.json()["file_variants"]["lustify.safetensors"]
     assert [item["source_file_id"] for item in offered] == ["301", "302"]
     assert [item["precision"] for item in offered] == ["fp16", "fp8"]
@@ -705,3 +706,126 @@ async def test_a_version_with_one_file_per_name_offers_no_choices(
 
     assert response.status_code == 200
     assert response.json()["file_variants"] == {}
+
+
+async def test_an_id_only_retry_is_accepted_by_the_workflow_owned_path(
+    client: AsyncClient,
+    app: FastAPI,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The two-step exchange the chooser actually performs.
+
+    Listing the choices proves nothing about answering with one. The retry
+    names an exact provider id and no filename at all - the two forms are
+    mutually exclusive - and it travels the workflow-owned path, where an
+    earlier guard counted filenames and refused a request that correctly
+    supplied none.
+
+    Deliberately not asserted here: that the plan binds the chosen id's exact
+    metadata. It does not yet. Asking for the first variant still returns the
+    second, because nothing resolves an id to its row - the index simply ranks.
+    An assertion on the artifact's identity would pass today for the wrong
+    reason and read as proof of a binding that does not exist. It belongs with
+    the resolution work, not here.
+    """
+
+    def _file(file_id: str, precision: str, size: int) -> dict[str, Any]:
+        return {
+            "filename": "lustify.safetensors",
+            "size": size,
+            "sha256": file_id[0] * 64,
+            "source_file_id": file_id,
+            "source_version_id": "201",
+            "format": "SafeTensor",
+            "pickle_scan_result": "Success",
+            "virus_scan_result": "Success",
+            "metadata": {
+                "provider": "civitai",
+                "source_model_id": "101",
+                "source_version_id": "201",
+                "model_type": "LORA",
+                "precision": precision,
+            },
+        }
+
+    detail = _lora_detail()
+    detail["files"] = [_file("301", "fp16", 2048), _file("302", "fp8", 1024)]
+
+    async def canned_inspect(
+        self: CivitaiCatalog, item_id: str, revision: str = "main", role: str | None = None
+    ) -> dict[str, Any]:
+        return detail
+
+    monkeypatch.setattr(CivitaiCatalog, "inspect", canned_inspect)
+    monkeypatch.setattr(app.state.services.settings, "civitai_token", "vaulted-token")
+
+    listed = await client.post(
+        "/api/catalog/preflight",
+        params={"source": "civitai", "id": "201"},
+        json={
+            "revision": "201",
+            "role": "image",
+            "engine": "comfyui",
+            "selected_files": ["lustify.safetensors"],
+            "workflow_reference_kind": "lora",
+        },
+    )
+    assert listed.status_code == 200, listed.text
+    assert [
+        item["source_file_id"] for item in listed.json()["file_variants"]["lustify.safetensors"]
+    ] == [
+        "301",
+        "302",
+    ]
+
+    chosen = await client.post(
+        "/api/catalog/preflight",
+        params={"source": "civitai", "id": "201"},
+        json={
+            "revision": "201",
+            "role": "image",
+            "engine": "comfyui",
+            "selected_files": [],
+            "selected_file_ids": ["302"],
+            "workflow_reference_kind": "lora",
+        },
+    )
+
+    # What this half guarantees: the answer is accepted. An id-only retry
+    # reaches assessment and produces a plan, where before it was refused by a
+    # guard that counted filenames and found none.
+    assert chosen.status_code == 200, chosen.text
+    assert chosen.json()["install_plan"] is not None
+
+
+async def test_naming_a_file_both_ways_is_refused(
+    client: AsyncClient,
+    app: FastAPI,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """One identity in one form; naming it twice is a request nobody meant."""
+    detail = _lora_detail()
+
+    async def canned_inspect(
+        self: CivitaiCatalog, item_id: str, revision: str = "main", role: str | None = None
+    ) -> dict[str, Any]:
+        return detail
+
+    monkeypatch.setattr(CivitaiCatalog, "inspect", canned_inspect)
+    monkeypatch.setattr(app.state.services.settings, "civitai_token", "vaulted-token")
+
+    response = await client.post(
+        "/api/catalog/preflight",
+        params={"source": "civitai", "id": "201"},
+        json={
+            "revision": "201",
+            "role": "image",
+            "engine": "comfyui",
+            "selected_files": ["portrait.safetensors"],
+            "selected_file_ids": ["301"],
+            "workflow_reference_kind": "lora",
+        },
+    )
+
+    assert response.status_code == 422
+    assert response.json()["code"] == "workflow-asset-file-not-exact"

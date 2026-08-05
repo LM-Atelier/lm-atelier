@@ -3495,12 +3495,18 @@ async def resolve_catalog_preflight(
         # repository's official four-file bundle instead: a diffusion model, an
         # unrelated LoRA, the encoder actually wanted, and a VAE already on
         # disk, together over 19GB.
-        if len(payload.selected_files) != 1:
+        # One identity, in exactly one form. A retry that answers an ambiguous
+        # filename supplies the exact provider id and no filename at all, so
+        # counting filenames alone refused the very request the refusal asked
+        # for.
+        named = len(payload.selected_files) + len(payload.selected_file_ids)
+        if named != 1:
             raise api_error(
                 422,
                 "workflow-asset-file-not-exact",
-                "A workflow asset install must name exactly one file. "
-                "Run the install check again with the exact file the workflow needs.",
+                "A workflow asset install must name exactly one file, by name or by "
+                "exact provider id. Run the install check again with the exact file "
+                "the workflow needs.",
             )
         return await finalize(
             assess_catalog_install(detail, payload, services.settings, system),
