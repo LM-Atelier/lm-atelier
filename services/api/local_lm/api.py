@@ -3212,16 +3212,23 @@ async def resolve_catalog_preflight(
         ) from exc
     system = collect_system_info(services.settings)
 
-    def assess(target: CatalogDetail) -> CatalogPreflight:
+    def assess(
+        target: CatalogDetail, request: CatalogPreflightRequest | None = None
+    ) -> CatalogPreflight:
         """Assess with the request's exact ids, every time.
 
-        A wrapper rather than the same argument at six call sites: one that
+        A wrapper rather than the same argument at every call site: one that
         forgets it silently plans the provider's primary variant, which looks
         exactly like a successful install of something else.
+
+        A caller that rewrote the request - to pin a revision, or to substitute
+        template-selected filenames - passes its own version, and the ids ride
+        along with it. Dropping them there would be the same silent fallback in
+        a place nobody was looking.
         """
         return assess_catalog_install(
             target,
-            payload,
+            request or payload,
             services.settings,
             system,
             selected_file_ids=payload.selected_file_ids,
@@ -3277,7 +3284,10 @@ async def resolve_catalog_preflight(
                     )
                     for item in safe_civitai_file_variants(resolved_detail.files, filename)
                 ]
-                for filename in sorted(ambiguous_files)
+                # Only names this request asked for. A version can publish
+                # duplicate attachments nobody selected, and offering a choice
+                # about those turns an install that succeeded into a question.
+                for filename in sorted(ambiguous_files & set(payload.selected_files))
             }
             if source == "civitai" and not payload.selected_file_ids
             else {}
@@ -3378,11 +3388,6 @@ async def resolve_catalog_preflight(
                         for component in inspection.components
                     ),
                 )
-        files, _ambiguous_files = catalog_file_index(
-            resolved_detail.files,
-            provider=source,
-            prefer_duplicate_variants=not payload.selected_files,
-        )
         # The chosen row, not whichever row shares its destination. A filename
         # index re-resolves an answered choice back to the provider's primary
         # variant, which is the whole failure the exact id exists to prevent.
@@ -3558,12 +3563,7 @@ async def resolve_catalog_preflight(
             )
     if not candidates:
         resolved_payload = payload.model_copy(update={"revision": detail.revision})
-        result = assess_catalog_install(
-            detail,
-            resolved_payload,
-            services.settings,
-            system,
-        )
+        result = assess(detail, resolved_payload)
         adaptive = registry.adaptive_checkpoint(
             detail.model.remote_id,
             detail.revision,
@@ -3735,12 +3735,18 @@ async def resolve_catalog_preflight(
             "selected_files": template.selected_files,
         }
     )
-    result = assess_catalog_install(
-        resolved_detail,
-        resolved_payload,
-        services.settings,
-        system,
-    )
+    if payload.selected_file_ids:
+        # The template chose the files here, so an exact id was answering a
+        # question this path never asked. Refused rather than dropped: silently
+        # ignoring it would install the template's bundle while the caller
+        # believed it had named one exact variant.
+        raise api_error(
+            422,
+            "catalog-file-variant-not-applicable",
+            "This install resolves its files from a workflow template, so it cannot "
+            "also name an exact provider file. Run the install check again without one.",
+        )
+    result = assess(resolved_detail, resolved_payload)
     checks = [
         *[
             (

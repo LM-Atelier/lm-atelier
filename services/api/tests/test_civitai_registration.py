@@ -887,3 +887,62 @@ async def test_an_unsafe_variant_is_never_offered_as_a_choice(
     assert response.status_code == 200, response.text
     offered = response.json()["file_variants"]["lustify.safetensors"]
     assert sorted(item["source_file_id"] for item in offered) == ["301", "302"]
+
+
+async def test_the_repository_path_honors_an_exact_id_too(
+    client: AsyncClient,
+    app: FastAPI,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Every assessment path carries the ids, not only the workflow-owned one.
+
+    This is the branch that resolves without a workflow template. It used to
+    call the assessor directly and would have dropped the id silently, which
+    looks exactly like a successful install of the provider's primary variant.
+    """
+
+    def _file(file_id: str, size: int) -> dict[str, Any]:
+        return {
+            "filename": "lustify.safetensors",
+            "size": size,
+            "sha256": file_id[0] * 64,
+            "source_file_id": file_id,
+            "source_version_id": "201",
+            "format": "SafeTensor",
+            "pickle_scan_result": "Success",
+            "virus_scan_result": "Success",
+            "source_file_precision": "fp16",
+            "metadata": {"provider": "civitai", "source_version_id": "201"},
+        }
+
+    detail = _lora_detail()
+    detail["files"] = [_file("301", 2048), _file("302", 1024)]
+
+    async def canned_inspect(
+        self: CivitaiCatalog, item_id: str, revision: str = "main", role: str | None = None
+    ) -> dict[str, Any]:
+        return detail
+
+    monkeypatch.setattr(CivitaiCatalog, "inspect", canned_inspect)
+    monkeypatch.setattr(app.state.services.settings, "civitai_token", "vaulted-token")
+
+    response = await client.post(
+        "/api/catalog/preflight",
+        params={"source": "civitai", "id": "201"},
+        json={
+            "revision": "201",
+            "role": "image",
+            "engine": "comfyui",
+            "selected_files": [],
+            # The row ranking would not have chosen.
+            "selected_file_ids": ["301"],
+            "auxiliary_kind": "lora",
+        },
+    )
+
+    assert response.status_code == 200, response.text
+    plan = response.json()["install_plan"]
+    assert plan is not None
+    (artifact,) = plan["artifacts_json"]
+    assert artifact["source_file_id"] == "301"
+    assert artifact["size_bytes"] == 2048
