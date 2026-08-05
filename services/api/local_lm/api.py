@@ -6722,6 +6722,46 @@ def _analyzed_package_node_types(
     return _prepared_node_types(list(requirement.node_types))
 
 
+def _authorized_workflow_context(
+    session: Session, payload: WorkflowPackagePrepareRequest
+) -> tuple[str, tuple[str, ...]] | None:
+    """The revision an omission candidate would be about, and its whole node set.
+
+    Read from the stored graph rather than the submitted one. Re-analyzing what
+    a caller sends proves that graph is internally consistent; it does not bind
+    it to anything this machine saved, and a proof about a graph nobody stored
+    is a proof about nothing.
+
+    A submitted graph that disagrees with the stored one is refused rather than
+    reconciled: one of them is not the workflow, and guessing which would let a
+    caller choose the subject of its own proof.
+    """
+    if not payload.workflow_revision_id:
+        return None
+    revision = session.get(WorkflowRevision, payload.workflow_revision_id)
+    if not revision:
+        raise api_error(404, "workflow-revision-not-found", "That workflow revision is unknown.")
+    try:
+        analysis = analyze_comfyui_workflow_package(revision.ui_graph_json)
+    except WorkflowPackageError as exc:
+        raise api_error(422, exc.code, str(exc)) from exc
+    if payload.ui_graph:
+        try:
+            submitted = analyze_comfyui_workflow_package(payload.ui_graph)
+        except WorkflowPackageError as exc:
+            raise api_error(422, exc.code, str(exc)) from exc
+        if set(submitted.required_node_types) != set(analysis.required_node_types):
+            raise api_error(
+                422,
+                "workflow-graph-mismatch",
+                "The submitted workflow does not match the stored revision it names.",
+            )
+    # The analyzer's complete set, not the selected package's declared subset:
+    # the proof is that the workflow runs, and every type it needs is part of
+    # that whether or not this package supplies it.
+    return revision.id, tuple(sorted(set(analysis.required_node_types)))
+
+
 async def _run_workflow_package_preparation(
     services: Services,
     job_id: str,
@@ -6729,6 +6769,7 @@ async def _run_workflow_package_preparation(
     version: str,
     node_types: tuple[str, ...],
     renew_install_id: str | None = None,
+    authorized_workflow: tuple[str, tuple[str, ...]] | None = None,
 ) -> None:
     """One durable preparation job: lease held, worker state told truthfully."""
 
@@ -6767,6 +6808,7 @@ async def _run_workflow_package_preparation(
                 wheel_downloader=ComfyRegistryWheelDownloader(),
                 phase=report,
                 renew_install_id=renew_install_id,
+                authorized_workflow=authorized_workflow,
             )
             with SessionLocal() as session:
                 job = session.get(Job, job_id)
@@ -6824,12 +6866,19 @@ def _queue_registry_preparation(
     version: str,
     node_types: tuple[str, ...],
     renew_install_id: str | None = None,
+    authorized_workflow: tuple[str, tuple[str, ...]] | None = None,
 ) -> Job:
     payload: dict[str, Any] = {
         "package_id": package_id,
         "version": version,
         "node_types": list(node_types),
     }
+    if authorized_workflow is not None:
+        revision_id, required_node_types = authorized_workflow
+        payload["authorized_workflow"] = {
+            "workflow_revision_id": revision_id,
+            "required_node_types": list(required_node_types),
+        }
     if renew_install_id is not None:
         payload["renew_install_id"] = renew_install_id
     job = Job(
@@ -6848,6 +6897,7 @@ def _queue_registry_preparation(
             version,
             node_types,
             renew_install_id,
+            authorized_workflow,
         ),
         name=f"registry-prepare-{job.id}",
     )
@@ -6870,6 +6920,9 @@ async def prepare_workflow_package_endpoint(
     # Re-analyze the source graph before judging the machine. The package name,
     # version, and node closure have to agree independently of browser state.
     node_types = _analyzed_package_node_types(payload.ui_graph, payload.package_id, payload.version)
+    # Resolved before queueing so an unknown or mismatched revision is a typed
+    # refusal rather than a job that fails on its first step.
+    authorized = _authorized_workflow_context(session, payload)
     # Then refuse when the machine cannot prepare at all - a job that must fail
     # on its first step is a worse answer than a typed 422.
     try:
@@ -6882,6 +6935,7 @@ async def prepare_workflow_package_endpoint(
         package_id=payload.package_id,
         version=payload.version,
         node_types=node_types,
+        authorized_workflow=authorized,
     )
 
 

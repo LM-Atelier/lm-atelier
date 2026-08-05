@@ -28,6 +28,7 @@ says which of those three situations the package is in.
 from __future__ import annotations
 
 import re
+from collections.abc import Sequence
 from dataclasses import dataclass
 from urllib.parse import urlsplit
 
@@ -107,3 +108,32 @@ def source_refusal(source: SourceDependency) -> tuple[str, str]:
         "Installing it would run a build backend that has not been reviewed, so it is "
         "refused until that source can be resolved to a reviewed artifact.",
     )
+
+
+def partition_unpinned_sources(
+    declarations: Sequence[str], *, authorized: bool
+) -> tuple[tuple[str, ...], tuple[str, ...]]:
+    """Split declarations into what can be planned and what may be omitted.
+
+    Only an unpinned dependency on an allowed host is ever set aside, and only
+    under an authorized workflow: without one there is nothing an omission
+    could later be proven against, so the ordinary refusal stands and the
+    planner sees the declaration unchanged.
+
+    A pinned source is never omitted. It names an immutable object and its road
+    is resolution, not omission - setting it aside would quietly skip a
+    dependency that could have been installed exactly.
+    """
+    if not authorized:
+        return tuple(declarations), ()
+    installable: list[str] = []
+    omitted: list[str] = []
+    for declaration in declarations:
+        line = declaration.strip()
+        _, _, url = line.partition("@")
+        source = classify_source_url(url.strip()) if url.strip() else classify_source_url(line)
+        if source.repository is not None and not source.pinned:
+            omitted.append(declaration)
+        else:
+            installable.append(declaration)
+    return tuple(installable), tuple(omitted)

@@ -7,6 +7,7 @@ import pytest
 from local_lm.package_sources import (
     MAX_SOURCE_URL_CHARACTERS,
     classify_source_url,
+    partition_unpinned_sources,
     source_refusal,
 )
 
@@ -90,3 +91,42 @@ def test_a_url_that_was_never_allowed_keeps_the_original_refusal() -> None:
     code, _ = source_refusal(classify_source_url("file:///tmp/example.whl"))
 
     assert code == "direct_dependency_url"
+
+
+def test_nothing_is_set_aside_without_an_authorized_workflow() -> None:
+    """With no workflow to prove it against, the ordinary refusal stands."""
+    declarations = ("example @ git+https://github.com/owner/repo", "requests>=2")
+
+    installable, omitted = partition_unpinned_sources(declarations, authorized=False)
+
+    assert installable == declarations
+    assert omitted == ()
+
+
+def test_only_the_unpinned_allowed_host_declaration_is_set_aside() -> None:
+    declarations = (
+        "example @ git+https://github.com/owner/repo",
+        "pinned @ git+https://github.com/owner/other@" + "a" * 40,
+        "elsewhere @ https://example.com/thing.whl",
+        "requests>=2",
+    )
+
+    installable, omitted = partition_unpinned_sources(declarations, authorized=True)
+
+    # A pinned source names an immutable object; its road is resolution, not
+    # omission, and setting it aside would skip something installable exactly.
+    assert omitted == ("example @ git+https://github.com/owner/repo",)
+    assert installable == (
+        "pinned @ git+https://github.com/owner/other@" + "a" * 40,
+        "elsewhere @ https://example.com/thing.whl",
+        "requests>=2",
+    )
+
+
+def test_a_bare_url_declaration_is_read_the_same_way() -> None:
+    installable, omitted = partition_unpinned_sources(
+        ("git+https://github.com/owner/repo",), authorized=True
+    )
+
+    assert omitted == ("git+https://github.com/owner/repo",)
+    assert installable == ()
