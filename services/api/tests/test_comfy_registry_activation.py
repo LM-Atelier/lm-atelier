@@ -19,6 +19,7 @@ from local_lm.comfy_registry_activation import (
 from local_lm.comfy_registry_installs import ComfyRegistryLaunchContract
 from local_lm.db import Base
 from local_lm.models import ComfyRegistryInstall
+from local_lm.source_omission_proof import OmissionRequirement
 
 
 @pytest.fixture
@@ -450,3 +451,149 @@ async def test_worker_must_be_stopped_before_install_lookup(
             )
 
     assert raised.value.code == "media_worker_running"
+
+
+def _omission(install_id: str) -> OmissionRequirement:
+    return OmissionRequirement(
+        install_id=install_id,
+        manifest_sha256="a" * 64,
+        omitted_declarations=("example @ git+https://github.com/owner/repo",),
+        workflow_revision_id="revision-1",
+        required_node_types=("ExampleNode",),
+    )
+
+
+async def test_a_trial_activation_that_loads_the_required_nodes_records_its_proof(
+    session: Session,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    install_id = _install(session, trusted=True)
+    monkeypatch.setattr(
+        activation_module,
+        "trusted_comfy_registry_launch_contract",
+        lambda current, **_kwargs: _verified_contract(current, install_id),
+    )
+
+    async def start_media() -> object:
+        return object()
+
+    async def read_inventory() -> frozenset[str]:
+        return frozenset({"ExampleNode", "SaveImage"})
+
+    await activate_comfy_registry_install(
+        session,
+        install_id=install_id,
+        custom_node_root=tmp_path,
+        environment_root=tmp_path,
+        media_worker_stopped=True,
+        start_media=start_media,
+        omission=_omission(install_id),
+        read_node_inventory=read_inventory,
+    )
+
+    stored = session.get(ComfyRegistryInstall, install_id)
+    assert stored is not None and stored.active is True
+    assert stored.review_json["source_omission_proof"]["required_node_types"] == ["ExampleNode"]
+    assert len(stored.review_json["source_omission_digest"]) == 64
+
+
+async def test_a_started_runtime_missing_a_required_node_is_rolled_back(
+    session: Session,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A service that merely starts is not proof, and must not be left running."""
+    install_id = _install(session, trusted=True)
+    monkeypatch.setattr(
+        activation_module,
+        "trusted_comfy_registry_launch_contract",
+        lambda current, **_kwargs: _verified_contract(current, install_id),
+    )
+    starts = 0
+
+    async def start_media() -> object:
+        nonlocal starts
+        starts += 1
+        return object()
+
+    async def read_inventory() -> frozenset[str]:
+        return frozenset({"SaveImage"})
+
+    with pytest.raises(ComfyRegistryActivationError) as raised:
+        await activate_comfy_registry_install(
+            session,
+            install_id=install_id,
+            custom_node_root=tmp_path,
+            environment_root=tmp_path,
+            media_worker_stopped=True,
+            start_media=start_media,
+            omission=_omission(install_id),
+            read_node_inventory=read_inventory,
+        )
+
+    assert raised.value.code == "omission_required_nodes_missing"
+    stored = session.get(ComfyRegistryInstall, install_id)
+    assert stored is not None and stored.active is False
+    # Started for the trial, then started again without the package.
+    assert starts == 2
+
+
+async def test_a_trial_with_no_way_to_read_the_inventory_refuses_and_restores(
+    session: Session,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    install_id = _install(session, trusted=True)
+    monkeypatch.setattr(
+        activation_module,
+        "trusted_comfy_registry_launch_contract",
+        lambda current, **_kwargs: _verified_contract(current, install_id),
+    )
+
+    async def start_media() -> object:
+        return object()
+
+    with pytest.raises(ComfyRegistryActivationError) as raised:
+        await activate_comfy_registry_install(
+            session,
+            install_id=install_id,
+            custom_node_root=tmp_path,
+            environment_root=tmp_path,
+            media_worker_stopped=True,
+            start_media=start_media,
+            omission=_omission(install_id),
+        )
+
+    assert raised.value.code == "omission_unverifiable"
+    stored = session.get(ComfyRegistryInstall, install_id)
+    assert stored is not None and stored.active is False
+
+
+async def test_an_ordinary_activation_records_no_proof_at_all(
+    session: Session,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    install_id = _install(session, trusted=True)
+    monkeypatch.setattr(
+        activation_module,
+        "trusted_comfy_registry_launch_contract",
+        lambda current, **_kwargs: _verified_contract(current, install_id),
+    )
+
+    async def start_media() -> object:
+        return object()
+
+    await activate_comfy_registry_install(
+        session,
+        install_id=install_id,
+        custom_node_root=tmp_path,
+        environment_root=tmp_path,
+        media_worker_stopped=True,
+        start_media=start_media,
+    )
+
+    stored = session.get(ComfyRegistryInstall, install_id)
+    assert stored is not None
+    assert "source_omission_proof" not in stored.review_json
