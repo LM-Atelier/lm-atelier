@@ -107,3 +107,6 @@ else
     git log --check --format= -1 HEAD --
 fi
 echo "All LM Atelier local verification gates passed."
+# Named because this gate discovers and typechecks the browser suite without
+# running it, which reads as coverage.
+echo "Not run here: the browser golden path. Use 'npm run e2e'; CI runs it on Ubuntu."
