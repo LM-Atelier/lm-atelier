@@ -417,9 +417,9 @@ async def _engine_role_fields(
             allow_inactive=allow_inactive,
         )
     except EngineNotConfiguredError as exc:
-        raise HTTPException(409, str(exc)) from exc
+        raise api_error(409, "engine-not-configured", str(exc)) from exc
     except EngineSchemaUnavailableError as exc:
-        raise HTTPException(503, str(exc)) from exc
+        raise api_error(503, "engine-schema-unavailable", str(exc)) from exc
 
 
 @router.post("/session")
@@ -466,7 +466,7 @@ def _provider(value: str) -> CredentialProvider:
     try:
         return credential_provider(value)
     except ValueError as exc:
-        raise HTTPException(404, str(exc)) from exc
+        raise api_error(404, "credential-provider-unknown", str(exc)) from exc
 
 
 def _credential_status(provider: CredentialProvider, request: Request) -> CredentialStatus:
@@ -510,9 +510,9 @@ async def set_credential(
     try:
         services.credentials.set_token(payload.token, selected)
     except ValueError as exc:
-        raise HTTPException(409, str(exc)) from exc
+        raise api_error(409, "credential-rejected", str(exc)) from exc
     except CredentialVaultUnavailable as exc:
-        raise HTTPException(503, str(exc)) from exc
+        raise api_error(503, "credential-vault-unavailable", str(exc)) from exc
     _refresh_credential_clients(services, selected, services.credentials.token(selected))
     return _credential_status(selected, request)
 
@@ -524,9 +524,9 @@ async def delete_credential(provider: str, request: Request) -> CredentialStatus
     try:
         services.credentials.delete_token(selected)
     except ValueError as exc:
-        raise HTTPException(409, str(exc)) from exc
+        raise api_error(409, "credential-rejected", str(exc)) from exc
     except CredentialVaultUnavailable as exc:
-        raise HTTPException(503, str(exc)) from exc
+        raise api_error(503, "credential-vault-unavailable", str(exc)) from exc
     _refresh_credential_clients(services, selected, None)
     return _credential_status(selected, request)
 
@@ -580,9 +580,9 @@ async def verify_backup(name: str, request: Request) -> BackupInfo:
     try:
         return await asyncio.to_thread(_services(request).backups.verify, name)
     except FileNotFoundError as exc:
-        raise HTTPException(404, "backup not found") from exc
+        raise api_error(404, "backup-not-found", "That backup no longer exists.") from exc
     except ValueError as exc:
-        raise HTTPException(422, str(exc)) from exc
+        raise api_error(422, "backup-invalid", str(exc)) from exc
 
 
 @router.post("/backups/{name}/restore", response_model=BackupInfo)
@@ -590,9 +590,9 @@ async def restore_backup(name: str, request: Request) -> BackupInfo:
     try:
         return await asyncio.to_thread(_services(request).backups.request_restore, name)
     except FileNotFoundError as exc:
-        raise HTTPException(404, "backup not found") from exc
+        raise api_error(404, "backup-not-found", "That backup no longer exists.") from exc
     except ValueError as exc:
-        raise HTTPException(422, str(exc)) from exc
+        raise api_error(422, "backup-invalid", str(exc)) from exc
 
 
 @router.delete("/backups/{name}", status_code=204)
@@ -600,9 +600,9 @@ async def delete_backup(name: str, request: Request) -> Response:
     try:
         await asyncio.to_thread(_services(request).backups.delete, name)
     except FileNotFoundError as exc:
-        raise HTTPException(404, "backup not found") from exc
+        raise api_error(404, "backup-not-found", "That backup no longer exists.") from exc
     except ValueError as exc:
-        raise HTTPException(422, str(exc)) from exc
+        raise api_error(422, "backup-invalid", str(exc)) from exc
     return Response(status_code=204)
 
 
