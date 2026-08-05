@@ -16,6 +16,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any
 
+from .outpaint_workflows import workflow_declares_outpaint
 from .studio_masks import workflow_accepts_mask
 from .upscale_workflows import workflow_declares_upscale
 
@@ -28,12 +29,14 @@ TOOL_WORKFLOW_CLASSES: dict[str, str] = {
     "rect": "inpaint",
     "lasso": "inpaint",
     "enhance": "upscale",
+    "extend": "outpaint",
 }
 
 _CLASS_GUIDANCE = {
     "image_to_image": "Install an image editing workflow to change a picture.",
     "inpaint": "Install an inpainting workflow to edit part of a picture.",
     "upscale": "Install an upscaling workflow to enlarge a picture.",
+    "outpaint": "Install an outpainting workflow to extend a picture past its edge.",
 }
 
 
@@ -61,10 +64,12 @@ def tool_capabilities(
     can_edit = bool(edit_input_schemas)
     can_mask = any(workflow_accepts_mask(schema) for schema in edit_input_schemas)
     can_upscale = any(workflow_declares_upscale(schema) for schema in edit_input_schemas)
+    can_outpaint = any(workflow_declares_outpaint(schema) for schema in edit_input_schemas)
     available = {
         "image_to_image": can_edit,
         "inpaint": can_mask,
         "upscale": can_upscale,
+        "outpaint": can_outpaint,
     }
     capabilities = []
     for kind, workflow_class in TOOL_WORKFLOW_CLASSES.items():

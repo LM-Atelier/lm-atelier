@@ -4,6 +4,7 @@ import { api } from "./api";
 import { StudioOpenImage } from "./StudioOpenImage";
 import { ErrorCallout } from "./ErrorCallout";
 import { StudioCanvas } from "./StudioCanvas";
+import { StudioExtendHandles } from "./StudioExtendHandles";
 import { StudioToolRail } from "./StudioToolRail";
 import { coverage, encodeMaskPng, isEmpty } from "./studioMasks";
 import {
@@ -129,6 +130,15 @@ export function StudioView({
               <p>Loading the image…</p>
             </div>
           )}
+          {bitmap && tools.kind === "extend" && (
+            // Over the picture rather than beside it: the frame is the
+            // control, so it has to be where the frame is.
+            <StudioExtendHandles
+              tools={tools}
+              dispatch={dispatch}
+              size={{ width: bitmap.width, height: bitmap.height }}
+            />
+          )}
         </div>
         <aside className="studio-panel">
           {tools.kind !== "instruct" && (
@@ -171,7 +181,27 @@ export function StudioView({
               </small>
             </div>
           )}
-          {tools.kind === "enhance" ? (
+          {tools.kind === "extend" ? (
+            <div className="studio-tool-options">
+              <span>
+                <strong>Extend by</strong>
+              </span>
+              <small>
+                {Object.values(tools.margins).some(Boolean)
+                  ? (["top", "right", "bottom", "left"] as const)
+                      .filter((side) => tools.margins[side] > 0)
+                      .map((side) => `${side} ${Math.round(tools.margins[side] * 100)}%`)
+                      .join(", ")
+                  : "Drag an edge of the picture outward, or use the arrow keys on one."}
+              </small>
+              <button
+                className="secondary compact-button"
+                onClick={() => dispatch({ type: "clear-margins" })}
+              >
+                Reset edges
+              </button>
+            </div>
+          ) : tools.kind === "enhance" ? (
             <label>
               <span>
                 <strong>Enlarge by</strong> {tools.upscaleFactor}x
@@ -214,7 +244,8 @@ export function StudioView({
             // Enhance asks for no words: the whole picture is the subject and
             // the size is the whole instruction.
             disabled={
-              (tools.kind !== "enhance" && !instruction.trim()) ||
+              (tools.kind === "extend" && !Object.values(tools.margins).some(Boolean)) ||
+              (tools.kind !== "enhance" && tools.kind !== "extend" && !instruction.trim()) ||
               busy ||
               !current ||
               Boolean(unavailable)
@@ -229,7 +260,11 @@ export function StudioView({
                   instruction.trim(),
                   current.artifactId,
                   mask ? { blob: mask, featherPx: tools.featherPx, invert: false } : undefined,
-                  tools.kind === "enhance" ? { upscale_factor: tools.upscaleFactor } : undefined,
+                  tools.kind === "enhance"
+                    ? { upscale_factor: tools.upscaleFactor }
+                    : tools.kind === "extend"
+                      ? { outpaint_margins: tools.margins }
+                      : undefined,
                 );
                 setInstruction("");
                 setSelectedId(null);
@@ -240,8 +275,10 @@ export function StudioView({
           >
             {busy
               ? "Applying…"
-              : tools.kind === "enhance"
-                ? `Enlarge ${tools.upscaleFactor}x`
+              : tools.kind === "extend"
+                ? "Extend"
+                : tools.kind === "enhance"
+                  ? `Enlarge ${tools.upscaleFactor}x`
                 : tools.kind !== "instruct" && selectionCoverage > 0
                   ? "Apply to selection"
                   : "Apply edit"}

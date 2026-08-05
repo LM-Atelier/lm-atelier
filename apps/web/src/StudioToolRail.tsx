@@ -2,6 +2,7 @@ import {
   Brush,
   Eraser,
   Lasso,
+  Maximize2,
   Redo2,
   Sparkles,
   Square,
@@ -18,6 +19,7 @@ const TOOLS: Array<{ kind: StudioToolKind; label: string; icon: typeof Brush }> 
   { kind: "rect", label: "Select a rectangle", icon: Square },
   { kind: "lasso", label: "Lasso a selection", icon: Lasso },
   { kind: "enhance", label: "Enlarge and restore detail", icon: Sparkles },
+  { kind: "extend", label: "Extend past the edge", icon: Maximize2 },
 ];
 
 /** The studio's left rail: pick how you point at the image.
