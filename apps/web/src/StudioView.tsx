@@ -171,19 +171,37 @@ export function StudioView({
               </small>
             </div>
           )}
-          <label>
-            <span>
-              <strong>
-                {tools.kind === "instruct" ? "Describe the edit" : "Describe the change here"}
-              </strong>
-            </span>
-            <textarea
-              rows={4}
-              value={instruction}
-              placeholder="e.g. make it a watercolor painting"
-              onChange={(event) => setInstruction(event.target.value)}
-            />
-          </label>
+          {tools.kind === "enhance" ? (
+            <label>
+              <span>
+                <strong>Enlarge by</strong> {tools.upscaleFactor}x
+              </span>
+              <input
+                type="range"
+                min={1}
+                max={8}
+                step={1}
+                value={tools.upscaleFactor}
+                onChange={(event) =>
+                  dispatch({ type: "set-upscale-factor", factor: Number(event.target.value) })
+                }
+              />
+            </label>
+          ) : (
+            <label>
+              <span>
+                <strong>
+                  {tools.kind === "instruct" ? "Describe the edit" : "Describe the change here"}
+                </strong>
+              </span>
+              <textarea
+                rows={4}
+                value={instruction}
+                placeholder="e.g. make it a watercolor painting"
+                onChange={(event) => setInstruction(event.target.value)}
+              />
+            </label>
+          )}
           {unavailable && (
             // Beside the button that would fail, and named by the tools that
             // cannot run, so the sentence arrives before the drawing does.
@@ -193,7 +211,14 @@ export function StudioView({
           )}
           <button
             className="primary"
-            disabled={!instruction.trim() || busy || !current || Boolean(unavailable)}
+            // Enhance asks for no words: the whole picture is the subject and
+            // the size is the whole instruction.
+            disabled={
+              (tools.kind !== "enhance" && !instruction.trim()) ||
+              busy ||
+              !current ||
+              Boolean(unavailable)
+            }
             onClick={() => {
               if (!current) return;
               const selection = tools.kind !== "instruct" && tools.mask && !isEmpty(tools.mask)
@@ -204,6 +229,7 @@ export function StudioView({
                   instruction.trim(),
                   current.artifactId,
                   mask ? { blob: mask, featherPx: tools.featherPx, invert: false } : undefined,
+                  tools.kind === "enhance" ? { upscale_factor: tools.upscaleFactor } : undefined,
                 );
                 setInstruction("");
                 setSelectedId(null);
@@ -214,9 +240,11 @@ export function StudioView({
           >
             {busy
               ? "Applying…"
-              : tools.kind !== "instruct" && selectionCoverage > 0
-                ? "Apply to selection"
-                : "Apply edit"}
+              : tools.kind === "enhance"
+                ? `Enlarge ${tools.upscaleFactor}x`
+                : tools.kind !== "instruct" && selectionCoverage > 0
+                  ? "Apply to selection"
+                  : "Apply edit"}
           </button>
         </aside>
       </div>
