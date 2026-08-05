@@ -1050,6 +1050,9 @@ class EditTemplateCreate(ApiModel):
     description: str = Field(default="", max_length=2_000)
     instruction: str = Field(min_length=1, max_length=20_000)
     settings_json: dict[str, Any] = Field(default_factory=dict)
+    # When given, the recipe is read from what this run actually did rather
+    # than from whatever is current when Save is pressed.
+    from_run_id: str | None = Field(default=None, max_length=40)
 
 
 class EditTemplateOut(ApiModel):
@@ -1059,6 +1062,9 @@ class EditTemplateOut(ApiModel):
     instruction: str
     operation: str
     settings_json: dict[str, Any]
+    workflow_revision_id: str | None
+    model_profile_id: str | None
+    mask_mode: str
     trigger_words_json: list[str]
     content_rating: ContentRating
     builtin: bool
