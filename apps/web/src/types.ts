@@ -1151,3 +1151,14 @@ export interface WorkflowResourceConsumers {
   resource_name: string;
   consumers: WorkflowResourceConsumer[];
 }
+
+export interface StudioToolCapability {
+  kind: string;
+  workflow_class: string;
+  available: boolean;
+  reason: string | null;
+}
+
+export interface StudioCapabilityReport {
+  tools: StudioToolCapability[];
+}
