@@ -159,3 +159,81 @@ async def test_cancel_stops_a_blocking_preparation_for_good(
     jobs = (await client.get("/api/jobs")).json()
     job = next(item for item in jobs if item["id"] == job_id)
     assert job["status"] == "cancelled"
+
+
+async def test_an_unknown_workflow_revision_refuses_before_queueing(
+    client: AsyncClient,
+) -> None:
+    response = await client.post(
+        "/api/workflows/packages/prepare",
+        json={
+            "package_id": "example-pack",
+            "version": "1.2.3",
+            "ui_graph": _workflow(),
+            "workflow_revision_id": "rev_missing",
+        },
+    )
+
+    assert response.status_code == 404
+    assert response.json()["code"] == "workflow-revision-not-found"
+
+
+async def test_a_caller_graph_cannot_be_bound_to_another_revision(
+    client: AsyncClient,
+) -> None:
+    """The proof subject is the stored workflow, never the submitted one.
+
+    Re-analyzing a submitted graph proves that graph is internally consistent.
+    It does not bind it to anything this machine saved, so a caller that could
+    name one revision while sending a different graph could choose the subject
+    of its own proof.
+    """
+    from local_lm.db import SessionLocal
+    from local_lm.models import WorkflowDefinition, WorkflowRevision
+
+    stored = dict(_workflow())
+    with SessionLocal() as session:
+        definition = WorkflowDefinition(name="Stored", operation="image_to_image")
+        session.add(definition)
+        session.flush()
+        revision = WorkflowRevision(
+            workflow_id=definition.id,
+            version=1,
+            engine="mock",
+            ui_graph_json=stored,
+            api_graph_json={},
+            input_schema_json={},
+            dependencies_json={},
+            trusted=True,
+        )
+        session.add(revision)
+        session.flush()
+        definition.current_revision_id = revision.id
+        session.commit()
+        revision_id = revision.id
+
+    # The same node type, attributed to a different package. Comparing only the
+    # required node names would let this through, and the caller would prepare
+    # one package while binding the proof to a graph that names another.
+    forged = dict(_workflow())
+    forged["nodes"] = [
+        {
+            "id": 1,
+            "type": "ExampleNode",
+            "properties": {"cnr_id": "other-pack", "ver": "9.9.9"},
+            "widgets_values": [],
+        }
+    ]
+
+    response = await client.post(
+        "/api/workflows/packages/prepare",
+        json={
+            "package_id": "example-pack",
+            "version": "1.2.3",
+            "ui_graph": forged,
+            "workflow_revision_id": revision_id,
+        },
+    )
+
+    assert response.status_code == 422
+    assert response.json()["code"] == "workflow-graph-mismatch"

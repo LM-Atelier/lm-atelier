@@ -7,6 +7,7 @@ import pytest
 from local_lm.package_sources import (
     MAX_SOURCE_URL_CHARACTERS,
     classify_source_url,
+    partition_unpinned_sources,
     source_refusal,
 )
 
@@ -90,3 +91,62 @@ def test_a_url_that_was_never_allowed_keeps_the_original_refusal() -> None:
     code, _ = source_refusal(classify_source_url("file:///tmp/example.whl"))
 
     assert code == "direct_dependency_url"
+
+
+def test_nothing_is_set_aside_without_an_authorized_workflow() -> None:
+    """With no workflow to prove it against, the ordinary refusal stands."""
+    declarations = ("example @ git+https://github.com/owner/repo", "requests>=2")
+
+    installable, omitted = partition_unpinned_sources(declarations, authorized=False)
+
+    assert installable == declarations
+    assert omitted == ()
+
+
+def test_only_the_unpinned_allowed_host_declaration_is_set_aside() -> None:
+    declarations = (
+        "example @ git+https://github.com/owner/repo",
+        "pinned @ git+https://github.com/owner/other@" + "a" * 40,
+        "elsewhere @ https://example.com/thing.whl",
+        "requests>=2",
+    )
+
+    installable, omitted = partition_unpinned_sources(declarations, authorized=True)
+
+    # A pinned source names an immutable object; its road is resolution, not
+    # omission, and setting it aside would skip something installable exactly.
+    assert omitted == ("example @ git+https://github.com/owner/repo",)
+    assert installable == (
+        "pinned @ git+https://github.com/owner/other@" + "a" * 40,
+        "elsewhere @ https://example.com/thing.whl",
+        "requests>=2",
+    )
+
+
+def test_a_line_no_parser_accepts_is_not_set_aside() -> None:
+    """A bare URL is not a PEP 508 requirement, so the planner refuses it.
+
+    Leaving it in the installable set is the fail-closed answer: the package
+    is refused for declaring something unreadable, rather than having a line
+    quietly skipped on the strength of a guess about what it meant.
+    """
+    installable, omitted = partition_unpinned_sources(
+        ("git+https://github.com/owner/repo",), authorized=True
+    )
+
+    assert omitted == ()
+    assert installable == ("git+https://github.com/owner/repo",)
+
+
+def test_comments_and_installer_options_are_never_set_aside() -> None:
+    declarations = (
+        "# git+https://github.com/owner/repo",
+        "--index-url https://example.com/simple",
+        "",
+        "example @ git+https://github.com/owner/repo  # the live case",
+    )
+
+    installable, omitted = partition_unpinned_sources(declarations, authorized=True)
+
+    assert omitted == ("example @ git+https://github.com/owner/repo  # the live case",)
+    assert len(installable) == 3
