@@ -123,10 +123,30 @@ def test_only_the_unpinned_allowed_host_declaration_is_set_aside() -> None:
     )
 
 
-def test_a_bare_url_declaration_is_read_the_same_way() -> None:
+def test_a_line_no_parser_accepts_is_not_set_aside() -> None:
+    """A bare URL is not a PEP 508 requirement, so the planner refuses it.
+
+    Leaving it in the installable set is the fail-closed answer: the package
+    is refused for declaring something unreadable, rather than having a line
+    quietly skipped on the strength of a guess about what it meant.
+    """
     installable, omitted = partition_unpinned_sources(
         ("git+https://github.com/owner/repo",), authorized=True
     )
 
-    assert omitted == ("git+https://github.com/owner/repo",)
-    assert installable == ()
+    assert omitted == ()
+    assert installable == ("git+https://github.com/owner/repo",)
+
+
+def test_comments_and_installer_options_are_never_set_aside() -> None:
+    declarations = (
+        "# git+https://github.com/owner/repo",
+        "--index-url https://example.com/simple",
+        "",
+        "example @ git+https://github.com/owner/repo  # the live case",
+    )
+
+    installable, omitted = partition_unpinned_sources(declarations, authorized=True)
+
+    assert omitted == ("example @ git+https://github.com/owner/repo  # the live case",)
+    assert len(installable) == 3

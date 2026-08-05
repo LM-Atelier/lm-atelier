@@ -32,12 +32,18 @@ from collections.abc import Sequence
 from dataclasses import dataclass
 from urllib.parse import urlsplit
 
+from packaging.requirements import InvalidRequirement, Requirement
+
 #: Git object names are exactly this, and anything shorter is a prefix that
 #: can become ambiguous as a repository grows.
 _COMMIT = re.compile(r"\A[0-9a-f]{40}\Z")
 _ALLOWED_HOSTS = frozenset({"github.com", "www.github.com"})
 _GIT_SCHEMES = frozenset({"git+https", "git+ssh", "git"})
 MAX_SOURCE_URL_CHARACTERS = 700
+#: A requirements file carries furniture that names no dependency. Matching
+#: what the planner already strips, so partition and refusal read one line the
+#: same way rather than through two parsers that can drift apart.
+_INLINE_COMMENT = re.compile(r"\s+#")
 
 
 @dataclass(frozen=True)
@@ -129,11 +135,32 @@ def partition_unpinned_sources(
     installable: list[str] = []
     omitted: list[str] = []
     for declaration in declarations:
-        line = declaration.strip()
-        _, _, url = line.partition("@")
-        source = classify_source_url(url.strip()) if url.strip() else classify_source_url(line)
-        if source.repository is not None and not source.pinned:
+        url = declared_source_url(declaration)
+        source = classify_source_url(url) if url else None
+        if source is not None and source.repository is not None and not source.pinned:
             omitted.append(declaration)
         else:
             installable.append(declaration)
     return tuple(installable), tuple(omitted)
+
+
+def declared_source_url(declaration: str) -> str | None:
+    """The URL a requirement line points at, read by the packaging parser.
+
+    One interpretation of a line, not two. Splitting on "@" by hand looked
+    like the same thing and is not: it mistakes an extras marker, a bare URL
+    with no name, and a revision separator for each other, and each of those
+    appears in real requirements files.
+    """
+    line = declaration.strip()
+    if not line or line.startswith("#") or line.startswith("-"):
+        return None
+    line = _INLINE_COMMENT.split(line, maxsplit=1)[0].strip()
+    if not line:
+        return None
+    try:
+        return Requirement(line).url
+    except InvalidRequirement:
+        # A line the planner will refuse on its own terms. Nothing is set
+        # aside on the strength of something nobody could parse.
+        return None

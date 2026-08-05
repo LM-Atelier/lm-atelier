@@ -43,9 +43,8 @@ from .comfy_registry_wheel_downloads import ComfyRegistryWheelDownloader
 from .comfy_registry_wheel_projects import ComfyRegistryWheelProjectClient
 from .comfy_workflow_packages import WorkflowPackageRequirement
 from .config import Settings
-from .models import ComfyRegistryInstall
 from .package_sources import partition_unpinned_sources
-from .source_omission_proof import record_pending_omission
+from .source_omission_proof import PendingOmission
 
 # One target interpreter probe: markers, wheel tags, and installed distributions for the
 # managed ComfyUI python. Owned as its own contract because target-binding
@@ -199,16 +198,9 @@ async def prepare_workflow_package(
                 if manifest is not None
                 else ()
             )
-            # An unpinned source dependency is partitioned here rather than in
-            # the planner, which stays uniformly hostile to URLs. Only under an
-            # authorized workflow: without one there is nothing the omission
-            # could later be proven against, so the ordinary refusal stands.
-            installable, omitted = partition_unpinned_sources(
-                dependencies, authorized=authorized_workflow is not None
-            )
             effective_resolution = replace(
                 resolution,
-                pip_dependencies=installable,
+                pip_dependencies=dependencies,
             )
         except ComfyRegistryLifecycleError as exc:
             raise WorkflowPackagePreparationError(exc.code, str(exc)) from exc
@@ -220,6 +212,30 @@ async def prepare_workflow_package(
                     custom_node_root=context.custom_node_root,
                 )
             raise WorkflowPackagePreparationError(exc.code, str(exc)) from exc
+
+    # Partitioned here, after both sources of declarations have been read: a
+    # commit-pinned package states them inside its staged tree and a Registry
+    # archive states them in its record. Doing it per-branch covered one live
+    # case and missed the other.
+    #
+    # In preparation rather than in the planner, which stays uniformly hostile
+    # to URLs, and only under an authorized workflow - without one there is
+    # nothing an omission could later be proven against, so the ordinary
+    # refusal stands.
+    installable, omitted = partition_unpinned_sources(
+        effective_resolution.pip_dependencies,
+        authorized=authorized_workflow is not None,
+    )
+    effective_resolution = replace(effective_resolution, pip_dependencies=installable)
+    pending_omission = (
+        PendingOmission(
+            omitted_declarations=omitted,
+            workflow_revision_id=authorized_workflow[0],
+            required_node_types=authorized_workflow[1],
+        )
+        if omitted and authorized_workflow is not None
+        else None
+    )
 
     async def _closure_progress(name: str, round_number: int, items: tuple[str, ...]) -> None:
         _phase(f"Dependencies: {name.replace('_', ' ')} (round {round_number})", len(items), None)
@@ -260,6 +276,14 @@ async def prepare_workflow_package(
             # so it holds no SQLite lock while the lifecycle downloads and
             # assembles; the concurrency regression beside this proves another
             # writer makes progress mid-preparation.
+            # Renewal refreshes an existing install's dependencies and is not
+            # the act that can set a declaration aside, so an omission reaching
+            # it is a contradiction rather than something to record quietly.
+            if omitted and renew_install_id is not None:
+                raise WorkflowPackagePreparationError(
+                    "omission_not_renewable",
+                    "A dependency renewal cannot omit a source dependency",
+                )
             if renew_install_id is None:
                 preparation = await prepare_comfy_registry_install(
                     session,
@@ -274,6 +298,7 @@ async def prepare_workflow_package(
                     archive_progress=_archive_progress,
                     wheel_progress=_wheel_progress,
                     staged_archive=staged_archive,
+                    pending_omission=pending_omission,
                 )
             else:
                 preparation = await renew_comfy_registry_install_environment(
@@ -289,22 +314,6 @@ async def prepare_workflow_package(
                     wheel_progress=_wheel_progress,
                 )
             staged_archive = None
-            # Only now: the resolution is exact, the install exists, and the
-            # manifest is what a later proof will be bound to. Recording any
-            # earlier would bind a candidate to an install that might not
-            # survive its own preparation.
-            if omitted and authorized_workflow is not None:
-                revision_id, required_node_types = authorized_workflow
-                install = session.get(ComfyRegistryInstall, preparation.install_id)
-                if install is not None:
-                    install.review_json = record_pending_omission(
-                        install.review_json,
-                        manifest_sha256=preparation.manifest_sha256,
-                        omitted_declarations=omitted,
-                        workflow_revision_id=revision_id,
-                        required_node_types=required_node_types,
-                    )
-                    session.commit()
             return preparation
     except ComfyRegistryLifecycleError as exc:
         if staged_archive is not None:

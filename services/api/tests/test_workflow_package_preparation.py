@@ -545,3 +545,126 @@ async def test_the_probes_typed_refusals_keep_their_codes() -> None:
             **_clients(),
         )
     assert refused.value.code == "interpreter_timeout"
+
+
+async def test_a_registry_archive_omission_reaches_the_install_transaction(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """WAS 3.0.1's shape: three unpinned declarations in the Registry record.
+
+    The partition ran only for commit-pinned packages at first, which covered
+    Impact Pack and missed this one entirely - a live case each, and only one
+    of them exercised.
+    """
+    closure = SimpleNamespace(closure="closure-object")
+    prepared = SimpleNamespace(install_id="install_1")
+    seen: dict[str, Any] = {}
+
+    async def fake_drive(resolution: Any, **_kwargs: Any) -> Any:
+        seen["planned"] = resolution.pip_dependencies
+        return closure
+
+    async def fake_prepare(session: Any, **kwargs: Any) -> Any:
+        seen["pending"] = kwargs["pending_omission"]
+        return prepared
+
+    monkeypatch.setattr(composition, "drive_comfy_registry_wheel_closure", fake_drive)
+    monkeypatch.setattr(composition, "prepare_comfy_registry_install", fake_prepare)
+
+    declarations = (
+        "requests>=2",
+        "a @ git+https://github.com/owner/one",
+        "b @ git+https://github.com/owner/two",
+        "c @ git+https://github.com/owner/three",
+    )
+    registry = _Registry(_resolution(pip_dependencies=declarations))
+
+    await prepare_workflow_package(
+        _NullSessionFactory(),
+        package_id="example-pack",
+        node_types=("ExampleNode",),
+        version="1.2.3",
+        context=_CONTEXT,
+        media_worker_stopped=True,
+        interpreter_probe=_probe,
+        registry_client=registry,  # type: ignore[arg-type]
+        authorized_workflow=("revision-1", ("ExampleNode", "SaveImage")),
+        **_clients(),
+    )
+
+    # The three sources never reach the planner; the ordinary requirement does.
+    assert seen["planned"] == ("requests>=2",)
+    assert seen["pending"] is not None
+    assert seen["pending"].omitted_declarations == declarations[1:]
+    assert seen["pending"].workflow_revision_id == "revision-1"
+    assert seen["pending"].required_node_types == ("ExampleNode", "SaveImage")
+
+
+async def test_without_an_authorized_workflow_nothing_is_set_aside(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The ordinary refusal stands: the planner sees the declaration itself."""
+    seen: dict[str, Any] = {}
+
+    async def fake_drive(resolution: Any, **_kwargs: Any) -> Any:
+        seen["planned"] = resolution.pip_dependencies
+        return SimpleNamespace(closure="closure-object")
+
+    async def fake_prepare(session: Any, **kwargs: Any) -> Any:
+        seen["pending"] = kwargs["pending_omission"]
+        return SimpleNamespace(install_id="install_1")
+
+    monkeypatch.setattr(composition, "drive_comfy_registry_wheel_closure", fake_drive)
+    monkeypatch.setattr(composition, "prepare_comfy_registry_install", fake_prepare)
+
+    declarations = ("a @ git+https://github.com/owner/one",)
+    registry = _Registry(_resolution(pip_dependencies=declarations))
+
+    await prepare_workflow_package(
+        _NullSessionFactory(),
+        package_id="example-pack",
+        node_types=("ExampleNode",),
+        version="1.2.3",
+        context=_CONTEXT,
+        media_worker_stopped=True,
+        interpreter_probe=_probe,
+        registry_client=registry,  # type: ignore[arg-type]
+        **_clients(),
+    )
+
+    assert seen["planned"] == declarations
+    assert seen["pending"] is None
+
+
+async def test_a_renewal_cannot_omit_a_source_dependency(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Refreshing dependencies is not the act that can set one aside."""
+
+    async def fake_drive(resolution: Any, **_kwargs: Any) -> Any:
+        return SimpleNamespace(closure="closure-object")
+
+    async def unexpected(*_args: Any, **_kwargs: Any) -> Any:
+        raise AssertionError("a contradictory renewal must not reach the install")
+
+    monkeypatch.setattr(composition, "drive_comfy_registry_wheel_closure", fake_drive)
+    monkeypatch.setattr(composition, "renew_comfy_registry_install_environment", unexpected)
+
+    registry = _Registry(_resolution(pip_dependencies=("a @ git+https://github.com/owner/one",)))
+
+    with pytest.raises(WorkflowPackagePreparationError) as raised:
+        await prepare_workflow_package(
+            _NullSessionFactory(),
+            package_id="example-pack",
+            node_types=("ExampleNode",),
+            version="1.2.3",
+            context=_CONTEXT,
+            media_worker_stopped=True,
+            interpreter_probe=_probe,
+            registry_client=registry,  # type: ignore[arg-type]
+            renew_install_id="install_1",
+            authorized_workflow=("revision-1", ("ExampleNode",)),
+            **_clients(),
+        )
+
+    assert raised.value.code == "omission_not_renewable"

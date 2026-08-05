@@ -212,12 +212,15 @@ async def test_a_caller_graph_cannot_be_bound_to_another_revision(
         session.commit()
         revision_id = revision.id
 
+    # The same node type, attributed to a different package. Comparing only the
+    # required node names would let this through, and the caller would prepare
+    # one package while binding the proof to a graph that names another.
     forged = dict(_workflow())
     forged["nodes"] = [
         {
             "id": 1,
-            "type": "SomethingElse",
-            "properties": {"cnr_id": "example-pack", "ver": "1.2.3"},
+            "type": "ExampleNode",
+            "properties": {"cnr_id": "other-pack", "ver": "9.9.9"},
             "widgets_values": [],
         }
     ]

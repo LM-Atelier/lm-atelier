@@ -127,6 +127,19 @@ def _evidence(requirement: OmissionRequirement) -> dict[str, Any]:
 PENDING_KEY = "pending_source_omission"
 
 
+@dataclass(frozen=True)
+class PendingOmission:
+    """A candidate on its way into the same commit as its install.
+
+    The manifest hash is deliberately absent: it is the install's, and taking
+    it from the row being written is the only way the two cannot disagree.
+    """
+
+    omitted_declarations: tuple[str, ...]
+    workflow_revision_id: str
+    required_node_types: tuple[str, ...]
+
+
 def record_pending_omission(
     review: dict[str, Any],
     *,
