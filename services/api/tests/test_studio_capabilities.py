@@ -11,6 +11,10 @@ MASK_SCHEMA: dict[str, Any] = {
     "properties": {"mask": {"type": "object", "x-lm-atelier-kind": "mask"}},
 }
 PLAIN_SCHEMA: dict[str, Any] = {"type": "object", "properties": {"denoise": {"type": "number"}}}
+UPSCALE_SCHEMA: dict[str, Any] = {
+    "type": "object",
+    "properties": {"upscale_factor": {"type": "number", "x-lm-atelier-kind": "upscale"}},
+}
 
 
 def _by_kind(schemas: list[dict[str, Any] | None]) -> dict[str, Any]:
@@ -22,6 +26,19 @@ def test_nothing_installed_leaves_every_tool_unavailable_with_a_reason() -> None
 
     assert not any(tool.available for tool in tools.values())
     assert all(tool.reason for tool in tools.values())
+
+
+def test_enhance_waits_for_a_workflow_that_can_actually_enlarge() -> None:
+    """Offering it over an ordinary editor would promise a size nothing delivers."""
+    assert _by_kind([PLAIN_SCHEMA])["enhance"].available is False
+    assert _by_kind([PLAIN_SCHEMA, UPSCALE_SCHEMA])["enhance"].available is True
+
+
+def test_an_upscaler_does_not_enable_the_selection_tools() -> None:
+    tools = _by_kind([UPSCALE_SCHEMA])
+
+    assert tools["enhance"].available is True
+    assert tools["brush"].available is False
 
 
 def test_a_plain_editor_runs_instruct_but_not_a_selection() -> None:

@@ -17,6 +17,7 @@ from dataclasses import dataclass
 from typing import Any
 
 from .studio_masks import workflow_accepts_mask
+from .upscale_workflows import workflow_declares_upscale
 
 #: The tool kinds the surface offers, paired with what each needs installed.
 #: Selection tools share one class: they are four ways to draw one mask.
@@ -26,11 +27,13 @@ TOOL_WORKFLOW_CLASSES: dict[str, str] = {
     "eraser": "inpaint",
     "rect": "inpaint",
     "lasso": "inpaint",
+    "enhance": "upscale",
 }
 
 _CLASS_GUIDANCE = {
     "image_to_image": "Install an image editing workflow to change a picture.",
     "inpaint": "Install an inpainting workflow to edit part of a picture.",
+    "upscale": "Install an upscaling workflow to enlarge a picture.",
 }
 
 
@@ -57,7 +60,12 @@ def tool_capabilities(
     """
     can_edit = bool(edit_input_schemas)
     can_mask = any(workflow_accepts_mask(schema) for schema in edit_input_schemas)
-    available = {"image_to_image": can_edit, "inpaint": can_mask}
+    can_upscale = any(workflow_declares_upscale(schema) for schema in edit_input_schemas)
+    available = {
+        "image_to_image": can_edit,
+        "inpaint": can_mask,
+        "upscale": can_upscale,
+    }
     capabilities = []
     for kind, workflow_class in TOOL_WORKFLOW_CLASSES.items():
         ready = available[workflow_class]
