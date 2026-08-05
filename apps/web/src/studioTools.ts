@@ -23,6 +23,13 @@ export type ToolPreview =
   | { kind: "lasso"; points: ImagePoint[] };
 
 export interface PointerTool {
+  /** Whether the gesture writes to the mask as it travels.
+   *
+   * A brush does, so the tint has to be repainted mid-stroke or the selection
+   * is invisible until the pointer lifts. A rectangle or a lasso writes
+   * nothing until it closes, so repainting mid-gesture would only redraw what
+   * is already on screen. */
+  readonly appliesWhileMoving: boolean;
   down(point: ImagePoint): void;
   move(point: ImagePoint): void;
   /** Returns true when the gesture changed the mask (history push point). */
@@ -39,6 +46,7 @@ export interface PointerTool {
 
 /** Brush and eraser: identical gesture, inverse stamp value. */
 export class BrushTool implements PointerTool {
+  readonly appliesWhileMoving = true;
   private last: ImagePoint | null = null;
   private hover: ImagePoint | null = null;
   private touched = false;
@@ -84,6 +92,7 @@ export class BrushTool implements PointerTool {
 }
 
 export class RectTool implements PointerTool {
+  readonly appliesWhileMoving = false;
   private origin: ImagePoint | null = null;
   private current: ImagePoint | null = null;
 
@@ -121,6 +130,7 @@ export class RectTool implements PointerTool {
 }
 
 export class LassoTool implements PointerTool {
+  readonly appliesWhileMoving = false;
   private points: ImagePoint[] = [];
 
   constructor(
