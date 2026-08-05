@@ -1,4 +1,5 @@
 import type {
+  StudioCapabilityReport,
   ApplicationInfo,
   AppEvent,
   Artifact,
@@ -239,6 +240,7 @@ export const api = {
     ),
   deletePromptHelper: (id: string) =>
     request<void>(`/api/prompt-helpers/${id}`, { method: "DELETE" }),
+  studioCapabilities: () => request<StudioCapabilityReport>("/api/studio/capabilities"),
   sendTurn: async (
     chatId: string,
     text: string,

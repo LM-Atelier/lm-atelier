@@ -6322,6 +6322,28 @@ class ConversationOrchestrator:
             generic.append(revision)
         return generic[0] if generic else None
 
+    def installed_edit_input_schemas(self, session: Session) -> list[dict[str, Any] | None]:
+        """Input schemas of every edit workflow this engine could actually run.
+
+        Every installed one rather than the single one selection would pick:
+        the question a tool asks is whether anything here can honor it, and a
+        workflow that is not first in line is still installed.
+        """
+
+        definitions = session.scalars(
+            select(WorkflowDefinition).where(
+                WorkflowDefinition.operation == Operation.IMAGE_TO_IMAGE.value
+            )
+        ).all()
+        schemas: list[dict[str, Any] | None] = []
+        for definition in definitions:
+            if not definition.current_revision_id:
+                continue
+            revision = session.get(WorkflowRevision, definition.current_revision_id)
+            if revision and self._workflow_matches_engine(revision):
+                schemas.append(revision.input_schema_json)
+        return schemas
+
     def legacy_workflow_revision(
         self,
         session: Session,
