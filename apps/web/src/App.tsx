@@ -108,6 +108,7 @@ import { SettingControl } from "./SettingControl";
 import { MediaLibraryView } from "./MediaLibraryView";
 import { MediaOutputPlan } from "./MediaOutputPlan";
 import { ModelCard } from "./ModelCard";
+import { VersionChooser } from "./VersionChooser";
 import { StudioView } from "./StudioView";
 import { RecipeCard } from "./RecipeCard";
 import { ModelUpdatesPanel } from "./ModelUpdatesPanel";
@@ -1971,6 +1972,7 @@ interface PendingInstall {
 }
 
 function ModelsView({ initialRole }: { initialRole: EngineRole }) {
+  const [choosingVersions, setChoosingVersions] = useState<CatalogModel | null>(null);
   const [confirmDialog, confirm] = useConfirm();
   const client = useQueryClient();
   const [query, setQuery] = useState("");
@@ -2316,7 +2318,12 @@ function ModelsView({ initialRole }: { initialRole: EngineRole }) {
       )}
       <ErrorCallout message={catalog.error?.message} action={<button className="secondary compact-button" disabled={catalog.isFetching} onClick={() => void catalog.refetch()}>Retry</button>} />
       {catalogIsStale && !catalog.error && <div className="callout warning action-callout" role="status"><span>Showing saved results while Hugging Face is unavailable.</span><button className="secondary compact-button" disabled={catalog.isFetching} onClick={() => void catalog.refetch()}>Refresh</button></div>}
-      <div className={`model-grid ${catalog.isFetching && !catalog.isFetchingNextPage ? "superseded" : ""}`}>{catalogItems.map((model) => <ModelCard key={model.remote_id} model={model} role={role} runtime={runtimeFor(model)} status={statusFor(model)} onDownload={() => download.mutate({ model, selectedRole: role })} />)}</div>
+      <div className={`model-grid ${catalog.isFetching && !catalog.isFetchingNextPage ? "superseded" : ""}`}>{catalogItems.map((model) => <ModelCard key={model.remote_id} model={model} role={role} runtime={runtimeFor(model)} status={statusFor(model)} onDownload={() => download.mutate({ model, selectedRole: role })} onChooseVersion={model.provider === "civitai" && model.parent_model_id ? () => setChoosingVersions(model) : undefined} />)}</div>
+      {choosingVersions?.parent_model_id && (
+        <VersionChooser modelId={choosingVersions.parent_model_id} modelName={choosingVersions.parent_model_name ?? choosingVersions.name}
+          onClose={() => setChoosingVersions(null)}
+          onChoose={(versionId) => { setChoosingVersions(null); download.mutate({ model: { ...choosingVersions, remote_id: versionId }, selectedRole: role }); }} />
+      )}
       {catalog.hasNextPage && <div className="load-more"><button className="secondary" disabled={catalog.isFetchingNextPage} onClick={() => void catalog.fetchNextPage()}>{catalog.isFetchingNextPage ? "Loading…" : "Load more models"}</button></div>}
       {importOpen && (
         <AccessibleDialog

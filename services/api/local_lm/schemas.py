@@ -1347,6 +1347,10 @@ class CatalogModel(ApiModel):
     # parent renders exactly as it does now.
     parent_model_id: str | None = None
     parent_model_name: str | None = None
+    # How many versions this card stands for. One means the card is the whole
+    # story; more means it must open a chooser rather than install, because
+    # the point of version identity is that the person picked one.
+    version_count: int = 1
     # Set only on workflow catalog cards: one repository can ship several
     # official workflows, and the card must say which one it is.
     workflow_template_id: str | None = None
@@ -1355,6 +1359,30 @@ class CatalogModel(ApiModel):
     # it (general-only source); it exists so install provenance is honest and
     # downstream consumers inherit one labeling mechanism.
     content_rating: ContentRating = "unknown"
+
+
+class CatalogVersionRow(ApiModel):
+    """One installable version of a catalogue model, as the chooser sees it."""
+
+    version_id: str
+    version_name: str | None = None
+    published_at: str | None = None
+    base_model: str | None = None
+    size_bytes: int = 0
+    changelog: str | None = None
+    # True, false, or unknown - and unknown is a real answer. Checkpoint
+    # installs do not record a provider version, so for those we cannot tell
+    # whether this exact version is on disk. Reporting `false` there would be
+    # a claim we cannot support, and the one that would make someone install
+    # a second copy of what they already have.
+    installed: bool | None = None
+    installed_as: str | None = None
+
+
+class CatalogVersions(ApiModel):
+    model_id: str
+    model_name: str | None = None
+    versions: list[CatalogVersionRow] = Field(default_factory=list)
 
 
 class CatalogPage(ApiModel):

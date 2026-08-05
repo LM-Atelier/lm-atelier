@@ -181,6 +181,8 @@ from .schemas import (
     CatalogPreflight,
     CatalogPreflightCheck,
     CatalogPreflightRequest,
+    CatalogVersionRow,
+    CatalogVersions,
     ChatCreate,
     ChatDetail,
     ChatOut,
@@ -2788,6 +2790,42 @@ async def artifact_content(
     )
 
 
+def _grouped_by_parent(items: list[CatalogModel]) -> list[CatalogModel]:
+    """One card per model, where the provider says a card is a version of one.
+
+    A CivitAI card is a version, because a version is what installs. Listing
+    every version as its own card buries a model with twelve releases under
+    twelve rows that differ only in a suffix. The card becomes the model, and
+    keeps the newest version's identity so it still names something real.
+
+    `version_count` is what stops this from silently installing the latest: a
+    card offering more than one has to open the chooser rather than act, and
+    the count is how the browser knows which card that is.
+
+    Order is preserved - the first card seen for a parent keeps its place, so
+    whatever the provider's ranking meant still holds.
+    """
+    grouped: dict[str, CatalogModel] = {}
+    ordered: list[CatalogModel] = []
+    for item in items:
+        parent = item.parent_model_id
+        if not parent:
+            ordered.append(item)
+            continue
+        existing = grouped.get(parent)
+        if existing is None:
+            card = item.model_copy(
+                update={"name": item.parent_model_name or item.name, "version_count": 1}
+            )
+            grouped[parent] = card
+            ordered.append(card)
+            continue
+        merged = existing.model_copy(update={"version_count": existing.version_count + 1})
+        grouped[parent] = merged
+        ordered[ordered.index(existing)] = merged
+    return ordered
+
+
 @router.get("/catalog", response_model=CatalogPage)
 async def catalog_search(
     request: Request,
@@ -2833,7 +2871,7 @@ async def catalog_search(
             updated_within_days=updated_within_days,
         )
         if not media_catalog or role is None:
-            return page
+            return page.model_copy(update={"items": _grouped_by_parent(page.items)})
         registry = ComfyTemplateRegistry(services.settings)
         items = []
         for item in page.items:
@@ -2870,7 +2908,7 @@ async def catalog_search(
                     -(item.downloads or 0),
                 )
             )
-        return page.model_copy(update={"items": items})
+        return page.model_copy(update={"items": _grouped_by_parent(items)})
     except ValueError as exc:
         raise HTTPException(422, f"invalid catalog request: {exc}") from exc
     except Exception as exc:
@@ -4148,6 +4186,68 @@ async def model_storage(request: Request, session: SessionDep) -> ModelStorageIn
             or 0
         ),
         partial_download_count=len(partials),
+    )
+
+
+@router.get("/catalog/civitai/{model_id}/versions", response_model=CatalogVersions)
+async def catalog_model_versions(
+    model_id: str, request: Request, session: SessionDep
+) -> CatalogVersions:
+    """Every installable version of one model, and which are already here.
+
+    A version is what installs, so a card that groups them still has to let
+    someone choose one deliberately. This is the list that choice is made
+    from; picking a row goes back through the ordinary preflight and install
+    for that exact version, and nothing about the verified path changes.
+
+    Installed state is read from the same manifest field update checks use.
+    Where a kind does not record a provider version - checkpoints today - the
+    answer is `null` rather than `false`: saying "not installed" about
+    something we cannot see is how a person ends up with a second copy.
+    """
+
+    services = _services(request)
+    source = services.catalog_sources.get("civitai")
+    if not isinstance(source, CivitaiCatalog):
+        raise api_error(503, "provider-unavailable", "CivitAI catalog is not available")
+    if not source.validate_item_id(model_id):
+        raise api_error(422, "catalog-item-id-invalid", "That is not a CivitAI model id.")
+    try:
+        summary = await source.versions(model_id)
+    except CatalogUnavailableError as exc:
+        raise api_error(503, "catalog-unavailable", str(exc)) from exc
+    except ValueError as exc:
+        raise api_error(404, "catalog-item-not-found", str(exc)) from exc
+
+    installed = {
+        identity.version_id: identity
+        for identity in installed_civitai_identities(session)
+        if identity.model_id == model_id
+    }
+    rows = []
+    for version in summary.get("versions") or []:
+        version_id = str(version.get("version_id") or "")
+        match = installed.get(version_id)
+        rows.append(
+            CatalogVersionRow(
+                version_id=version_id,
+                version_name=version.get("version_name"),
+                published_at=version.get("published_at"),
+                base_model=version.get("base_model"),
+                size_bytes=int(version.get("size_bytes") or 0),
+                changelog=version.get("changelog"),
+                # `False` is only safe once this model has proved it records
+                # versions at all - which one recorded identity demonstrates.
+                # With none, silence is the honest answer: an install that
+                # stores no version is indistinguishable from no install.
+                installed=True if match else (False if installed else None),
+                installed_as=match.name if match else None,
+            )
+        )
+    return CatalogVersions(
+        model_id=str(summary.get("model_id") or model_id),
+        model_name=summary.get("model_name"),
+        versions=rows,
     )
 
 

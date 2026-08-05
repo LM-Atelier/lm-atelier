@@ -554,6 +554,10 @@ export interface CatalogModel {
    */
   parent_model_id?: string | null;
   parent_model_name?: string | null;
+  /** How many versions this card stands for. More than one means the card
+   * must open a chooser rather than install, because the point of version
+   * identity is that the person picked one. */
+  version_count?: number;
   workflow_template_id?: string | null;
   operation?: string | null;
   content_rating?: ContentRating;
@@ -571,6 +575,27 @@ export interface ExchangeDeletion {
   released_artifact_ids: string[];
   retained_artifact_ids: string[];
   new_head_message_id: string | null;
+}
+
+export interface CatalogVersionRow {
+  version_id: string;
+  version_name?: string | null;
+  published_at?: string | null;
+  base_model?: string | null;
+  size_bytes: number;
+  changelog?: string | null;
+  /** True, false, or unknown - and unknown is a real answer, not a default.
+   * Checkpoint installs record no provider version, so for those we cannot
+   * tell. Rendering unknown as "not installed" is how someone installs a
+   * second copy of what they already have. */
+  installed?: boolean | null;
+  installed_as?: string | null;
+}
+
+export interface CatalogVersions {
+  model_id: string;
+  model_name?: string | null;
+  versions: CatalogVersionRow[];
 }
 
 export interface CatalogPage {

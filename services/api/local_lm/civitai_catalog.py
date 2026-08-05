@@ -289,6 +289,14 @@ class CivitaiCatalog:
                         "published_at": str(version.get("publishedAt") or "") or None,
                         "base_model": str(version.get("baseModel") or "") or None,
                         "changelog": str(version.get("description") or "")[:4096] or None,
+                        # The chooser has to say what a version costs before
+                        # someone picks it. The payload already carries the
+                        # files, so this needs no extra call.
+                        "size_bytes": sum(
+                            self._size_bytes(file.get("sizeKB"))
+                            for file in version.get("files") or []
+                            if isinstance(file, dict)
+                        ),
                     }
                     for version in self._versions(payload)
                     if self._is_general_version(version)
