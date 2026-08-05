@@ -140,6 +140,10 @@ try {
         )
     }
     Write-Host "All LM Atelier local verification gates passed."
+    # Named because this gate discovers and typechecks the browser suite
+    # without running it, which reads as coverage. Three fixes for one
+    # browser failure were written blind before anyone noticed the gap.
+    Write-Host "Not run here: the browser golden path. Use 'npm run e2e'; CI runs it on Ubuntu."
 }
 finally {
     Pop-Location
