@@ -586,6 +586,22 @@ def test_catalog_normalizes_filterable_model_metadata() -> None:
     assert model.total_size_bytes == 5_000_000_000
 
 
+def test_a_repository_card_has_no_parent_to_group_under() -> None:
+    """On Hugging Face the repository is already the installable thing.
+
+    Parent identity exists so a CivitAI version can be listed under the model
+    it belongs to. A provider without that distinction must report none, so
+    the library groups nothing and the card renders exactly as it did.
+    """
+    model = HuggingFaceCatalog._normalize(
+        {"id": "owner/Model-8B-GGUF", "pipeline_tag": "text-generation"},
+        "chat",
+    )
+
+    assert model.parent_model_id is None
+    assert model.parent_model_name is None
+
+
 def test_catalog_normalizes_modern_comfy_quantization_names() -> None:
     model = HuggingFaceCatalog._normalize(
         {
