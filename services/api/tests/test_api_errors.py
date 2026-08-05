@@ -13,7 +13,7 @@ API_SOURCE = (Path(__file__).resolve().parents[1] / "local_lm" / "api.py").read_
 
 # Lower this every time a bare HTTPException is converted to api_error; it
 # must never rise. The eslint test ceilings use the same one-way ratchet.
-BARE_HTTP_EXCEPTIONS_CEILING = 191
+BARE_HTTP_EXCEPTIONS_CEILING = 181
 
 
 async def test_a_typed_error_keeps_detail_and_adds_a_stable_code(
