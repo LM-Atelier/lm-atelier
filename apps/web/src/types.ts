@@ -545,6 +545,15 @@ export interface CatalogModel {
   compatibility: string;
   compatibility_reasons: string[];
   required_runtime?: string | null;
+  /** The model this card is a version of, when the provider has one.
+   *
+   * A CivitAI card is one version, because a version is what installs and
+   * what the download path binds to. These let the library list versions
+   * under one parent without giving that up. Absent where the repository is
+   * already the installable thing, and a card without them renders as before.
+   */
+  parent_model_id?: string | null;
+  parent_model_name?: string | null;
   workflow_template_id?: string | null;
   operation?: string | null;
   content_rating?: ContentRating;

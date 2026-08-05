@@ -1339,6 +1339,14 @@ class CatalogModel(ApiModel):
     compatibility: str
     compatibility_reasons: list[str] = Field(default_factory=list)
     required_runtime: str | None = None
+    # A CivitAI card is one *version*, because a version is what installs and
+    # what the download path is bound to. These say which model it is a version
+    # of, so the library can list versions under one parent without giving up
+    # the version identity that install depends on. Absent for providers where
+    # the repository is already the installable thing, and a card with no
+    # parent renders exactly as it does now.
+    parent_model_id: str | None = None
+    parent_model_name: str | None = None
     # Set only on workflow catalog cards: one repository can ship several
     # official workflows, and the card must say which one it is.
     workflow_template_id: str | None = None

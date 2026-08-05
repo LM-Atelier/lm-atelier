@@ -525,3 +525,23 @@ async def test_versions_refuses_a_mature_parent_model(tmp_path: Path) -> None:
             await catalog.versions("101")
     finally:
         await catalog.close()
+
+
+def test_a_card_names_the_model_it_is_a_version_of() -> None:
+    """A CivitAI card is one version, because a version is what installs.
+
+    The library wants to list versions under one parent without giving up the
+    version identity the download path is bound to, so the card carries both.
+    """
+    version = {"id": 9001, "name": "v3.0", "baseModel": "SDXL 1.0", "files": [_file()]}
+    card = CivitaiCatalog._normalize(
+        {"id": 4201, "name": "Lustify", "type": "Checkpoint", "modelVersions": [version]},
+        "image",
+        version=version,
+    )
+
+    assert card.remote_id == "9001"
+    assert card.parent_model_id == "4201"
+    assert card.parent_model_name == "Lustify"
+    # The version identity is untouched: install still binds to the version.
+    assert card.parent_model_id != card.remote_id
