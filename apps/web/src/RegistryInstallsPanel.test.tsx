@@ -11,6 +11,7 @@ vi.mock("./api", () => ({
     reviewRegistryInstall: vi.fn(),
     activateRegistryInstall: vi.fn(),
     deactivateRegistryInstall: vi.fn(),
+    renewRegistryInstall: vi.fn(),
   },
 }));
 
@@ -59,6 +60,7 @@ describe("RegistryInstallsPanel", () => {
     vi.mocked(api.reviewRegistryInstall).mockResolvedValue(install({ trusted: true }));
     vi.mocked(api.activateRegistryInstall).mockResolvedValue(install({ active: true }));
     vi.mocked(api.deactivateRegistryInstall).mockResolvedValue(install());
+    vi.mocked(api.renewRegistryInstall).mockResolvedValue({ id: "job-renew" } as never);
   });
   afterEach(() => {
     cleanup();
@@ -167,6 +169,19 @@ describe("RegistryInstallsPanel", () => {
     fireEvent.click(await screen.findByRole("button", { name: "Deactivate" }));
     await waitFor(() => expect(api.deactivateRegistryInstall).toHaveBeenCalledWith("install-1"));
     expect(screen.queryByRole("button", { name: "Activate" })).toBeNull();
+  });
+
+  it("refreshes dependencies only while the package is inactive", async () => {
+    renderPanel();
+
+    fireEvent.click(await screen.findByRole("button", { name: "Refresh dependencies" }));
+    await waitFor(() => expect(api.renewRegistryInstall).toHaveBeenCalledWith("install-1"));
+
+    cleanup();
+    vi.mocked(api.registryInstalls).mockResolvedValue([install({ trusted: true, active: true })]);
+    renderPanel();
+    expect(await screen.findByText("comfyui-example-node")).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Refresh dependencies" })).toBeNull();
   });
 
   it("speaks the server's stable refusal codes in plain words", async () => {

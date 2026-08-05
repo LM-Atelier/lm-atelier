@@ -329,21 +329,21 @@ h1, h2, h3 { margin: 0; }
 /* Actions stay out of the way until wanted. Revealed on hover and on keyboard
    focus - hover alone would make them unreachable without a mouse. The
    revision arrows above are deliberately not in here: they never hide. */
-.message-actions { display: inline-flex; align-items: center; gap: 4px; opacity: 0; transition: opacity .12s ease; }
+.message-actions { display: inline-flex; align-items: center; gap: 4px; opacity: 0; transition: opacity var(--quick) var(--ease); }
 .message:hover .message-actions, .message-actions:focus-within { opacity: 1; }
 @media (hover: none) { .message-actions { opacity: 1; } }
 .message-meta button { display: inline-flex; align-items: center; gap: 4px; border: 0; border-radius: 6px; background: transparent; color: var(--ink-secondary); padding: 4px 6px; cursor: pointer; }
 .message-meta button:hover { background: var(--panel-2); color: var(--ink-primary); }
 .message.optimistic { opacity: .82; }
 .submission-progress { display: flex; align-items: center; gap: 8px; color: var(--ink-secondary); font-size: 12px; }
-.submission-progress svg, .send-button.pending svg { animation: spin .9s linear infinite; }
+.submission-progress svg, .send-button.pending svg { animation: spin 1.1s var(--ease) infinite; }
 .pending-response small { color: var(--muted); font-size: 10px; }
 .message-error, .callout.error { border: 1px solid #8e4048; color: #ffb8be; background: #391c22; border-radius: 10px; padding: 11px 13px; white-space: pre-wrap; }
 .generation-progress { display: grid; grid-template-columns: 24px 1fr; gap: 12px; align-items: center; max-width: 420px; color: var(--ink-primary); }
-.generation-progress svg { color: var(--accent-2); animation: pulse 1.5s ease infinite; }
+.generation-progress svg { color: var(--accent-2); animation: pulse 1.8s var(--ease) infinite; }
 .progress-track { height: 4px; overflow: hidden; border-radius: 6px; background: var(--surface-3); margin-top: 7px; }
-.progress-track > div { height: 100%; border-radius: inherit; background: linear-gradient(90deg, var(--blue), var(--terracotta)); transition: width .25s; }
-.progress-track > div.indeterminate { width: 34%; animation: progress-indeterminate 1.2s ease-in-out infinite; }
+.progress-track > div { height: 100%; border-radius: inherit; background: linear-gradient(90deg, var(--blue), var(--terracotta)); transition: width var(--settled) var(--ease); }
+.progress-track > div.indeterminate { width: 34%; animation: progress-indeterminate 1.6s var(--ease) infinite; }
 @keyframes pulse { 50% { opacity: .45; transform: scale(.9); } }
 @keyframes spin { to { transform: rotate(360deg); } }
 @keyframes progress-indeterminate { from { transform: translateX(-110%); } to { transform: translateX(300%); } }
@@ -459,7 +459,7 @@ h1, h2, h3 { margin: 0; }
 .recipe-meta { display: flex; flex-wrap: wrap; gap: 12px; color: var(--ink-secondary); font-size: 11px; }
 .recipe-meta span { display: inline-flex; align-items: center; gap: 4px; }
 .model-grid { display: grid; gap: 8px; }
-.model-card { display: grid; grid-template-columns: 44px 1fr auto; align-items: center; gap: 16px; background: var(--panel); border: 1px solid var(--border); border-radius: 14px; padding: 15px; transition: border-color .15s, background .15s; }
+.model-card { display: grid; grid-template-columns: 44px 1fr auto; align-items: center; gap: 16px; background: var(--panel); border: 1px solid var(--border); border-radius: 14px; padding: 15px; transition: border-color var(--quick) var(--ease), background var(--quick) var(--ease); }
 .model-card:hover { border-color: var(--accent); background: var(--panel-2); }
 .model-icon { width: 42px; height: 42px; display: grid; place-items: center; border-radius: 10px; background: #18233a; color: var(--accent-2); }
 .model-icon svg { width: 20px; }
@@ -474,7 +474,7 @@ h1, h2, h3 { margin: 0; }
 .model-stats { display: flex; flex-direction: column; align-items: flex-end; gap: 8px; color: var(--ink-muted); font-size: 11px; }
 .model-stats > span { display: flex; align-items: center; gap: 4px; }
 .compact-button { padding: 7px 10px; font-size: 11px; }
-.loading-line { height: 2px; background: linear-gradient(90deg, transparent, var(--accent), transparent); animation: load 1s linear infinite; margin-bottom: 15px; }
+.loading-line { height: 2px; background: linear-gradient(90deg, transparent, var(--accent), transparent); animation: load 1.4s var(--ease) infinite; margin-bottom: 15px; }
 @keyframes load { from { transform: translateX(-50%); } to { transform: translateX(50%); } }
 
 .workflow-layout { display: grid; grid-template-columns: 300px minmax(0, 1fr); min-height: 540px; background: var(--panel); border: 1px solid var(--border); border-radius: 14px; overflow: hidden; }
@@ -562,7 +562,7 @@ h1, h2, h3 { margin: 0; }
 .setup-role > p { min-height: 32px; margin: 0; line-height: 1.45; }
 .setup-job, .setup-actions { display: grid; gap: 6px; }
 .setup-actions .secondary { width: 100%; }
-.spin { animation: spin 1s linear infinite; }
+.spin { animation: spin 1.1s var(--ease) infinite; }
 .prompt-helper-dialog { width: min(860px, 96vw); overflow: hidden; }
 .prompt-helper-body { display: grid; gap: 16px; min-height: 0; }
 .prompt-helper-draft { margin-bottom: 0 !important; }
@@ -851,7 +851,7 @@ h1, h2, h3 { margin: 0; }
 .studio-canvas-layers > canvas { position: absolute; inset: 0; width: 100%; height: 100%; }
 /* The picture is the only opaque layer; the two above it must not hide it. */
 .studio-canvas-layers > canvas[data-layer] { background: transparent; pointer-events: none; }
-.studio-tool-rail { display: flex; flex-direction: column; align-items: center; gap: 4px; padding: 7px; border: 1px solid var(--border); border-radius: 14px; background: var(--panel); align-self: start; }
+.studio-tool-rail { display: flex; flex-direction: column; align-items: center; gap: 4px; padding: 7px; border: 1px solid var(--border); border-radius: var(--cut); background: var(--panel); align-self: start; }
 .studio-rail-divider { width: 18px; height: 1px; margin: 3px 0; background: var(--border); }
 /* The selected tool needs a visible state, not only aria-pressed: without
    this the rail announces its selection correctly and shows nothing. */
