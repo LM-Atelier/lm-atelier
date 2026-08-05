@@ -185,6 +185,85 @@ async def test_an_unconfigured_runtime_refuses_review_before_touching_rows(
     assert response.json()["code"] == "managed_runtime_unavailable"
 
 
+async def test_dependency_renewal_queues_the_exact_inactive_install(
+    client: AsyncClient,
+    app: FastAPI,
+    settings: Settings,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path,
+) -> None:
+    _configure_runtime(settings, monkeypatch, tmp_path)
+    install_id = _seed_install(trusted=True)
+    services = app.state.services
+    monkeypatch.setattr(
+        services.processes,
+        "statuses",
+        lambda: [SimpleNamespace(name="media", running=False, state="stopped")],
+    )
+    captured: list[tuple[object, ...]] = []
+
+    import local_lm.api as api_module
+
+    async def fake_run(*args: object) -> None:
+        captured.append(args)
+
+    monkeypatch.setattr(api_module, "_run_workflow_package_preparation", fake_run)
+
+    response = await client.post(f"/api/workflows/packages/installs/{install_id}/renew")
+
+    assert response.status_code == 202
+    body = response.json()
+    assert body["kind"] == "registry_prepare"
+    assert body["payload_json"] == {
+        "package_id": "comfyui-example-node",
+        "version": "1.2.3",
+        "node_types": ["ExampleNode"],
+        "renew_install_id": install_id,
+    }
+    import asyncio
+
+    await asyncio.sleep(0)
+    assert captured
+    assert captured[0][2:] == (
+        "comfyui-example-node",
+        "1.2.3",
+        ("ExampleNode",),
+        install_id,
+    )
+
+
+async def test_dependency_renewal_refuses_active_or_running_packages(
+    client: AsyncClient,
+    app: FastAPI,
+    settings: Settings,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path,
+) -> None:
+    _configure_runtime(settings, monkeypatch, tmp_path)
+    active_id = _seed_install(active=True)
+
+    active = await client.post(f"/api/workflows/packages/installs/{active_id}/renew")
+    assert active.status_code == 409
+    assert active.json()["code"] == "registry-install-active"
+
+    from local_lm.db import SessionLocal
+    from local_lm.models import ComfyRegistryInstall
+
+    with SessionLocal() as session:
+        install = session.get(ComfyRegistryInstall, active_id)
+        assert install is not None
+        install.active = False
+        session.commit()
+    monkeypatch.setattr(
+        app.state.services.processes,
+        "statuses",
+        lambda: [SimpleNamespace(name="media", running=True, state="running")],
+    )
+    running = await client.post(f"/api/workflows/packages/installs/{active_id}/renew")
+    assert running.status_code == 409
+    assert running.json()["code"] == "media-worker-running"
+
+
 async def test_deactivation_restarts_the_runtime_without_the_package(
     client: AsyncClient,
     app: FastAPI,

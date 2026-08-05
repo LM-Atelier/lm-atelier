@@ -739,6 +739,10 @@ export const api = {
     request<RegistryInstall>(`/api/workflows/packages/installs/${installId}/deactivate`, {
       method: "POST",
     }),
+  renewRegistryInstall: (installId: string) =>
+    request<Job>(`/api/workflows/packages/installs/${installId}/renew`, {
+      method: "POST",
+    }),
   analyzeWorkflowPackage: (uiGraph: Record<string, unknown>) =>
     request<WorkflowPackageAnalysis>("/api/workflows/packages/analyze", {
       method: "POST",

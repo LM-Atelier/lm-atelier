@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
+import logging
 import shutil
 import stat
 from collections.abc import Awaitable, Callable
@@ -50,6 +51,7 @@ from .comfy_registry_wheel_environments import (
 from .models import ComfyRegistryInstall
 
 _REPARSE_POINT = getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0x400)
+logger = logging.getLogger(__name__)
 
 
 class ComfyRegistryLifecycleError(ValueError):
@@ -286,6 +288,146 @@ async def prepare_comfy_registry_install(
         raise
 
 
+async def renew_comfy_registry_install_environment(
+    session: Session,
+    *,
+    install_id: str,
+    resolution: ComfyNodeResolution,
+    closure: ComfyRegistryWheelClosure,
+    wheel_downloader: RegistryWheelDownloader,
+    python_executable: Path,
+    custom_node_root: Path,
+    state_root: Path,
+    media_worker_stopped: bool,
+    wheel_progress: WheelDownloadProgress | None = None,
+    environment_assembler: EnvironmentAssembler = assemble_comfy_registry_wheel_environment,
+) -> ComfyRegistryPreparation:
+    """Rebuild only an inactive package's target-bound wheel environment.
+
+    The reviewed node archive never changes. A new environment is assembled
+    beside the old one, the database binding moves in one commit, and only then
+    is an unshared old environment retired. Failed renewal therefore leaves the
+    prior verified binding usable.
+    """
+    if media_worker_stopped is not True:
+        raise ComfyRegistryLifecycleError(
+            "media_worker_running",
+            "The media worker must be stopped before renewing a Registry package",
+        )
+    install = session.get(ComfyRegistryInstall, install_id)
+    if install is None:
+        raise ComfyRegistryLifecycleError(
+            "registry_install_not_found", "Registry package install was not found"
+        )
+    if install.active:
+        raise ComfyRegistryLifecycleError(
+            "registry_install_active",
+            "Deactivate the Registry package before refreshing its dependencies",
+        )
+    _validate_renewal_identity(install, resolution)
+    artifacts = _complete_closure(closure, resolution)
+    node_root = _managed_root(custom_node_root, "custom node")
+    managed_state = _managed_root(state_root, "state")
+    environment_root = _managed_child(managed_state, "registry-wheel-environments")
+    staging_root = _managed_child(managed_state, "registry-wheel-staging")
+    node_destination = _existing_managed_child(node_root, install.installed_path, "node")
+    _verify_existing_archive(install, node_destination)
+    old_environment_name = install.wheel_environment_path
+    if not old_environment_name:
+        raise ComfyRegistryLifecycleError(
+            "registry_environment_missing",
+            "Registry package has no prepared dependency environment",
+        )
+    old_environment = _existing_managed_child(environment_root, old_environment_name, "environment")
+    environment_destination = environment_root / f"registry-wheels-{closure.closure_sha256}"
+    wheel_destination = staging_root / f"registry-wheels-{closure.closure_sha256}"
+    environment_preexisting = (
+        environment_destination.exists() or environment_destination.is_symlink()
+    )
+    old_shared = session.scalar(
+        select(ComfyRegistryInstall.id)
+        .where(
+            ComfyRegistryInstall.id != install.id,
+            ComfyRegistryInstall.wheel_environment_path == old_environment_name,
+        )
+        .limit(1)
+    )
+    retirement = environment_root / f".{old_environment_name}.retiring-{install.id}"
+    retired = False
+    original_trusted = install.trusted
+    try:
+        if wheel_destination.exists() or wheel_destination.is_symlink():
+            raise ComfyRegistryLifecycleError(
+                "wheel_stage_exists", "Registry wheel staging from another attempt still exists"
+            )
+        environment, reused = await _environment(
+            session,
+            closure=closure,
+            artifacts=artifacts,
+            wheel_downloader=wheel_downloader,
+            wheel_destination=wheel_destination,
+            wheel_progress=wheel_progress,
+            python_executable=python_executable,
+            environment_destination=environment_destination,
+            environment_root=environment_root,
+            environment_assembler=environment_assembler,
+        )
+        await _remove_tree(wheel_destination, staging_root)
+        if old_environment != environment_destination and old_shared is None:
+            if retirement.exists() or retirement.is_symlink():
+                raise ComfyRegistryLifecycleError(
+                    "renewal_cleanup_pending",
+                    "A previous Registry dependency renewal still needs cleanup",
+                )
+            old_environment.rename(retirement)
+            retired = True
+        install.trusted = False
+        install.wheel_closure_sha256 = None
+        install.wheel_environment_sha256 = None
+        install.wheel_environment_path = None
+        try:
+            bind_comfy_registry_wheel_environment(
+                install,
+                closure,
+                environment,
+                environment_destination,
+                environment_root=environment_root,
+            )
+        finally:
+            install.trusted = original_trusted
+        preparation = ComfyRegistryPreparation(
+            install.id,
+            install.installed_path,
+            install.wheel_environment_path or "",
+            install.archive_sha256,
+            install.manifest_sha256,
+            install.wheel_closure_sha256 or "",
+            install.wheel_environment_sha256 or "",
+            reused,
+        )
+        session.commit()
+    except (Exception, asyncio.CancelledError):
+        session.rollback()
+        await _remove_tree(wheel_destination, staging_root)
+        if retired and (retirement.exists() or retirement.is_symlink()):
+            retirement.rename(old_environment)
+        if (
+            not environment_preexisting
+            and environment_destination != old_environment
+            and (environment_destination.exists() or environment_destination.is_symlink())
+        ):
+            await _remove_tree(environment_destination, environment_root)
+        raise
+    if retired:
+        try:
+            await _remove_tree(retirement, environment_root)
+        except ComfyRegistryLifecycleError:
+            logger.warning(
+                "Registry dependency renewal committed but stale environment cleanup is pending"
+            )
+    return preparation
+
+
 async def _environment(
     session: Session,
     *,
@@ -383,6 +525,65 @@ def _resolution_identity(resolution: ComfyNodeResolution) -> tuple[str, str, str
     return source.package_id, source.package_version, source.source_record_id
 
 
+def _validate_renewal_identity(
+    install: ComfyRegistryInstall, resolution: ComfyNodeResolution
+) -> None:
+    package_id, package_version, record_id = _resolution_identity(resolution)
+    expected = (
+        package_id,
+        package_version,
+        record_id,
+        resolution.repository_url,
+        resolution.download_url,
+        tuple(resolution.node_types),
+        tuple(resolution.pip_dependencies),
+    )
+    actual = (
+        install.package_id,
+        install.package_version,
+        install.registry_record_id,
+        install.repository_url,
+        install.download_url,
+        tuple(install.node_types_json),
+        tuple(install.pip_dependencies_json),
+    )
+    if actual != expected:
+        raise ComfyRegistryLifecycleError(
+            "registry_install_identity_changed",
+            "Registry package identity changed; remove and review a fresh package instead",
+        )
+
+
+def _verify_existing_archive(install: ComfyRegistryInstall, destination: Path) -> None:
+    review = install.review_json if isinstance(install.review_json, dict) else {}
+    file_count = review.get("file_count")
+    expanded_bytes = review.get("expanded_bytes")
+    if (
+        not isinstance(file_count, int)
+        or isinstance(file_count, bool)
+        or file_count < 1
+        or not isinstance(expanded_bytes, int)
+        or isinstance(expanded_bytes, bool)
+        or expanded_bytes < 1
+    ):
+        raise ComfyRegistryLifecycleError(
+            "registry_install_review_missing",
+            "Registry package has no complete archive review evidence",
+        )
+    try:
+        verify_staged_comfy_registry_archive(
+            destination,
+            expected_manifest_sha256=install.manifest_sha256,
+            expected_file_count=file_count,
+            expected_expanded_bytes=expanded_bytes,
+        )
+    except ComfyRegistryArchiveError as exc:
+        raise ComfyRegistryLifecycleError(
+            "registry_install_verification_failed",
+            "Registry package files failed verification",
+        ) from exc
+
+
 def _validate_staged_archive(
     staged_archive: ComfyRegistryStagedArchive,
     destination: Path,
@@ -446,6 +647,25 @@ def _managed_child(root: Path, name: str) -> Path:
     if resolved.parent != root or _is_link_or_reparse(path) or not resolved.is_dir():
         raise ComfyRegistryLifecycleError(
             "invalid_managed_root", "Managed Registry storage is invalid"
+        )
+    return resolved
+
+
+def _existing_managed_child(root: Path, name: str, label: str) -> Path:
+    if not isinstance(name, str) or not name or Path(name).name != name:
+        raise ComfyRegistryLifecycleError(
+            "invalid_managed_path", f"Managed Registry {label} path is invalid"
+        )
+    path = root / name
+    try:
+        resolved = path.resolve(strict=True)
+    except OSError as exc:
+        raise ComfyRegistryLifecycleError(
+            "managed_path_missing", f"Managed Registry {label} path is missing"
+        ) from exc
+    if resolved.parent != root or _is_link_or_reparse(path) or not resolved.is_dir():
+        raise ComfyRegistryLifecycleError(
+            "invalid_managed_path", f"Managed Registry {label} path is invalid"
         )
     return resolved
 

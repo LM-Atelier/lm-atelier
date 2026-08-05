@@ -133,6 +133,81 @@ async def test_composes_resolve_close_prepare_in_order(monkeypatch: pytest.Monke
     assert any("a.whl" in name for name in phases)
 
 
+async def test_renewal_reuses_resolution_and_closure_without_replacing_node_code(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    closure = SimpleNamespace(closure="closure-object")
+    prepared = SimpleNamespace(install_id="install_1")
+
+    async def fake_drive(_resolution: Any, **_kwargs: Any) -> Any:
+        return closure
+
+    async def fake_renew(session: Any, **kwargs: Any) -> Any:
+        assert session is not None
+        assert kwargs["install_id"] == "install_1"
+        assert kwargs["closure"] == "closure-object"
+        assert kwargs["media_worker_stopped"] is True
+        return prepared
+
+    async def unexpected_prepare(*_args: Any, **_kwargs: Any) -> Any:
+        raise AssertionError("renewal must not replace the reviewed node archive")
+
+    monkeypatch.setattr(composition, "drive_comfy_registry_wheel_closure", fake_drive)
+    monkeypatch.setattr(composition, "renew_comfy_registry_install_environment", fake_renew)
+    monkeypatch.setattr(composition, "prepare_comfy_registry_install", unexpected_prepare)
+
+    result = await prepare_workflow_package(
+        _NullSessionFactory(),
+        package_id="example-pack",
+        node_types=("ExampleNode",),
+        version="1.2.3",
+        context=_CONTEXT,
+        media_worker_stopped=True,
+        interpreter_probe=_probe,
+        registry_client=_Registry(_resolution()),  # type: ignore[arg-type]
+        renew_install_id="install_1",
+        **_clients(),
+    )
+
+    assert result is prepared
+
+
+async def test_commit_pin_renewal_refuses_before_probe_or_archive_download(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    revision = "a" * 40
+
+    async def unexpected_probe(_python: Path) -> Any:
+        raise AssertionError("unsupported renewal must refuse before probing")
+
+    async def unexpected_stage(**_kwargs: Any) -> Any:
+        raise AssertionError("renewal must not replace or download node code")
+
+    monkeypatch.setattr(composition, "stage_comfy_registry_install_archive", unexpected_stage)
+
+    with pytest.raises(WorkflowPackagePreparationError) as refused:
+        await prepare_workflow_package(
+            _NullSessionFactory(),
+            package_id="example-pack",
+            node_types=("ExampleNode",),
+            version=revision,
+            context=_CONTEXT,
+            media_worker_stopped=True,
+            interpreter_probe=unexpected_probe,
+            registry_client=_Registry(
+                _resolution(
+                    declared_version=revision,
+                    install_kind="git_commit",
+                    repository_url="https://github.com/example/example-pack.git",
+                )
+            ),  # type: ignore[arg-type]
+            renew_install_id="install_1",
+            **_clients(),
+        )
+
+    assert refused.value.code == "registry_renewal_source_unsupported"
+
+
 async def test_commit_pin_stages_reads_closes_and_prepares_the_same_tree(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

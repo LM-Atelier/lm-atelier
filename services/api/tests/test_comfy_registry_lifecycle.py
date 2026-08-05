@@ -24,8 +24,10 @@ from local_lm.comfy_registry_lifecycle import (
     ComfyRegistryLifecycleError,
     ComfyRegistryPreparation,
     prepare_comfy_registry_install,
+    renew_comfy_registry_install_environment,
     stage_comfy_registry_install_archive,
 )
+from local_lm.comfy_registry_runtime import ComfyRegistryRuntimeDistribution
 from local_lm.comfy_registry_wheel_artifacts import (
     ComfyRegistryWheelArtifactManifest,
     build_comfy_registry_wheel_artifact_manifest,
@@ -71,7 +73,11 @@ def _resolution(**changes: Any) -> ComfyNodeResolution:
     return replace(value, **changes)
 
 
-def _closure(resolution: ComfyNodeResolution) -> ComfyRegistryWheelClosure:
+def _closure(
+    resolution: ComfyNodeResolution,
+    *,
+    runtime_distributions: tuple[ComfyRegistryRuntimeDistribution, ...] = (),
+) -> ComfyRegistryWheelClosure:
     dependency_plan = plan_comfy_registry_dependencies(resolution.pip_dependencies)
     marker_environment, supported_tags = current_comfy_registry_wheel_target()
     target_sha256 = comfy_registry_wheel_target_sha256(
@@ -87,6 +93,7 @@ def _closure(resolution: ComfyNodeResolution) -> ComfyRegistryWheelClosure:
         manifest,
         {},
         marker_environment=marker_environment,
+        runtime_distributions=runtime_distributions,
     )
 
 
@@ -773,3 +780,129 @@ async def test_existing_install_is_not_removed_by_a_staged_argument(
 
     assert raised.value.code == "registry_install_exists"
     assert (custom_nodes / result.installed_path / "__init__.py").read_bytes() == content
+
+
+async def test_renewal_rebinds_dependencies_without_changing_reviewed_node_code(
+    session: Session,
+    tmp_path: Path,
+) -> None:
+    result, _, _, custom_nodes, state = await _prepare(session, tmp_path)
+    install = session.get(ComfyRegistryInstall, result.install_id)
+    assert install is not None
+    install.trusted = True
+    session.commit()
+    node_bytes = (custom_nodes / result.installed_path / "__init__.py").read_bytes()
+    old_environment = state / "registry-wheel-environments" / result.wheel_environment_path
+    renewed_closure = _closure(
+        _resolution(),
+        runtime_distributions=(ComfyRegistryRuntimeDistribution("torch", "2.13.0+cu130"),),
+    )
+
+    renewed = await renew_comfy_registry_install_environment(
+        session,
+        install_id=result.install_id,
+        resolution=_resolution(),
+        closure=renewed_closure,
+        wheel_downloader=_WheelDownloader(),
+        python_executable=Path(sys.executable),
+        custom_node_root=custom_nodes,
+        state_root=state,
+        media_worker_stopped=True,
+    )
+
+    current = session.get(ComfyRegistryInstall, result.install_id)
+    assert current is not None
+    assert current.trusted is True
+    assert current.active is False
+    assert renewed.install_id == result.install_id
+    assert renewed.wheel_closure_sha256 == renewed_closure.closure_sha256
+    assert renewed.wheel_environment_path != result.wheel_environment_path
+    assert not old_environment.exists()
+    assert (custom_nodes / result.installed_path / "__init__.py").read_bytes() == node_bytes
+
+
+async def test_renewal_refuses_an_active_or_changed_package(
+    session: Session,
+    tmp_path: Path,
+) -> None:
+    result, _, _, custom_nodes, state = await _prepare(session, tmp_path)
+    install = session.get(ComfyRegistryInstall, result.install_id)
+    assert install is not None
+    install.active = True
+    session.commit()
+
+    with pytest.raises(ComfyRegistryLifecycleError) as active:
+        await renew_comfy_registry_install_environment(
+            session,
+            install_id=result.install_id,
+            resolution=_resolution(),
+            closure=_closure(_resolution()),
+            wheel_downloader=_WheelDownloader(),
+            python_executable=Path(sys.executable),
+            custom_node_root=custom_nodes,
+            state_root=state,
+            media_worker_stopped=True,
+        )
+    assert active.value.code == "registry_install_active"
+
+    install.active = False
+    session.commit()
+    with pytest.raises(ComfyRegistryLifecycleError) as changed:
+        await renew_comfy_registry_install_environment(
+            session,
+            install_id=result.install_id,
+            resolution=_resolution(pip_dependencies=("unexpected==1.0",)),
+            closure=_closure(_resolution(pip_dependencies=("unexpected==1.0",))),
+            wheel_downloader=_WheelDownloader(),
+            python_executable=Path(sys.executable),
+            custom_node_root=custom_nodes,
+            state_root=state,
+            media_worker_stopped=True,
+        )
+    assert changed.value.code == "registry_install_identity_changed"
+
+
+async def test_failed_renewal_keeps_the_prior_binding_and_environment(
+    session: Session,
+    tmp_path: Path,
+) -> None:
+    result, _, _, custom_nodes, state = await _prepare(session, tmp_path)
+    install = session.get(ComfyRegistryInstall, result.install_id)
+    assert install is not None
+    install.trusted = True
+    session.commit()
+    old_environment = state / "registry-wheel-environments" / result.wheel_environment_path
+    renewed_closure = _closure(
+        _resolution(),
+        runtime_distributions=(ComfyRegistryRuntimeDistribution("torch", "2.13.0+cu130"),),
+    )
+
+    async def refuse_environment(*_args: object, **_kwargs: object) -> object:
+        raise environment_module.ComfyRegistryWheelEnvironmentError(
+            "renewal_fixture_refused", "The replacement environment was refused"
+        )
+
+    with pytest.raises(ComfyRegistryLifecycleError) as raised:
+        await renew_comfy_registry_install_environment(
+            session,
+            install_id=result.install_id,
+            resolution=_resolution(),
+            closure=renewed_closure,
+            wheel_downloader=_WheelDownloader(),
+            python_executable=Path(sys.executable),
+            custom_node_root=custom_nodes,
+            state_root=state,
+            media_worker_stopped=True,
+            environment_assembler=refuse_environment,  # type: ignore[arg-type]
+        )
+
+    assert raised.value.code == "renewal_fixture_refused"
+    current = session.get(ComfyRegistryInstall, result.install_id)
+    assert current is not None
+    assert current.trusted is True
+    assert current.wheel_closure_sha256 == result.wheel_closure_sha256
+    assert current.wheel_environment_path == result.wheel_environment_path
+    assert old_environment.is_dir()
+    assert not (
+        state / "registry-wheel-environments" / f"registry-wheels-{renewed_closure.closure_sha256}"
+    ).exists()
