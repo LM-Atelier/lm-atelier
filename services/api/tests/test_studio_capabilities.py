@@ -41,6 +41,18 @@ def test_an_upscaler_does_not_enable_the_selection_tools() -> None:
     assert tools["brush"].available is False
 
 
+def test_extend_waits_for_a_workflow_that_paints_past_the_edge() -> None:
+    outpaint: dict[str, Any] = {
+        "type": "object",
+        "properties": {"outpaint_margins": {"type": "object", "x-lm-atelier-kind": "outpaint"}},
+    }
+
+    assert _by_kind([PLAIN_SCHEMA])["extend"].available is False
+    assert _by_kind([outpaint])["extend"].available is True
+    # Each class stands alone: an outpainter is not an upscaler.
+    assert _by_kind([outpaint])["enhance"].available is False
+
+
 def test_a_plain_editor_runs_instruct_but_not_a_selection() -> None:
     """The live case: an edit workflow that declares no mask input.
 

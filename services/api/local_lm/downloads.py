@@ -70,6 +70,11 @@ from .models import (
     WorkflowDefinition,
     WorkflowRevision,
 )
+from .outpaint_workflows import (
+    OUTPAINT_SCHEMA_KIND,
+    OUTPAINT_SETTING_KEY,
+    graph_can_outpaint,
+)
 from .profile_service import (
     build_profile_for_install,
     ensure_profile_for_install,
@@ -2461,6 +2466,16 @@ class DownloadManager:
         # setting is declared only where the graph carries an upscale node, so
         # the studio's Enhance tool is offered exactly when something installed
         # can honor it.
+        if graph_can_outpaint(compiled.api_graph):
+            properties = input_schema.setdefault("properties", {})
+            if isinstance(properties, dict):
+                properties[OUTPAINT_SETTING_KEY] = {
+                    "type": "object",
+                    "title": "Extend by",
+                    "description": "How far past each edge to paint, as a fraction.",
+                    "x-lm-atelier-kind": OUTPAINT_SCHEMA_KIND,
+                    "default": {"top": 0, "right": 0, "bottom": 0, "left": 0},
+                }
         if upscale_capability(compiled.api_graph):
             properties = input_schema.setdefault("properties", {})
             if isinstance(properties, dict):
