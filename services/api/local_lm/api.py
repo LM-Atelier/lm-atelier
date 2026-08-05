@@ -961,7 +961,7 @@ async def install_runtime(engine: str, request: Request) -> RuntimeStatus:
         cast(Literal["llama.cpp", "vllm", "comfyui"], engine)
     )
     if status.state == "unsupported":
-        raise HTTPException(422, status.message)
+        raise api_error(422, "runtime-unavailable", status.message)
     return status
 
 
@@ -1009,9 +1009,9 @@ def _validated_profile_install(
             engine=engine,
         )
     except LookupError as exc:
-        raise HTTPException(404, str(exc)) from exc
+        raise api_error(404, "profile-install-missing", str(exc)) from exc
     except ValueError as exc:
-        raise HTTPException(422, str(exc)) from exc
+        raise api_error(422, "profile-install-invalid", str(exc)) from exc
 
 
 @router.post("/workers/chat/load/{profile_id}", response_model=WorkerStatus)
@@ -1031,7 +1031,7 @@ async def _load_chat_profile(services: Services, session: Session, profile_id: s
     if not profile or not profile.model_install_id:
         raise api_error(404, "profile-install-missing", "profile with a model install not found")
     if profile.role != ModelRole.CHAT.value:
-        raise HTTPException(422, "chat worker requires a chat profile")
+        raise api_error(422, "profile-role-mismatch", "chat worker requires a chat profile")
     install = _validated_profile_install(
         session,
         model_install_id=profile.model_install_id,
@@ -1039,7 +1039,7 @@ async def _load_chat_profile(services: Services, session: Session, profile_id: s
         engine=profile.engine,
     )
     if not install:
-        raise HTTPException(404, "profile with a model install not found")
+        raise api_error(404, "profile-install-missing", "profile with a model install not found")
     try:
         status = await services.processes.load_chat(profile, install)
     except (OSError, RuntimeError, ValueError, TimeoutError) as exc:
@@ -1061,7 +1061,7 @@ async def start_media_worker(request: Request, session: SessionDep) -> WorkerSta
         session.expire_all()
         _ensure_worker_idle(session, "media")
         if services.settings.media_engine != "comfyui":
-            raise HTTPException(422, "The ComfyUI media engine is not active.")
+            raise api_error(422, "media-engine-inactive", "The ComfyUI media engine is not active.")
         try:
             return await services.processes.start_media()
         except (OSError, RuntimeError, ValueError, TimeoutError) as exc:
