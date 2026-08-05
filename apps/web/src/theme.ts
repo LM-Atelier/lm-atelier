@@ -17,11 +17,12 @@ export type ThemeMode = "light" | "dark";
 
 /** A room is a whole palette. Adding one means adding a block of custom
  * properties and a name here; no rule in the stylesheet changes. */
-export const ROOMS = ["north-light"] as const;
+export const ROOMS = ["north-light", "blue-hour"] as const;
 export type Room = (typeof ROOMS)[number];
 
 export const ROOM_LABELS: Record<Room, string> = {
   "north-light": "North Light",
+  "blue-hour": "Blue Hour",
 };
 
 export const ROOM_KEY = "local-lm-room";
