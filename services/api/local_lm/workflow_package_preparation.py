@@ -35,6 +35,7 @@ from .comfy_registry_lifecycle import (
     ComfyRegistryStagedArchive,
     discard_comfy_registry_staged_archive,
     prepare_comfy_registry_install,
+    renew_comfy_registry_install_environment,
     stage_comfy_registry_install_archive,
 )
 from .comfy_registry_runtime import ComfyRegistryRuntimeDistribution
@@ -107,6 +108,7 @@ async def prepare_workflow_package(
     archive_downloader: ComfyRegistryArchiveDownloader,
     wheel_downloader: ComfyRegistryWheelDownloader,
     phase: PreparationPhase | None = None,
+    renew_install_id: str | None = None,
 ) -> ComfyRegistryPreparation:
     """Resolve, close, and prepare one package; refuse with the source's code.
 
@@ -141,6 +143,11 @@ async def prepare_workflow_package(
         raise WorkflowPackagePreparationError(
             resolution.error_code,
             f"The Registry could not resolve {package_id}.",
+        )
+    if renew_install_id is not None and resolution.install_kind == "git_commit":
+        raise WorkflowPackagePreparationError(
+            "registry_renewal_source_unsupported",
+            "Commit-pinned Registry packages must be removed and reviewed again",
         )
 
     _phase("Probing the target runtime")
@@ -238,20 +245,34 @@ async def prepare_workflow_package(
             # so it holds no SQLite lock while the lifecycle downloads and
             # assembles; the concurrency regression beside this proves another
             # writer makes progress mid-preparation.
-            preparation = await prepare_comfy_registry_install(
-                session,
-                resolution=effective_resolution,
-                closure=closure_result.closure,
-                archive_downloader=archive_downloader,
-                wheel_downloader=wheel_downloader,
-                python_executable=context.python_executable,
-                custom_node_root=context.custom_node_root,
-                state_root=context.state_root,
-                media_worker_stopped=media_worker_stopped,
-                archive_progress=_archive_progress,
-                wheel_progress=_wheel_progress,
-                staged_archive=staged_archive,
-            )
+            if renew_install_id is None:
+                preparation = await prepare_comfy_registry_install(
+                    session,
+                    resolution=effective_resolution,
+                    closure=closure_result.closure,
+                    archive_downloader=archive_downloader,
+                    wheel_downloader=wheel_downloader,
+                    python_executable=context.python_executable,
+                    custom_node_root=context.custom_node_root,
+                    state_root=context.state_root,
+                    media_worker_stopped=media_worker_stopped,
+                    archive_progress=_archive_progress,
+                    wheel_progress=_wheel_progress,
+                    staged_archive=staged_archive,
+                )
+            else:
+                preparation = await renew_comfy_registry_install_environment(
+                    session,
+                    install_id=renew_install_id,
+                    resolution=effective_resolution,
+                    closure=closure_result.closure,
+                    wheel_downloader=wheel_downloader,
+                    python_executable=context.python_executable,
+                    custom_node_root=context.custom_node_root,
+                    state_root=context.state_root,
+                    media_worker_stopped=media_worker_stopped,
+                    wheel_progress=_wheel_progress,
+                )
             staged_archive = None
             return preparation
     except ComfyRegistryLifecycleError as exc:

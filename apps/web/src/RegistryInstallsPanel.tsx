@@ -17,7 +17,11 @@ import type { RegistryInstall, RegistryInstallReview } from "./types";
  */
 export function RegistryInstallsPanel() {
   const client = useQueryClient();
-  const installs = useQuery({ queryKey: ["registry-installs"], queryFn: api.registryInstalls });
+  const installs = useQuery({
+    queryKey: ["registry-installs"],
+    queryFn: api.registryInstalls,
+    refetchInterval: 3_000,
+  });
   const refresh = () => void client.invalidateQueries({ queryKey: ["registry-installs"] });
   const [trusting, setTrusting] = useState<RegistryInstall | null>(null);
   const review = useMutation({
@@ -33,7 +37,14 @@ export function RegistryInstallsPanel() {
     mutationFn: (id: string) => api.deactivateRegistryInstall(id),
     onSuccess: refresh,
   });
-  const error = (review.error ?? activate.error ?? deactivate.error) as
+  const renew = useMutation({
+    mutationFn: (id: string) => api.renewRegistryInstall(id),
+    onSuccess: () => {
+      refresh();
+      void client.invalidateQueries({ queryKey: ["jobs"] });
+    },
+  });
+  const error = (review.error ?? activate.error ?? deactivate.error ?? renew.error) as
     | (Error & { code?: string })
     | null;
   if (!installs.data?.length) return null;
@@ -94,6 +105,15 @@ export function RegistryInstallsPanel() {
                   onClick={() => deactivate.mutate(install.id)}
                 >
                   Deactivate
+                </button>
+              )}
+              {!install.active && (
+                <button
+                  className="secondary compact-button"
+                  disabled={renew.isPending && renew.variables === install.id}
+                  onClick={() => renew.mutate(install.id)}
+                >
+                  Refresh dependencies
                 </button>
               )}
             </span>
