@@ -471,3 +471,26 @@ describe("material character", () => {
     }
   });
 });
+
+describe("the collapsed sidebar", () => {
+  const css = readFileSync(STYLESHEET, "utf8");
+
+  it("keeps its grid track rather than leaving the page one column short", () => {
+    // `display: none` took the sidebar out of the grid, so every remaining
+    // child shifted one track left: `main` landed in the `auto` column and
+    // collapsed to nothing. Hiding the sidebar blanked the whole page.
+    const collapsed = css.match(/\[data-sidebar="collapsed"\] \.sidebar \{([^}]*)\}/)?.[1] ?? "";
+    expect(collapsed).not.toMatch(/display:\s*none/);
+
+    // Three tracks, and the work keeps the one that grows.
+    const shell = css.match(/\.app-shell \{([^}]*)\}/)?.[1] ?? "";
+    expect(shell).toMatch(/grid-template-columns:[^;]*var\(--sidebar-width[^;]*1fr/);
+  });
+
+  it("leaves the edge reachable, since it is the only way back", () => {
+    // With no separate reveal button, a collapsed sidebar can only be brought
+    // back by its own edge - so that edge must still be there and hittable.
+    expect(css).toMatch(/\[data-sidebar="collapsed"\] \.sidebar-resizer \{[^}]*width:/);
+    expect(css).not.toContain(".reveal-sidebar");
+  });
+});
