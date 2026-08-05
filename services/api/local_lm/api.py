@@ -1108,7 +1108,11 @@ async def restart_worker(name: str, request: Request, session: SessionDep) -> Wo
             setting = session.get(AppSetting, LAST_CHAT_PROFILE_KEY)
             profile_id = setting.value_json if setting else None
         if not isinstance(profile_id, str) or not profile_id:
-            raise HTTPException(409, "no chat model has been loaded yet; load a profile first")
+            raise api_error(
+                409,
+                "chat-model-not-loaded",
+                "no chat model has been loaded yet; load a profile first",
+            )
         return await _load_chat_profile(services, session, profile_id)
 
 
@@ -1215,9 +1219,17 @@ def _validate_project_workflow_pins(session: Session, values: dict[str, Any]) ->
         revision = session.get(WorkflowRevision, revision_id)
         definition = session.get(WorkflowDefinition, revision.workflow_id) if revision else None
         if not revision or not definition:
-            raise HTTPException(422, f"{field} does not identify a workflow revision")
+            raise api_error(
+                422,
+                "workflow-revision-unknown",
+                f"{field} does not identify a workflow revision",
+            )
         if definition.operation not in operations:
-            raise HTTPException(422, f"{field} has an incompatible workflow operation")
+            raise api_error(
+                422,
+                "workflow-operation-mismatch",
+                f"{field} has an incompatible workflow operation",
+            )
 
 
 async def _validate_generation_defaults(
@@ -1232,13 +1244,18 @@ async def _validate_generation_defaults(
     if scoped:
         for role, settings in scoped.items():
             if len(settings) > 256 or any(len(key) > 200 for key in settings):
-                raise HTTPException(422, f"{role} generation defaults are too large")
+                raise api_error(
+                    422,
+                    "generation-defaults-too-large",
+                    f"{role} generation defaults are too large",
+                )
             request_settings = settings
             if STRENGTH_MODE_PARAMETER in settings:
                 mode = settings[STRENGTH_MODE_PARAMETER]
                 if role != ModelRole.IMAGE.value or mode not in {"auto", "manual"}:
-                    raise HTTPException(
+                    raise api_error(
                         422,
+                        "strength-mode-invalid",
                         "image edit strength mode must be auto or manual for image defaults",
                     )
                 request_settings = {
@@ -1249,15 +1266,16 @@ async def _validate_generation_defaults(
             load_keys = {field.key for field in fields if field.scope == "load"}
             disallowed = sorted(load_keys & set(request_settings))
             if disallowed:
-                raise HTTPException(
+                raise api_error(
                     422,
+                    "generation-defaults-load-settings",
                     f"{role} generation defaults cannot include load settings: "
                     f"{', '.join(disallowed)}",
                 )
             try:
                 validate_settings(request_settings, request_fields)
             except ValueError as exc:
-                raise HTTPException(422, str(exc)) from exc
+                raise api_error(422, "generation-defaults-invalid", str(exc)) from exc
 
     bindings = values.get("generation_preset_ids_json")
     if bindings is None and "generation_preset_ids_json" in values:
