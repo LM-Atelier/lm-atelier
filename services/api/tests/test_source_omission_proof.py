@@ -5,9 +5,11 @@ from __future__ import annotations
 import pytest
 
 from local_lm.source_omission_proof import (
+    PENDING_KEY,
     OmissionProofError,
     OmissionRequirement,
     evidence_digest,
+    pending_omission_requirement,
     prove_omission,
 )
 
@@ -106,3 +108,58 @@ def test_the_record_does_not_depend_on_the_order_it_was_given() -> None:
     )
 
     assert evidence_digest(one) == evidence_digest(other)
+
+
+VALID_CANDIDATE = {
+    "manifest_sha256": "a" * 64,
+    "omitted_declarations": ["example @ git+https://github.com/owner/repo"],
+    "workflow_revision_id": "revision-1",
+    "required_node_types": ["ImpactWildcard"],
+}
+
+
+def test_no_candidate_at_all_is_an_ordinary_activation() -> None:
+    assert pending_omission_requirement("install-1", {"reviewed_at": "then"}) is None
+
+
+def test_a_whole_candidate_is_read_verbatim() -> None:
+    requirement = pending_omission_requirement("install-1", {PENDING_KEY: VALID_CANDIDATE})
+
+    assert requirement is not None
+    assert requirement.omitted_declarations == ("example @ git+https://github.com/owner/repo",)
+    assert requirement.required_node_types == ("ImpactWildcard",)
+
+
+@pytest.mark.parametrize(
+    "candidate",
+    [
+        "not a mapping",
+        None,
+        [],
+        {**VALID_CANDIDATE, "omitted_declarations": [{}]},
+        {**VALID_CANDIDATE, "omitted_declarations": [1]},
+        {**VALID_CANDIDATE, "omitted_declarations": [""]},
+        {**VALID_CANDIDATE, "omitted_declarations": ["  "]},
+        {**VALID_CANDIDATE, "omitted_declarations": []},
+        {**VALID_CANDIDATE, "omitted_declarations": "one"},
+        {**VALID_CANDIDATE, "required_node_types": [{"name": "ImpactWildcard"}]},
+        {**VALID_CANDIDATE, "required_node_types": [7]},
+        {**VALID_CANDIDATE, "required_node_types": []},
+        {**VALID_CANDIDATE, "manifest_sha256": 12345},
+        {**VALID_CANDIDATE, "manifest_sha256": ""},
+        {**VALID_CANDIDATE, "workflow_revision_id": {"id": "revision-1"}},
+        {**VALID_CANDIDATE, "workflow_revision_id": None},
+        {k: v for k, v in VALID_CANDIDATE.items() if k != "manifest_sha256"},
+        {k: v for k, v in VALID_CANDIDATE.items() if k != "required_node_types"},
+    ],
+)
+def test_a_malformed_candidate_refuses_rather_than_being_normalized(candidate: object) -> None:
+    """str() would turn any of these into a plausible-looking identity.
+
+    The proof would then be about whatever that produced, which is the exact
+    opposite of what a record like this exists to do.
+    """
+    with pytest.raises(OmissionProofError) as raised:
+        pending_omission_requirement("install-1", {PENDING_KEY: candidate})
+
+    assert raised.value.code == "omission_candidate_unreadable"

@@ -173,18 +173,38 @@ def pending_omission_requirement(
     if PENDING_KEY not in review:
         return None
     candidate = review.get(PENDING_KEY)
-    declarations = candidate.get("omitted_declarations") if isinstance(candidate, dict) else None
-    node_types = candidate.get("required_node_types") if isinstance(candidate, dict) else None
-    if not isinstance(declarations, list) or not isinstance(node_types, list):
-        raise OmissionProofError(
-            "omission_candidate_unreadable",
-            "This package records an omitted dependency that cannot be read",
-        )
-    assert isinstance(candidate, dict)
+    if not isinstance(candidate, dict):
+        raise _unreadable()
     return OmissionRequirement(
         install_id=install_id,
-        manifest_sha256=str(candidate.get("manifest_sha256") or ""),
-        omitted_declarations=tuple(str(value) for value in declarations),
-        workflow_revision_id=str(candidate.get("workflow_revision_id") or ""),
-        required_node_types=tuple(str(value) for value in node_types),
+        manifest_sha256=_exact_text(candidate.get("manifest_sha256")),
+        omitted_declarations=_exact_texts(candidate.get("omitted_declarations")),
+        workflow_revision_id=_exact_text(candidate.get("workflow_revision_id")),
+        required_node_types=_exact_texts(candidate.get("required_node_types")),
     )
+
+
+def _unreadable() -> OmissionProofError:
+    return OmissionProofError(
+        "omission_candidate_unreadable",
+        "This package records an omitted dependency that cannot be read",
+    )
+
+
+def _exact_text(value: object) -> str:
+    """A stored identity, refused unless it is already one.
+
+    Never coerced. `str(value)` would turn a number, a mapping, or a blank
+    into a plausible-looking identity and the proof would be about whatever
+    that produced - which is the opposite of what a record like this is for.
+    """
+    if not isinstance(value, str) or not value.strip():
+        raise _unreadable()
+    return value
+
+
+def _exact_texts(value: object) -> tuple[str, ...]:
+    """A stored list of identities, kept verbatim or refused."""
+    if not isinstance(value, list) or not value:
+        raise _unreadable()
+    return tuple(_exact_text(item) for item in value)
