@@ -155,7 +155,10 @@ def verify_staged_comfy_registry_archive(
                 continue
             if not path.is_file():
                 raise ComfyRegistryArchiveError("staged Registry archive contains a special file")
-            relative = path.relative_to(destination).as_posix()
+            relative_path = path.relative_to(destination)
+            if _is_runtime_python_cache(destination, relative_path):
+                continue
+            relative = relative_path.as_posix()
             size = path.stat().st_size
             expanded_bytes += size
             if len(files) >= MAX_ARCHIVE_ENTRIES or expanded_bytes > MAX_ARCHIVE_EXPANDED_BYTES:
@@ -176,6 +179,22 @@ def verify_staged_comfy_registry_archive(
         or hashlib.sha256(manifest.encode()).hexdigest() != expected_manifest_sha256.lower()
     ):
         raise ComfyRegistryArchiveError("staged Registry archive contents have changed")
+
+
+def _is_runtime_python_cache(destination: Path, path: Path) -> bool:
+    """Recognize only bytecode Python writes beside reviewed source at import."""
+
+    if (
+        path.suffix.casefold() != ".pyc"
+        or len(path.parts) < 2
+        or path.parts[-2].casefold() != "__pycache__"
+    ):
+        return False
+    source_name, separator, implementation_tag = path.name.partition(".")
+    if not separator or not source_name or not implementation_tag.casefold().startswith("cpython-"):
+        return False
+    source = destination.joinpath(*path.parts[:-2], f"{source_name}.py")
+    return source.is_file() and not _is_link_or_reparse(source)
 
 
 def _read_bounded_archive(path: Path) -> bytes:
