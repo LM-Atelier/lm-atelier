@@ -34,7 +34,6 @@ import {
   RotateCcw,
   Search,
   Send,
-  Settings,
   SlidersHorizontal,
   Sparkles,
   ThumbsDown,
@@ -93,9 +92,11 @@ import { focusMainContent, roleForMode } from "./viewHelpers";
 import { ArtifactPart } from "./ArtifactPart";
 import { FirstRunSetup, SetupWizard } from "./SetupWizard";
 import { ChatManager } from "./ChatManager";
-import { READING_ROOM_VIEWS, type View } from "./rooms";
-import { ThemeToggle } from "./ThemeToggle";
-import { roomFor, useThemeChoice, type ThemeChoice } from "./theme";
+import { type View } from "./rooms";
+import type { Appearance } from "./theme";
+import { useWorkspaceChrome, type SidebarLayout } from "./sidebarLayout";
+import { SidebarResizer } from "./SidebarResizer";
+import { SidebarFooter } from "./SidebarFooter";
 import { WorkflowConsumers } from "./WorkflowConsumers";
 import { WorkflowFamilyPreferences } from "./WorkflowFamilyPreferences";
 import { WorkflowSelector } from "./WorkflowSelector";
@@ -3046,8 +3047,8 @@ function Sidebar({
   onDeleteChat,
   onUpdateProject,
   onDeleteProject,
-  theme,
-  onTheme,
+  appearance,
+  sidebar,
 }: {
   projects: Project[];
   chats: Chat[];
@@ -3067,8 +3068,8 @@ function Sidebar({
   onDeleteChat: (id: string, deleteGeneratedMedia: boolean) => void;
   onUpdateProject: (id: string, values: Partial<Project>) => void;
   onDeleteProject: (id: string) => void;
-  theme: ThemeChoice;
-  onTheme: (choice: ThemeChoice) => void;
+  appearance: Appearance;
+  sidebar: SidebarLayout;
 }) {
   const [naming, setNaming] = useState(false);
   const [closedProjects, setClosedProjects] = useState<Set<string>>(new Set());
@@ -3084,6 +3085,7 @@ function Sidebar({
   const unfiled = visibleChats.filter((chat) => !chat.project_id);
   const chatRow = (chat: Chat) => <div className="sidebar-chat-row" key={chat.id}><button className={`chat-main ${view === "chat" && currentChatId === chat.id ? "active" : ""}`} aria-current={view === "chat" && currentChatId === chat.id ? "page" : undefined} onClick={() => { onChat(chat.id); setMobileOpen(false); }}><MessageSquare size={14} /><span>{chat.title}</span>{chat.archived && <small>Archived</small>}</button><button className={`inline-add sidebar-pin ${chat.pinned ? "pinned" : ""}`} aria-label={chat.pinned ? `Unpin ${chat.title}` : `Pin ${chat.title}`} aria-pressed={chat.pinned} title={chat.pinned ? "Unpin" : "Pin"} onClick={() => onUpdateChat(chat.id, { pinned: !chat.pinned })}><Pin size={13} /></button><button className="inline-add" aria-label={`Manage ${chat.title}`} onClick={() => setManagedChat(chat)}><MoreHorizontal size={13} /></button></div>;
   return (
+    <>
     <aside className={`sidebar ${mobileOpen ? "mobile-open" : ""}`}>
       <div className="brand"><div className="brand-mark"><AtelierMark /></div><span>LM Atelier<small>Local creative studio</small></span><button className="icon-button mobile-menu" aria-label="Toggle navigation" aria-expanded={mobileOpen} onClick={() => setMobileOpen((open) => !open)}><Menu /></button></div>
       <button className="new-chat" onClick={() => { onNewChat(null); setMobileOpen(false); }}><Plus size={18} />New chat</button>
@@ -3121,28 +3123,19 @@ function Sidebar({
         {unfiled.length > 0 && <div className="sidebar-section"><div className="section-title"><span>Chats</span></div><div className="chat-list standalone">{unfiled.map(chatRow)}</div></div>}
       </div>
       {naming && <PromptDialog title="New project" label="Project name" confirmLabel="Create project" placeholder="Portrait studies" onCancel={() => setNaming(false)} onConfirm={(name) => { setNaming(false); onNewProject(name); }} />}
-      <div className="sidebar-footer">
-        <ThemeToggle choice={theme} onChoose={onTheme} />
-        <button onClick={() => { onSetup(); setMobileOpen(false); }}>
-          <Sparkles />Setup
-          {setupState && (
-            <small className={`setup-nav-state ${setupState}`}>
-              {setupState === "ready" ? "Ready" : setupState === "in_progress" ? "Working" : "Action needed"}
-            </small>
-          )}
-        </button>
-        <button className={view === "settings" ? "active" : ""} aria-current={view === "settings" ? "page" : undefined} onClick={() => { onView("settings"); setMobileOpen(false); }}><Settings />Settings</button>
-      </div>
+      <SidebarFooter appearance={appearance} onToggleSidebar={sidebar.toggle} setupState={setupState} view={view} onSetup={onSetup} onView={onView} onNavigate={() => setMobileOpen(false)} />
       {managedChat && <ChatManager chat={managedChat} projects={projects} onClose={() => setManagedChat(null)} onSave={(values) => { onUpdateChat(managedChat.id, values); setManagedChat(null); }} onDelete={(deleteGeneratedMedia) => { onDeleteChat(managedChat.id, deleteGeneratedMedia); setManagedChat(null); }} />}
       {managedProject && <ProjectManager project={managedProject} engines={engines} presets={presets} onClose={() => setManagedProject(null)} onSave={(values) => { onUpdateProject(managedProject.id, values); setManagedProject(null); }} onDelete={() => { onDeleteProject(managedProject.id); setManagedProject(null); }} onExport={(includeMedia) => onExportProject(managedProject.id, includeMedia)} />}
     </aside>
+      <SidebarResizer layout={sidebar} />
+    </>
   );
 }
 
 export default function App() {
   const client = useQueryClient();
   const [view, setView] = useState<View>("chat");
-  const [theme, chooseTheme] = useThemeChoice();
+  const { appearance, sidebar } = useWorkspaceChrome();
   const [libraryEdit, setLibraryEdit] = useState<VisualTarget | null>(null);
   const [studioSource, setStudioSource] = useState<{ artifactId: string; chatId: string | null } | null>(null);
   const [modelLibraryRole, setModelLibraryRole] = useState<EngineRole>("chat");
@@ -3507,10 +3500,10 @@ export default function App() {
     return <FirstRunSetup report={setupReadiness.data} onExit={exitFirstRunSetup} onOpenModels={(role) => { exitFirstRunSetup(); setModelLibraryRole(role); setView("models"); }} onOpenWorkflows={() => { exitFirstRunSetup(); setView("workflows"); }} />;
   }
   return (
-    <div className="app-shell" data-room={theme === "light" ? "reading" : "making"}>
+    <div className="app-shell">
       <a className="skip-link" href="#main-content">Skip to main content</a>
-      <Sidebar projects={allProjects} chats={allChats} engines={engines.data ?? []} presets={presets.data ?? []} currentChatId={activeChatId} view={view} setupState={setupReadiness.data?.state} onSetup={() => setSetupOpen(true)} onChat={(id) => { setCurrentChatId(id); localStorage.setItem(CURRENT_CHAT_KEY, id); setView("chat"); focusMainContent(); }} onView={(nextView) => { setView(nextView); focusMainContent(); }} onNewChat={(projectId) => createChat.mutate(projectId)} onNewProject={(name) => createProject.mutate(name)} onExportProject={(id, includeMedia) => exportProject.mutate({ id, includeMedia })} onImportProject={(file) => importProject.mutate(file)} onUpdateChat={(id, values) => manageChat.mutate({ id, values })} onDeleteChat={(id, deleteGeneratedMedia) => deleteChat.mutate({ id, deleteGeneratedMedia })} onUpdateProject={(id, values) => updateProject.mutate({ id, values })} onDeleteProject={(id) => deleteProject.mutate(id)} theme={theme} onTheme={chooseTheme} />
-      <main id="main-content" tabIndex={-1} data-room={roomFor(theme, READING_ROOM_VIEWS.has(view))}>{activeContent}</main>
+      <Sidebar projects={allProjects} chats={allChats} engines={engines.data ?? []} presets={presets.data ?? []} currentChatId={activeChatId} view={view} setupState={setupReadiness.data?.state} onSetup={() => setSetupOpen(true)} onChat={(id) => { setCurrentChatId(id); localStorage.setItem(CURRENT_CHAT_KEY, id); setView("chat"); focusMainContent(); }} onView={(nextView) => { setView(nextView); focusMainContent(); }} onNewChat={(projectId) => createChat.mutate(projectId)} onNewProject={(name) => createProject.mutate(name)} onExportProject={(id, includeMedia) => exportProject.mutate({ id, includeMedia })} onImportProject={(file) => importProject.mutate(file)} onUpdateChat={(id, values) => manageChat.mutate({ id, values })} onDeleteChat={(id, deleteGeneratedMedia) => deleteChat.mutate({ id, deleteGeneratedMedia })} onUpdateProject={(id, values) => updateProject.mutate({ id, values })} onDeleteProject={(id) => deleteProject.mutate(id)} appearance={appearance} sidebar={sidebar} />
+      <main id="main-content" tabIndex={-1}>{activeContent}</main>
       {setupOpen === true && !setupReadiness.data && (
         <AccessibleDialog
           title="Checking local setup"

@@ -1,41 +1,44 @@
-import { Moon, Sun, SunMoon } from "lucide-react";
-import type { ThemeChoice } from "./theme";
+import { Moon, Sun } from "lucide-react";
+import { ROOMS, ROOM_LABELS, type Appearance, type Room, type ThemeMode } from "./theme";
 
-const CHOICES: Array<{ value: ThemeChoice; label: string; icon: typeof Sun }> = [
-  { value: "by-room", label: "Light that suits each room", icon: SunMoon },
-  { value: "light", label: "Always light", icon: Sun },
-  { value: "dark", label: "Always dark", icon: Moon },
-];
-
-/** Pick the light to work in.
+/** Turn the light on or off, and choose which room you are in.
  *
- * The middle option is the design's own answer - paper where you read,
- * a dark room where you judge pictures - and the other two exist because a
- * default is not a decision. Someone working at night wants the whole thing
- * dark whatever prose prefers, and that is not an argument to have.
+ * Two controls because they are two questions. The mode is the one people
+ * change often and expect to find; the room is a whole palette and changes
+ * rarely, so it sits beside the switch rather than competing with it.
+ *
+ * The room control is hidden while there is only one room. A picker with a
+ * single entry asks a question that has no second answer.
  */
-export function ThemeToggle({
-  choice,
-  onChoose,
-}: {
-  choice: ThemeChoice;
-  onChoose: (choice: ThemeChoice) => void;
-}) {
+export function ThemeToggle({ appearance }: { appearance: Appearance }) {
+  const { mode, setMode: onMode, room, setRoom: onRoom } = appearance;
+  const next: ThemeMode = mode === "dark" ? "light" : "dark";
+  const label = mode === "dark" ? "Switch to light" : "Switch to dark";
+  const Icon = mode === "dark" ? Sun : Moon;
   return (
     <div className="theme-toggle" role="group" aria-label="Appearance">
-      {CHOICES.map(({ value, label, icon: Icon }) => (
-        <button
-          key={value}
-          type="button"
-          className={`icon-button ${choice === value ? "selected" : ""}`}
-          aria-label={label}
-          aria-pressed={choice === value}
-          title={label}
-          onClick={() => onChoose(value)}
+      <button
+        type="button"
+        className="icon-button"
+        aria-label={label}
+        title={label}
+        onClick={() => onMode(next)}
+      >
+        <Icon size={15} aria-hidden="true" />
+      </button>
+      {ROOMS.length > 1 && (
+        <select
+          aria-label="Theme"
+          value={room}
+          onChange={(event) => onRoom(event.target.value as Room)}
         >
-          <Icon size={15} aria-hidden="true" />
-        </button>
-      ))}
+          {ROOMS.map((value) => (
+            <option key={value} value={value}>
+              {ROOM_LABELS[value]}
+            </option>
+          ))}
+        </select>
+      )}
     </div>
   );
 }

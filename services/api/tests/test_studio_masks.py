@@ -9,6 +9,7 @@ from local_lm.studio_masks import (
     mask_geometry,
     mask_provenance,
     parse_mask_setting,
+    split_mask_setting,
     workflow_accepts_mask,
 )
 
@@ -164,3 +165,24 @@ def test_the_turn_contract_holds_end_to_end(client) -> None:
     with pytest.raises(MaskContractError) as raised:
         parse_mask_setting({"mask": {"artifact_id": ARTIFACT}}, schema)
     assert raised.value.code == "workflow-has-no-mask-input"
+
+
+def test_a_selection_is_kept_out_of_the_tunable_schema() -> None:
+    """The defect: a mask validated as a tunable is refused as unknown.
+
+    No workflow declares `mask` among its setting fields, so running it
+    through the schema validator produced "unsupported settings: mask" and
+    every masked edit failed - while the orchestrator was, a few lines later,
+    waiting to read exactly that key from the run record.
+    """
+    mask, tunables = split_mask_setting({"mask": {"artifact_id": "art-1"}, "steps": 20})
+
+    assert mask == {"artifact_id": "art-1"}
+    assert tunables == {"steps": 20}
+
+
+def test_settings_without_a_selection_are_untouched() -> None:
+    mask, tunables = split_mask_setting({"steps": 20, "cfg": 7})
+
+    assert mask is None
+    assert tunables == {"steps": 20, "cfg": 7}
