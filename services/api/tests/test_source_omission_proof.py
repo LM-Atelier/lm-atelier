@@ -8,7 +8,6 @@ from local_lm.source_omission_proof import (
     OmissionProofError,
     OmissionRequirement,
     evidence_digest,
-    proof_covers,
     prove_omission,
 )
 
@@ -70,12 +69,15 @@ def test_a_runtime_that_reports_nothing_proves_nothing() -> None:
     assert raised.value.code == "omission_inventory_empty"
 
 
-def test_a_proof_about_one_workflow_is_not_permission_for_another() -> None:
+def test_the_record_says_which_workflow_it_was_about() -> None:
+    """So a proof about one workflow can never read as one about another."""
     loaded = frozenset({"ImpactWildcard", "UpscaleImage"})
     evidence = prove_omission(_requirement(), observed_node_types=loaded)
 
-    assert proof_covers(evidence, _requirement()) is True
-    assert proof_covers(evidence, _requirement(workflow_revision_id="revision-2")) is False
+    assert evidence["workflow_revision_id"] == "revision-1"
+    assert evidence_digest(evidence) != evidence_digest(
+        prove_omission(_requirement(workflow_revision_id="revision-2"), observed_node_types=loaded)
+    )
 
 
 @pytest.mark.parametrize(
@@ -90,8 +92,9 @@ def test_a_proof_about_one_workflow_is_not_permission_for_another() -> None:
 def test_the_digest_moves_when_anything_it_is_about_moves(overrides: dict[str, object]) -> None:
     loaded = frozenset({"ImpactWildcard", "UpscaleImage"})
     evidence = prove_omission(_requirement(), observed_node_types=loaded)
+    other = prove_omission(_requirement(**overrides), observed_node_types=loaded)
 
-    assert proof_covers(evidence, _requirement(**overrides)) is False
+    assert evidence_digest(evidence) != evidence_digest(other)
 
 
 def test_the_record_does_not_depend_on_the_order_it_was_given() -> None:

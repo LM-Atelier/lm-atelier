@@ -667,3 +667,49 @@ async def test_a_later_ordinary_activation_does_not_inherit_the_old_proof(
     assert stored is not None
     assert stored.review_json["source_omission_proof"] is None
     assert stored.review_json["source_omission_digest"] is None
+
+
+async def test_a_candidate_that_cannot_be_read_stops_the_activation_before_it_starts(
+    session: Session,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Absent and unreadable are different answers.
+
+    Treating a corrupt record as "no candidate" made it an ordinary
+    activation - the package would go active, the worker would start, and the
+    omitted dependency would never be proven unnecessary. The record exists;
+    that it cannot be read is a reason to stop, not to proceed.
+    """
+    install_id = _install(session, trusted=True)
+    monkeypatch.setattr(
+        activation_module,
+        "trusted_comfy_registry_launch_contract",
+        lambda current, **_kwargs: _verified_contract(current, install_id),
+    )
+    corrupt = session.get(ComfyRegistryInstall, install_id)
+    assert corrupt is not None
+    corrupt.review_json = {**corrupt.review_json, PENDING_KEY: {"omitted_declarations": "one"}}
+    session.commit()
+
+    async def start_media() -> object:
+        raise AssertionError("the worker must not start for an unreadable candidate")
+
+    with pytest.raises(ComfyRegistryActivationError) as raised:
+        await activate_comfy_registry_install(
+            session,
+            install_id=install_id,
+            custom_node_root=tmp_path,
+            environment_root=tmp_path,
+            media_worker_stopped=True,
+            start_media=start_media,
+            read_node_inventory=lambda: _never_read(),
+        )
+
+    assert raised.value.code == "omission_candidate_unreadable"
+    stored = session.get(ComfyRegistryInstall, install_id)
+    assert stored is not None and stored.active is False
+
+
+async def _never_read() -> frozenset[str]:
+    raise AssertionError("the inventory must not be read for an unreadable candidate")

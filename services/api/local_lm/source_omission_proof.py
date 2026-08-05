@@ -15,9 +15,12 @@ hard to satisfy:
   required node types must be present in the inventory afterwards - all of
   them, by name.
 - The conclusion is bound to what produced it: the package's manifest, the
-  declarations omitted, the workflow revision, and the required types. A
-  digest over that record is what a later activation is checked against, so
-  proving one workflow can never quietly become permission for another.
+  declarations omitted, the workflow revision, and the required types, with a
+  digest over that record. The candidate is not spent by succeeding, so every
+  later activation proves it again against the runtime in front of it. That is
+  the conservative reading: a proof recorded once says the nodes loaded then,
+  and re-checking costs a comparison against an inventory that has to be read
+  at startup anyway.
 
 Nothing here rewrites a requirement, excepts a package by name, or treats a
 mutable source as trusted. It records that a specific package, missing
@@ -100,17 +103,6 @@ def evidence_digest(evidence: dict[str, Any]) -> str:
     return hashlib.sha256(encoded).hexdigest()
 
 
-def proof_covers(evidence: dict[str, Any], requirement: OmissionRequirement) -> bool:
-    """Whether a stored proof was made about exactly this situation.
-
-    Compared as a whole rather than field by field: the point of recording the
-    workflow and the declarations is that a proof about one of them is not
-    permission for another, and a partial match is exactly how that would
-    happen.
-    """
-    return evidence_digest(evidence) == evidence_digest(_evidence(requirement))
-
-
 def _evidence(requirement: OmissionRequirement) -> dict[str, Any]:
     return {
         "version": 1,
@@ -171,23 +163,28 @@ def pending_omission_requirement(
 ) -> OmissionRequirement | None:
     """The candidate stored against this install, or None when there is none.
 
-    A malformed candidate is None rather than an error: it cannot authorize
-    anything, and an activation with no omission to prove is an ordinary one.
+    Absent and unreadable are different answers, and treating them alike was a
+    fail-open: an activation with no candidate is an ordinary one, so a corrupt
+    or half-written record would have skipped the proof entirely and left an
+    install active with its dependencies omitted. A record that exists and
+    cannot be read is the one case where refusing outright is the only safe
+    reading of it.
     """
+    if PENDING_KEY not in review:
+        return None
     candidate = review.get(PENDING_KEY)
-    if not isinstance(candidate, dict):
-        return None
-    try:
-        return OmissionRequirement(
-            install_id=install_id,
-            manifest_sha256=str(candidate.get("manifest_sha256") or ""),
-            omitted_declarations=tuple(
-                str(value) for value in candidate.get("omitted_declarations") or ()
-            ),
-            workflow_revision_id=str(candidate.get("workflow_revision_id") or ""),
-            required_node_types=tuple(
-                str(value) for value in candidate.get("required_node_types") or ()
-            ),
+    declarations = candidate.get("omitted_declarations") if isinstance(candidate, dict) else None
+    node_types = candidate.get("required_node_types") if isinstance(candidate, dict) else None
+    if not isinstance(declarations, list) or not isinstance(node_types, list):
+        raise OmissionProofError(
+            "omission_candidate_unreadable",
+            "This package records an omitted dependency that cannot be read",
         )
-    except OmissionProofError:
-        return None
+    assert isinstance(candidate, dict)
+    return OmissionRequirement(
+        install_id=install_id,
+        manifest_sha256=str(candidate.get("manifest_sha256") or ""),
+        omitted_declarations=tuple(str(value) for value in declarations),
+        workflow_revision_id=str(candidate.get("workflow_revision_id") or ""),
+        required_node_types=tuple(str(value) for value in node_types),
+    )

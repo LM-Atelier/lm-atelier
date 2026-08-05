@@ -113,6 +113,17 @@ async def activate_comfy_registry_install(
         custom_node_root=custom_node_root,
         environment_root=environment_root,
     )
+    # Read before anything is marked active or started. A record that exists
+    # and cannot be read must stop the activation rather than be discovered
+    # after the worker is already running with the dependency omitted.
+    #
+    # From what preparation recorded against this install, never from what the
+    # caller asked for: a request that could name its own manifest hash or
+    # workflow could prove anything about anything.
+    try:
+        omission = pending_omission_requirement(install_id, install.review_json)
+    except OmissionProofError as exc:
+        raise ComfyRegistryActivationError(exc.code, str(exc)) from exc
     archive_path = _archive_path(custom_node_root, install.installed_path)
     before_start = snapshot_staged_comfy_registry_files(archive_path)
     install.active = True
@@ -163,10 +174,6 @@ async def activate_comfy_registry_install(
             "the prior media runtime was restored",
         ) from exc
     proof: dict[str, Any] | None = None
-    # From what preparation recorded against this install, never from what
-    # the caller asked for: a request that could name its own manifest hash or
-    # workflow could prove anything about anything.
-    omission = pending_omission_requirement(install_id, _install(session, install_id).review_json)
     if omission is not None:
         # After startup and after the file contract, because both of those
         # can restore on their own terms; this one restores the same way.
