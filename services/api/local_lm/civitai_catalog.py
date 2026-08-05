@@ -397,6 +397,11 @@ class CivitaiCatalog:
             provider=cls.source_id,
             remote_id=version_id,
             name=name,
+            # The card is a version; this is the model it belongs to. Carrying
+            # both keeps the installable identity exact while letting the
+            # library list versions under one parent.
+            parent_model_id=str(item.get("id") or "") or None,
+            parent_model_name=model_name,
             author=str(creator.get("username") or "") or None,
             pipeline_tag="text-to-image" if model_type == "Checkpoint" else "lora",
             tags=tags,
