@@ -1360,7 +1360,7 @@ async def update_project(
 ) -> Project:
     project = session.get(Project, project_id)
     if not project:
-        raise HTTPException(404, "project not found")
+        raise api_error(404, "project-not-found", "project not found")
     values = payload.model_dump(exclude_unset=True)
     _validate_project_workflow_pins(session, values)
     await _validate_generation_defaults(request, session, values)
@@ -1389,7 +1389,7 @@ async def update_project(
 async def delete_project(project_id: str, session: SessionDep) -> Response:
     project = session.get(Project, project_id)
     if not project:
-        raise HTTPException(404, "project not found")
+        raise api_error(404, "project-not-found", "project not found")
     for chat in project.chats:
         chat.project_id = None
     session.delete(project)
@@ -1444,7 +1444,7 @@ async def create_chat(
     session: ConversationSessionDep,
 ) -> Chat:
     if payload.project_id and not session.get(Project, payload.project_id):
-        raise HTTPException(404, "project not found")
+        raise api_error(404, "project-not-found", "project not found")
     values = payload.model_dump(mode="json")
     await _validate_generation_defaults(request, session, values)
     chat = Chat(
@@ -1487,7 +1487,7 @@ async def get_chat(chat_id: str, session: ConversationSessionDep) -> Chat:
         .where(Chat.id == chat_id, Chat.scope == STANDARD_CHAT_SCOPE)
     )
     if not chat:
-        raise HTTPException(404, "chat not found")
+        raise api_error(404, "chat-not-found", "chat not found")
     return chat
 
 
@@ -1690,7 +1690,7 @@ async def create_prompt_helper(
 ) -> Chat:
     source = session.get(Chat, payload.source_chat_id)
     if not source or source.scope != STANDARD_CHAT_SCOPE:
-        raise HTTPException(404, "source chat not found")
+        raise api_error(404, "chat-not-found", "source chat not found")
     generation_settings = copy.deepcopy(source.generation_settings_json)
     for role in (ModelRole.IMAGE.value, ModelRole.VIDEO.value):
         try:
@@ -1734,7 +1734,7 @@ async def get_prompt_helper(
 ) -> Chat:
     helper = session.scalar(_prompt_helper_query(helper_id))
     if not helper:
-        raise HTTPException(404, "prompt helper not found")
+        raise api_error(404, "prompt-helper-not-found", "prompt helper not found")
     return helper
 
 
@@ -1746,7 +1746,7 @@ async def update_prompt_helper(
 ) -> Chat:
     helper = session.scalar(_prompt_helper_query(helper_id))
     if not helper:
-        raise HTTPException(404, "prompt helper not found")
+        raise api_error(404, "prompt-helper-not-found", "prompt helper not found")
     helper.draft_prompt = payload.draft_prompt.strip()
     session.commit()
     return session.scalar(_prompt_helper_query(helper_id)) or helper
@@ -1760,13 +1760,13 @@ async def delete_prompt_helper(
 ) -> Response:
     helper = session.get(Chat, helper_id)
     if not helper or helper.scope != PROMPT_HELPER_SCOPE:
-        raise HTTPException(404, "prompt helper not found")
+        raise api_error(404, "prompt-helper-not-found", "prompt helper not found")
     services = _services(request)
     async with services.orchestrator.prepare_chat_deletion(helper_id):
         session.expire_all()
         helper = session.get(Chat, helper_id)
         if not helper or helper.scope != PROMPT_HELPER_SCOPE:
-            raise HTTPException(404, "prompt helper not found")
+            raise api_error(404, "prompt-helper-not-found", "prompt helper not found")
         services.artifacts.delete_chat_generated_media(session, helper_id)
         session.delete(helper)
         session.commit()
@@ -1782,7 +1782,7 @@ async def update_chat(
 ) -> Chat:
     chat = session.get(Chat, chat_id)
     if not chat or chat.scope != STANDARD_CHAT_SCOPE:
-        raise HTTPException(404, "chat not found")
+        raise api_error(404, "chat-not-found", "chat not found")
     values = payload.model_dump(exclude_unset=True, mode="json")
     await _validate_generation_defaults(request, session, values)
     if (
@@ -1790,7 +1790,7 @@ async def update_chat(
         and values["project_id"]
         and not session.get(Project, values["project_id"])
     ):
-        raise HTTPException(404, "project not found")
+        raise api_error(404, "project-not-found", "project not found")
     profile_fields = {
         "active_chat_profile_id": ModelRole.CHAT.value,
         "active_vision_profile_id": ModelRole.CHAT.value,
@@ -1855,13 +1855,13 @@ async def delete_chat(
 ) -> Response:
     chat = session.get(Chat, chat_id)
     if not chat or chat.scope != STANDARD_CHAT_SCOPE:
-        raise HTTPException(404, "chat not found")
+        raise api_error(404, "chat-not-found", "chat not found")
     services = _services(request)
     async with services.orchestrator.prepare_chat_deletion(chat_id):
         session.expire_all()
         chat = session.get(Chat, chat_id)
         if not chat or chat.scope != STANDARD_CHAT_SCOPE:
-            raise HTTPException(404, "chat not found")
+            raise api_error(404, "chat-not-found", "chat not found")
         if delete_generated_media:
             services.artifacts.delete_chat_generated_media(session, chat_id)
         session.delete(chat)
@@ -2247,7 +2247,7 @@ async def get_work_plan(plan_id: str, session: ConversationSessionDep) -> WorkPl
         select(WorkPlan).options(selectinload(WorkPlan.steps)).where(WorkPlan.id == plan_id)
     )
     if not plan:
-        raise HTTPException(404, "work plan not found")
+        raise api_error(404, "work-plan-not-found", "work plan not found")
     return plan
 
 
@@ -2269,7 +2269,7 @@ async def cancel_work_plan(
         select(WorkPlan).options(selectinload(WorkPlan.steps)).where(WorkPlan.id == plan_id)
     )
     if not plan:
-        raise HTTPException(404, "work plan not found")
+        raise api_error(404, "work-plan-not-found", "work plan not found")
     jobs = list(
         session.scalars(
             select(Job)
@@ -2289,7 +2289,7 @@ async def cancel_work_plan(
         select(WorkPlan).options(selectinload(WorkPlan.steps)).where(WorkPlan.id == plan_id)
     )
     if not refreshed:
-        raise HTTPException(404, "work plan not found")
+        raise api_error(404, "work-plan-not-found", "work plan not found")
     return refreshed
 
 
@@ -2315,7 +2315,7 @@ async def retry_work_plan(
         select(WorkPlan).options(selectinload(WorkPlan.steps)).where(WorkPlan.id == plan_id)
     )
     if not plan:
-        raise HTTPException(404, "work plan not found")
+        raise api_error(404, "work-plan-not-found", "work plan not found")
     jobs = list(
         session.scalars(
             select(Job)
@@ -2335,7 +2335,7 @@ async def retry_work_plan(
         select(WorkPlan).options(selectinload(WorkPlan.steps)).where(WorkPlan.id == plan_id)
     )
     if not refreshed:
-        raise HTTPException(404, "work plan not found")
+        raise api_error(404, "work-plan-not-found", "work plan not found")
     return refreshed
 
 
@@ -2371,7 +2371,7 @@ async def cancel_job(
 ) -> Job | JobOut:
     job = session.get(Job, job_id)
     if not job:
-        raise HTTPException(404, "job not found")
+        raise api_error(404, "job-not-found", "job not found")
     verification_snapshot = (
         JobOut.model_validate(job)
         if isinstance(job.payload_json, dict)
@@ -2408,7 +2408,7 @@ async def cancel_job(
                     "completed_at": utcnow(),
                 }
             )
-        raise HTTPException(404, "job not found")
+        raise api_error(404, "job-not-found", "job not found")
     return refreshed
 
 
@@ -2428,7 +2428,7 @@ async def classify_chat_draft(
     """
     chat = session.get(Chat, chat_id)
     if not chat:
-        raise HTTPException(404, "chat not found")
+        raise api_error(404, "chat-not-found", "chat not found")
     return DraftClassification(
         references_prior_visual=_services(request).orchestrator.classify_draft(
             session,
@@ -2447,7 +2447,7 @@ async def cancel_active_chat_run(
     session: ConversationSessionDep,
 ) -> Job:
     if not session.get(Chat, chat_id):
-        raise HTTPException(404, "chat not found")
+        raise api_error(404, "chat-not-found", "chat not found")
     if not _current_chat_job(session, chat_id):
         raise HTTPException(409, "chat has no cancellable run")
     refreshed = await _cancel_current_chat_work(request, session, chat_id)
@@ -2468,7 +2468,7 @@ async def stop_and_send_turn(
     session: ConversationSessionDep,
 ) -> TurnAccepted:
     if not session.get(Chat, chat_id):
-        raise HTTPException(404, "chat not found")
+        raise api_error(404, "chat-not-found", "chat not found")
     await _cancel_current_chat_work(request, session, chat_id)
     return await _accept_turn(
         _services(request).orchestrator,
@@ -2554,7 +2554,7 @@ async def retry_job(
 ) -> Job:
     job = session.get(Job, job_id)
     if not job:
-        raise HTTPException(404, "job not found")
+        raise api_error(404, "job-not-found", "job not found")
     if job.status not in {"failed", "cancelled", "interrupted"}:
         raise HTTPException(409, "only terminal unsuccessful jobs can be retried")
     if job.kind == JobKind.DOWNLOAD.value:
@@ -2588,7 +2588,7 @@ async def retry_job(
         session.expire_all()
         job = session.get(Job, job_id)
         if not job:
-            raise HTTPException(404, "job not found")
+            raise api_error(404, "job-not-found", "job not found")
         if job.status not in {"failed", "cancelled", "interrupted"}:
             raise HTTPException(409, "only terminal unsuccessful jobs can be retried")
         if not job.run_id:
@@ -5207,7 +5207,7 @@ async def update_profile(
 ) -> ModelProfile:
     profile = session.get(ModelProfile, profile_id)
     if not profile:
-        raise HTTPException(404, "profile not found")
+        raise api_error(404, "profile-not-found", "profile not found")
     try:
         validate_profile_binding(session, profile)
     except LookupError as exc:
@@ -5263,7 +5263,7 @@ async def delete_profile(profile_id: str, request: Request, session: SessionDep)
     async with services.scheduler.lease("primary"):
         profile = session.get(ModelProfile, profile_id)
         if not profile:
-            raise HTTPException(404, "profile not found")
+            raise api_error(404, "profile-not-found", "profile not found")
         worker_name = "chat" if profile.role == ModelRole.CHAT.value else "media"
         _ensure_worker_idle(session, worker_name)
         if any(
@@ -5288,7 +5288,7 @@ async def clone_profile(
 ) -> ModelProfile:
     source = session.get(ModelProfile, profile_id)
     if not source:
-        raise HTTPException(404, "profile not found")
+        raise api_error(404, "profile-not-found", "profile not found")
     return await create_profile(
         ModelProfileCreate(
             name=payload.name or f"{source.name} copy",
@@ -5308,7 +5308,7 @@ async def clone_profile(
 async def reset_profile(profile_id: str, session: SessionDep) -> ModelProfile:
     profile = session.get(ModelProfile, profile_id)
     if not profile:
-        raise HTTPException(404, "profile not found")
+        raise api_error(404, "profile-not-found", "profile not found")
     try:
         validate_profile_binding(session, profile)
     except LookupError as exc:
@@ -5327,7 +5327,7 @@ async def reset_profile(profile_id: str, session: SessionDep) -> ModelProfile:
 async def export_profile(profile_id: str, session: SessionDep) -> ModelProfileBundle:
     profile = session.get(ModelProfile, profile_id)
     if not profile:
-        raise HTTPException(404, "profile not found")
+        raise api_error(404, "profile-not-found", "profile not found")
     return ModelProfileBundle(
         name=profile.name,
         use_case=profile.use_case,
@@ -5408,7 +5408,7 @@ async def update_preset(
 ) -> GenerationPreset:
     preset = session.get(GenerationPreset, preset_id)
     if not preset:
-        raise HTTPException(404, "preset not found")
+        raise api_error(404, "preset-not-found", "preset not found")
     values = payload.model_dump(exclude_unset=True)
     if "settings" in values:
         fields = await _engine_role_fields(request, preset.role)
@@ -5438,7 +5438,7 @@ async def update_preset(
 async def delete_preset(preset_id: str, session: SessionDep) -> Response:
     preset = session.get(GenerationPreset, preset_id)
     if not preset:
-        raise HTTPException(404, "preset not found")
+        raise api_error(404, "preset-not-found", "preset not found")
     owners: list[Project | Chat] = []
     owners.extend(session.scalars(select(Project)).all())
     owners.extend(session.scalars(select(Chat)).all())
@@ -5477,7 +5477,7 @@ async def clone_preset(
 ) -> GenerationPreset:
     source = session.get(GenerationPreset, preset_id)
     if not source:
-        raise HTTPException(404, "preset not found")
+        raise api_error(404, "preset-not-found", "preset not found")
     return await create_preset(
         PresetCreate(
             name=payload.name or f"{source.name} copy",
@@ -5493,7 +5493,7 @@ async def clone_preset(
 async def reset_preset(preset_id: str, session: SessionDep) -> GenerationPreset:
     preset = session.get(GenerationPreset, preset_id)
     if not preset:
-        raise HTTPException(404, "preset not found")
+        raise api_error(404, "preset-not-found", "preset not found")
     preset.settings_json = {}
     session.commit()
     session.refresh(preset)
@@ -5504,7 +5504,7 @@ async def reset_preset(preset_id: str, session: SessionDep) -> GenerationPreset:
 async def export_preset(preset_id: str, session: SessionDep) -> PresetBundle:
     preset = session.get(GenerationPreset, preset_id)
     if not preset:
-        raise HTTPException(404, "preset not found")
+        raise api_error(404, "preset-not-found", "preset not found")
     return PresetBundle(
         name=preset.name,
         role=cast(Literal["chat", "image", "video"], preset.role),
@@ -6518,7 +6518,7 @@ async def update_workflow(
 ) -> WorkflowDefinition:
     definition = session.get(WorkflowDefinition, workflow_id)
     if not definition:
-        raise HTTPException(404, "workflow not found")
+        raise api_error(404, "workflow-not-found", "workflow not found")
     for key, value in payload.model_dump(exclude_unset=True).items():
         setattr(definition, key, value)
     session.commit()
@@ -7762,7 +7762,7 @@ async def create_workflow_revision(
 ) -> WorkflowRevision:
     definition = session.get(WorkflowDefinition, workflow_id)
     if not definition:
-        raise HTTPException(404, "workflow not found")
+        raise api_error(404, "workflow-not-found", "workflow not found")
     try:
         validate_lora_workflow_contract(
             payload.api_graph,
@@ -7839,7 +7839,7 @@ async def validate_workflow(
 ) -> dict[str, Any]:
     definition = session.get(WorkflowDefinition, workflow_id)
     if not definition or not definition.current_revision_id:
-        raise HTTPException(404, "workflow not found")
+        raise api_error(404, "workflow-not-found", "workflow not found")
     revision = session.get(WorkflowRevision, definition.current_revision_id)
     if not revision:
         raise HTTPException(404, "workflow revision not found")
@@ -7921,7 +7921,7 @@ def _workflow_and_revision(
 ) -> tuple[WorkflowDefinition, WorkflowRevision]:
     definition = session.get(WorkflowDefinition, workflow_id)
     if not definition or not definition.current_revision_id:
-        raise HTTPException(404, "workflow not found")
+        raise api_error(404, "workflow-not-found", "workflow not found")
     revision = session.get(WorkflowRevision, definition.current_revision_id)
     if not revision:
         raise HTTPException(404, "workflow revision not found")
