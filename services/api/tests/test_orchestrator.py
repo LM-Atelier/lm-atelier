@@ -52,6 +52,24 @@ def test_contract_backed_queue_freezes_only_the_ready_active_activation() -> Non
     assert _queued_workflow_activation(FakeSession(), None) is None
 
 
+def test_media_prompt_uses_the_frozen_combined_trigger_words() -> None:
+    run = SimpleNamespace(
+        operation="text_to_image",
+        standalone_prompt="A candid portrait",
+        provenance_json={
+            "auxiliary_assets": {
+                "model_trigger_words_applied": ["portrait-style"],
+                "lora_trigger_words_applied": ["atelier ink"],
+                "trigger_words_applied": ["portrait-style", "atelier ink"],
+            }
+        },
+    )
+
+    assert ConversationOrchestrator._media_prompt(run) == (
+        "A candid portrait, portrait-style, atelier ink"
+    )
+
+
 def test_successful_media_evidence_requires_an_exact_official_contract(monkeypatch) -> None:
     template_sha256 = "b" * 64
     profile = SimpleNamespace(
