@@ -79,6 +79,103 @@ async def test_the_preflight_route_refuses_unknown_sources_and_bad_ids(
     assert invalid.json()["code"] == "catalog-item-id-invalid"
 
 
+async def test_a_workflow_owned_civitai_lora_is_not_classified_as_a_checkpoint(
+    client: AsyncClient,
+    app: FastAPI,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The defect: declaring ownership correctly is what broke the plan.
+
+    A workflow-owned asset sends `workflow_reference_kind` and must not also
+    send `auxiliary_kind`, because the planner refuses that as conflicting
+    ownership. The provider-declaration substitute named only the auxiliary
+    field, so every workflow-owned CivitAI LoRA inspected as a checkpoint and
+    was blocked as a kind mismatch.
+    """
+    detail: dict[str, Any] = {
+        "model": {
+            "provider": "civitai",
+            "remote_id": "201",
+            "name": "Portrait LoRA - v1",
+            "author": "creator",
+            "pipeline_tag": "lora",
+            "tags": ["portrait"],
+            "downloads": 10,
+            "likes": 2,
+            "created_at": None,
+            "last_modified": None,
+            "gated": False,
+            "private": False,
+            "architecture": "SDXL 1.0",
+            "formats": ["safetensors"],
+            "quantizations": [],
+            "license_id": None,
+            "total_size_bytes": 1024,
+            "compatibility": "supported",
+            "compatibility_reasons": [],
+            "required_runtime": "comfyui",
+            "content_rating": "general",
+        },
+        "revision": "201",
+        # The exact shape production _normalize_files() emits: identities at
+        # the file top level; shared metadata carries the version and the
+        # provider's typed model_type, never the file id.
+        "files": [
+            {
+                "filename": "portrait.safetensors",
+                "size": 1024,
+                "sha256": SHA256,
+                "source_file_id": "301",
+                "source_version_id": "201",
+                "format": "SafeTensor",
+                "pickle_scan_result": "Success",
+                "virus_scan_result": "Success",
+                "metadata": {
+                    "provider": "civitai",
+                    "source_model_id": "101",
+                    "source_version_id": "201",
+                    "version_name": "v1",
+                    "published_at": None,
+                    "model_type": "LORA",
+                    "base_model": "SDXL 1.0",
+                    "base_models": ["SDXL 1.0"],
+                    "tags": ["portrait"],
+                    "trained_words": ["portrait-style"],
+                },
+            }
+        ],
+    }
+
+    async def canned_inspect(
+        self: CivitaiCatalog, item_id: str, revision: str = "main", role: str | None = None
+    ) -> dict[str, Any]:
+        return detail
+
+    monkeypatch.setattr(CivitaiCatalog, "inspect", canned_inspect)
+    monkeypatch.setattr(app.state.services.settings, "civitai_token", "vaulted-token")
+
+    response = await client.post(
+        "/api/catalog/preflight",
+        params={"source": "civitai", "id": "201"},
+        json={
+            "revision": "201",
+            "role": "image",
+            "engine": "comfyui",
+            "selected_files": ["portrait.safetensors"],
+            "workflow_reference_kind": "lora",
+        },
+    )
+
+    assert response.status_code == 200, response.text
+    payload = response.json()
+    assert payload["can_install"] is True
+    plan_out = payload["install_plan"]
+    assert plan_out is not None
+    (artifact,) = plan_out["artifacts_json"]
+    assert artifact["kind"] == "lora"
+    assert artifact["target_folder"] == "loras"
+
+
 async def test_a_civitai_preflight_composes_into_the_download_manager(
     client: AsyncClient, app: FastAPI, monkeypatch: pytest.MonkeyPatch
 ) -> None:
