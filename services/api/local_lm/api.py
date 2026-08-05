@@ -81,6 +81,7 @@ from .domain import (
     utcnow,
 )
 from .downloads import DownloadManager
+from .edit_recipes import capture_recipe
 from .engines import (
     EngineNotConfiguredError,
     EngineRegistry,
@@ -3842,14 +3843,26 @@ async def create_edit_template(payload: EditTemplateCreate, session: SessionDep)
         raise api_error(
             409, "edit-template-name-taken", "A template with this name already exists."
         )
+    # Saved from a result someone liked, so the record of what produced it is
+    # the run's, not the machine's current state - those differ the moment a
+    # profile is switched between the edit and the save.
+    capture = None
+    if payload.from_run_id:
+        run = session.get(Run, payload.from_run_id)
+        if not run:
+            raise api_error(404, "run-not-found", "That run no longer exists.")
+        capture = capture_recipe(run.provenance_json)
     template = EditTemplate(
         name=payload.name,
         description=payload.description,
         instruction=payload.instruction,
         operation="image_to_image",
-        settings_json=payload.settings_json,
+        settings_json=capture.settings if capture else payload.settings_json,
         trigger_words_json=[],
         content_rating="general",
+        workflow_revision_id=capture.workflow_revision_id if capture else None,
+        model_profile_id=capture.model_profile_id if capture else None,
+        mask_mode=capture.mask_mode if capture else "none",
         builtin=False,
         enabled=True,
     )
