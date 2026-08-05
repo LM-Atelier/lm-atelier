@@ -73,3 +73,75 @@ def test_the_bound_is_where_the_new_region_dwarfs_the_picture() -> None:
     # At the limit the extension is twice the source on that side, which is
     # already most of what the result will be.
     assert normalize_margins({"left": MAX_MARGIN_FRACTION})["left"] == MAX_MARGIN_FRACTION
+
+
+async def test_a_turn_refuses_margins_the_contract_would_not_accept(client) -> None:
+    """The gap: this contract existed and nothing called it.
+
+    Margins arrive as an ordinary object setting, and the schema layer only
+    bounds a value's size and nesting - it has no opinion about the numbers
+    inside. A negative margin, a margin of nine hundred, and a margin of
+    "lots" were all accepted and handed to a workflow that would do something
+    arbitrary with each.
+    """
+    from local_lm.db import SessionLocal
+    from local_lm.models import WorkflowDefinition, WorkflowRevision
+
+    with SessionLocal() as session:
+        definition = WorkflowDefinition(name="Outpainter", operation="image_to_image")
+        session.add(definition)
+        session.flush()
+        revision = WorkflowRevision(
+            workflow_id=definition.id,
+            version=1,
+            engine="mock",
+            api_graph_json={"1": {"class_type": "ImagePadForOutpaint"}},
+            input_schema_json={
+                "type": "object",
+                "properties": {
+                    OUTPAINT_SETTING_KEY: {
+                        "type": "object",
+                        "x-lm-atelier-kind": OUTPAINT_SCHEMA_KIND,
+                        # The default is what makes a schema property a
+                        # setting rather than a runtime binding, and the
+                        # compiler emits one. Without it the turn refuses with
+                        # "unsupported settings" and every assertion below
+                        # passes for the wrong reason.
+                        "default": {"top": 0, "right": 0, "bottom": 0, "left": 0},
+                    }
+                },
+            },
+            dependencies_json={},
+            trusted=True,
+        )
+        session.add(revision)
+        session.flush()
+        definition.current_revision_id = revision.id
+        session.commit()
+
+    source = (
+        await client.post(
+            "/api/artifacts",
+            files={"file": ("extend.png", b"source-image", "image/png")},
+        )
+    ).json()
+    chat = (await client.post("/api/chats", json={"title": "Extend"})).json()
+
+    async def apply(margins: object) -> int:
+        response = await client.post(
+            f"/api/chats/{chat['id']}/turns",
+            json={
+                "text": "extend the scene",
+                "mode": "image",
+                "input_artifact_ids": [source["id"]],
+                "settings": {OUTPAINT_SETTING_KEY: margins},
+            },
+        )
+        return response.status_code
+
+    assert await apply({"top": -0.5}) == 422
+    assert await apply({"top": 900}) == 422
+    assert await apply({"top": "lots"}) == 422
+    assert await apply({}) == 422
+    # And the one that is actually askable still is.
+    assert await apply({"top": 0.25}) == 202

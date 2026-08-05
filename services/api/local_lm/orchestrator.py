@@ -112,6 +112,11 @@ from .models import (
     WorkStepDependency,
 )
 from .ordered_planning import OrderedPlanCompiler, OrderedPlanConfirmationRequired
+from .outpaint_workflows import (
+    OUTPAINT_SETTING_KEY,
+    normalize_margins,
+    workflow_declares_outpaint,
+)
 from .processes import ProcessSupervisor
 from .profile_service import AUTO_PROFILE_ID
 from .progress import completed_progress, update_job_progress
@@ -1056,6 +1061,24 @@ class ConversationOrchestrator:
                 parse_mask_setting(effective_settings, workflow_revision.input_schema_json)
             except MaskContractError as exc:
                 raise ValueError(str(exc)) from exc
+        # Margins reach here as an ordinary object setting, and the schema
+        # layer only bounds a value's size and nesting - it has no opinion
+        # about what the numbers inside mean. Without this, a negative margin,
+        # a margin of nine hundred, and a margin of "lots" were all accepted
+        # and handed to a workflow that would do something arbitrary with
+        # each. The contract that refuses them existed already and nothing
+        # called it.
+        if plan.operation != Operation.TEXT and OUTPAINT_SETTING_KEY in effective_settings:
+            if not workflow_revision or not workflow_declares_outpaint(
+                workflow_revision.input_schema_json
+            ):
+                raise ValueError(
+                    "This workflow cannot extend a picture past its edge; choose one built "
+                    "for outpainting."
+                )
+            effective_settings[OUTPAINT_SETTING_KEY] = normalize_margins(
+                effective_settings[OUTPAINT_SETTING_KEY]
+            )
         # Same reasoning as the mask above: the workflow is known here, so a
         # turn handing over more references than the graph can consume refuses
         # now rather than producing a picture conditioned on the first and
