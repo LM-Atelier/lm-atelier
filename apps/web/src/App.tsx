@@ -26,7 +26,6 @@ import {
   MessageSquare,
   MoreHorizontal,
   Pin,
-  Paperclip,
   Pencil,
   Plus,
   Quote,
@@ -100,6 +99,7 @@ import { StudioView } from "./StudioView";
 import { RecipeCard } from "./RecipeCard";
 import { ModelUpdatesPanel } from "./ModelUpdatesPanel";
 import { useProjectMutations } from "./useProjectMutations";
+import { AttachControls } from "./AttachControls";
 import { JobsPanel } from "./JobsPanel";
 import { editVisionNote, workshopTranscript } from "./promptWorkshop";
 import { useComposerUploads } from "./useComposerUploads";
@@ -1075,7 +1075,7 @@ function Composer({
           <MessageField field={textInput} value={text} onChange={setText} onSubmit={submit} />
           <div className="composer-tools">
             <div className="left-tools">
-              <button className="icon-button" onClick={() => fileInput.current?.click()} disabled={uploading} aria-label="Attach file"><Paperclip size={18} /></button>
+              <AttachControls disabled={uploading} onPickFile={() => fileInput.current?.click()} onAttach={(attachment) => setAttachments((current) => [...current, attachment])} />
               <input ref={fileInput} hidden multiple type="file" accept="image/*,video/*" onChange={(event) => { setUploadError(""); void uploadFiles(Array.from(event.target.files ?? [])); event.target.value = ""; }} />
               <button
                 className="icon-button"
@@ -2419,7 +2419,7 @@ export default function App() {
           sourceChatId={studioSource?.chatId ?? null}
           onOpenArtifact={(artifactId) => setStudioSource({ artifactId, chatId: null })}
           onOpenWorkflows={openWorkflows}
-        />
+          onClose={() => setStudioSource(null)}/>
       );
     }
     if (view === "media") return <MediaLibraryView onEditImages={openLibraryEdit} />;
