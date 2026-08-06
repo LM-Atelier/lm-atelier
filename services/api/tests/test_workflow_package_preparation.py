@@ -636,6 +636,57 @@ async def test_without_an_authorized_workflow_nothing_is_set_aside(
     assert seen["pending"] is None
 
 
+async def test_the_live_packages_declare_their_sources_bare_and_still_prepare(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The exact declarations of the two packages this product has to install.
+
+    Both write their VCS dependencies as a URL with no distribution name -
+    pip's spelling, not PEP 508's. Read through the parser alone that is
+    nothing, so neither package could be set aside and both refused outright,
+    while a package writing `name @ url` prepared. Same situation, so the
+    same outcome: planned without them, and every one recorded.
+    """
+    seen: dict[str, Any] = {}
+
+    async def fake_drive(resolution: Any, **_kwargs: Any) -> Any:
+        seen["planned"] = resolution.pip_dependencies
+        return SimpleNamespace(closure="closure-object")
+
+    async def fake_prepare(session: Any, **kwargs: Any) -> Any:
+        seen["pending"] = kwargs["pending_omission"]
+        return SimpleNamespace(install_id="install_1")
+
+    monkeypatch.setattr(composition, "drive_comfy_registry_wheel_closure", fake_drive)
+    monkeypatch.setattr(composition, "prepare_comfy_registry_install", fake_prepare)
+
+    declarations = (
+        "numpy",
+        "git+https://github.com/facebookresearch/sam2",
+        "git+https://github.com/ltdrdata/img2texture.git",
+        "git+https://github.com/ltdrdata/cstr",
+        "git+https://github.com/ltdrdata/ffmpy.git",
+    )
+    registry = _Registry(_resolution(pip_dependencies=declarations))
+
+    await prepare_workflow_package(
+        _NullSessionFactory(),
+        package_id="example-pack",
+        node_types=("ExampleNode",),
+        version="1.2.3",
+        context=_CONTEXT,
+        media_worker_stopped=True,
+        interpreter_probe=_probe,
+        registry_client=registry,  # type: ignore[arg-type]
+        authorized_workflow=("revision-1", ("ExampleNode",)),
+        **_clients(),
+    )
+
+    assert seen["planned"] == ("numpy",)
+    assert seen["pending"] is not None
+    assert seen["pending"].omitted_declarations == declarations[1:]
+
+
 async def test_a_renewal_cannot_omit_a_source_dependency(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

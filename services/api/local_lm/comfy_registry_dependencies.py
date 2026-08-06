@@ -9,7 +9,7 @@ from dataclasses import dataclass
 from packaging.requirements import InvalidRequirement, Requirement
 from packaging.utils import canonicalize_name
 
-from .package_sources import classify_source_url, source_refusal
+from .package_sources import bare_source_url, classify_source_url, source_refusal
 
 # A comment starts at a `#` that follows whitespace, matching how pip reads a
 # requirements file. A bare `#` inside a requirement is not a comment.
@@ -152,6 +152,16 @@ def _dependency(value: object) -> ComfyRegistryDependency:
     try:
         parsed = Requirement(value.strip())
     except InvalidRequirement as exc:
+        # pip accepts a bare `git+https://...` line; PEP 508 requires the
+        # `name @ url` form, so packaging refuses it and the dependency died
+        # here as "invalid" - which says nothing about what is wrong or who
+        # can fix it. The same dependency written the named way already gets
+        # a refusal that explains itself, and both are the same situation: a
+        # source URL with no immutable identity. Send them to one answer.
+        source = bare_source_url(value.strip())
+        if source is not None:
+            code, message = source_refusal(classify_source_url(source))
+            raise ComfyRegistryDependencyError(code, message) from exc
         raise ComfyRegistryDependencyError(
             "invalid_dependency", "Registry version has an invalid pip dependency"
         ) from exc
