@@ -179,3 +179,92 @@ def test_every_checked_component_still_exists(schemas: dict[str, dict]) -> None:
     """A renamed model must not silently drop out of the comparison."""
     unknown = sorted(set(CHECKED_CONTRACTS.values()) - set(schemas))
     assert not unknown, f"CHECKED_CONTRACTS names components that no longer exist: {unknown}"
+
+
+def _typescript_field_type(source: str, interface: str, field: str) -> str | None:
+    """The declared type of one field, following `extends` as the field check does."""
+
+    match = re.search(
+        rf"^export interface {interface}(?: extends ([\w, ]+?))? \{{$",
+        source,
+        re.MULTILINE,
+    )
+    if not match:
+        return None
+    depth = 1
+    for line in source[match.end() :].splitlines()[1:]:
+        stripped = line.strip()
+        if depth == 1:
+            declared = re.match(rf"{field}\??\s*:\s*(.+?);\s*$", stripped)
+            if declared:
+                return declared.group(1)
+        depth += line.count("{") - line.count("}")
+        if depth <= 0:
+            break
+    for parent in (match.group(1) or "").replace(" ", "").split(","):
+        if parent:
+            inherited = _typescript_field_type(source, parent, field)
+            if inherited is not None:
+                return inherited
+    return None
+
+
+def _declared_literals(source: str, expression: str | None) -> set[str] | None:
+    """The string literals a type expression admits, or None if it is not a union.
+
+    Resolves one level of named alias, because the readiness and status unions
+    are written that way and comparing against the alias name proves nothing.
+    """
+
+    if expression is None:
+        return None
+    if '"' in expression:
+        return set(re.findall(r'"([^"]+)"', expression))
+    alias = re.fullmatch(r"(\w+)(\s*\|\s*null)?", expression.strip())
+    if alias:
+        # Comments are removed first. A union is read up to its semicolon, and
+        # a member documented in a sentence containing one would otherwise cut
+        # the union short and report the rest as missing - a contract check
+        # that punctuation can defeat is worse than none.
+        uncommented = re.sub(r"//.*", "", source)
+        declaration = re.search(
+            rf"^export type {alias.group(1)} =\s*(.+?);", uncommented, re.MULTILINE | re.DOTALL
+        )
+        if declaration:
+            return set(re.findall(r'"([^"]+)"', declaration.group(1)))
+    return None
+
+
+@pytest.mark.parametrize(("interface", "component"), sorted(CHECKED_CONTRACTS.items()))
+def test_browser_can_represent_every_value_the_server_returns(
+    interface: str,
+    component: str,
+    schemas: dict[str, dict],
+    types_source: str,
+) -> None:
+    """Matching field names is not a matching contract.
+
+    A server union can gain a member without any field appearing or vanishing,
+    so the existing comparison sees nothing. `review_required` was added to
+    workflow readiness and the browser's union kept three members, which meant
+    a workflow awaiting review was described to the user as one that cannot run
+    on this machine - a true state reported as a different, false one.
+    """
+    schema = schemas.get(component) or {}
+    for field, spec in (schema.get("properties") or {}).items():
+        values = spec.get("enum") or next(
+            (option.get("enum") for option in spec.get("anyOf", []) if option.get("enum")),
+            None,
+        )
+        if not values:
+            continue
+        declared = _declared_literals(
+            types_source, _typescript_field_type(types_source, interface, field)
+        )
+        if declared is None:
+            continue
+        missing = {value for value in values if isinstance(value, str)} - declared
+        assert not missing, (
+            f"{interface}.{field} in types.ts cannot represent {sorted(missing)}, which "
+            f"{component} returns. Add the member, and handle it where the field is read."
+        )

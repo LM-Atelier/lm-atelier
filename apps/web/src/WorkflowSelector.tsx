@@ -20,6 +20,11 @@ function readinessNote(variant: WorkflowFamilyVariant): string | null {
   if (variant.readiness === "setup_required") {
     return variant.readiness_reason ?? "Needs files or nodes installed before it can run.";
   }
+  if (variant.readiness === "review_required") {
+    // Not a machine problem, and saying so sent people to change settings that
+    // were never wrong. What it needs is somebody to look at it and say so.
+    return variant.readiness_reason ?? "Needs review before it can run.";
+  }
   return variant.readiness_reason ?? "Cannot run on this machine as configured.";
 }
 
