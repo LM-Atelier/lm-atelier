@@ -17,6 +17,7 @@ import {
   toolFor,
   type StudioToolKind,
 } from "./studioToolState";
+import { useStudioImage } from "./useStudioImage";
 import { useStudioSession, type StudioStep } from "./useStudioSession";
 import { useConfirm } from "./useConfirm";
 import type { EditTemplate } from "./types";
@@ -59,7 +60,6 @@ export function StudioView({
   // edited by hand: at that point the words are no longer the recipe's, and
   // running its workflow would attribute a result to something it did not do.
   const [recipe, setRecipe] = useState<EditTemplate | null>(null);
-  const [bitmap, setBitmap] = useState<ImageBitmap | null>(null);
   const [tools, dispatch] = useReducer(studioToolReducer, undefined, initialToolState);
   // The pointer tool is rebuilt whenever the mode or brush changes; each one
   // is a cheap wrapper over the shared raster, never a copy of it.
@@ -84,32 +84,12 @@ export function StudioView({
   const current = steps.find((step) => step.artifactId === selectedId) ?? steps.at(-1) ?? null;
 
   const currentArtifactId = current?.artifactId ?? null;
+  const { bitmap, error: imageError, reload } = useStudioImage(currentArtifactId);
   useEffect(() => {
-    let live = true;
-    if (!currentArtifactId) {
-      // Async so the clear never runs synchronously inside the effect.
-      void Promise.resolve().then(() => {
-        if (live) setBitmap(null);
-      });
-      return () => {
-        live = false;
-      };
+    if (bitmap) {
+      dispatch({ type: "image-changed", width: bitmap.width, height: bitmap.height });
     }
-    void fetch(`/api/artifacts/${encodeURIComponent(currentArtifactId)}/content`)
-      .then((response) => response.blob())
-      .then((blob) => createImageBitmap(blob))
-      .then((decoded) => {
-        if (!live) return;
-        setBitmap(decoded);
-        dispatch({ type: "image-changed", width: decoded.width, height: decoded.height });
-      })
-      .catch(() => {
-        if (live) setBitmap(null);
-      });
-    return () => {
-      live = false;
-    };
-  }, [currentArtifactId]);
+  }, [bitmap]);
 
   if (!sourceArtifactId) {
     return (
@@ -201,6 +181,13 @@ export function StudioView({
               onGestureStart={() => dispatch({ type: "gesture-start" })}
               onStrokeEnd={() => dispatch({ type: "stroke-end" })}
             />
+          ) : imageError ? (
+            // A picture that cannot be read is not one still arriving, and
+            // "Loading the image" forever is the more comfortable of the two.
+            <div className="studio-stage-loading" role="alert">
+              <p>{imageError}</p>
+              <button className="secondary compact-button" onClick={reload}>Try again</button>
+            </div>
           ) : (
             // Not an empty state: the empty-state tile is styled to say
             // "nothing here", which is the opposite of what is happening.
