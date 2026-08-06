@@ -63,6 +63,13 @@ export function WorkflowFamilyArchive({
       question="Archiving hides it from the selectors. It does not delete anything."
       detail={
         <div className="family-archive-impact">
+          {/* Success closes this dialog, so a refusal used to leave it sitting
+              open and unchanged - indistinguishable from a press that missed. */}
+          {archive.error && (
+            <div className="callout error" role="alert">
+              <span>{archive.error.message}</span>
+            </div>
+          )}
           {attention.length > 0 && (
             <section>
               <h4>What changes</h4>

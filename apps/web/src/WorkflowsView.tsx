@@ -104,7 +104,7 @@ export function WorkflowsView() {
   return (
     <div className="page-view">
       <header className="page-header"><div><h1>Workflows</h1></div><div className="storage-actions"><input ref={importInput} hidden type="file" accept="application/json,.json" onChange={(event) => { void importBundle(event.target.files?.[0]); event.target.value = ""; }} /><button className="secondary" onClick={() => importInput.current?.click()}>Import bundle</button><button className="primary" onClick={openCreate}><Plus size={17} />New workflow</button></div></header>
-      {(importError || clone.error || restore.error || exportBundle.error || openInComfy.error) && <ErrorCallout message={(importError || clone.error || restore.error || exportBundle.error || openInComfy.error)?.message} />}
+      {(importError || clone.error || restore.error || exportBundle.error || openInComfy.error || validate.error) && <ErrorCallout message={(importError || clone.error || restore.error || exportBundle.error || openInComfy.error || validate.error)?.message} />}
       {packageReview && <WorkflowPackageReview analysis={packageReview.analysis} fileName={packageReview.fileName} uiGraph={packageReview.uiGraph} onImported={() => { closePackageReview(); refresh(); }} onClose={closePackageReview} />}
       {selected && <div className="storage-actions"><button className="secondary" onClick={() => openInComfy.mutate(selected.id)}>Download UI graph and open in ComfyUI</button></div>}
       {selectedFamily && <WorkflowFamilyPreferences family={selectedFamily} />}

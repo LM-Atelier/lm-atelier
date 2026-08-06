@@ -1,5 +1,7 @@
 import { afterEach, describe, expect, it } from "vitest";
 import { cleanup, fireEvent, render, screen } from "@testing-library/react";
+import { readFileSync, readdirSync } from "node:fs";
+import { join } from "node:path";
 import { GlobalNotices } from "./GlobalNotices";
 
 const ok = { error: null };
@@ -66,5 +68,52 @@ describe("GlobalNotices", () => {
     // ...but a retried action that fails again is a new Error and must show.
     rerender(<GlobalNotices connected mutations={[failed("Send failed")]} />);
     expect(screen.getByRole("alert")).toHaveTextContent("Send failed");
+  });
+});
+
+describe("every mutation in the app", () => {
+  it("leaves none with nowhere to report a failure", () => {
+    // Centralizing the two `||` chains fixed this drift once; it then recurred
+    // in nine places across seven files. Rating a response, cancelling a job,
+    // favouriting a picture, archiving a family and asking for a diagnostics
+    // bundle each changed a control that only moves on success, so a refusal
+    // was indistinguishable on screen from a press that never happened.
+    //
+    // Two answers are honest: join the global list, or report where the action
+    // lives. Most components already do the second - and did it for some of
+    // their mutations while the one beside it stayed silent. What is not an
+    // answer is neither, and reading twenty-odd names by eye never caught it.
+    const app = readFileSync(join(__dirname, "App.tsx"), "utf8");
+    const registered = new Set(
+      /<GlobalNotices[^>]*mutations=\{\[([^\]]*)\]\}/
+        .exec(app)![1]
+        .split(",")
+        .map((name) => name.trim()),
+    );
+
+    const silent: string[] = [];
+    for (const file of readdirSync(__dirname)) {
+      if (!file.endsWith(".tsx") || file.endsWith(".test.tsx")) continue;
+      const source = readFileSync(join(__dirname, file), "utf8");
+      // Handing a request to FirstFailure is the third way to report one, and
+      // the one that replaced the chains. A name inside its list is reported.
+      const reported = new Set<string>();
+      for (const list of source.matchAll(/<FirstFailure[^>]*of=\{\[([^\]]*)\]\}/g)) {
+        for (const name of list[1].split(",")) reported.add(name.trim());
+      }
+      for (const match of source.matchAll(/const\s+(\w+)\s*=\s*useMutation[<(]/g)) {
+        const name = match[1];
+        if (reported.has(name)) continue;
+        if (file === "App.tsx" && registered.has(name)) continue;
+        const declaration = source.slice(match.index, match.index + 1200);
+        const speaksLocally =
+          source.includes(`${name}.error`)
+          || source.includes(`${name}.isError`)
+          || declaration.includes("onError");
+        if (!speaksLocally) silent.push(`${file}: ${name}`);
+      }
+    }
+
+    expect(silent).toEqual([]);
   });
 });
