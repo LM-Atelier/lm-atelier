@@ -74,7 +74,20 @@ export function WorkflowsView() {
   const [dependencies, setDependencies] = useState("{}");
   const [trusted, setTrusted] = useState(false);
   const importInput = useRef<HTMLInputElement>(null);
-  const refresh = () => void client.invalidateQueries({ queryKey: ["workflows"] });
+  // Everything on this page that changes a workflow calls this: create, new
+  // revision, duplicate, restore, and both import paths. It refreshed the
+  // list alone, while the server derives a family's current revision, engine,
+  // capabilities and readiness from the very revision that just changed - so
+  // the families beside the list, the selectors elsewhere, and the studio's
+  // idea of which tools exist all kept the previous answer.
+  //
+  // The keys are prefixes, so ["workflow-families"] also covers the
+  // per-capability entries the selector holds.
+  const refresh = () => {
+    void client.invalidateQueries({ queryKey: ["workflows"] });
+    void client.invalidateQueries({ queryKey: ["workflow-families"] });
+    void client.invalidateQueries({ queryKey: ["studio-capabilities"] });
+  };
   const save = useMutation({
     mutationFn: async () => {
       const revision = { engine_version: null, api_graph: JSON.parse(graph), ui_graph: JSON.parse(uiGraph), input_schema: JSON.parse(inputSchema), dependencies: JSON.parse(dependencies), trusted };
