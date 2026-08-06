@@ -562,3 +562,56 @@ describe("the collapsed sidebar", () => {
     expect(css).not.toContain(".reveal-sidebar");
   });
 });
+
+describe("one selector, one rule", () => {
+  const css = readFileSync(STYLESHEET, "utf8");
+
+  it("never declares a top-level selector twice over the same property", () => {
+    // Moving the appearance control out of the sidebar and onto the screen
+    // left its old rule in place directly below the new one. Both said
+    // `padding`, so document order handed the pill the sidebar's vertical-
+    // only value and the two buttons sat flush against its rounded edge.
+    // Nothing was misspelled and no class was missing, so the class-coverage
+    // check above saw a fully styled element.
+    //
+    // Responsive and room overrides are exactly this pattern used on purpose,
+    // so only rules outside any block qualify - a second top-level rule for
+    // the same selector is a leftover, not an override.
+    const declarations = new Map<string, Array<{ line: number; properties: Set<string> }>>();
+    let depth = 0;
+    css.split("\n").forEach((line, index) => {
+      const rule = /^([^{@}]+)\{([^}]*)\}\s*$/.exec(line.trim());
+      if (rule && depth === 0) {
+        const selector = rule[1].trim().replace(/\s+/g, " ");
+        const properties = new Set(
+          rule[2]
+            .split(";")
+            .filter((part) => part.includes(":"))
+            .map((part) => part.slice(0, part.indexOf(":")).trim()),
+        );
+        declarations.set(selector, [
+          ...(declarations.get(selector) ?? []),
+          { line: index + 1, properties },
+        ]);
+        return;
+      }
+      const trimmed = line.trim();
+      depth = Math.max(0, depth + (trimmed.split("{").length - trimmed.split("}").length));
+    });
+
+    const shadowed: string[] = [];
+    for (const [selector, rules] of declarations) {
+      for (let a = 0; a < rules.length; a += 1) {
+        for (let b = a + 1; b < rules.length; b += 1) {
+          const both = [...rules[a].properties].filter((name) => rules[b].properties.has(name));
+          if (both.length) {
+            shadowed.push(
+              `${selector} sets ${both.join(", ")} at line ${rules[a].line} and again at ${rules[b].line}`,
+            );
+          }
+        }
+      }
+    }
+    expect(shadowed).toEqual([]);
+  });
+});
