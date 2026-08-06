@@ -98,3 +98,37 @@ describe("saving a picture to the library", () => {
     await waitFor(() => expect(screen.getByRole("button", { name: /kept in the library/i })).toBeTruthy());
   });
 });
+
+describe("what the studio believes it can do", () => {
+  it("re-asks on every entry, so an install made in between is seen", async () => {
+    // The answer was held for a minute. Someone following the studio's own
+    // "Browse workflows" button, installing the workflow, and coming straight
+    // back was told by the same sentence that it still was not installed.
+    vi.mocked(useStudioSession).mockReturnValue({
+      steps: [{ artifactId: "art-1", instruction: null }],
+      busy: false,
+      error: null,
+      apply: vi.fn(),
+    } as unknown as ReturnType<typeof useStudioSession>);
+    // One client across both visits: a fresh cache each time would prove
+    // nothing about whether the cached answer is re-asked.
+    const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+    const view = (
+      <QueryClientProvider client={client}>
+        <StudioView
+          sourceArtifactId="art-1"
+          onOpenArtifact={vi.fn()}
+          onOpenWorkflows={vi.fn()}
+          onClose={vi.fn()}
+        />
+      </QueryClientProvider>
+    );
+
+    const first = render(view);
+    await waitFor(() => expect(api.studioCapabilities).toHaveBeenCalledTimes(1));
+    first.unmount();
+    render(view);
+
+    await waitFor(() => expect(api.studioCapabilities).toHaveBeenCalledTimes(2));
+  });
+});

@@ -10,6 +10,7 @@ vi.mock("./api", () => ({
     workflowFamilies: vi.fn().mockResolvedValue([]),
     validateWorkflow: vi.fn(),
     workflowOpenTarget: vi.fn(),
+    cloneWorkflow: vi.fn(),
   },
 }));
 
@@ -112,5 +113,27 @@ describe("opening a workflow in ComfyUI", () => {
     expect(link.getAttribute("href")).toBe("http://127.0.0.1:8188/");
     expect(popup).not.toHaveBeenCalled();
     vi.unstubAllGlobals();
+  });
+});
+
+describe("after a workflow changes", () => {
+  it("re-asks for the families the change could have moved", async () => {
+    // The server derives a family's current revision, engine, capabilities and
+    // readiness from the revision that just changed. Refreshing the list alone
+    // left the families beside it - and the selectors elsewhere - answering
+    // from before the change, with nothing to heal them while mounted.
+    vi.mocked(api.workflows).mockResolvedValue([workflow("wf-a", "Alpha")] as never);
+    vi.mocked(api.cloneWorkflow).mockResolvedValue(workflow("wf-b", "Alpha copy") as never);
+
+    renderView();
+    await screen.findByText("Alpha");
+    const familiesReadBefore = vi.mocked(api.workflowFamilies).mock.calls.length;
+
+    fireEvent.click(screen.getByText("Alpha"));
+    fireEvent.click(screen.getByRole("button", { name: "Duplicate" }));
+
+    await waitFor(() =>
+      expect(vi.mocked(api.workflowFamilies).mock.calls.length).toBeGreaterThan(familiesReadBefore),
+    );
   });
 });

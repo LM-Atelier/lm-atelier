@@ -76,7 +76,11 @@ export function StudioView({
   const capabilities = useQuery({
     queryKey: ["studio-capabilities"],
     queryFn: api.studioCapabilities,
-    staleTime: 60_000,
+    // Asked again on every entry, which is what the line above already
+    // claimed. Held for a minute instead, the studio told someone who had
+    // just followed its own "Browse workflows" button and installed the
+    // workflow that the tool was still not installed.
+    refetchOnMount: "always",
   });
   const activeTool = capabilities.data?.tools.find((tool) => tool.kind === tools.kind);
   const unavailable = activeTool && !activeTool.available ? activeTool.reason : null;
