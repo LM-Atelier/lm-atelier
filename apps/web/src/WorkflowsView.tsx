@@ -90,7 +90,20 @@ export function WorkflowsView() {
   const clone = useMutation({ mutationFn: (id: string) => api.cloneWorkflow(id), onSuccess: refresh });
   const restore = useMutation({ mutationFn: ({ id, revisionId }: { id: string; revisionId: string }) => api.restoreWorkflowRevision(id, revisionId), onSuccess: refresh });
   const exportBundle = useMutation({ mutationFn: (id: string) => api.exportWorkflow(id), onSuccess: (bundle) => downloadJson(bundle, `${bundle.name.replaceAll(/[^a-z0-9]+/gi, "-").toLowerCase()}.lm-atelier-workflow.json`) });
-  const openInComfy = useMutation({ mutationFn: (id: string) => api.workflowOpenTarget(id), onSuccess: (target) => { downloadJson(target.ui_graph, target.filename); window.open(target.url, "_blank", "noopener,noreferrer"); } });
+  // The graph downloads, and the way in is offered as a link rather than
+  // opened for you. A window asked for after the click is a popup, which
+  // browsers refuse - and `noopener` makes window.open return null whether it
+  // was refused or not, so the old code could not have noticed either way.
+  const [comfyTarget, setComfyTarget] = useState<{ url: string; filename: string } | null>(null);
+  const openInComfy = useMutation({
+    mutationFn: (id: string) => api.workflowOpenTarget(id),
+    onSuccess: (target) => {
+      // The link first: whatever the browser makes of the download, the way
+      // in is already known and should not depend on it.
+      setComfyTarget({ url: target.url, filename: target.filename });
+      downloadJson(target.ui_graph, target.filename);
+    },
+  });
   const {
     importFile: importBundle,
     importError,
@@ -117,7 +130,22 @@ export function WorkflowsView() {
       )}
       {(importError || clone.error || restore.error || exportBundle.error || openInComfy.error || validate.error) && <ErrorCallout message={(importError || clone.error || restore.error || exportBundle.error || openInComfy.error || validate.error)?.message} />}
       {packageReview && <WorkflowPackageReview analysis={packageReview.analysis} fileName={packageReview.fileName} uiGraph={packageReview.uiGraph} onImported={() => { closePackageReview(); refresh(); }} onClose={closePackageReview} />}
-      {selected && <div className="storage-actions"><button className="secondary" onClick={() => openInComfy.mutate(selected.id)}>Download UI graph and open in ComfyUI</button></div>}
+      {selected && (
+        <div className="storage-actions">
+          <button
+            className="secondary"
+            disabled={openInComfy.isPending}
+            onClick={() => { setComfyTarget(null); openInComfy.mutate(selected.id); }}
+          >
+            Download UI graph for ComfyUI
+          </button>
+          {comfyTarget && (
+            <a className="secondary compact-button" href={comfyTarget.url} target="_blank" rel="noopener noreferrer">
+              Open ComfyUI
+            </a>
+          )}
+        </div>
+      )}
       {selectedFamily && <WorkflowFamilyPreferences family={selectedFamily} />}
       <div className="workflow-layout">
         <div className="workflow-list">{workflows.data?.map((workflow) => <button key={workflow.id} className={selected?.id === workflow.id ? "selected" : ""} onClick={() => { setSelectedId(workflow.id); setSelectedRevisionId(workflow.current_revision_id); }}><span><strong>{workflow.name}</strong><small>{workflow.operation} · {workflow.revisions.length} revision{workflow.revisions.length === 1 ? "" : "s"}</small></span></button>)}</div>
