@@ -1021,7 +1021,14 @@ export interface RegistryInstall {
 export type WorkflowSelectorCapability = "chat" | "vision" | "image" | "video";
 
 /** Whether a variant can actually run right now, and why not when it cannot. */
-export type WorkflowVariantReadiness = "ready" | "setup_required" | "unavailable";
+export type WorkflowVariantReadiness =
+  | "ready"
+  | "setup_required"
+  // The revision runs here, but nobody has vouched for it yet. Absent
+  // from this union it fell through to "cannot run on this machine",
+  // which is untrue and points at the wrong remedy.
+  | "review_required"
+  | "unavailable";
 
 export type WorkflowSelectionMode =
   | "default"
