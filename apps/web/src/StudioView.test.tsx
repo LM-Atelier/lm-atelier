@@ -8,6 +8,7 @@ import { useStudioSession } from "./useStudioSession";
 vi.mock("./api", () => ({
   api: {
     favoriteArtifact: vi.fn(),
+    artifact: vi.fn().mockResolvedValue({ id: "art-1", favorite: false }),
     editTemplates: vi.fn().mockResolvedValue([]),
     studioCapabilities: vi.fn().mockResolvedValue({ tools: [] }),
   },
@@ -75,27 +76,52 @@ describe("applying an edit", () => {
   });
 });
 
-describe("saving a picture to the library", () => {
-  it("says so when the save fails instead of looking unchanged", async () => {
-    // The button only relabels on success, so a failure left the picture
-    // unmarked while the label still invited the same press - identical on
+describe("marking a picture in the library", () => {
+  it("says so when the request fails instead of looking unchanged", async () => {
+    // The control reflects the artifact, so a failure leaves the picture
+    // unmarked while the label still invites the same press - identical on
     // screen to never having pressed it.
     vi.mocked(api.favoriteArtifact).mockRejectedValue(new Error("artifact not found"));
     renderStudio();
 
-    fireEvent.click(screen.getByRole("button", { name: /save to library/i }));
+    const button = await screen.findByRole("button", { name: /favorite/i });
+    await waitFor(() => expect(button).toBeEnabled());
+    fireEvent.click(button);
 
     await waitFor(() => expect(screen.getByText("artifact not found")).toBeTruthy());
-    expect(screen.getByRole("button", { name: /save to library/i })).toBeTruthy();
+    expect(screen.getByRole("button", { name: /favorite/i })).toBeTruthy();
   });
 
-  it("confirms the picture is kept when the save succeeds", async () => {
+  it("shows what the artifact says rather than what this visit did", async () => {
+    // Read locally, the mark was forgotten on every reopen and could never be
+    // taken back. Read from the artifact, it survives leaving and returning.
+    vi.mocked(api.artifact)
+      .mockResolvedValueOnce({ id: "art-1", favorite: false } as never)
+      .mockResolvedValue({ id: "art-1", favorite: true } as never);
     vi.mocked(api.favoriteArtifact).mockResolvedValue(undefined as never);
     renderStudio();
 
-    fireEvent.click(screen.getByRole("button", { name: /save to library/i }));
+    const button = await screen.findByRole("button", { name: /favorite/i });
+    await waitFor(() => expect(button).toBeEnabled());
+    expect(button.getAttribute("aria-pressed")).toBe("false");
+    fireEvent.click(button);
 
-    await waitFor(() => expect(screen.getByRole("button", { name: /kept in the library/i })).toBeTruthy());
+    await waitFor(() =>
+      expect(screen.getByRole("button", { name: /favorited/i })).toBeTruthy(),
+    );
+    expect(api.favoriteArtifact).toHaveBeenCalledWith("art-1", true);
+  });
+
+  it("takes the mark back rather than only ever adding it", async () => {
+    vi.mocked(api.artifact).mockResolvedValue({ id: "art-1", favorite: true } as never);
+    vi.mocked(api.favoriteArtifact).mockResolvedValue(undefined as never);
+    renderStudio();
+
+    const button = await screen.findByRole("button", { name: /favorited/i });
+    await waitFor(() => expect(button).toBeEnabled());
+    fireEvent.click(button);
+
+    await waitFor(() => expect(api.favoriteArtifact).toHaveBeenCalledWith("art-1", false));
   });
 });
 
