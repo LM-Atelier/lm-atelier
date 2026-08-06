@@ -54,6 +54,34 @@ describe("GlobalNotices", () => {
     expect(screen.getByRole("alert")).toHaveTextContent("Send failed");
   });
 
+  it("shows a later failure after an earlier one was dismissed", () => {
+    // The dismissed error stays on its mutation, and that mutation is first in
+    // the list. Choosing the first failure and then hiding it if dismissed left
+    // every later failure behind it invisible - a silent failure produced by
+    // the control meant to make failures speak.
+    const read = failed("Send failed");
+    const { rerender } = render(<GlobalNotices connected mutations={[read, ok]} />);
+    fireEvent.click(screen.getByRole("button", { name: "Dismiss error" }));
+
+    rerender(<GlobalNotices connected mutations={[read, failed("Delete failed")]} />);
+
+    expect(screen.getByRole("alert")).toHaveTextContent("Delete failed");
+  });
+
+  it("keeps an earlier dismissal when a second failure is dismissed too", () => {
+    const first = failed("Send failed");
+    const second = failed("Delete failed");
+    const { rerender } = render(<GlobalNotices connected mutations={[first, second]} />);
+
+    fireEvent.click(screen.getByRole("button", { name: "Dismiss error" }));
+    rerender(<GlobalNotices connected mutations={[first, second]} />);
+    fireEvent.click(screen.getByRole("button", { name: "Dismiss error" }));
+    rerender(<GlobalNotices connected mutations={[first, second]} />);
+
+    // One slot for the dismissed error would have forgotten the first here.
+    expect(screen.queryByRole("alert")).not.toBeInTheDocument();
+  });
+
   it("dismisses a read failure and returns for a new one", () => {
     const first = failed("Send failed");
     const { rerender } = render(<GlobalNotices connected mutations={[first]} />);
