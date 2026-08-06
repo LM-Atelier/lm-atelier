@@ -42,6 +42,39 @@ afterEach(() => {
   vi.clearAllMocks();
 });
 
+describe("applying an edit", () => {
+  it("keeps the instruction when the turn is refused", async () => {
+    // The words were cleared at dispatch, so a refusal erased exactly what
+    // would have been retyped to try again.
+    const apply = vi.fn();
+    vi.mocked(useStudioSession).mockReturnValue({
+      steps: [{ artifactId: "art-1", instruction: null }],
+      busy: false,
+      error: null,
+      apply,
+    } as unknown as ReturnType<typeof useStudioSession>);
+    const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+    render(
+      <QueryClientProvider client={client}>
+        <StudioView
+          sourceArtifactId="art-1"
+          onOpenArtifact={vi.fn()}
+          onOpenWorkflows={vi.fn()}
+          onClose={vi.fn()}
+        />
+      </QueryClientProvider>,
+    );
+
+    const words = screen.getByRole("textbox");
+    fireEvent.change(words, { target: { value: "make it warmer" } });
+    fireEvent.click(screen.getByRole("button", { name: /apply/i }));
+
+    // Dispatched, not accepted: nothing has called back yet.
+    expect(apply).toHaveBeenCalled();
+    expect((words as HTMLTextAreaElement).value).toBe("make it warmer");
+  });
+});
+
 describe("saving a picture to the library", () => {
   it("says so when the save fails instead of looking unchanged", async () => {
     // The button only relabels on success, so a failure left the picture
