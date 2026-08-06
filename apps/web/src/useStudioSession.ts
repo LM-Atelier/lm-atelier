@@ -38,17 +38,50 @@ export type StudioStep = {
   isSource: boolean;
 };
 
+/** A session is only ever usable for the picture it was opened for.
+ *
+ * Storing the id alone let a switch between images pair the new source with
+ * the previous session for as long as opening took: the filmstrip showed the
+ * old chain under the new picture, and an Apply in that window was addressed
+ * to the wrong session. Carrying the source alongside makes the mismatch
+ * representable, so it can be refused instead of raced.
+ */
+type StudioSessionBinding = { id: string; source: string };
+
+function storedBinding(): StudioSessionBinding | null {
+  const raw = localStorage.getItem(STUDIO_SESSION_KEY);
+  if (!raw) return null;
+  try {
+    const parsed: unknown = JSON.parse(raw);
+    if (
+      typeof parsed === "object" && parsed !== null
+      && typeof (parsed as StudioSessionBinding).id === "string"
+      && typeof (parsed as StudioSessionBinding).source === "string"
+    ) {
+      return parsed as StudioSessionBinding;
+    }
+  } catch {
+    // A binding written before it carried its source. It cannot be matched
+    // against anything, so it is not resumed; opening the image again costs
+    // one request and cannot address the wrong session.
+  }
+  return null;
+}
+
 export function useStudioSession(sourceArtifactId: string | null, sourceChatId: string | null) {
   const client = useQueryClient();
-  const [sessionId, setSessionId] = useState<string | null>(
-    () => localStorage.getItem(STUDIO_SESSION_KEY),
-  );
+  const [binding, setBinding] = useState<StudioSessionBinding | null>(storedBinding);
+  // The only binding this render may act on. Anything else belongs to a
+  // picture that is no longer open.
+  const current = binding && binding.source === sourceArtifactId ? binding : null;
+  const sessionId = current?.id ?? null;
 
   const open = useMutation({
     mutationFn: () => api.openStudioSession(sourceArtifactId!, sourceChatId),
     onSuccess: (session) => {
-      setSessionId(session.id);
-      localStorage.setItem(STUDIO_SESSION_KEY, session.id);
+      const opened = { id: session.id, source: sourceArtifactId! };
+      setBinding(opened);
+      localStorage.setItem(STUDIO_SESSION_KEY, JSON.stringify(opened));
       client.setQueryData(["studio-session", session.id], session);
     },
   });
@@ -75,6 +108,12 @@ export function useStudioSession(sourceArtifactId: string | null, sourceChatId: 
       settings,
       workflowRevisionId,
     }: StudioApply) => {
+      // Refused rather than raced. Between switching pictures and the new
+      // session opening there is no session for what is on screen, and the
+      // previous one is emphatically not it.
+      if (!sessionId) {
+        throw new Error("This picture is still opening. Try that again in a moment.");
+      }
       // The mask uploads as its own artifact and travels in settings, not in
       // input_artifact_ids: a selection is instruction, not content, so it
       // must never render as an attachment or count toward edit lineage.
@@ -83,7 +122,7 @@ export function useStudioSession(sourceArtifactId: string | null, sourceChatId: 
         ...(mask ? { mask: await uploadMask(mask) } : {}),
       };
       return api.sendTurn(
-        sessionId!,
+        sessionId,
         instruction,
         "image",
         [artifactId],
@@ -100,7 +139,7 @@ export function useStudioSession(sourceArtifactId: string | null, sourceChatId: 
     sessionId,
     session: session.data ?? null,
     steps: session.data ? studioSteps(session.data, sourceArtifactId) : [],
-    busy: apply.isPending || hasPendingWork(session.data),
+    busy: open.isPending || apply.isPending || hasPendingWork(session.data),
     error: open.error ?? session.error ?? apply.error,
     apply: (
       instruction: string,
