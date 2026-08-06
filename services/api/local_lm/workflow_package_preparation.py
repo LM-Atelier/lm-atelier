@@ -103,6 +103,12 @@ class _RenewedInstall:
 
     installed_path: str
     recorded_omissions: frozenset[str]
+    # Staging is what learns these, and a renewal deliberately does not stage.
+    # They name the archive already on disk - the one being reused - so the
+    # renewal carries them forward rather than resolving to nothing and
+    # tripping the identity check against itself.
+    registry_record_id: str | None
+    download_url: str | None
 
 
 def _renewed_install(session: Session, install_id: str) -> _RenewedInstall | None:
@@ -113,6 +119,8 @@ def _renewed_install(session: Session, install_id: str) -> _RenewedInstall | Non
     return _RenewedInstall(
         installed_path=install.installed_path,
         recorded_omissions=frozenset(recorded.omitted_declarations if recorded else ()),
+        registry_record_id=install.registry_record_id,
+        download_url=install.download_url,
     )
 
 
@@ -229,6 +237,8 @@ async def prepare_workflow_package(
             pip_dependencies=(
                 read_staged_requirements(staged, manifest) if manifest is not None else ()
             ),
+            registry_record_id=renewed_install.registry_record_id,
+            download_url=renewed_install.download_url,
         )
     elif resolution.install_kind == "git_commit":
         try:

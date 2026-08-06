@@ -200,7 +200,13 @@ def _staged_install(tmp_path: Path, requirements: str, *, recorded: tuple[str, .
             "workflow_revision_id": "revision-1",
             "required_node_types": ["ExampleNode"],
         }
-    return SimpleNamespace(installed_path=folder.name, review_json=review)
+    return SimpleNamespace(
+        installed_path=folder.name,
+        review_json=review,
+        # Staging learns these; a renewal reuses the archive they name.
+        registry_record_id="github-commit:" + "b" * 60,
+        download_url="https://codeload.github.com/example/example-pack/zip/" + "a" * 40,
+    )
 
 
 async def test_a_commit_pinned_renewal_reads_the_tree_it_already_reviewed(
@@ -222,6 +228,7 @@ async def test_a_commit_pinned_renewal_reads_the_tree_it_already_reviewed(
 
     async def fake_drive(resolution: Any, **_kwargs: Any) -> Any:
         seen["planned"] = resolution.pip_dependencies
+        seen["identity"] = (resolution.registry_record_id, resolution.download_url)
         return SimpleNamespace(closure="closure-object")
 
     async def fake_renew(_session: Any, **kwargs: Any) -> Any:
@@ -259,6 +266,12 @@ async def test_a_commit_pinned_renewal_reads_the_tree_it_already_reviewed(
 
     assert seen["planned"] == ("numpy", "requests>=2")
     assert seen["renewed"] == "install_1"
+    # The archive identity travels with it, so the lifecycle's check compares
+    # the renewal against the install it is renewing rather than against gaps.
+    assert seen["identity"] == (
+        "github-commit:" + "b" * 60,
+        "https://codeload.github.com/example/example-pack/zip/" + "a" * 40,
+    )
 
 
 async def test_a_renewal_may_rederive_an_omission_it_already_carries(
