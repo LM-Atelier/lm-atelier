@@ -9,6 +9,7 @@ vi.mock("./api", () => ({
     workflows: vi.fn(),
     workflowFamilies: vi.fn().mockResolvedValue([]),
     validateWorkflow: vi.fn(),
+    workflowOpenTarget: vi.fn(),
   },
 }));
 
@@ -84,5 +85,32 @@ describe("a list that could not be read", () => {
     await waitFor(() =>
       expect(screen.getByText("workflow library unreachable")).toBeTruthy(),
     );
+  });
+});
+
+describe("opening a workflow in ComfyUI", () => {
+  it("offers the way in as a link rather than a popup", async () => {
+    // A window asked for after the click is a popup and gets refused, and
+    // `noopener` makes window.open return null either way - so the old code
+    // could not tell a blocked tab from an opened one.
+    vi.mocked(api.workflows).mockResolvedValue([workflow("wf-a", "Alpha")] as never);
+    vi.mocked(api.workflowOpenTarget).mockResolvedValue({
+      url: "http://127.0.0.1:8188/",
+      filename: "alpha.json",
+      ui_graph: {},
+    } as never);
+    const popup = vi.fn();
+    vi.stubGlobal("open", popup);
+    // jsdom has no download plumbing; the anchor click is not under test.
+    vi.spyOn(HTMLAnchorElement.prototype, "click").mockImplementation(() => {});
+
+    renderView();
+    fireEvent.click(await screen.findByText("Alpha"));
+    fireEvent.click(screen.getByRole("button", { name: /Download UI graph/i }));
+
+    const link = await screen.findByRole("link", { name: "Open ComfyUI" });
+    expect(link.getAttribute("href")).toBe("http://127.0.0.1:8188/");
+    expect(popup).not.toHaveBeenCalled();
+    vi.unstubAllGlobals();
   });
 });
