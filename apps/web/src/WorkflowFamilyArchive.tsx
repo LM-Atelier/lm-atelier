@@ -41,6 +41,27 @@ export function WorkflowFamilyArchive({
     );
   }
 
+  if (impact.error) {
+    // Offering the action anyway would present "nothing will be affected" as
+    // a finding, when the truth is that nobody managed to look. Archiving is
+    // reversible, but a decision taken on invented evidence is not a decision.
+    return (
+      <ConfirmDialog
+        title={`Archive ${family.name}?`}
+        question="What this would affect could not be read, so it is not being offered yet."
+        detail={
+          <div className="callout error" role="alert">
+            <span>{(impact.error as Error).message}</span>
+          </div>
+        }
+        confirmLabel="Try again"
+        confirmDisabled={impact.isFetching}
+        onConfirm={() => void impact.refetch()}
+        onCancel={onClose}
+      />
+    );
+  }
+
   const found = impact.data;
   if (found?.archive_blocked) {
     return (
@@ -93,6 +114,7 @@ export function WorkflowFamilyArchive({
         </div>
       }
       confirmLabel="Archive it"
+      confirmDisabled={archive.isPending}
       onConfirm={() => archive.mutate()}
       onCancel={onClose}
     />
