@@ -174,7 +174,12 @@ export function StudioView({
         </div>
       </header>
       {confirmDialog}
-      {error && <ErrorCallout message={(error as Error).message} />}
+      {/* A save that fails must not look like a save that worked. The button
+          only changes on success, so without this the picture silently stays
+          unmarked while the label still invites the same press. */}
+      {(error || keep.error) && (
+        <ErrorCallout message={((error ?? keep.error) as Error).message} />
+      )}
       <div className="studio-layout">
         <StudioToolRail
           active={tools.kind}
