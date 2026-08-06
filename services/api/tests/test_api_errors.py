@@ -13,7 +13,7 @@ API_SOURCE = (Path(__file__).resolve().parents[1] / "local_lm" / "api.py").read_
 
 # Lower this every time a bare HTTPException is converted to api_error; it
 # must never rise. The eslint test ceilings use the same one-way ratchet.
-BARE_HTTP_EXCEPTIONS_CEILING = 108
+BARE_HTTP_EXCEPTIONS_CEILING = 89
 
 
 async def test_a_typed_error_keeps_detail_and_adds_a_stable_code(
@@ -41,6 +41,16 @@ async def test_a_busy_worker_error_carries_its_job_count(client: AsyncClient) ->
     assert body["code"] == "worker-busy"
     assert body["busy_jobs"] == 1
     assert "cancel or wait" in body["detail"]
+
+
+async def test_selecting_an_unknown_revision_says_which_refusal_it_was(
+    client: AsyncClient,
+) -> None:
+    """Two 404s reach this route; only the code says which one happened."""
+
+    response = await client.post("/api/messages/msg_missing/revisions/rev_missing/select")
+    assert response.status_code == 404
+    assert response.json()["code"] == "response-revision-not-found"
 
 
 async def test_an_unknown_request_field_is_refused_not_defaulted(

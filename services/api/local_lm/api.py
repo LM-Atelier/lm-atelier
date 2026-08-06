@@ -1049,7 +1049,7 @@ async def _load_chat_profile(services: Services, session: Session, profile_id: s
     try:
         status = await services.processes.load_chat(profile, install)
     except (OSError, RuntimeError, ValueError, TimeoutError) as exc:
-        raise HTTPException(422, str(exc)) from exc
+        raise api_error(422, "chat-worker-start-failed", str(exc)) from exc
     setting = session.get(AppSetting, LAST_CHAT_PROFILE_KEY)
     if setting:
         setting.value_json = profile.id
@@ -1071,7 +1071,7 @@ async def start_media_worker(request: Request, session: SessionDep) -> WorkerSta
         try:
             return await services.processes.start_media()
         except (OSError, RuntimeError, ValueError, TimeoutError) as exc:
-            raise HTTPException(422, str(exc)) from exc
+            raise api_error(422, "media-worker-start-failed", str(exc)) from exc
 
 
 @router.post("/workers/{name}/stop", response_model=WorkerStatus)
@@ -1086,7 +1086,7 @@ async def stop_worker(name: str, request: Request, session: SessionDep) -> Worke
         try:
             return await services.processes.stop(name)
         except ValueError as exc:
-            raise HTTPException(422, str(exc)) from exc
+            raise api_error(422, "worker-stop-failed", str(exc)) from exc
 
 
 @router.post("/workers/{name}/restart", response_model=WorkerStatus)
@@ -1100,12 +1100,14 @@ async def restart_worker(name: str, request: Request, session: SessionDep) -> Wo
         _ensure_worker_idle(session, name)
         if name == "media":
             if services.settings.media_engine != "comfyui":
-                raise HTTPException(422, "The ComfyUI media engine is not active.")
+                raise api_error(
+                    422, "media-engine-inactive", "The ComfyUI media engine is not active."
+                )
             try:
                 await services.processes.stop("media")
                 return await services.processes.start_media()
             except (OSError, RuntimeError, ValueError, TimeoutError) as exc:
-                raise HTTPException(422, str(exc)) from exc
+                raise api_error(422, "media-worker-restart-failed", str(exc)) from exc
         # The chat worker restarts with the model it ran last, whether or not it
         # is currently running - a crashed worker still knows what to reload.
         record = next((item for item in services.processes.statuses() if item.name == "chat"), None)
@@ -1150,7 +1152,7 @@ async def reset_worker(name: str, request: Request, session: SessionDep) -> Work
     try:
         worker = await services.processes.stop(name)
     except ValueError as exc:
-        raise HTTPException(422, str(exc)) from exc
+        raise api_error(422, "worker-stop-failed", str(exc)) from exc
     session.expire_all()
     return WorkerResetResult(worker=worker, cancelled_jobs=cancelled)
 
@@ -1905,7 +1907,7 @@ async def _accept_turn(
             inherited_image_edit_strength=inherited_image_edit_strength,
         )
     except LookupError as exc:
-        raise HTTPException(404, str(exc)) from exc
+        raise api_error(404, "turn-subject-not-found", str(exc)) from exc
     except RouteConfirmationRequired as exc:
         raise HTTPException(
             409,
@@ -1952,13 +1954,13 @@ async def _accept_turn(
             },
         ) from exc
     except ResponseRevisionConflict as exc:
-        raise HTTPException(409, str(exc)) from exc
+        raise api_error(409, "response-revision-conflict", str(exc)) from exc
     except EngineNotConfiguredError as exc:
-        raise HTTPException(409, str(exc)) from exc
+        raise api_error(409, "engine-not-configured", str(exc)) from exc
     except EngineSchemaUnavailableError as exc:
-        raise HTTPException(503, str(exc)) from exc
+        raise api_error(503, "engine-schema-unavailable", str(exc)) from exc
     except ValueError as exc:
-        raise HTTPException(422, str(exc)) from exc
+        raise api_error(422, "turn-invalid", str(exc)) from exc
 
 
 @router.get("/messages/{message_id}", response_model=MessageOut)
@@ -2092,11 +2094,11 @@ async def regenerate_message(
             engine=prior_profile.engine if prior_profile else None,
         )
     except EngineNotConfiguredError as exc:
-        raise HTTPException(409, str(exc)) from exc
+        raise api_error(409, "engine-not-configured", str(exc)) from exc
     except EngineSchemaUnavailableError as exc:
-        raise HTTPException(503, str(exc)) from exc
+        raise api_error(503, "engine-schema-unavailable", str(exc)) from exc
     except ValueError as exc:
-        raise HTTPException(422, str(exc)) from exc
+        raise api_error(422, "generation-settings-invalid", str(exc)) from exc
     turn = TurnRequest(
         text=text,
         mode=mode,
@@ -2142,9 +2144,9 @@ async def select_response_revision(
             revision_id,
         )
     except LookupError as exc:
-        raise HTTPException(404, str(exc)) from exc
+        raise api_error(404, "response-revision-not-found", str(exc)) from exc
     except ValueError as exc:
-        raise HTTPException(409, str(exc)) from exc
+        raise api_error(409, "response-revision-not-selectable", str(exc)) from exc
 
 
 @router.post("/messages/{message_id}/branch", response_model=TurnAccepted, status_code=202)
@@ -2197,11 +2199,11 @@ async def edit_and_branch(
                 )
                 inherited_image_edit_strength = _inherited_auto_image_edit_strength(prior_run)
             except EngineNotConfiguredError as exc:
-                raise HTTPException(409, str(exc)) from exc
+                raise api_error(409, "engine-not-configured", str(exc)) from exc
             except EngineSchemaUnavailableError as exc:
-                raise HTTPException(503, str(exc)) from exc
+                raise api_error(503, "engine-schema-unavailable", str(exc)) from exc
             except ValueError as exc:
-                raise HTTPException(422, str(exc)) from exc
+                raise api_error(422, "generation-settings-invalid", str(exc)) from exc
     turn = payload.model_copy(update=updates)
     return await _accept_turn(
         _services(request).orchestrator,
