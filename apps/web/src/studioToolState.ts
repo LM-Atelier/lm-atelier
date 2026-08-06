@@ -18,6 +18,25 @@ import { BrushTool, LassoTool, RectTool, type PointerTool } from "./studioTools"
 
 export type StudioToolKind = "instruct" | "brush" | "eraser" | "rect" | "lasso" | "enhance" | "extend";
 
+/** The tools whose drawing is part of the request.
+ *
+ * Enhance and Extend are not among them: the whole picture is their subject,
+ * and the size or the margins are the whole instruction. Gating on "not the
+ * instruct tool" instead meant a selection drawn with the brush, left on the
+ * canvas, travelled with an Enhance or an Extend that never asked for one -
+ * a mask the reader had stopped thinking about, silently narrowing the work.
+ */
+const MASK_TOOLS: ReadonlySet<StudioToolKind> = new Set<StudioToolKind>([
+  "brush",
+  "eraser",
+  "rect",
+  "lasso",
+]);
+
+export function toolUsesMask(kind: StudioToolKind): boolean {
+  return MASK_TOOLS.has(kind);
+}
+
 export type StudioToolState = {
   readonly kind: StudioToolKind;
   readonly brushRadius: number;
@@ -133,6 +152,24 @@ export function studioToolReducer(
       return { ...state, mask: next, maskVersion: state.maskVersion + 1 };
     }
   }
+}
+
+/** What to call a turn the reader gave no words for.
+ *
+ * The turn contract requires text, and these two tools deliberately ask for
+ * none - so an empty box reached the server and was refused before anything
+ * ran. Describing the operation is truthful and reads as a caption in the
+ * filmstrip, which is where this ends up.
+ */
+export function defaultInstruction(state: StudioToolState): string {
+  if (state.kind === "enhance") return `Enhance to ${state.upscaleFactor}x`;
+  if (state.kind === "extend") {
+    const edges = Object.entries(state.margins)
+      .filter(([, value]) => value)
+      .map(([edge]) => edge);
+    return edges.length ? `Extend past the ${edges.join(", ")}` : "Extend the picture";
+  }
+  return "";
 }
 
 /** The pointer tool for the current state, or null for text-only modes. */

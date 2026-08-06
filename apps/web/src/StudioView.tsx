@@ -13,8 +13,10 @@ import { artifactSource } from "./messageMedia";
 import { coverage, encodeMaskPng, isEmpty } from "./studioMasks";
 import {
   initialToolState,
+  defaultInstruction,
   studioToolReducer,
   toolFor,
+  toolUsesMask,
   type StudioToolKind,
 } from "./studioToolState";
 import { useStudioImage } from "./useStudioImage";
@@ -326,12 +328,16 @@ export function StudioView({
             }
             onClick={() => {
               if (!current) return;
-              const selection = tools.kind !== "instruct" && tools.mask && !isEmpty(tools.mask)
+              const selection = toolUsesMask(tools.kind) && tools.mask && !isEmpty(tools.mask)
                 ? tools.mask
                 : null;
+              // Enhance and Extend ask for no words, and the turn requires
+              // some: both were reaching the server and being refused before
+              // anything ran. The user's words win whenever there are any.
+              const words = instruction.trim() || defaultInstruction(tools);
               const send = (mask: Blob | null) => {
                 apply(
-                  instruction.trim(),
+                  words,
                   current.artifactId,
                   mask ? { blob: mask, featherPx: tools.featherPx, invert: false } : undefined,
                   tools.kind === "enhance"

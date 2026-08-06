@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { coverage, createMask, fillRect, isEmpty } from "./studioMasks";
 import { BrushTool, LassoTool, RectTool } from "./studioTools";
+import { defaultInstruction, initialToolState, toolUsesMask } from "./studioToolState";
 
 describe("brush tool", () => {
   it("paints a continuous stroke across a drag and reports the change", () => {
@@ -123,5 +124,36 @@ describe("abandoning a gesture", () => {
     // and the snapshot taken at gesture start is what restores it.
     expect(coverage(mask)).toBe(painted);
     expect(brush.up({ x: 20, y: 20 })).toBe(false);
+  });
+});
+
+describe("what travels with a turn", () => {
+  it("keeps a drawn selection away from the tools that never asked for one", () => {
+    // Gating on "not the instruct tool" sent a mask left over from the brush
+    // with an Enhance or an Extend, silently narrowing work that is meant to
+    // be about the whole picture.
+    expect(toolUsesMask("brush")).toBe(true);
+    expect(toolUsesMask("eraser")).toBe(true);
+    expect(toolUsesMask("rect")).toBe(true);
+    expect(toolUsesMask("lasso")).toBe(true);
+    expect(toolUsesMask("enhance")).toBe(false);
+    expect(toolUsesMask("extend")).toBe(false);
+    expect(toolUsesMask("instruct")).toBe(false);
+  });
+
+  it("gives the wordless tools something true to say", () => {
+    // The turn contract requires text and these two ask for none, so an empty
+    // box was refused by the server before anything ran.
+    const enhance = { ...initialToolState(), kind: "enhance" as const, upscaleFactor: 2 };
+    expect(defaultInstruction(enhance)).toBe("Enhance to 2x");
+
+    const extend = {
+      ...initialToolState(),
+      kind: "extend" as const,
+      margins: { top: 64, right: 0, bottom: 0, left: 32 },
+    };
+    expect(defaultInstruction(extend)).toBe("Extend past the top, left");
+
+    expect(defaultInstruction({ ...initialToolState(), kind: "instruct" as const })).toBe("");
   });
 });
