@@ -615,3 +615,40 @@ describe("one selector, one rule", () => {
     expect(shadowed).toEqual([]);
   });
 });
+
+describe("the two things that float in the corner", () => {
+  const css = readFileSync(STYLESHEET, "utf8");
+
+  function fixedRule(selector: string): Record<string, string> {
+    const opening = `\n${selector} {`;
+    const start = css.indexOf(opening);
+    const body = start < 0 ? "" : css.slice(start + opening.length, css.indexOf("}", start));
+    return Object.fromEntries(
+      body
+        .split(";")
+        .filter((part) => part.includes(":"))
+        .map((part) => [
+          part.slice(0, part.indexOf(":")).trim(),
+          part.slice(part.indexOf(":") + 1).trim(),
+        ]),
+    );
+  }
+
+  it("keeps the jobs panel clear of the appearance control", () => {
+    // Both are fixed to the bottom right. The panel is 310px wide and was
+    // stacked above the pill, so while any job ran it covered the control
+    // completely: the work sat on the thing meant to sit above the work.
+    const panel = fixedRule(".jobs-panel");
+    const toggle = fixedRule(".theme-toggle");
+
+    const px = (value: string) => Number.parseInt(value, 10);
+    expect(panel.position).toBe("fixed");
+    expect(toggle.position).toBe("fixed");
+
+    // The pill occupies roughly 40px above its own offset; the panel has to
+    // begin above that rather than share the space.
+    expect(px(panel.bottom)).toBeGreaterThan(px(toggle.bottom) + 40);
+    // And whatever else is on screen, the control stays reachable.
+    expect(px(toggle["z-index"])).toBeGreaterThan(px(panel["z-index"]));
+  });
+});
