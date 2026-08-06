@@ -93,6 +93,35 @@ describe("style contract", () => {
     expect(footer).not.toContain("ThemeToggle");
   });
 
+  it("gives the studio both a keep and an export, not one word for two acts", () => {
+    // "Save" was one download link, which is export. Keeping a picture in the
+    // library is a different act with a different result, and collapsing them
+    // into one verb left no way to do the other.
+    const view = readFileSync(join(SOURCE_DIR, "StudioView.tsx"), "utf8");
+    expect(view).toContain("Save to library");
+    expect(view).toContain("favoriteArtifact");
+    expect(view).toMatch(/download/);
+  });
+
+  it("keeps the composer above the transcript it floats over", () => {
+    // The blurred backdrop gave message images a stacking order and the
+    // composer had none, so a picture scrolled up over the box being typed
+    // into. Anything that floats over the whole workspace stays above both.
+    const css = readFileSync(STYLESHEET, "utf8");
+    const order = (selector: string) => {
+      const at = css.indexOf(selector + " {");
+      if (at === -1) throw new Error(`no rule for ${selector}`);
+      const rule = css.slice(at, css.indexOf("}", at));
+      return Number(/z-index:\s*(-?\d+)/.exec(rule)?.[1] ?? 0);
+    };
+
+    const composer = order(".composer-wrap");
+    expect(composer).toBeGreaterThan(order(".media-frame > img:not(.media-backdrop)"));
+    expect(composer).toBeGreaterThan(order(".block-copy"));
+    expect(order(".jobs-panel")).toBeGreaterThan(composer);
+    expect(order(".theme-toggle")).toBeGreaterThan(composer);
+  });
+
   it("fills a letterboxed picture with itself rather than with a flat bar", () => {
     const css = readFileSync(STYLESHEET, "utf8");
     expect(css).toMatch(/\.media-frame\s*\{[^}]*position:\s*relative/);

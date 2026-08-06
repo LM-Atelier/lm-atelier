@@ -740,10 +740,30 @@ export const api = {
     request<EditTemplate>("/api/edit-templates", { method: "POST", body: JSON.stringify(payload) }),
   deleteEditTemplate: (id: string) =>
     request<void>(`/api/edit-templates/${id}`, { method: "DELETE" }),
-  prepareWorkflowPackage: (packageId: string, version: string, uiGraph: Record<string, unknown>) =>
+  ensureWorkflowPackageDraft: (payload: {
+    ui_graph: Record<string, unknown>;
+    name: string;
+    operation: string;
+    description?: string;
+  }) =>
+    request<Workflow>("/api/workflows/packages/drafts", {
+      method: "POST",
+      body: JSON.stringify(payload),
+    }),
+  prepareWorkflowPackage: (
+    packageId: string,
+    version: string,
+    uiGraph: Record<string, unknown>,
+    workflowRevisionId?: string,
+  ) =>
     request<Job>("/api/workflows/packages/prepare", {
       method: "POST",
-      body: JSON.stringify({ package_id: packageId, version, ui_graph: uiGraph }),
+      body: JSON.stringify({
+        package_id: packageId,
+        version,
+        ui_graph: uiGraph,
+        workflow_revision_id: workflowRevisionId,
+      }),
     }),
   catalogVersions: (modelId: string) =>
     request<CatalogVersions>(`/api/catalog/civitai/${encodeURIComponent(modelId)}/versions`),
@@ -804,6 +824,8 @@ export const api = {
     name: string;
     operation: string;
     description?: string;
+    draft_workflow_id?: string;
+    draft_revision_id?: string;
   }) =>
     request<Workflow>("/api/workflows/packages/import", {
       method: "POST",

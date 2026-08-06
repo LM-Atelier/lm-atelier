@@ -26,7 +26,9 @@ from local_lm.models import (
     WorkflowRevision,
 )
 from local_lm.schemas import RuntimeStatus, WorkerStatus
+from local_lm.setup_readiness import _workflow_check
 from local_lm.setup_verification import verification_evidence_key
+from local_lm.workflow_package_drafts import workflow_package_draft_dependencies
 
 pytestmark = pytest.mark.asyncio
 
@@ -172,6 +174,26 @@ def _add_workflow(
     )
     definition.current_revision_id = revision.id
     return definition, revision
+
+
+async def test_internal_package_draft_is_not_a_setup_candidate(app: FastAPI) -> None:
+    del app
+    install = _add_install(role="image", engine="comfyui")
+    definition, revision = _add_workflow(install, "text_to_image")
+    revision.api_graph_json = {}
+    revision.dependencies_json = workflow_package_draft_dependencies("a" * 64)
+    revision.trusted = False
+
+    with SessionLocal() as session:
+        session.add_all([install, definition])
+        session.flush()
+        session.add(revision)
+        session.commit()
+        selected, check = _workflow_check(session, "image", install)
+
+    assert selected is None
+    assert check.code == "workflow_missing"
+    assert check.action == "repair_workflow"
 
 
 def _add_verification(

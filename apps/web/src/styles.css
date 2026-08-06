@@ -476,7 +476,11 @@ h1, h2, h3 { margin: 0; }
 .media-card figcaption button { margin-left: auto; border: 0; padding: 0; color: var(--accent); background: transparent; cursor: pointer; }
 .media-card figcaption button + button { margin-left: 4px; }
 .media-card figcaption button + a { margin-left: 4px; }
-.composer-wrap { position: absolute; bottom: 0; left: 0; right: 0; padding: 35px max(24px, calc((100% - 860px) / 2)) 18px; background: linear-gradient(transparent, var(--bg) 28%); }
+/* Above the transcript it floats over. The blurred backdrop gave message
+   images a stacking order, and this had none - so a picture scrolled up over
+   the box being typed into. Below the jobs panel and the light toggle, which
+   float over everything including this. */
+.composer-wrap { z-index: 2; position: absolute; bottom: 0; left: 0; right: 0; padding: 35px max(24px, calc((100% - 860px) / 2)) 18px; background: linear-gradient(transparent, var(--bg) 28%); }
 .composer { background: var(--panel); border: 1px solid var(--border); border-radius: 14px; padding: 12px 13px 10px; box-shadow: 0 16px 50px #0007; }
 .composer:focus-within { border-color: var(--accent); box-shadow: 0 16px 50px #0007, 0 0 0 2px #315a9a26; }
 .composer textarea { display: block; width: 100%; max-height: 180px; min-height: 42px; overflow-y: auto; resize: none; border: 0; outline: 0; color: var(--ink-primary); background: transparent; padding: 4px 3px 9px; line-height: 1.5; }
@@ -1126,3 +1130,10 @@ h1, h2, h3 { margin: 0; }
 .catalog-variant-choice { display: flex; flex-direction: column; gap: 6px; padding: 8px 10px; border: 1px solid var(--line); border-radius: 10px; background: var(--surface-2); font-size: 12px; }
 .catalog-variant-choice p { margin: 0; color: var(--ink-secondary); }
 .catalog-variant-choice ul { display: flex; flex-wrap: wrap; gap: 6px; margin: 0; padding: 0; list-style: none; }
+/* The studio's picture-level actions, beside its title. */
+.studio-header-actions { display: flex; align-items: center; gap: 6px; }
+/* Attaching from the library: a grid of what is already here. */
+.library-attach-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(96px, 1fr)); gap: 8px; margin: 0; padding: 0; list-style: none; max-height: 52vh; overflow-y: auto; }
+.library-attach-tile { display: block; width: 100%; padding: 0; border: 2px solid var(--line); border-radius: 10px; background: var(--surface-2); overflow: hidden; cursor: pointer; }
+.library-attach-tile.picked { border-color: var(--accent); }
+.library-attach-tile img { display: block; width: 100%; aspect-ratio: 1; object-fit: cover; }

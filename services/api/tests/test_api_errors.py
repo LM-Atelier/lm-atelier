@@ -13,7 +13,7 @@ API_SOURCE = (Path(__file__).resolve().parents[1] / "local_lm" / "api.py").read_
 
 # Lower this every time a bare HTTPException is converted to api_error; it
 # must never rise. The eslint test ceilings use the same one-way ratchet.
-BARE_HTTP_EXCEPTIONS_CEILING = 168
+BARE_HTTP_EXCEPTIONS_CEILING = 108
 
 
 async def test_a_typed_error_keeps_detail_and_adds_a_stable_code(
@@ -72,3 +72,22 @@ def test_error_codes_are_kebab_case_slugs() -> None:
     assert codes, "expected at least one typed api_error in api.py"
     for code in codes:
         assert re.fullmatch(r"[a-z0-9]+(-[a-z0-9]+)*", code), code
+
+
+def test_no_code_means_two_different_things() -> None:
+    """A code may recur; it may not recur at two different statuses.
+
+    Reuse across call sites is deliberate - four worker endpoints refusing an
+    unknown name all mean the same thing and share `worker-unknown`. But the
+    same code at a 409 in one place and a 422 in another is two conditions
+    wearing one name, and a client branching on it would take the wrong action
+    for one of them. That is the failure typed codes exist to prevent, so
+    reintroducing it through a copied slug should fail here rather than in
+    somebody's error handling.
+    """
+    statuses: dict[str, set[str]] = {}
+    for status, code in re.findall(r'api_error\(\s*(\d+),\s*"([^"]+)"', API_SOURCE):
+        statuses.setdefault(code, set()).add(status)
+
+    ambiguous = {code: sorted(seen) for code, seen in statuses.items() if len(seen) > 1}
+    assert ambiguous == {}, f"codes used at more than one status: {ambiguous}"

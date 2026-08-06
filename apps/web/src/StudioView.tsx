@@ -1,5 +1,6 @@
+import { Download, Star, X } from "lucide-react";
 import { useEffect, useMemo, useReducer, useState } from "react";
-import { useQuery } from "@tanstack/react-query";
+import { useMutation, useQuery } from "@tanstack/react-query";
 import { api } from "./api";
 import { StudioOpenImage } from "./StudioOpenImage";
 import { ErrorCallout } from "./ErrorCallout";
@@ -8,6 +9,7 @@ import { StudioExtendHandles } from "./StudioExtendHandles";
 import { StudioRecipes } from "./StudioRecipes";
 import { StudioToolGuidance } from "./StudioToolGuidance";
 import { StudioToolRail } from "./StudioToolRail";
+import { artifactSource } from "./messageMedia";
 import { coverage, encodeMaskPng, isEmpty } from "./studioMasks";
 import {
   initialToolState,
@@ -16,6 +18,7 @@ import {
   type StudioToolKind,
 } from "./studioToolState";
 import { useStudioSession, type StudioStep } from "./useStudioSession";
+import { useConfirm } from "./useConfirm";
 import type { EditTemplate } from "./types";
 
 /** The Image Studio: a canvas-first editing surface, not a conversation.
@@ -30,14 +33,26 @@ export function StudioView({
   sourceChatId = null,
   onOpenArtifact,
   onOpenWorkflows,
+  onClose,
 }: {
   sourceArtifactId: string | null;
   sourceChatId?: string | null;
   onOpenArtifact: (artifactId: string) => void;
   /** Where a tool that needs an uninstalled workflow sends you. */
   onOpenWorkflows: () => void;
+  /** Put the picture down and go back to an empty studio. */
+  onClose: () => void;
 }) {
   const { steps, busy, error, apply } = useStudioSession(sourceArtifactId, sourceChatId);
+  const [confirmDialog, confirm] = useConfirm();
+  // Every result is already an artifact in the library - the studio's turns
+  // are ordinary turns. What was missing is a way to say "keep this one",
+  // because a picture among hundreds is findable only in principle.
+  const [kept, setKept] = useState<string | null>(null);
+  const keep = useMutation({
+    mutationFn: (artifactId: string) => api.favoriteArtifact(artifactId, true),
+    onSuccess: (_result, artifactId) => setKept(artifactId),
+  });
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [instruction, setInstruction] = useState("");
   // The recipe an apply should run under. Cleared whenever the instruction is
@@ -109,7 +124,56 @@ export function StudioView({
     <div className="page-view studio-view">
       <header className="page-header">
         <div><h1>Image Studio</h1></div>
+        <div className="studio-header-actions">
+          {current && (
+            <>
+              <button
+                className="secondary compact-button"
+                disabled={keep.isPending || kept === current.artifactId}
+                onClick={() => keep.mutate(current.artifactId)}
+              >
+                <Star size={14} aria-hidden="true" />
+                {kept === current.artifactId ? "Kept in the library" : "Save to library"}
+              </button>
+              <a
+                className="secondary compact-button"
+                href={artifactSource(current.artifactId) ?? undefined}
+                download
+              >
+                <Download size={14} aria-hidden="true" /> Export
+              </a>
+            </>
+          )}
+          <button
+            className="secondary compact-button"
+            disabled={busy}
+            onClick={() => {
+              // Only the edits are at stake. The source picture is in the
+              // library either way, and every result is a durable artifact -
+              // what closing loses is the chain that got here, which is the
+              // part worth asking about.
+              const edited = steps.length > 1;
+              if (!edited) {
+                onClose();
+                return;
+              }
+              void confirm({
+                title: "Close this image?",
+                question: `This session has ${steps.length - 1} edit${
+                  steps.length === 2 ? "" : "s"
+                }. Closing puts the picture down and leaves the chain behind.`,
+                detail:
+                  "Every result is already in the media library; closing only "
+                  + "leaves this chain of edits behind.",
+                confirmLabel: "Close it",
+              }).then((ok) => ok && onClose());
+            }}
+          >
+            <X size={14} aria-hidden="true" /> Close
+          </button>
+        </div>
       </header>
+      {confirmDialog}
       {error && <ErrorCallout message={(error as Error).message} />}
       <div className="studio-layout">
         <StudioToolRail

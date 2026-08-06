@@ -1209,6 +1209,20 @@ class WorkflowPackageImportRequest(ApiModel):
     name: str = Field(min_length=1, max_length=240)
     operation: Operation
     description: str = Field(default="", max_length=10_000)
+    # A package that needed preparation is first persisted as a deliberately
+    # non-executable revision. Supplying both identities lets import finalize
+    # that exact draft instead of creating a second, unrelated workflow.
+    draft_workflow_id: str | None = Field(default=None, max_length=64)
+    draft_revision_id: str | None = Field(default=None, max_length=40)
+
+
+class WorkflowPackageDraftRequest(ApiModel):
+    """Persist one exact source graph before resolving its dependencies."""
+
+    ui_graph: dict[str, Any]
+    name: str = Field(min_length=1, max_length=240)
+    operation: Operation
+    description: str = Field(default="", max_length=10_000)
 
 
 class WorkflowPackagePrepareRequest(ApiModel):

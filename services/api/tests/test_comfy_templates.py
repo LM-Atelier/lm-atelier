@@ -2189,3 +2189,86 @@ def test_declared_acceleration_preserves_auxiliary_schedule_switches(
 
     assert len(recipes) == 1
     assert recipes[0].switched_inputs == (schedule_input, "steps")
+
+
+def test_rgthree_group_controls_compile_away_without_touching_modes() -> None:
+    """The compiler kept its own smaller frontend list than the analyzer.
+
+    So a graph the analyzer accepted could still fail to compile with
+    "requires missing node type". These three controls set other nodes' modes
+    while a graph is edited; by the time it is saved, every node they muted
+    carries that mode itself - which is why discarding them cannot change
+    what they applied, and why this asserts the bypassed node stays bypassed.
+    """
+    ui_graph = {
+        "nodes": [
+            {
+                "id": 1,
+                "type": "LoadImage",
+                "inputs": [],
+                "outputs": [{"name": "IMAGE", "type": "IMAGE", "links": [1]}],
+                "widgets_values": ["source.png"],
+            },
+            {
+                "id": 2,
+                "type": "KSampler",
+                "inputs": [{"name": "image", "type": "IMAGE", "link": 1}],
+                "outputs": [],
+                "widgets_values": [1.0],
+            },
+            {
+                # Already bypassed by the repeater, in the saved graph.
+                "id": 3,
+                "type": "KSampler",
+                "mode": 4,
+                "inputs": [],
+                "outputs": [],
+                "widgets_values": [1.0],
+            },
+            {
+                "id": 10,
+                "type": "Fast Groups Bypasser (rgthree)",
+                "inputs": [],
+                "outputs": [{"name": "OPT_CONNECTION", "type": "OPT_CONNECTION", "links": [2]}],
+                "widgets_values": [],
+            },
+            {
+                "id": 11,
+                "type": "Mute / Bypass Relay (rgthree)",
+                "inputs": [{"name": "OPT_CONNECTION", "type": "OPT_CONNECTION", "link": 2}],
+                "outputs": [{"name": "REPEATER", "type": "REPEATER", "links": [3]}],
+                "widgets_values": [],
+            },
+            {
+                "id": 12,
+                "type": "Mute / Bypass Repeater (rgthree)",
+                "inputs": [{"name": "REPEATER", "type": "REPEATER", "link": 3}],
+                "outputs": [],
+                "widgets_values": [],
+            },
+        ],
+        "links": [
+            [1, 1, 0, 2, 0, "IMAGE"],
+            [2, 10, 0, 11, 0, "OPT_CONNECTION"],
+            [3, 11, 0, 12, 0, "REPEATER"],
+        ],
+    }
+    object_info = {
+        "LoadImage": {
+            "input": {"required": {"image": [["source.png"], {"image_upload": True}]}},
+            "input_order": {"required": ["image"]},
+        },
+        "KSampler": {
+            "input": {"required": {"image": ["IMAGE"], "denoise": ["FLOAT", {"default": 1.0}]}},
+            "input_order": {"required": ["image", "denoise"]},
+        },
+    }
+
+    graph, _schema = _compile_ui_graph(ui_graph, object_info, operation="image_to_image")
+
+    # The controls are gone and nothing else is.
+    assert set(graph) == {"1", "2"}
+    assert graph["2"]["inputs"]["image"] == ["1", 0]
+    # Node 3 stayed out because it carries mode 4 itself, not because a
+    # control node is still in the graph telling anyone about it.
+    assert "3" not in graph
