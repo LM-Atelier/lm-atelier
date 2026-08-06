@@ -20,6 +20,7 @@ from .comfy_package_requirements import (
     StagedRequirementsError,
     read_staged_requirements,
     select_requirements_manifest,
+    staged_requirements_manifests,
 )
 from .comfy_registry import ComfyNodeResolution, ComfyRegistryClient
 from .comfy_registry_closure_driver import (
@@ -44,8 +45,9 @@ from .comfy_registry_wheel_downloads import ComfyRegistryWheelDownloader
 from .comfy_registry_wheel_projects import ComfyRegistryWheelProjectClient
 from .comfy_workflow_packages import WorkflowPackageRequirement
 from .config import Settings
+from .models import ComfyRegistryInstall
 from .package_sources import partition_unpinned_sources
-from .source_omission_proof import PendingOmission
+from .source_omission_proof import PendingOmission, pending_omission_requirement
 
 # One target interpreter probe: markers, wheel tags, and installed distributions for the
 # managed ComfyUI python. Owned as its own contract because target-binding
@@ -126,6 +128,25 @@ def _withdrawable_declaration(
     )
 
 
+@dataclass(frozen=True)
+class _RenewedInstall:
+    """What a renewal needs to know about the install it is refreshing."""
+
+    installed_path: str
+    recorded_omissions: frozenset[str]
+
+
+def _renewed_install(session: Session, install_id: str) -> _RenewedInstall | None:
+    install = session.get(ComfyRegistryInstall, install_id)
+    if install is None or not install.installed_path:
+        return None
+    recorded = pending_omission_requirement(install_id, install.review_json)
+    return _RenewedInstall(
+        installed_path=install.installed_path,
+        recorded_omissions=frozenset(recorded.omitted_declarations if recorded else ()),
+    )
+
+
 async def prepare_workflow_package(
     session_factory: Callable[[], Session],
     *,
@@ -178,10 +199,22 @@ async def prepare_workflow_package(
             resolution.error_code,
             f"The Registry could not resolve {package_id}.",
         )
-    if renew_install_id is not None and resolution.install_kind == "git_commit":
+    renewed_install: _RenewedInstall | None = None
+    if renew_install_id is not None:
+        with session_factory() as session:
+            renewed_install = _renewed_install(session, renew_install_id)
+    if (
+        renew_install_id is not None
+        and resolution.install_kind == "git_commit"
+        and renewed_install is None
+    ):
+        # Fail closed if the install cannot be read: a commit-pinned package
+        # states its dependencies inside its own tree, and renewal deliberately
+        # does not fetch that tree again, so without the staged copy there is
+        # nothing to read them from.
         raise WorkflowPackagePreparationError(
             "registry_renewal_source_unsupported",
-            "Commit-pinned Registry packages must be removed and reviewed again",
+            "The staged package this renewal would reuse could not be read",
         )
 
     _phase("Probing the target runtime")
@@ -213,7 +246,22 @@ async def prepare_workflow_package(
     # tree, so only that path can set anything aside; every other resolution
     # reaches the recording step with nothing omitted.
     omitted: tuple[str, ...] = ()
-    if resolution.install_kind == "git_commit":
+    if resolution.install_kind == "git_commit" and renewed_install is not None:
+        # Renewal reuses the node code it already reviewed and never fetches it
+        # again, so the declarations are read from the copy already on disk.
+        # Refusing instead - which is what this did - left a commit-pinned
+        # package unable to follow its runtime anywhere, and told the reader to
+        # remove it, which nothing offers a way to do.
+        _phase("Reading package dependencies")
+        staged = context.custom_node_root / renewed_install.installed_path
+        manifest = select_requirements_manifest(staged_requirements_manifests(staged))
+        effective_resolution = replace(
+            resolution,
+            pip_dependencies=(
+                read_staged_requirements(staged, manifest) if manifest is not None else ()
+            ),
+        )
+    elif resolution.install_kind == "git_commit":
         try:
             staged_archive = await stage_comfy_registry_install_archive(
                 resolution=resolution,
@@ -350,11 +398,21 @@ async def prepare_workflow_package(
             # Renewal refreshes an existing install's dependencies and is not
             # the act that can set a declaration aside, so an omission reaching
             # it is a contradiction rather than something to record quietly.
-            if omitted and renew_install_id is not None:
-                raise WorkflowPackagePreparationError(
-                    "omission_not_renewable",
-                    "A dependency renewal cannot omit a source dependency",
-                )
+            if renew_install_id is not None:
+                # A renewal may re-derive the omissions this install already
+                # carries - it is reading the same declarations from the same
+                # reviewed tree, so finding them again is agreement, not news.
+                # What it may not do is set aside something new, because an
+                # omission is only trustworthy when it was proven against the
+                # workflow that authorized it, and a renewal authorizes nothing.
+                recorded = renewed_install.recorded_omissions if renewed_install else frozenset()
+                introduced = sorted(set(omitted) - recorded)
+                if introduced:
+                    raise WorkflowPackagePreparationError(
+                        "omission_not_renewable",
+                        "A dependency renewal cannot set aside something new: "
+                        + ", ".join(introduced),
+                    )
             if renew_install_id is None:
                 preparation = await prepare_comfy_registry_install(
                     session,
