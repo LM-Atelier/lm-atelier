@@ -141,13 +141,24 @@ export function useStudioSession(sourceArtifactId: string | null, sourceChatId: 
     steps: session.data ? studioSteps(session.data, sourceArtifactId) : [],
     busy: open.isPending || apply.isPending || hasPendingWork(session.data),
     error: open.error ?? session.error ?? apply.error,
+    /** `onAccepted` runs only once the turn has been taken.
+     *
+     * The surface clears the instruction and the selection there rather than
+     * at dispatch: a refusal used to erase exactly the words that would have
+     * been retried, leaving the reader to remember what they had typed.
+     */
     apply: (
       instruction: string,
       artifactId: string,
       mask?: StudioMaskUpload,
       settings?: Record<string, unknown>,
       workflowRevisionId?: string,
-    ) => apply.mutate({ instruction, artifactId, mask, settings, workflowRevisionId }),
+      onAccepted?: () => void,
+    ) =>
+      apply.mutate(
+        { instruction, artifactId, mask, settings, workflowRevisionId },
+        { onSuccess: onAccepted },
+      ),
   };
 }
 

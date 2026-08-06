@@ -342,9 +342,11 @@ export function StudioView({
                         ? recipe.settings_json
                         : undefined,
                   recipe?.workflow_revision_id ?? undefined,
+                  () => {
+                    setInstruction("");
+                    setSelectedId(null);
+                  },
                 );
-                setInstruction("");
-                setSelectedId(null);
               };
               if (selection) void encodeMaskPng(selection).then(send);
               else send(null);
