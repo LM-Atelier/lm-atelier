@@ -65,6 +65,8 @@ import {
 } from "./messageMedia";
 import { useLiveEvents } from "./useLiveEvents";
 import { ErrorCallout } from "./ErrorCallout";
+import { FirstFailure } from "./FirstFailure";
+import { openLibraryEditTargets, type VisualTarget } from "./libraryEditTargets";
 import { EmptyState } from "./EmptyState";
 import { AtelierMark } from "./AtelierMark";
 import { EditingStudio } from "./EditingStudio";
@@ -137,20 +139,6 @@ import type {
 } from "./types";
 
 type PendingTurn = { id: string; text: string; mode: RoutingMode };
-type VisualTarget = {
-  attachment: ComposerAttachment;
-  // null means "attach only", used by Reference: quoting a picture says what
-  // the next turn is about; it must not silently change the generation mode
-  // the user chose, the way Edit and Animate deliberately do.
-  mode: "image" | "video" | null;
-  requestId: number;
-  // Open the editing studio once the image is attached - the library's Edit
-  // entry point, where no instruction has been drafted yet.
-  studio?: boolean;
-  // Companions from a library multi-select; the studio's "Apply to each"
-  // path then runs one turn per image.
-  extraAttachments?: ComposerAttachment[];
-};
 type SendTurnVariables = PendingTurn & {
   chatId: string;
   artifacts: string[];
@@ -165,44 +153,6 @@ const CURRENT_CHAT_KEY = "local-lm-chat";
 
 /** The library's Edit action: attach the selection in the chat composer,
  * switch to image mode, and open the studio. */
-function libraryEditTarget(artifacts: ArtifactLibraryItem[]): VisualTarget | null {
-  const [first, ...rest] = artifacts.map((artifact): ComposerAttachment => ({
-    id: artifact.id,
-    kind: "image",
-    artifact,
-    // Stored uploads keep their filename; generated media has none.
-    origin: artifact.original_name ? "uploaded" : "generated",
-  }));
-  if (!first) return null;
-  return {
-    attachment: first,
-    mode: "image",
-    requestId: Date.now(),
-    studio: true,
-    extraAttachments: rest,
-  };
-}
-
-/** One image opens the studio canvas; a selection keeps the composer's
- * apply-to-each batch path. */
-function openLibraryEditTargets(
-  artifacts: ArtifactLibraryItem[],
-  handlers: {
-    openStudio: (artifactId: string) => void;
-    openComposer: (target: VisualTarget) => void;
-  },
-): void {
-  if (artifacts.length === 1) {
-    handlers.openStudio(artifacts[0].id);
-    focusMainContent();
-    return;
-  }
-  const target = libraryEditTarget(artifacts);
-  if (!target) return;
-  handlers.openComposer(target);
-  focusMainContent();
-}
-
 function PartView({
   part,
   liveText,
@@ -1379,6 +1329,9 @@ function ChatView({
           })}
         </div>
       </div>
+      {/* Reported here because the global list belongs to a component the
+          transcript cannot reach. */}
+      <FirstFailure of={[feedback, toggleFavorite]} />
       <div className="messages" ref={messagesRef} onScroll={trackMessageScroll}>
         {messages.length === 0 && pendingTurns.length === 0 ? (
           <EmptyState icon={<Sparkles />} title="What should we make?" body="Ask anything or create an image or video. Auto mode picks the model." />
@@ -1921,8 +1874,7 @@ function ModelsView({ initialRole }: { initialRole: EngineRole }) {
       <section className="recipe-section">
         <div className="section-heading"><div><h2>Reference recipes</h2></div></div>
         {recipes.isLoading && <div className="loading-line" />}
-        {recipes.error && <ErrorCallout message={recipes.error.message} />}
-        {installRecipe.error && <ErrorCallout message={installRecipe.error.message} />}
+        <FirstFailure of={[recipes, installRecipe]} />
         <div className="recipe-grid">{recipes.data?.map((recipe) => <RecipeCard key={recipe.id} recipe={recipe} pending={installRecipe.isPending && installRecipe.variables === recipe.id} onInstall={() => installRecipe.mutate(recipe.id)} />)}</div>
       </section>
       <div className="toolbar">
@@ -2001,7 +1953,7 @@ function ModelsView({ initialRole }: { initialRole: EngineRole }) {
           onCancel={() => setPendingInstall(null)}
         />
       )}
-      {(download.error || confirmInstall.error || deleteModel.error || cleanupDownloads.error || updateUseCase.error || setDefaultModel.error || updateModelAsset.error || deleteModelAsset.error) && <ErrorCallout message={download.error?.message || confirmInstall.error?.message || deleteModel.error?.message || cleanupDownloads.error?.message || updateUseCase.error?.message || setDefaultModel.error?.message || updateModelAsset.error?.message || deleteModelAsset.error?.message} />}
+      <FirstFailure of={[createProfile, download, confirmInstall, deleteModel, cleanupDownloads, updateUseCase, setDefaultModel, updateModelAsset, deleteModelAsset]} />
       {/* isFetching, not isLoading: the latter is only true the first
           time, so changing a filter swapped the results with no sign
           anything had happened - which reads as the page refreshing

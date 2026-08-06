@@ -141,7 +141,11 @@ export function JobsPanel() {
           </span>
         </div>
       ))}
-      {retry.error && <div className="jobs-error" role="alert">{retry.error.message}</div>}
+      {(retry.error || cancel.error || pause.error || resume.error) && (
+        <div className="jobs-error" role="alert">
+          {(retry.error ?? cancel.error ?? pause.error ?? resume.error)!.message}
+        </div>
+      )}
     </aside>
   );
 }
