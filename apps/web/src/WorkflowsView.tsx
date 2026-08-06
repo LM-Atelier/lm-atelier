@@ -92,12 +92,27 @@ export function WorkflowsView() {
     mutationFn: async () => {
       const revision = { engine_version: null, api_graph: JSON.parse(graph), ui_graph: JSON.parse(uiGraph), input_schema: JSON.parse(inputSchema), dependencies: JSON.parse(dependencies), trusted };
       if (editing && selected) {
-        await api.updateWorkflow(selected.id, { name, description });
+        // Two writes, and the second is the one that validates: a rejected
+        // schema or dependency block used to leave a committed rename behind
+        // while the dialog reported one failed save. Skipping the write that
+        // has nothing to say removes the split for the ordinary case, where
+        // someone is editing the graph and not renaming anything.
+        //
+        // The order stays as it is. Creating the revision first would make it
+        // current before the rename could fail, and the obvious retry would
+        // then mint a second revision and quietly promote that instead.
+        if (name !== selected.name || description !== selected.description) {
+          await api.updateWorkflow(selected.id, { name, description });
+        }
         return api.createWorkflowRevision(selected.id, revision);
       }
       return api.createWorkflow({ name, description, operation, engine: "comfyui", ...revision });
     },
-    onSuccess: () => { setNewOpen(false); setEditing(false); refresh(); },
+    onSuccess: () => { setNewOpen(false); setEditing(false); },
+    // Refreshed either way. A rename that did land while the revision was
+    // refused is real, and leaving the list showing the old name hid it until
+    // some later visit produced it with no action from the reader.
+    onSettled: () => refresh(),
   });
   const validate = useMutation({ mutationFn: (id: string) => api.validateWorkflow(id) });
   const clone = useMutation({ mutationFn: (id: string) => api.cloneWorkflow(id), onSuccess: refresh });
