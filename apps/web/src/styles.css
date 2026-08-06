@@ -831,7 +831,7 @@ h1, h2, h3 { margin: 0; }
 .gallery-card > div { display: grid; gap: 4px; padding: 11px; }.gallery-card strong { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 12px; }.gallery-card small { color: var(--muted); font-size: 10px; }
 .gallery-card span { display: flex; align-items: center; gap: 8px; }.gallery-card a { color: var(--accent-2); font-size: 11px; }.gallery-card code { color: var(--muted); font-size: 9px; margin-right: auto; }
 
-.jobs-panel { position: fixed; right: 16px; bottom: 16px; width: 310px; max-height: min(70vh, 560px); overflow-y: auto; z-index: 15; border: 1px solid var(--border); border-radius: 14px; background: var(--surface-1); backdrop-filter: blur(12px); box-shadow: 0 16px 45px var(--shadow); padding: 11px; }
+.jobs-panel { position: fixed; right: 16px; bottom: 68px; width: 310px; max-height: min(70vh, 560px); overflow-y: auto; z-index: 15; border: 1px solid var(--border); border-radius: 14px; background: var(--surface-1); backdrop-filter: blur(12px); box-shadow: 0 16px 45px var(--shadow); padding: 11px; }
 .jobs-panel > header { display: flex; align-items: center; gap: 6px; color: var(--ink-primary); font-size: 12px; padding: 2px 3px 9px; }
 .jobs-clear { margin-left: auto; border: 0; background: transparent; color: var(--ink-secondary); padding: 3px 5px; font-size: 11px; cursor: pointer; }
 .jobs-clear:hover { color: var(--ink-primary); }
@@ -1073,8 +1073,13 @@ h1, h2, h3 { margin: 0; }
 /* Floats over the work rather than living in a panel that can be hidden:
    the light is a property of the whole workspace, so its control belongs to
    the screen rather than to the sidebar. */
-.theme-toggle { position: fixed; right: 14px; bottom: 14px; z-index: 6; display: flex; gap: 2px; background: var(--surface-2); border: 1px solid var(--line); border-radius: 999px; padding: 4px; box-shadow: var(--lift); }
+.theme-toggle { position: fixed; right: 14px; bottom: 14px; z-index: 16; display: flex; gap: 2px; background: var(--surface-2); border: 1px solid var(--line); border-radius: 999px; padding: 4px; box-shadow: var(--lift); }
 .theme-toggle .icon-button { width: 28px; height: 28px; }
+/* Both of these float in the bottom-right corner. The jobs panel is 310px
+   wide and stacked higher, so while any job was running it covered the
+   appearance control completely - the control is meant to sit above the
+   work, and instead the work sat on it. The panel now starts above the
+   pill rather than on top of it, and the pill outranks it. */
 .studio-open-image { display: grid; gap: 8px; justify-items: center; text-align: center; align-content: center; height: 100%; border: 2px dashed var(--line-control); border-radius: 14px; background: var(--surface-1); color: var(--ink-muted); padding: 24px; }
 .studio-open-image.over { border-color: var(--accent-warm); background: var(--surface-2); }
 .studio-open-image h2 { color: var(--ink-primary); font-size: 16px; }
