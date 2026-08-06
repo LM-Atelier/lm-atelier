@@ -21,9 +21,10 @@ from .comfy_package_requirements import (
     read_staged_requirements,
     select_requirements_manifest,
 )
-from .comfy_registry import ComfyRegistryClient
+from .comfy_registry import ComfyNodeResolution, ComfyRegistryClient
 from .comfy_registry_closure_driver import (
     ComfyRegistryWheelClosureDriverError,
+    ComfyRegistryWheelClosureResult,
     ComfyRegistryWheelMetadataClient,
     drive_comfy_registry_wheel_closure,
 )
@@ -93,6 +94,36 @@ class PreparationContext:
             custom_node_root=Path(settings.comfy_directory) / "custom_nodes",
             state_root=settings.registry_dir,
         )
+
+
+def _withdrawable_declaration(
+    exc: ComfyRegistryWheelClosureDriverError,
+    resolution: ComfyNodeResolution,
+    authorized_workflow: tuple[str, tuple[str, ...]] | None,
+) -> str | None:
+    """The declaration to set aside for this refusal, if any may be.
+
+    Narrow on purpose, and every clause earns its place:
+
+    - only `no_compatible_wheel`, because that is the one refusal where the
+      distribution exists and simply cannot be installed the safe way. A
+      malformed requirement, an unreachable index or a hash mismatch all mean
+      something else and must keep failing;
+    - only under an authorized workflow, because an omission that cannot be
+      proven against a stored revision is an omission nobody can check;
+    - only a declaration the package itself made. A transitive requirement
+      belongs to whichever distribution asked for it, and withdrawing it would
+      quietly hollow out that distribution instead of this package.
+    """
+    if exc.code != "no_compatible_wheel" or authorized_workflow is None:
+        return None
+    requirement = exc.requirement
+    if not requirement:
+        return None
+    return next(
+        (item for item in resolution.pip_dependencies if item.strip() == requirement.strip()),
+        None,
+    )
 
 
 async def prepare_workflow_package(
@@ -240,9 +271,9 @@ async def prepare_workflow_package(
     async def _closure_progress(name: str, round_number: int, items: tuple[str, ...]) -> None:
         _phase(f"Dependencies: {name.replace('_', ' ')} (round {round_number})", len(items), None)
 
-    try:
-        closure_result = await drive_comfy_registry_wheel_closure(
-            effective_resolution,
+    async def _resolve_closure(resolution: ComfyNodeResolution) -> ComfyRegistryWheelClosureResult:
+        return await drive_comfy_registry_wheel_closure(
+            resolution,
             project_fetcher=project_client.fetch,
             metadata_fetcher=metadata_client.fetch,
             marker_environment=marker_environment,
@@ -250,6 +281,46 @@ async def prepare_workflow_package(
             runtime_distributions=runtime_distributions,
             progress=_closure_progress,
         )
+
+    try:
+        # A dependency with no wheel is set aside on the same terms as an
+        # unpinned source: only under an authorized workflow, only when it is
+        # one the package itself declared, and always recorded.
+        #
+        # It cannot be decided up front the way a source URL can. Whether a
+        # distribution publishes a hash-bound wheel for this interpreter and
+        # platform is only knowable after asking, so the closure says which
+        # requirement it could not satisfy and the declaration is withdrawn
+        # before asking again. Installing it from source instead would run a
+        # build backend nobody reviewed, which is the thing this refuses.
+        #
+        # Bounded by the number of declarations, and each round must actually
+        # remove one, so a refusal this does not understand ends the loop
+        # rather than repeating it.
+        while True:
+            try:
+                closure_result = await _resolve_closure(effective_resolution)
+                break
+            except ComfyRegistryWheelClosureDriverError as exc:
+                withdrawn = (
+                    _withdrawable_declaration(exc, effective_resolution, authorized_workflow)
+                    if authorized_workflow is not None
+                    else None
+                )
+                if withdrawn is None or authorized_workflow is None:
+                    raise
+                effective_resolution = replace(
+                    effective_resolution,
+                    pip_dependencies=tuple(
+                        item for item in effective_resolution.pip_dependencies if item != withdrawn
+                    ),
+                )
+                omitted = (*omitted, withdrawn)
+                pending_omission = PendingOmission(
+                    omitted_declarations=omitted,
+                    workflow_revision_id=authorized_workflow[0],
+                    required_node_types=authorized_workflow[1],
+                )
     except asyncio.CancelledError:
         if staged_archive is not None:
             await discard_comfy_registry_staged_archive(
