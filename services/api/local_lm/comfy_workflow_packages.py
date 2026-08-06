@@ -24,7 +24,28 @@ BLOCKED_MODEL_SUFFIXES = frozenset({".bin", ".ckpt", ".pickle", ".pkl", ".pt", "
 KNOWN_MODEL_SUFFIXES = SUPPORTED_MODEL_SUFFIXES | BLOCKED_MODEL_SUFFIXES | frozenset({".onnx"})
 
 # These definitions live in the ComfyUI frontend rather than /object_info.
-FRONTEND_SYSTEM_NODE_TYPES = frozenset({"MarkdownNote", "Note", "PrimitiveNode", "Reroute"})
+#
+# The rgthree entries are group-state controls: they set other nodes' modes
+# while the graph is being edited and have no runtime existence at all. By the
+# time a saved graph reaches us their work is already done - every node it
+# muted or bypassed carries that mode itself - so discarding the controls
+# cannot disturb what they applied.
+#
+# Named individually rather than by a rule like "no cnr_id". A node without a
+# package is usually a node whose package we failed to identify, and treating
+# that whole class as frontend furniture would silently drop real
+# dependencies.
+FRONTEND_SYSTEM_NODE_TYPES = frozenset(
+    {
+        "MarkdownNote",
+        "Note",
+        "PrimitiveNode",
+        "Reroute",
+        "Fast Groups Bypasser (rgthree)",
+        "Mute / Bypass Relay (rgthree)",
+        "Mute / Bypass Repeater (rgthree)",
+    }
+)
 
 AssetPolicy = Literal["supported", "blocked", "unsupported"]
 AssetKind = Literal[
