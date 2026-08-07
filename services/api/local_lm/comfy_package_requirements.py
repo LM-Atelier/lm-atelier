@@ -56,6 +56,31 @@ def select_requirements_manifest(manifests: Sequence[str]) -> str | None:
     return at_depth[0]
 
 
+MAX_STAGED_MANIFEST_SCAN = 20_000
+
+
+def staged_requirements_manifests(root: Path) -> tuple[str, ...]:
+    """Every requirements file already staged under this package, by relative path.
+
+    Staging reports these while it unpacks. A renewal has no archive to report
+    them, because it deliberately reuses the node code it already reviewed, so
+    the same question is asked of the copy on disk and answered the same way -
+    the selector below still decides which of them describes the package.
+
+    Bounded: a staged tree that is somehow enormous stops the scan rather than
+    walking it forever, and the caller sees no manifest instead of hanging.
+    """
+    if not root.is_dir():
+        return ()
+    found: list[str] = []
+    for seen, path in enumerate(root.rglob("*"), start=1):
+        if seen > MAX_STAGED_MANIFEST_SCAN:
+            break
+        if path.is_file() and path.name.casefold() == REQUIREMENTS_NAME:
+            found.append(path.relative_to(root).as_posix())
+    return tuple(sorted(found))
+
+
 def read_staged_requirements(root: Path, manifest: str) -> tuple[str, ...]:
     """Read one staged requirements file into inert declaration lines.
 
