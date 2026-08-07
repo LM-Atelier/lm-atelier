@@ -285,9 +285,14 @@ def _verify_install(
         session.rollback()
         if isinstance(exc, ComfyRegistryActivationError):
             raise
+        # The cause, not just the category. This check re-verifies node files,
+        # the wheel environment and the launch binding, and reported all three
+        # the same way - so a reader who hit it had to re-derive by hand which
+        # of them had actually complained, against packages holding thousands
+        # of files. The underlying refusals are already written for people.
         raise ComfyRegistryActivationError(
             "registry_install_verification_failed",
-            "Registry package files or dependencies failed verification",
+            f"Registry package files or dependencies failed verification: {exc}",
         ) from exc
     install.trusted = original_trusted
     install.active = original_active
