@@ -5,10 +5,11 @@ import asyncio
 import pytest
 from fastapi import FastAPI
 from httpx2 import AsyncClient
+from sqlalchemy import create_engine
 from sqlalchemy.orm import Session
 
 from local_lm.custom_nodes import CustomNodeManager
-from local_lm.db import SessionLocal
+from local_lm.db import Base, SessionLocal
 from local_lm.domain import new_id
 from local_lm.models import CustomNodeInstall, Job
 
@@ -250,3 +251,97 @@ async def test_custom_node_change_rechecks_media_queue_inside_compute_lease(
         node = session.get(CustomNodeInstall, "node_lease_race")
         assert node
         assert node.trusted is False
+
+
+def test_a_registry_package_dependency_resolves_against_registry_installs() -> None:
+    """The run path could only see git installs, so a revision naming a Registry
+    package would have been refused forever - which is why imported workflows
+    declare nothing and run on whatever the shared runtime happens to carry."""
+
+    from local_lm.models import ComfyRegistryInstall
+    from local_lm.workflow_node_dependencies import node_dependency_errors
+
+    engine = create_engine("sqlite://")
+    Base.metadata.create_all(engine)
+    with Session(engine) as session:
+        session.add_all(
+            [
+                ComfyRegistryInstall(
+                    package_id="rgthree-comfy",
+                    registry_record_id="rec-rgthree",
+                    repository_url="https://github.com/example/rgthree-comfy",
+                    download_url="https://example.invalid/rgthree-comfy.zip",
+                    archive_sha256="aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                    manifest_sha256="aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                    package_version="1.2.3",
+                    installed_path="lm-atelier-registry_aaa",
+                    trusted=True,
+                    active=True,
+                    node_types_json=[],
+                    pip_dependencies_json=[],
+                    review_json={},
+                ),
+                ComfyRegistryInstall(
+                    package_id="comfyui-impact-pack",
+                    registry_record_id="rec-impact",
+                    repository_url="https://github.com/example/comfyui-impact-pack",
+                    download_url="https://example.invalid/comfyui-impact-pack.zip",
+                    archive_sha256="bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+                    manifest_sha256="bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+                    package_version="8.0.0",
+                    installed_path="lm-atelier-registry_bbb",
+                    trusted=True,
+                    active=False,
+                    node_types_json=[],
+                    pip_dependencies_json=[],
+                    review_json={},
+                ),
+                ComfyRegistryInstall(
+                    package_id="was-ns",
+                    registry_record_id="rec-was",
+                    repository_url="https://github.com/example/was-ns",
+                    download_url="https://example.invalid/was-ns.zip",
+                    archive_sha256="cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+                    manifest_sha256="cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+                    package_version="3.0.1",
+                    installed_path="lm-atelier-registry_ccc",
+                    trusted=False,
+                    active=False,
+                    node_types_json=[],
+                    pip_dependencies_json=[],
+                    review_json={},
+                ),
+            ]
+        )
+        session.commit()
+
+        ready = {"registry_packages": [{"package_id": "rgthree-comfy", "package_version": "1.2.3"}]}
+        assert node_dependency_errors(session, ready) == []
+
+        # Trusted but not carried by this runtime - what a re-provision leaves.
+        inactive = node_dependency_errors(
+            session, {"registry_packages": [{"package_id": "comfyui-impact-pack"}]}
+        )
+        assert inactive == [
+            "registry package dependency is not active in this runtime: comfyui-impact-pack"
+        ]
+
+        untrusted = node_dependency_errors(
+            session, {"registry_packages": [{"package_id": "was-ns"}]}
+        )
+        assert untrusted == ["registry package dependency is not trusted: was-ns"]
+
+        absent = node_dependency_errors(
+            session, {"registry_packages": [{"package_id": "never-installed"}]}
+        )
+        assert absent == ["missing registry package dependency: never-installed"]
+
+        wrong_version = node_dependency_errors(
+            session,
+            {"registry_packages": [{"package_id": "rgthree-comfy", "package_version": "9.9.9"}]},
+        )
+        assert wrong_version == ["missing registry package dependency: rgthree-comfy 9.9.9"]
+
+        # A revision that declares neither key costs nothing, which is every
+        # revision stored before this existed.
+        assert node_dependency_errors(session, {}) == []
