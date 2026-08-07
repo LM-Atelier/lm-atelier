@@ -10,6 +10,9 @@ vi.mock("./api", () => ({
     workflowFamilies: vi.fn().mockResolvedValue([]),
     validateWorkflow: vi.fn(),
     workflowOpenTarget: vi.fn(),
+    cloneWorkflow: vi.fn(),
+    updateWorkflow: vi.fn(),
+    createWorkflowRevision: vi.fn(),
   },
 }));
 
@@ -20,6 +23,7 @@ function revision(id: string) {
     version: 1,
     engine: "comfyui",
     api_graph_json: {},
+    ui_graph_json: {},
     input_schema_json: {},
     dependencies_json: {},
     trusted: true,
@@ -112,5 +116,67 @@ describe("opening a workflow in ComfyUI", () => {
     expect(link.getAttribute("href")).toBe("http://127.0.0.1:8188/");
     expect(popup).not.toHaveBeenCalled();
     vi.unstubAllGlobals();
+  });
+});
+
+describe("after a workflow changes", () => {
+  it("re-asks for the families the change could have moved", async () => {
+    // The server derives a family's current revision, engine, capabilities and
+    // readiness from the revision that just changed. Refreshing the list alone
+    // left the families beside it - and the selectors elsewhere - answering
+    // from before the change, with nothing to heal them while mounted.
+    vi.mocked(api.workflows).mockResolvedValue([workflow("wf-a", "Alpha")] as never);
+    vi.mocked(api.cloneWorkflow).mockResolvedValue(workflow("wf-b", "Alpha copy") as never);
+
+    renderView();
+    await screen.findByText("Alpha");
+    const familiesReadBefore = vi.mocked(api.workflowFamilies).mock.calls.length;
+
+    fireEvent.click(screen.getByText("Alpha"));
+    fireEvent.click(screen.getByRole("button", { name: "Duplicate" }));
+
+    await waitFor(() =>
+      expect(vi.mocked(api.workflowFamilies).mock.calls.length).toBeGreaterThan(familiesReadBefore),
+    );
+  });
+});
+
+describe("saving a new revision", () => {
+  async function openTheEditor() {
+    vi.mocked(api.workflows).mockResolvedValue([workflow("wf-a", "Alpha")] as never);
+    renderView();
+    fireEvent.click(await screen.findByText("Alpha"));
+    fireEvent.click(screen.getByRole("button", { name: "New revision" }));
+  }
+
+  it("does not rewrite the name when only the graph changed", async () => {
+    // The metadata write is unvalidated and commits first, so a revision the
+    // server rejects used to leave a rename behind that nobody asked for.
+    // With nothing to rename there is no second write to be left behind.
+    vi.mocked(api.createWorkflowRevision).mockRejectedValue(new Error("schema rejected"));
+    await openTheEditor();
+
+    fireEvent.click(screen.getByRole("button", { name: "Create revision" }));
+
+    await waitFor(() => expect(screen.getByText("schema rejected")).toBeTruthy());
+    expect(api.updateWorkflow).not.toHaveBeenCalled();
+  });
+
+  it("shows a rename that landed even though the revision was refused", async () => {
+    vi.mocked(api.updateWorkflow).mockResolvedValue({} as never);
+    vi.mocked(api.createWorkflowRevision).mockRejectedValue(new Error("schema rejected"));
+    await openTheEditor();
+
+    const nameBox = screen.getByDisplayValue("Alpha");
+    fireEvent.change(nameBox, { target: { value: "Alpha renamed" } });
+    const readsBefore = vi.mocked(api.workflows).mock.calls.length;
+    fireEvent.click(screen.getByRole("button", { name: "Create revision" }));
+
+    await waitFor(() => expect(api.updateWorkflow).toHaveBeenCalled());
+    // The rename is committed, so the list has to be re-read despite the
+    // failure - otherwise the old name stays on screen until some later visit.
+    await waitFor(() =>
+      expect(vi.mocked(api.workflows).mock.calls.length).toBeGreaterThan(readsBefore),
+    );
   });
 });

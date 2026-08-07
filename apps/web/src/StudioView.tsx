@@ -1,6 +1,6 @@
 import { Download, Star, X } from "lucide-react";
 import { useEffect, useMemo, useReducer, useState } from "react";
-import { useMutation, useQuery } from "@tanstack/react-query";
+import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { api } from "./api";
 import { StudioOpenImage } from "./StudioOpenImage";
 import { ErrorCallout } from "./ErrorCallout";
@@ -51,11 +51,12 @@ export function StudioView({
   // Every result is already an artifact in the library - the studio's turns
   // are ordinary turns. What was missing is a way to say "keep this one",
   // because a picture among hundreds is findable only in principle.
-  const [kept, setKept] = useState<string | null>(null);
-  const keep = useMutation({
-    mutationFn: (artifactId: string) => api.favoriteArtifact(artifactId, true),
-    onSuccess: (_result, artifactId) => setKept(artifactId),
-  });
+  //
+  // Read from the artifact rather than remembered locally. A local flag knew
+  // only what this visit had done: reopening a picture already marked - from
+  // here or from the library - showed it as unmarked, and the control could
+  // only ever mark, never take it back.
+  const client = useQueryClient();
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [instruction, setInstruction] = useState("");
   // The recipe an apply should run under. Cleared whenever the instruction is
@@ -76,7 +77,11 @@ export function StudioView({
   const capabilities = useQuery({
     queryKey: ["studio-capabilities"],
     queryFn: api.studioCapabilities,
-    staleTime: 60_000,
+    // Asked again on every entry, which is what the line above already
+    // claimed. Held for a minute instead, the studio told someone who had
+    // just followed its own "Browse workflows" button and installed the
+    // workflow that the tool was still not installed.
+    refetchOnMount: "always",
   });
   const activeTool = capabilities.data?.tools.find((tool) => tool.kind === tools.kind);
   const unavailable = activeTool && !activeTool.available ? activeTool.reason : null;
@@ -86,6 +91,20 @@ export function StudioView({
   const current = steps.find((step) => step.artifactId === selectedId) ?? steps.at(-1) ?? null;
 
   const currentArtifactId = current?.artifactId ?? null;
+  const artifact = useQuery({
+    queryKey: ["artifact", currentArtifactId],
+    queryFn: () => api.artifact(currentArtifactId!),
+    enabled: Boolean(currentArtifactId),
+  });
+  const isFavorite = artifact.data?.favorite ?? false;
+  const keep = useMutation({
+    mutationFn: (next: boolean) => api.favoriteArtifact(currentArtifactId!, next),
+    onSuccess: () => {
+      void client.invalidateQueries({ queryKey: ["artifact", currentArtifactId] });
+      // The library is looking at the same picture.
+      void client.invalidateQueries({ queryKey: ["artifacts"] });
+    },
+  });
   const { bitmap, error: imageError, reload } = useStudioImage(currentArtifactId);
   useEffect(() => {
     if (bitmap) {
@@ -109,13 +128,18 @@ export function StudioView({
         <div className="studio-header-actions">
           {current && (
             <>
+              {/* Every result is already in the library - the close dialog
+                  beside this says so. What this does is mark one, which is
+                  what makes it findable among hundreds, and it is named for
+                  that now rather than for saving something already saved. */}
               <button
                 className="secondary compact-button"
-                disabled={keep.isPending || kept === current.artifactId}
-                onClick={() => keep.mutate(current.artifactId)}
+                disabled={keep.isPending || artifact.isLoading}
+                aria-pressed={isFavorite}
+                onClick={() => keep.mutate(!isFavorite)}
               >
-                <Star size={14} aria-hidden="true" />
-                {kept === current.artifactId ? "Kept in the library" : "Save to library"}
+                <Star size={14} aria-hidden="true" fill={isFavorite ? "currentColor" : "none"} />
+                {isFavorite ? "Favorited" : "Favorite"}
               </button>
               <a
                 className="secondary compact-button"

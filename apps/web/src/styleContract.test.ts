@@ -93,13 +93,18 @@ describe("style contract", () => {
     expect(footer).not.toContain("ThemeToggle");
   });
 
-  it("gives the studio both a keep and an export, not one word for two acts", () => {
-    // "Save" was one download link, which is export. Keeping a picture in the
+  it("gives the studio both a mark and an export, not one word for two acts", () => {
+    // "Save" was one download link, which is export. Marking a picture in the
     // library is a different act with a different result, and collapsing them
     // into one verb left no way to do the other.
+    //
+    // The mark is named for what it does. It was called "Save to library"
+    // while the close dialog beside it said every result is already there -
+    // two sentences in one header that could not both be true.
     const view = readFileSync(join(SOURCE_DIR, "StudioView.tsx"), "utf8");
-    expect(view).toContain("Save to library");
     expect(view).toContain("favoriteArtifact");
+    expect(view).toMatch(/aria-pressed=\{isFavorite\}/);
+    expect(view).not.toContain("Save to library");
     expect(view).toMatch(/download/);
   });
 
