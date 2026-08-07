@@ -6839,14 +6839,25 @@ def _analyzed_package_node_types(
         raise api_error(
             422,
             "workflow-package-requirement-not-found",
-            "The workflow does not declare exactly one matching custom-node package.",
+            f"The workflow does not declare exactly one custom-node package named "
+            f"{package_id}; it declares "
+            + (", ".join(sorted(item.package_id for item in analysis.custom_packages)) or "none")
+            + ".",
         )
     requirement = matches[0]
     if requirement.versions != (version,):
+        # Both halves named. A workflow can declare a version that cannot be
+        # installed at all - a Registry release whose own pins have no wheels
+        # for this interpreter, say - and the reader's next move depends
+        # entirely on knowing which version was asked for and which the
+        # workflow wrote down. Saying only that they differ leaves them to go
+        # and find both.
+        declared = ", ".join(requirement.versions) or "no version"
         raise api_error(
             422,
             "workflow-package-version-mismatch",
-            "The selected package version does not exactly match the workflow declaration.",
+            f"This asked to prepare {package_id} {version}, but the workflow declares "
+            f"{declared}. A workflow is prepared with the version it names.",
         )
     return _prepared_node_types(list(requirement.node_types))
 
