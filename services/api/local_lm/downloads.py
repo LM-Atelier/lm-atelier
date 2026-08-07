@@ -97,7 +97,14 @@ if TYPE_CHECKING:
 
 _REMOTE_ID = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]*/[A-Za-z0-9][A-Za-z0-9_.-]*$")
 _CIVITAI_ID = re.compile(r"^[1-9][0-9]{0,11}$")
-_CIVITAI_ALLOWED_DOWNLOAD_HOSTS = ("civitai.com", "b2.civitai.com")
+# civitai.com issues the redirect, b2 serves smaller files, and anything of
+# any size comes from their Cloudflare R2 delivery domain. Without the last of
+# these every large model refused with "untrusted host" at the second hop.
+_CIVITAI_ALLOWED_DOWNLOAD_HOSTS = (
+    "civitai.com",
+    "b2.civitai.com",
+    ".r2.cloudflarestorage.com",
+)
 _TRANSFER_ATTEMPTS = 3
 # How often a running transfer records a byte sample. Must stay comfortably
 # under the five-second window `progress._byte_rate` allows between samples,

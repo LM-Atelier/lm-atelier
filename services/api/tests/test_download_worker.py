@@ -9,6 +9,7 @@ from typing import Any
 import httpx
 import pytest
 
+import local_lm.https_transfer as transfer_module
 from local_lm import download_worker
 from local_lm.https_transfer import HttpsTransferError, download_https_artifact
 
@@ -149,7 +150,51 @@ def test_https_transfer_refuses_redirect_outside_allowlist_without_leaking_url(
         download_https_artifact(_https_payload(tmp_path), transport=httpx.MockTransport(handler))
 
     assert raised.value.code == "untrusted_host"
+    # The host is named so a redirect chain can be followed; the rest of the
+    # address can carry credentials and stays out of it.
+    assert "evil.example" in str(raised.value)
     assert "secret" not in str(raised.value)
+
+
+def test_a_provider_storage_domain_is_reachable_by_suffix() -> None:
+    """CivitAI hands anything large to Cloudflare R2, under a bucket of its own.
+
+    Pinning the exact bucket meant every model above their small-file threshold
+    refused at the second hop with "untrusted host", and a rotation on their
+    side would do it again. A suffix entry names one provider's storage domain
+    and widens nothing for any other source.
+    """
+    allowed = frozenset({"civitai.com", "b2.civitai.com", ".r2.cloudflarestorage.com"})
+
+    assert transfer_module._host_allowed("civitai.com", allowed)
+    assert transfer_module._host_allowed(
+        "civitai-delivery-worker-prod.5ac0637cfd.r2.cloudflarestorage.com", allowed
+    )
+    # The bare domain itself, and nothing that merely ends in the same letters.
+    assert transfer_module._host_allowed("r2.cloudflarestorage.com", allowed)
+    assert not transfer_module._host_allowed("evil-r2.cloudflarestorage.com.attacker.test", allowed)
+    assert not transfer_module._host_allowed("cloudflarestorage.com", allowed)
+    # Only sources that declare the suffix get it.
+    assert not transfer_module._host_allowed(
+        "anything.r2.cloudflarestorage.com", frozenset({"civitai.com"})
+    )
+
+
+def test_https_transfer_still_refuses_a_storage_domain_no_source_declared(
+    tmp_path: Path,
+) -> None:
+    """The suffix only helps the source that asked for it."""
+
+    def handler(_request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            302,
+            headers={"location": "https://someone-else.r2.cloudflarestorage.com/model.safetensors"},
+        )
+
+    with pytest.raises(HttpsTransferError) as raised:
+        download_https_artifact(_https_payload(tmp_path), transport=httpx.MockTransport(handler))
+
+    assert raised.value.code == "untrusted_host"
 
 
 @pytest.mark.parametrize(
