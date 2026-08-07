@@ -55,9 +55,14 @@ _MARKER_ENVIRONMENT_KEYS = frozenset(
 
 
 class ComfyRegistryWheelArtifactError(ValueError):
-    def __init__(self, code: str, message: str) -> None:
+    def __init__(self, code: str, message: str, *, requirement: str | None = None) -> None:
         super().__init__(message)
         self.code = code
+        # Which declared requirement could not be satisfied, when the refusal is
+        # about one. Carried rather than left in the sentence: a caller deciding
+        # what to do about it should not have to parse an error message to find
+        # out what the error was about.
+        self.requirement = requirement
 
 
 @dataclass(frozen=True)
@@ -428,6 +433,7 @@ def _resolve_dependency(
         raise ComfyRegistryWheelArtifactError(
             "no_compatible_wheel",
             f"No non-yanked, hash-bound compatible wheel exists for {dependency.requirement}",
+            requirement=dependency.requirement,
         )
     if prefer_latest_version:
         specifier = Requirement(dependency.requirement).specifier
@@ -437,6 +443,7 @@ def _resolve_dependency(
             raise ComfyRegistryWheelArtifactError(
                 "no_compatible_wheel",
                 f"No non-yanked, hash-bound compatible wheel exists for {dependency.requirement}",
+                requirement=dependency.requirement,
             )
         best_version = max(eligible)
         candidates = [

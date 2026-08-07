@@ -85,10 +85,13 @@ class ComfyRegistryWheelClosureDriverError(ValueError):
         message: str,
         *,
         retry_after_seconds: int | None = None,
+        requirement: str | None = None,
     ) -> None:
         super().__init__(message)
         self.code = code
         self.retry_after_seconds = retry_after_seconds
+        # The declared requirement a refusal is about, when it is about one.
+        self.requirement = requirement
 
 
 @dataclass(frozen=True)
@@ -563,8 +566,12 @@ def _driver_error(
     retry_after = getattr(exc, "retry_after_seconds", None)
     if not isinstance(retry_after, int) or isinstance(retry_after, bool):
         retry_after = None
+    requirement = getattr(exc, "requirement", None)
+    if not isinstance(requirement, str) or not requirement:
+        requirement = None
     return ComfyRegistryWheelClosureDriverError(
         code,
         str(exc) or "Registry wheel closure resolution failed",
         retry_after_seconds=retry_after,
+        requirement=requirement,
     )
