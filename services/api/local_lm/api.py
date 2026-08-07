@@ -8075,18 +8075,26 @@ async def validate_workflow(
             "workflow revision is not trusted; review it and create a trusted revision "
             "before execution"
         )
+    # Asking the engine what a role offers is I/O and can fail for reasons that
+    # have nothing to do with this schema. It stays outside the block below so
+    # its failure cannot be reported as "invalid workflow input schema", and so
+    # whatever it says about the engine's internals does not reach the caller
+    # through an error text meant to describe the user's own document.
+    role = "video" if "video" in definition.operation else "image"
+    base_fields = await _engine_role_fields(
+        request,
+        role,
+        engine=revision.engine,
+        allow_inactive=True,
+    )
     try:
-        role = "video" if "video" in definition.operation else "image"
-        base_fields = await _engine_role_fields(
-            request,
-            role,
-            engine=revision.engine,
-            allow_inactive=True,
-        )
         declared_fields = workflow_settings(base_fields, revision.input_schema_json)
         validate_settings(defaults(declared_fields), declared_fields)
         validate_workflow_edit_calibration(revision.input_schema_json)
     except ValueError as exc:
+        # Explaining why a schema is invalid is what this endpoint is for, so the
+        # message survives - but it now comes only from our own validators,
+        # which describe the document the caller supplied.
         errors.append(f"invalid workflow input schema: {exc}")
     dependencies = revision.dependencies_json
     errors.extend(custom_node_dependency_errors(session, dependencies.get("custom_nodes")))
