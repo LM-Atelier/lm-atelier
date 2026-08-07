@@ -76,6 +76,38 @@ export function WorkflowSelector({
       void client.invalidateQueries({ queryKey: [scope, scopeId, "workflow-selections"] }),
   });
 
+  // Neither read having arrived is not the same as an answer. Undefined data
+  // fell straight through the value chain below: a failed families read
+  // rendered "Selected workflow (unavailable)", telling someone their
+  // configured workflow had been removed when one HTTP request had failed,
+  // and a failed selections read read as "Use the project's choice" - an
+  // inherited default presented as the confirmed current state. The natural
+  // response to either is to pick something else, overwriting a setting that
+  // was never broken.
+  const readFailure = (families.error ?? selections.error) as Error | null;
+  if (readFailure) {
+    return (
+      <label className="workflow-selector">
+        <span>{label}</span>
+        <select disabled value="">
+          <option value="">Cannot read the current choice</option>
+        </select>
+        <small role="alert">
+          {readFailure.message}
+          <button
+            className="secondary compact-button"
+            onClick={() => {
+              void families.refetch();
+              void selections.refetch();
+            }}
+          >
+            Try again
+          </button>
+        </small>
+      </label>
+    );
+  }
+
   const current: WorkflowSelection | undefined = selections.data?.find(
     (selection) => selection.selector_capability === capability,
   );
