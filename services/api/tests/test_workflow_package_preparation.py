@@ -825,6 +825,137 @@ async def test_without_an_authorized_workflow_nothing_is_set_aside(
     assert seen["pending"] is None
 
 
+async def test_a_dependency_with_no_wheel_anywhere_is_set_aside(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The live WAS case: fairscale publishes source distributions and no wheels.
+
+    There is nothing malformed about the requirement and nothing wrong with the
+    index. The distribution simply cannot be installed the one safe way this
+    product installs anything, and refusing the whole package for it left a
+    workflow uninstallable over a dependency its nodes may never touch.
+
+    Set aside like any other, recorded, and proven at activation - which is
+    where a wrong guess is caught, because activation refuses if the workflow
+    turns out to need what was left out.
+    """
+    seen: dict[str, Any] = {}
+    attempts: list[tuple[str, ...]] = []
+
+    async def fake_drive(resolution: Any, **_kwargs: Any) -> Any:
+        attempts.append(tuple(resolution.pip_dependencies))
+        for declaration in resolution.pip_dependencies:
+            if declaration.startswith("fairscale"):
+                raise ComfyRegistryWheelClosureDriverError(
+                    "no_compatible_wheel",
+                    "No non-yanked, hash-bound compatible wheel exists for fairscale>=0.4.4",
+                    requirement="fairscale>=0.4.4",
+                )
+        seen["planned"] = resolution.pip_dependencies
+        return SimpleNamespace(closure="closure-object")
+
+    async def fake_prepare(session: Any, **kwargs: Any) -> Any:
+        seen["pending"] = kwargs["pending_omission"]
+        return SimpleNamespace(install_id="install_1")
+
+    monkeypatch.setattr(composition, "drive_comfy_registry_wheel_closure", fake_drive)
+    monkeypatch.setattr(composition, "prepare_comfy_registry_install", fake_prepare)
+
+    declarations = ("numpy", "fairscale>=0.4.4", "git+https://github.com/ltdrdata/cstr")
+    registry = _Registry(_resolution(pip_dependencies=declarations))
+
+    await prepare_workflow_package(
+        _NullSessionFactory(),
+        package_id="was-ns",
+        node_types=("ExampleNode",),
+        version="3.0.1",
+        context=_CONTEXT,
+        media_worker_stopped=True,
+        interpreter_probe=_probe,
+        registry_client=registry,  # type: ignore[arg-type]
+        authorized_workflow=("revision-1", ("ExampleNode",)),
+        **_clients(),
+    )
+
+    # The bare source never reaches the closure; fairscale is withdrawn only
+    # after the closure says it cannot satisfy it.
+    assert attempts[0] == ("numpy", "fairscale>=0.4.4")
+    assert seen["planned"] == ("numpy",)
+    assert seen["pending"].omitted_declarations == (
+        "git+https://github.com/ltdrdata/cstr",
+        "fairscale>=0.4.4",
+    )
+
+
+async def test_a_transitive_requirement_with_no_wheel_still_refuses(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Only what the package declared may be withdrawn.
+
+    A requirement pulled in by some other distribution belongs to that
+    distribution. Dropping it would hollow out whatever asked for it, while
+    this package - which never mentioned it - appears to have installed
+    cleanly.
+    """
+
+    async def fake_drive(_resolution: Any, **_kwargs: Any) -> Any:
+        raise ComfyRegistryWheelClosureDriverError(
+            "no_compatible_wheel",
+            "No non-yanked, hash-bound compatible wheel exists for someone-elses-dep",
+            requirement="someone-elses-dep",
+        )
+
+    monkeypatch.setattr(composition, "drive_comfy_registry_wheel_closure", fake_drive)
+    registry = _Registry(_resolution(pip_dependencies=("numpy",)))
+
+    with pytest.raises(WorkflowPackagePreparationError) as refusal:
+        await prepare_workflow_package(
+            _NullSessionFactory(),
+            package_id="example-pack",
+            node_types=("ExampleNode",),
+            version="1.2.3",
+            context=_CONTEXT,
+            media_worker_stopped=True,
+            interpreter_probe=_probe,
+            registry_client=registry,  # type: ignore[arg-type]
+            authorized_workflow=("revision-1", ("ExampleNode",)),
+            **_clients(),
+        )
+
+    assert refusal.value.code == "no_compatible_wheel"
+
+
+async def test_without_an_authorized_workflow_a_missing_wheel_still_refuses(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Nothing an omission could later be proven against, so nothing is set aside."""
+
+    async def fake_drive(_resolution: Any, **_kwargs: Any) -> Any:
+        raise ComfyRegistryWheelClosureDriverError(
+            "no_compatible_wheel",
+            "No non-yanked, hash-bound compatible wheel exists for fairscale>=0.4.4",
+            requirement="fairscale>=0.4.4",
+        )
+
+    monkeypatch.setattr(composition, "drive_comfy_registry_wheel_closure", fake_drive)
+    registry = _Registry(_resolution(pip_dependencies=("fairscale>=0.4.4",)))
+
+    with pytest.raises(WorkflowPackagePreparationError) as refusal:
+        await prepare_workflow_package(
+            _NullSessionFactory(),
+            package_id="was-ns",
+            node_types=("ExampleNode",),
+            version="3.0.1",
+            context=_CONTEXT,
+            media_worker_stopped=True,
+            interpreter_probe=_probe,
+            registry_client=registry,  # type: ignore[arg-type]
+            **_clients(),
+        )
+
+    assert refusal.value.code == "no_compatible_wheel"
+
+
 async def test_the_live_packages_declare_their_sources_bare_and_still_prepare(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
