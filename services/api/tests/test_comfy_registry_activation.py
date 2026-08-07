@@ -119,6 +119,10 @@ def test_failed_review_rolls_back_without_trust(
         )
 
     assert raised.value.code == "registry_install_verification_failed"
+    # The cause travels with it. This one check re-verifies node files, the
+    # wheel environment and the launch binding, and reporting all three the
+    # same way left the reader to work out by hand which had complained.
+    assert "changed" in str(raised.value)
     stored = session.get(ComfyRegistryInstall, install_id)
     assert stored is not None
     assert stored.trusted is False

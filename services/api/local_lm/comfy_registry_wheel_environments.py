@@ -40,6 +40,18 @@ MAX_REGISTRY_WHEEL_METADATA_FILE_BYTES = 1024 * 1024
 MAX_REGISTRY_WHEEL_ENVIRONMENT_MANIFEST_BYTES = 16 * 1024 * 1024
 MAX_REGISTRY_WHEEL_ARCHIVE_PATH_CHARACTERS = 1_000
 MAX_REGISTRY_WHEEL_EXPANSION_RATIO = 200
+# The ratio only means anything once an entry is big enough to matter. A
+# decompression bomb is dangerous because of what it expands *to*, not because
+# it compressed well: an entry that unpacks to a few hundred kilobytes cannot
+# fill a disk at any ratio, and the whole-environment caps above already bound
+# what an archive set may expand to in total.
+#
+# Without this floor the check refuses ordinary packages for shipping
+# compressible test data. pooch - a transitive dependency of scikit-image, and
+# so of half the scientific ecosystem - includes `tests/data/large-data.txt`,
+# which is 0.1 MB expanded and compresses at 321:1. Nothing about that is a
+# bomb, and refusing it made an entire workflow uninstallable.
+MAX_REGISTRY_WHEEL_UNCHECKED_ENTRY_BYTES = 64 * 1024 * 1024
 WHEEL_HASH_CHUNK_BYTES = 1024 * 1024
 WHEEL_INSTALL_TIMEOUT_SECONDS = 600
 _REPARSE_POINT = getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0x400)
@@ -412,9 +424,14 @@ def _inspect_wheel_archive(path: Path, installed_paths: set[str]) -> tuple[int, 
                 file_count += 1
                 expanded_bytes += entry.file_size
                 compressed = max(entry.compress_size, 1)
-                if entry.file_size > compressed * MAX_REGISTRY_WHEEL_EXPANSION_RATIO:
+                if (
+                    entry.file_size > MAX_REGISTRY_WHEEL_UNCHECKED_ENTRY_BYTES
+                    and entry.file_size > compressed * MAX_REGISTRY_WHEEL_EXPANSION_RATIO
+                ):
                     raise ComfyRegistryWheelEnvironmentError(
-                        "unsafe_wheel_archive", "Wheel archive expansion ratio is unsafe"
+                        "unsafe_wheel_archive",
+                        f"{path.name} expands {entry.filename} from "
+                        f"{compressed} bytes to {entry.file_size}, which is an unsafe ratio",
                     )
     except (OSError, zipfile.BadZipFile, zipfile.LargeZipFile) as exc:
         raise ComfyRegistryWheelEnvironmentError(
