@@ -24,7 +24,7 @@ from local_lm.comfy_registry_runtime import ComfyRegistryRuntimeDistribution
 from local_lm.custom_nodes import CustomNodeManager
 from local_lm.db import SessionLocal
 from local_lm.events import EventBroker
-from local_lm.models import CustomNodeInstall, ModelInstall, ModelProfile
+from local_lm.models import CustomNodeInstall, ModelAssetInstall, ModelInstall, ModelProfile
 from local_lm.network import shared_tls_context
 from local_lm.processes import (
     WORKER_STDERR_DISPLAY_CHARS,
@@ -1990,6 +1990,63 @@ async def test_media_whitelist_contains_only_active_verified_trusted_installs(
 
     assert folders == ["lm-atelier-node_trusted"]
     assert verified == folders
+
+
+async def test_every_installed_asset_kind_reaches_the_runtime(
+    client,
+    settings,
+    tmp_path: Path,  # type: ignore[no-untyped-def]
+) -> None:
+    """A verified asset the runtime cannot see is a download that bought nothing."""
+
+    del client
+    settings.prepare()
+    kinds = {
+        "diffusion_model": "diffusion_models",
+        "text_encoder": "text_encoders",
+        "clip_vision": "clip_vision",
+        "checkpoint": "checkpoints",
+        "vae": "vae",
+        "lora": "loras",
+    }
+    with SessionLocal() as session:
+        for kind in (*kinds, "configuration"):
+            directory = tmp_path / f"asset-{kind}"
+            directory.mkdir()
+            session.add(
+                ModelAssetInstall(
+                    name=kind,
+                    kind=kind,
+                    local_path=str(directory),
+                    size_bytes=1024,
+                    manifest_json={},
+                    active=True,
+                )
+            )
+        inactive = tmp_path / "asset-retired"
+        inactive.mkdir()
+        session.add(
+            ModelAssetInstall(
+                name="retired",
+                kind="lora",
+                local_path=str(inactive),
+                size_bytes=1024,
+                manifest_json={},
+                active=False,
+            )
+        )
+        session.commit()
+
+    destination = ProcessSupervisor(settings)._write_comfy_model_paths()
+
+    published = json.loads(destination.read_text(encoding="utf-8"))
+    served = {
+        Path(entry["base_path"]).name: folder
+        for entry in published.values()
+        for folder in entry
+        if folder != "base_path"
+    }
+    assert served == {f"asset-{kind}": folder for kind, folder in kinds.items()}
 
 
 async def test_liveness_probe_requires_success_from_the_owned_listener(
