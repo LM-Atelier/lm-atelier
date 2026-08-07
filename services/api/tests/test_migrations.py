@@ -2,14 +2,18 @@ from __future__ import annotations
 
 import json
 import sqlite3
+from contextlib import closing
 from pathlib import Path
 
 import pytest
 from alembic import command
+from alembic.script import ScriptDirectory
 from alembic.util.exc import CommandError
 
+from local_lm.backups import BackupManager
 from local_lm.config import Settings
 from local_lm.database_migrations import (
+    DatabaseUpgradeError,
     DatabaseVersionError,
     alembic_config,
     upgrade_database,
@@ -1061,4 +1065,99 @@ def test_artifact_hash_backfills_existing_revisions(tmp_path) -> None:  # type: 
         api_graph=api_graph,
         input_schema=input_schema,
         dependencies=dependencies,
+    )
+
+
+def _parent_revision(settings: Settings) -> str:
+    script = ScriptDirectory.from_config(alembic_config(settings))
+    head = script.get_revision("head")
+    assert head.down_revision, "expected the migration chain to have more than one revision"
+    return str(head.down_revision)
+
+
+def test_a_failed_upgrade_gives_the_data_back_on_the_next_start(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The defect this guards is not hypothetical: SQLite's driver leaves DDL
+    standing when the transaction around it fails, while the revision marker
+    rolls back. So the failure is injected after real DDL has been applied."""
+
+    settings = Settings(data_dir=tmp_path / "interrupted-upgrade")
+    settings.prepare()
+    database = settings.state_dir / "local-lm.sqlite3"
+    upgrade_database(settings)
+    _run(
+        database,
+        ("CREATE TABLE canary (id TEXT PRIMARY KEY)", ()),
+        ("INSERT INTO canary VALUES ('irreplaceable')", ()),
+        ("UPDATE alembic_version SET version_num = ?", (_parent_revision(settings),)),
+    )
+
+    def half_apply_then_die(*_args: object, **_kwargs: object) -> None:
+        _run(database, ("CREATE TABLE added_by_the_migration (id TEXT PRIMARY KEY)", ()))
+        raise RuntimeError("interrupted partway")
+
+    monkeypatch.setattr(command, "upgrade", half_apply_then_die)
+
+    with pytest.raises(DatabaseUpgradeError, match="Restart LM Atelier"):
+        upgrade_database(settings)
+
+    # Without the restore the install is finished: the schema holds half a
+    # migration the data says was never applied.
+    assert _table_exists(database, "added_by_the_migration")
+
+    assert BackupManager(settings).apply_pending_restore()
+
+    assert not _table_exists(database, "added_by_the_migration")
+    assert _query(database, "SELECT id FROM canary") == [("irreplaceable",)]
+
+
+def test_data_from_a_newer_build_is_never_restored_over(tmp_path: Path) -> None:
+    """Nothing was applied, so there is nothing to give back, and replacing the
+    data would destroy what a newer build wrote."""
+
+    settings = Settings(data_dir=tmp_path / "newer-build")
+    settings.prepare()
+    _run(
+        settings.state_dir / "local-lm.sqlite3",
+        ("CREATE TABLE alembic_version (version_num TEXT PRIMARY KEY)", ()),
+        ("INSERT INTO alembic_version VALUES ('from_a_newer_build')", ()),
+    )
+
+    with pytest.raises(DatabaseVersionError):
+        upgrade_database(settings)
+
+    assert not (settings.state_dir / "restore-on-next-start.json").exists()
+
+
+def test_an_upgrade_with_nothing_to_do_does_not_copy_the_data(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    settings = Settings(data_dir=tmp_path / "already-current")
+    settings.prepare()
+    upgrade_database(settings)
+    before = {path.name for path in settings.backup_dir.glob("*.sqlite3")}
+
+    upgrade_database(settings)
+
+    assert {path.name for path in settings.backup_dir.glob("*.sqlite3")} == before
+
+
+def _run(database: Path, *statements: tuple[str, tuple[object, ...]]) -> None:
+    """Windows will not let a restore replace a file that is still open."""
+
+    with closing(sqlite3.connect(database)) as connection:
+        for sql, parameters in statements:
+            connection.execute(sql, parameters)
+        connection.commit()
+
+
+def _query(database: Path, sql: str) -> list[tuple[object, ...]]:
+    with closing(sqlite3.connect(database)) as connection:
+        return connection.execute(sql).fetchall()
+
+
+def _table_exists(database: Path, name: str) -> bool:
+    return bool(
+        _query(database, f"SELECT name FROM sqlite_master WHERE type='table' AND name = '{name}'")
     )
