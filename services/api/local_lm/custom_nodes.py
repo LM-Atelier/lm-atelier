@@ -10,7 +10,6 @@ from contextlib import suppress
 from pathlib import Path
 from urllib.parse import urlparse
 
-from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from .config import Settings
@@ -19,43 +18,6 @@ from .models import CustomNodeInstall
 from .subprocess_env import git_subprocess_environment
 
 _COMMIT = re.compile(r"^[0-9a-fA-F]{40}$")
-
-
-def custom_node_dependency_errors(session: Session, dependencies: object) -> list[str]:
-    if not isinstance(dependencies, list):
-        return [] if dependencies in (None, []) else ["custom node dependencies must be a list"]
-    installs = session.scalars(
-        select(CustomNodeInstall).where(CustomNodeInstall.active.is_(True))
-    ).all()
-    errors: list[str] = []
-    for dependency in dependencies:
-        revision: str | None = None
-        if isinstance(dependency, dict):
-            identifier = (
-                dependency.get("id") or dependency.get("name") or dependency.get("source_url")
-            )
-            revision_value = dependency.get("revision")
-            revision = str(revision_value) if revision_value else None
-        else:
-            identifier = dependency
-        match = next(
-            (
-                install
-                for install in installs
-                if str(identifier) in {install.id, install.name, install.source_url}
-            ),
-            None,
-        )
-        if not match:
-            errors.append(f"missing custom node dependency: {identifier}")
-        elif not match.trusted:
-            errors.append(f"custom node dependency is not trusted: {match.name}")
-        elif revision and revision.lower() != match.revision.lower():
-            errors.append(
-                f"custom node revision mismatch for {match.name}: expected {revision}, "
-                f"found {match.revision}"
-            )
-    return errors
 
 
 class CustomNodeManager:
