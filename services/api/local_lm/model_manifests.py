@@ -532,15 +532,33 @@ def _target_folder(path: str, role: str) -> str:
     return "models" if role == "chat" else "checkpoints"
 
 
+_COMFY_FOLDER_BY_KIND = {
+    "checkpoint": "checkpoints",
+    "diffusion_model": "diffusion_models",
+    "text_encoder": "text_encoders",
+    "vae": "vae",
+    "clip_vision": "clip_vision",
+    "lora": "loras",
+    "controlnet": "controlnet",
+    "upscaler": "upscale_models",
+    "embedding": "embeddings",
+    "ip_adapter": "ipadapter",
+}
+
+
+def comfy_folder_for_kind(kind: str) -> str | None:
+    """Name the ComfyUI folder that serves a component kind.
+
+    One table, because a second copy drifts: a kind missing from the copy that
+    publishes model paths leaves the file downloaded, verified, recorded, and
+    invisible to the runtime that needs it.
+    """
+
+    return _COMFY_FOLDER_BY_KIND.get(kind)
+
+
 def _target_folder_for_kind(kind: str) -> str:
-    return {
-        "checkpoint": "checkpoints",
-        "diffusion_model": "diffusion_models",
-        "text_encoder": "text_encoders",
-        "vae": "vae",
-        "clip_vision": "clip_vision",
-        "lora": "loras",
-    }.get(kind, "checkpoints")
+    return comfy_folder_for_kind(kind) or "checkpoints"
 
 
 def _kind_from_comfy_folder(folder: str) -> str | None:
