@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+from dataclasses import replace
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
@@ -69,14 +70,27 @@ def _clients() -> dict[str, Any]:
 
 
 class _NullSessionFactory:
+    """A session that knows nothing, unless a test hands it an install to find.
+
+    Renewal reads the install it is refreshing - where its reviewed tree is,
+    and what that install already records as omitted - so the double has to
+    answer `get` rather than be a bare object.
+    """
+
+    def __init__(self, install: object | None = None) -> None:
+        self._install = install
+
     def __call__(self) -> _NullSessionFactory:
         return self
 
-    def __enter__(self) -> object:
-        return object()
+    def __enter__(self) -> _NullSessionFactory:
+        return self
 
     def __exit__(self, *args: object) -> None:
         return None
+
+    def get(self, _model: object, _identity: object) -> object | None:
+        return self._install
 
 
 async def test_composes_resolve_close_prepare_in_order(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -170,6 +184,181 @@ async def test_renewal_reuses_resolution_and_closure_without_replacing_node_code
     )
 
     assert result is prepared
+
+
+def _staged_install(tmp_path: Path, requirements: str, *, recorded: tuple[str, ...] = ()) -> Any:
+    """An install whose reviewed tree is already on disk, as a renewal finds it."""
+    folder = tmp_path / "lm-atelier-registry_staged"
+    folder.mkdir(parents=True, exist_ok=True)
+    (folder / "requirements.txt").write_text(requirements, encoding="utf-8")
+    review: dict[str, Any] = {}
+    if recorded:
+        review["pending_source_omission"] = {
+            "install_id": "install_1",
+            "manifest_sha256": "a" * 64,
+            "omitted_declarations": list(recorded),
+            "workflow_revision_id": "revision-1",
+            "required_node_types": ["ExampleNode"],
+        }
+    return SimpleNamespace(
+        installed_path=folder.name,
+        review_json=review,
+        # Staging learns these; a renewal reuses the archive they name.
+        registry_record_id="github-commit:" + "b" * 60,
+        download_url="https://codeload.github.com/example/example-pack/zip/" + "a" * 40,
+    )
+
+
+async def test_a_commit_pinned_renewal_reads_the_tree_it_already_reviewed(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A commit is the most immutable identity there is, and it could not renew.
+
+    Renewal reuses the node code it already reviewed rather than fetching it
+    again, and a commit-pinned package states its dependencies inside that
+    tree - so the declarations had nowhere to come from and the whole path
+    refused, telling the reader to remove the package. Nothing offers a way to
+    remove one, which left a commit-pinned install unable to follow its runtime
+    anywhere.
+
+    The tree is on disk and already reviewed. This reads it.
+    """
+    seen: dict[str, Any] = {}
+
+    async def fake_drive(resolution: Any, **_kwargs: Any) -> Any:
+        seen["planned"] = resolution.pip_dependencies
+        seen["identity"] = (resolution.registry_record_id, resolution.download_url)
+        return SimpleNamespace(closure="closure-object")
+
+    async def fake_renew(_session: Any, **kwargs: Any) -> Any:
+        seen["renewed"] = kwargs["install_id"]
+        return SimpleNamespace(install_id="install_1")
+
+    async def unexpected_stage(**_kwargs: Any) -> Any:
+        raise AssertionError("renewal must not fetch the node code again")
+
+    monkeypatch.setattr(composition, "drive_comfy_registry_wheel_closure", fake_drive)
+    monkeypatch.setattr(composition, "renew_comfy_registry_install_environment", fake_renew)
+    monkeypatch.setattr(composition, "stage_comfy_registry_install_archive", unexpected_stage)
+
+    revision = "a" * 40
+    install = _staged_install(tmp_path, "numpy" + chr(10) + "requests>=2" + chr(10))
+
+    await prepare_workflow_package(
+        _NullSessionFactory(install),
+        package_id="example-pack",
+        node_types=("ExampleNode",),
+        version=revision,
+        context=replace(_CONTEXT, custom_node_root=tmp_path),
+        media_worker_stopped=True,
+        interpreter_probe=_probe,
+        registry_client=_Registry(
+            _resolution(
+                declared_version=revision,
+                install_kind="git_commit",
+                repository_url="https://github.com/example/example-pack.git",
+            )
+        ),  # type: ignore[arg-type]
+        renew_install_id="install_1",
+        **_clients(),
+    )
+
+    assert seen["planned"] == ("numpy", "requests>=2")
+    assert seen["renewed"] == "install_1"
+    # The archive identity travels with it, so the lifecycle's check compares
+    # the renewal against the install it is renewing rather than against gaps.
+    assert seen["identity"] == (
+        "github-commit:" + "b" * 60,
+        "https://codeload.github.com/example/example-pack/zip/" + "a" * 40,
+    )
+
+
+async def test_a_renewal_may_rederive_an_omission_it_already_carries(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Finding the same omission again is agreement, not news."""
+    seen: dict[str, Any] = {}
+
+    async def fake_drive(resolution: Any, **_kwargs: Any) -> Any:
+        seen["planned"] = resolution.pip_dependencies
+        return SimpleNamespace(closure="closure-object")
+
+    async def fake_renew(_session: Any, **_kwargs: Any) -> Any:
+        return SimpleNamespace(install_id="install_1")
+
+    monkeypatch.setattr(composition, "drive_comfy_registry_wheel_closure", fake_drive)
+    monkeypatch.setattr(composition, "renew_comfy_registry_install_environment", fake_renew)
+
+    source = "git+https://github.com/owner/repo"
+    install = _staged_install(tmp_path, "numpy" + chr(10) + source + chr(10), recorded=(source,))
+
+    await prepare_workflow_package(
+        _NullSessionFactory(install),
+        package_id="example-pack",
+        node_types=("ExampleNode",),
+        version="a" * 40,
+        context=replace(_CONTEXT, custom_node_root=tmp_path),
+        media_worker_stopped=True,
+        interpreter_probe=_probe,
+        registry_client=_Registry(
+            _resolution(
+                declared_version="a" * 40,
+                install_kind="git_commit",
+                repository_url="https://github.com/example/example-pack.git",
+            )
+        ),  # type: ignore[arg-type]
+        renew_install_id="install_1",
+        authorized_workflow=("revision-1", ("ExampleNode",)),
+        **_clients(),
+    )
+
+    assert seen["planned"] == ("numpy",)
+
+
+async def test_a_renewal_may_not_set_aside_something_new(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An omission is only trustworthy proven against the workflow that allowed it.
+
+    A renewal authorizes nothing, so a declaration this install has never had
+    set aside must stop it - and the refusal names which one.
+    """
+
+    async def fake_drive(_resolution: Any, **_kwargs: Any) -> Any:
+        return SimpleNamespace(closure="closure-object")
+
+    monkeypatch.setattr(composition, "drive_comfy_registry_wheel_closure", fake_drive)
+
+    install = _staged_install(
+        tmp_path, "numpy" + chr(10) + "git+https://github.com/owner/newcomer" + chr(10)
+    )
+
+    with pytest.raises(WorkflowPackagePreparationError) as refused:
+        await prepare_workflow_package(
+            _NullSessionFactory(install),
+            package_id="example-pack",
+            node_types=("ExampleNode",),
+            version="a" * 40,
+            context=replace(_CONTEXT, custom_node_root=tmp_path),
+            media_worker_stopped=True,
+            interpreter_probe=_probe,
+            registry_client=_Registry(
+                _resolution(
+                    declared_version="a" * 40,
+                    install_kind="git_commit",
+                    repository_url="https://github.com/example/example-pack.git",
+                )
+            ),  # type: ignore[arg-type]
+            renew_install_id="install_1",
+            authorized_workflow=("revision-1", ("ExampleNode",)),
+            **_clients(),
+        )
+
+    assert refused.value.code == "omission_not_renewable"
+    assert "newcomer" in str(refused.value)
 
 
 async def test_commit_pin_renewal_refuses_before_probe_or_archive_download(
