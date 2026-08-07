@@ -12,7 +12,10 @@ from .comfy_workflow_packages import (
 
 _SUPPORTED_WIDGET_TYPES = frozenset({"BOOLEAN", "COMBO", "FLOAT", "INT", "STRING"})
 _CONTROL_AFTER_GENERATE = frozenset({"decrement", "fixed", "increment", "randomize"})
-_IGNORED_FRONTEND_NODE_TYPES = frozenset({"MarkdownNote", "Note", "PrimitiveNode"})
+# Nodes that draw something and carry nothing. Dropping one loses a caption.
+_IGNORED_FRONTEND_NODE_TYPES = frozenset(
+    {"MarkdownNote", "Note", "PrimitiveNode", "Label (rgthree)"}
+)
 # Nodes that carry a wire and nothing else. They are resolved away before
 # compilation rather than ignored: ignoring one drops the edge it was
 # carrying, which is a different graph, not a smaller one.
