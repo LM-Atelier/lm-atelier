@@ -3620,7 +3620,10 @@ describe("App", () => {
     fireEvent.click(await screen.findByText("Studio image"));
     expect(await screen.findByText("Where this workflow is offered")).toBeInTheDocument();
     expect(await screen.findByText("Declared controls")).toBeInTheDocument();
-    expect(screen.getByDisplayValue("20")).toBeInTheDocument();
+    // Described, not offered for setting: this pane says what a workflow is,
+    // and the inputs here answered to nobody.
+    expect(screen.getByText("Default: 20")).toBeInTheDocument();
+    expect(screen.queryByDisplayValue("20")).not.toBeInTheDocument();
     expect(screen.getByText("v2 · current")).toBeInTheDocument();
     expect(screen.queryByText("Restore as new revision")).not.toBeInTheDocument();
   });
