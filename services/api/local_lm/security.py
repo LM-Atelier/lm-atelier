@@ -3,7 +3,6 @@ from __future__ import annotations
 import hashlib
 import hmac
 import secrets
-from pathlib import Path
 
 from fastapi import Request, Response, WebSocket, status
 from fastapi.responses import JSONResponse
@@ -33,17 +32,6 @@ SECURITY_HEADERS = {
     b"x-content-type-options": b"nosniff",
     b"x-frame-options": b"DENY",
 }
-
-
-def _write_private(path: Path, value: str) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    try:
-        path.write_text(value, encoding="utf-8")
-        path.chmod(0o600)
-    except OSError:
-        if path.exists():
-            return
-        raise
 
 
 class JsonBodyLimitMiddleware:
@@ -230,27 +218,29 @@ class _UploadLimitExceeded(Exception):
 
 
 class SessionSecurity:
+    """Hold the browser's session in memory, for this run of the service only.
+
+    The session token was previously a secret kept on disk and handed to the
+    browser unchanged, so the cookie was not a token standing for a session - it
+    was the durable credential itself, identical after every restart, with a
+    CSRF token derived from it that could therefore never rotate either.
+
+    Nothing needs that persistence. The page asks for a session when it loads,
+    so a token minted per run is enough, and both values change whenever the
+    service does.
+    """
+
     def __init__(self, settings: Settings) -> None:
         self.settings = settings
-        self.secret = self._load_or_create_secret(settings.session_secret_path)
+        self._session_token = secrets.token_urlsafe(48)
         self.csrf_token = hmac.new(
-            self.secret.encode(), b"local-lm-csrf-v1", hashlib.sha256
+            self._session_token.encode(), b"local-lm-csrf-v1", hashlib.sha256
         ).hexdigest()
-
-    @staticmethod
-    def _load_or_create_secret(path: Path) -> str:
-        if path.exists():
-            value = path.read_text(encoding="utf-8").strip()
-            if len(value) >= 32:
-                return value
-        value = secrets.token_urlsafe(48)
-        _write_private(path, value)
-        return value
 
     def issue_session(self, response: Response) -> str:
         response.set_cookie(
             SESSION_COOKIE,
-            self.secret,
+            self._session_token,
             httponly=True,
             secure=False,
             samesite="strict",
@@ -259,7 +249,7 @@ class SessionSecurity:
         return self.csrf_token
 
     def _valid_cookie(self, cookie: str | None) -> bool:
-        return bool(cookie and hmac.compare_digest(cookie, self.secret))
+        return bool(cookie and hmac.compare_digest(cookie, self._session_token))
 
     def _valid_origin(self, origin: str | None) -> bool:
         if origin is None:
