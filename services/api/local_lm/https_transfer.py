@@ -5,7 +5,7 @@ import logging
 import os
 import re
 import stat
-from collections.abc import Iterator, Mapping
+from collections.abc import Collection, Iterator, Mapping
 from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
@@ -31,9 +31,13 @@ _REDIRECT_STATUSES = {301, 302, 303, 307, 308}
 
 
 class HttpsTransferError(RuntimeError):
-    def __init__(self, code: str) -> None:
-        super().__init__(code)
+    def __init__(self, code: str, detail: str | None = None) -> None:
+        # The code stays a stable identifier that callers branch on; detail is
+        # the part a person reads. They are kept apart so naming what happened
+        # can never change what the code means.
+        super().__init__(f"{code}: {detail}" if detail else code)
         self.code = code
+        self.detail = detail
 
 
 @dataclass(frozen=True)
@@ -295,17 +299,51 @@ def _validate_url(url: str, allowed_hosts: frozenset[str], *, initial: bool) -> 
     ):
         raise HttpsTransferError("invalid_url")
     host = _normalize_host(parsed.hostname)
-    if host not in allowed_hosts:
-        raise HttpsTransferError("untrusted_host")
+    if not _host_allowed(host, allowed_hosts):
+        # The host is named, never the URL: a redirect chain is invisible from
+        # outside, so a bare "untrusted host" meant working out by hand where a
+        # provider had sent the transfer. The rest of the address can carry
+        # credentials and stays out of it.
+        raise HttpsTransferError("untrusted_host", host)
     if initial and any(
         key.casefold() in _SENSITIVE_QUERY_KEYS for key, _value in parse_qsl(parsed.query)
     ):
         raise HttpsTransferError("credential_in_url")
 
 
+def _host_allowed(host: str, allowed_hosts: Collection[str]) -> bool:
+    """Whether a redirect target is one this source is allowed to reach.
+
+    Exact names, with one deliberate exception: an entry written as a leading
+    dot is a domain suffix. Providers serve their larger objects from storage
+    domains whose bucket name is an account detail rather than an identity -
+    CivitAI hands files over about a gigabyte to Cloudflare R2 - and pinning
+    the exact bucket means a routine rotation on their side reads here as an
+    untrusted host, with the download simply failing.
+
+    A suffix entry still names one provider's storage domain, and only the
+    source that declares it is affected: nothing widens for anyone else.
+    """
+    if host in allowed_hosts:
+        return True
+    return any(
+        entry.startswith(".") and (host.endswith(entry) or host == entry[1:])
+        for entry in allowed_hosts
+    )
+
+
 def _normalize_host(value: str) -> str:
     host = value.casefold()
-    if host != value.strip().casefold() or host.endswith(".") or not _HOST.fullmatch(host):
+    # A leading dot marks a domain suffix in an allowlist. The rest still has
+    # to be a well-formed host, so the entry names one domain rather than
+    # opening a wildcard.
+    candidate = host[1:] if host.startswith(".") else host
+    if (
+        host != value.strip().casefold()
+        or host.endswith(".")
+        or not candidate
+        or not _HOST.fullmatch(candidate)
+    ):
         raise HttpsTransferError("invalid_allowed_hosts")
     return host
 
