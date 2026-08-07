@@ -240,3 +240,45 @@ describe("WorkflowSelector", () => {
     expect(orderFamilies([second, first], "image").map((one) => one.id)).toEqual(["a", "b"]);
   });
 });
+
+describe("when the current choice cannot be read", () => {
+  // The cleanup above belongs to another describe block, so this one needs
+  // its own or the previous render's alert is still on screen.
+  afterEach(() => {
+    cleanup();
+    vi.clearAllMocks();
+  });
+
+  it("says so rather than reporting the configured workflow as gone", async () => {
+    // Undefined data fell through the value chain: a failed families read
+    // rendered "Selected workflow (unavailable)", which says the configured
+    // workflow was removed. The natural response is to pick another one,
+    // overwriting a setting that was never broken.
+    vi.mocked(api.workflowFamilies).mockRejectedValue(new Error("families unreachable"));
+    vi.mocked(api.chatWorkflowSelections).mockResolvedValue([
+      {
+        selector_capability: "image",
+        mode: "family",
+        workflow_family_id: "family-1",
+      },
+    ] as never);
+
+    renderSelector();
+
+    await waitFor(() => expect(screen.getByRole("alert")).toHaveTextContent("families unreachable"));
+    expect(screen.queryByText(/unavailable\)/)).toBeNull();
+    expect(screen.getByRole("combobox")).toBeDisabled();
+  });
+
+  it("does not present an inherited default as the confirmed choice", async () => {
+    vi.mocked(api.workflowFamilies).mockResolvedValue([] as never);
+    vi.mocked(api.chatWorkflowSelections).mockRejectedValue(new Error("selections unreachable"));
+
+    renderSelector();
+
+    await waitFor(() =>
+      expect(screen.getByRole("alert")).toHaveTextContent("selections unreachable"),
+    );
+    expect(screen.queryByText(/Use the project's choice/)).toBeNull();
+  });
+});
