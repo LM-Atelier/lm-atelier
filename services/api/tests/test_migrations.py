@@ -1161,3 +1161,33 @@ def _table_exists(database: Path, name: str) -> bool:
     return bool(
         _query(database, f"SELECT name FROM sqlite_master WHERE type='table' AND name = '{name}'")
     )
+
+
+def test_the_restore_is_armed_before_the_upgrade_not_after(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A process that is killed never reaches an exception handler, so the
+    request has to already be on disk while the upgrade is in flight."""
+
+    settings = Settings(data_dir=tmp_path / "armed-first")
+    settings.prepare()
+    database = settings.state_dir / "local-lm.sqlite3"
+    upgrade_database(settings)
+    _run(
+        database,
+        ("UPDATE alembic_version SET version_num = ?", (_parent_revision(settings),)),
+    )
+    marker = settings.state_dir / "restore-on-next-start.json"
+    armed_during_upgrade: list[bool] = []
+
+    def observe(*_args: object, **_kwargs: object) -> None:
+        armed_during_upgrade.append(marker.is_file())
+
+    monkeypatch.setattr(command, "upgrade", observe)
+
+    upgrade_database(settings)
+
+    assert armed_during_upgrade == [True]
+    # And withdrawn once the upgrade survived, so an ordinary start does not
+    # roll itself back.
+    assert not marker.exists()

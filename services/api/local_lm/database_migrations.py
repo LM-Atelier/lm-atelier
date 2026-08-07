@@ -80,10 +80,16 @@ def upgrade_database(settings: Settings) -> None:
     if _upgrade_is_pending(config, settings):
         try:
             snapshot = manager.create().name
+            # Armed before the work, not after it. An exception handler only
+            # runs for an exception; a process killed mid-upgrade - the case
+            # that motivates all of this - never reaches one, and would
+            # otherwise leave half-applied DDL with nothing asking for it back.
+            manager.request_restore(snapshot)
         except Exception:
             # A missing snapshot is worth reporting but not worth refusing to
             # start over: without it the upgrade is exactly as safe as it was
             # before this protection existed.
+            snapshot = None
             logger.warning("Could not snapshot the data before upgrading", exc_info=True)
     try:
         command.upgrade(config, "head")
@@ -92,6 +98,8 @@ def upgrade_database(settings: Settings) -> None:
         # nothing to give back and a restore would be the wrong answer.
         if not isinstance(error.__cause__, ResolutionError):
             raise
+        if snapshot is not None:
+            manager.cancel_restore()
         raise DatabaseVersionError(
             "This LM Atelier data uses a database schema revision that this "
             "build does not recognize. Install the latest LM Atelier version "
@@ -100,9 +108,10 @@ def upgrade_database(settings: Settings) -> None:
     except Exception as error:
         if snapshot is None:
             raise
-        manager.request_restore(snapshot)
         raise DatabaseUpgradeError(
             "The data could not be upgraded to this version of LM Atelier. "
             "Restart LM Atelier to return to your data as it was before the "
             "upgrade started."
         ) from error
+    if snapshot is not None:
+        manager.cancel_restore()
