@@ -621,8 +621,11 @@ h1, h2, h3 { margin: 0; }
 .workflow-input-section { margin: 16px 0; border: 1px solid var(--border); border-radius: 10px; background: var(--well); padding: 14px; }
 .workflow-input-section h3 { margin-bottom: 9px; font-size: 13px; }
 .workflow-controls { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 8px; }
-.workflow-controls label { display: grid; grid-template-columns: minmax(0, 1fr) 120px; gap: 8px; align-items: center; border-top: 1px solid var(--border); padding: 8px 0; }
-.workflow-controls label > span { display: grid; gap: 2px; text-transform: capitalize; }.workflow-controls small { color: var(--muted); text-transform: none; }
+.workflow-control { display: grid; gap: 2px; border-top: 1px solid var(--border); padding: 8px 0; }
+.workflow-control dt { display: flex; align-items: baseline; gap: 6px; text-transform: capitalize; }
+.workflow-control dd { margin: 0; display: grid; gap: 2px; }
+.workflow-control p { margin: 0; }
+.workflow-controls small { color: var(--muted); text-transform: none; }
 .workflow-controls input, .workflow-controls select { width: 100%; min-width: 0; border: 1px solid var(--border); border-radius: 6px; background: var(--panel-2); color: var(--ink); padding: 6px 7px; }
 .workflow-controls input[type="checkbox"] { width: 18px; justify-self: end; }
 .workflow-compare { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 8px; }.workflow-compare pre { max-height: 360px; }

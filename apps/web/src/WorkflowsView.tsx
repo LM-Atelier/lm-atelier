@@ -12,49 +12,55 @@ import { WorkflowPackageReview } from "./WorkflowPackageReview";
 import { useWorkflowPackageImport } from "./useWorkflowPackageImport";
 import { downloadJson } from "./format";
 
+/** What a revision declares it can be asked for, as a description of it.
+ *
+ * These used to be live inputs backed by local state, in a pane whose whole
+ * job is to show what a workflow is. Nothing consumed them: typing changed a
+ * value that was read by nobody, saved by nothing, and discarded when the
+ * selection moved. An editable-looking field that throws away what you put in
+ * it is worse than plain text, because it invites the attempt.
+ *
+ * Where these controls are really answered - a turn in chat, an apply in the
+ * studio - the settings panel there owns them, validates them, and sends
+ * them.
+ */
 export function WorkflowControls({ schema }: { schema: Record<string, unknown> }) {
   const properties = schema.properties && typeof schema.properties === "object"
     ? schema.properties as Record<string, Record<string, unknown>>
     : {};
-  const schemaKey = JSON.stringify(schema);
-  const defaults = Object.fromEntries(
-    Object.entries(properties).map(([key, field]) => [key, field.default ?? ""]),
-  );
-  const [stored, setStored] = useState<{ schemaKey: string; values: Record<string, unknown> }>(
-    { schemaKey, values: defaults },
-  );
-  const values = stored.schemaKey === schemaKey ? stored.values : defaults;
-  if (!Object.keys(properties).length) return <p className="muted">This revision does not declare user-facing inputs.</p>;
+  const required = Array.isArray(schema.required) ? schema.required.map(String) : [];
+  if (!Object.keys(properties).length) {
+    return <p className="muted">This revision does not declare user-facing inputs.</p>;
+  }
   return (
-    <div className="workflow-controls">
+    <dl className="workflow-controls">
       {Object.entries(properties).map(([key, field]) => {
         const label = String(field.title ?? key.replaceAll("_", " "));
         const description = typeof field.description === "string" ? field.description : "";
         const choices = Array.isArray(field.enum) ? field.enum : [];
-        const type = String(field.type ?? "string");
-        const update = (value: unknown) => setStored((current) => ({
-          schemaKey,
-          values: {
-            ...(current.schemaKey === schemaKey ? current.values : defaults),
-            [key]: value,
-          },
-        }));
+        const bounds = [
+          typeof field.minimum === "number" ? `min ${field.minimum}` : null,
+          typeof field.maximum === "number" ? `max ${field.maximum}` : null,
+        ].filter(Boolean).join(", ");
         return (
-          <label key={key}>
-            <span><strong>{label}</strong>{description && <small>{description}</small>}</span>
-            {choices.length ? (
-              <select value={String(values[key] ?? "")} onChange={(event) => update(event.target.value)}>
-                {choices.map((choice) => <option key={String(choice)} value={String(choice)}>{String(choice)}</option>)}
-              </select>
-            ) : type === "boolean" ? (
-              <input type="checkbox" checked={Boolean(values[key])} onChange={(event) => update(event.target.checked)} />
-            ) : (
-              <input type={type === "integer" || type === "number" ? "number" : "text"} min={typeof field.minimum === "number" ? field.minimum : undefined} max={typeof field.maximum === "number" ? field.maximum : undefined} step={type === "integer" ? 1 : typeof field.multipleOf === "number" ? field.multipleOf : undefined} value={String(values[key] ?? "")} onChange={(event) => update(type === "integer" || type === "number" ? Number(event.target.value) : event.target.value)} />
-            )}
-          </label>
+          <div key={key} className="workflow-control">
+            <dt>
+              <strong>{label}</strong>
+              <small>{String(field.type ?? "string")}</small>
+              {required.includes(key) && <small className="badge">required</small>}
+            </dt>
+            <dd>
+              {description && <p>{description}</p>}
+              {field.default !== undefined && <p><small>Default: {String(field.default)}</small></p>}
+              {choices.length > 0 && (
+                <p><small>One of: {choices.map((choice) => String(choice)).join(", ")}</small></p>
+              )}
+              {bounds && <p><small>{bounds}</small></p>}
+            </dd>
+          </div>
         );
       })}
-    </div>
+    </dl>
   );
 }
 export function WorkflowsView() {
