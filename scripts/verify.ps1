@@ -123,6 +123,10 @@ try {
         "scripts/check-repository-hygiene.py"
     )
 
+    Invoke-Checked "Do-not-regress register" $Python @(
+        "scripts/check-do-not-regress.py"
+    )
+
     Invoke-Checked "Unstaged whitespace check" $Git @("diff", "--check", "--")
     Invoke-Checked "Staged whitespace check" $Git @(
         "diff", "--cached", "--check", "--"
