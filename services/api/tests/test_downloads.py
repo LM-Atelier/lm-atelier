@@ -1318,7 +1318,9 @@ async def test_civitai_download_worker_receives_a_verified_redacted_envelope(
         "local_dir": str(Path("C:/staging")),
         "expected_sha256": "a" * 64,
         "expected_size": 17,
-        "allowed_hosts": ["civitai.com", "b2.civitai.com"],
+        # civitai.com redirects, b2 serves the small files, and anything large
+        # comes from their Cloudflare R2 delivery domain.
+        "allowed_hosts": ["civitai.com", "b2.civitai.com", ".r2.cloudflarestorage.com"],
         "bearer_token": "secret-civitai-token",
     }
     assert "CIVITAI_TOKEN" not in environments[0]
