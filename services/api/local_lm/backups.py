@@ -147,6 +147,19 @@ class BackupManager:
             result.restore_pending = True
             return result
 
+    def cancel_restore(self) -> bool:
+        """Withdraw a restore that is no longer wanted.
+
+        Pairs with `request_restore` for callers that arm a restore before doing
+        something they might not survive, and withdraw it once they have.
+        """
+
+        with self._lock:
+            marker = self.settings.state_dir / "restore-on-next-start.json"
+            existed = marker.is_file()
+            marker.unlink(missing_ok=True)
+            return existed
+
     def delete(self, name: str) -> None:
         with self._lock:
             path = self._path(name)
