@@ -255,6 +255,27 @@ def test_conflicting_custom_package_versions_are_reported() -> None:
     assert not analysis.dependencies_resolved
 
 
+def test_a_canvas_label_never_becomes_a_runtime_dependency() -> None:
+    """rgthree draws its label in the browser and registers no node for it.
+
+    Installing the package it names cannot satisfy it, so counting it as
+    missing refuses the workflow over a caption.
+    """
+
+    analysis = analyze_comfyui_workflow_package(
+        workflow(
+            nodes=[
+                node(1, "Label (rgthree)"),
+                node(2, "Lora Loader Stack (rgthree)"),
+            ]
+        ),
+        available_node_types={"Lora Loader Stack (rgthree)"},
+    )
+
+    assert analysis.runtime_nodes_available
+    assert "Label (rgthree)" in analysis.frontend_node_types
+
+
 @pytest.mark.parametrize("node_type", sorted(FRONTEND_SYSTEM_NODE_TYPES))
 def test_frontend_system_nodes_are_not_runtime_dependencies(node_type: str) -> None:
     analysis = analyze_comfyui_workflow_package(
