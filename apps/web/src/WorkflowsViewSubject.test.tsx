@@ -24,7 +24,13 @@ function revision(id: string) {
     engine: "comfyui",
     api_graph_json: {},
     ui_graph_json: {},
-    input_schema_json: {},
+    input_schema_json: {
+      required: ["steps"],
+      properties: {
+        steps: { type: "integer", default: 20, minimum: 1, maximum: 50, title: "Steps" },
+        sampler: { type: "string", enum: ["euler", "dpmpp"], default: "euler" },
+      },
+    },
     dependencies_json: {},
     trusted: true,
     created_at: "2026-08-06T00:00:00Z",
@@ -178,5 +184,23 @@ describe("saving a new revision", () => {
     await waitFor(() =>
       expect(vi.mocked(api.workflows).mock.calls.length).toBeGreaterThan(readsBefore),
     );
+  });
+});
+
+describe("the controls a revision declares", () => {
+  it("describes them rather than pretending they can be set here", async () => {
+    // They were live inputs with local state and no consumer: typing changed
+    // a value read by nobody and discarded when the selection moved. A field
+    // that throws away what you put in it is worse than plain text.
+    vi.mocked(api.workflows).mockResolvedValue([workflow("wf-a", "Alpha")] as never);
+
+    renderView();
+    fireEvent.click(await screen.findByText("Alpha"));
+
+    expect(screen.getByText("Steps")).toBeTruthy();
+    expect(screen.getByText("Default: 20")).toBeTruthy();
+    expect(screen.getByText("One of: euler, dpmpp")).toBeTruthy();
+    expect(screen.queryByRole("spinbutton")).toBeNull();
+    expect(screen.queryByRole("combobox", { name: /sampler/i })).toBeNull();
   });
 });
