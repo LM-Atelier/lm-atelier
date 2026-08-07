@@ -856,3 +856,31 @@ it("still recognizes the older wording, for a server that predates the code", as
   const { api } = await import("./api");
   await expect(api.editTemplates()).resolves.toEqual([]);
 });
+
+it("drops event frames it cannot act on, and keeps the ones it can", async () => {
+  const { readEvent } = await import("./api");
+
+  // onmessage runs long after the try around the connection returned, so a
+  // throw here would leave the socket open and the stream silent.
+  expect(readEvent("not json at all")).toBeNull();
+  expect(readEvent("null")).toBeNull();
+  expect(readEvent("[1,2,3]")).toBeNull();
+  expect(readEvent(new Blob())).toBeNull();
+
+  // A sequence that is not a real number would carry NaN into the ?after= of
+  // every later reconnect, through Math.max.
+  expect(readEvent(JSON.stringify({ type: "run.updated" }))).toBeNull();
+  expect(readEvent(JSON.stringify({ sequence: "12", type: "run.updated" }))).toBeNull();
+  expect(readEvent(JSON.stringify({ sequence: Number.NaN, type: "run.updated" }))).toBeNull();
+
+  const good = readEvent(
+    JSON.stringify({
+      sequence: 7,
+      type: "run.updated",
+      entity_id: null,
+      payload: {},
+      created_at: "2026-08-07T00:00:00Z",
+    }),
+  );
+  expect(good?.sequence).toBe(7);
+});

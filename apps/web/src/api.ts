@@ -861,6 +861,21 @@ export const api = {
   },
 };
 
+/** Read one event frame, or nothing if it is not one we can act on. */
+export function readEvent(data: unknown): AppEvent | null {
+  if (typeof data !== "string") return null;
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(data);
+  } catch {
+    return null;
+  }
+  if (!parsed || typeof parsed !== "object") return null;
+  const event = parsed as Partial<AppEvent>;
+  if (!Number.isFinite(event.sequence) || typeof event.type !== "string") return null;
+  return event as AppEvent;
+}
+
 export async function connectEvents(
   onEvent: (event: AppEvent) => void,
   onStatus: (connected: boolean) => void,
@@ -907,7 +922,13 @@ export async function connectEvents(
         hasOpened = true;
       };
       socket.onmessage = (message) => {
-        const event = JSON.parse(message.data as string) as AppEvent;
+        // onmessage is called by the browser long after the try around the
+        // connection has returned, so anything thrown here escapes it: the
+        // stream would keep its socket open while delivering nothing, and a
+        // non-numeric sequence would carry NaN into the ?after= of every
+        // later reconnect. Drop the frame instead; the next one still counts.
+        const event = readEvent(message.data);
+        if (!event) return;
         lastSequence = Math.max(lastSequence, event.sequence);
         eventSequence = lastSequence;
         onEvent(event);
