@@ -91,7 +91,16 @@ async def test_refuses_a_selection_that_disagrees_with_the_graph(
     )
 
     assert response.status_code == 422
-    assert response.json()["code"] == code
+    body = response.json()
+    assert body["code"] == code
+    # Both sides named. A workflow can declare a version that cannot be
+    # installed at all, and what the reader does next depends on knowing which
+    # version was asked for and which the workflow wrote down - saying only
+    # that they differ sends them off to find both.
+    assert package_id in body["detail"]
+    if code == "workflow-package-version-mismatch":
+        assert version in body["detail"]
+        assert "1.2.3" in body["detail"]
     jobs = (await client.get("/api/jobs")).json()
     assert all(job["kind"] != "registry_prepare" for job in jobs)
 
