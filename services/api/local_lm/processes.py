@@ -266,29 +266,10 @@ class ProcessSupervisor:
         self._liveness_failure_threshold = liveness_failure_threshold
         self._workers: dict[str, WorkerRecord] = {}
         self._locks = {"chat": asyncio.Lock(), "media": asyncio.Lock()}
-        self._private_output_suppression_depth = 0
         self._identity_path = self.settings.state_dir / "worker-processes.json"
         self._identity_lock = threading.Lock()
         self._worker_identities = self._load_worker_identities()
         self._reap_persisted_workers()
-
-    @property
-    def private_output_suppressed(self) -> bool:
-        return self._private_output_suppression_depth > 0
-
-    def begin_private_session(self) -> None:
-        """Keep backend output from entering durable logs during private work."""
-        self._private_output_suppression_depth += 1
-        for record in self._workers.values():
-            record.stderr_tail.clear()
-            record.stderr_pending.clear()
-
-    def end_private_session(self) -> None:
-        if self._private_output_suppression_depth > 0:
-            self._private_output_suppression_depth -= 1
-        for record in self._workers.values():
-            record.stderr_tail.clear()
-            record.stderr_pending.clear()
 
     def statuses(self) -> list[WorkerStatus]:
         result: list[WorkerStatus] = []
@@ -1498,8 +1479,6 @@ class ProcessSupervisor:
                 return
             try:
                 while chunk := await stream.read(16 * 1024):
-                    if self.private_output_suppressed:
-                        continue
                     if stderr:
                         self._append_stderr_tail(record, chunk)
                     if not log_failed:
