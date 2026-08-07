@@ -42,6 +42,7 @@ FRONTEND_SYSTEM_NODE_TYPES = frozenset(
         "PrimitiveNode",
         "Reroute",
         "Fast Groups Bypasser (rgthree)",
+        "Label (rgthree)",
         "Mute / Bypass Relay (rgthree)",
         "Mute / Bypass Repeater (rgthree)",
     }
