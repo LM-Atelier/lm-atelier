@@ -35,10 +35,16 @@ def _marker_environment() -> dict[str, str]:
     return environment
 
 
-def _wheel_content(*, extra_path: str | None = None) -> bytes:
+def _wheel_content(
+    *, extra_path: str | None = None, compressible_bytes: int | None = None
+) -> bytes:
     buffer = io.BytesIO()
     with zipfile.ZipFile(buffer, "w", compression=zipfile.ZIP_DEFLATED) as archive:
-        archive.writestr("alpha/__init__.py", "VALUE = 1")
+        # Padding lives inside the module that is already declared, so the file
+        # set is unchanged and only its compressibility varies.
+        filler = chr(10) + "# " + "a" * 97
+        padding = filler * (compressible_bytes // 100) if compressible_bytes else ""
+        archive.writestr("alpha/__init__.py", "VALUE = 1" + padding)
         archive.writestr(
             "alpha-1.0.dist-info/METADATA",
             chr(10).join(["Metadata-Version: 2.4", "Name: alpha", "Version: 1.0", ""]),
@@ -50,6 +56,7 @@ def _wheel_content(*, extra_path: str | None = None) -> bytes:
         archive.writestr("alpha-1.0.dist-info/RECORD", "")
         if extra_path is not None:
             archive.writestr(extra_path, "unsafe")
+
     return buffer.getvalue()
 
 
@@ -375,6 +382,58 @@ async def test_unsafe_archive_path_is_rejected_before_pip(
             media_worker_stopped=True,
         )
     assert raised.value.code == "unsafe_wheel_archive"
+
+
+def test_small_but_very_compressible_entries_are_not_treated_as_bombs(tmp_path: Path) -> None:
+    """Ordinary packages ship compressible test data, and it is not a bomb.
+
+    pooch - a transitive dependency of scikit-image, and so of much of the
+    scientific ecosystem - ships `tests/data/large-data.txt`: 0.1 MB expanded,
+    compressing at 321 to 1. A ratio that high on an entry that small cannot
+    fill anything, and refusing it made a whole workflow uninstallable.
+
+    What bounds the real risk is total expansion, which the environment caps
+    enforce across every archive together.
+    """
+    source = _wheel_file(tmp_path, _wheel_content(compressible_bytes=200_000))
+
+    file_count, expanded = environment_module._inspect_wheel_archive(source, set())
+
+    assert file_count > 0
+    assert expanded > 200_000
+
+
+async def test_a_large_entry_at_an_absurd_ratio_is_still_refused(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The guard still does its job where the job exists.
+
+    Big enough to matter and compressed far beyond anything real, which is what
+    a decompression bomb looks like.
+    """
+
+    async def unexpected_pip(*_args: object, **_kwargs: object) -> None:
+        raise AssertionError("a bomb must not reach pip")
+
+    monkeypatch.setattr(environment_module, "_run_pip", unexpected_pip)
+
+    content = _wheel_content(compressible_bytes=96 * 1024 * 1024)
+    closure = _closure(content)
+    source = _wheel_file(tmp_path, content)
+
+    with pytest.raises(ComfyRegistryWheelEnvironmentError) as raised:
+        await assemble_comfy_registry_wheel_environment(
+            closure,
+            {source.name: source},
+            python_executable=Path(sys.executable),
+            destination=_destination(tmp_path, closure),
+            media_worker_stopped=True,
+        )
+
+    assert raised.value.code == "unsafe_wheel_archive"
+    # Named, so the reader knows which entry in which wheel was refused.
+    assert "alpha/__init__.py" in str(raised.value)
 
 
 async def test_install_failure_cleans_staging_lock_and_destination(
