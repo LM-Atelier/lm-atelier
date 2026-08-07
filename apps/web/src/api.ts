@@ -534,6 +534,8 @@ export const api = {
     if (favorites) parameters.set("favorites", "true");
     return request<ArtifactLibraryItem[]>(`/api/artifacts?${parameters}`);
   },
+  artifact: (artifactId: string) =>
+    request<Artifact>(`/api/artifacts/${encodeURIComponent(artifactId)}`),
   favoriteArtifact: (artifactId: string, favorite: boolean) =>
     request<Artifact>(`/api/artifacts/${encodeURIComponent(artifactId)}`, {
       method: "PATCH",
