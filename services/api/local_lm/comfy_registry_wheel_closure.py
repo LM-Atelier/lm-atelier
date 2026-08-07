@@ -171,9 +171,14 @@ def _plan_closure(
             "Hash-bound metadata is required to close wheel dependencies",
         )
     if metadata_plan.conflicts:
+        # Named, because "something conflicts" is not a finding anybody can act
+        # on. The plan already knows which distributions could not be reconciled
+        # and used to discard them on the way out, leaving the reader to guess
+        # among twenty declarations which one met an immovable version.
         raise ComfyRegistryWheelClosureError(
             "dependency_conflict",
-            "Wheel dependency closure contains incompatible locked versions",
+            "Wheel dependency closure contains incompatible locked versions for "
+            + ", ".join(metadata_plan.conflicts),
         )
     pending = tuple(item.name for item in metadata_plan.frontier if item.status == "resolve")
     if pending != tuple(sorted(set(pending))):
