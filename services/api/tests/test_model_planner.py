@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import struct
+from dataclasses import replace
 
 import pytest
 
@@ -729,6 +730,89 @@ async def test_install_plan_hash_is_stable_and_persistence_is_idempotent(client)
         session.commit()
         assert second.id == first_id
         assert second.plan_hash == resolved.plan_hash
+
+
+async def test_a_stored_plan_stops_quoting_a_reason_that_no_longer_applies(client) -> None:  # type: ignore[no-untyped-def]
+    """A refusal must not outlive the attempt that produced it.
+
+    Plans are reused by hash, and the failure fields are not part of that hash,
+    so two resolves of the same install can disagree about why it failed. The
+    stored row was never rewritten while it sat in "planned", so the first
+    reason recorded was the reason reported forever - including to a caller
+    whose own request had nothing to do with it.
+
+    This is how a malformed request came back, unchanged, to well-formed ones
+    made afterwards: same install, same hash, somebody else's error message.
+    """
+    inspection = inspect_repository_metadata(
+        {"model.gguf": _gguf({"general.architecture": "llama"})},
+        ["model.gguf"],
+        role="chat",
+    )
+    resolved = resolve_install_plan(
+        remote_id="synthetic/repairable",
+        revision="c" * 40,
+        role="chat",
+        engine="llama.cpp",
+        selected_files=[{"filename": "model.gguf", "size": 4_096, "sha256": "2" * 64}],
+        inspection=inspection,
+    )
+    # Only the failure fields differ, so both resolutions share a plan hash and
+    # therefore the same stored row - which is the whole point.
+    first = replace(
+        resolved, failure_code="preflight_blocked", failure_reason="Choose one or the other."
+    )
+    second = replace(resolved, failure_code="disk_full", failure_reason="Not enough room for this.")
+    assert first.plan_hash == second.plan_hash
+
+    with SessionLocal() as session:
+        persist_install_plan(session, first)
+        session.commit()
+
+    with SessionLocal() as session:
+        stored = persist_install_plan(session, second)
+        session.commit()
+
+        assert stored.failure_code == "disk_full"
+        assert stored.failure_reason == "Not enough room for this."
+
+    with SessionLocal() as session:
+        cleared = persist_install_plan(session, resolved)
+        session.commit()
+
+        assert cleared.failure_code is None
+        assert cleared.failure_reason is None
+
+
+async def test_a_plan_being_downloaded_is_not_rewritten_underneath_the_transfer(client) -> None:  # type: ignore[no-untyped-def]
+    """The transfer reads these fields while it runs."""
+    inspection = inspect_repository_metadata(
+        {"model.gguf": _gguf({"general.architecture": "llama"})},
+        ["model.gguf"],
+        role="chat",
+    )
+    resolved = resolve_install_plan(
+        remote_id="synthetic/in-flight",
+        revision="d" * 40,
+        role="chat",
+        engine="llama.cpp",
+        selected_files=[{"filename": "model.gguf", "size": 4_096, "sha256": "3" * 64}],
+        inspection=inspection,
+    )
+
+    with SessionLocal() as session:
+        stored = persist_install_plan(session, resolved)
+        stored.status = "downloading"
+        session.commit()
+
+    with SessionLocal() as session:
+        again = persist_install_plan(
+            session, replace(resolved, failure_code="late", failure_reason="arrived mid-transfer")
+        )
+        session.commit()
+
+        assert again.status == "downloading"
+        assert again.failure_code is None
 
 
 async def test_supported_plan_can_be_retried_after_a_terminal_attempt(client) -> None:  # type: ignore[no-untyped-def]
