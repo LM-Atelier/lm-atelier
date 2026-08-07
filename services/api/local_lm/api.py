@@ -66,7 +66,6 @@ from .credentials import (
     CredentialVaultUnavailable,
     credential_provider,
 )
-from .custom_nodes import custom_node_dependency_errors
 from .db import SessionLocal, get_session
 from .domain import (
     ArtifactKind,
@@ -367,6 +366,7 @@ from .workflow_library import (
     workflow_resource_consumers,
     workflow_resource_name,
 )
+from .workflow_node_dependencies import node_dependency_errors
 from .workflow_package_drafts import (
     is_workflow_package_draft,
     workflow_package_draft_dependencies,
@@ -8097,7 +8097,7 @@ async def validate_workflow(
         # which describe the document the caller supplied.
         errors.append(f"invalid workflow input schema: {exc}")
     dependencies = revision.dependencies_json
-    errors.extend(custom_node_dependency_errors(session, dependencies.get("custom_nodes")))
+    errors.extend(node_dependency_errors(session, dependencies))
     required_models = dependencies.get("models", [])
     installed = session.scalars(select(ModelInstall).where(ModelInstall.active.is_(True))).all()
     installed_values = {
