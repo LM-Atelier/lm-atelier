@@ -24,6 +24,7 @@ from .comfy_editor_bridge import ComfyEditorBridgeError, prepare_comfy_editor_br
 from .config import Settings
 from .events import EventBroker
 from .gguf import GGUFSelectionError, automatic_mmproj_selection, validate_gguf_selection
+from .model_manifests import comfy_folder_for_kind
 from .models import ModelAssetInstall, ModelInstall, ModelProfile
 from .network import shared_tls_context
 from .schemas import WorkerStatus
@@ -849,14 +850,7 @@ class ProcessSupervisor:
                 select(ModelAssetInstall).where(ModelAssetInstall.active.is_(True))
             ).all()
             for asset in assets:
-                folder = {
-                    "lora": "loras",
-                    "vae": "vae",
-                    "controlnet": "controlnet",
-                    "upscaler": "upscale_models",
-                    "embedding": "embeddings",
-                    "ip_adapter": "ipadapter",
-                }.get(asset.kind)
+                folder = comfy_folder_for_kind(asset.kind)
                 if not folder:
                     continue
                 base_path = str(Path(asset.local_path).resolve())
