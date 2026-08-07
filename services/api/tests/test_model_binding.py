@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import itertools
 
+import local_lm.model_manifests as manifests_module
 from local_lm.config import Settings
 from local_lm.db import SessionLocal
 from local_lm.model_manifests import inspect_repository_metadata
@@ -216,3 +217,32 @@ def test_an_undeclared_component_is_left_exactly_as_it_was() -> None:
     assert [item.target_folder for item in with_others_declared.components] == [
         item.target_folder for item in untouched.components
     ]
+
+
+def test_a_lycoris_adapter_is_recognised_as_a_lora() -> None:
+    """LoKr, LoHa and DoRA are LoRAs in every way that matters here.
+
+    ComfyUI loads them through the same loader and providers list them as
+    LoRAs, but none of them spells "lora" in a tensor name: LoKr factorises
+    into `lokr_w1`/`lokr_w2`, LoHa into `hada_w1_a`/`hada_w2_b`, DoRA adds a
+    `dora_scale`. Classified as an unknown blob, a real 1.5 GB adapter finished
+    downloading and was then discarded at the contract check for not being what
+    it plainly is.
+    """
+    lokr = [
+        "diffusion_model.blocks.0.attn.gate.alpha",
+        "diffusion_model.blocks.0.attn.gate.lokr_w1",
+        "diffusion_model.blocks.0.attn.gate.lokr_w2",
+    ]
+    loha = ["diffusion_model.blocks.0.attn.hada_w1_a", "diffusion_model.blocks.0.attn.hada_w2_b"]
+    dora = ["diffusion_model.blocks.0.attn.wk.dora_scale"]
+    for names in (lokr, loha, dora):
+        assert manifests_module._safetensors_kind(names, {}) == "lora"
+
+    # A checkpoint stays a checkpoint: these names mean nothing outside an
+    # adapter, so nothing ordinary is promoted by matching them.
+    plain = [
+        "model.diffusion_model.input_blocks.0.0.weight",
+        "model.diffusion_model.output_blocks.0.0.bias",
+    ]
+    assert manifests_module._safetensors_kind(plain, {}) != "lora"
