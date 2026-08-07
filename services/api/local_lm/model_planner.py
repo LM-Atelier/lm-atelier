@@ -681,13 +681,23 @@ def persist_install_plan(session: Session, resolved: ResolvedInstallPlan) -> Ins
         select(InstallPlan).where(InstallPlan.plan_hash == resolved.plan_hash)
     )
     if existing:
-        if resolved.compatibility == "supported" and existing.status not in {
-            "planned",
-            "downloading",
-        }:
-            existing.status = "planned"
-            existing.failure_code = None
-            existing.failure_reason = None
+        # A plan already being fetched is left exactly as it is: the transfer
+        # reads these fields, and rewriting them underneath it would change
+        # what is being downloaded while it is being downloaded.
+        if existing.status == "downloading":
+            return existing
+        # Otherwise the fresh resolution is the truth, including its failure.
+        #
+        # Plans are reused by hash and the failure fields are not part of that
+        # hash, so two resolves of one install can disagree about why it failed.
+        # A row sitting in "planned" was never rewritten, so the first reason
+        # recorded was the reason reported from then on - which is how a
+        # malformed request's error came back, unchanged, to well-formed
+        # requests made afterwards, about an attempt nobody remembered making.
+        existing.status = "planned"
+        existing.compatibility = resolved.compatibility
+        existing.failure_code = resolved.failure_code
+        existing.failure_reason = resolved.failure_reason
         return existing
     plan = InstallPlan(
         id=new_id("plan"),
