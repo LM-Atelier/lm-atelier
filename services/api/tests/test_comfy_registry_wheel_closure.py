@@ -223,6 +223,9 @@ def test_new_metadata_conflict_fails_before_another_round() -> None:
             marker_environment=_environment(),
         )
     assert raised.value.code == "dependency_conflict"
+    # Named, because "something conflicts" is not a finding anybody can act on:
+    # a package declaring twenty requirements gives the reader nowhere to look.
+    assert "alpha" in str(raised.value)
 
 
 def test_extended_manifest_requires_complete_hash_bound_metadata_set() -> None:
