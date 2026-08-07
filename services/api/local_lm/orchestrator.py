@@ -41,7 +41,6 @@ from .context_compaction import (
     MIN_COMPACTION_CHARACTERS,
     compact_context_messages,
 )
-from .custom_nodes import custom_node_dependency_errors
 from .db import SessionLocal
 from .domain import (
     ArtifactKind,
@@ -182,6 +181,7 @@ from .workflow_compatibility import (
     resolve_chat_workflow_selection,
     resolve_project_workflow_selection,
 )
+from .workflow_node_dependencies import node_dependency_errors
 from .workflow_selection import (
     ResolvedWorkflowFamily,
     WorkflowFamilySelectionError,
@@ -1689,9 +1689,9 @@ class ConversationOrchestrator:
             if workflow_revision:
                 if workflow_revision.engine == "comfyui" and not workflow_revision.trusted:
                     raise ValueError(f"Ordered step {index + 1} selected an untrusted workflow.")
-                dependency_errors = custom_node_dependency_errors(
+                dependency_errors = node_dependency_errors(
                     session,
-                    workflow_revision.dependencies_json.get("custom_nodes"),
+                    workflow_revision.dependencies_json,
                 )
                 if dependency_errors:
                     raise ValueError(
@@ -3976,9 +3976,7 @@ class ConversationOrchestrator:
                             "The selected ComfyUI workflow is not trusted. Review its nodes and "
                             "create a trusted revision before execution."
                         )
-                    dependency_errors = custom_node_dependency_errors(
-                        session, revision.dependencies_json.get("custom_nodes")
-                    )
+                    dependency_errors = node_dependency_errors(session, revision.dependencies_json)
                     if dependency_errors:
                         raise RuntimeError("; ".join(dependency_errors))
                     workflow = revision.api_graph_json

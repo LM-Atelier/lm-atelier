@@ -87,6 +87,11 @@ WORKFLOW_ARTIFACT_CONTRACT_VERSION = 1
 _EXECUTION_DEPENDENCY_KEYS = (
     "model_files",
     "custom_nodes",
+    # A Registry package changes what runs exactly as a git-installed node does,
+    # so it belongs in the artifact's identity. Adding the key does not disturb
+    # anything already stored: the payload is built by reading only the keys a
+    # revision actually carries, and no existing revision carries this one.
+    "registry_packages",
     "extensions",
 )
 
