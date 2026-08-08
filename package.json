@@ -31,7 +31,9 @@
     "e2e:typecheck": "tsc --noEmit --project e2e/tsconfig.json",
     "lint": "npm --workspace @lm-atelier/web run lint",
     "test": "npm --workspace @lm-atelier/web run test",
-    "typecheck": "npm --workspace @lm-atelier/web run typecheck"
+    "typecheck": "npm --workspace @lm-atelier/web run typecheck",
+    "e2e:workflow-editor": "npm run build && npm run e2e:typecheck && npm run e2e:workflow-editor:run",
+    "e2e:workflow-editor:run": "node scripts/run-workflow-editor-e2e.mjs"
   },
   "engines": {
     "node": ">=22.13"
