@@ -630,6 +630,10 @@ class ProjectExporter:
 
         workflow = provenance.get("workflow")
         if isinstance(workflow, dict):
+            # Families are local library presentation records. The executable
+            # definition and revision are portable dependencies; a family id
+            # must not claim to identify a record on another machine.
+            workflow["family_id"] = None
             source_revision_id = self._portable_revision_reference(
                 workflow.get("revision_id"),
                 dependencies,
@@ -729,6 +733,7 @@ class ProjectExporter:
 
         workflow = provenance.get("workflow")
         if isinstance(workflow, dict):
+            workflow["family_id"] = None
             source_revision_id = workflow.get("revision_id")
             if dependencies and source_revision_id is not None:
                 imported_revision_id = dependencies.revision(
@@ -1458,6 +1463,8 @@ class ProjectExporter:
         workflow = value.get("workflow")
         if not isinstance(workflow, dict):
             return
+        if workflow.get("family_id") is not None:
+            raise ValueError("project provenance contains a local workflow family")
         activation = workflow.get("activation")
         if isinstance(activation, dict) and ("id" in activation or "launch_sha256" in activation):
             raise ValueError("project provenance contains a local workflow activation")
