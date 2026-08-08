@@ -18,7 +18,14 @@ from .comfy_workflow_packages import (
 from .workflow_trust import canonical_graph
 
 WORKFLOW_EDITOR_PROTOCOL_VERSION = WORKFLOW_EDITOR_BRIDGE_PROTOCOL_VERSION
-DEFAULT_EDITOR_SESSION_TTL = timedelta(minutes=5)
+# A native graph edit is human work, not a request/response timeout. Five
+# minutes made ordinary inspection expire underneath the editor and the browser
+# then closed the only live canvas. The session remains memory-only,
+# launch-bound, nonce-authenticated, capacity-limited, cancellable, and
+# single-use; two hours is a realistic editing window without making it
+# durable. A validated return keeps the shorter bearer lifetime below.
+DEFAULT_EDITOR_SESSION_TTL = timedelta(hours=2)
+DEFAULT_VALIDATED_RETURN_TTL = timedelta(minutes=5)
 DEFAULT_MAX_EDITOR_SESSIONS = 128
 _OPAQUE_TOKEN_CHARACTERS = frozenset(
     "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_-."
@@ -97,6 +104,7 @@ class ValidatedWorkflowEditorReturn:
     returned_ui_graph_json: str
     returned_api_graph_json: str
     runtime_identity: str
+    source_session: WorkflowEditorSession
     draft_revision_id: str | None = None
 
 
@@ -125,15 +133,19 @@ class WorkflowEditorSessions:
         self,
         *,
         ttl: timedelta = DEFAULT_EDITOR_SESSION_TTL,
+        validated_return_ttl: timedelta = DEFAULT_VALIDATED_RETURN_TTL,
         max_active: int = DEFAULT_MAX_EDITOR_SESSIONS,
         clock: Clock | None = None,
         token_factory: TokenFactory | None = None,
     ) -> None:
         if ttl <= timedelta(0):
             raise ValueError("workflow editor session TTL must be positive")
+        if validated_return_ttl <= timedelta(0):
+            raise ValueError("validated workflow editor return TTL must be positive")
         if max_active < 1:
             raise ValueError("workflow editor session capacity must be positive")
         self._ttl = ttl
+        self._validated_return_ttl = validated_return_ttl
         self._max_active = max_active
         self._clock = clock or (lambda: datetime.now(UTC))
         self._token_factory = token_factory or secrets.token_urlsafe
@@ -204,6 +216,24 @@ class WorkflowEditorSessions:
         now = _aware_utc(self._clock())
         with self._lock:
             self._purge_expired(now)
+            replay = self._validated_return_for_session_locked(session_id)
+            if replay is not None:
+                self._authorize_session_locked(
+                    replay.source_session,
+                    nonce=nonce,
+                    workflow_id=workflow_id,
+                    base_revision_id=base_revision_id,
+                    runtime_identity=runtime_identity,
+                )
+                if (
+                    replay.returned_ui_graph_json != returned_ui_graph_json
+                    or replay.returned_api_graph_json != returned_api_graph_json
+                ):
+                    raise WorkflowEditorSessionError(
+                        "workflow-editor-session-replay-mismatch",
+                        "The workflow editor session was already consumed with another return",
+                    )
+                return replay.result
             session = self._authorize_return_locked(
                 session_id=session_id,
                 nonce=nonce,
@@ -237,13 +267,14 @@ class WorkflowEditorSessions:
                 changed=changed,
                 forked=changed and current_revision_id != session.base_revision_id,
                 delta=_graph_delta(session.base_graph, returned_graph),
-                expires_at=now + self._ttl,
+                expires_at=now + self._validated_return_ttl,
             )
             self._validated_returns[validated_return_id] = ValidatedWorkflowEditorReturn(
                 result=result,
                 returned_ui_graph_json=returned_ui_graph_json,
                 returned_api_graph_json=returned_api_graph_json,
                 runtime_identity=session.runtime_identity,
+                source_session=session,
             )
             del self._sessions[session_id]
             return result
@@ -407,10 +438,31 @@ class WorkflowEditorSessions:
     ) -> WorkflowEditorSession:
         session = self._sessions.get(session_id)
         if session is None:
+            replay = self._validated_return_for_session_locked(session_id)
+            session = replay.source_session if replay is not None else None
+        if session is None:
             raise WorkflowEditorSessionError(
                 "workflow-editor-session-not-found",
                 "The workflow editor session is unavailable or expired",
             )
+        self._authorize_session_locked(
+            session,
+            nonce=nonce,
+            workflow_id=workflow_id,
+            base_revision_id=base_revision_id,
+            runtime_identity=runtime_identity,
+        )
+        return session
+
+    @staticmethod
+    def _authorize_session_locked(
+        session: WorkflowEditorSession,
+        *,
+        nonce: str,
+        workflow_id: str,
+        base_revision_id: str,
+        runtime_identity: str,
+    ) -> None:
         if not hmac.compare_digest(session.nonce, nonce):
             raise WorkflowEditorSessionError(
                 "workflow-editor-session-authentication-failed",
@@ -426,7 +478,18 @@ class WorkflowEditorSessions:
                 "workflow-editor-runtime-changed",
                 "The media runtime changed while the workflow editor was open",
             )
-        return session
+
+    def _validated_return_for_session_locked(
+        self, session_id: str
+    ) -> ValidatedWorkflowEditorReturn | None:
+        return next(
+            (
+                validated
+                for validated in self._validated_returns.values()
+                if validated.result.session_id == session_id
+            ),
+            None,
+        )
 
     def _validated_return_locked(
         self,

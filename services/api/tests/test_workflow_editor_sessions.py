@@ -59,11 +59,15 @@ class _Tokens:
 
 
 def _sessions(
-    *, ttl: timedelta = timedelta(minutes=5), max_active: int = 8
+    *,
+    ttl: timedelta = timedelta(minutes=5),
+    validated_return_ttl: timedelta | None = None,
+    max_active: int = 8,
 ) -> tuple[WorkflowEditorSessions, _Clock]:
     clock = _Clock()
     return WorkflowEditorSessions(
         ttl=ttl,
+        validated_return_ttl=validated_return_ttl or ttl,
         max_active=max_active,
         clock=clock,
         token_factory=_Tokens(),
@@ -84,6 +88,28 @@ def _start(
     )
 
 
+def test_default_human_session_and_receipt_have_separate_lifetimes() -> None:
+    clock = _Clock()
+    manager = WorkflowEditorSessions(clock=clock, token_factory=_Tokens())
+    session = _start(manager)
+
+    assert session.expires_at == clock.value + timedelta(hours=2)
+    returned = manager.consume(
+        session_id=session.id,
+        nonce=session.nonce,
+        workflow_id=session.workflow_id,
+        base_revision_id=session.base_revision_id,
+        current_revision_id=session.base_revision_id,
+        returned_ui_graph=_graph(),
+        returned_api_graph=_prompt(),
+        runtime_identity=session.runtime_identity,
+    )
+    assert returned.expires_at == clock.value + timedelta(minutes=5)
+
+    clock.value += timedelta(minutes=6)
+    assert manager.validated_return_count == 0
+
+
 def test_workflow_graph_digest_is_canonical_and_rejects_non_finite_values() -> None:
     assert workflow_ui_graph_sha256(_graph()) == workflow_ui_graph_sha256(
         {"links": [], "nodes": _graph()["nodes"], "version": 0.4}
@@ -93,7 +119,7 @@ def test_workflow_graph_digest_is_canonical_and_rejects_non_finite_values() -> N
     assert rejected.value.code == "workflow-editor-non_finite_number"
 
 
-def test_session_is_consumed_once_and_reports_unchanged_graph() -> None:
+def test_identical_consume_replays_the_same_unchanged_return() -> None:
     manager, _clock = _sessions()
     session = _start(manager)
 
@@ -112,18 +138,19 @@ def test_session_is_consumed_once_and_reports_unchanged_graph() -> None:
     assert not returned.forked
     assert returned.validated_return_id.startswith("wfreturn_")
     assert manager.validated_return_count == 1
-    with pytest.raises(WorkflowEditorSessionError) as replay:
-        manager.consume(
-            session_id=session.id,
-            nonce=session.nonce,
-            workflow_id=session.workflow_id,
-            base_revision_id=session.base_revision_id,
-            current_revision_id=session.base_revision_id,
-            returned_ui_graph=_graph(),
-            returned_api_graph=_prompt(),
-            runtime_identity=session.runtime_identity,
-        )
-    assert replay.value.code == "workflow-editor-session-not-found"
+    replay = manager.consume(
+        session_id=session.id,
+        nonce=session.nonce,
+        workflow_id=session.workflow_id,
+        base_revision_id=session.base_revision_id,
+        current_revision_id=session.base_revision_id,
+        returned_ui_graph=_graph(),
+        returned_api_graph=_prompt(),
+        runtime_identity=session.runtime_identity,
+    )
+
+    assert replay == returned
+    assert manager.validated_return_count == 1
 
 
 def test_unchanged_graph_requires_its_bound_prompt_and_preserves_retry() -> None:
@@ -199,6 +226,33 @@ def test_changed_return_is_marked_as_a_fork_when_current_revision_advanced() -> 
     assert returned.forked
     assert returned.current_revision_id == "revision_two"
     assert manager.validated_return_count == 1
+
+
+def test_consume_replays_only_the_exact_authenticated_payload() -> None:
+    manager, _clock = _sessions()
+    session = _start(manager)
+    payload = {
+        "session_id": session.id,
+        "nonce": session.nonce,
+        "workflow_id": session.workflow_id,
+        "base_revision_id": session.base_revision_id,
+        "current_revision_id": session.base_revision_id,
+        "returned_ui_graph": _graph(node_type="VAEDecode"),
+        "returned_api_graph": _prompt(node_type="VAEDecode"),
+        "runtime_identity": session.runtime_identity,
+    }
+
+    first = manager.consume(**payload)
+    replay = manager.consume(**payload)
+
+    assert replay == first
+    assert manager.validated_return_count == 1
+    with pytest.raises(WorkflowEditorSessionError) as mismatched:
+        manager.consume(**{**payload, "returned_ui_graph": _graph(node_type="KSampler")})
+    assert mismatched.value.code == "workflow-editor-session-replay-mismatch"
+    with pytest.raises(WorkflowEditorSessionError) as unauthenticated:
+        manager.consume(**{**payload, "nonce": "wrong"})
+    assert unauthenticated.value.code == "workflow-editor-session-authentication-failed"
 
 
 def test_unchanged_return_does_not_claim_a_fork_when_current_revision_advanced() -> None:
@@ -683,31 +737,29 @@ def test_invalid_nonce_is_rejected_without_consuming_the_session(nonce: str) -> 
     )
 
 
-def test_concurrent_returns_allow_exactly_one_consumer() -> None:
+def test_concurrent_identical_returns_share_one_validated_return() -> None:
     manager, _clock = _sessions()
     session = _start(manager)
 
     def consume() -> str:
-        try:
-            manager.consume(
-                session_id=session.id,
-                nonce=session.nonce,
-                workflow_id=session.workflow_id,
-                base_revision_id=session.base_revision_id,
-                current_revision_id=session.base_revision_id,
-                returned_ui_graph=_graph(node_type="VAEDecode"),
-                returned_api_graph=_prompt(node_type="VAEDecode"),
-                runtime_identity=session.runtime_identity,
-            )
-        except WorkflowEditorSessionError as exc:
-            return exc.code
-        return "consumed"
+        returned = manager.consume(
+            session_id=session.id,
+            nonce=session.nonce,
+            workflow_id=session.workflow_id,
+            base_revision_id=session.base_revision_id,
+            current_revision_id=session.base_revision_id,
+            returned_ui_graph=_graph(node_type="VAEDecode"),
+            returned_api_graph=_prompt(node_type="VAEDecode"),
+            runtime_identity=session.runtime_identity,
+        )
+        return returned.validated_return_id
 
     with ThreadPoolExecutor(max_workers=2) as pool:
         futures = [pool.submit(consume) for _ in range(2)]
         results = sorted(future.result() for future in futures)
 
-    assert results == ["consumed", "workflow-editor-session-not-found"]
+    assert len(set(results)) == 1
+    assert results[0].startswith("wfreturn_")
     assert manager.validated_return_count == 1
 
 
@@ -755,6 +807,7 @@ def test_concurrent_consume_and_cancel_allow_one_terminal_winner() -> None:
     "kwargs",
     [
         {"ttl": timedelta(0)},
+        {"validated_return_ttl": timedelta(0)},
         {"max_active": 0},
         {"clock": lambda: datetime(2026, 8, 3, 12)},
     ],

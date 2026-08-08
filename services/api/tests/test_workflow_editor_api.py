@@ -422,7 +422,8 @@ async def test_consume_validates_prompt_without_mutating_and_remains_retryable(
             "api_prompt": _api_graph(),
         },
     )
-    assert replay.status_code == 404
+    assert replay.status_code == 200
+    assert replay.json() == result
     after = next(
         item for item in (await client.get("/api/workflows")).json() if item["id"] == workflow["id"]
     )

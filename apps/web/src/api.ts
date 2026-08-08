@@ -50,6 +50,9 @@ import type {
   WorkflowAssetReview,
   WorkflowPackageAnalysis,
   WorkflowRevision,
+  WorkflowEditorDraft,
+  WorkflowEditorReturn,
+  WorkflowEditorSession,
   WorkerLogLocation,
   WorkerLogTail,
   WorkerResetResult,
@@ -735,6 +738,34 @@ export const api = {
     request<Workflow>(`/api/workflows/${id}/clone`, { method: "POST", body: JSON.stringify({ name }) }),
   exportWorkflow: (id: string) => request<WorkflowBundle>(`/api/workflows/${id}/export`),
   workflowOpenTarget: (id: string) => request<{ url: string; filename: string; ui_graph: Record<string, unknown> }>(`/api/workflows/${id}/open-target`),
+  startWorkflowEditor: (id: string) =>
+    request<WorkflowEditorSession>(`/api/workflows/${encodeURIComponent(id)}/editor-sessions`, {
+      method: "POST",
+    }),
+  consumeWorkflowEditor: (
+    workflowId: string,
+    sessionId: string,
+    payload: {
+      nonce: string;
+      base_revision_id: string;
+      ui_graph: Record<string, unknown>;
+      api_prompt: Record<string, unknown>;
+    },
+  ) =>
+    request<WorkflowEditorReturn>(
+      `/api/workflows/${encodeURIComponent(workflowId)}/editor-sessions/${encodeURIComponent(sessionId)}/consume`,
+      { method: "POST", body: JSON.stringify(payload) },
+    ),
+  createWorkflowEditorDraft: (workflowId: string, validatedReturnId: string) =>
+    request<WorkflowEditorDraft>(
+      `/api/workflows/${encodeURIComponent(workflowId)}/editor-drafts`,
+      { method: "POST", body: JSON.stringify({ validated_return_id: validatedReturnId }) },
+    ),
+  cancelWorkflowEditor: (workflowId: string, sessionId: string, nonce: string) =>
+    request<void>(
+      `/api/workflows/${encodeURIComponent(workflowId)}/editor-sessions/${encodeURIComponent(sessionId)}/cancel`,
+      { method: "POST", body: JSON.stringify({ nonce }) },
+    ),
   importWorkflow: (bundle: WorkflowBundle) =>
     request<Workflow>("/api/workflows/import", { method: "POST", body: JSON.stringify(bundle) }),
   editTemplates: () => request<EditTemplate[]>("/api/edit-templates"),
