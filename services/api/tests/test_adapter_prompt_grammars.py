@@ -13,6 +13,7 @@ from local_lm.models import AdapterPromptGrammar, ModelAssetInstall
 ORIGINAL = "a" * 64
 REPLACEMENT = "b" * 64
 SOURCE = "c" * 64
+GRAMMAR_DIGEST = "d" * 64
 
 
 @pytest.fixture
@@ -38,7 +39,12 @@ def _grammar(install_id: str, **changes: object) -> AdapterPromptGrammar:
         "source_sha256": SOURCE,
         "schema_version": 1,
         "grammar_json": {"trigger": "TRIGGERWORD"},
-        "examples_reviewed": False,
+        "grammar_sha256": GRAMMAR_DIGEST,
+        "approved_prose_json": [],
+        "verified_values_json": {},
+        "compiler_version": "visual-prompt-compiler-v1",
+        "compiler_ceiling": 900,
+        "fits": True,
     }
     values.update(changes)
     return AdapterPromptGrammar(**values)
@@ -92,16 +98,18 @@ def test_one_grammar_per_install(session: Session) -> None:
         session.commit()
 
 
-def test_examples_are_unreviewed_until_someone_says_otherwise(session: Session) -> None:
-    """Examples are the only free text a normalized grammar still carries, so
-    they start out unusable rather than trusted."""
+def test_prose_is_unapproved_until_its_exact_text_is_named(session: Session) -> None:
+    """Approval is a list of content digests rather than a flag, because a flag
+    approves a field while the danger is in the characters. Nothing is approved
+    until some exact text has been."""
 
     install = _install(session)
     session.add(_grammar(install.id))
     session.commit()
 
     stored = session.query(AdapterPromptGrammar).one()
-    assert stored.examples_reviewed is False
+    assert stored.approved_prose_json == []
+    assert stored.verified_values_json == {}
     assert stored.reviewed_at is None
 
 
