@@ -3,17 +3,28 @@ import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/re
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { WorkflowsView } from "./WorkflowsView";
 import { api } from "./api";
+import { openWorkflowEditorPopup, runWorkflowEditor } from "./workflowEditorBridge";
 
 vi.mock("./api", () => ({
   api: {
     workflows: vi.fn(),
     workflowFamilies: vi.fn().mockResolvedValue([]),
     validateWorkflow: vi.fn(),
-    workflowOpenTarget: vi.fn(),
     cloneWorkflow: vi.fn(),
     updateWorkflow: vi.fn(),
     createWorkflowRevision: vi.fn(),
+    createWorkflowEditorDraft: vi.fn(),
+    consumeWorkflowEditor: vi.fn(),
+    cancelWorkflowEditor: vi.fn().mockResolvedValue(undefined),
+    workflowOpenTarget: vi.fn(),
+    registryInstalls: vi.fn().mockResolvedValue([]),
+    customNodes: vi.fn().mockResolvedValue([]),
   },
+}));
+
+vi.mock("./workflowEditorBridge", () => ({
+  openWorkflowEditorPopup: vi.fn(),
+  runWorkflowEditor: vi.fn(),
 }));
 
 function revision(id: string) {
@@ -45,6 +56,31 @@ function workflow(id: string, name: string) {
     operation: "text_to_image",
     current_revision_id: id,
     revisions: [revision(id)],
+  };
+}
+
+function editorReturn() {
+  return {
+    validated_return_id: "return-1",
+    session_id: "session-1",
+    workflow_id: "wf-a",
+    base_revision_id: "revision-1",
+    current_revision_id: "revision-1",
+    base_graph_sha256: "a".repeat(64),
+    returned_graph_sha256: "b".repeat(64),
+    base_prompt_sha256: "c".repeat(64),
+    returned_prompt_sha256: "d".repeat(64),
+    changed: true,
+    forked: false,
+    delta: {
+      node_count_delta: 0,
+      link_count_delta: 0,
+      added_node_types: [],
+      removed_node_types: [],
+      added_asset_filenames: [],
+      removed_asset_filenames: [],
+    },
+    expires_at: "2026-08-08T18:00:00Z",
   };
 }
 
@@ -99,29 +135,172 @@ describe("a list that could not be read", () => {
 });
 
 describe("opening a workflow in ComfyUI", () => {
-  it("offers the way in as a link rather than a popup", async () => {
-    // A window asked for after the click is a popup and gets refused, and
-    // `noopener` makes window.open return null either way - so the old code
-    // could not tell a blocked tab from an opened one.
+  it("opens the shell during the click before beginning asynchronous setup", async () => {
+    vi.mocked(api.workflows).mockResolvedValue([workflow("wf-a", "Alpha")] as never);
+    const popup = { closed: false, close: vi.fn(), postMessage: vi.fn() } as unknown as Window;
+    vi.mocked(openWorkflowEditorPopup).mockReturnValue(popup);
+    let finish!: (value: never) => void;
+    vi.mocked(runWorkflowEditor).mockImplementation(() => new Promise((resolve) => { finish = resolve; }));
+
+    renderView();
+    fireEvent.click(await screen.findByText("Alpha"));
+    fireEvent.click(screen.getByRole("button", { name: "Edit in ComfyUI (preview)" }));
+
+    expect(openWorkflowEditorPopup).toHaveBeenCalledOnce();
+    await waitFor(() => expect(runWorkflowEditor).toHaveBeenCalledWith(
+      api,
+      "wf-a",
+      popup,
+      expect.objectContaining({ signal: expect.any(AbortSignal) }),
+    ));
+    finish({ kind: "unchanged", returned: { changed: false } } as never);
+    await screen.findByText("No workflow changes to save.");
+  });
+
+  it("opens only one session across a rapid double click", async () => {
+    vi.mocked(api.workflows).mockResolvedValue([workflow("wf-a", "Alpha")] as never);
+    const popup = { closed: false, close: vi.fn(), postMessage: vi.fn() } as unknown as Window;
+    vi.mocked(openWorkflowEditorPopup).mockReturnValue(popup);
+    vi.mocked(runWorkflowEditor).mockImplementation(() => new Promise(() => {}));
+    renderView();
+    fireEvent.click(await screen.findByText("Alpha"));
+    const edit = screen.getByRole("button", { name: "Edit in ComfyUI (preview)" });
+    fireEvent.click(edit);
+    fireEvent.click(edit);
+    expect(openWorkflowEditorPopup).toHaveBeenCalledOnce();
+    await waitFor(() => expect(runWorkflowEditor).toHaveBeenCalledOnce());
+  });
+
+  it("keeps an ambiguous returned edit until retry or explicit discard", async () => {
+    vi.mocked(api.workflows).mockResolvedValue([workflow("wf-a", "Alpha")] as never);
+    const popup = { closed: false, close: vi.fn(), postMessage: vi.fn() } as unknown as Window;
+    vi.mocked(openWorkflowEditorPopup).mockReturnValue(popup);
+    vi.mocked(runWorkflowEditor).mockImplementation(async (_client, _id, _popup, options) => {
+      options?.onSubmission?.({
+        workflowId: "wf-a",
+        sessionId: "session-1",
+        nonce: "nonce-1",
+        baseRevisionId: "revision-1",
+        uiGraph: { nodes: [1] },
+        apiPrompt: { 1: {} },
+      });
+      throw new Error("response was lost");
+    });
+    renderView();
+    fireEvent.click(await screen.findByText("Alpha"));
+    fireEvent.click(screen.getByRole("button", { name: "Edit in ComfyUI (preview)" }));
+    expect(await screen.findByRole("button", { name: "Retry validating returned edit" })).toBeTruthy();
+
+    const disabledEdit = screen.getByRole("button", { name: "Edit in ComfyUI (preview)" });
+    expect((disabledEdit as HTMLButtonElement).disabled).toBe(true);
+    fireEvent.click(disabledEdit);
+    expect(openWorkflowEditorPopup).toHaveBeenCalledOnce();
+
+    fireEvent.click(screen.getByRole("button", { name: "Discard pending edit" }));
+    await waitFor(() => expect(api.cancelWorkflowEditor).toHaveBeenCalledWith(
+      "wf-a",
+      "session-1",
+      "nonce-1",
+    ));
+    expect(screen.queryByRole("button", { name: "Retry validating returned edit" })).toBeNull();
+    expect(screen.getByText("Pending workflow edit discarded.")).toBeTruthy();
+  });
+
+  it("does not offer recovery controls while the original consume is running", async () => {
+    vi.mocked(api.workflows).mockResolvedValue([workflow("wf-a", "Alpha")] as never);
+    const popup = { closed: false, close: vi.fn(), postMessage: vi.fn() } as unknown as Window;
+    vi.mocked(openWorkflowEditorPopup).mockReturnValue(popup);
+    let fail!: (reason: Error) => void;
+    vi.mocked(runWorkflowEditor).mockImplementation((_client, _id, _popup, options) => {
+      options?.onSubmission?.({
+        workflowId: "wf-a",
+        sessionId: "session-1",
+        nonce: "nonce-1",
+        baseRevisionId: "revision-1",
+        uiGraph: { nodes: [1] },
+        apiPrompt: { 1: {} },
+      });
+      return new Promise((_resolve, reject) => { fail = reject; });
+    });
+    renderView();
+    fireEvent.click(await screen.findByText("Alpha"));
+    fireEvent.click(screen.getByRole("button", { name: "Edit in ComfyUI (preview)" }));
+    await waitFor(() => expect(runWorkflowEditor).toHaveBeenCalledOnce());
+    expect(screen.queryByRole("button", { name: "Retry validating returned edit" })).toBeNull();
+    expect(screen.queryByRole("button", { name: "Discard pending edit" })).toBeNull();
+
+    fail(new Error("response was lost"));
+    expect(await screen.findByRole("button", { name: "Retry validating returned edit" })).toBeTruthy();
+    expect(screen.getByRole("button", { name: "Discard pending edit" })).toBeTruthy();
+  });
+
+  it("does not offer recovery controls while the original draft save is running", async () => {
+    vi.mocked(api.workflows).mockResolvedValue([workflow("wf-a", "Alpha")] as never);
+    const popup = { closed: false, close: vi.fn(), postMessage: vi.fn() } as unknown as Window;
+    vi.mocked(openWorkflowEditorPopup).mockReturnValue(popup);
+    let fail!: (reason: Error) => void;
+    vi.mocked(runWorkflowEditor).mockImplementation((_client, _id, _popup, options) => {
+      options?.onValidated?.(editorReturn());
+      return new Promise((_resolve, reject) => { fail = reject; });
+    });
+    renderView();
+    fireEvent.click(await screen.findByText("Alpha"));
+    fireEvent.click(screen.getByRole("button", { name: "Edit in ComfyUI (preview)" }));
+    await waitFor(() => expect(runWorkflowEditor).toHaveBeenCalledOnce());
+    expect(screen.queryByRole("button", { name: "Retry saving validated edit" })).toBeNull();
+    expect(screen.queryByRole("button", { name: "Discard pending edit" })).toBeNull();
+
+    fail(new Error("draft save failed"));
+    expect(await screen.findByRole("button", { name: "Retry saving validated edit" })).toBeTruthy();
+    expect(screen.getByRole("button", { name: "Discard pending edit" })).toBeTruthy();
+  });
+
+  it("does not replace a validated edit whose draft still needs saving", async () => {
+    vi.mocked(api.workflows).mockResolvedValue([workflow("wf-a", "Alpha")] as never);
+    const popup = { closed: false, close: vi.fn(), postMessage: vi.fn() } as unknown as Window;
+    vi.mocked(openWorkflowEditorPopup).mockReturnValue(popup);
+    vi.mocked(runWorkflowEditor).mockImplementation(async (_client, _id, _popup, options) => {
+      options?.onValidated?.(editorReturn());
+      throw new Error("draft save failed");
+    });
+    renderView();
+    fireEvent.click(await screen.findByText("Alpha"));
+    fireEvent.click(screen.getByRole("button", { name: "Edit in ComfyUI (preview)" }));
+    expect(await screen.findByRole("button", { name: "Retry saving validated edit" })).toBeTruthy();
+
+    const edit = screen.getByRole("button", { name: "Edit in ComfyUI (preview)" });
+    expect((edit as HTMLButtonElement).disabled).toBe(true);
+    fireEvent.click(edit);
+    expect(openWorkflowEditorPopup).toHaveBeenCalledOnce();
+  });
+
+  it("explains when the browser refuses the synchronous popup", async () => {
+    vi.mocked(api.workflows).mockResolvedValue([workflow("wf-a", "Alpha")] as never);
+    vi.mocked(openWorkflowEditorPopup).mockReturnValue(null);
+
+    renderView();
+    fireEvent.click(await screen.findByText("Alpha"));
+    fireEvent.click(screen.getByRole("button", { name: "Edit in ComfyUI (preview)" }));
+
+    expect(await screen.findByText(/browser blocked the workflow editor window/i)).toBeTruthy();
+    expect(runWorkflowEditor).not.toHaveBeenCalled();
+  });
+
+  it("keeps the manual graph handoff available until browser certification", async () => {
     vi.mocked(api.workflows).mockResolvedValue([workflow("wf-a", "Alpha")] as never);
     vi.mocked(api.workflowOpenTarget).mockResolvedValue({
       url: "http://127.0.0.1:8188/",
       filename: "alpha.json",
       ui_graph: {},
     } as never);
-    const popup = vi.fn();
-    vi.stubGlobal("open", popup);
-    // jsdom has no download plumbing; the anchor click is not under test.
     vi.spyOn(HTMLAnchorElement.prototype, "click").mockImplementation(() => {});
 
     renderView();
     fireEvent.click(await screen.findByText("Alpha"));
-    fireEvent.click(screen.getByRole("button", { name: /Download UI graph/i }));
+    fireEvent.click(screen.getByRole("button", { name: "Download UI graph" }));
 
-    const link = await screen.findByRole("link", { name: "Open ComfyUI" });
+    const link = await screen.findByRole("link", { name: "Open ComfyUI manually" });
     expect(link.getAttribute("href")).toBe("http://127.0.0.1:8188/");
-    expect(popup).not.toHaveBeenCalled();
-    vi.unstubAllGlobals();
   });
 });
 

@@ -1,4 +1,4 @@
-import { useRef, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { Plus, Workflow as WorkflowIcon } from "lucide-react";
 import { api } from "./api";
@@ -11,6 +11,22 @@ import { WorkflowFamilyPreferences } from "./WorkflowFamilyPreferences";
 import { WorkflowPackageReview } from "./WorkflowPackageReview";
 import { useWorkflowPackageImport } from "./useWorkflowPackageImport";
 import { downloadJson } from "./format";
+import {
+  openWorkflowEditorPopup,
+  runWorkflowEditor,
+  type WorkflowEditorPhase,
+  type WorkflowEditorSubmission,
+} from "./workflowEditorBridge";
+import type { WorkflowEditorReturn } from "./types";
+
+const editorPhaseLabel: Record<WorkflowEditorPhase, string> = {
+  preparing: "Preparing the native editor…",
+  connecting: "Connecting to ComfyUI…",
+  loading: "Loading the workflow…",
+  editing: "Editing in ComfyUI…",
+  validating: "Validating the returned workflow…",
+  saving: "Saving a review draft…",
+};
 
 /** What a revision declares it can be asked for, as a description of it.
  *
@@ -80,6 +96,17 @@ export function WorkflowsView() {
   const [dependencies, setDependencies] = useState("{}");
   const [trusted, setTrusted] = useState(false);
   const importInput = useRef<HTMLInputElement>(null);
+  const editorAbort = useRef<AbortController | null>(null);
+  const editorStarting = useRef(false);
+  const [editorPhase, setEditorPhase] = useState<WorkflowEditorPhase | null>(null);
+  const [editorNotice, setEditorNotice] = useState<string | null>(null);
+  const [popupError, setPopupError] = useState<Error | null>(null);
+  const [pendingDraft, setPendingDraft] = useState<{
+    workflowId: string;
+    returned: WorkflowEditorReturn;
+  } | null>(null);
+  const [pendingSubmission, setPendingSubmission] = useState<WorkflowEditorSubmission | null>(null);
+  useEffect(() => () => editorAbort.current?.abort(), []);
   // Everything on this page that changes a workflow calls this: create, new
   // revision, duplicate, restore, and both import paths. It refreshed the
   // list alone, while the server derives a family's current revision, engine,
@@ -124,20 +151,131 @@ export function WorkflowsView() {
   const clone = useMutation({ mutationFn: (id: string) => api.cloneWorkflow(id), onSuccess: refresh });
   const restore = useMutation({ mutationFn: ({ id, revisionId }: { id: string; revisionId: string }) => api.restoreWorkflowRevision(id, revisionId), onSuccess: refresh });
   const exportBundle = useMutation({ mutationFn: (id: string) => api.exportWorkflow(id), onSuccess: (bundle) => downloadJson(bundle, `${bundle.name.replaceAll(/[^a-z0-9]+/gi, "-").toLowerCase()}.lm-atelier-workflow.json`) });
-  // The graph downloads, and the way in is offered as a link rather than
-  // opened for you. A window asked for after the click is a popup, which
-  // browsers refuse - and `noopener` makes window.open return null whether it
-  // was refused or not, so the old code could not have noticed either way.
   const [comfyTarget, setComfyTarget] = useState<{ url: string; filename: string } | null>(null);
-  const openInComfy = useMutation({
+  const downloadForComfy = useMutation({
     mutationFn: (id: string) => api.workflowOpenTarget(id),
     onSuccess: (target) => {
-      // The link first: whatever the browser makes of the download, the way
-      // in is already known and should not depend on it.
       setComfyTarget({ url: target.url, filename: target.filename });
       downloadJson(target.ui_graph, target.filename);
     },
   });
+  const nativeEditor = useMutation({
+    mutationFn: ({
+      id,
+      popup,
+      controller,
+    }: {
+      id: string;
+      popup: Window;
+      controller: AbortController;
+    }) => runWorkflowEditor(api, id, popup, {
+      signal: controller.signal,
+      onPhase: setEditorPhase,
+      onValidated: (returned) => setPendingDraft(
+        returned?.changed ? { workflowId: id, returned } : null,
+      ),
+      onSubmission: setPendingSubmission,
+      onExpiryWarning: () => setEditorNotice(
+        "The secure editor session expires in five minutes. Save or download the workflow in ComfyUI.",
+      ),
+    }),
+    onSuccess: (result, variables) => {
+      setPendingDraft(null);
+      setSelectedId(variables.id);
+      if (result.kind === "draft") {
+        setSelectedRevisionId(result.draft.draft_revision_id);
+        setEditorNotice(`Draft v${result.draft.version} saved for review.`);
+      } else {
+        setEditorNotice("No workflow changes to save.");
+      }
+      refresh();
+    },
+    onSettled: (_result, _error, variables) => {
+      if (editorAbort.current === variables.controller) {
+        editorAbort.current = null;
+        editorStarting.current = false;
+      }
+      setEditorPhase(null);
+    },
+  });
+  const retryDraft = useMutation({
+    mutationFn: ({ workflowId, returned }: NonNullable<typeof pendingDraft>) =>
+      api.createWorkflowEditorDraft(workflowId, returned.validated_return_id),
+    onMutate: () => nativeEditor.reset(),
+    onSuccess: (draft, variables) => {
+      setPendingDraft(null);
+      setSelectedId(variables.workflowId);
+      setSelectedRevisionId(draft.draft_revision_id);
+      setEditorNotice(`Draft v${draft.version} saved for review.`);
+      refresh();
+    },
+  });
+  const retrySubmission = useMutation({
+    mutationFn: async (submission: WorkflowEditorSubmission) => {
+      const returned = await api.consumeWorkflowEditor(
+        submission.workflowId,
+        submission.sessionId,
+        {
+          nonce: submission.nonce,
+          base_revision_id: submission.baseRevisionId,
+          ui_graph: submission.uiGraph,
+          api_prompt: submission.apiPrompt,
+        },
+      );
+      return { submission, returned };
+    },
+    onMutate: () => nativeEditor.reset(),
+    onSuccess: ({ submission, returned }) => {
+      setPendingSubmission(null);
+      if (!returned.changed) {
+        setEditorNotice("No workflow changes to save.");
+        return;
+      }
+      const pending = { workflowId: submission.workflowId, returned };
+      setPendingDraft(pending);
+      retryDraft.mutate(pending);
+    },
+  });
+  const openNativeEditor = () => {
+    if (
+      !selected
+      || editorStarting.current
+      || pendingSubmission
+      || pendingDraft
+      || retryDraft.isPending
+      || retrySubmission.isPending
+    ) return;
+    editorStarting.current = true;
+    nativeEditor.reset();
+    retrySubmission.reset();
+    retryDraft.reset();
+    setPopupError(null);
+    setEditorNotice(null);
+    const popup = openWorkflowEditorPopup();
+    if (!popup) {
+      editorStarting.current = false;
+      setPopupError(new Error("The browser blocked the workflow editor window. Allow popups for this local app and try again."));
+      return;
+    }
+    const controller = new AbortController();
+    editorAbort.current = controller;
+    nativeEditor.mutate({ id: selected.id, popup, controller });
+  };
+  const discardPendingEdit = () => {
+    if (pendingSubmission) {
+      void api.cancelWorkflowEditor(
+        pendingSubmission.workflowId,
+        pendingSubmission.sessionId,
+        pendingSubmission.nonce,
+      ).catch(() => {});
+    }
+    setPendingSubmission(null);
+    setPendingDraft(null);
+    nativeEditor.reset();
+    retrySubmission.reset();
+    retryDraft.reset();
+    setEditorNotice("Pending workflow edit discarded.");
+  };
   const {
     importFile: importBundle,
     importError,
@@ -152,6 +290,9 @@ export function WorkflowsView() {
   const verdict = validate.data && validate.variables === selected?.id ? validate.data : null;
   const selectedRevision = selected?.revisions.find((revision) => revision.id === selectedRevisionId) ?? selected?.revisions.find((revision) => revision.id === selected.current_revision_id) ?? selected?.revisions.at(-1);
   const currentRevision = selected?.revisions.find((revision) => revision.id === selected.current_revision_id);
+  const editorRecoveryReady = !nativeEditor.isPending
+    && !retrySubmission.isPending
+    && !retryDraft.isPending;
   return (
     <div className="page-view">
       <header className="page-header"><div><h1>Workflows</h1></div><div className="storage-actions"><input ref={importInput} hidden type="file" accept="application/json,.json" onChange={(event) => { void importBundle(event.target.files?.[0]); event.target.value = ""; }} /><button className="secondary" onClick={() => importInput.current?.click()}>Import bundle</button><button className="primary" onClick={openCreate}><Plus size={17} />New workflow</button></div></header>
@@ -162,22 +303,62 @@ export function WorkflowsView() {
       {(workflows.error || families.error) && (
         <ErrorCallout message={((workflows.error ?? families.error) as Error).message} />
       )}
-      {(importError || clone.error || restore.error || exportBundle.error || openInComfy.error || validate.error) && <ErrorCallout message={(importError || clone.error || restore.error || exportBundle.error || openInComfy.error || validate.error)?.message} />}
+      {(importError || clone.error || restore.error || exportBundle.error || downloadForComfy.error || nativeEditor.error || retrySubmission.error || retryDraft.error || popupError || validate.error) && <ErrorCallout message={(importError || clone.error || restore.error || exportBundle.error || downloadForComfy.error || nativeEditor.error || retrySubmission.error || retryDraft.error || popupError || validate.error)?.message} />}
       {packageReview && <WorkflowPackageReview analysis={packageReview.analysis} fileName={packageReview.fileName} uiGraph={packageReview.uiGraph} onImported={() => { closePackageReview(); refresh(); }} onClose={closePackageReview} />}
       {selected && (
         <div className="storage-actions">
           <button
-            className="secondary"
-            disabled={openInComfy.isPending}
-            onClick={() => { setComfyTarget(null); openInComfy.mutate(selected.id); }}
+            className="primary"
+            disabled={nativeEditor.isPending || Boolean(pendingSubmission || pendingDraft) || selectedRevision?.id !== selected.current_revision_id}
+            onClick={openNativeEditor}
           >
-            Download UI graph for ComfyUI
+            {nativeEditor.isPending
+              ? "Editor open"
+              : selectedRevision?.id !== selected.current_revision_id
+                ? "Select current revision to edit"
+                : "Edit in ComfyUI (preview)"}
+          </button>
+          <button
+            className="secondary compact-button"
+            disabled={downloadForComfy.isPending}
+            onClick={() => { setComfyTarget(null); downloadForComfy.mutate(selected.id); }}
+          >
+            Download UI graph
           </button>
           {comfyTarget && (
             <a className="secondary compact-button" href={comfyTarget.url} target="_blank" rel="noopener noreferrer">
-              Open ComfyUI
+              Open ComfyUI manually
             </a>
           )}
+          {editorPhase && <span role="status" className="muted">{editorPhaseLabel[editorPhase]}</span>}
+          {pendingDraft && editorRecoveryReady && (
+            <button
+              className="secondary compact-button"
+              disabled={retryDraft.isPending}
+              onClick={() => retryDraft.mutate(pendingDraft)}
+            >
+              {retryDraft.isPending ? "Saving…" : "Retry saving validated edit"}
+            </button>
+          )}
+          {pendingSubmission && editorRecoveryReady && (
+            <button
+              className="secondary compact-button"
+              disabled={retrySubmission.isPending}
+              onClick={() => retrySubmission.mutate(pendingSubmission)}
+            >
+              {retrySubmission.isPending ? "Validating…" : "Retry validating returned edit"}
+            </button>
+          )}
+          {(pendingSubmission || pendingDraft) && editorRecoveryReady && (
+            <button
+              className="secondary compact-button danger"
+              disabled={retrySubmission.isPending || retryDraft.isPending}
+              onClick={discardPendingEdit}
+            >
+              Discard pending edit
+            </button>
+          )}
+          {editorNotice && <span role="status" className="muted">{editorNotice}</span>}
         </div>
       )}
       {selectedFamily && <WorkflowFamilyPreferences family={selectedFamily} />}

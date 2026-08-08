@@ -62,6 +62,78 @@ it("starts setup verification with the local CSRF contract", async () => {
   expect(fetchMock.mock.calls[1][1]?.method).toBe("POST");
   expect(new Headers(fetchMock.mock.calls[1][1]?.headers).get("x-local-lm-csrf")).toBe("csrf");
 });
+
+it("keeps native workflow editor authority in authenticated request bodies", async () => {
+  const session = {
+    id: "editor-session",
+    protocol_version: 2,
+    workflow_id: "workflow/one",
+    base_revision_id: "revision-one",
+    ui_graph: {},
+    nonce: "secret-nonce",
+  };
+  const returned = {
+    validated_return_id: "validated-return",
+    changed: true,
+  };
+  const draft = {
+    draft_revision_id: "draft-one",
+    review_required: true,
+  };
+  const fetchMock = vi.fn()
+    .mockResolvedValueOnce(new Response(JSON.stringify({ csrf_token: "csrf" }), {
+      status: 200,
+      headers: { "content-type": "application/json" },
+    }))
+    .mockResolvedValueOnce(new Response(JSON.stringify(session), {
+      status: 201,
+      headers: { "content-type": "application/json" },
+    }))
+    .mockResolvedValueOnce(new Response(JSON.stringify(returned), {
+      status: 200,
+      headers: { "content-type": "application/json" },
+    }))
+    .mockResolvedValueOnce(new Response(JSON.stringify(draft), {
+      status: 200,
+      headers: { "content-type": "application/json" },
+    }))
+    .mockResolvedValueOnce(new Response(null, { status: 204 }));
+  vi.stubGlobal("fetch", fetchMock);
+
+  const { api } = await import("./api");
+  await api.startWorkflowEditor("workflow/one");
+  await api.consumeWorkflowEditor("workflow/one", "editor/session", {
+    nonce: "secret-nonce",
+    base_revision_id: "revision-one",
+    ui_graph: { nodes: [] },
+    api_prompt: { 1: {} },
+  });
+  await api.createWorkflowEditorDraft("workflow/one", "validated-return");
+  await api.cancelWorkflowEditor("workflow/one", "editor/session", "secret-nonce");
+
+  expect(fetchMock.mock.calls.slice(1).map((call) => call[0])).toEqual([
+    "/api/workflows/workflow%2Fone/editor-sessions",
+    "/api/workflows/workflow%2Fone/editor-sessions/editor%2Fsession/consume",
+    "/api/workflows/workflow%2Fone/editor-drafts",
+    "/api/workflows/workflow%2Fone/editor-sessions/editor%2Fsession/cancel",
+  ]);
+  expect(JSON.parse(String(fetchMock.mock.calls[2][1]?.body))).toEqual({
+    nonce: "secret-nonce",
+    base_revision_id: "revision-one",
+    ui_graph: { nodes: [] },
+    api_prompt: { 1: {} },
+  });
+  expect(JSON.parse(String(fetchMock.mock.calls[3][1]?.body))).toEqual({
+    validated_return_id: "validated-return",
+  });
+  expect(JSON.parse(String(fetchMock.mock.calls[4][1]?.body))).toEqual({
+    nonce: "secret-nonce",
+  });
+  for (const call of fetchMock.mock.calls.slice(1)) {
+    expect(new Headers(call[1]?.headers).get("x-local-lm-csrf")).toBe("csrf");
+    expect(String(call[0])).not.toContain("secret-nonce");
+  }
+});
 it("returns the complete uploaded artifact for composer previews", async () => {
   const artifact = {
     id: "artifact-uploaded",
