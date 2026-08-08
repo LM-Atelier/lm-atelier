@@ -1214,3 +1214,40 @@ def test_api_mypy_config_rejects_a_strict_only_fixture(tmp_path: Path) -> None:
     )
 
     assert result.returncode != 0, result.stdout + result.stderr
+
+
+def test_a_file_that_declares_it_must_not_ship_is_refused(tmp_path: Path) -> None:
+    """Some files carry handling flags saying they must never be published, and
+    nothing enforced them, so the rule held only as long as nobody copied the
+    content somewhere tracked.
+
+    Matching the declaration rather than a path means a rename, a copy, or an
+    excerpt embedded in another document is still caught, which is how this kind
+    of content actually escapes.
+    """
+
+    namespace = runpy.run_path(str(ROOT / "scripts/check-repository-hygiene.py"))
+    refused = namespace["declares_it_must_not_ship"]
+
+    # Assembled rather than written out, so this file does not trip the very
+    # check it tests - the same discipline the secret scan test follows.
+    committable = '"never' + '_commit"'
+    publishable = '"never' + '_publish"'
+    documentable = '"never' + '_include_in_public_documentation"'
+
+    for ordinal, flag in enumerate((committable, publishable, documentable)):
+        declared = tmp_path / f"declared-{ordinal}.json"
+        declared.write_text("{" + flag + ": true}", encoding="utf-8")
+        assert refused(str(declared)), flag
+
+    excerpt = tmp_path / "notes.md"
+    excerpt.write_text(
+        "Pasted from elsewhere:\n\n    " + committable + ": true\n", encoding="utf-8"
+    )
+    assert refused(str(excerpt))
+
+    ordinary = tmp_path / "settings.json"
+    ordinary.write_text(
+        '{"classification": "public", ' + committable + ": false}", encoding="utf-8"
+    )
+    assert not refused(str(ordinary))
