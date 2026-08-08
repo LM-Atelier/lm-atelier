@@ -10,7 +10,10 @@ import type { WorkflowFamily } from "./types";
 
 vi.mock("./api", () => ({ api: { setWorkflowFamilyPreference: vi.fn() } }));
 
-function family(preferences: WorkflowFamily["preferences"] = []): WorkflowFamily {
+function family(
+  preferences: WorkflowFamily["preferences"] = [],
+  operation: WorkflowFamily["variants"][number]["operation"] = "text_to_image",
+): WorkflowFamily {
   return {
     id: "family-1",
     name: "Portrait finish",
@@ -20,7 +23,7 @@ function family(preferences: WorkflowFamily["preferences"] = []): WorkflowFamily
     enabled: true,
     archived: false,
     compatibility: false,
-    variants: [{ operation: "text_to_image" } as never],
+    variants: [{ operation } as never],
     preferences,
     created_at: "2026-08-03T00:00:00Z",
     updated_at: "2026-08-03T00:00:00Z",
@@ -89,6 +92,32 @@ describe("where a workflow family is offered", () => {
     expect(screen.queryByRole("checkbox", { name: /Conversation/ })).toBeNull();
     expect(screen.queryByRole("checkbox", { name: /Looking at images/ })).toBeNull();
     expect(screen.queryByRole("checkbox", { name: /Video/ })).toBeNull();
+  });
+
+  it("keeps a persisted legacy Vision preference out of the text-family controls", async () => {
+    vi.mocked(api.setWorkflowFamilyPreference).mockResolvedValue({} as never);
+    renderPreferences(family([
+      { selector_capability: "chat", enabled: true, is_default: false, sort_order: 1 },
+      { selector_capability: "vision", enabled: true, is_default: true, sort_order: 2 },
+    ], "text"));
+
+    const conversation = screen.getByRole("checkbox", { name: /Conversation/ });
+    expect(conversation).toBeChecked();
+    expect(screen.queryByRole("checkbox", { name: /Looking at images/ })).toBeNull();
+
+    fireEvent.click(conversation);
+    await waitFor(() =>
+      expect(api.setWorkflowFamilyPreference).toHaveBeenCalledWith("family-1", "chat", {
+        enabled: false,
+        is_default: false,
+        sort_order: 1,
+      }),
+    );
+    expect(api.setWorkflowFamilyPreference).not.toHaveBeenCalledWith(
+      "family-1",
+      "vision",
+      expect.anything(),
+    );
   });
 
   it("says what the server's refusals mean", () => {
