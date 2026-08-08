@@ -749,7 +749,7 @@ def _serialize_widget_value(
             "invalid_widget_choice", f"node {node_id} has invalid value for {name}"
         )
     if isinstance(value, Sequence) and not isinstance(value, str | bytes):
-        return {"__value__": list(value)}
+        return list(value)
     if isinstance(value, Mapping):
         return dict(value)
     return value

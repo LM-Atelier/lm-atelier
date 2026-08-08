@@ -140,7 +140,7 @@ def test_link_overrides_widget_value_after_consuming_it() -> None:
     }
 
 
-def test_wraps_array_widget_values_as_literals() -> None:
+def test_preserves_array_widget_values_as_arrays() -> None:
     workflow = _workflow()
     workflow["nodes"] = [
         {
@@ -161,7 +161,7 @@ def test_wraps_array_widget_values_as_literals() -> None:
 
     compiled = compile_comfyui_ui_graph(workflow, object_info)
 
-    assert compiled.api_graph["1"]["inputs"] == {"values": {"__value__": [1, 2, 3]}}
+    assert compiled.api_graph["1"]["inputs"] == {"values": [1, 2, 3]}
 
 
 def test_ignores_unlinked_note_nodes() -> None:
