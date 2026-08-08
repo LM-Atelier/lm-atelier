@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import re
-import stat
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
@@ -33,6 +32,7 @@ from .comfy_registry_wheel_environments import (
     ComfyRegistryWheelEnvironmentReport,
     verify_comfy_registry_wheel_environment,
 )
+from .filesystem_links import is_link_or_reparse
 from .models import ComfyRegistryInstall
 
 if TYPE_CHECKING:
@@ -530,11 +530,8 @@ def _node_types(value: object) -> tuple[str, ...]:
 
 
 def _is_link_or_reparse(path: Path) -> bool:
-    try:
-        info = path.lstat()
-    except OSError:
-        return True
-    return path.is_symlink() or bool(
-        getattr(info, "st_file_attributes", 0)
-        & getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0x400)
+    return is_link_or_reparse(
+        path,
+        missing="assume_link",
+        unreadable="assume_link",
     )

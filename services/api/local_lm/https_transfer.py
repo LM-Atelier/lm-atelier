@@ -4,7 +4,6 @@ import hashlib
 import logging
 import os
 import re
-import stat
 from collections.abc import Collection, Iterator, Mapping
 from contextlib import contextmanager
 from dataclasses import dataclass
@@ -14,12 +13,13 @@ from urllib.parse import parse_qsl, urljoin, urlsplit
 
 import httpx
 
+from .filesystem_links import is_link_or_reparse
+
 _CHUNK_BYTES = 1024 * 1024
 _MAX_ALLOWED_HOSTS = 16
 _MAX_EXPECTED_BYTES = 1024**4
 _MAX_REDIRECTS = 5
 _MAX_URL_LENGTH = 8_192
-_REPARSE_POINT = getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0x400)
 _SHA256 = re.compile(r"[0-9a-f]{64}\Z")
 _HOST = re.compile(
     r"(?=.{1,253}\Z)(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+"
@@ -404,8 +404,8 @@ def _quiet_http_loggers() -> Iterator[None]:
 
 
 def _is_link_or_reparse(path: Path) -> bool:
-    try:
-        info = path.lstat()
-    except FileNotFoundError:
-        return False
-    return path.is_symlink() or bool(getattr(info, "st_file_attributes", 0) & _REPARSE_POINT)
+    return is_link_or_reparse(
+        path,
+        missing="assume_regular",
+        unreadable="raise",
+    )

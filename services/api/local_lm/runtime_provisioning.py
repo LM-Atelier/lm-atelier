@@ -25,6 +25,7 @@ from uuid import uuid4
 import httpx
 
 from .config import Settings
+from .filesystem_links import is_link_or_reparse
 from .network import shared_tls_context
 from .progress import reduce_progress
 from .runtime_config import persist_runtime_values
@@ -786,14 +787,16 @@ class RuntimeProvisioner:
     ) -> None:
         entries = 0
         total_size = 0
-        reparse_flag = getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0)
         for candidate in destination.rglob("*"):
             entries += 1
             if entries > max_entries:
                 raise RuntimeProvisioningError("The extracted runtime contains too many entries.")
             metadata = candidate.lstat()
-            attributes = getattr(metadata, "st_file_attributes", 0)
-            if candidate.is_symlink() or (reparse_flag and attributes & reparse_flag):
+            if is_link_or_reparse(
+                candidate,
+                missing="raise",
+                unreadable="raise",
+            ):
                 raise RuntimeProvisioningError(
                     "The extracted runtime may not contain links or reparse points."
                 )

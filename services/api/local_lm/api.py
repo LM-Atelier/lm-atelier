@@ -10,7 +10,6 @@ import math
 import os
 import re
 import shutil
-import stat
 from collections.abc import AsyncGenerator, AsyncIterator, Callable, Mapping
 from contextlib import suppress
 from pathlib import Path, PurePosixPath
@@ -88,6 +87,7 @@ from .engines import (
     EngineRegistry,
     EngineSchemaUnavailableError,
 )
+from .filesystem_links import is_link_or_reparse
 from .gguf import (
     GGUFSelectionError,
     automatic_gguf_selection,
@@ -4745,18 +4745,11 @@ def _managed_model_path(model_root: Path, value: str) -> Path | None:
 
 
 def _model_path_is_link(path: Path) -> bool:
-    try:
-        if path.is_symlink():
-            return True
-        is_junction = getattr(path, "is_junction", None)
-        if is_junction is not None and is_junction():
-            return True
-        attributes = getattr(path.lstat(), "st_file_attributes", 0)
-        return bool(attributes & getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0))
-    except FileNotFoundError:
-        return False
-    except OSError:
-        return True
+    return is_link_or_reparse(
+        path,
+        missing="assume_regular",
+        unreadable="assume_link",
+    )
 
 
 def _ensure_model_tree_link_free(path: Path) -> None:

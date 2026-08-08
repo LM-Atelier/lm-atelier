@@ -19,6 +19,7 @@ from sqlalchemy.orm import Session
 
 from .config import Settings
 from .domain import ArtifactKind, MessageRole, PartType
+from .filesystem_links import is_link_or_reparse
 from .models import (
     Artifact,
     Message,
@@ -797,10 +798,11 @@ class ArtifactStore:
 
     @staticmethod
     def _is_link(path: Path) -> bool:
-        try:
-            return path.is_symlink() or (hasattr(path, "is_junction") and path.is_junction())
-        except OSError:
-            return True
+        return is_link_or_reparse(
+            path,
+            missing="assume_regular",
+            unreadable="assume_link",
+        )
 
     @staticmethod
     def _matches_file(path: Path, digest_value: str, size: int) -> bool:

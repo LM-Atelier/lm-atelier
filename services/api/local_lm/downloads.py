@@ -40,6 +40,7 @@ from .comfy_templates import (
 from .config import Settings
 from .domain import CompatibilityLevel, JobKind, JobStatus, new_id, utcnow
 from .events import EventBroker
+from .filesystem_links import is_link_or_reparse
 from .gguf import (
     GGUFSelectionError,
     automatic_gguf_selection,
@@ -122,6 +123,16 @@ _VISION_PROBE_DATA_URL = (
     "BmIAE1GqkMCoBmIAyaEEAEAuAR9UPEsJAAAAAElFTkSuQmCC"
 )
 _ACTIVATION_PROBE_PNG = base64.b64decode(_VISION_PROBE_DATA_URL.partition(",")[2])
+
+
+def _path_is_link(path: Path) -> bool:
+    return is_link_or_reparse(
+        path,
+        missing="assume_regular",
+        unreadable="assume_link",
+    )
+
+
 _NUMBERED_WORKFLOW_INPUT_IMAGE = re.compile(r"input_image_(?P<index>\d{1,2})\Z")
 
 
@@ -563,7 +574,7 @@ class DownloadManager:
         staging_root = staging.resolve()
         for root in sorted(download_root.glob("plan-*.partial")):
             if (
-                root.is_symlink()
+                _path_is_link(root)
                 or not root.is_dir()
                 or not re.fullmatch(r"plan-[0-9a-f]{64}\.partial", root.name)
             ):
@@ -590,7 +601,7 @@ class DownloadManager:
         relative = PurePosixPath(filename)
         target = staging.joinpath(*relative.parts)
         for candidate in candidates:
-            if not candidate.is_file() or candidate.is_symlink():
+            if not candidate.is_file() or _path_is_link(candidate):
                 continue
             size = candidate.stat().st_size
             if expected_size and size != expected_size:
@@ -1068,19 +1079,19 @@ class DownloadManager:
             ):
                 continue
             reclaimed_bytes += self._path_size(candidate)
-            if candidate.is_dir() and not candidate.is_symlink():
+            if candidate.is_dir() and not _path_is_link(candidate):
                 shutil.rmtree(candidate)
             else:
                 candidate.unlink(missing_ok=True)
             removed_count += 1
         quarantine_parent = self.settings.download_dir / ".discarded-installs"
-        if quarantine_parent.is_dir() and not quarantine_parent.is_symlink():
+        if quarantine_parent.is_dir() and not _path_is_link(quarantine_parent):
             for candidate in quarantine_parent.iterdir():
                 if any(candidate.name.startswith(f"{job_id}-") for job_id in active_ids):
                     continue
-                if not candidate.is_symlink():
+                if not _path_is_link(candidate):
                     reclaimed_bytes += self._path_size(candidate)
-                if candidate.is_dir() and not candidate.is_symlink():
+                if candidate.is_dir() and not _path_is_link(candidate):
                     shutil.rmtree(candidate)
                 else:
                     candidate.unlink(missing_ok=True)
@@ -2607,7 +2618,7 @@ class DownloadManager:
                 raise
         if quarantined_root:
             try:
-                if quarantined_root.is_dir() and not quarantined_root.is_symlink():
+                if quarantined_root.is_dir() and not _path_is_link(quarantined_root):
                     shutil.rmtree(quarantined_root)
                 else:
                     quarantined_root.unlink(missing_ok=True)
@@ -2695,7 +2706,7 @@ class DownloadManager:
         if not re.fullmatch(r"[A-Za-z0-9_-]+", job_id):
             return
         partial = self.settings.download_dir / f"{job_id}.partial"
-        if partial.is_dir() and not partial.is_symlink():
+        if partial.is_dir() and not _path_is_link(partial):
             shutil.rmtree(partial)
         else:
             partial.unlink(missing_ok=True)
@@ -3339,7 +3350,7 @@ class DownloadManager:
     ) -> None:
         """Move only this failed plan's verified files back to resumable staging."""
 
-        if install_path.is_symlink() or staging.is_symlink():
+        if _path_is_link(install_path) or _path_is_link(staging):
             raise ValueError("model staging cannot use filesystem links")
         staging.mkdir(parents=True, exist_ok=True)
         for filename in filenames:
@@ -3348,7 +3359,7 @@ class DownloadManager:
                 raise ValueError("model staging path is unsafe")
             source = install_path.joinpath(*relative.parts)
             target = staging.joinpath(*relative.parts)
-            if not source.is_file() or source.is_symlink():
+            if not source.is_file() or _path_is_link(source):
                 continue
             target.parent.mkdir(parents=True, exist_ok=True)
             if target.exists():
@@ -3393,7 +3404,7 @@ class DownloadManager:
         expected_source = staging.joinpath(*PurePosixPath(source_filename).parts)
         source = Path(downloaded_path)
         if (
-            source.is_symlink()
+            _path_is_link(source)
             or not source.is_file()
             or source.resolve(strict=True) != expected_source.resolve(strict=True)
             or staging_root not in expected_source.resolve(strict=True).parents
@@ -3402,7 +3413,7 @@ class DownloadManager:
         target = staging.joinpath(*PurePosixPath(destination_filename).parts)
         target.parent.mkdir(parents=True, exist_ok=True)
         if target.exists():
-            if target.is_symlink() or not target.is_file():
+            if _path_is_link(target) or not target.is_file():
                 raise ValueError("companion destination is not a regular staged file")
             target.unlink()
         os.replace(source, target)

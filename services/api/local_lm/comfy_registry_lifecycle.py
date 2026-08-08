@@ -4,7 +4,6 @@ import asyncio
 import hashlib
 import logging
 import shutil
-import stat
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from pathlib import Path
@@ -50,10 +49,10 @@ from .comfy_registry_wheel_environments import (
     assemble_comfy_registry_wheel_environment,
     verify_comfy_registry_wheel_environment,
 )
+from .filesystem_links import is_link_or_reparse
 from .models import ComfyRegistryInstall
 from .source_omission_proof import PendingOmission, record_pending_omission
 
-_REPARSE_POINT = getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0x400)
 logger = logging.getLogger(__name__)
 
 
@@ -712,8 +711,8 @@ async def _remove_tree(path: Path, root: Path) -> None:
 
 
 def _is_link_or_reparse(path: Path) -> bool:
-    try:
-        info = path.lstat()
-    except OSError:
-        return False
-    return path.is_symlink() or bool(getattr(info, "st_file_attributes", 0) & _REPARSE_POINT)
+    return is_link_or_reparse(
+        path,
+        missing="assume_regular",
+        unreadable="assume_regular",
+    )
