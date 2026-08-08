@@ -468,6 +468,31 @@ _PER_OUTPUT_DISTRIBUTOR = re.compile(
     r"\b(?:with\s+)?each(?:\s+(?:one|image|picture|photo|video|clip))?\b\s*",
     re.IGNORECASE,
 )
+_TIGHTENED_PUNCTUATION = frozenset(",.;:!?")
+
+
+def _tighten_punctuation(text: str) -> str:
+    """Drop the whitespace that ends up in front of punctuation.
+
+    Written as a single pass rather than the obvious `\\s+([,.;:!?])`, which is
+    quadratic: the engine retries at every offset inside a whitespace run, so a
+    pasted column of blank lines cost time in proportion to its square - a
+    measured 621ms for 16,000 characters, against 0.3ms here.
+
+    An atomic group looks like the fix and is not. It stops the backtracking
+    within one attempt but not the attempt made at the next offset, so it stays
+    quadratic and merely moves the cliff.
+    """
+
+    out: list[str] = []
+    for character in text:
+        if character in _TIGHTENED_PUNCTUATION:
+            while out and out[-1].isspace():
+                out.pop()
+        out.append(character)
+    return "".join(out)
+
+
 _COUNT_WORDS = {
     "one": 1,
     "two": 2,
@@ -1144,5 +1169,5 @@ class ModalityRouter:
             return cleaned
         generation_prompt = _PER_OUTPUT_DISTRIBUTOR.sub("", generation_prompt)
         generation_prompt = re.sub(r"[ \t]+", " ", generation_prompt)
-        generation_prompt = re.sub(r"\s+([,.;:!?])", r"\1", generation_prompt).strip()
+        generation_prompt = _tighten_punctuation(generation_prompt).strip()
         return f"{generation_prompt}{separator}{context}" if separator else generation_prompt

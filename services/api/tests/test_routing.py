@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import time
 from collections.abc import AsyncIterator
 from pathlib import Path
 
@@ -1036,3 +1037,23 @@ def test_text_operations_still_receive_the_full_referenced_context() -> None:
     assert plan.operation == Operation.TEXT
     # `_with_text_context` returns early for text, so nothing is appended at all.
     assert "Source chat text:" not in plan.standalone_prompt
+
+
+def test_whitespace_before_punctuation_is_dropped_in_one_pass() -> None:
+    """The regex this replaced was quadratic: it retried at every offset inside
+    a whitespace run, so a pasted column of blank lines cost time in proportion
+    to its square - 621ms measured for 16,000 characters."""
+
+    from local_lm.routing import _tighten_punctuation
+
+    assert _tighten_punctuation("hello   , world  ! ok") == "hello, world! ok"
+    assert _tighten_punctuation("a\n\n\n. b") == "a. b"
+    assert _tighten_punctuation("tabs\t\t; and\r\n\r\n: mixed") == "tabs; and: mixed"
+    assert _tighten_punctuation("no punctuation here") == "no punctuation here"
+    assert _tighten_punctuation("") == ""
+    assert _tighten_punctuation("   ,") == ","
+
+    # Linear, so a pathological run finishes rather than stalling the request.
+    started = time.perf_counter()
+    assert _tighten_punctuation(" " * 200_000 + "x").endswith("x")
+    assert time.perf_counter() - started < 1.0
