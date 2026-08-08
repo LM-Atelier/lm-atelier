@@ -21,7 +21,11 @@ from urllib.parse import urlparse
 import httpx
 import psutil
 
-from .comfy_editor_bridge import ComfyEditorBridgeError, prepare_comfy_editor_bridge
+from .comfy_editor_bridge import (
+    ComfyEditorBridgeError,
+    ComfyEditorBridgeSupport,
+    prepare_comfy_editor_bridge,
+)
 from .comfy_registry_paths import registry_wheel_environment_root
 from .config import Settings
 from .events import EventBroker
@@ -245,6 +249,7 @@ class WorkerRecord:
     failure_detail: str | None = None
     launch_scope_sha256: str | None = None
     editor_bridge_launch_id: str | None = None
+    editor_bridge_support: ComfyEditorBridgeSupport | None = None
 
 
 class ProcessSupervisor:
@@ -347,7 +352,23 @@ class ProcessSupervisor:
         record = self._workers.get("media")
         if record is None or record.process.returncode is not None or record.state != "ready":
             return None
+        support = record.editor_bridge_support
+        if support is None or not support.supported:
+            return None
         return record.editor_bridge_launch_id
+
+    def workflow_editor_bridge_support(self) -> ComfyEditorBridgeSupport | None:
+        """Return the exact editor support fact bound to the live ready media launch."""
+
+        record = self._workers.get("media")
+        if record is None or record.process.returncode is not None or record.state != "ready":
+            return None
+        support = record.editor_bridge_support
+        if support is None:
+            return None
+        if support.supported != (record.editor_bridge_launch_id is not None):
+            return None
+        return support
 
     async def load_chat(self, profile: ModelProfile, install: ModelInstall) -> WorkerStatus:
         if profile.engine == "vllm":
@@ -510,7 +531,7 @@ class ProcessSupervisor:
         if directory not in entrypoint.parents:
             raise ValueError("ComfyUI entrypoint escapes its configured directory")
         parsed = urlparse(self.settings.comfy_url)
-        editor_bridge_enabled = False
+        editor_bridge_support: ComfyEditorBridgeSupport | None = None
         await report_phase("Validating media dependencies")
         custom_node_types: tuple[str, ...] = ()
         if activation_scope is None:
@@ -553,11 +574,24 @@ class ProcessSupervisor:
                 coordinator_origins=trusted_browser_origins(self.settings),
             )
         except ComfyEditorBridgeError as exc:
+            editor_bridge_support = ComfyEditorBridgeSupport(False, exc.code, str(exc))
             logger.warning("Native workflow editing is unavailable: %s", exc)
         else:
-            if editor_bridge.folder is not None:
+            editor_bridge_support = editor_bridge.support
+            if editor_bridge.folder is not None and editor_bridge.support.supported:
                 trusted_custom_nodes.append(editor_bridge.folder.name)
-                editor_bridge_enabled = True
+            elif editor_bridge.folder is not None or editor_bridge.support.supported:
+                editor_bridge_support = ComfyEditorBridgeSupport(
+                    False,
+                    "workflow-editor-bridge-staging-failed",
+                    "The verified workflow editor bridge was not staged for this launch.",
+                    editor_bridge.support.comfyui_version,
+                    editor_bridge.support.frontend_version,
+                )
+                logger.warning(
+                    "Native workflow editing is unavailable: %s",
+                    editor_bridge_support.message,
+                )
             elif editor_bridge.support.code != "workflow-editor-runtime-unavailable":
                 logger.debug(
                     "Native workflow editing is unavailable: %s",
@@ -615,7 +649,7 @@ class ProcessSupervisor:
                     else None
                 ),
                 launch_scope_sha256=activation_scope.launch_sha256,
-                editor_bridge_enabled=editor_bridge_enabled,
+                editor_bridge_support=editor_bridge_support,
             )
         elif registry_contract.site_packages:
             await self._replace(
@@ -624,14 +658,14 @@ class ProcessSupervisor:
                 self.settings.comfy_url + "/system_stats",
                 environment_overrides=environment_overrides,
                 ready_check=lambda: self._verify_comfy_node_types(registry_contract.node_types),
-                editor_bridge_enabled=editor_bridge_enabled,
+                editor_bridge_support=editor_bridge_support,
             )
         else:
             await self._replace(
                 "media",
                 command,
                 self.settings.comfy_url + "/system_stats",
-                editor_bridge_enabled=editor_bridge_enabled,
+                editor_bridge_support=editor_bridge_support,
             )
         return self.statuses()[1]
 
@@ -915,7 +949,7 @@ class ProcessSupervisor:
         environment_overrides: Mapping[str, str] | None = None,
         ready_check: Callable[[], Awaitable[None]] | None = None,
         launch_scope_sha256: str | None = None,
-        editor_bridge_enabled: bool = False,
+        editor_bridge_support: ComfyEditorBridgeSupport | None = None,
     ) -> None:
         if launch_scope_sha256 is not None and not re.fullmatch(
             r"[0-9a-f]{64}", launch_scope_sha256
@@ -930,7 +964,9 @@ class ProcessSupervisor:
                 and current.state == "ready"
                 and current.command == command
                 and current.launch_scope_sha256 == launch_scope_sha256
-                and (current.editor_bridge_launch_id is not None) == editor_bridge_enabled
+                and current.editor_bridge_support == editor_bridge_support
+                and (current.editor_bridge_launch_id is not None)
+                == bool(editor_bridge_support and editor_bridge_support.supported)
             ):
                 return
             await self._stop_unlocked(name)
@@ -974,8 +1010,11 @@ class ProcessSupervisor:
                 estimated_memory_bytes=estimated_memory_bytes,
                 launch_scope_sha256=launch_scope_sha256,
                 editor_bridge_launch_id=(
-                    secrets.token_urlsafe(24) if editor_bridge_enabled else None
+                    secrets.token_urlsafe(24)
+                    if editor_bridge_support and editor_bridge_support.supported
+                    else None
                 ),
+                editor_bridge_support=editor_bridge_support,
             )
             record.output_task = asyncio.create_task(self._capture_process_output(record))
             self._workers[name] = record
