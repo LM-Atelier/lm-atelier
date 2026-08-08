@@ -20,6 +20,7 @@ from sqlalchemy.orm import object_session
 import local_lm.comfy_registry_interpreter as registry_interpreter_module
 from local_lm.comfy_editor_bridge import BRIDGE_DIRECTORY_NAME
 from local_lm.comfy_registry_installs import ComfyRegistryLaunchContract
+from local_lm.comfy_registry_paths import registry_wheel_environment_root
 from local_lm.comfy_registry_runtime import ComfyRegistryRuntimeDistribution
 from local_lm.custom_nodes import CustomNodeManager
 from local_lm.db import SessionLocal
@@ -1757,7 +1758,7 @@ def test_registry_launch_contracts_use_the_managed_registry_root(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:  # type: ignore[no-untyped-def]
     supervisor = ProcessSupervisor(settings)
-    expected_root = settings.registry_dir / "registry-wheel-environments"
+    expected_root = registry_wheel_environment_root(settings.registry_dir)
     observed: list[Path] = []
 
     def trusted_contract(_session, *, custom_node_root, environment_root):  # type: ignore[no-untyped-def]

@@ -34,6 +34,7 @@ from .capability_evidence import (
     evidence_input_modalities,
     record_capability_evidence,
 )
+from .comfy_registry_paths import registry_wheel_environment_root
 from .comfy_templates import COMFY_TEMPLATE_COMPILER_VERSION
 from .context_compaction import (
     CONTEXT_COMPACTION_VERSION,
@@ -3853,8 +3854,8 @@ class ConversationOrchestrator:
                 activation,
                 runtime_materializer=runtime_materializer,
                 custom_node_root=self.engines.settings.custom_node_dir,
-                registry_environment_root=(
-                    self.engines.settings.state_dir / "registry-wheel-environments"
+                registry_environment_root=registry_wheel_environment_root(
+                    self.engines.settings.registry_dir
                 ),
             )
         except WorkflowActivationError as exc:

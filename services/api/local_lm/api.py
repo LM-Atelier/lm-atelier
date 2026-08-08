@@ -48,6 +48,7 @@ from .comfy_registry_closure_driver import ComfyRegistryWheelMetadataClient
 from .comfy_registry_downloads import ComfyRegistryArchiveDownloader
 from .comfy_registry_installs import installed_comfy_registry_versions
 from .comfy_registry_interpreter import probe_comfy_registry_runtime_target
+from .comfy_registry_paths import registry_wheel_environment_root
 from .comfy_registry_wheel_downloads import ComfyRegistryWheelDownloader
 from .comfy_registry_wheel_projects import ComfyRegistryWheelProjectClient
 from .comfy_templates import (
@@ -7406,7 +7407,7 @@ async def review_registry_install(
                 install_id=install_id,
                 trusted=payload.trusted,
                 custom_node_root=context.custom_node_root,
-                environment_root=context.state_root / "registry-wheel-environments",
+                environment_root=registry_wheel_environment_root(context.state_root),
                 media_worker_stopped=_media_worker_truly_stopped(services),
             )
         except ComfyRegistryActivationError as exc:
@@ -7431,7 +7432,7 @@ async def activate_registry_install(
                 session,
                 install_id=install_id,
                 custom_node_root=context.custom_node_root,
-                environment_root=context.state_root / "registry-wheel-environments",
+                environment_root=registry_wheel_environment_root(context.state_root),
                 media_worker_stopped=_media_worker_truly_stopped(services),
                 start_media=services.processes.start_media,
                 # The same read startup verifies against, so a proof cannot be
