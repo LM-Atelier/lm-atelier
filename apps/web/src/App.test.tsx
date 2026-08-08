@@ -111,8 +111,8 @@ vi.mock("./api", () => ({
     cleanupArtifacts: vi.fn(),
     deleteArtifact: vi.fn(),
     favoriteArtifact: vi.fn(),
-    openStudioSession: vi.fn().mockResolvedValue({ id: "chat-studio", messages: [] }),
-    studioSession: vi.fn().mockResolvedValue({ id: "chat-studio", messages: [] }),
+    openStudioSession: vi.fn().mockResolvedValue({ id: "chat-studio", messages: [] }), studioSession: vi.fn().mockResolvedValue({ id: "chat-studio", messages: [] }),
+    studioCapabilities: vi.fn().mockResolvedValue({ tools: [] }),
     setResponseFeedback: vi.fn(),
     sendTurn: vi.fn(),
     stopAndSendTurn: vi.fn(),
@@ -3816,8 +3816,8 @@ describe("App", () => {
     fireEvent.click(await screen.findByText("Media library"));
     fireEvent.click(await screen.findByRole("button", { name: "Edit observatory.png" }));
 
-    // One image opens the canvas-first studio, not the composer dialog.
     expect(await screen.findByRole("heading", { name: "Image Studio" })).toBeVisible();
+    await waitFor(() => expect(api.studioCapabilities).toHaveBeenCalledTimes(1));
     await waitFor(() =>
       expect(api.openStudioSession).toHaveBeenCalledWith("sha256:library-image", null));
   });
