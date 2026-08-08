@@ -4,6 +4,9 @@ import pytest
 
 from local_lm.prompt_grammar import (
     PromptGrammarError,
+    canonical_grammar_digest,
+    grammar_fits,
+    grammar_overhead,
     normalize_grammar,
     prose_digest,
     rewriter_instruction,
@@ -224,3 +227,66 @@ def test_a_placeholder_is_held_to_the_identifier_grammar() -> None:
         template = f"TRIGGERWORD {hostile}, <angle>, <description>"
         with pytest.raises(PromptGrammarError):
             normalize_grammar({**GRAMMAR, "template": template})
+
+
+def test_the_digest_identifies_what_would_actually_be_acted_on() -> None:
+    """Approval state is part of the identity. A grammar whose prose was
+    approved is a different thing to act on, and sharing one identity would let
+    approval widen without re-review."""
+
+    plain = normalize_grammar(GRAMMAR, verified_values=LOCAL)
+    same = normalize_grammar(GRAMMAR, verified_values=LOCAL)
+    assert canonical_grammar_digest(plain) == canonical_grammar_digest(same)
+
+    approved = normalize_grammar(
+        GRAMMAR, verified_values=LOCAL, approved_prose=frozenset({prose_digest(GUIDANCE)})
+    )
+    assert canonical_grammar_digest(approved) != canonical_grammar_digest(plain)
+
+    # New local evidence is also a different grammar to act on.
+    wider = normalize_grammar(
+        GRAMMAR,
+        verified_values={**LOCAL, "shape": frozenset({"circle", "square", "circle_hollow"})},
+    )
+    assert canonical_grammar_digest(wider) != canonical_grammar_digest(plain)
+
+
+def test_overhead_is_measured_at_the_widest_the_template_can_be() -> None:
+    """A grammar that fits only when its shortest values are chosen does not
+    fit: nothing constrains which value a request will need."""
+
+    grammar = normalize_grammar(
+        {
+            "trigger": "T",
+            "template": "T <shape>, <description>",
+            "slots": [{"name": "shape", "required": True, "values": ["a", "wwwwwwwwww"]}],
+        }
+    )
+    # "T " + widest value + ", " with the description contributing nothing.
+    assert grammar_overhead(grammar) == len("T wwwwwwwwww, ")
+
+
+def test_a_grammar_that_cannot_fit_is_refused_rather_than_truncated() -> None:
+    """Truncating removes the end of a description whose whole value was being
+    complete, so the incompatibility is recorded instead."""
+
+    grammar = normalize_grammar(GRAMMAR, verified_values=LOCAL)
+    overhead = grammar_overhead(grammar)
+
+    assert grammar_fits(grammar, overhead + 200, minimum_description=200)
+    assert not grammar_fits(grammar, overhead + 199, minimum_description=200)
+    # The real consumer ceiling leaves ample room for this shape.
+    assert grammar_fits(grammar, 900, minimum_description=200)
+
+
+@pytest.mark.parametrize(
+    ("ceiling", "minimum"),
+    [(0, 200), (-1, 200), (900, 0), (900, -5)],
+)
+def test_a_nonsensical_bound_is_not_a_review_result(ceiling: int, minimum: int) -> None:
+    """Either bound taken as given would make every grammar fit or none of
+    them, and the answer would be stored as though someone had reviewed it."""
+
+    grammar = normalize_grammar(GRAMMAR, verified_values=LOCAL)
+    with pytest.raises(PromptGrammarError):
+        grammar_fits(grammar, ceiling, minimum_description=minimum)
