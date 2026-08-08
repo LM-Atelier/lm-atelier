@@ -1227,6 +1227,72 @@ class WorkflowDependencyBinding(TimestampMixin, Base):
     )
 
 
+class WorkflowTrustAttestation(TimestampMixin, Base):
+    """What this machine verified about one revision, and what it verified it against.
+
+    Deliberately not a boolean on the revision. Derived trust proves a revision
+    came from a template this build compiled; attestation proves something
+    weaker - that at one moment, on this machine, every node type the graph
+    executes resolved to something installed and reviewed, and every asset it
+    names was present. Recording the evidence rather than a verdict is what
+    keeps the two from being confused, because conflating them would turn
+    import into a way to run an unreviewed package.
+
+    The identity columns are what make the claim checkable later. An attestation
+    is about one artifact on one runtime carrying one whitelist, so if any of
+    those move, the answer is stale rather than wrong - and staleness is
+    computed when read, never stored, because the thing that invalidates it
+    happens elsewhere and would not come back to update a row.
+    """
+
+    __tablename__ = "workflow_trust_attestations"
+    __table_args__ = (
+        UniqueConstraint("workflow_revision_id", name="uq_workflow_trust_attestation_revision"),
+        CheckConstraint(
+            _lowercase_sha256_check("artifact_sha256"),
+            name="ck_workflow_trust_attestation_artifact_sha256",
+        ),
+        CheckConstraint(
+            _lowercase_sha256_check("node_inventory_sha256"),
+            name="ck_workflow_trust_attestation_node_inventory_sha256",
+        ),
+        CheckConstraint(
+            _lowercase_sha256_check("whitelist_sha256"),
+            name="ck_workflow_trust_attestation_whitelist_sha256",
+        ),
+        CheckConstraint(
+            "runtime_contract_sha256 IS NULL OR ("
+            + _lowercase_sha256_check("runtime_contract_sha256")
+            + ")",
+            name="ck_workflow_trust_attestation_runtime_contract_sha256",
+        ),
+        CheckConstraint(
+            "launch_scope_sha256 IS NULL OR ("
+            + _lowercase_sha256_check("launch_scope_sha256")
+            + ")",
+            name="ck_workflow_trust_attestation_launch_scope_sha256",
+        ),
+    )
+
+    # "wfattest_" plus 32 hex is 41 characters, so String(40) would truncate.
+    id: Mapped[str] = mapped_column(
+        String(48), primary_key=True, default=lambda: new_id("wfattest")
+    )
+    workflow_revision_id: Mapped[str] = mapped_column(
+        ForeignKey("workflow_revisions.id", ondelete="CASCADE"), index=True
+    )
+    artifact_sha256: Mapped[str] = mapped_column(String(64), index=True)
+    runtime_contract_sha256: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    runtime_managed: Mapped[bool] = mapped_column(Boolean, default=False)
+    node_inventory_sha256: Mapped[str] = mapped_column(String(64))
+    whitelist_sha256: Mapped[str] = mapped_column(String(64))
+    launch_scope_sha256: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    required_node_types_json: Mapped[list[str]] = mapped_column(JSON, default=list)
+    declared_dependencies_json: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
+    resolution_json: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
+    attested_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+
+
 class WorkflowInstallOffer(TimestampMixin, Base):
     """One reviewed, content-bound way to make a workflow locally installable."""
 
