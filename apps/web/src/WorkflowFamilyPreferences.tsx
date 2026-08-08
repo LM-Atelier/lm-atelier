@@ -8,16 +8,16 @@ import type {
   WorkflowSelectorCapability,
 } from "./types";
 
-const CAPABILITIES: Array<{ key: WorkflowSelectorCapability; label: string }> = [
+type UserSelectableWorkflowCapability = Exclude<WorkflowSelectorCapability, "vision">;
+
+const CAPABILITIES: Array<{ key: UserSelectableWorkflowCapability; label: string }> = [
   { key: "chat", label: "Conversation" },
-  { key: "vision", label: "Looking at images" },
   { key: "image", label: "Images" },
   { key: "video", label: "Video" },
 ];
 
-const OPERATIONS: Record<WorkflowSelectorCapability, string[]> = {
+const OPERATIONS: Record<UserSelectableWorkflowCapability, string[]> = {
   chat: ["text"],
-  vision: ["text"],
   image: ["text_to_image", "image_to_image"],
   video: ["text_to_video", "image_to_video"],
 };
@@ -46,7 +46,7 @@ export function WorkflowFamilyPreferences({ family }: { family: WorkflowFamily }
     },
   });
 
-  const known = (capability: WorkflowSelectorCapability): WorkflowFamilyPreference =>
+  const known = (capability: UserSelectableWorkflowCapability): WorkflowFamilyPreference =>
     family.preferences.find((one) => one.selector_capability === capability) ?? {
       selector_capability: capability,
       enabled: false,
