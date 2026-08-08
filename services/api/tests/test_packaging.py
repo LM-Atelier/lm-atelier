@@ -1214,3 +1214,38 @@ def test_api_mypy_config_rejects_a_strict_only_fixture(tmp_path: Path) -> None:
     )
 
     assert result.returncode != 0, result.stdout + result.stderr
+
+
+def test_private_preference_data_cannot_be_committed(tmp_path: Path) -> None:
+    """The preference file declares its own handling rules - never_commit among
+    them - and lives outside the repository. Nothing enforced that, so the rule
+    held only as long as nobody pasted the content somewhere tracked.
+
+    Matching the declaration rather than a path means a rename, a copy, or an
+    excerpt embedded in another document is still caught, which is how this kind
+    of content actually escapes.
+    """
+
+    namespace = runpy.run_path(str(ROOT / "scripts/check-repository-hygiene.py"))
+    carries = namespace["contains_private_preference_data"]
+
+    # Assembled rather than written out, so this file does not trip the very
+    # check it tests - the same discipline the secret scan test follows.
+    classification = '"classification": "private_sensitive' + '_user_preference_data"'
+    committable = '"never' + '_commit"'
+
+    declared = tmp_path / "anything.json"
+    declared.write_text("{" + classification + "}", encoding="utf-8")
+    assert carries(str(declared))
+
+    excerpt = tmp_path / "notes.md"
+    excerpt.write_text(
+        "Pasted from the profile:\n\n    " + committable + ": true\n", encoding="utf-8"
+    )
+    assert carries(str(excerpt))
+
+    ordinary = tmp_path / "settings.json"
+    ordinary.write_text(
+        '{"classification": "public", ' + committable + ": false}", encoding="utf-8"
+    )
+    assert not carries(str(ordinary))
