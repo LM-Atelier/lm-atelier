@@ -186,6 +186,8 @@ def test_bridge_script_uses_only_the_explicit_message_channel_save_path() -> Non
         "app.loadGraphData",
         "app.graphToPrompt",
         "result?.workflow",
+        "result?.output",
+        "{ nonce: editorNonce, graph, prompt }",
         "event.source !== window.opener",
         "!isLoopbackOrigin(event.origin)",
         "event.ports.length !== 1",

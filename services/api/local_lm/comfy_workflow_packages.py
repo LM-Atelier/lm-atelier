@@ -367,6 +367,12 @@ def _validate_bounded_json(value: object) -> None:
         raise WorkflowPackageError("too_large", "workflow exceeds the UI graph size limit")
 
 
+def validate_bounded_workflow_json(value: object) -> None:
+    """Validate a workflow-shaped JSON value without interpreting its graph form."""
+
+    _validate_bounded_json(value)
+
+
 def _format_version(value: object) -> str:
     if value != 0.4 and value != "0.4":
         raise WorkflowPackageError(

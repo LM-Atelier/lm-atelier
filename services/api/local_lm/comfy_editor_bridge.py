@@ -23,7 +23,7 @@ _BRIDGE_ASSET_DIRECTORY = Path(__file__).with_name("comfy_editor_bridge_assets")
 _BRIDGE_ASSET_HASHES = {
     "__init__.py": "a236d9d2e96f0857dc38192fef58927b9592886b7d2c7c9e05a941b253887df8",
     "js/lm_atelier_workflow_editor.js": (
-        "e281bb90641a850f683a91672280da9fa9bbbf15a74ee0b6e50291435cb452dd"
+        "b04dba29fa607525eea042c588a5b368fd05986c7620b781c97bfcef1a0deb53"
     ),
 }
 _BRIDGE_MANIFEST_SHA256 = hashlib.sha256(

@@ -137,11 +137,12 @@ async function saveToLmAtelier() {
   try {
     const result = await app.graphToPrompt();
     const graph = result?.workflow;
-    if (!validGraph(graph)) {
+    const prompt = result?.output;
+    if (!validGraph(graph) || !validGraph(prompt)) {
       refuse("invalid-save");
       return;
     }
-    postPort("save", { nonce: editorNonce, graph });
+    postPort("save", { nonce: editorNonce, graph, prompt });
     closePort();
   } catch {
     refuse("graph-save-failed");
