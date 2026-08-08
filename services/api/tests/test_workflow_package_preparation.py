@@ -24,7 +24,6 @@ from local_lm.workflow_package_preparation import (
     PreparationContext,
     WorkflowPackagePreparationError,
     prepare_workflow_package,
-    refuse_interpreter_probe,
 )
 
 pytestmark = pytest.mark.asyncio
@@ -607,12 +606,6 @@ async def test_each_stage_refuses_with_its_own_code(monkeypatch: pytest.MonkeyPa
             **_clients(),
         )
     assert prepared.value.code == "media_worker_running"
-
-
-async def test_the_probe_placeholder_refuses_rather_than_guessing() -> None:
-    with pytest.raises(WorkflowPackagePreparationError) as refused:
-        await refuse_interpreter_probe(Path("C:/synthetic/python.exe"))
-    assert refused.value.code == "interpreter_probe_unavailable"
 
 
 async def test_context_requires_a_configured_managed_runtime(tmp_path: Path) -> None:

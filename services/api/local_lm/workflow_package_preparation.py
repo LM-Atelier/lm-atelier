@@ -462,19 +462,3 @@ async def prepare_workflow_package(
                 custom_node_root=context.custom_node_root,
             )
         raise WorkflowPackagePreparationError(exc.code, str(exc)) from exc
-
-
-async def refuse_interpreter_probe(
-    python_executable: Path,
-) -> tuple[Mapping[str, str], Sequence[str]]:
-    """Fail closed until a verified probe for the managed python exists.
-
-    Guessing the host interpreter's markers or tags for the managed one would
-    bind wheel selection to the wrong target - the exact inference the chain
-    exists to prevent.
-    """
-
-    raise WorkflowPackagePreparationError(
-        "interpreter_probe_unavailable",
-        "Determining the managed runtime's package target is not supported yet.",
-    )
