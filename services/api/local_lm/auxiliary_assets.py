@@ -22,22 +22,16 @@ LORA_GRAPH_TRANSFORM_VERSION = "lora-graph-v2"
 LORA_AUTO_SELECTION_VERSION = "lora-use-case-v1"
 MAX_LORA_STACK_SIZE = 8
 MAX_LORA_STRENGTH = 4.0
-SUPPORTED_AUXILIARY_KINDS = {
-    "lora",
-    "vae",
-    "controlnet",
-    "upscaler",
-    "embedding",
-    "ip_adapter",
-}
-COMFY_AUXILIARY_FOLDERS = {
-    "lora": "loras",
-    "vae": "vae",
-    "controlnet": "controlnet",
-    "upscaler": "upscale_models",
-    "embedding": "embeddings",
-    "ip_adapter": "ipadapter",
-}
+AUXILIARY_ASSET_KINDS: frozenset[str] = frozenset(
+    {
+        "lora",
+        "vae",
+        "controlnet",
+        "upscaler",
+        "embedding",
+        "ip_adapter",
+    }
+)
 _MODEL_SAMPLER_CLASS_TYPES = {
     "KSampler",
     "KSamplerAdvanced",

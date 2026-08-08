@@ -515,18 +515,7 @@ def _component_kind_from_path(path: str, role: str) -> str:
 
 def _target_folder(path: str, role: str) -> str:
     parts = PurePosixPath(path).parts
-    known = {
-        "checkpoints",
-        "diffusion_models",
-        "text_encoders",
-        "vae",
-        "clip_vision",
-        "loras",
-        "controlnet",
-        "upscale_models",
-        "embeddings",
-    }
-    folder = next((part for part in parts[:-1] if part in known), None)
+    folder = next((part for part in parts[:-1] if part in COMFY_MODEL_FOLDERS), None)
     if folder:
         return folder
     return "models" if role == "chat" else "checkpoints"
@@ -544,6 +533,8 @@ _COMFY_FOLDER_BY_KIND = {
     "embedding": "embeddings",
     "ip_adapter": "ipadapter",
 }
+COMFY_MODEL_ASSET_KINDS: frozenset[str] = frozenset(_COMFY_FOLDER_BY_KIND)
+COMFY_MODEL_FOLDERS: frozenset[str] = frozenset(_COMFY_FOLDER_BY_KIND.values())
 
 
 def comfy_folder_for_kind(kind: str) -> str | None:

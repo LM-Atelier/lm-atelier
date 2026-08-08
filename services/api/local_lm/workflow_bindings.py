@@ -11,7 +11,8 @@ from urllib.parse import urlparse
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from .auxiliary_assets import COMFY_AUXILIARY_FOLDERS
+from .auxiliary_assets import AUXILIARY_ASSET_KINDS
+from .model_manifests import COMFY_MODEL_FOLDERS
 from .models import (
     ComfyRegistryInstall,
     CustomNodeInstall,
@@ -48,20 +49,6 @@ _PACKAGE_ID = re.compile(r"^[a-z0-9][a-z0-9._-]{0,99}$")
 _LOWERCASE_COMMIT = re.compile(r"^[0-9a-f]{40}$")
 _SEMANTIC_VERSION = re.compile(r"^[0-9]+[.][0-9]+[.][0-9]+(?:[-+][0-9A-Za-z.-]+)?$")
 _REGISTRY_ENVIRONMENT_PATH = re.compile(r"^registry-wheels-([0-9a-f]{64})$")
-_COMFY_MODEL_FOLDERS = frozenset(
-    {
-        "checkpoints",
-        "diffusion_models",
-        "text_encoders",
-        "vae",
-        "clip_vision",
-        "loras",
-        "controlnet",
-        "upscale_models",
-        "embeddings",
-        "ipadapter",
-    }
-)
 
 
 class WorkflowBindingError(ValueError):
@@ -491,7 +478,7 @@ def materialize_model_asset(asset: ModelAssetInstall) -> MaterializedWorkflowDep
     if (
         not asset.active
         or asset.verified_at is None
-        or asset.kind not in COMFY_AUXILIARY_FOLDERS
+        or asset.kind not in AUXILIARY_ASSET_KINDS
         or not isinstance(digest, str)
         or not _DIGEST_INPUT.fullmatch(digest)
         or not isinstance(runtime_reference, str)
@@ -710,7 +697,7 @@ def _comfy_paths(install: ModelInstall) -> dict[str, str]:
         )
     paths: dict[str, str] = {}
     for key, value in raw_paths.items():
-        if not isinstance(key, str) or key not in _COMFY_MODEL_FOLDERS:
+        if not isinstance(key, str) or key not in COMFY_MODEL_FOLDERS:
             raise WorkflowBindingError(
                 "invalid_dependency_identity", "Comfy model path mapping is invalid"
             )

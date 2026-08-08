@@ -10,9 +10,15 @@ from __future__ import annotations
 import itertools
 
 import local_lm.model_manifests as manifests_module
+from local_lm.auxiliary_assets import AUXILIARY_ASSET_KINDS
 from local_lm.config import Settings
 from local_lm.db import SessionLocal
-from local_lm.model_manifests import inspect_repository_metadata
+from local_lm.model_manifests import (
+    COMFY_MODEL_ASSET_KINDS,
+    COMFY_MODEL_FOLDERS,
+    comfy_folder_for_kind,
+    inspect_repository_metadata,
+)
 from local_lm.model_planner import (
     declared_model_components,
     install_satisfies_components,
@@ -26,6 +32,41 @@ _COUNTER = itertools.count()
 
 def _unique() -> str:
     return f"case{next(_COUNTER)}"
+
+
+def test_comfy_model_folder_contract_has_one_complete_source() -> None:
+    expected = {
+        "checkpoint": "checkpoints",
+        "diffusion_model": "diffusion_models",
+        "text_encoder": "text_encoders",
+        "vae": "vae",
+        "clip_vision": "clip_vision",
+        "lora": "loras",
+        "controlnet": "controlnet",
+        "upscaler": "upscale_models",
+        "embedding": "embeddings",
+        "ip_adapter": "ipadapter",
+    }
+
+    assert {kind: comfy_folder_for_kind(kind) for kind in expected} == expected
+    assert frozenset(expected) == COMFY_MODEL_ASSET_KINDS
+    assert frozenset(expected.values()) == COMFY_MODEL_FOLDERS
+    assert comfy_folder_for_kind("gguf_model") is None
+    assert comfy_folder_for_kind("unet") is None
+    assert comfy_folder_for_kind("unknown") is None
+
+
+def test_standalone_auxiliary_kinds_do_not_enable_every_workflow_component() -> None:
+    assert (
+        frozenset({"lora", "vae", "controlnet", "upscaler", "embedding", "ip_adapter"})
+        == AUXILIARY_ASSET_KINDS
+    )
+    assert AUXILIARY_ASSET_KINDS < COMFY_MODEL_ASSET_KINDS
+
+
+def test_repository_paths_recognize_every_canonical_comfy_folder() -> None:
+    for folder in COMFY_MODEL_FOLDERS:
+        assert manifests_module._target_folder(f"bundle/{folder}/weights.bin", "image") == folder
 
 
 def _install(session, suffix: str, components: list[tuple[str, str]]) -> ModelInstall:  # type: ignore[no-untyped-def]

@@ -1269,6 +1269,14 @@ class WorkflowSourceCandidateOut(ApiModel):
 # What the workflow analyzer can say a referenced file is. One definition, so
 # a caller naming an exact file cannot name a kind the analyzer never emits.
 WorkflowAssetKind = Literal["checkpoint", "configuration", "embedding", "lora", "upscaler", "vae"]
+AuxiliaryAssetKind = Literal[
+    "lora",
+    "vae",
+    "controlnet",
+    "upscaler",
+    "embedding",
+    "ip_adapter",
+]
 
 
 class WorkflowAssetReferenceOut(ApiModel):
@@ -1481,17 +1489,7 @@ class CatalogPreflightRequest(ApiModel):
     # ranking a repository's official bundle over it would install several
     # gigabytes nobody asked for.
     workflow_reference_kind: WorkflowAssetKind | None = None
-    auxiliary_kind: (
-        Literal[
-            "lora",
-            "vae",
-            "controlnet",
-            "upscaler",
-            "embedding",
-            "ip_adapter",
-        ]
-        | None
-    ) = None
+    auxiliary_kind: AuxiliaryAssetKind | None = None
 
 
 class CatalogPreflightCheck(ApiModel):
@@ -1558,17 +1556,7 @@ class DownloadRequest(ApiModel):
     workflow_template_sha256: str | None = None
     content_rating: ContentRating = "unknown"
     default_settings: dict[str, Any] = Field(default_factory=dict)
-    auxiliary_kind: (
-        Literal[
-            "lora",
-            "vae",
-            "controlnet",
-            "upscaler",
-            "embedding",
-            "ip_adapter",
-        ]
-        | None
-    ) = None
+    auxiliary_kind: AuxiliaryAssetKind | None = None
     # A dependency owned by one reviewed workflow binding. Unlike an
     # auxiliary asset it is never offered for auto-application or activated as
     # a standalone profile.

@@ -25,7 +25,7 @@ from .comfy_registry_paths import registry_wheel_environment_root
 from .config import Settings
 from .events import EventBroker
 from .gguf import GGUFSelectionError, automatic_mmproj_selection, validate_gguf_selection
-from .model_manifests import comfy_folder_for_kind
+from .model_manifests import COMFY_MODEL_FOLDERS, comfy_folder_for_kind
 from .models import ModelAssetInstall, ModelInstall, ModelProfile
 from .network import shared_tls_context
 from .schemas import WorkerStatus
@@ -864,21 +864,9 @@ class ProcessSupervisor:
     def _validated_comfy_paths(value: object) -> dict[str, str]:
         if not isinstance(value, dict):
             return {}
-        allowed = {
-            "checkpoints",
-            "diffusion_models",
-            "text_encoders",
-            "vae",
-            "clip_vision",
-            "loras",
-            "controlnet",
-            "upscale_models",
-            "embeddings",
-            "ipadapter",
-        }
         result: dict[str, str] = {}
         for key, item in value.items():
-            if key not in allowed or not isinstance(item, str):
+            if key not in COMFY_MODEL_FOLDERS or not isinstance(item, str):
                 continue
             path = Path(item)
             if path.is_absolute() or ".." in path.parts:
