@@ -94,6 +94,7 @@ from .upscale_workflows import (
     upscale_capability,
 )
 from .workflow_edit_calibration import validate_workflow_edit_calibration
+from .workflow_ownership import ensure_workflow_family_ownership
 
 if TYPE_CHECKING:
     from .adapters.comfyui import ComfyUIAdapter
@@ -2439,6 +2440,7 @@ class DownloadManager:
             and install.id in declared_installs
             and current_lora_extension == lora_extension
         ):
+            ensure_workflow_family_ownership(session, definition, current)
             return current
         version = max((item.version for item in definition.revisions), default=0) + 1
         input_schema = copy.deepcopy(compiled.input_schema)
@@ -2522,6 +2524,7 @@ class DownloadManager:
         session.add(revision)
         session.flush()
         definition.current_revision_id = revision.id
+        ensure_workflow_family_ownership(session, definition, revision)
         return revision
 
     async def _cleanup_provisional_install_serialized(

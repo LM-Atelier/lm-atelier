@@ -369,6 +369,7 @@ from .workflow_library import (
     workflow_resource_name,
 )
 from .workflow_node_dependencies import node_dependency_errors
+from .workflow_ownership import ensure_workflow_family_ownership
 from .workflow_package_drafts import (
     is_workflow_package_draft,
     workflow_package_draft_dependencies,
@@ -6532,6 +6533,7 @@ async def create_workflow(payload: WorkflowCreate, session: SessionDep) -> Workf
     session.add(revision)
     session.flush()
     definition.current_revision_id = revision.id
+    ensure_workflow_family_ownership(session, definition, revision)
     session.commit()
     created = session.scalar(
         select(WorkflowDefinition)
@@ -8030,6 +8032,7 @@ async def create_workflow_revision(
     session.add(revision)
     session.flush()
     definition.current_revision_id = revision.id
+    ensure_workflow_family_ownership(session, definition, revision)
     session.commit()
     session.refresh(revision)
     return revision

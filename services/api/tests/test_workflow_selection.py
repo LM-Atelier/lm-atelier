@@ -209,8 +209,8 @@ def test_automatic_ranks_ready_families_by_family_use_case(session: Session) -> 
 
 
 def test_automatic_uses_default_then_sort_order_for_equal_scores(session: Session) -> None:
-    first, _, _ = _family_revision(session, "First")
-    second, _, _ = _family_revision(session, "Second")
+    first, _, _ = _family_revision(session, "First", use_case="general images")
+    second, _, _ = _family_revision(session, "Second", use_case="general images")
     first_preference = first.preferences[0]
     second_preference = second.preferences[0]
     first_preference.sort_order = -10
@@ -235,6 +235,40 @@ def test_automatic_uses_default_then_sort_order_for_equal_scores(session: Sessio
         mode="automatic",
     )
     assert ordered_result.workflow_family_id == first.id
+
+
+def test_automatic_ignores_unconfigured_family_but_explicit_selection_uses_it(
+    session: Session,
+) -> None:
+    configured, _, _ = _family_revision(
+        session,
+        "Configured",
+        use_case="general images",
+    )
+    unconfigured, _, unconfigured_revision = _family_revision(
+        session,
+        "Exact prompt words",
+    )
+
+    automatic = resolve_workflow_family(
+        session,
+        capability="image",
+        operation=Operation.TEXT_TO_IMAGE,
+        mode="automatic",
+        prompt="Exact prompt words",
+        engine="comfyui",
+    )
+    explicit = resolve_workflow_family(
+        session,
+        capability="image",
+        operation=Operation.TEXT_TO_IMAGE,
+        mode="explicit",
+        workflow_family_id=unconfigured.id,
+        engine="comfyui",
+    )
+
+    assert automatic.workflow_family_id == configured.id
+    assert explicit.workflow_revision_id == unconfigured_revision.id
 
 
 def test_default_refuses_an_unready_default_instead_of_substituting(session: Session) -> None:
