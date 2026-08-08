@@ -22,6 +22,7 @@ evidence and is never read out of the file.
 from __future__ import annotations
 
 import hashlib
+import json
 import re
 from collections.abc import Mapping
 from dataclasses import dataclass
@@ -368,3 +369,74 @@ def rewriter_instruction(grammar: PromptGrammar) -> str:
     if len(rendered) > MAX_INSTRUCTION_CHARS:
         raise PromptGrammarError(f"the rendered grammar exceeds {MAX_INSTRUCTION_CHARS} characters")
     return rendered
+
+
+def canonical_grammar_digest(grammar: PromptGrammar) -> str:
+    """The identity of a grammar as it would actually be acted on.
+
+    Digests the normalized form rather than the source document, because the
+    normalized form is what reaches a rewriter. Approval state is part of it on
+    purpose: a grammar whose prose was approved is a different thing to act on
+    than the same grammar without it, and treating them as one identity would
+    let approval widen silently.
+    """
+
+    payload = json.dumps(
+        {
+            "schema_version": grammar.schema_version,
+            "trigger": grammar.trigger,
+            "template": grammar.template,
+            "slots": [
+                {
+                    "name": slot.name,
+                    "required": slot.required,
+                    "values": [
+                        {"value": item.value, "verified": item.verified} for item in slot.values
+                    ],
+                }
+                for slot in grammar.slots
+            ],
+            "description_guidance": grammar.description_guidance,
+            "examples": list(grammar.examples),
+        },
+        sort_keys=True,
+        separators=(",", ":"),
+        ensure_ascii=False,
+    )
+    return hashlib.sha256(payload.encode("utf-8")).hexdigest()
+
+
+def grammar_overhead(grammar: PromptGrammar) -> int:
+    """Characters a prompt in this shape must spend before any description.
+
+    Measured at the widest the template can be: the longest value each slot can
+    take. A grammar that fits only when its shortest values are chosen does not
+    fit, because nothing constrains which value a request needs.
+    """
+
+    rendered = grammar.template
+    for slot in grammar.slots:
+        offered = slot.verified_values() or tuple(item.value for item in slot.values)
+        widest = max(offered, key=len)
+        rendered = rendered.replace(f"<{slot.name}>", widest)
+    # The description placeholder is what the room is being measured for, so it
+    # contributes nothing itself.
+    return len(rendered.replace(f"<{DESCRIPTION_SLOT}>", ""))
+
+
+def grammar_fits(grammar: PromptGrammar, ceiling: int, *, minimum_description: int) -> bool:
+    """Whether a complete prompt in this shape can fit what the consumer emits.
+
+    Checked when a grammar is reviewed, not per turn. A grammar that cannot fit
+    must be recorded incompatible so the adapter becomes ineligible for
+    automatic application, because the alternative - truncating - removes the
+    end of a description whose whole value was being complete.
+    """
+
+    # A nonsensical bound would make every grammar fit or none of them, and
+    # either answer would be recorded as if it were a review result.
+    if ceiling <= 0:
+        raise PromptGrammarError("the consumer ceiling must be a positive number of characters")
+    if minimum_description <= 0:
+        raise PromptGrammarError("a description must be allowed at least one character")
+    return grammar_overhead(grammar) + minimum_description <= ceiling
