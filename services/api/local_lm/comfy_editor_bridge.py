@@ -14,11 +14,10 @@ from email.policy import compat32
 from pathlib import Path, PurePosixPath
 from urllib.parse import urlparse
 
+from .comfy_version_support import COMFY_VERSION_SUPPORT, VersionSupport
 from .filesystem_links import is_link_or_reparse
 
 WORKFLOW_EDITOR_BRIDGE_PROTOCOL_VERSION = 2
-SUPPORTED_COMFYUI_VERSION = "0.28.0"
-SUPPORTED_COMFYUI_FRONTEND_VERSION = "1.45.21"
 MAX_BRIDGE_ASSET_BYTES = 512 * 1024
 MAX_DISTRIBUTION_METADATA_BYTES = 64 * 1024
 MAX_SITE_PACKAGES_ENTRIES = 4_096
@@ -92,25 +91,41 @@ def inspect_comfy_editor_bridge_support(
             "workflow-editor-runtime-unavailable",
             "The media runtime could not be inspected for workflow editing.",
         )
-    if comfyui_version != SUPPORTED_COMFYUI_VERSION:
+    compatibility = COMFY_VERSION_SUPPORT.evaluate_runtime(
+        comfyui_version=comfyui_version,
+        frontend_version=frontend_version,
+    )
+    if not compatibility.supported and compatibility.component == "comfyui":
         return ComfyEditorBridgeSupport(
             False,
             "workflow-editor-comfyui-unsupported",
             (
                 "Native workflow editing requires ComfyUI "
-                f"{SUPPORTED_COMFYUI_VERSION}; the configured runtime uses {comfyui_version}."
+                f"{_version_requirement(compatibility.comfyui)}; the configured runtime "
+                f"uses {comfyui_version}."
             ),
             comfyui_version,
             frontend_version,
         )
-    if frontend_version != SUPPORTED_COMFYUI_FRONTEND_VERSION:
+    if not compatibility.supported and compatibility.component == "frontend":
         return ComfyEditorBridgeSupport(
             False,
             "workflow-editor-frontend-unsupported",
             (
                 "Native workflow editing requires the ComfyUI frontend "
-                f"{SUPPORTED_COMFYUI_FRONTEND_VERSION}; the configured runtime uses "
+                f"{_version_requirement(compatibility.frontend)}; the configured runtime uses "
                 f"{frontend_version}."
+            ),
+            comfyui_version,
+            frontend_version,
+        )
+    if not compatibility.supported:
+        return ComfyEditorBridgeSupport(
+            False,
+            "workflow-editor-runtime-pair-unsupported",
+            (
+                f"Native workflow editing has not certified ComfyUI {comfyui_version} "
+                f"with the ComfyUI frontend {frontend_version}."
             ),
             comfyui_version,
             frontend_version,
@@ -121,6 +136,14 @@ def inspect_comfy_editor_bridge_support(
         "Native workflow editing is available.",
         comfyui_version,
         frontend_version,
+    )
+
+
+def _version_requirement(support: VersionSupport) -> str:
+    return (
+        support.floor
+        if support.floor == support.ceiling
+        else f"{support.floor} through {support.ceiling}"
     )
 
 
