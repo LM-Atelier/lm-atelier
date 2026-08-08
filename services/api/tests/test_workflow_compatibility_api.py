@@ -8,10 +8,12 @@ from local_lm.db import SessionLocal
 from local_lm.models import (
     ChatWorkflowSelection,
     ProjectWorkflowSelection,
+    Run,
     WorkflowDefinition,
     WorkflowFamily,
     WorkflowPreference,
     WorkflowRevision,
+    WorkStep,
 )
 from local_lm.workflow_compatibility import AUTO_PROFILE_ID, compatibility_family_id
 
@@ -183,8 +185,22 @@ async def test_explicit_chat_family_queues_its_current_operation_revision(
     assert run["profile_id"] is None
     selected = run["provenance_json"]["model_selection"]
     assert selected["mode"] == "explicit"
+    assert selected["compatibility_only"] is True
     assert selected["workflow_family_id"] == family_id
     assert selected["workflow_revision_id"] == revision_id
+    witness = run["provenance_json"]["workflow"]
+    assert witness["family_id"] == family_id
+    assert witness["family_name"] == "Selected family"
+    assert witness["definition_name"] == "Selected family create"
+    assert witness["revision_id"] == revision_id
+    assert witness["selection"] == {
+        "source": "workflow_family",
+        "mode": "explicit",
+        "score": 0,
+        "matched_terms": [],
+        "fallback": False,
+        "compatibility": False,
+    }
 
 
 async def test_automatic_chat_selection_ranks_ready_workflow_families(
@@ -228,8 +244,76 @@ async def test_automatic_chat_selection_ranks_ready_workflow_families(
     assert run["workflow_revision_id"] == revision_id
     selected = run["provenance_json"]["model_selection"]
     assert selected["mode"] == "auto"
+    assert selected["compatibility_only"] is True
     assert selected["workflow_family_id"] == family_id
     assert "architectural" in selected["matched_terms"]
+    witness = run["provenance_json"]["workflow"]
+    assert witness["family_id"] == family_id
+    assert witness["revision_id"] == revision_id
+    assert witness["selection"]["source"] == "workflow_family"
+    assert witness["selection"]["mode"] == "auto"
+    assert "architectural" in witness["selection"]["matched_terms"]
+
+
+async def test_exact_revision_witness_does_not_claim_the_legacy_profile_ran(
+    client: AsyncClient,
+) -> None:
+    profile_response = await client.post(
+        "/api/profiles",
+        json={
+            "name": "Legacy portrait profile",
+            "role": "image",
+            "engine": "mock",
+        },
+    )
+    assert profile_response.status_code == 201
+    profile = profile_response.json()
+    chat = (await client.post("/api/chats", json={"title": "Exact workflow"})).json()
+    selected_profile = await client.patch(
+        f"/api/chats/{chat['id']}",
+        json={"active_image_profile_id": profile["id"]},
+    )
+    assert selected_profile.status_code == 200
+    with SessionLocal() as session:
+        family, revision = _ready_image_family(session, name="Exact revision family")
+        session.commit()
+        family_id = family.id
+        definition_id = revision.workflow_id
+        revision_id = revision.id
+
+    accepted = await client.post(
+        f"/api/chats/{chat['id']}/turns",
+        json={
+            "text": "Draw a blue bowl with the exact workflow",
+            "mode": "image",
+            "workflow_revision_id": revision_id,
+        },
+    )
+
+    assert accepted.status_code == 202, accepted.json()
+    run = accepted.json()["run"]
+    assert run["profile_id"] == profile["id"]
+    assert run["workflow_revision_id"] == revision_id
+    legacy_selection = run["provenance_json"]["model_selection"]
+    assert legacy_selection["profile_id"] == profile["id"]
+    assert legacy_selection["profile_name"] == "Legacy portrait profile"
+    assert legacy_selection["compatibility_only"] is True
+    witness = run["provenance_json"]["workflow"]
+    assert witness["family_id"] == family_id
+    assert witness["family_name"] == "Exact revision family"
+    assert witness["definition_id"] == definition_id
+    assert witness["definition_name"] == "Exact revision family create"
+    assert witness["revision_id"] == revision_id
+    assert witness["selection"] == {
+        "source": "resolved_revision",
+        "mode": "revision",
+    }
+    with SessionLocal() as session:
+        queued_run = session.get(Run, run["id"])
+        assert queued_run is not None and queued_run.work_step_id is not None
+        work_step = session.get(WorkStep, queued_run.work_step_id)
+        assert work_step is not None
+        assert work_step.workflow_revision_id == queued_run.workflow_revision_id == revision_id
 
 
 async def test_chat_family_overrides_the_project_family_without_changing_its_revision(

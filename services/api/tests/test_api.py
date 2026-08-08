@@ -2128,6 +2128,16 @@ async def test_ordered_text_image_video_text_plan_resolves_typed_outputs(
         assert video_artifact and video_artifact.media_type.startswith("video/")
         for resolved_step, resolved_run in zip(steps, runs, strict=True):
             assert resolved_run
+            assert resolved_step.workflow_revision_id == resolved_run.workflow_revision_id
+            workflow_witness = resolved_run.provenance_json.get("workflow")
+            if resolved_run.workflow_revision_id:
+                assert workflow_witness["revision_id"] == resolved_run.workflow_revision_id
+                assert workflow_witness["definition_id"]
+                assert workflow_witness["definition_name"]
+                assert workflow_witness["operation"] == resolved_step.operation
+                assert resolved_run.provenance_json["model_selection"]["compatibility_only"] is True
+            else:
+                assert workflow_witness is None
             if resolved_run.profile_id:
                 profile = session.get(ModelProfile, resolved_run.profile_id)
                 assert profile

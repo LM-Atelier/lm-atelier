@@ -778,6 +778,8 @@ def test_workflow_activation_provenance_exports_only_portable_digests() -> None:
     )
     provenance = {
         "workflow": {
+            "family_id": "wffamily-local",
+            "family_name": "Portable image family",
             "revision_id": "revision-source",
             "definition_id": "workflow-source",
             "trusted": True,
@@ -803,9 +805,20 @@ def test_workflow_activation_provenance_exports_only_portable_digests() -> None:
         "dependency_contract_sha256": "a" * 64,
         "binding_sha256": "b" * 64,
     }
-    with pytest.raises(ValueError, match="local workflow activation"):
+    assert portable["workflow"]["family_id"] is None
+    assert portable["workflow"]["family_name"] == "Portable image family"
+    with pytest.raises(ValueError, match="local workflow family"):
         exporter._validate_portable_provenance(
             provenance,
+            Operation.TEXT_TO_IMAGE,
+            dependencies,
+            set(),
+        )
+    provenance_without_family = json.loads(json.dumps(provenance))
+    provenance_without_family["workflow"]["family_id"] = None
+    with pytest.raises(ValueError, match="local workflow activation"):
+        exporter._validate_portable_provenance(
+            provenance_without_family,
             Operation.TEXT_TO_IMAGE,
             dependencies,
             set(),
