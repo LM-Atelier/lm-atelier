@@ -149,6 +149,10 @@ async def test_an_unresolved_package_can_be_persisted_as_an_exact_non_executable
     assert revision["dependencies_json"]["workflow_package_draft"]["graph_sha256"]
     listed = (await client.get("/api/workflows")).json()
     assert all(workflow["id"] != draft["id"] for workflow in listed)
+    draft_families = (await client.get("/api/workflow-families?selector_capability=image")).json()
+    assert all(
+        variant["id"] != draft["id"] for family in draft_families for variant in family["variants"]
+    )
 
 
 async def test_a_draft_identity_collision_refuses_instead_of_reusing_another_graph(
@@ -211,6 +215,17 @@ async def test_a_ready_draft_finalizes_in_place_and_retry_is_idempotent(
     assert current["api_graph_json"]["1"]["class_type"] == "Source"
     listed = (await client.get("/api/workflows")).json()
     assert any(workflow["id"] == draft["id"] for workflow in listed)
+    finalized_families = (
+        await client.get("/api/workflow-families?selector_capability=image")
+    ).json()
+    assert (
+        sum(
+            variant["id"] == draft["id"]
+            for family in finalized_families
+            for variant in family["variants"]
+        )
+        == 1
+    )
 
     retry_response = await client.post(
         "/api/workflows/packages/import",
