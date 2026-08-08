@@ -70,6 +70,11 @@ def _workflow() -> dict[str, Any]:
     }
 
 
+def _with_supported_frontend(workflow: dict[str, Any]) -> dict[str, Any]:
+    workflow["extra"] = {"frontendVersion": "1.45.21"}
+    return workflow
+
+
 def _assert_error(code: str, workflow: dict[str, Any], object_info: dict[str, Any]) -> None:
     with pytest.raises(WorkflowCompilationError) as raised:
         compile_comfyui_ui_graph(workflow, object_info)
@@ -228,7 +233,7 @@ def test_a_subgraph_that_cannot_be_expanded_exactly_still_refuses() -> None:
 
 
 def test_compiles_a_fixed_primitive_widget_value() -> None:
-    workflow = _workflow()
+    workflow = _with_supported_frontend(_workflow())
     workflow["nodes"][0]["inputs"] = [
         {
             "name": "label",
@@ -265,11 +270,47 @@ def test_compiles_a_fixed_primitive_widget_value() -> None:
 
 
 def test_rejects_malformed_primitive_nodes() -> None:
-    workflow = _workflow()
+    workflow = _with_supported_frontend(_workflow())
     workflow["nodes"].append(
         {"id": 3, "type": "PrimitiveNode", "inputs": [], "outputs": [], "widgets_values": [1]}
     )
     _assert_error("unsupported_primitive_node", workflow, _object_info())
+
+
+@pytest.mark.parametrize("node_type", ["PrimitiveNode", "Reroute"])
+@pytest.mark.parametrize(
+    "frontend_version",
+    [None, "invalid", "1.45.20", "1.45.22", "1.45.21rc1"],
+)
+def test_frontend_semantics_require_a_certified_declared_version(
+    node_type: str,
+    frontend_version: str | None,
+) -> None:
+    workflow = _workflow()
+    if frontend_version is not None:
+        workflow["extra"] = {"frontendVersion": frontend_version}
+    workflow["nodes"].append({"id": 42, "type": node_type, "mode": 0, "inputs": [], "outputs": []})
+
+    with pytest.raises(WorkflowCompilationError) as raised:
+        compile_comfyui_ui_graph(workflow, _object_info())
+    assert raised.value.code == "unsupported_frontend_version"
+    assert str(raised.value) == (
+        "workflow uses PrimitiveNode or Reroute semantics without a certified "
+        "ComfyUI frontend version"
+    )
+
+
+@pytest.mark.parametrize("frontend_version", [None, "invalid", "1.45.20", "1.45.22"])
+def test_plain_headless_graph_does_not_require_an_editor_frontend_version(
+    frontend_version: str | None,
+) -> None:
+    workflow = _workflow()
+    if frontend_version is not None:
+        workflow["extra"] = {"frontendVersion": frontend_version}
+
+    compiled = compile_comfyui_ui_graph(workflow, _object_info())
+
+    assert compiled.execution_order == ("1", "2")
 
 
 @pytest.mark.parametrize(
@@ -283,7 +324,7 @@ def test_rejects_dynamic_primitive_widget_values(
     properties: dict[str, bool],
     values: list[object],
 ) -> None:
-    workflow = _workflow()
+    workflow = _with_supported_frontend(_workflow())
     workflow["nodes"].append(
         {
             "id": 3,
@@ -499,7 +540,7 @@ def test_rejects_missing_runtime_node_type() -> None:
 def _rerouted(count: int) -> dict[str, Any]:
     """The same workflow, with a chain of reroutes standing in the one wire."""
 
-    workflow = _workflow()
+    workflow = _with_supported_frontend(_workflow())
     source, save = workflow["nodes"]
     chain = list(range(100, 100 + count))
     source["outputs"][0]["links"] = [chain[0]]
@@ -539,7 +580,7 @@ def test_a_reroute_chain_compiles_to_the_same_graph_as_the_wire(length: int) -> 
 
 
 def test_a_reroute_feeding_several_targets_reconnects_each_of_them() -> None:
-    workflow = _workflow()
+    workflow = _with_supported_frontend(_workflow())
     workflow["nodes"][0]["outputs"][0]["links"] = [100]
     workflow["nodes"].append(
         {
@@ -592,7 +633,7 @@ def test_a_reroute_with_consumers_and_nothing_feeding_it_is_refused() -> None:
 
 
 def test_a_reroute_attached_to_nothing_is_simply_dropped() -> None:
-    workflow = _workflow()
+    workflow = _with_supported_frontend(_workflow())
     workflow["nodes"].append({"id": 42, "type": "Reroute", "mode": 0, "inputs": [], "outputs": []})
 
     compiled = compile_comfyui_ui_graph(workflow, _object_info())

@@ -329,6 +329,23 @@ async def test_start_reports_typed_compiler_refusal(
     assert response.json()["reason_code"] == "missing_node_type"
 
 
+async def test_start_reports_uncertified_frontend_semantics(
+    app: FastAPI,
+    client: AsyncClient,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _ready_editor(app, monkeypatch)
+    ui_graph = _ui_graph()
+    ui_graph["nodes"].append({"id": 3, "type": "Reroute", "mode": 0, "inputs": [], "outputs": []})
+    workflow = await _create_workflow(client, ui_graph=ui_graph)
+
+    response = await client.post(f"/api/workflows/{workflow['id']}/editor-sessions")
+
+    assert response.status_code == 422
+    assert response.json()["code"] == "workflow-editor-graph-cannot-compile"
+    assert response.json()["reason_code"] == "unsupported_frontend_version"
+
+
 async def test_start_maps_session_capacity_without_eviction(
     app: FastAPI,
     client: AsyncClient,
@@ -557,6 +574,33 @@ async def test_consume_compiler_and_inventory_failures_preserve_session(
     monkeypatch.setattr(services.engines.media, "object_info", available, raising=False)
     retry = await client.post(path, json=payload)
     assert retry.status_code == 200
+
+
+async def test_consume_reports_uncertified_frontend_semantics_and_preserves_session(
+    app: FastAPI,
+    client: AsyncClient,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _ready_editor(app, monkeypatch)
+    workflow = await _create_workflow(client)
+    started = (await client.post(f"/api/workflows/{workflow['id']}/editor-sessions")).json()
+    ui_graph = _ui_graph()
+    ui_graph["nodes"].append({"id": 3, "type": "Reroute", "mode": 0, "inputs": [], "outputs": []})
+
+    response = await client.post(
+        f"/api/workflows/{workflow['id']}/editor-sessions/{started['id']}/consume",
+        json={
+            "nonce": started["nonce"],
+            "base_revision_id": started["base_revision_id"],
+            "ui_graph": ui_graph,
+            "api_prompt": _api_graph(),
+        },
+    )
+
+    assert response.status_code == 422
+    assert response.json()["code"] == "workflow-editor-return-cannot-compile"
+    assert response.json()["reason_code"] == "unsupported_frontend_version"
+    assert app.state.services.workflow_editor_sessions.active_count == 1
 
 
 async def test_validated_return_creates_one_untrusted_noncurrent_draft(

@@ -5,6 +5,7 @@ from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 
 from .comfy_subgraphs import SubgraphExpansionError, expand_workflow
+from .comfy_version_support import COMFY_VERSION_SUPPORT
 from .comfy_workflow_packages import (
     WorkflowPackageError,
     analyze_comfyui_workflow_package,
@@ -20,6 +21,7 @@ _IGNORED_FRONTEND_NODE_TYPES = frozenset(
 # compilation rather than ignored: ignoring one drops the edge it was
 # carrying, which is a different graph, not a smaller one.
 _PASS_THROUGH_TYPES = frozenset({"Reroute"})
+_FRONTEND_SEMANTIC_NODE_TYPES = frozenset({"PrimitiveNode", "Reroute"})
 
 
 class WorkflowCompilationError(WorkflowPackageError):
@@ -90,6 +92,19 @@ def compile_comfyui_ui_graph(
         raise WorkflowCompilationError(
             "missing_node_type", f"ComfyUI does not provide node type {node_type}"
         )
+    frontend_semantic_nodes = set(analysis.frontend_node_types) & _FRONTEND_SEMANTIC_NODE_TYPES
+    if frontend_semantic_nodes:
+        frontend_support = COMFY_VERSION_SUPPORT.evaluate_frontend_semantics(
+            analysis.frontend_version
+        )
+        if not frontend_support.supported:
+            raise WorkflowCompilationError(
+                "unsupported_frontend_version",
+                (
+                    "workflow uses PrimitiveNode or Reroute semantics without a "
+                    "certified ComfyUI frontend version"
+                ),
+            )
 
     nodes = _nodes_by_id(workflow)
     links = tuple(_parse_link(value) for value in _sequence(workflow.get("links"), "links"))
@@ -398,7 +413,7 @@ def _primitive_widget_values(
     links: Sequence[_Link],
     object_info: Mapping[str, object],
 ) -> tuple[dict[tuple[str, str], object], frozenset[str]]:
-    """Resolve the pinned frontend's fixed PrimitiveNode widget propagation."""
+    """Resolve PrimitiveNode propagation after the shared version preflight."""
 
     primitive_ids = {
         node_id for node_id, node in nodes.items() if node.get("type") == "PrimitiveNode"

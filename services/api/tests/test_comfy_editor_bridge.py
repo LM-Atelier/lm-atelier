@@ -14,6 +14,11 @@ from local_lm.comfy_editor_bridge import (
     prepare_comfy_editor_bridge,
     stage_comfy_editor_bridge,
 )
+from local_lm.comfy_version_support import (
+    CertifiedComfyCompatibility,
+    ComfyCompatibilityContract,
+    VersionInterval,
+)
 
 COORDINATOR_ORIGINS = (
     "http://127.0.0.1:12340",
@@ -105,8 +110,57 @@ def test_unpinned_runtime_versions_fail_closed_without_blocking_media(
 
     assert not prepared.support.supported
     assert prepared.support.code == code
+    expected = (
+        f"Native workflow editing requires ComfyUI 0.28.0; the configured runtime "
+        f"uses {comfyui_version}."
+        if code == "workflow-editor-comfyui-unsupported"
+        else (
+            "Native workflow editing requires the ComfyUI frontend 1.45.21; "
+            f"the configured runtime uses {frontend_version}."
+        )
+    )
+    assert prepared.support.message == expected
+    assert prepared.support.comfyui_version == comfyui_version
+    assert prepared.support.frontend_version == frontend_version
     assert prepared.folder is None
     assert not (directory / "custom_nodes").exists()
+
+
+def test_individually_supported_but_uncertified_runtime_pair_is_named(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    contract = ComfyCompatibilityContract(
+        certified=(
+            CertifiedComfyCompatibility(
+                comfyui=VersionInterval("0.28.0", "0.28.0"),
+                frontend=VersionInterval("1.45.21", "1.45.21"),
+            ),
+            CertifiedComfyCompatibility(
+                comfyui=VersionInterval("0.29.0", "0.29.0"),
+                frontend=VersionInterval("1.46.0", "1.46.0"),
+            ),
+        )
+    )
+    monkeypatch.setattr(editor_bridge, "COMFY_VERSION_SUPPORT", contract)
+    executable, directory, _site_packages = _runtime(
+        tmp_path,
+        comfyui_version="0.28.0",
+        frontend_version="1.46.0",
+    )
+
+    support = inspect_comfy_editor_bridge_support(
+        comfy_executable=executable,
+        comfy_directory=directory,
+    )
+
+    assert not support.supported
+    assert support.code == "workflow-editor-runtime-pair-unsupported"
+    assert support.message == (
+        "Native workflow editing has not certified ComfyUI 0.28.0 with the ComfyUI frontend 1.46.0."
+    )
+    assert support.comfyui_version == "0.28.0"
+    assert support.frontend_version == "1.46.0"
 
 
 def test_conflicting_frontend_distributions_fail_closed(tmp_path: Path) -> None:
