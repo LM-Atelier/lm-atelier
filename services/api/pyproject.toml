@@ -58,7 +58,10 @@ path = "local_lm/__init__.py"
 
 [tool.hatch.build.targets.wheel]
 packages = ["local_lm"]
-artifacts = ["local_lm/comfy_editor_bridge_assets/**/*.js"]
+artifacts = [
+  "local_lm/comfy_editor_bridge_assets/**/*.js",
+  "local_lm/workflow_editor_shell_assets/*",
+]
 
 [tool.pytest.ini_options]
 addopts = "-q --strict-markers"

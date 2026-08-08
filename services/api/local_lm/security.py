@@ -34,6 +34,23 @@ SECURITY_HEADERS = {
 }
 
 
+def trusted_browser_origins(settings: Settings) -> frozenset[str]:
+    origins = {
+        f"http://127.0.0.1:{settings.port}",
+        f"http://localhost:{settings.port}",
+        f"http://[::1]:{settings.port}",
+    }
+    if settings.dev:
+        origins.update(
+            {
+                "http://127.0.0.1:5173",
+                "http://localhost:5173",
+                "http://[::1]:5173",
+            }
+        )
+    return frozenset(origins)
+
+
 class JsonBodyLimitMiddleware:
     """Bound JSON bodies while leaving separately streamed upload endpoints intact."""
 
@@ -254,20 +271,7 @@ class SessionSecurity:
     def _valid_origin(self, origin: str | None) -> bool:
         if origin is None:
             return True
-        allowed = {
-            f"http://127.0.0.1:{self.settings.port}",
-            f"http://localhost:{self.settings.port}",
-            f"http://[::1]:{self.settings.port}",
-        }
-        if self.settings.dev:
-            allowed.update(
-                {
-                    "http://127.0.0.1:5173",
-                    "http://localhost:5173",
-                    "http://[::1]:5173",
-                }
-            )
-        return origin.lower() in allowed
+        return origin.lower() in trusted_browser_origins(self.settings)
 
     def validate_origin(self, origin: str | None) -> None:
         if not self._valid_origin(origin):

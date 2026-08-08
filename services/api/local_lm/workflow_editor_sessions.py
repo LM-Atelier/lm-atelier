@@ -9,6 +9,7 @@ from dataclasses import dataclass, replace
 from datetime import UTC, datetime, timedelta
 from typing import Any
 
+from .comfy_editor_bridge import WORKFLOW_EDITOR_BRIDGE_PROTOCOL_VERSION
 from .comfy_workflow_packages import (
     WorkflowPackageError,
     analyze_comfyui_workflow_package,
@@ -16,7 +17,7 @@ from .comfy_workflow_packages import (
 )
 from .workflow_trust import canonical_graph
 
-WORKFLOW_EDITOR_PROTOCOL_VERSION = 1
+WORKFLOW_EDITOR_PROTOCOL_VERSION = WORKFLOW_EDITOR_BRIDGE_PROTOCOL_VERSION
 DEFAULT_EDITOR_SESSION_TTL = timedelta(minutes=5)
 DEFAULT_MAX_EDITOR_SESSIONS = 128
 _OPAQUE_TOKEN_CHARACTERS = frozenset(

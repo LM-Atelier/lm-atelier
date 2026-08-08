@@ -1,15 +1,17 @@
 import { app } from "../../scripts/app.js";
+import { COORDINATOR_ORIGINS } from "./lm_atelier_workflow_editor_config.js";
 
-const PROTOCOL_VERSION = 1;
+const PROTOCOL_VERSION = 2;
 const BRIDGE_SOURCE = "lm-atelier-workflow-editor";
 const PARENT_SOURCE = "lm-atelier";
 const MAX_GRAPH_BYTES = 1024 * 1024;
 const NONCE_PATTERN = /^[A-Za-z0-9_.-]{1,200}$/;
-const LOOPBACK_HOSTS = new Set(["127.0.0.1", "localhost", "[::1]"]);
+const coordinatorOrigins = new Set(COORDINATOR_ORIGINS);
 
 let editorPort = null;
 let editorNonce = null;
 let saving = false;
+const editorCoordinator = window.parent !== window ? window.parent : window.opener;
 
 function isRecord(value) {
   return value !== null && typeof value === "object" && !Array.isArray(value);
@@ -29,19 +31,6 @@ function graphBytes(graph) {
 function validGraph(graph) {
   const size = graphBytes(graph);
   return size !== null && size <= MAX_GRAPH_BYTES;
-}
-
-function isLoopbackOrigin(value) {
-  try {
-    const source = new URL(value);
-    return (
-      ["http:", "https:"].includes(source.protocol) &&
-      LOOPBACK_HOSTS.has(source.hostname) &&
-      source.origin === value
-    );
-  } catch {
-    return false;
-  }
 }
 
 function postPort(type, details = {}) {
@@ -111,8 +100,8 @@ async function receivePortMessage(event) {
 function acceptParent(event) {
   const message = event.data;
   if (
-    event.source !== window.opener ||
-    !isLoopbackOrigin(event.origin) ||
+    event.source !== editorCoordinator ||
+    !coordinatorOrigins.has(event.origin) ||
     editorPort !== null ||
     !isRecord(message) ||
     message.source !== PARENT_SOURCE ||
@@ -151,9 +140,9 @@ async function saveToLmAtelier() {
   }
 }
 
-if (window.opener) {
+if (editorCoordinator) {
   window.addEventListener("message", acceptParent);
-  window.opener.postMessage(
+  editorCoordinator.postMessage(
     {
       source: BRIDGE_SOURCE,
       protocol: PROTOCOL_VERSION,
