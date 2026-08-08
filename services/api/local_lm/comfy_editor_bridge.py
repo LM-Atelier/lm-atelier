@@ -4,12 +4,13 @@ import hashlib
 import hmac
 import os
 import shutil
-import stat
 import tempfile
 from dataclasses import dataclass
 from email.parser import BytesParser
 from email.policy import compat32
 from pathlib import Path, PurePosixPath
+
+from .filesystem_links import is_link_or_reparse
 
 WORKFLOW_EDITOR_BRIDGE_PROTOCOL_VERSION = 1
 SUPPORTED_COMFYUI_VERSION = "0.28.0"
@@ -355,10 +356,8 @@ def _read_bounded(path: Path, limit: int) -> bytes:
 
 
 def _is_link_or_reparse(path: Path) -> bool:
-    try:
-        metadata = path.lstat()
-    except OSError:
-        return False
-    attributes = int(getattr(metadata, "st_file_attributes", 0))
-    reparse = int(getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0))
-    return path.is_symlink() or bool(attributes & reparse)
+    return is_link_or_reparse(
+        path,
+        missing="assume_regular",
+        unreadable="assume_regular",
+    )

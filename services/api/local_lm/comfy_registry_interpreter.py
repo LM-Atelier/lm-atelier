@@ -3,7 +3,6 @@ from __future__ import annotations
 import asyncio
 import json
 import os
-import stat
 from contextlib import suppress
 from pathlib import Path
 from typing import Any
@@ -17,6 +16,7 @@ from .comfy_registry_wheel_artifacts import (
     ComfyRegistryWheelArtifactError,
     comfy_registry_wheel_target_sha256,
 )
+from .filesystem_links import is_link_or_reparse
 from .processes import WINDOWS_CREATE_NO_WINDOW
 from .subprocess_env import subprocess_environment
 
@@ -24,7 +24,6 @@ INTERPRETER_PROBE_TIMEOUT_SECONDS = 15
 MAX_INTERPRETER_PROBE_OUTPUT_BYTES = 1024 * 1024
 MAX_INTERPRETER_PROBE_ERROR_BYTES = 64 * 1024
 _READ_CHUNK_BYTES = 64 * 1024
-_REPARSE_POINT = getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0x400)
 _PROBE_PROGRAM = """
 import json
 from importlib.metadata import distributions
@@ -262,8 +261,8 @@ async def _terminate(process: asyncio.subprocess.Process) -> None:
 
 
 def _is_link_or_reparse(path: Path) -> bool:
-    try:
-        info = path.lstat()
-    except OSError:
-        return True
-    return path.is_symlink() or bool(getattr(info, "st_file_attributes", 0) & _REPARSE_POINT)
+    return is_link_or_reparse(
+        path,
+        missing="assume_link",
+        unreadable="assume_link",
+    )

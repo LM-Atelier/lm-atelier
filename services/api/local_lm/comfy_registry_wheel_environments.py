@@ -31,6 +31,7 @@ from .comfy_registry_wheel_closure import (
     ComfyRegistryWheelClosureError,
     validate_comfy_registry_wheel_closure,
 )
+from .filesystem_links import is_link_or_reparse
 from .processes import WINDOWS_CREATE_NO_WINDOW
 from .subprocess_env import subprocess_environment
 
@@ -54,7 +55,6 @@ MAX_REGISTRY_WHEEL_EXPANSION_RATIO = 200
 MAX_REGISTRY_WHEEL_UNCHECKED_ENTRY_BYTES = 64 * 1024 * 1024
 WHEEL_HASH_CHUNK_BYTES = 1024 * 1024
 WHEEL_INSTALL_TIMEOUT_SECONDS = 600
-_REPARSE_POINT = getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0x400)
 _DIGEST_CHARACTERS = frozenset("0123456789abcdefABCDEF")
 
 
@@ -767,11 +767,11 @@ def _file_identity(path: Path) -> tuple[int, str]:
 
 
 def _is_link_or_reparse(path: Path) -> bool:
-    try:
-        info = path.lstat()
-    except OSError:
-        return True
-    return path.is_symlink() or bool(getattr(info, "st_file_attributes", 0) & _REPARSE_POINT)
+    return is_link_or_reparse(
+        path,
+        missing="assume_link",
+        unreadable="assume_link",
+    )
 
 
 def _write_new(path: Path, content: bytes) -> None:

@@ -10,6 +10,8 @@ import zipfile
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
 
+from .filesystem_links import is_link_or_reparse
+
 MAX_ARCHIVE_BYTES = 64 * 1024 * 1024
 MAX_ARCHIVE_ENTRIES = 4_096
 MAX_ARCHIVE_EXPANDED_BYTES = 256 * 1024 * 1024
@@ -45,7 +47,6 @@ _RUNTIME_DATA_SUFFIXES = {
     ".yaml",
     ".yml",
 }
-_REPARSE_POINT = getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0x400)
 
 
 class ComfyRegistryArchiveError(ValueError):
@@ -542,8 +543,8 @@ def _extract_entries(
 
 
 def _is_link_or_reparse(path: Path) -> bool:
-    try:
-        info = path.lstat()
-    except OSError:
-        return True
-    return path.is_symlink() or bool(getattr(info, "st_file_attributes", 0) & _REPARSE_POINT)
+    return is_link_or_reparse(
+        path,
+        missing="assume_link",
+        unreadable="assume_link",
+    )

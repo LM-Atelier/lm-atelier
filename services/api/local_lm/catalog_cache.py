@@ -7,6 +7,8 @@ import time
 from dataclasses import dataclass
 from pathlib import Path
 
+from .filesystem_links import is_link_or_reparse
+
 
 @dataclass(frozen=True)
 class CatalogCachePolicy:
@@ -73,7 +75,11 @@ class CatalogCacheStore:
         regular: list[_CacheEntry] = []
         for path in entries:
             try:
-                if path.is_symlink():
+                if is_link_or_reparse(
+                    path,
+                    missing="assume_regular",
+                    unreadable="assume_link",
+                ):
                     continue
                 metadata = path.stat()
             except OSError:
@@ -135,7 +141,11 @@ class CatalogCacheStore:
     ) -> os.stat_result | None:
         self._require_cache_path(path)
         try:
-            if path.is_symlink():
+            if is_link_or_reparse(
+                path,
+                missing="assume_regular",
+                unreadable="assume_link",
+            ):
                 return None
             metadata = path.stat()
         except OSError:
