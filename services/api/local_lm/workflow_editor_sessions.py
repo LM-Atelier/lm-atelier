@@ -9,7 +9,11 @@ from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from typing import Any
 
-from .comfy_workflow_packages import WorkflowPackageError, analyze_comfyui_workflow_package
+from .comfy_workflow_packages import (
+    WorkflowPackageError,
+    analyze_comfyui_workflow_package,
+    validate_bounded_workflow_json,
+)
 from .workflow_trust import canonical_graph
 
 WORKFLOW_EDITOR_PROTOCOL_VERSION = 1
@@ -55,6 +59,7 @@ class WorkflowEditorSession:
     workflow_id: str
     base_revision_id: str
     base_graph: WorkflowEditorGraphSummary
+    base_prompt_sha256: str
     nonce: str
     created_at: datetime
     expires_at: datetime
@@ -73,6 +78,8 @@ class WorkflowEditorReturn:
     current_revision_id: str
     base_graph_sha256: str
     returned_graph_sha256: str
+    base_prompt_sha256: str
+    returned_prompt_sha256: str
     changed: bool
     forked: bool
     delta: WorkflowEditorGraphDelta
@@ -80,6 +87,20 @@ class WorkflowEditorReturn:
 
 def workflow_ui_graph_sha256(graph: Mapping[str, Any]) -> str:
     return _workflow_ui_graph_summary(graph).sha256
+
+
+def workflow_api_graph_sha256(graph: Mapping[str, Any]) -> str:
+    try:
+        validate_bounded_workflow_json(graph)
+        canonical = canonical_graph(graph)
+    except WorkflowPackageError as exc:
+        raise WorkflowEditorSessionError(f"workflow-editor-{exc.code}", str(exc)) from exc
+    except (RecursionError, TypeError, ValueError) as exc:
+        raise WorkflowEditorSessionError(
+            "workflow-editor-invalid-prompt",
+            "The workflow editor prompt is not valid JSON",
+        ) from exc
+    return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
 
 
 class WorkflowEditorSessions:
@@ -110,10 +131,12 @@ class WorkflowEditorSessions:
         workflow_id: str,
         base_revision_id: str,
         base_ui_graph: Mapping[str, Any],
+        base_api_graph: Mapping[str, Any],
     ) -> WorkflowEditorSession:
         workflow_id = _identifier(workflow_id, "workflow")
         base_revision_id = _identifier(base_revision_id, "workflow revision")
         base_graph = _workflow_ui_graph_summary(base_ui_graph)
+        base_prompt_sha256 = workflow_api_graph_sha256(base_api_graph)
         now = _aware_utc(self._clock())
         with self._lock:
             self._purge_expired(now)
@@ -128,6 +151,7 @@ class WorkflowEditorSessions:
                 workflow_id=workflow_id,
                 base_revision_id=base_revision_id,
                 base_graph=base_graph,
+                base_prompt_sha256=base_prompt_sha256,
                 nonce=_nonce(self._token_factory(32)),
                 created_at=now,
                 expires_at=now + self._ttl,
@@ -144,6 +168,7 @@ class WorkflowEditorSessions:
         base_revision_id: str,
         current_revision_id: str,
         returned_ui_graph: Mapping[str, Any],
+        returned_api_graph: Mapping[str, Any],
     ) -> WorkflowEditorReturn:
         session_id = _identifier(session_id, "workflow editor session")
         nonce = _nonce(nonce)
@@ -151,6 +176,7 @@ class WorkflowEditorSessions:
         base_revision_id = _identifier(base_revision_id, "workflow revision")
         current_revision_id = _identifier(current_revision_id, "current workflow revision")
         returned_graph = _workflow_ui_graph_summary(returned_ui_graph)
+        returned_prompt_sha256 = workflow_api_graph_sha256(returned_api_graph)
         now = _aware_utc(self._clock())
         with self._lock:
             self._purge_expired(now)
@@ -170,12 +196,20 @@ class WorkflowEditorSessions:
                     "workflow-editor-session-mismatch",
                     "The workflow editor session does not match this workflow revision",
                 )
+            changed = not hmac.compare_digest(
+                session.base_graph_sha256,
+                returned_graph.sha256,
+            )
+            if not changed and not hmac.compare_digest(
+                session.base_prompt_sha256,
+                returned_prompt_sha256,
+            ):
+                raise WorkflowEditorSessionError(
+                    "workflow-editor-prompt-mismatch",
+                    "The workflow editor returned a prompt that does not match the graph",
+                )
             del self._sessions[session_id]
 
-        changed = not hmac.compare_digest(
-            session.base_graph_sha256,
-            returned_graph.sha256,
-        )
         return WorkflowEditorReturn(
             session_id=session.id,
             workflow_id=session.workflow_id,
@@ -183,6 +217,8 @@ class WorkflowEditorSessions:
             current_revision_id=current_revision_id,
             base_graph_sha256=session.base_graph_sha256,
             returned_graph_sha256=returned_graph.sha256,
+            base_prompt_sha256=session.base_prompt_sha256,
+            returned_prompt_sha256=returned_prompt_sha256,
             changed=changed,
             forked=changed and current_revision_id != session.base_revision_id,
             delta=_graph_delta(session.base_graph, returned_graph),

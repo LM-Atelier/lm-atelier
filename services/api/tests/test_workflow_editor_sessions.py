@@ -11,6 +11,7 @@ from local_lm.workflow_editor_sessions import (
     WorkflowEditorSession,
     WorkflowEditorSessionError,
     WorkflowEditorSessions,
+    workflow_api_graph_sha256,
     workflow_ui_graph_sha256,
 )
 
@@ -32,6 +33,10 @@ def _graph(
     ]
     nodes.extend(extra_nodes or [])
     return {"version": 0.4, "nodes": nodes, "links": []}
+
+
+def _prompt(*, node_type: str = "KSampler") -> dict[str, object]:
+    return {"1": {"class_type": node_type, "inputs": {}}}
 
 
 class _Clock:
@@ -73,6 +78,7 @@ def _start(
         workflow_id="workflow_one",
         base_revision_id="revision_one",
         base_ui_graph=graph or _graph(),
+        base_api_graph=_prompt(),
     )
 
 
@@ -96,6 +102,7 @@ def test_session_is_consumed_once_and_reports_unchanged_graph() -> None:
         base_revision_id=session.base_revision_id,
         current_revision_id=session.base_revision_id,
         returned_ui_graph=_graph(),
+        returned_api_graph=_prompt(),
     )
 
     assert not returned.changed
@@ -108,8 +115,56 @@ def test_session_is_consumed_once_and_reports_unchanged_graph() -> None:
             base_revision_id=session.base_revision_id,
             current_revision_id=session.base_revision_id,
             returned_ui_graph=_graph(),
+            returned_api_graph=_prompt(),
         )
     assert replay.value.code == "workflow-editor-session-not-found"
+
+
+def test_unchanged_graph_requires_its_bound_prompt_and_preserves_retry() -> None:
+    manager, _clock = _sessions()
+    session = _start(manager)
+
+    with pytest.raises(WorkflowEditorSessionError, match="does not match") as rejected:
+        manager.consume(
+            session_id=session.id,
+            nonce=session.nonce,
+            workflow_id=session.workflow_id,
+            base_revision_id=session.base_revision_id,
+            current_revision_id=session.base_revision_id,
+            returned_ui_graph=_graph(),
+            returned_api_graph=_prompt(node_type="VAEDecode"),
+        )
+    assert rejected.value.code == "workflow-editor-prompt-mismatch"
+
+    returned = manager.consume(
+        session_id=session.id,
+        nonce=session.nonce,
+        workflow_id=session.workflow_id,
+        base_revision_id=session.base_revision_id,
+        current_revision_id=session.base_revision_id,
+        returned_ui_graph=_graph(),
+        returned_api_graph=_prompt(),
+    )
+    assert not returned.changed
+
+
+def test_invalid_prompt_is_bounded_without_consuming_the_session() -> None:
+    manager, _clock = _sessions()
+    session = _start(manager)
+
+    with pytest.raises(WorkflowEditorSessionError) as rejected:
+        manager.consume(
+            session_id=session.id,
+            nonce=session.nonce,
+            workflow_id=session.workflow_id,
+            base_revision_id=session.base_revision_id,
+            current_revision_id=session.base_revision_id,
+            returned_ui_graph=_graph(),
+            returned_api_graph={"value": float("nan")},
+        )
+    assert rejected.value.code == "workflow-editor-non_finite_number"
+
+    manager.cancel(session_id=session.id, nonce=session.nonce)
 
 
 def test_changed_return_is_marked_as_a_fork_when_current_revision_advanced() -> None:
@@ -123,6 +178,7 @@ def test_changed_return_is_marked_as_a_fork_when_current_revision_advanced() -> 
         base_revision_id=session.base_revision_id,
         current_revision_id="revision_two",
         returned_ui_graph=_graph(node_type="VAEDecode"),
+        returned_api_graph=_prompt(node_type="VAEDecode"),
     )
 
     assert returned.changed
@@ -141,6 +197,7 @@ def test_unchanged_return_does_not_claim_a_fork_when_current_revision_advanced()
         base_revision_id=session.base_revision_id,
         current_revision_id="revision_two",
         returned_ui_graph=_graph(),
+        returned_api_graph=_prompt(),
     )
 
     assert not returned.changed
@@ -171,9 +228,14 @@ def test_changed_return_reports_server_derived_graph_and_asset_delta() -> None:
         base_revision_id=session.base_revision_id,
         current_revision_id=session.base_revision_id,
         returned_ui_graph=returned_graph,
+        returned_api_graph=_prompt(node_type="VAEDecode"),
     )
 
     assert returned.returned_graph_sha256 == workflow_ui_graph_sha256(returned_graph)
+    assert returned.base_prompt_sha256 == workflow_api_graph_sha256(_prompt())
+    assert returned.returned_prompt_sha256 == workflow_api_graph_sha256(
+        _prompt(node_type="VAEDecode")
+    )
     assert returned.delta.node_count_delta == 1
     assert returned.delta.link_count_delta == 0
     assert returned.delta.added_node_types == ("CLIPTextEncode", "VAEDecode")
@@ -194,6 +256,7 @@ def test_invalid_returned_graph_does_not_consume_the_session() -> None:
             base_revision_id=session.base_revision_id,
             current_revision_id=session.base_revision_id,
             returned_ui_graph={"version": 0.4, "nodes": [], "links": []},
+            returned_api_graph=_prompt(),
         )
     assert rejected.value.code == "workflow-editor-empty_workflow"
 
@@ -204,6 +267,7 @@ def test_invalid_returned_graph_does_not_consume_the_session() -> None:
         base_revision_id=session.base_revision_id,
         current_revision_id=session.base_revision_id,
         returned_ui_graph=_graph(),
+        returned_api_graph=_prompt(),
     ).changed
 
 
@@ -229,6 +293,7 @@ def test_rejected_return_does_not_consume_the_valid_session(
             base_revision_id=(value if field == "base_revision_id" else session.base_revision_id),
             current_revision_id=session.base_revision_id,
             returned_ui_graph=_graph(),
+            returned_api_graph=_prompt(),
         )
     assert rejected.value.code == code
 
@@ -239,6 +304,7 @@ def test_rejected_return_does_not_consume_the_valid_session(
         base_revision_id=session.base_revision_id,
         current_revision_id=session.base_revision_id,
         returned_ui_graph=_graph(),
+        returned_api_graph=_prompt(),
     ).changed
 
 
@@ -295,6 +361,7 @@ def test_concurrent_returns_allow_exactly_one_consumer() -> None:
                 base_revision_id=session.base_revision_id,
                 current_revision_id=session.base_revision_id,
                 returned_ui_graph=_graph(node_type="VAEDecode"),
+                returned_api_graph=_prompt(node_type="VAEDecode"),
             )
         except WorkflowEditorSessionError as exc:
             return exc.code
