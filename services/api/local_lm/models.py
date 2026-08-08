@@ -1344,7 +1344,21 @@ class AdapterPromptGrammar(TimestampMixin, Base):
     source_sha256: Mapped[str] = mapped_column(String(64))
     schema_version: Mapped[int] = mapped_column(Integer, default=1)
     grammar_json: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
-    examples_reviewed: Mapped[bool] = mapped_column(Boolean, default=False)
+    # The digest of what a rewriter would actually act on, including the two
+    # overlays that change emitted text. Storing the grammar alone would leave
+    # the overlays unauthenticated, so widening approval or verification would
+    # change the output without changing anything review is bound to.
+    grammar_sha256: Mapped[str] = mapped_column(String(64), default="")
+    approved_prose_json: Mapped[list[str]] = mapped_column(JSON, default=list)
+    # Reviewed evidence, not observations. Nothing generated may write here; a
+    # future observations table accumulates separately and can only promote a
+    # value through an explicit review.
+    verified_values_json: Mapped[dict[str, list[str]]] = mapped_column(JSON, default=dict)
+    # What the fit was judged against. A compiler change must make the evidence
+    # stale rather than overflow at turn time.
+    compiler_version: Mapped[str] = mapped_column(String(64), default="")
+    compiler_ceiling: Mapped[int] = mapped_column(Integer, default=0)
+    fits: Mapped[bool] = mapped_column(Boolean, default=False)
     reviewed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
 
 
