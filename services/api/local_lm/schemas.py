@@ -1100,6 +1100,22 @@ class WorkflowEditorReturnOut(ApiModel):
     expires_at: datetime
 
 
+class WorkflowEditorDraftCreateIn(ApiModel):
+    validated_return_id: str = Field(min_length=1, max_length=200)
+
+
+class WorkflowEditorDraftOut(ApiModel):
+    workflow_id: str
+    base_revision_id: str
+    draft_revision_id: str
+    current_revision_id: str | None
+    version: int
+    created: bool
+    forked: bool
+    trusted: Literal[False]
+    review_required: Literal[True]
+
+
 class EditTemplateCreate(ApiModel):
     name: str = Field(min_length=1, max_length=200)
     description: str = Field(default="", max_length=2_000)

@@ -18,7 +18,7 @@ from typing import TYPE_CHECKING, Annotated, Any, Literal, cast
 import httpx
 from fastapi import APIRouter, Depends, File, HTTPException, Query, Request, Response, UploadFile
 from sqlalchemy import Select, and_, func, or_, select, text
-from sqlalchemy.exc import SQLAlchemyError
+from sqlalchemy.exc import IntegrityError, SQLAlchemyError
 from sqlalchemy.orm import Session, selectinload
 from starlette.responses import FileResponse
 
@@ -279,6 +279,8 @@ from .schemas import (
     WorkflowDependencyResourceKind,
     WorkflowEditorCancelIn,
     WorkflowEditorConsumeIn,
+    WorkflowEditorDraftCreateIn,
+    WorkflowEditorDraftOut,
     WorkflowEditorGraphDeltaOut,
     WorkflowEditorReturnOut,
     WorkflowEditorSessionOut,
@@ -7042,6 +7044,298 @@ async def consume_workflow_editor_session(
             removed_asset_filenames=result.delta.removed_asset_filenames,
         ),
         expires_at=result.expires_at,
+    )
+
+
+def _workflow_editor_draft_revision_id(validated_return_id: str) -> str:
+    digest = hashlib.sha256(validated_return_id.encode("utf-8")).hexdigest()
+    return f"wfrev_editor_{digest[:27]}"
+
+
+def _workflow_runtime_binding_paths(
+    graph: Mapping[str, Any],
+) -> frozenset[tuple[tuple[str | int, ...], str]]:
+    bindings: set[tuple[tuple[str | int, ...], str]] = set()
+    stack: list[tuple[tuple[str | int, ...], Any]] = [((), graph)]
+    while stack:
+        path, value = stack.pop()
+        if isinstance(value, Mapping):
+            stack.extend(((*path, str(key)), item) for key, item in value.items())
+        elif isinstance(value, list):
+            stack.extend(((*path, index), item) for index, item in enumerate(value))
+        elif isinstance(value, str) and value.startswith("${") and value.endswith("}"):
+            bindings.add((path, value))
+    return frozenset(bindings)
+
+
+def _workflow_editor_draft_dependencies(
+    dependencies: Mapping[str, Any],
+) -> dict[str, Any]:
+    copied = copy.deepcopy(dict(dependencies))
+    for provenance_key in ("template_id", "template_sha256", "compiler_version"):
+        copied.pop(provenance_key, None)
+    return copied
+
+
+def _workflow_editor_dependency_signature(
+    ui_graph: Mapping[str, Any],
+) -> tuple[Any, ...]:
+    analysis = analyze_comfyui_workflow_package(ui_graph)
+    assets = tuple(
+        (
+            asset.filename,
+            asset.suffix,
+            asset.policy,
+            asset.kind,
+            asset.source_url,
+        )
+        for asset in analysis.asset_references
+    )
+    return (
+        analysis.required_node_types,
+        analysis.custom_packages,
+        assets,
+        analysis.node_provenance,
+        analysis.operation_guess,
+    )
+
+
+def _workflow_editor_draft_matches(
+    revision: WorkflowRevision,
+    *,
+    workflow_id: str,
+    engine: str,
+    engine_version: str | None,
+    ui_graph: Mapping[str, Any],
+    api_graph: Mapping[str, Any],
+    input_schema: Mapping[str, Any],
+    capabilities: list[str],
+    dependencies: Mapping[str, Any],
+    artifact_sha256: str,
+) -> bool:
+    return (
+        revision.workflow_id == workflow_id
+        and revision.engine == engine
+        and revision.engine_version == engine_version
+        and revision.ui_graph_json == dict(ui_graph)
+        and revision.api_graph_json == dict(api_graph)
+        and revision.input_schema_json == dict(input_schema)
+        and revision.capabilities_json == capabilities
+        and revision.dependencies_json == dict(dependencies)
+        and revision.dependency_contract_sha256 is None
+        and revision.artifact_sha256 == artifact_sha256
+        and not revision.trusted
+    )
+
+
+@router.post(
+    "/workflows/{workflow_id}/editor-drafts",
+    response_model=WorkflowEditorDraftOut,
+)
+async def create_workflow_editor_draft(
+    workflow_id: str,
+    payload: WorkflowEditorDraftCreateIn,
+    request: Request,
+    session: SessionDep,
+) -> WorkflowEditorDraftOut:
+    services = _services(request)
+    runtime_identity = services.processes.workflow_editor_runtime_identity()
+    if runtime_identity is None:
+        raise api_error(
+            409,
+            "workflow-editor-runtime-not-ready",
+            "The supported media runtime is no longer available.",
+        )
+    try:
+        validated = services.workflow_editor_sessions.validated_return(
+            validated_return_id=payload.validated_return_id,
+            workflow_id=workflow_id,
+            runtime_identity=runtime_identity,
+        )
+    except WorkflowEditorSessionError as exc:
+        if exc.code == "workflow-editor-validated-return-not-found":
+            raise api_error(404, exc.code, str(exc)) from exc
+        if exc.code in {
+            "workflow-editor-validated-return-mismatch",
+            "workflow-editor-runtime-changed",
+        }:
+            raise api_error(409, exc.code, str(exc)) from exc
+        raise api_error(
+            422,
+            "workflow-editor-validated-return-invalid",
+            "The validated editor return could not be used.",
+            reason_code=exc.code,
+        ) from exc
+    if not validated.result.changed:
+        raise api_error(
+            409,
+            "workflow-editor-return-unchanged",
+            "The editor return contains no workflow changes to save.",
+        )
+
+    definition = session.get(WorkflowDefinition, workflow_id)
+    base_revision = session.get(WorkflowRevision, validated.result.base_revision_id)
+    if definition is None or base_revision is None or base_revision.workflow_id != definition.id:
+        raise api_error(
+            409,
+            "workflow-editor-base-revision-changed",
+            "The workflow revision opened by this editor session is no longer available.",
+        )
+    try:
+        returned_ui_graph = json.loads(validated.returned_ui_graph_json)
+        returned_api_graph = json.loads(validated.returned_api_graph_json)
+    except json.JSONDecodeError as exc:
+        raise api_error(
+            409,
+            "workflow-editor-validated-return-corrupt",
+            "The validated editor return can no longer be read.",
+        ) from exc
+    if not isinstance(returned_ui_graph, dict) or not isinstance(returned_api_graph, dict):
+        raise api_error(
+            409,
+            "workflow-editor-validated-return-corrupt",
+            "The validated editor return does not contain workflow graphs.",
+        )
+    try:
+        base_dependency_signature = _workflow_editor_dependency_signature(
+            base_revision.ui_graph_json
+        )
+        returned_dependency_signature = _workflow_editor_dependency_signature(returned_ui_graph)
+    except WorkflowPackageError as exc:
+        raise api_error(
+            409,
+            "workflow-editor-validated-return-corrupt",
+            "The validated editor return can no longer be analyzed.",
+            reason_code=exc.code,
+        ) from exc
+    if base_dependency_signature != returned_dependency_signature:
+        raise api_error(
+            422,
+            "workflow-editor-draft-dependencies-changed",
+            "Review and prepare dependency-changing edits before saving them as a revision.",
+        )
+    if _workflow_runtime_binding_paths(
+        base_revision.api_graph_json
+    ) != _workflow_runtime_binding_paths(returned_api_graph):
+        raise api_error(
+            422,
+            "workflow-editor-draft-bindings-changed",
+            "Review and prepare runtime input changes before saving them as a revision.",
+        )
+    try:
+        validate_lora_workflow_contract(
+            returned_api_graph,
+            base_revision.input_schema_json,
+            base_revision.dependencies_json,
+        )
+        validate_workflow_edit_calibration(base_revision.input_schema_json)
+    except ValueError as exc:
+        raise api_error(
+            422,
+            "workflow-editor-draft-contract-invalid",
+            "The edited workflow does not satisfy its declared input contract.",
+        ) from exc
+
+    draft_revision_id = _workflow_editor_draft_revision_id(payload.validated_return_id)
+    try:
+        services.workflow_editor_sessions.bind_validated_return_to_draft(
+            validated_return_id=payload.validated_return_id,
+            workflow_id=workflow_id,
+            runtime_identity=runtime_identity,
+            draft_revision_id=draft_revision_id,
+        )
+    except WorkflowEditorSessionError as exc:
+        if exc.code in {
+            "workflow-editor-validated-return-not-found",
+            "workflow-editor-validated-return-mismatch",
+            "workflow-editor-validated-return-already-applied",
+            "workflow-editor-runtime-changed",
+        }:
+            raise api_error(409, exc.code, str(exc)) from exc
+        raise api_error(
+            422,
+            "workflow-editor-validated-return-invalid",
+            "The validated editor return could not be bound to a draft.",
+            reason_code=exc.code,
+        ) from exc
+
+    capabilities: list[str] = []
+    dependencies = _workflow_editor_draft_dependencies(base_revision.dependencies_json)
+    input_schema = dict(base_revision.input_schema_json)
+    artifact_sha256 = workflow_artifact_contract(
+        operation=definition.operation,
+        engine=base_revision.engine,
+        api_graph=returned_api_graph,
+        input_schema=input_schema,
+        dependencies=dependencies,
+    )
+    existing = session.get(WorkflowRevision, draft_revision_id)
+    created = False
+    if existing is None:
+        version = (
+            session.scalar(
+                select(func.max(WorkflowRevision.version)).where(
+                    WorkflowRevision.workflow_id == workflow_id
+                )
+            )
+            or 0
+        )
+        existing = WorkflowRevision(
+            id=draft_revision_id,
+            workflow_id=workflow_id,
+            version=version + 1,
+            engine=base_revision.engine,
+            engine_version=base_revision.engine_version,
+            ui_graph_json=returned_ui_graph,
+            api_graph_json=returned_api_graph,
+            input_schema_json=input_schema,
+            capabilities_json=capabilities,
+            dependencies_json=dependencies,
+            dependency_contract_sha256=None,
+            trusted=False,
+            artifact_sha256=artifact_sha256,
+        )
+        session.add(existing)
+        try:
+            session.commit()
+            created = True
+        except IntegrityError:
+            session.rollback()
+            existing = session.get(WorkflowRevision, draft_revision_id)
+            if existing is None:
+                raise api_error(
+                    409,
+                    "workflow-editor-draft-version-conflict",
+                    "The workflow changed while the editor draft was being saved. Retry the save.",
+                ) from None
+    if not _workflow_editor_draft_matches(
+        existing,
+        workflow_id=workflow_id,
+        engine=base_revision.engine,
+        engine_version=base_revision.engine_version,
+        ui_graph=returned_ui_graph,
+        api_graph=returned_api_graph,
+        input_schema=input_schema,
+        capabilities=capabilities,
+        dependencies=dependencies,
+        artifact_sha256=artifact_sha256,
+    ):
+        raise api_error(
+            409,
+            "workflow-editor-draft-collision",
+            "The validated editor return conflicts with an existing draft.",
+        )
+    session.refresh(definition, attribute_names=["current_revision_id"])
+    return WorkflowEditorDraftOut(
+        workflow_id=workflow_id,
+        base_revision_id=base_revision.id,
+        draft_revision_id=existing.id,
+        current_revision_id=definition.current_revision_id,
+        version=existing.version,
+        created=created,
+        forked=definition.current_revision_id != base_revision.id,
+        trusted=False,
+        review_required=True,
     )
 
 
