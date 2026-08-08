@@ -7,6 +7,7 @@ import json
 import logging
 import os
 import re
+import secrets
 import socket
 import sys
 import threading
@@ -242,6 +243,7 @@ class WorkerRecord:
     monitor_task: asyncio.Task[None] | None = None
     failure_detail: str | None = None
     launch_scope_sha256: str | None = None
+    editor_bridge_launch_id: str | None = None
 
 
 class ProcessSupervisor:
@@ -337,6 +339,14 @@ class ProcessSupervisor:
         if record is None or record.process.returncode is not None or record.state != "ready":
             return None
         return record.launch_scope_sha256
+
+    def workflow_editor_runtime_identity(self) -> str | None:
+        """Return authority for the ready launch that whitelisted the verified bridge."""
+
+        record = self._workers.get("media")
+        if record is None or record.process.returncode is not None or record.state != "ready":
+            return None
+        return record.editor_bridge_launch_id
 
     async def load_chat(self, profile: ModelProfile, install: ModelInstall) -> WorkerStatus:
         if profile.engine == "vllm":
@@ -499,6 +509,7 @@ class ProcessSupervisor:
         if directory not in entrypoint.parents:
             raise ValueError("ComfyUI entrypoint escapes its configured directory")
         parsed = urlparse(self.settings.comfy_url)
+        editor_bridge_enabled = False
         await report_phase("Validating media dependencies")
         custom_node_types: tuple[str, ...] = ()
         if activation_scope is None:
@@ -544,6 +555,7 @@ class ProcessSupervisor:
         else:
             if editor_bridge.folder is not None:
                 trusted_custom_nodes.append(editor_bridge.folder.name)
+                editor_bridge_enabled = True
             elif editor_bridge.support.code != "workflow-editor-runtime-unavailable":
                 logger.debug(
                     "Native workflow editing is unavailable: %s",
@@ -601,6 +613,7 @@ class ProcessSupervisor:
                     else None
                 ),
                 launch_scope_sha256=activation_scope.launch_sha256,
+                editor_bridge_enabled=editor_bridge_enabled,
             )
         elif registry_contract.site_packages:
             await self._replace(
@@ -609,9 +622,15 @@ class ProcessSupervisor:
                 self.settings.comfy_url + "/system_stats",
                 environment_overrides=environment_overrides,
                 ready_check=lambda: self._verify_comfy_node_types(registry_contract.node_types),
+                editor_bridge_enabled=editor_bridge_enabled,
             )
         else:
-            await self._replace("media", command, self.settings.comfy_url + "/system_stats")
+            await self._replace(
+                "media",
+                command,
+                self.settings.comfy_url + "/system_stats",
+                editor_bridge_enabled=editor_bridge_enabled,
+            )
         return self.statuses()[1]
 
     def _scoped_comfy_registry_contract(
@@ -894,6 +913,7 @@ class ProcessSupervisor:
         environment_overrides: Mapping[str, str] | None = None,
         ready_check: Callable[[], Awaitable[None]] | None = None,
         launch_scope_sha256: str | None = None,
+        editor_bridge_enabled: bool = False,
     ) -> None:
         if launch_scope_sha256 is not None and not re.fullmatch(
             r"[0-9a-f]{64}", launch_scope_sha256
@@ -908,6 +928,7 @@ class ProcessSupervisor:
                 and current.state == "ready"
                 and current.command == command
                 and current.launch_scope_sha256 == launch_scope_sha256
+                and (current.editor_bridge_launch_id is not None) == editor_bridge_enabled
             ):
                 return
             await self._stop_unlocked(name)
@@ -950,6 +971,9 @@ class ProcessSupervisor:
                 profile_id,
                 estimated_memory_bytes=estimated_memory_bytes,
                 launch_scope_sha256=launch_scope_sha256,
+                editor_bridge_launch_id=(
+                    secrets.token_urlsafe(24) if editor_bridge_enabled else None
+                ),
             )
             record.output_task = asyncio.create_task(self._capture_process_output(record))
             self._workers[name] = record

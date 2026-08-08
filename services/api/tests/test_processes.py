@@ -131,6 +131,32 @@ def test_llama_arguments_are_explicit_and_shell_free() -> None:
     ]
 
 
+def test_workflow_editor_authority_requires_the_live_ready_verified_launch(
+    settings,
+    tmp_path: Path,  # type: ignore[no-untyped-def]
+) -> None:
+    supervisor = ProcessSupervisor(settings)
+    process = FakeRunningProcess(34567, terminate_code=0)
+    record = WorkerRecord(
+        "media",
+        process,  # type: ignore[arg-type]
+        ["comfy"],
+        _RotatingWorkerLog(tmp_path / "media.log"),
+        editor_bridge_launch_id="verified-launch",
+    )
+    supervisor._workers["media"] = record
+
+    assert supervisor.workflow_editor_runtime_identity() is None
+    record.state = "ready"
+    assert supervisor.workflow_editor_runtime_identity() == "verified-launch"
+    record.editor_bridge_launch_id = None
+    assert supervisor.workflow_editor_runtime_identity() is None
+    record.editor_bridge_launch_id = "verified-launch"
+    process.returncode = 1
+    assert supervisor.workflow_editor_runtime_identity() is None
+    record.log.close()
+
+
 def test_gguf_resolution_rejects_ambiguous_installs(tmp_path: Path) -> None:
     (tmp_path / "a.gguf").touch()
     (tmp_path / "b.gguf").touch()
@@ -811,6 +837,42 @@ async def test_runtime_exit_captures_only_a_bounded_stderr_tail(
     await supervisor.close()
 
 
+async def test_media_replacement_rotates_verified_editor_launch_authority(
+    settings,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:  # type: ignore[no-untyped-def]
+    settings.prepare()
+    supervisor = ProcessSupervisor(settings)
+
+    async def healthy_immediately(*_args: object) -> None:
+        return None
+
+    monkeypatch.setattr(supervisor, "_wait_healthy", healthy_immediately)
+    monkeypatch.setattr(supervisor, "_ensure_port_available", AsyncMock())
+    command = [sys.executable, "-c", "import time; time.sleep(30)"]
+
+    await supervisor._replace(
+        "media",
+        command,
+        "http://127.0.0.1:9/health",
+        editor_bridge_enabled=True,
+    )
+    first = supervisor.workflow_editor_runtime_identity()
+    await supervisor._replace(
+        "media",
+        command,
+        "http://127.0.0.1:9/health",
+        editor_bridge_enabled=True,
+    )
+    second = supervisor.workflow_editor_runtime_identity()
+
+    assert first
+    assert second
+    assert second != first
+    await supervisor.stop("media")
+    assert supervisor.workflow_editor_runtime_identity() is None
+
+
 async def test_loading_health_503_lines_do_not_displace_stderr_tail(
     settings,
 ) -> None:  # type: ignore[no-untyped-def]
@@ -1122,8 +1184,10 @@ async def test_media_first_use_provisions_missing_runtime(
         _profile_id: str | None = None,
         *,
         estimated_memory_bytes: int | None = None,
+        editor_bridge_enabled: bool = False,
     ) -> None:
         del estimated_memory_bytes
+        assert not editor_bridge_enabled
         assert name == "media"
         captured["command"] = command
         captured["health_url"] = health_url
@@ -1408,9 +1472,11 @@ async def test_media_start_disables_unapproved_custom_nodes(
         _profile_id: str | None = None,
         *,
         estimated_memory_bytes: int | None = None,
+        editor_bridge_enabled: bool = False,
     ) -> None:
         assert name == "media"
         assert estimated_memory_bytes is None
+        assert not editor_bridge_enabled
         captured["command"] = command
 
     monkeypatch.setattr(supervisor, "_trusted_comfy_node_folders", trusted_nodes)
@@ -1469,8 +1535,10 @@ async def test_media_start_whitelists_only_the_verified_first_party_editor_bridg
         _profile_id: str | None = None,
         *,
         estimated_memory_bytes: int | None = None,
+        editor_bridge_enabled: bool = False,
     ) -> None:
         assert estimated_memory_bytes is None
+        assert editor_bridge_enabled
         captured["command"] = command
 
     monkeypatch.setattr(supervisor, "_trusted_comfy_node_folders", trusted_nodes)
@@ -1558,7 +1626,9 @@ async def test_media_start_uses_only_the_exact_activation_scope(
         environment_overrides: dict[str, str] | None = None,
         ready_check=None,  # type: ignore[no-untyped-def]
         launch_scope_sha256: str | None = None,
+        editor_bridge_enabled: bool = False,
     ) -> None:
+        assert not editor_bridge_enabled
         captured.update(
             name=name,
             command=command,
@@ -1707,7 +1777,9 @@ async def test_media_start_uses_only_verified_registry_overlay_contract(
         *,
         environment_overrides: dict[str, str] | None = None,
         ready_check=None,  # type: ignore[no-untyped-def]
+        editor_bridge_enabled: bool = False,
     ) -> None:
+        assert not editor_bridge_enabled
         captured.update(
             name=name,
             command=command,

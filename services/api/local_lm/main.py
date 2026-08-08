@@ -54,6 +54,7 @@ from .security import (
 )
 from .seed import seed_defaults
 from .worker_startup import restore_configured_workers
+from .workflow_editor_sessions import WorkflowEditorSessions
 
 logger = logging.getLogger("local_lm")
 AUTOMATIC_BACKUP_CHECK_INTERVAL_SECONDS = 60 * 60
@@ -206,6 +207,7 @@ class Services:
     diagnostics: DiagnosticBundleBuilder
     custom_nodes: CustomNodeManager
     credentials: CredentialStore
+    workflow_editor_sessions: WorkflowEditorSessions
 
     @property
     def catalog(self) -> HuggingFaceCatalog:
@@ -257,6 +259,7 @@ def build_services(settings: Settings) -> Services:
         diagnostics=DiagnosticBundleBuilder(settings, artifacts, processes),
         custom_nodes=CustomNodeManager(settings),
         credentials=credentials,
+        workflow_editor_sessions=WorkflowEditorSessions(),
     )
     return services
 
@@ -346,6 +349,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                     with suppress(asyncio.CancelledError):
                         await task
                 await shutdown_registry_preparations()
+                services.workflow_editor_sessions.clear()
                 await services.downloads.close()
                 await services.orchestrator.close()
                 await services.runtimes.close()

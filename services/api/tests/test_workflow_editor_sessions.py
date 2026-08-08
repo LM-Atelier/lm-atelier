@@ -79,6 +79,7 @@ def _start(
         base_revision_id="revision_one",
         base_ui_graph=graph or _graph(),
         base_api_graph=_prompt(),
+        runtime_identity="runtime_one",
     )
 
 
@@ -103,6 +104,7 @@ def test_session_is_consumed_once_and_reports_unchanged_graph() -> None:
         current_revision_id=session.base_revision_id,
         returned_ui_graph=_graph(),
         returned_api_graph=_prompt(),
+        runtime_identity=session.runtime_identity,
     )
 
     assert not returned.changed
@@ -116,6 +118,7 @@ def test_session_is_consumed_once_and_reports_unchanged_graph() -> None:
             current_revision_id=session.base_revision_id,
             returned_ui_graph=_graph(),
             returned_api_graph=_prompt(),
+            runtime_identity=session.runtime_identity,
         )
     assert replay.value.code == "workflow-editor-session-not-found"
 
@@ -133,6 +136,7 @@ def test_unchanged_graph_requires_its_bound_prompt_and_preserves_retry() -> None
             current_revision_id=session.base_revision_id,
             returned_ui_graph=_graph(),
             returned_api_graph=_prompt(node_type="VAEDecode"),
+            runtime_identity=session.runtime_identity,
         )
     assert rejected.value.code == "workflow-editor-prompt-mismatch"
 
@@ -144,6 +148,7 @@ def test_unchanged_graph_requires_its_bound_prompt_and_preserves_retry() -> None
         current_revision_id=session.base_revision_id,
         returned_ui_graph=_graph(),
         returned_api_graph=_prompt(),
+        runtime_identity=session.runtime_identity,
     )
     assert not returned.changed
 
@@ -161,10 +166,15 @@ def test_invalid_prompt_is_bounded_without_consuming_the_session() -> None:
             current_revision_id=session.base_revision_id,
             returned_ui_graph=_graph(),
             returned_api_graph={"value": float("nan")},
+            runtime_identity=session.runtime_identity,
         )
     assert rejected.value.code == "workflow-editor-non_finite_number"
 
-    manager.cancel(session_id=session.id, nonce=session.nonce)
+    manager.cancel(
+        session_id=session.id,
+        nonce=session.nonce,
+        workflow_id=session.workflow_id,
+    )
 
 
 def test_changed_return_is_marked_as_a_fork_when_current_revision_advanced() -> None:
@@ -179,6 +189,7 @@ def test_changed_return_is_marked_as_a_fork_when_current_revision_advanced() -> 
         current_revision_id="revision_two",
         returned_ui_graph=_graph(node_type="VAEDecode"),
         returned_api_graph=_prompt(node_type="VAEDecode"),
+        runtime_identity=session.runtime_identity,
     )
 
     assert returned.changed
@@ -198,6 +209,7 @@ def test_unchanged_return_does_not_claim_a_fork_when_current_revision_advanced()
         current_revision_id="revision_two",
         returned_ui_graph=_graph(),
         returned_api_graph=_prompt(),
+        runtime_identity=session.runtime_identity,
     )
 
     assert not returned.changed
@@ -229,6 +241,7 @@ def test_changed_return_reports_server_derived_graph_and_asset_delta() -> None:
         current_revision_id=session.base_revision_id,
         returned_ui_graph=returned_graph,
         returned_api_graph=_prompt(node_type="VAEDecode"),
+        runtime_identity=session.runtime_identity,
     )
 
     assert returned.returned_graph_sha256 == workflow_ui_graph_sha256(returned_graph)
@@ -257,6 +270,7 @@ def test_invalid_returned_graph_does_not_consume_the_session() -> None:
             current_revision_id=session.base_revision_id,
             returned_ui_graph={"version": 0.4, "nodes": [], "links": []},
             returned_api_graph=_prompt(),
+            runtime_identity=session.runtime_identity,
         )
     assert rejected.value.code == "workflow-editor-empty_workflow"
 
@@ -268,6 +282,7 @@ def test_invalid_returned_graph_does_not_consume_the_session() -> None:
         current_revision_id=session.base_revision_id,
         returned_ui_graph=_graph(),
         returned_api_graph=_prompt(),
+        runtime_identity=session.runtime_identity,
     ).changed
 
 
@@ -294,6 +309,7 @@ def test_rejected_return_does_not_consume_the_valid_session(
             current_revision_id=session.base_revision_id,
             returned_ui_graph=_graph(),
             returned_api_graph=_prompt(),
+            runtime_identity=session.runtime_identity,
         )
     assert rejected.value.code == code
 
@@ -305,6 +321,7 @@ def test_rejected_return_does_not_consume_the_valid_session(
         current_revision_id=session.base_revision_id,
         returned_ui_graph=_graph(),
         returned_api_graph=_prompt(),
+        runtime_identity=session.runtime_identity,
     ).changed
 
 
@@ -319,21 +336,127 @@ def test_expiry_purges_authority_and_releases_capacity() -> None:
     second = _start(manager)
     assert second.id != first.id
     with pytest.raises(WorkflowEditorSessionError) as expired:
-        manager.cancel(session_id=first.id, nonce=first.nonce)
+        manager.cancel(
+            session_id=first.id,
+            nonce=first.nonce,
+            workflow_id=first.workflow_id,
+        )
     assert expired.value.code == "workflow-editor-session-not-found"
+
+
+def test_new_runtime_authority_discards_sessions_from_the_previous_launch() -> None:
+    manager, _clock = _sessions(max_active=1)
+    first = _start(manager)
+
+    second = manager.start(
+        workflow_id="workflow_two",
+        base_revision_id="revision_two",
+        base_ui_graph=_graph(),
+        base_api_graph=_prompt(),
+        runtime_identity="runtime_two",
+    )
+
+    assert manager.active_count == 1
+    assert second.runtime_identity == "runtime_two"
+    with pytest.raises(WorkflowEditorSessionError) as stale:
+        manager.cancel(
+            session_id=first.id,
+            nonce=first.nonce,
+            workflow_id=first.workflow_id,
+        )
+    assert stale.value.code == "workflow-editor-session-not-found"
+
+
+def test_runtime_change_refuses_return_without_consuming_the_session() -> None:
+    manager, _clock = _sessions()
+    session = _start(manager)
+
+    with pytest.raises(WorkflowEditorSessionError) as changed:
+        manager.consume(
+            session_id=session.id,
+            nonce=session.nonce,
+            workflow_id=session.workflow_id,
+            base_revision_id=session.base_revision_id,
+            current_revision_id=session.base_revision_id,
+            returned_ui_graph=_graph(),
+            returned_api_graph=_prompt(),
+            runtime_identity="runtime_two",
+        )
+    assert changed.value.code == "workflow-editor-runtime-changed"
+
+    manager.cancel(
+        session_id=session.id,
+        nonce=session.nonce,
+        workflow_id=session.workflow_id,
+    )
+
+
+def test_clear_invalidates_every_session() -> None:
+    manager, _clock = _sessions()
+    session = _start(manager)
+
+    manager.clear()
+
+    assert manager.active_count == 0
+    with pytest.raises(WorkflowEditorSessionError) as missing:
+        manager.cancel(
+            session_id=session.id,
+            nonce=session.nonce,
+            workflow_id=session.workflow_id,
+        )
+    assert missing.value.code == "workflow-editor-session-not-found"
 
 
 def test_cancel_requires_the_nonce_and_is_one_use() -> None:
     manager, _clock = _sessions()
     session = _start(manager)
     with pytest.raises(WorkflowEditorSessionError) as rejected:
-        manager.cancel(session_id=session.id, nonce="wrong")
+        manager.cancel(
+            session_id=session.id,
+            nonce="wrong",
+            workflow_id=session.workflow_id,
+        )
     assert rejected.value.code == "workflow-editor-session-authentication-failed"
 
-    manager.cancel(session_id=session.id, nonce=session.nonce)
+    manager.cancel(
+        session_id=session.id,
+        nonce=session.nonce,
+        workflow_id=session.workflow_id,
+    )
     with pytest.raises(WorkflowEditorSessionError) as replay:
-        manager.cancel(session_id=session.id, nonce=session.nonce)
+        manager.cancel(
+            session_id=session.id,
+            nonce=session.nonce,
+            workflow_id=session.workflow_id,
+        )
     assert replay.value.code == "workflow-editor-session-not-found"
+
+
+def test_cancel_authenticates_before_revealing_a_workflow_mismatch() -> None:
+    manager, _clock = _sessions()
+    session = _start(manager)
+
+    with pytest.raises(WorkflowEditorSessionError) as unauthenticated:
+        manager.cancel(
+            session_id=session.id,
+            nonce="wrong",
+            workflow_id="workflow_two",
+        )
+    assert unauthenticated.value.code == "workflow-editor-session-authentication-failed"
+
+    with pytest.raises(WorkflowEditorSessionError) as mismatched:
+        manager.cancel(
+            session_id=session.id,
+            nonce=session.nonce,
+            workflow_id="workflow_two",
+        )
+    assert mismatched.value.code == "workflow-editor-session-mismatch"
+
+    manager.cancel(
+        session_id=session.id,
+        nonce=session.nonce,
+        workflow_id=session.workflow_id,
+    )
 
 
 @pytest.mark.parametrize("nonce", ["", "has whitespace", "line\\nbreak", "x" * 201])
@@ -342,10 +465,18 @@ def test_invalid_nonce_is_rejected_without_consuming_the_session(nonce: str) -> 
     session = _start(manager)
 
     with pytest.raises(WorkflowEditorSessionError) as rejected:
-        manager.cancel(session_id=session.id, nonce=nonce)
+        manager.cancel(
+            session_id=session.id,
+            nonce=nonce,
+            workflow_id=session.workflow_id,
+        )
     assert rejected.value.code == "invalid-workflow-editor-session"
 
-    manager.cancel(session_id=session.id, nonce=session.nonce)
+    manager.cancel(
+        session_id=session.id,
+        nonce=session.nonce,
+        workflow_id=session.workflow_id,
+    )
 
 
 def test_concurrent_returns_allow_exactly_one_consumer() -> None:
@@ -362,6 +493,7 @@ def test_concurrent_returns_allow_exactly_one_consumer() -> None:
                 current_revision_id=session.base_revision_id,
                 returned_ui_graph=_graph(node_type="VAEDecode"),
                 returned_api_graph=_prompt(node_type="VAEDecode"),
+                runtime_identity=session.runtime_identity,
             )
         except WorkflowEditorSessionError as exc:
             return exc.code

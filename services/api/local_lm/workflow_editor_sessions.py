@@ -60,6 +60,7 @@ class WorkflowEditorSession:
     base_revision_id: str
     base_graph: WorkflowEditorGraphSummary
     base_prompt_sha256: str
+    runtime_identity: str
     nonce: str
     created_at: datetime
     expires_at: datetime
@@ -132,14 +133,17 @@ class WorkflowEditorSessions:
         base_revision_id: str,
         base_ui_graph: Mapping[str, Any],
         base_api_graph: Mapping[str, Any],
+        runtime_identity: str,
     ) -> WorkflowEditorSession:
         workflow_id = _identifier(workflow_id, "workflow")
         base_revision_id = _identifier(base_revision_id, "workflow revision")
         base_graph = _workflow_ui_graph_summary(base_ui_graph)
         base_prompt_sha256 = workflow_api_graph_sha256(base_api_graph)
+        runtime_identity = _identifier(runtime_identity, "workflow editor runtime")
         now = _aware_utc(self._clock())
         with self._lock:
             self._purge_expired(now)
+            self._purge_other_runtimes(runtime_identity)
             if len(self._sessions) >= self._max_active:
                 raise WorkflowEditorSessionError(
                     "workflow-editor-capacity",
@@ -152,6 +156,7 @@ class WorkflowEditorSessions:
                 base_revision_id=base_revision_id,
                 base_graph=base_graph,
                 base_prompt_sha256=base_prompt_sha256,
+                runtime_identity=runtime_identity,
                 nonce=_nonce(self._token_factory(32)),
                 created_at=now,
                 expires_at=now + self._ttl,
@@ -169,6 +174,7 @@ class WorkflowEditorSessions:
         current_revision_id: str,
         returned_ui_graph: Mapping[str, Any],
         returned_api_graph: Mapping[str, Any],
+        runtime_identity: str,
     ) -> WorkflowEditorReturn:
         session_id = _identifier(session_id, "workflow editor session")
         nonce = _nonce(nonce)
@@ -177,6 +183,7 @@ class WorkflowEditorSessions:
         current_revision_id = _identifier(current_revision_id, "current workflow revision")
         returned_graph = _workflow_ui_graph_summary(returned_ui_graph)
         returned_prompt_sha256 = workflow_api_graph_sha256(returned_api_graph)
+        runtime_identity = _identifier(runtime_identity, "workflow editor runtime")
         now = _aware_utc(self._clock())
         with self._lock:
             self._purge_expired(now)
@@ -195,6 +202,11 @@ class WorkflowEditorSessions:
                 raise WorkflowEditorSessionError(
                     "workflow-editor-session-mismatch",
                     "The workflow editor session does not match this workflow revision",
+                )
+            if session.runtime_identity != runtime_identity:
+                raise WorkflowEditorSessionError(
+                    "workflow-editor-runtime-changed",
+                    "The media runtime changed while the workflow editor was open",
                 )
             changed = not hmac.compare_digest(
                 session.base_graph_sha256,
@@ -224,9 +236,10 @@ class WorkflowEditorSessions:
             delta=_graph_delta(session.base_graph, returned_graph),
         )
 
-    def cancel(self, *, session_id: str, nonce: str) -> None:
+    def cancel(self, *, session_id: str, nonce: str, workflow_id: str) -> None:
         session_id = _identifier(session_id, "workflow editor session")
         nonce = _nonce(nonce)
+        workflow_id = _identifier(workflow_id, "workflow")
         now = _aware_utc(self._clock())
         with self._lock:
             self._purge_expired(now)
@@ -241,7 +254,25 @@ class WorkflowEditorSessions:
                     "workflow-editor-session-authentication-failed",
                     "The workflow editor session could not be authenticated",
                 )
+            if session.workflow_id != workflow_id:
+                raise WorkflowEditorSessionError(
+                    "workflow-editor-session-mismatch",
+                    "The workflow editor session does not match this workflow",
+                )
             del self._sessions[session_id]
+
+    def clear(self) -> None:
+        """Invalidate every outstanding authority during application shutdown."""
+
+        with self._lock:
+            self._sessions.clear()
+
+    @property
+    def active_count(self) -> int:
+        now = _aware_utc(self._clock())
+        with self._lock:
+            self._purge_expired(now)
+            return len(self._sessions)
 
     def _new_session_id(self) -> str:
         for _attempt in range(8):
@@ -261,6 +292,15 @@ class WorkflowEditorSessions:
             if session.expires_at <= now
         ]
         for session_id in expired:
+            del self._sessions[session_id]
+
+    def _purge_other_runtimes(self, runtime_identity: str) -> None:
+        stale = [
+            session_id
+            for session_id, session in self._sessions.items()
+            if session.runtime_identity != runtime_identity
+        ]
+        for session_id in stale:
             del self._sessions[session_id]
 
 
