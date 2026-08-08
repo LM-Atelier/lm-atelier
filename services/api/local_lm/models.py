@@ -1293,6 +1293,61 @@ class WorkflowTrustAttestation(TimestampMixin, Base):
     attested_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
 
 
+class AdapterPromptGrammar(TimestampMixin, Base):
+    """How one installed adapter expects to be prompted, and what file that was true of.
+
+    An adapter can be trained to expect a particular prompt shape, and one
+    prompted the wrong way does not fail - it produces confident output in the
+    wrong form. Recording the shape is what lets a prompt be written correctly,
+    and what lets the application say a request is outside what the loaded stack
+    can express instead of rendering something adjacent.
+
+    Keyed to the asset's content digest and not only to the install row. An
+    install row is mutable and a file can be replaced underneath it, so binding
+    the grammar to the row alone would let a new file silently inherit the old
+    file's description of itself. `asset_sha256` is what the grammar was written
+    about; if the install no longer hashes to it, the grammar is stale rather
+    than wrong, and staleness is computed on read for the same reason it is for
+    an attestation.
+
+    `grammar_json` holds the normalized form only. The document it came from is
+    third-party text on its way to a model that rewrites what the user wrote,
+    which makes it an instruction channel, so the raw file is quarantined
+    outside this row and only its digest is kept. `examples_reviewed` gates the
+    one part of a normalized grammar that is still free text.
+    """
+
+    __tablename__ = "adapter_prompt_grammars"
+    __table_args__ = (
+        # One grammar per install. A second would raise the question of which one
+        # a rewriter believed, and the answer has to be that there is only one.
+        UniqueConstraint("model_asset_install_id", name="uq_adapter_prompt_grammar_install"),
+        CheckConstraint(
+            _lowercase_sha256_check("asset_sha256"),
+            name="ck_adapter_prompt_grammar_asset_sha256",
+        ),
+        CheckConstraint(
+            _lowercase_sha256_check("source_sha256"),
+            name="ck_adapter_prompt_grammar_source_sha256",
+        ),
+    )
+
+    # "promptgrammar_" plus 32 hex is 46 characters, so String(40) would truncate.
+    id: Mapped[str] = mapped_column(
+        String(48), primary_key=True, default=lambda: new_id("promptgrammar")
+    )
+    model_asset_install_id: Mapped[str] = mapped_column(
+        ForeignKey("model_asset_installs.id", ondelete="CASCADE"), index=True
+    )
+    asset_sha256: Mapped[str] = mapped_column(String(64), index=True)
+    source_identity: Mapped[str] = mapped_column(Text)
+    source_sha256: Mapped[str] = mapped_column(String(64))
+    schema_version: Mapped[int] = mapped_column(Integer, default=1)
+    grammar_json: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
+    examples_reviewed: Mapped[bool] = mapped_column(Boolean, default=False)
+    reviewed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+
+
 class WorkflowInstallOffer(TimestampMixin, Base):
     """One reviewed, content-bound way to make a workflow locally installable."""
 
