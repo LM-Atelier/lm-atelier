@@ -1018,6 +1018,7 @@ class ConversationOrchestrator:
                 session,
                 workflow_revision,
                 plan.standalone_prompt if accepted_offer else request.text,
+                workflow_activation_id=(workflow_activation["id"] if workflow_activation else None),
             )
             if lora_selection.settings:
                 effective_settings["loras"] = lora_selection.settings
@@ -1455,9 +1456,18 @@ class ConversationOrchestrator:
                             if lora_resolution
                             else {}
                         ),
+                        **(
+                            {"selection": lora_selection.provenance}
+                            if lora_selection
+                            and lora_selection.provenance.get("skipped_reason")
+                            and not lora_resolution
+                            else {}
+                        ),
                         **trigger_word_provenance,
                     }
-                    if lora_resolution or trigger_word_provenance["trigger_words_applied"]
+                    if lora_resolution
+                    or (lora_selection and lora_selection.provenance.get("skipped_reason"))
+                    or trigger_word_provenance["trigger_words_applied"]
                     else None
                 ),
                 **(
@@ -1765,6 +1775,9 @@ class ConversationOrchestrator:
                     session,
                     workflow_revision,
                     step_intent.prompt,
+                    workflow_activation_id=(
+                        workflow_activation["id"] if workflow_activation else None
+                    ),
                 )
                 if lora_selection.settings:
                     effective_settings["loras"] = lora_selection.settings
@@ -2121,9 +2134,20 @@ class ConversationOrchestrator:
                                 if resolved["lora_resolution"]
                                 else {}
                             ),
+                            **(
+                                {"selection": resolved["lora_selection"].provenance}
+                                if resolved["lora_selection"]
+                                and resolved["lora_selection"].provenance.get("skipped_reason")
+                                and not resolved["lora_resolution"]
+                                else {}
+                            ),
                             **trigger_word_provenance,
                         }
                         if resolved["lora_resolution"]
+                        or (
+                            resolved["lora_selection"]
+                            and resolved["lora_selection"].provenance.get("skipped_reason")
+                        )
                         or trigger_word_provenance["trigger_words_applied"]
                         else None
                     ),

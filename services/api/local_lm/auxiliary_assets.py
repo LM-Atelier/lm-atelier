@@ -10,7 +10,13 @@ from typing import Any
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from .models import ModelAssetInstall, ModelInstall, WorkflowRevision
+from .models import (
+    ModelAssetInstall,
+    ModelInstall,
+    ModelProfile,
+    WorkflowDependencyBinding,
+    WorkflowRevision,
+)
 
 LORA_GRAPH_TRANSFORM_VERSION = "lora-graph-v2"
 LORA_AUTO_SELECTION_VERSION = "lora-use-case-v1"
@@ -82,6 +88,8 @@ def select_automatic_lora_stack(
     session: Session,
     revision: WorkflowRevision,
     prompt: str,
+    *,
+    workflow_activation_id: str | None = None,
 ) -> AutomaticLoraSelection:
     """Select a small deterministic LoRA stack from user-authored use cases."""
 
@@ -91,7 +99,29 @@ def select_automatic_lora_stack(
     prompt_terms = set(_meaningful_terms(prompt_text))
     if not prompt_terms:
         return AutomaticLoraSelection([], _automatic_selection_provenance([]))
-    base_families = _workflow_families(session, revision)
+    base_families = _workflow_families(
+        session,
+        revision,
+        workflow_activation_id=workflow_activation_id,
+    )
+    if not base_families:
+        # Nothing is known about what architecture this workflow runs, and an
+        # adapter trained for another one does not refuse to load - it quietly
+        # degrades the image while provenance reports that it applied. The
+        # compatibility test below can only skip an asset when the families are
+        # known, so an unknown family used to mean no test at all: every
+        # auto-apply LoRA was eligible for every workflow. Choosing nothing is
+        # the only safe reading of "we cannot tell".
+        #
+        # This is why a workflow declaring where LoRAs go is not, on its own,
+        # enough to receive them automatically. It also has to say what it runs.
+        return AutomaticLoraSelection(
+            [],
+            _automatic_selection_provenance(
+                [],
+                skipped_reason="workflow_architecture_unknown",
+            ),
+        )
     assets = session.scalars(
         select(ModelAssetInstall).where(
             ModelAssetInstall.kind == "lora",
@@ -103,7 +133,7 @@ def select_automatic_lora_stack(
     ranked: list[tuple[int, float, int, str, str, ModelAssetInstall, list[str], str]] = []
     for asset in assets:
         family = asset.family.casefold() if asset.family else None
-        if base_families and (not family or family not in base_families):
+        if not family or family not in base_families:
             continue
         comfy_name = asset.manifest_json.get("comfy_name")
         sha256 = asset.manifest_json.get("sha256")
@@ -162,12 +192,19 @@ def select_automatic_lora_stack(
     return AutomaticLoraSelection(selected, _automatic_selection_provenance(provenance))
 
 
-def _automatic_selection_provenance(selected: list[dict[str, Any]]) -> dict[str, Any]:
-    return {
+def _automatic_selection_provenance(
+    selected: list[dict[str, Any]],
+    *,
+    skipped_reason: str | None = None,
+) -> dict[str, Any]:
+    provenance: dict[str, Any] = {
         "mode": "automatic",
         "selector_version": LORA_AUTO_SELECTION_VERSION,
         "selected": selected,
     }
+    if skipped_reason:
+        provenance["skipped_reason"] = skipped_reason
+    return provenance
 
 
 def _normalized_match_text(value: str) -> str:
@@ -565,18 +602,54 @@ def _strength(value: object, index: int, label: str) -> float:
     return result
 
 
-def _workflow_families(session: Session, revision: WorkflowRevision) -> set[str]:
-    raw_ids = revision.dependencies_json.get("model_install_ids")
-    install_ids = (
-        [item for item in raw_ids if isinstance(item, str)] if isinstance(raw_ids, list) else []
-    )
+def _workflow_families(
+    session: Session,
+    revision: WorkflowRevision,
+    *,
+    workflow_activation_id: str | None = None,
+) -> set[str]:
+    """Return one verified architecture family or fail closed.
+
+    An activation is the authoritative local binding for a portable workflow.
+    Legacy install IDs are only a fallback for revisions without a typed
+    activation. Every declared model binding must resolve and agree: an empty,
+    partial, or mixed-family answer cannot safely authorize an automatic LoRA.
+    """
+
+    install_ids: list[str] = []
+    if workflow_activation_id:
+        bindings = session.scalars(
+            select(WorkflowDependencyBinding).where(
+                WorkflowDependencyBinding.workflow_activation_id == workflow_activation_id,
+                WorkflowDependencyBinding.workflow_revision_id == revision.id,
+            )
+        ).all()
+        for binding in bindings:
+            if binding.model_install_id:
+                install_ids.append(binding.model_install_id)
+            elif binding.model_profile_id:
+                profile = session.get(ModelProfile, binding.model_profile_id)
+                if profile is None or not profile.model_install_id:
+                    return set()
+                install_ids.append(profile.model_install_id)
+        if not install_ids:
+            return set()
+    else:
+        raw_ids = revision.dependencies_json.get("model_install_ids")
+        if not isinstance(raw_ids, list) or not raw_ids:
+            return set()
+        if any(not isinstance(item, str) or not item for item in raw_ids):
+            return set()
+        install_ids = list(raw_ids)
+
     families: set[str] = set()
     for install_id in install_ids:
         install = session.get(ModelInstall, install_id)
         family = install.manifest_json.get("family") if install else None
-        if isinstance(family, str) and family:
-            families.add(family.casefold())
-    return families
+        if not isinstance(family, str) or not family.strip():
+            return set()
+        families.add(family.strip().casefold())
+    return families if len(families) == 1 else set()
 
 
 def _valid_link(value: object) -> bool:
