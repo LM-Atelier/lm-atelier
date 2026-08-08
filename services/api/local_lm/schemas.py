@@ -1051,6 +1051,23 @@ class WorkflowOpenTarget(ApiModel):
     ui_graph: dict[str, Any]
 
 
+class WorkflowEditorSessionOut(ApiModel):
+    id: str
+    protocol_version: int
+    workflow_id: str
+    base_revision_id: str
+    base_graph_sha256: str
+    base_prompt_sha256: str
+    created_at: datetime
+    expires_at: datetime
+    ui_graph: dict[str, Any]
+    nonce: str
+
+
+class WorkflowEditorCancelIn(ApiModel):
+    nonce: str = Field(min_length=1, max_length=200)
+
+
 class EditTemplateCreate(ApiModel):
     name: str = Field(min_length=1, max_length=200)
     description: str = Field(default="", max_length=2_000)

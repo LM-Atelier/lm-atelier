@@ -277,6 +277,8 @@ from .schemas import (
     WorkflowCreate,
     WorkflowDependencyImpactOut,
     WorkflowDependencyResourceKind,
+    WorkflowEditorCancelIn,
+    WorkflowEditorSessionOut,
     WorkflowFamilyOut,
     WorkflowFamilyPreferenceOut,
     WorkflowFamilyPreferenceUpdate,
@@ -354,6 +356,10 @@ from .workflow_compatibility import (
     retire_legacy_profile_workflow,
 )
 from .workflow_edit_calibration import validate_workflow_edit_calibration
+from .workflow_editor_sessions import (
+    WorkflowEditorSessionError,
+    workflow_api_graph_sha256,
+)
 from .workflow_install_offers import (
     WorkflowInstallOfferError,
     create_workflow_install_offer,
@@ -6703,6 +6709,164 @@ async def workflow_open_target(
         filename=f"{filename or 'workflow'}.comfyui.json",
         ui_graph=revision.ui_graph_json,
     )
+
+
+@router.post(
+    "/workflows/{workflow_id}/editor-sessions",
+    response_model=WorkflowEditorSessionOut,
+    status_code=201,
+)
+async def start_workflow_editor_session(
+    workflow_id: str,
+    request: Request,
+    response: Response,
+    session: SessionDep,
+) -> WorkflowEditorSessionOut:
+    _definition, revision = _workflow_and_revision(session, workflow_id)
+    if revision.engine != "comfyui":
+        raise api_error(
+            422,
+            "workflow-editor-engine-unsupported",
+            "Native editing requires a ComfyUI workflow.",
+        )
+    if not revision.ui_graph_json:
+        raise api_error(
+            422,
+            "workflow-editor-ui-graph-missing",
+            "This workflow has no ComfyUI user-interface graph.",
+        )
+    if not revision.api_graph_json:
+        raise api_error(
+            409,
+            "workflow-editor-api-graph-missing",
+            "This workflow has no executable ComfyUI prompt to verify.",
+        )
+
+    services = _services(request)
+    runtime_identity = services.processes.workflow_editor_runtime_identity()
+    if runtime_identity is None:
+        raise api_error(
+            409,
+            "workflow-editor-runtime-not-ready",
+            "Start the supported media runtime before opening this workflow.",
+        )
+    describe_nodes = getattr(services.engines.media, "object_info", None)
+    if not callable(describe_nodes):
+        raise api_error(
+            503,
+            "workflow-editor-node-inventory-unavailable",
+            "The media runtime cannot describe its workflow nodes.",
+        )
+    invalidate_nodes = getattr(services.engines.media, "invalidate_object_info_cache", None)
+    if callable(invalidate_nodes):
+        invalidate_nodes()
+    try:
+        object_info = await describe_nodes()
+    except Exception as exc:  # noqa: BLE001 - every runtime failure is unavailable here
+        raise api_error(
+            503,
+            "workflow-editor-node-inventory-unavailable",
+            "The media runtime could not describe its workflow nodes.",
+        ) from exc
+    if not isinstance(object_info, Mapping):
+        raise api_error(
+            503,
+            "workflow-editor-node-inventory-invalid",
+            "The media runtime returned an invalid workflow node inventory.",
+        )
+    try:
+        compilation = compile_comfyui_ui_graph(revision.ui_graph_json, object_info)
+        compiled_api_graph = {key: dict(value) for key, value in compilation.api_graph.items()}
+        compiled_sha256 = workflow_api_graph_sha256(compiled_api_graph)
+        stored_sha256 = workflow_api_graph_sha256(revision.api_graph_json)
+    except WorkflowCompilationError as exc:
+        raise api_error(
+            422,
+            "workflow-editor-graph-cannot-compile",
+            "This workflow cannot be opened for verified native editing.",
+            reason_code=exc.code,
+        ) from exc
+    except WorkflowEditorSessionError as exc:
+        raise api_error(
+            422,
+            "workflow-editor-graph-invalid",
+            "This workflow cannot be opened for verified native editing.",
+            reason_code=exc.code,
+        ) from exc
+    if compiled_sha256 != stored_sha256:
+        raise api_error(
+            409,
+            "workflow-editor-graph-prompt-mismatch",
+            "The visual workflow no longer matches its executable prompt.",
+        )
+    if services.processes.workflow_editor_runtime_identity() != runtime_identity:
+        raise api_error(
+            409,
+            "workflow-editor-runtime-changed",
+            "The media runtime changed while the workflow editor was opening.",
+        )
+    try:
+        editor_session = services.workflow_editor_sessions.start(
+            workflow_id=workflow_id,
+            base_revision_id=revision.id,
+            base_ui_graph=revision.ui_graph_json,
+            base_api_graph=revision.api_graph_json,
+            runtime_identity=runtime_identity,
+        )
+    except WorkflowEditorSessionError as exc:
+        if exc.code == "workflow-editor-capacity":
+            raise api_error(429, exc.code, str(exc)) from exc
+        raise api_error(
+            422,
+            "workflow-editor-session-invalid",
+            "The workflow editor session could not be created.",
+            reason_code=exc.code,
+        ) from exc
+    response.headers["Cache-Control"] = "no-store"
+    return WorkflowEditorSessionOut(
+        id=editor_session.id,
+        protocol_version=editor_session.protocol_version,
+        workflow_id=editor_session.workflow_id,
+        base_revision_id=editor_session.base_revision_id,
+        base_graph_sha256=editor_session.base_graph_sha256,
+        base_prompt_sha256=editor_session.base_prompt_sha256,
+        created_at=editor_session.created_at,
+        expires_at=editor_session.expires_at,
+        ui_graph=revision.ui_graph_json,
+        nonce=editor_session.nonce,
+    )
+
+
+@router.post(
+    "/workflows/{workflow_id}/editor-sessions/{session_id}/cancel",
+    status_code=204,
+)
+async def cancel_workflow_editor_session(
+    workflow_id: str,
+    session_id: str,
+    payload: WorkflowEditorCancelIn,
+    request: Request,
+) -> Response:
+    try:
+        _services(request).workflow_editor_sessions.cancel(
+            session_id=session_id,
+            nonce=payload.nonce,
+            workflow_id=workflow_id,
+        )
+    except WorkflowEditorSessionError as exc:
+        if exc.code == "workflow-editor-session-not-found":
+            raise api_error(404, exc.code, str(exc)) from exc
+        if exc.code == "workflow-editor-session-authentication-failed":
+            raise api_error(403, exc.code, str(exc)) from exc
+        if exc.code == "workflow-editor-session-mismatch":
+            raise api_error(409, exc.code, str(exc)) from exc
+        raise api_error(
+            422,
+            "workflow-editor-session-invalid",
+            "The workflow editor session could not be cancelled.",
+            reason_code=exc.code,
+        ) from exc
+    return Response(status_code=204)
 
 
 def _local_asset_filenames(session: Session) -> set[str]:
