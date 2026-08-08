@@ -21,6 +21,7 @@ import httpx
 import psutil
 
 from .comfy_editor_bridge import ComfyEditorBridgeError, prepare_comfy_editor_bridge
+from .comfy_registry_paths import registry_wheel_environment_root
 from .config import Settings
 from .events import EventBroker
 from .gguf import GGUFSelectionError, automatic_mmproj_selection, validate_gguf_selection
@@ -628,7 +629,7 @@ class ProcessSupervisor:
                 session,
                 scope.registry_packages,
                 custom_node_root=self.settings.custom_node_dir,
-                environment_root=self.settings.registry_dir / "registry-wheel-environments",
+                environment_root=registry_wheel_environment_root(self.settings.registry_dir),
             )
 
     def _trusted_comfy_registry_contract(self) -> ComfyRegistryLaunchContract:
@@ -639,7 +640,7 @@ class ProcessSupervisor:
             return trusted_comfy_registry_launch_contract(
                 session,
                 custom_node_root=self.settings.custom_node_dir,
-                environment_root=self.settings.registry_dir / "registry-wheel-environments",
+                environment_root=registry_wheel_environment_root(self.settings.registry_dir),
             )
 
     async def comfy_node_inventory(self) -> frozenset[str]:

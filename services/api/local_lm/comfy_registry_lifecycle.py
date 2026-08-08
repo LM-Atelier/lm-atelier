@@ -29,6 +29,7 @@ from .comfy_registry_installs import (
     bind_comfy_registry_wheel_environment,
     persist_comfy_registry_install,
 )
+from .comfy_registry_paths import registry_wheel_environment_root
 from .comfy_registry_sources import ComfyPackageSourceError, resolve_comfy_package_source
 from .comfy_registry_wheel_artifacts import (
     ComfyRegistryWheelArtifact,
@@ -196,7 +197,10 @@ async def prepare_comfy_registry_install(
     artifacts = _complete_closure(closure, resolution)
     node_root = _managed_root(custom_node_root, "custom node")
     managed_state = _managed_root(state_root, "state")
-    environment_root = _managed_child(managed_state, "registry-wheel-environments")
+    environment_root = _managed_child(
+        managed_state,
+        registry_wheel_environment_root(managed_state).name,
+    )
     staging_root = _managed_child(managed_state, "registry-wheel-staging")
     installed_path = _installed_path(package_id, package_version, record_id)
     node_destination = node_root / installed_path
@@ -345,7 +349,10 @@ async def renew_comfy_registry_install_environment(
     artifacts = _complete_closure(closure, resolution)
     node_root = _managed_root(custom_node_root, "custom node")
     managed_state = _managed_root(state_root, "state")
-    environment_root = _managed_child(managed_state, "registry-wheel-environments")
+    environment_root = _managed_child(
+        managed_state,
+        registry_wheel_environment_root(managed_state).name,
+    )
     staging_root = _managed_child(managed_state, "registry-wheel-staging")
     node_destination = _existing_managed_child(node_root, install.installed_path, "node")
     _verify_existing_archive(install, node_destination)
