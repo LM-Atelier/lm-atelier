@@ -1068,6 +1068,38 @@ class WorkflowEditorCancelIn(ApiModel):
     nonce: str = Field(min_length=1, max_length=200)
 
 
+class WorkflowEditorConsumeIn(ApiModel):
+    nonce: str = Field(min_length=1, max_length=200)
+    base_revision_id: str = Field(min_length=1, max_length=40)
+    ui_graph: dict[str, Any]
+    api_prompt: dict[str, Any]
+
+
+class WorkflowEditorGraphDeltaOut(ApiModel):
+    node_count_delta: int
+    link_count_delta: int
+    added_node_types: list[str]
+    removed_node_types: list[str]
+    added_asset_filenames: list[str]
+    removed_asset_filenames: list[str]
+
+
+class WorkflowEditorReturnOut(ApiModel):
+    validated_return_id: str
+    session_id: str
+    workflow_id: str
+    base_revision_id: str
+    current_revision_id: str
+    base_graph_sha256: str
+    returned_graph_sha256: str
+    base_prompt_sha256: str
+    returned_prompt_sha256: str
+    changed: bool
+    forked: bool
+    delta: WorkflowEditorGraphDeltaOut
+    expires_at: datetime
+
+
 class EditTemplateCreate(ApiModel):
     name: str = Field(min_length=1, max_length=200)
     description: str = Field(default="", max_length=2_000)

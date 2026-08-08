@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from collections.abc import Iterator
+from copy import deepcopy
 from typing import Any
 
 import pytest
@@ -86,6 +87,18 @@ def _api_graph() -> dict[str, Any]:
             "_meta": {"title": "Save"},
         },
     }
+
+
+def _edited_ui_graph() -> dict[str, Any]:
+    graph = deepcopy(_ui_graph())
+    graph["nodes"][0]["widgets_values"][0] = "studio"
+    return graph
+
+
+def _edited_api_graph() -> dict[str, Any]:
+    graph = deepcopy(_api_graph())
+    graph["1"]["inputs"]["label"] = "studio"
+    return graph
 
 
 async def _create_workflow(
@@ -325,3 +338,215 @@ async def test_start_maps_session_capacity_without_eviction(
     assert first.status_code == 201
     assert second.status_code == 429
     assert second.json()["code"] == "workflow-editor-capacity"
+
+
+async def test_consume_validates_prompt_without_mutating_and_remains_retryable(
+    app: FastAPI,
+    client: AsyncClient,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _ready_editor(app, monkeypatch)
+    workflow = await _create_workflow(client)
+    before = next(
+        item for item in (await client.get("/api/workflows")).json() if item["id"] == workflow["id"]
+    )
+    started = (await client.post(f"/api/workflows/{workflow['id']}/editor-sessions")).json()
+    path = f"/api/workflows/{workflow['id']}/editor-sessions/{started['id']}/consume"
+
+    mismatched = await client.post(
+        path,
+        json={
+            "nonce": started["nonce"],
+            "base_revision_id": started["base_revision_id"],
+            "ui_graph": _ui_graph(),
+            "api_prompt": _edited_api_graph(),
+        },
+    )
+    assert mismatched.status_code == 422
+    assert mismatched.json()["code"] == "workflow-editor-return-prompt-mismatch"
+    assert app.state.services.workflow_editor_sessions.active_count == 1
+
+    consumed = await client.post(
+        path,
+        json={
+            "nonce": started["nonce"],
+            "base_revision_id": started["base_revision_id"],
+            "ui_graph": _ui_graph(),
+            "api_prompt": _api_graph(),
+        },
+    )
+    assert consumed.status_code == 200
+    result = consumed.json()
+    assert result["validated_return_id"].startswith("wfreturn_")
+    assert result["expires_at"]
+    assert "nonce" not in result
+    assert "runtime_identity" not in result
+    assert "ui_graph" not in result
+    assert "api_prompt" not in result
+    assert not result["changed"]
+    assert not result["forked"]
+    assert result["base_graph_sha256"] == started["base_graph_sha256"]
+    assert result["returned_graph_sha256"] == started["base_graph_sha256"]
+    assert result["base_prompt_sha256"] == started["base_prompt_sha256"]
+    assert result["returned_prompt_sha256"] == started["base_prompt_sha256"]
+    assert result["delta"] == {
+        "node_count_delta": 0,
+        "link_count_delta": 0,
+        "added_node_types": [],
+        "removed_node_types": [],
+        "added_asset_filenames": [],
+        "removed_asset_filenames": [],
+    }
+    assert consumed.headers["cache-control"] == "no-store"
+    assert app.state.services.workflow_editor_sessions.active_count == 0
+    assert app.state.services.workflow_editor_sessions.validated_return_count == 1
+    retained = app.state.services.workflow_editor_sessions.validated_return(
+        validated_return_id=result["validated_return_id"],
+        workflow_id=workflow["id"],
+        runtime_identity="runtime_one",
+    )
+    assert retained.result.returned_prompt_sha256 == workflow_api_graph_sha256(_api_graph())
+
+    replay = await client.post(
+        path,
+        json={
+            "nonce": started["nonce"],
+            "base_revision_id": started["base_revision_id"],
+            "ui_graph": _ui_graph(),
+            "api_prompt": _api_graph(),
+        },
+    )
+    assert replay.status_code == 404
+    after = next(
+        item for item in (await client.get("/api/workflows")).json() if item["id"] == workflow["id"]
+    )
+    assert after == before
+
+
+async def test_consume_authenticates_before_workflow_mismatch(
+    app: FastAPI,
+    client: AsyncClient,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _ready_editor(app, monkeypatch)
+    workflow = await _create_workflow(client)
+    started = (await client.post(f"/api/workflows/{workflow['id']}/editor-sessions")).json()
+    payload = {
+        "nonce": "wrong",
+        "base_revision_id": started["base_revision_id"],
+        "ui_graph": _ui_graph(),
+        "api_prompt": _api_graph(),
+    }
+    wrong_path = f"/api/workflows/workflow_two/editor-sessions/{started['id']}/consume"
+
+    unauthenticated = await client.post(wrong_path, json=payload)
+    assert unauthenticated.status_code == 403
+    assert unauthenticated.json()["code"] == "workflow-editor-session-authentication-failed"
+    payload["nonce"] = started["nonce"]
+    mismatched = await client.post(wrong_path, json=payload)
+    assert mismatched.status_code == 409
+    assert mismatched.json()["code"] == "workflow-editor-session-mismatch"
+
+    correct = await client.post(
+        f"/api/workflows/{workflow['id']}/editor-sessions/{started['id']}/consume",
+        json=payload,
+    )
+    assert correct.status_code == 200
+
+
+async def test_changed_consume_reports_fork_without_creating_a_revision(
+    app: FastAPI,
+    client: AsyncClient,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _ready_editor(app, monkeypatch)
+    workflow = await _create_workflow(client)
+    started = (await client.post(f"/api/workflows/{workflow['id']}/editor-sessions")).json()
+    advanced = await client.post(
+        f"/api/workflows/{workflow['id']}/revisions",
+        json={
+            "ui_graph": _ui_graph(),
+            "api_graph": _api_graph(),
+            "trusted": True,
+        },
+    )
+    assert advanced.status_code == 201
+
+    consumed = await client.post(
+        f"/api/workflows/{workflow['id']}/editor-sessions/{started['id']}/consume",
+        json={
+            "nonce": started["nonce"],
+            "base_revision_id": started["base_revision_id"],
+            "ui_graph": _edited_ui_graph(),
+            "api_prompt": _edited_api_graph(),
+        },
+    )
+    assert consumed.status_code == 200
+    result = consumed.json()
+    assert result["changed"]
+    assert result["forked"]
+    assert result["current_revision_id"] == advanced.json()["id"]
+
+    after = next(
+        item for item in (await client.get("/api/workflows")).json() if item["id"] == workflow["id"]
+    )
+    assert after["current_revision_id"] == advanced.json()["id"]
+    assert len(after["revisions"]) == 2
+    assert all(revision["api_graph_json"] != _edited_api_graph() for revision in after["revisions"])
+
+
+async def test_consume_compiler_and_inventory_failures_preserve_session(
+    app: FastAPI,
+    client: AsyncClient,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _ready_editor(app, monkeypatch)
+    workflow = await _create_workflow(client)
+    started = (await client.post(f"/api/workflows/{workflow['id']}/editor-sessions")).json()
+    path = f"/api/workflows/{workflow['id']}/editor-sessions/{started['id']}/consume"
+    payload = {
+        "nonce": started["nonce"],
+        "base_revision_id": started["base_revision_id"],
+        "ui_graph": _ui_graph(),
+        "api_prompt": _api_graph(),
+    }
+    services = app.state.services
+
+    async def should_not_read_inventory() -> dict[str, Any]:
+        raise AssertionError("invalid JSON must be refused before runtime inventory")
+
+    monkeypatch.setattr(
+        services.engines.media,
+        "object_info",
+        should_not_read_inventory,
+        raising=False,
+    )
+    oversized = deepcopy(payload)
+    oversized["ui_graph"]["oversized"] = "x" * 65_537
+    bounded = await client.post(path, json=oversized)
+    assert bounded.status_code == 422
+    assert bounded.json()["code"] == "workflow-editor-return-invalid"
+    assert bounded.json()["reason_code"] == "workflow-editor-invalid_string"
+
+    async def available() -> dict[str, Any]:
+        return _object_info()
+
+    monkeypatch.setattr(services.engines.media, "object_info", available, raising=False)
+    invalid_graph = deepcopy(payload)
+    invalid_graph["ui_graph"]["nodes"][0]["type"] = "UnavailableNode"
+    refused = await client.post(path, json=invalid_graph)
+    assert refused.status_code == 422
+    assert refused.json()["code"] == "workflow-editor-return-cannot-compile"
+
+    async def unavailable() -> dict[str, Any]:
+        raise RuntimeError("offline")
+
+    monkeypatch.setattr(services.engines.media, "object_info", unavailable, raising=False)
+    offline = await client.post(path, json=payload)
+    assert offline.status_code == 503
+    assert offline.json()["code"] == "workflow-editor-node-inventory-unavailable"
+    assert services.workflow_editor_sessions.active_count == 1
+
+    monkeypatch.setattr(services.engines.media, "object_info", available, raising=False)
+    retry = await client.post(path, json=payload)
+    assert retry.status_code == 200

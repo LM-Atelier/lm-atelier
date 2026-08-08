@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from concurrent.futures import ThreadPoolExecutor
 from datetime import UTC, datetime, timedelta
 from itertools import count
@@ -109,6 +110,8 @@ def test_session_is_consumed_once_and_reports_unchanged_graph() -> None:
 
     assert not returned.changed
     assert not returned.forked
+    assert returned.validated_return_id.startswith("wfreturn_")
+    assert manager.validated_return_count == 1
     with pytest.raises(WorkflowEditorSessionError) as replay:
         manager.consume(
             session_id=session.id,
@@ -195,6 +198,7 @@ def test_changed_return_is_marked_as_a_fork_when_current_revision_advanced() -> 
     assert returned.changed
     assert returned.forked
     assert returned.current_revision_id == "revision_two"
+    assert manager.validated_return_count == 1
 
 
 def test_unchanged_return_does_not_claim_a_fork_when_current_revision_advanced() -> None:
@@ -325,6 +329,50 @@ def test_rejected_return_does_not_consume_the_valid_session(
     ).changed
 
 
+def test_authorize_return_is_retryable_and_preserves_authentication_order() -> None:
+    manager, _clock = _sessions()
+    session = _start(manager)
+
+    with pytest.raises(WorkflowEditorSessionError) as unauthenticated:
+        manager.authorize_return(
+            session_id=session.id,
+            nonce="wrong",
+            workflow_id="workflow_two",
+            base_revision_id=session.base_revision_id,
+            runtime_identity=session.runtime_identity,
+        )
+    assert unauthenticated.value.code == "workflow-editor-session-authentication-failed"
+    with pytest.raises(WorkflowEditorSessionError) as mismatched:
+        manager.authorize_return(
+            session_id=session.id,
+            nonce=session.nonce,
+            workflow_id="workflow_two",
+            base_revision_id=session.base_revision_id,
+            runtime_identity=session.runtime_identity,
+        )
+    assert mismatched.value.code == "workflow-editor-session-mismatch"
+
+    authorized = manager.authorize_return(
+        session_id=session.id,
+        nonce=session.nonce,
+        workflow_id=session.workflow_id,
+        base_revision_id=session.base_revision_id,
+        runtime_identity=session.runtime_identity,
+    )
+    assert authorized.id == session.id
+    assert manager.active_count == 1
+    assert not manager.consume(
+        session_id=session.id,
+        nonce=session.nonce,
+        workflow_id=session.workflow_id,
+        base_revision_id=session.base_revision_id,
+        current_revision_id=session.base_revision_id,
+        returned_ui_graph=_graph(),
+        returned_api_graph=_prompt(),
+        runtime_identity=session.runtime_identity,
+    ).changed
+
+
 def test_expiry_purges_authority_and_releases_capacity() -> None:
     manager, clock = _sessions(ttl=timedelta(seconds=30), max_active=1)
     first = _start(manager)
@@ -365,6 +413,84 @@ def test_new_runtime_authority_discards_sessions_from_the_previous_launch() -> N
             workflow_id=first.workflow_id,
         )
     assert stale.value.code == "workflow-editor-session-not-found"
+
+
+def test_validated_return_is_bounded_by_capacity_expiry_runtime_and_clear() -> None:
+    manager, clock = _sessions(ttl=timedelta(seconds=30), max_active=1)
+    session = _start(manager)
+    manager.consume(
+        session_id=session.id,
+        nonce=session.nonce,
+        workflow_id=session.workflow_id,
+        base_revision_id=session.base_revision_id,
+        current_revision_id=session.base_revision_id,
+        returned_ui_graph=_graph(),
+        returned_api_graph=_prompt(),
+        runtime_identity=session.runtime_identity,
+    )
+    assert manager.active_count == 0
+    assert manager.validated_return_count == 1
+    with pytest.raises(WorkflowEditorSessionError) as capacity:
+        _start(manager)
+    assert capacity.value.code == "workflow-editor-capacity"
+
+    clock.value += timedelta(seconds=30)
+    second = _start(manager)
+    assert manager.validated_return_count == 0
+    manager.consume(
+        session_id=second.id,
+        nonce=second.nonce,
+        workflow_id=second.workflow_id,
+        base_revision_id=second.base_revision_id,
+        current_revision_id=second.base_revision_id,
+        returned_ui_graph=_graph(),
+        returned_api_graph=_prompt(),
+        runtime_identity=second.runtime_identity,
+    )
+    assert manager.validated_return_count == 1
+    manager.clear()
+    assert manager.validated_return_count == 0
+
+
+def test_validated_return_receipt_retains_exact_canonical_graph_pair() -> None:
+    manager, _clock = _sessions()
+    session = _start(manager)
+    ui_graph = _graph(node_type="VAEDecode", filename="edited.safetensors")
+    api_graph = _prompt(node_type="VAEDecode")
+    result = manager.consume(
+        session_id=session.id,
+        nonce=session.nonce,
+        workflow_id=session.workflow_id,
+        base_revision_id=session.base_revision_id,
+        current_revision_id=session.base_revision_id,
+        returned_ui_graph=ui_graph,
+        returned_api_graph=api_graph,
+        runtime_identity=session.runtime_identity,
+    )
+
+    validated = manager.validated_return(
+        validated_return_id=result.validated_return_id,
+        workflow_id=session.workflow_id,
+        runtime_identity=session.runtime_identity,
+    )
+    assert json.loads(validated.returned_ui_graph_json) == ui_graph
+    assert json.loads(validated.returned_api_graph_json) == api_graph
+    assert validated.result == result
+
+    with pytest.raises(WorkflowEditorSessionError) as wrong_workflow:
+        manager.validated_return(
+            validated_return_id=result.validated_return_id,
+            workflow_id="workflow_two",
+            runtime_identity=session.runtime_identity,
+        )
+    assert wrong_workflow.value.code == "workflow-editor-validated-return-mismatch"
+    with pytest.raises(WorkflowEditorSessionError) as wrong_runtime:
+        manager.validated_return(
+            validated_return_id=result.validated_return_id,
+            workflow_id=session.workflow_id,
+            runtime_identity="runtime_two",
+        )
+    assert wrong_runtime.value.code == "workflow-editor-runtime-changed"
 
 
 def test_runtime_change_refuses_return_without_consuming_the_session() -> None:
@@ -504,6 +630,47 @@ def test_concurrent_returns_allow_exactly_one_consumer() -> None:
         results = sorted(future.result() for future in futures)
 
     assert results == ["consumed", "workflow-editor-session-not-found"]
+    assert manager.validated_return_count == 1
+
+
+def test_concurrent_consume_and_cancel_allow_one_terminal_winner() -> None:
+    manager, _clock = _sessions()
+    session = _start(manager)
+
+    def consume() -> str:
+        try:
+            manager.consume(
+                session_id=session.id,
+                nonce=session.nonce,
+                workflow_id=session.workflow_id,
+                base_revision_id=session.base_revision_id,
+                current_revision_id=session.base_revision_id,
+                returned_ui_graph=_graph(),
+                returned_api_graph=_prompt(),
+                runtime_identity=session.runtime_identity,
+            )
+        except WorkflowEditorSessionError as exc:
+            return exc.code
+        return "consumed"
+
+    def cancel() -> str:
+        try:
+            manager.cancel(
+                session_id=session.id,
+                nonce=session.nonce,
+                workflow_id=session.workflow_id,
+            )
+        except WorkflowEditorSessionError as exc:
+            return exc.code
+        return "cancelled"
+
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        futures = [pool.submit(consume), pool.submit(cancel)]
+        results = sorted(future.result() for future in futures)
+
+    assert "workflow-editor-session-not-found" in results
+    assert len({"consumed", "cancelled"} & set(results)) == 1
+    assert manager.validated_return_count == (1 if "consumed" in results else 0)
 
 
 @pytest.mark.parametrize(
