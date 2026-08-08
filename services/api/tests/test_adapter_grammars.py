@@ -153,3 +153,22 @@ def test_an_explicit_choice_still_runs_but_is_told_the_truth() -> None:
 def test_one_current_grammar_in_a_stack_is_passed_through() -> None:
     mixed = [resolve(review()), resolve(None, install_id="install-2")]
     assert resolve_stack(mixed, automatic=True).grammar is GRAMMAR
+
+
+def test_a_review_whose_grammar_cannot_be_rebuilt_is_stale() -> None:
+    """Without this it passed as current carrying no grammar, which reads
+    downstream as "there was nothing to apply" rather than as a failure."""
+
+    resolution = resolve(review(grammar=None))
+    assert resolution.outcome is GrammarOutcome.STALE
+    assert any("cannot read" in reason for reason in resolution.reasons)
+    assert resolution.bars_automatic_choice
+
+
+def test_composition_does_not_block_a_choice_already_made() -> None:
+    """An explicit stack has no automatic selection to refuse, so refusing one
+    would read as blocking the user's own choice."""
+
+    both = [resolve(review()), resolve(review(install_id="install-2"), install_id="install-2")]
+    assert resolve_stack(both, automatic=True).refuse_automatic
+    assert not resolve_stack(both, automatic=False).refuse_automatic

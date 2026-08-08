@@ -88,6 +88,11 @@ def staleness_reasons(
     reasons: list[str] = []
     if not review.reviewed:
         reasons.append("this grammar has not been reviewed on this machine")
+    # A review whose grammar this build can no longer rebuild is not a review of
+    # anything. Without this it passed as current carrying no grammar, which
+    # reads downstream as "there was nothing to apply" rather than as a failure.
+    if review.grammar is None:
+        reasons.append("this build cannot read the reviewed grammar")
     if review.asset_sha256 != running_asset_sha256:
         reasons.append("the adapter file changed since the grammar was reviewed")
     if review.schema_version != SCHEMA_VERSION:
@@ -176,9 +181,12 @@ def resolve_stack(resolutions: list[GrammarResolution], *, automatic: bool) -> S
     usable = [item for item in resolutions if item.usable]
 
     if len(usable) > 1:
+        # An explicit stack is honoured and simply told nothing. There is no
+        # automatic selection to refuse, and refusing one anyway would read as
+        # blocking a choice the user already made.
         return StackGrammar(
             None,
-            refuse_automatic=True,
+            refuse_automatic=automatic,
             warnings=warnings + (COMPOSITION_UNDEFINED,),
             provenance=provenance,
         )
