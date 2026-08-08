@@ -918,7 +918,7 @@ describe("App", () => {
     });
   });
 
-  it("offers only runtime-verified vision profiles in the per-chat vision selector", async () => {
+  it("keeps the legacy vision profile internal instead of exposing a second selector", async () => {
     const stamp = "2026-07-22T00:00:00Z";
     const chat = {
       id: "chat-vision-selector",
@@ -944,18 +944,6 @@ describe("App", () => {
     vi.mocked(api.chat).mockResolvedValue({ ...chat, messages: [] });
     vi.mocked(api.profiles).mockResolvedValue([
       {
-        id: "profile-text-only",
-        model_install_id: "model-text-only",
-        name: "Text only",
-        use_case: "",
-        role: "chat",
-        engine: "mock",
-        load_settings_json: {},
-        request_settings_json: {},
-        input_modalities: ["text"],
-        is_default: false,
-      },
-      {
         id: "profile-vision",
         model_install_id: "model-vision",
         name: "Visual observer",
@@ -968,10 +956,6 @@ describe("App", () => {
         is_default: false,
       },
     ]);
-    vi.mocked(api.updateChat).mockResolvedValue({
-      ...chat,
-      active_vision_profile_id: "profile-vision",
-    });
     const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
     render(
       <QueryClientProvider client={client}>
@@ -979,18 +963,16 @@ describe("App", () => {
       </QueryClientProvider>,
     );
 
-    const selector = await screen.findByRole("combobox", { name: "vision" });
-    expect(selector).toHaveValue("__auto__");
-    const optionNames = Array.from(selector.querySelectorAll("option"), (option) => option.textContent);
-    expect(optionNames).toContain("Visual observer");
-    expect(optionNames).not.toContain("Text only");
-    expect(optionNames).toContain("Off");
-
-    fireEvent.change(selector, { target: { value: "profile-vision" } });
-    await waitFor(() => expect(api.updateChat).toHaveBeenCalledWith(
-      chat.id,
-      { active_vision_profile_id: "profile-vision" },
-    ));
+    const selector = await screen.findByRole("combobox", {
+      name: "Workflow for this request type",
+    });
+    await waitFor(() => expect(selector).toHaveValue("default"));
+    expect(screen.queryByRole("combobox", { name: "vision" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("option", { name: "Visual observer" })).not.toBeInTheDocument();
+    expect(api.updateChat).not.toHaveBeenCalled();
+    fireEvent.click(screen.getByRole("button", { name: "Manage Vision selector" }));
+    expect(screen.getByRole("dialog", { name: "Manage chat" })).toBeVisible();
+    expect(screen.queryByText("Workflows for this chat")).not.toBeInTheDocument();
   });
 
   it("removes a deleted chat immediately while the API request is pending", async () => {
@@ -4708,9 +4690,20 @@ describe("App", () => {
   });
   it("shows an Auto submission while model routing is pending", async () => {
     const stamp = "2026-07-22T00:00:00Z";
+    const project = {
+      id: "project-auto-routing",
+      name: "Auto routing project",
+      description: "",
+      instructions: "",
+      pinned: false, archived: false,
+      image_workflow_revision_id: null,
+      video_workflow_revision_id: null,
+      created_at: stamp,
+      updated_at: stamp,
+    };
     const chat = {
       id: "chat-auto-routing",
-      project_id: null,
+      project_id: project.id,
       title: "Auto routing",
       archived: false,
       pinned: false, routing_mode: "auto" as const,
@@ -4724,6 +4717,7 @@ describe("App", () => {
       updated_at: stamp,
     };
     localStorage.setItem("local-lm-chat", chat.id);
+    vi.mocked(api.projects).mockResolvedValue([project]);
     vi.mocked(api.chats).mockResolvedValue([chat]);
     vi.mocked(api.chat).mockResolvedValue({ ...chat, messages: [] });
     vi.mocked(api.sendTurn).mockReturnValue(new Promise(() => {}));
@@ -4736,6 +4730,12 @@ describe("App", () => {
 
     const composer = await screen.findByRole("textbox", { name: "Message" });
     expect(screen.getByRole("combobox", { name: "Generation mode" })).toHaveValue("auto");
+    expect(screen.getByText("Chosen after request classification")).toBeVisible();
+    expect(screen.queryByRole("combobox", { name: "Workflow for this request type" }))
+      .not.toBeInTheDocument();
+    expect(api.workflowFamilies).not.toHaveBeenCalled();
+    expect(api.chatWorkflowSelections).not.toHaveBeenCalled();
+    expect(api.projectWorkflowSelections).not.toHaveBeenCalled();
     fireEvent.change(composer, { target: { value: "Surprise me with a tiny story" } });
     fireEvent.click(screen.getByRole("button", { name: "Send" }));
 
