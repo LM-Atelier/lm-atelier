@@ -139,6 +139,16 @@ SECRET_PATTERNS = (
     re.compile(r"AKIA[0-9A-Z]{16}"),
     re.compile(r"BEGIN (?:RSA |EC |OPENSSH )?PRIVATE KEY"),
 )
+# Some files carry machine-readable handling flags saying they must never be
+# published. Matching the declaration rather than a path means the rule survives
+# a rename, a copy, or an excerpt pasted into another document - which is how
+# this kind of content actually escapes.
+SELF_EXCLUDING_MARKERS = (
+    re.compile(r'"never_commit"\s*:\s*true'),
+    re.compile(r'"never_publish"\s*:\s*true'),
+    re.compile(r'"never_include_in_public_documentation"\s*:\s*true'),
+)
+
 MARKDOWN_LINK = re.compile(r"!?\[[^\]]*]\((?P<target>[^)]+)\)")
 # A UTF-8 sequence re-read as cp1252 or latin-1 always begins with one of
 # these pairs. They are written as escapes so this file stays ASCII and
@@ -199,6 +209,16 @@ def contains_secret(path: str) -> bool:
 # particular has to ship byte for byte as its author published it, and one
 # of the OFL files carries trailing whitespace upstream.
 VENDORED_TEXT = ("apps/web/public/fonts/",)
+
+
+def declares_it_must_not_ship(path: str) -> bool:
+    """Whether a file carries content that declared itself unpublishable."""
+
+    try:
+        text = Path(path).read_text(encoding="utf-8", errors="ignore")
+    except OSError:
+        return False
+    return any(pattern.search(text) for pattern in SELF_EXCLUDING_MARKERS)
 
 
 def is_vendored(path: str) -> bool:
@@ -278,6 +298,13 @@ def main() -> int:
         raise SystemExit(
             "Private, generated, executable, or runtime artifacts are in the "
             "candidate:\n- " + "\n- ".join(unsafe)
+        )
+
+    self_excluding = [path for path in paths if declares_it_must_not_ship(path)]
+    if self_excluding:
+        raise SystemExit(
+            "Files that declare they must never be published are in the "
+            "candidate:\n- " + "\n- ".join(self_excluding)
         )
 
     secret_paths = [path for path in paths if contains_secret(path)]
