@@ -11,9 +11,10 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from .adapters.contracts import ADAPTER_CONTRACT_VERSION
+from .auxiliary_assets import AUXILIARY_ASSET_KINDS
 from .comfy_templates import COMFY_TEMPLATE_COMPILER_VERSION
 from .domain import new_id
-from .model_manifests import ModelManifestInspection
+from .model_manifests import ModelManifestInspection, comfy_folder_for_kind
 from .models import InstallPlan, ModelComponentManifest
 
 INSTALL_RESOLVER_VERSION = "install-resolver-v9"
@@ -385,6 +386,13 @@ def resolve_install_plan(
     workflow_reference_kind: str | None = None,
     provider: str = "huggingface",
 ) -> ResolvedInstallPlan:
+    auxiliary_folder = None
+    if auxiliary_kind:
+        if auxiliary_kind not in AUXILIARY_ASSET_KINDS:
+            raise ValueError("unsupported auxiliary asset kind")
+        auxiliary_folder = comfy_folder_for_kind(auxiliary_kind)
+        if auxiliary_folder is None:
+            raise ValueError("auxiliary asset has no ComfyUI model folder")
     metadata_by_path = {component.path: component for component in inspection.components}
     workflow_contracts = {
         path: contract
@@ -417,15 +425,8 @@ def resolve_install_plan(
                 )
             ),
             target_folder=(
-                {
-                    "lora": "loras",
-                    "vae": "vae",
-                    "controlnet": "controlnet",
-                    "upscaler": "upscale_models",
-                    "embedding": "embeddings",
-                    "ip_adapter": "ipadapter",
-                }[auxiliary_kind]
-                if auxiliary_kind
+                auxiliary_folder
+                if auxiliary_folder
                 else workflow_contracts.get(
                     str(item["filename"]),
                     (

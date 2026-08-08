@@ -25,7 +25,7 @@ from starlette.responses import FileResponse
 
 from . import __version__
 from .api_errors import api_error
-from .auxiliary_assets import COMFY_AUXILIARY_FOLDERS, validate_lora_workflow_contract
+from .auxiliary_assets import AUXILIARY_ASSET_KINDS, validate_lora_workflow_contract
 from .capability_evidence import current_capability_evidence, evidence_input_modalities
 from .capability_probe import probe_structured_tools
 from .catalog_sources import CatalogSource, CatalogSourceNotFound
@@ -99,6 +99,7 @@ from .model_manifests import (
     MAX_METADATA_BYTES,
     MAX_WEIGHT_HEADER_BYTES,
     ModelManifestError,
+    comfy_folder_for_kind,
     inspect_repository_metadata,
 )
 from .model_planner import (
@@ -3505,6 +3506,13 @@ async def resolve_catalog_preflight(
         return result.model_copy(update={"install_plan": plan, "file_variants": variants})
 
     if payload.auxiliary_kind:
+        auxiliary_folder = comfy_folder_for_kind(payload.auxiliary_kind)
+        if payload.auxiliary_kind not in AUXILIARY_ASSET_KINDS or auxiliary_folder is None:
+            raise api_error(
+                422,
+                "auxiliary-kind-unsupported",
+                "Unsupported model asset kind.",
+            )
         if payload.role != "image":
             result = assess(detail)
             return await finalize(
@@ -3527,7 +3535,7 @@ async def resolve_catalog_preflight(
         return await finalize(
             assess(detail).model_copy(
                 update={
-                    "comfy_paths": {COMFY_AUXILIARY_FOLDERS[payload.auxiliary_kind]: "."},
+                    "comfy_paths": {auxiliary_folder: "."},
                 }
             ),
             detail,
@@ -4149,7 +4157,7 @@ async def list_model_assets(
 ) -> list[ModelAssetInstall]:
     statement = select(ModelAssetInstall)
     if kind:
-        if kind not in COMFY_AUXILIARY_FOLDERS:
+        if kind not in AUXILIARY_ASSET_KINDS:
             raise HTTPException(422, "unsupported model asset kind")
         statement = statement.where(ModelAssetInstall.kind == kind)
     return list(

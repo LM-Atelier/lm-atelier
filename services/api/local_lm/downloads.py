@@ -26,7 +26,7 @@ from sqlalchemy.orm import Session
 
 from .adapters.base import ChatAdapter, ChatRequest, MediaRequest
 from .auxiliary_assets import (
-    COMFY_AUXILIARY_FOLDERS,
+    AUXILIARY_ASSET_KINDS,
     detect_lora_extension,
     validate_lora_workflow_contract,
 )
@@ -47,9 +47,12 @@ from .gguf import (
     validate_gguf_selection,
 )
 from .model_manifests import (
+    COMFY_MODEL_ASSET_KINDS,
+    COMFY_MODEL_FOLDERS,
     MAX_METADATA_BYTES,
     MAX_WEIGHT_HEADER_BYTES,
     ModelManifestInspection,
+    comfy_folder_for_kind,
     inspect_repository_metadata,
 )
 from .model_planner import (
@@ -111,21 +114,7 @@ _TRANSFER_ATTEMPTS = 3
 # or the displayed transfer rate silently disappears.
 _TRANSFER_SAMPLE_SECONDS = 1.0
 _PROVISIONAL_INSTALL_KEY = "_provisional_install"
-_WORKFLOW_ASSET_KINDS = frozenset(
-    {
-        "checkpoint",
-        "clip_vision",
-        "controlnet",
-        "diffusion_model",
-        "embedding",
-        "gguf_model",
-        "ip_adapter",
-        "lora",
-        "text_encoder",
-        "upscaler",
-        "vae",
-    }
-)
+_WORKFLOW_ASSET_KINDS = COMFY_MODEL_ASSET_KINDS | {"gguf_model"}
 logger = logging.getLogger(__name__)
 _VISION_PROBE_DATA_URL = (
     "data:image/png;base64,"
@@ -224,6 +213,13 @@ class DownloadManager:
             raise ValueError(f"unsupported download provider: {provider}")
         if request.auxiliary_kind and request.workflow_asset_kind:
             raise ValueError("a download cannot be both auxiliary and workflow-owned")
+        auxiliary_folder = None
+        if request.auxiliary_kind:
+            if request.auxiliary_kind not in AUXILIARY_ASSET_KINDS:
+                raise ValueError("unsupported auxiliary asset kind")
+            auxiliary_folder = comfy_folder_for_kind(request.auxiliary_kind)
+            if auxiliary_folder is None:
+                raise ValueError("auxiliary asset has no ComfyUI model folder")
         if (request.auxiliary_kind or request.workflow_asset_kind) and not request.install_plan_id:
             raise ValueError("model assets require a verified install plan")
         if request.workflow_asset_kind and (
@@ -244,8 +240,8 @@ class DownloadManager:
             request = request.model_copy(
                 update={
                     "comfy_paths": (
-                        {COMFY_AUXILIARY_FOLDERS[request.auxiliary_kind]: "."}
-                        if request.auxiliary_kind
+                        {auxiliary_folder: "."}
+                        if auxiliary_folder
                         else self._automatic_comfy_paths(request.allow_patterns)
                     )
                 }
@@ -269,21 +265,9 @@ class DownloadManager:
                 raise ValueError("expected hash paths must be safe relative paths")
             if not re.fullmatch(r"[0-9a-f]{64}", digest):
                 raise ValueError("expected SHA-256 values must be lowercase hexadecimal")
-        allowed_comfy_folders = {
-            "checkpoints",
-            "diffusion_models",
-            "text_encoders",
-            "vae",
-            "clip_vision",
-            "loras",
-            "controlnet",
-            "upscale_models",
-            "embeddings",
-            "ipadapter",
-        }
         for folder, relative_path in request.comfy_paths.items():
             path = PurePosixPath(relative_path)
-            if folder not in allowed_comfy_folders:
+            if folder not in COMFY_MODEL_FOLDERS:
                 raise ValueError(f"unsupported ComfyUI model folder: {folder}")
             if path.is_absolute() or ".." in path.parts:
                 raise ValueError("ComfyUI model paths must be safe relative paths")
@@ -344,23 +328,11 @@ class DownloadManager:
 
     @staticmethod
     def _automatic_comfy_paths(filenames: list[str]) -> dict[str, str]:
-        known_folders = {
-            "checkpoints",
-            "diffusion_models",
-            "text_encoders",
-            "vae",
-            "clip_vision",
-            "loras",
-            "controlnet",
-            "upscale_models",
-            "embeddings",
-            "ipadapter",
-        }
         paths: dict[str, str] = {}
         for filename in filenames:
             parts = PurePosixPath(filename).parts
             for index, part in enumerate(parts[:-1]):
-                if part in known_folders:
+                if part in COMFY_MODEL_FOLDERS:
                     paths[part] = str(PurePosixPath(*parts[: index + 1]))
         if paths:
             return paths

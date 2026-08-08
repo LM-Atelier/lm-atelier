@@ -689,6 +689,9 @@ def test_automatic_comfy_paths_cover_checkpoint_and_component_layouts() -> None:
         "text_encoders": "split_files/text_encoders",
         "vae": "split_files/vae",
     }
+    assert DownloadManager._automatic_comfy_paths(
+        ["split_files/ipadapter/reference.safetensors"]
+    ) == {"ipadapter": "split_files/ipadapter"}
 
 
 def _write_safetensors_header(path: Path, tensor_names: list[str]) -> None:
