@@ -30,6 +30,7 @@ from .model_manifests import COMFY_MODEL_FOLDERS, comfy_folder_for_kind
 from .models import ModelAssetInstall, ModelInstall, ModelProfile
 from .network import shared_tls_context
 from .schemas import WorkerStatus
+from .security import trusted_browser_origins
 from .subprocess_env import python_subprocess_environment
 from .worker_failures import WorkerFailure, WorkerFailureCode, classify_worker_failure
 
@@ -549,6 +550,7 @@ class ProcessSupervisor:
                 comfy_executable=executable,
                 comfy_directory=directory,
                 custom_node_root=self.settings.custom_node_dir,
+                coordinator_origins=trusted_browser_origins(self.settings),
             )
         except ComfyEditorBridgeError as exc:
             logger.warning("Native workflow editing is unavailable: %s", exc)

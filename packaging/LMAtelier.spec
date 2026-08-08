@@ -45,6 +45,14 @@ editor_bridge_datas = [
     and "__pycache__" not in source.parts
     and source.suffix not in {".pyc", ".pyo"}
 ]
+editor_shell_root = (
+    repository_root / "services" / "api" / "local_lm" / "workflow_editor_shell_assets"
+)
+editor_shell_datas = [
+    (str(source), "local_lm/workflow_editor_shell_assets")
+    for source in editor_shell_root.iterdir()
+    if source.is_file()
+]
 
 datas = [
     (str(repository_root / "apps" / "web" / "dist"), "web"),
@@ -56,6 +64,7 @@ datas = [
     *migration_datas,
     *capability_pack_datas,
     *editor_bridge_datas,
+    *editor_shell_datas,
     (str(repository_root / "build" / "release-metadata" / "LICENSE"), "."),
     (
         str(repository_root / "build" / "release-metadata" / "THIRD_PARTY_NOTICES.md"),

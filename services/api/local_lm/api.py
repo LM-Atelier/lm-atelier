@@ -20,7 +20,7 @@ from fastapi import APIRouter, Depends, File, HTTPException, Query, Request, Res
 from sqlalchemy import Select, and_, func, or_, select, text
 from sqlalchemy.exc import IntegrityError, SQLAlchemyError
 from sqlalchemy.orm import Session, selectinload
-from starlette.responses import FileResponse
+from starlette.responses import FileResponse, HTMLResponse
 
 from . import __version__
 from .api_errors import api_error
@@ -36,6 +36,7 @@ from .chat_deletion import (
 )
 from .chat_forking import ForkSourceNotFound, fork_chat_from_message
 from .civitai_catalog import CivitaiCatalog
+from .comfy_editor_bridge import ComfyEditorBridgeError
 from .comfy_registry import ComfyRegistryClient
 from .comfy_registry_activation import (
     ComfyRegistryActivationError,
@@ -365,6 +366,14 @@ from .workflow_editor_sessions import (
     WorkflowEditorSessionError,
     workflow_api_graph_sha256,
     workflow_ui_graph_sha256,
+)
+from .workflow_editor_shell import (
+    SHELL_SCRIPT_ROUTE,
+    SHELL_STYLE_ROUTE,
+    workflow_editor_origins_conflict,
+    workflow_editor_shell_asset,
+    workflow_editor_shell_csp,
+    workflow_editor_shell_document,
 )
 from .workflow_install_offers import (
     WorkflowInstallOfferError,
@@ -6697,6 +6706,58 @@ async def derive_workflow_trust(
         revision.trusted = True
         session.commit()
     return TrustDerivation(**decision.as_dict())
+
+
+def _workflow_editor_shell_asset_response(name: str, media_type: str) -> Response:
+    try:
+        content = workflow_editor_shell_asset(name)
+    except ComfyEditorBridgeError as exc:
+        raise api_error(500, exc.code, str(exc)) from exc
+    return Response(
+        content=content,
+        media_type=media_type,
+        headers={"Cache-Control": "no-store"},
+    )
+
+
+@router.get(SHELL_SCRIPT_ROUTE.removeprefix("/api"), include_in_schema=False)
+async def workflow_editor_shell_script() -> Response:
+    return _workflow_editor_shell_asset_response("shell.js", "application/javascript")
+
+
+@router.get(SHELL_STYLE_ROUTE.removeprefix("/api"), include_in_schema=False)
+async def workflow_editor_shell_style() -> Response:
+    return _workflow_editor_shell_asset_response("shell.css", "text/css")
+
+
+@router.get("/workflow-editor/shell", include_in_schema=False)
+async def workflow_editor_shell(request: Request) -> HTMLResponse:
+    services = _services(request)
+    if services.processes.workflow_editor_runtime_identity() is None:
+        raise api_error(
+            409,
+            "workflow-editor-runtime-not-ready",
+            "Start the supported media runtime before opening this workflow.",
+        )
+    shell_origin = f"{request.url.scheme}://{request.url.netloc}"
+    if workflow_editor_origins_conflict(services.settings.comfy_url, shell_origin):
+        raise api_error(
+            409,
+            "workflow-editor-origin-conflict",
+            "The media runtime must use a separate loopback origin for native editing.",
+        )
+    try:
+        document = workflow_editor_shell_document(services.settings.comfy_url)
+        csp = workflow_editor_shell_csp(services.settings.comfy_url)
+    except ComfyEditorBridgeError as exc:
+        raise api_error(500, exc.code, str(exc)) from exc
+    return HTMLResponse(
+        document,
+        headers={
+            "Cache-Control": "no-store",
+            "Content-Security-Policy": csp,
+        },
+    )
 
 
 @router.get("/workflows/{workflow_id}/open-target", response_model=WorkflowOpenTarget)

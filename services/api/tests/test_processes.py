@@ -18,7 +18,7 @@ import pytest
 from sqlalchemy.orm import object_session
 
 import local_lm.comfy_registry_interpreter as registry_interpreter_module
-from local_lm.comfy_editor_bridge import BRIDGE_DIRECTORY_NAME
+from local_lm.comfy_editor_bridge import BRIDGE_COORDINATOR_CONFIG, bridge_directory_name
 from local_lm.comfy_registry_installs import ComfyRegistryLaunchContract
 from local_lm.comfy_registry_paths import registry_wheel_environment_root
 from local_lm.comfy_registry_runtime import ComfyRegistryRuntimeDistribution
@@ -36,6 +36,7 @@ from local_lm.processes import (
     _RotatingWorkerLog,
     _with_comfy_registry_overlays,
 )
+from local_lm.security import trusted_browser_origins
 from local_lm.worker_failures import WorkerFailureCode
 from local_lm.workflow_activations import (
     WorkflowActivationLaunchScope,
@@ -1548,10 +1549,13 @@ async def test_media_start_whitelists_only_the_verified_first_party_editor_bridg
     await supervisor.start_media()
 
     command = captured["command"]
-    assert command[command.index("--whitelist-custom-nodes") + 1 :] == [BRIDGE_DIRECTORY_NAME]
-    staged = runtime / "custom_nodes" / BRIDGE_DIRECTORY_NAME
+    bridge_name = bridge_directory_name(trusted_browser_origins(settings))
+    assert command[command.index("--whitelist-custom-nodes") + 1 :] == [bridge_name]
+    staged = runtime / "custom_nodes" / bridge_name
     assert (staged / "__init__.py").is_file()
     assert (staged / "js" / "lm_atelier_workflow_editor.js").is_file()
+    config = (staged / BRIDGE_COORDINATOR_CONFIG).read_text(encoding="utf-8")
+    assert f"http://127.0.0.1:{settings.port}" in config
 
 
 async def test_media_start_uses_only_the_exact_activation_scope(
