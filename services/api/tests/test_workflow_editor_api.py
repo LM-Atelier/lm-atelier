@@ -7,6 +7,8 @@ from typing import Any
 import pytest
 from fastapi import FastAPI
 from httpx2 import AsyncClient
+from sqlalchemy.exc import IntegrityError
+from sqlalchemy.orm import Session
 
 from local_lm.workflow_editor_sessions import (
     WorkflowEditorSessions,
@@ -107,6 +109,8 @@ async def _create_workflow(
     engine: str = "comfyui",
     ui_graph: dict[str, Any] | None = None,
     api_graph: dict[str, Any] | None = None,
+    input_schema: dict[str, Any] | None = None,
+    dependencies: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     response = await client.post(
         "/api/workflows",
@@ -116,6 +120,8 @@ async def _create_workflow(
             "engine": engine,
             "ui_graph": _ui_graph() if ui_graph is None else ui_graph,
             "api_graph": _api_graph() if api_graph is None else api_graph,
+            "input_schema": input_schema or {},
+            "dependencies": dependencies or {},
             "trusted": True,
         },
     )
@@ -550,3 +556,361 @@ async def test_consume_compiler_and_inventory_failures_preserve_session(
     monkeypatch.setattr(services.engines.media, "object_info", available, raising=False)
     retry = await client.post(path, json=payload)
     assert retry.status_code == 200
+
+
+async def test_validated_return_creates_one_untrusted_noncurrent_draft(
+    app: FastAPI,
+    client: AsyncClient,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _ready_editor(app, monkeypatch)
+    workflow = await _create_workflow(client)
+    started = (await client.post(f"/api/workflows/{workflow['id']}/editor-sessions")).json()
+    consumed = await client.post(
+        f"/api/workflows/{workflow['id']}/editor-sessions/{started['id']}/consume",
+        json={
+            "nonce": started["nonce"],
+            "base_revision_id": started["base_revision_id"],
+            "ui_graph": _edited_ui_graph(),
+            "api_prompt": _edited_api_graph(),
+        },
+    )
+    assert consumed.status_code == 200
+    receipt = consumed.json()["validated_return_id"]
+    draft_path = f"/api/workflows/{workflow['id']}/editor-drafts"
+
+    extra = await client.post(
+        draft_path,
+        json={"validated_return_id": receipt, "trusted": True},
+    )
+    assert extra.status_code == 422
+    wrong_workflow = await client.post(
+        "/api/workflows/workflow_two/editor-drafts",
+        json={"validated_return_id": receipt},
+    )
+    assert wrong_workflow.status_code == 409
+    assert wrong_workflow.json()["code"] == "workflow-editor-validated-return-mismatch"
+
+    created = await client.post(draft_path, json={"validated_return_id": receipt})
+    assert created.status_code == 200
+    assert receipt not in str(created.request.url)
+    result = created.json()
+    assert result["created"]
+    assert not result["forked"]
+    assert not result["trusted"]
+    assert result["review_required"]
+    assert result["base_revision_id"] == workflow["current_revision_id"]
+    assert result["current_revision_id"] == workflow["current_revision_id"]
+    assert result["draft_revision_id"].startswith("wfrev_editor_")
+    assert receipt not in result["draft_revision_id"]
+
+    repeated = await client.post(draft_path, json={"validated_return_id": receipt})
+    assert repeated.status_code == 200
+    assert repeated.json() == {**result, "created": False}
+    retained = app.state.services.workflow_editor_sessions.validated_return(
+        validated_return_id=receipt,
+        workflow_id=workflow["id"],
+        runtime_identity="runtime_one",
+    )
+    assert retained.draft_revision_id == result["draft_revision_id"]
+
+    after = next(
+        item for item in (await client.get("/api/workflows")).json() if item["id"] == workflow["id"]
+    )
+    assert after["current_revision_id"] == workflow["current_revision_id"]
+    assert len(after["revisions"]) == 2
+    draft = next(
+        revision for revision in after["revisions"] if revision["id"] == result["draft_revision_id"]
+    )
+    assert draft["ui_graph_json"] == _edited_ui_graph()
+    assert draft["api_graph_json"] == _edited_api_graph()
+    assert draft["trusted"] is False
+    assert receipt not in str(draft)
+
+
+async def test_editor_draft_reports_fork_without_replacing_new_current_revision(
+    app: FastAPI,
+    client: AsyncClient,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _ready_editor(app, monkeypatch)
+    workflow = await _create_workflow(client)
+    started = (await client.post(f"/api/workflows/{workflow['id']}/editor-sessions")).json()
+    consumed = (
+        await client.post(
+            f"/api/workflows/{workflow['id']}/editor-sessions/{started['id']}/consume",
+            json={
+                "nonce": started["nonce"],
+                "base_revision_id": started["base_revision_id"],
+                "ui_graph": _edited_ui_graph(),
+                "api_prompt": _edited_api_graph(),
+            },
+        )
+    ).json()
+    advanced = await client.post(
+        f"/api/workflows/{workflow['id']}/revisions",
+        json={"ui_graph": _ui_graph(), "api_graph": _api_graph(), "trusted": True},
+    )
+    assert advanced.status_code == 201
+
+    created = await client.post(
+        f"/api/workflows/{workflow['id']}/editor-drafts",
+        json={"validated_return_id": consumed["validated_return_id"]},
+    )
+    assert created.status_code == 200
+    result = created.json()
+    assert result["forked"]
+    assert result["current_revision_id"] == advanced.json()["id"]
+    assert result["draft_revision_id"] != advanced.json()["id"]
+
+    after = next(
+        item for item in (await client.get("/api/workflows")).json() if item["id"] == workflow["id"]
+    )
+    assert after["current_revision_id"] == advanced.json()["id"]
+    assert len(after["revisions"]) == 3
+
+
+async def test_unchanged_editor_return_cannot_create_a_draft(
+    app: FastAPI,
+    client: AsyncClient,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _ready_editor(app, monkeypatch)
+    workflow = await _create_workflow(client)
+    started = (await client.post(f"/api/workflows/{workflow['id']}/editor-sessions")).json()
+    consumed = (
+        await client.post(
+            f"/api/workflows/{workflow['id']}/editor-sessions/{started['id']}/consume",
+            json={
+                "nonce": started["nonce"],
+                "base_revision_id": started["base_revision_id"],
+                "ui_graph": _ui_graph(),
+                "api_prompt": _api_graph(),
+            },
+        )
+    ).json()
+
+    refused = await client.post(
+        f"/api/workflows/{workflow['id']}/editor-drafts",
+        json={"validated_return_id": consumed["validated_return_id"]},
+    )
+    assert refused.status_code == 409
+    assert refused.json()["code"] == "workflow-editor-return-unchanged"
+    after = next(
+        item for item in (await client.get("/api/workflows")).json() if item["id"] == workflow["id"]
+    )
+    assert after["current_revision_id"] == workflow["current_revision_id"]
+    assert len(after["revisions"]) == 1
+
+
+async def test_editor_draft_refuses_dependency_bearing_asset_changes(
+    app: FastAPI,
+    client: AsyncClient,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _ready_editor(app, monkeypatch)
+    workflow = await _create_workflow(client)
+    started = (await client.post(f"/api/workflows/{workflow['id']}/editor-sessions")).json()
+    changed_ui = _edited_ui_graph()
+    changed_ui["nodes"][0]["widgets_values"][0] = "replacement.safetensors"
+    changed_api = _edited_api_graph()
+    changed_api["1"]["inputs"]["label"] = "replacement.safetensors"
+    consumed = (
+        await client.post(
+            f"/api/workflows/{workflow['id']}/editor-sessions/{started['id']}/consume",
+            json={
+                "nonce": started["nonce"],
+                "base_revision_id": started["base_revision_id"],
+                "ui_graph": changed_ui,
+                "api_prompt": changed_api,
+            },
+        )
+    ).json()
+
+    refused = await client.post(
+        f"/api/workflows/{workflow['id']}/editor-drafts",
+        json={"validated_return_id": consumed["validated_return_id"]},
+    )
+    assert refused.status_code == 422
+    assert refused.json()["code"] == "workflow-editor-draft-dependencies-changed"
+    assert (
+        app.state.services.workflow_editor_sessions.validated_return(
+            validated_return_id=consumed["validated_return_id"],
+            workflow_id=workflow["id"],
+            runtime_identity="runtime_one",
+        ).draft_revision_id
+        is None
+    )
+
+
+@pytest.mark.parametrize("edited_binding", ["literal", "${negative_prompt}"])
+async def test_editor_draft_refuses_removed_or_replaced_runtime_binding(
+    app: FastAPI,
+    client: AsyncClient,
+    monkeypatch: pytest.MonkeyPatch,
+    edited_binding: str,
+) -> None:
+    _ready_editor(app, monkeypatch)
+    base_ui = _ui_graph()
+    base_ui["nodes"][0]["widgets_values"][0] = "${prompt}"
+    base_api = _api_graph()
+    base_api["1"]["inputs"]["label"] = "${prompt}"
+    workflow = await _create_workflow(
+        client,
+        ui_graph=base_ui,
+        api_graph=base_api,
+        input_schema={"type": "object", "properties": {"prompt": {"type": "string"}}},
+    )
+    started = (await client.post(f"/api/workflows/{workflow['id']}/editor-sessions")).json()
+    edited_ui = deepcopy(base_ui)
+    edited_ui["nodes"][0]["widgets_values"][0] = edited_binding
+    edited_api = deepcopy(base_api)
+    edited_api["1"]["inputs"]["label"] = edited_binding
+    consumed = (
+        await client.post(
+            f"/api/workflows/{workflow['id']}/editor-sessions/{started['id']}/consume",
+            json={
+                "nonce": started["nonce"],
+                "base_revision_id": started["base_revision_id"],
+                "ui_graph": edited_ui,
+                "api_prompt": edited_api,
+            },
+        )
+    ).json()
+
+    refused = await client.post(
+        f"/api/workflows/{workflow['id']}/editor-drafts",
+        json={"validated_return_id": consumed["validated_return_id"]},
+    )
+    assert refused.status_code == 422
+    assert refused.json()["code"] == "workflow-editor-draft-bindings-changed"
+
+
+async def test_editor_draft_drops_stale_template_provenance(
+    app: FastAPI,
+    client: AsyncClient,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _ready_editor(app, monkeypatch)
+    workflow = await _create_workflow(
+        client,
+        dependencies={
+            "template_id": "image_template",
+            "template_sha256": "a" * 64,
+            "compiler_version": 7,
+            "model_install_ids": ["install_one"],
+        },
+    )
+    started = (await client.post(f"/api/workflows/{workflow['id']}/editor-sessions")).json()
+    consumed = (
+        await client.post(
+            f"/api/workflows/{workflow['id']}/editor-sessions/{started['id']}/consume",
+            json={
+                "nonce": started["nonce"],
+                "base_revision_id": started["base_revision_id"],
+                "ui_graph": _edited_ui_graph(),
+                "api_prompt": _edited_api_graph(),
+            },
+        )
+    ).json()
+    created = (
+        await client.post(
+            f"/api/workflows/{workflow['id']}/editor-drafts",
+            json={"validated_return_id": consumed["validated_return_id"]},
+        )
+    ).json()
+
+    after = next(
+        item for item in (await client.get("/api/workflows")).json() if item["id"] == workflow["id"]
+    )
+    draft = next(
+        revision
+        for revision in after["revisions"]
+        if revision["id"] == created["draft_revision_id"]
+    )
+    assert draft["dependencies_json"] == {"model_install_ids": ["install_one"]}
+
+
+async def test_editor_draft_recovers_when_commit_succeeds_before_conflict_signal(
+    app: FastAPI,
+    client: AsyncClient,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _ready_editor(app, monkeypatch)
+    workflow = await _create_workflow(client)
+    started = (await client.post(f"/api/workflows/{workflow['id']}/editor-sessions")).json()
+    consumed = (
+        await client.post(
+            f"/api/workflows/{workflow['id']}/editor-sessions/{started['id']}/consume",
+            json={
+                "nonce": started["nonce"],
+                "base_revision_id": started["base_revision_id"],
+                "ui_graph": _edited_ui_graph(),
+                "api_prompt": _edited_api_graph(),
+            },
+        )
+    ).json()
+    original_commit = Session.commit
+    signalled = False
+
+    def committed_then_signalled(db: Session) -> None:
+        nonlocal signalled
+        original_commit(db)
+        if not signalled:
+            signalled = True
+            raise IntegrityError("simulated ambiguous commit", {}, RuntimeError("conflict"))
+
+    monkeypatch.setattr(Session, "commit", committed_then_signalled)
+    response = await client.post(
+        f"/api/workflows/{workflow['id']}/editor-drafts",
+        json={"validated_return_id": consumed["validated_return_id"]},
+    )
+
+    assert response.status_code == 200
+    assert response.json()["created"] is False
+    after = next(
+        item for item in (await client.get("/api/workflows")).json() if item["id"] == workflow["id"]
+    )
+    assert after["current_revision_id"] == workflow["current_revision_id"]
+    assert len(after["revisions"]) == 2
+
+
+async def test_editor_draft_version_conflict_keeps_receipt_retryable(
+    app: FastAPI,
+    client: AsyncClient,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _ready_editor(app, monkeypatch)
+    workflow = await _create_workflow(client)
+    started = (await client.post(f"/api/workflows/{workflow['id']}/editor-sessions")).json()
+    consumed = (
+        await client.post(
+            f"/api/workflows/{workflow['id']}/editor-sessions/{started['id']}/consume",
+            json={
+                "nonce": started["nonce"],
+                "base_revision_id": started["base_revision_id"],
+                "ui_graph": _edited_ui_graph(),
+                "api_prompt": _edited_api_graph(),
+            },
+        )
+    ).json()
+    original_commit = Session.commit
+
+    def conflicted(_db: Session) -> None:
+        raise IntegrityError("simulated version race", {}, RuntimeError("conflict"))
+
+    monkeypatch.setattr(Session, "commit", conflicted)
+    first = await client.post(
+        f"/api/workflows/{workflow['id']}/editor-drafts",
+        json={"validated_return_id": consumed["validated_return_id"]},
+    )
+    assert first.status_code == 409
+    assert first.json()["code"] == "workflow-editor-draft-version-conflict"
+
+    monkeypatch.setattr(Session, "commit", original_commit)
+    retry = await client.post(
+        f"/api/workflows/{workflow['id']}/editor-drafts",
+        json={"validated_return_id": consumed["validated_return_id"]},
+    )
+    assert retry.status_code == 200
+    assert retry.json()["created"]

@@ -5,7 +5,7 @@ import hmac
 import secrets
 import threading
 from collections.abc import Callable, Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import UTC, datetime, timedelta
 from typing import Any
 
@@ -96,6 +96,7 @@ class ValidatedWorkflowEditorReturn:
     returned_ui_graph_json: str
     returned_api_graph_json: str
     runtime_identity: str
+    draft_revision_id: str | None = None
 
 
 def workflow_ui_graph_sha256(graph: Mapping[str, Any]) -> str:
@@ -313,22 +314,42 @@ class WorkflowEditorSessions:
         now = _aware_utc(self._clock())
         with self._lock:
             self._purge_expired(now)
-            validated = self._validated_returns.get(validated_return_id)
-            if validated is None:
+            return self._validated_return_locked(
+                validated_return_id=validated_return_id,
+                workflow_id=workflow_id,
+                runtime_identity=runtime_identity,
+            )
+
+    def bind_validated_return_to_draft(
+        self,
+        *,
+        validated_return_id: str,
+        workflow_id: str,
+        runtime_identity: str,
+        draft_revision_id: str,
+    ) -> ValidatedWorkflowEditorReturn:
+        """Bind a receipt to exactly one deterministic immutable draft."""
+
+        validated_return_id = _identifier(validated_return_id, "validated workflow editor return")
+        workflow_id = _identifier(workflow_id, "workflow")
+        runtime_identity = _identifier(runtime_identity, "workflow editor runtime")
+        draft_revision_id = _identifier(draft_revision_id, "workflow revision")
+        now = _aware_utc(self._clock())
+        with self._lock:
+            self._purge_expired(now)
+            validated = self._validated_return_locked(
+                validated_return_id=validated_return_id,
+                workflow_id=workflow_id,
+                runtime_identity=runtime_identity,
+            )
+            if validated.draft_revision_id not in {None, draft_revision_id}:
                 raise WorkflowEditorSessionError(
-                    "workflow-editor-validated-return-not-found",
-                    "The validated workflow editor return is unavailable or expired",
+                    "workflow-editor-validated-return-already-applied",
+                    "The validated editor return is already bound to another draft",
                 )
-            if validated.result.workflow_id != workflow_id:
-                raise WorkflowEditorSessionError(
-                    "workflow-editor-validated-return-mismatch",
-                    "The validated editor return does not match this workflow",
-                )
-            if validated.runtime_identity != runtime_identity:
-                raise WorkflowEditorSessionError(
-                    "workflow-editor-runtime-changed",
-                    "The media runtime changed after the editor return was validated",
-                )
+            if validated.draft_revision_id is None:
+                validated = replace(validated, draft_revision_id=draft_revision_id)
+                self._validated_returns[validated_return_id] = validated
             return validated
 
     def clear(self) -> None:
@@ -405,6 +426,31 @@ class WorkflowEditorSessions:
                 "The media runtime changed while the workflow editor was open",
             )
         return session
+
+    def _validated_return_locked(
+        self,
+        *,
+        validated_return_id: str,
+        workflow_id: str,
+        runtime_identity: str,
+    ) -> ValidatedWorkflowEditorReturn:
+        validated = self._validated_returns.get(validated_return_id)
+        if validated is None:
+            raise WorkflowEditorSessionError(
+                "workflow-editor-validated-return-not-found",
+                "The validated workflow editor return is unavailable or expired",
+            )
+        if validated.result.workflow_id != workflow_id:
+            raise WorkflowEditorSessionError(
+                "workflow-editor-validated-return-mismatch",
+                "The validated editor return does not match this workflow",
+            )
+        if validated.runtime_identity != runtime_identity:
+            raise WorkflowEditorSessionError(
+                "workflow-editor-runtime-changed",
+                "The media runtime changed after the editor return was validated",
+            )
+        return validated
 
     def _purge_expired(self, now: datetime) -> None:
         expired = [

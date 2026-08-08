@@ -493,6 +493,84 @@ def test_validated_return_receipt_retains_exact_canonical_graph_pair() -> None:
     assert wrong_runtime.value.code == "workflow-editor-runtime-changed"
 
 
+def test_validated_return_binds_idempotently_to_exactly_one_draft() -> None:
+    manager, _clock = _sessions()
+    session = _start(manager)
+    result = manager.consume(
+        session_id=session.id,
+        nonce=session.nonce,
+        workflow_id=session.workflow_id,
+        base_revision_id=session.base_revision_id,
+        current_revision_id=session.base_revision_id,
+        returned_ui_graph=_graph(node_type="VAEDecode"),
+        returned_api_graph=_prompt(node_type="VAEDecode"),
+        runtime_identity=session.runtime_identity,
+    )
+
+    first = manager.bind_validated_return_to_draft(
+        validated_return_id=result.validated_return_id,
+        workflow_id=session.workflow_id,
+        runtime_identity=session.runtime_identity,
+        draft_revision_id="revision_draft_one",
+    )
+    repeated = manager.bind_validated_return_to_draft(
+        validated_return_id=result.validated_return_id,
+        workflow_id=session.workflow_id,
+        runtime_identity=session.runtime_identity,
+        draft_revision_id="revision_draft_one",
+    )
+    assert first.draft_revision_id == "revision_draft_one"
+    assert repeated == first
+    with pytest.raises(WorkflowEditorSessionError) as rebound:
+        manager.bind_validated_return_to_draft(
+            validated_return_id=result.validated_return_id,
+            workflow_id=session.workflow_id,
+            runtime_identity=session.runtime_identity,
+            draft_revision_id="revision_draft_two",
+        )
+    assert rebound.value.code == "workflow-editor-validated-return-already-applied"
+
+
+def test_concurrent_draft_bindings_allow_exactly_one_identity() -> None:
+    manager, _clock = _sessions()
+    session = _start(manager)
+    result = manager.consume(
+        session_id=session.id,
+        nonce=session.nonce,
+        workflow_id=session.workflow_id,
+        base_revision_id=session.base_revision_id,
+        current_revision_id=session.base_revision_id,
+        returned_ui_graph=_graph(node_type="VAEDecode"),
+        returned_api_graph=_prompt(node_type="VAEDecode"),
+        runtime_identity=session.runtime_identity,
+    )
+
+    def bind(draft_revision_id: str) -> str:
+        try:
+            manager.bind_validated_return_to_draft(
+                validated_return_id=result.validated_return_id,
+                workflow_id=session.workflow_id,
+                runtime_identity=session.runtime_identity,
+                draft_revision_id=draft_revision_id,
+            )
+        except WorkflowEditorSessionError as exc:
+            return exc.code
+        return draft_revision_id
+
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        futures = [pool.submit(bind, f"revision_draft_{index}") for index in range(2)]
+        results = [future.result() for future in futures]
+
+    assert results.count("workflow-editor-validated-return-already-applied") == 1
+    winner = next(value for value in results if value.startswith("revision_draft_"))
+    retained = manager.validated_return(
+        validated_return_id=result.validated_return_id,
+        workflow_id=session.workflow_id,
+        runtime_identity=session.runtime_identity,
+    )
+    assert retained.draft_revision_id == winner
+
+
 def test_runtime_change_refuses_return_without_consuming_the_session() -> None:
     manager, _clock = _sessions()
     session = _start(manager)
