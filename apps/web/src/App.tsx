@@ -43,6 +43,7 @@ import {
   X,
 } from "lucide-react";
 import { AccessibleDialog } from "./AccessibleDialog";
+import { ActiveChatWorkflowSelector } from "./ActiveChatWorkflowSelector";
 import { CopyTextButton } from "./CopyTextButton";
 import { InstallConfirmDialog } from "./InstallConfirmDialog";
 import { api } from "./api";
@@ -146,7 +147,6 @@ type SendTurnVariables = PendingTurn & {
   stopCurrent?: boolean;
 };
 
-const AUTO_PROFILE_ID = "__auto__";
 const SETUP_DISMISSED_KEY = "lm-atelier-setup-dismissed";
 const CURRENT_CHAT_KEY = "local-lm-chat";
 
@@ -875,14 +875,20 @@ function Composer({
     attachments.some((attachment) => attachment.kind === "image")
     || (priorImage && usePriorVisual)
   );
-  const families = useQuery({ queryKey: ["workflow-families"], queryFn: () => api.workflowFamilies() });
+  const needsWorkflowSchema = mode === "image" || mode === "video";
+  const families = useQuery({
+    queryKey: ["workflow-families"],
+    queryFn: () => api.workflowFamilies(),
+    enabled: needsWorkflowSchema,
+  });
   const selections = useQuery({
     queryKey: ["chat", chat?.id, "workflow-selections"],
     queryFn: () => api.chatWorkflowSelections(chat!.id),
-    enabled: Boolean(chat?.id),
+    enabled: needsWorkflowSchema && Boolean(chat?.id),
   });
   const projectSelections = useQuery({ queryKey: ["project", project?.id, "workflow-selections"],
-    queryFn: () => api.projectWorkflowSelections(project!.id), enabled: Boolean(project?.id) });
+    queryFn: () => api.projectWorkflowSelections(project!.id),
+    enabled: needsWorkflowSchema && Boolean(project?.id) });
   const imageProfile = profiles.find((profile) => profile.id === chat.active_image_profile_id)
     ?? profiles.find((profile) => profile.role === "image" && profile.is_default);
   const profileValues = {
@@ -1046,6 +1052,10 @@ function Composer({
                 </select>
                 <ChevronDown size={13} />
               </label>
+              <div className="composer-workflow-selector">
+                <WorkflowIcon aria-hidden="true" size={15} />
+                <ActiveChatWorkflowSelector chatId={chat.id} routingMode={mode} />
+              </div>
               {imageEdit && <button className="icon-button" onClick={() => setStudioOpen(true)} aria-label="Open editing studio" title="One-click edits"><Wand2 size={18} /></button>}
               <button className="icon-button" onClick={() => setSettingsOpen(true)} aria-label="Turn settings"><SlidersHorizontal size={18} /></button>
             </div>
@@ -1185,7 +1195,6 @@ function ChatView({
   onPreset,
   onMode,
   onSend,
-  onProfile,
   onRegenerate,
   onSelectRevision,
   onEdit,
@@ -1214,7 +1223,6 @@ function ChatView({
   onPreset: (presetId: string | null) => void;
   onMode: (mode: RoutingMode) => void;
   onSend: (text: string, mode: RoutingMode, artifacts: string[], settings: Record<string, unknown>) => void;
-  onProfile: (field: "active_chat_profile_id" | "active_vision_profile_id" | "active_image_profile_id" | "active_video_profile_id", id: string | null) => void;
   onRegenerate: (messageId: string, settings: Record<string, unknown>) => void;
   onSelectRevision: (messageId: string, revisionId: string) => void;
   onEdit: (
@@ -1312,22 +1320,6 @@ function ChatView({
     <div className="chat-view">
       <div className="chat-header">
         <div><small>{chat.project_id ? "Project chat" : "Unfiled chat"}</small><h1>{chat.title}</h1></div>
-        <div className="chat-profile-selectors">
-          {(["chat", "vision", "image", "video"] as const).map((role) => {
-            const field = `active_${role}_profile_id` as "active_chat_profile_id" | "active_vision_profile_id" | "active_image_profile_id" | "active_video_profile_id";
-            const defaultProfile = role === "vision"
-              ? undefined
-              : profiles.find((profile) => profile.role === role && profile.is_default);
-            const selected = profiles.find((profile) => profile.id === chat[field]);
-            const value = role !== "vision" && selected?.is_default ? "" : chat[field] ?? "";
-            const options = profiles.filter((profile) => (
-              role === "vision"
-                ? profile.role === "chat" && profile.input_modalities?.includes("image")
-                : profile.role === role
-            ) && (role === "vision" || !profile.is_default));
-            return <label key={role}><span>{role}</span><select value={value} onChange={(event) => onProfile(field, event.target.value || null)}><option value={AUTO_PROFILE_ID}>Auto</option><option value="">{role === "vision" ? "Off" : `Default${defaultProfile ? ` · ${defaultProfile.name}` : ""}`}</option>{options.map((profile) => <option key={profile.id} value={profile.id}>{profile.name}</option>)}</select></label>;
-          })}
-        </div>
       </div>
       {/* Reported here because the global list belongs to a component the
           transcript cannot reach. */}
@@ -2413,8 +2405,6 @@ export default function App() {
       persistActiveChat({ generation_preset_ids_json: bindings });
     }} onMode={(mode) => {
       persistActiveChat({ routing_mode: mode });
-    }} onProfile={(field, id) => {
-      persistActiveChat({ [field]: id });
     }} onRegenerate={(messageId, settings) => {
       if (displayedChat) regenerate.mutate({ chatId: displayedChat.id, messageId, settings });
     }} onSelectRevision={(messageId, revisionId) => {
