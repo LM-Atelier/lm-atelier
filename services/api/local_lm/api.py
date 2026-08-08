@@ -278,6 +278,9 @@ from .schemas import (
     WorkflowDependencyImpactOut,
     WorkflowDependencyResourceKind,
     WorkflowEditorCancelIn,
+    WorkflowEditorConsumeIn,
+    WorkflowEditorGraphDeltaOut,
+    WorkflowEditorReturnOut,
     WorkflowEditorSessionOut,
     WorkflowFamilyOut,
     WorkflowFamilyPreferenceOut,
@@ -359,6 +362,7 @@ from .workflow_edit_calibration import validate_workflow_edit_calibration
 from .workflow_editor_sessions import (
     WorkflowEditorSessionError,
     workflow_api_graph_sha256,
+    workflow_ui_graph_sha256,
 )
 from .workflow_install_offers import (
     WorkflowInstallOfferError,
@@ -6834,6 +6838,210 @@ async def start_workflow_editor_session(
         expires_at=editor_session.expires_at,
         ui_graph=revision.ui_graph_json,
         nonce=editor_session.nonce,
+    )
+
+
+@router.post(
+    "/workflows/{workflow_id}/editor-sessions/{session_id}/consume",
+    response_model=WorkflowEditorReturnOut,
+)
+async def consume_workflow_editor_session(
+    workflow_id: str,
+    session_id: str,
+    payload: WorkflowEditorConsumeIn,
+    request: Request,
+    response: Response,
+    session: SessionDep,
+) -> WorkflowEditorReturnOut:
+    services = _services(request)
+    runtime_identity = services.processes.workflow_editor_runtime_identity()
+    if runtime_identity is None:
+        raise api_error(
+            409,
+            "workflow-editor-runtime-not-ready",
+            "The supported media runtime is no longer available.",
+        )
+    try:
+        editor_session = services.workflow_editor_sessions.authorize_return(
+            session_id=session_id,
+            nonce=payload.nonce,
+            workflow_id=workflow_id,
+            base_revision_id=payload.base_revision_id,
+            runtime_identity=runtime_identity,
+        )
+    except WorkflowEditorSessionError as exc:
+        if exc.code == "workflow-editor-session-not-found":
+            raise api_error(404, exc.code, str(exc)) from exc
+        if exc.code == "workflow-editor-session-authentication-failed":
+            raise api_error(403, exc.code, str(exc)) from exc
+        if exc.code in {
+            "workflow-editor-session-mismatch",
+            "workflow-editor-runtime-changed",
+        }:
+            raise api_error(409, exc.code, str(exc)) from exc
+        raise api_error(
+            422,
+            "workflow-editor-session-invalid",
+            "The workflow editor return could not be authenticated.",
+            reason_code=exc.code,
+        ) from exc
+
+    definition = session.get(WorkflowDefinition, editor_session.workflow_id)
+    base_revision = session.get(WorkflowRevision, editor_session.base_revision_id)
+    if (
+        definition is None
+        or base_revision is None
+        or base_revision.workflow_id != definition.id
+        or not base_revision.ui_graph_json
+        or not base_revision.api_graph_json
+    ):
+        raise api_error(
+            409,
+            "workflow-editor-base-revision-changed",
+            "The workflow revision opened by this editor session is no longer available.",
+        )
+    try:
+        base_graph_sha256 = workflow_ui_graph_sha256(base_revision.ui_graph_json)
+        base_prompt_sha256 = workflow_api_graph_sha256(base_revision.api_graph_json)
+    except WorkflowEditorSessionError as exc:
+        raise api_error(
+            409,
+            "workflow-editor-base-revision-invalid",
+            "The workflow revision opened by this editor session can no longer be verified.",
+            reason_code=exc.code,
+        ) from exc
+    if (
+        base_graph_sha256 != editor_session.base_graph_sha256
+        or base_prompt_sha256 != editor_session.base_prompt_sha256
+    ):
+        raise api_error(
+            409,
+            "workflow-editor-base-revision-changed",
+            "The workflow revision changed while the native editor was open.",
+        )
+
+    try:
+        workflow_ui_graph_sha256(payload.ui_graph)
+        returned_prompt_sha256 = workflow_api_graph_sha256(payload.api_prompt)
+    except WorkflowEditorSessionError as exc:
+        raise api_error(
+            422,
+            "workflow-editor-return-invalid",
+            "The workflow editor returned an invalid graph or prompt.",
+            reason_code=exc.code,
+        ) from exc
+
+    describe_nodes = getattr(services.engines.media, "object_info", None)
+    if not callable(describe_nodes):
+        raise api_error(
+            503,
+            "workflow-editor-node-inventory-unavailable",
+            "The media runtime cannot describe its workflow nodes.",
+        )
+    invalidate_nodes = getattr(services.engines.media, "invalidate_object_info_cache", None)
+    if callable(invalidate_nodes):
+        invalidate_nodes()
+    try:
+        object_info = await describe_nodes()
+    except Exception as exc:  # noqa: BLE001 - every runtime failure is unavailable here
+        raise api_error(
+            503,
+            "workflow-editor-node-inventory-unavailable",
+            "The media runtime could not describe its workflow nodes.",
+        ) from exc
+    if not isinstance(object_info, Mapping):
+        raise api_error(
+            503,
+            "workflow-editor-node-inventory-invalid",
+            "The media runtime returned an invalid workflow node inventory.",
+        )
+    try:
+        compilation = compile_comfyui_ui_graph(payload.ui_graph, object_info)
+        compiled_api_graph = {key: dict(value) for key, value in compilation.api_graph.items()}
+        compiled_prompt_sha256 = workflow_api_graph_sha256(compiled_api_graph)
+    except WorkflowCompilationError as exc:
+        raise api_error(
+            422,
+            "workflow-editor-return-cannot-compile",
+            "The returned visual workflow cannot be compiled.",
+            reason_code=exc.code,
+        ) from exc
+    except WorkflowEditorSessionError as exc:
+        raise api_error(
+            422,
+            "workflow-editor-return-invalid",
+            "The workflow editor returned an invalid graph or prompt.",
+            reason_code=exc.code,
+        ) from exc
+    if compiled_prompt_sha256 != returned_prompt_sha256:
+        raise api_error(
+            422,
+            "workflow-editor-return-prompt-mismatch",
+            "The returned visual workflow does not match its executable prompt.",
+        )
+    if services.processes.workflow_editor_runtime_identity() != runtime_identity:
+        raise api_error(
+            409,
+            "workflow-editor-runtime-changed",
+            "The media runtime changed while the workflow editor return was verified.",
+        )
+
+    session.refresh(definition, attribute_names=["current_revision_id"])
+    if not definition.current_revision_id:
+        raise api_error(
+            409,
+            "workflow-editor-current-revision-missing",
+            "The workflow no longer has a current revision.",
+        )
+    try:
+        result = services.workflow_editor_sessions.consume(
+            session_id=session_id,
+            nonce=payload.nonce,
+            workflow_id=workflow_id,
+            base_revision_id=payload.base_revision_id,
+            current_revision_id=definition.current_revision_id,
+            returned_ui_graph=payload.ui_graph,
+            returned_api_graph=compiled_api_graph,
+            runtime_identity=runtime_identity,
+        )
+    except WorkflowEditorSessionError as exc:
+        if exc.code == "workflow-editor-session-not-found":
+            raise api_error(404, exc.code, str(exc)) from exc
+        if exc.code == "workflow-editor-session-authentication-failed":
+            raise api_error(403, exc.code, str(exc)) from exc
+        if exc.code in {
+            "workflow-editor-session-mismatch",
+            "workflow-editor-runtime-changed",
+        }:
+            raise api_error(409, exc.code, str(exc)) from exc
+        raise api_error(
+            422,
+            "workflow-editor-return-invalid",
+            "The workflow editor return could not be consumed.",
+            reason_code=exc.code,
+        ) from exc
+    response.headers["Cache-Control"] = "no-store"
+    return WorkflowEditorReturnOut(
+        validated_return_id=result.validated_return_id,
+        session_id=result.session_id,
+        workflow_id=result.workflow_id,
+        base_revision_id=result.base_revision_id,
+        current_revision_id=result.current_revision_id,
+        base_graph_sha256=result.base_graph_sha256,
+        returned_graph_sha256=result.returned_graph_sha256,
+        base_prompt_sha256=result.base_prompt_sha256,
+        returned_prompt_sha256=result.returned_prompt_sha256,
+        changed=result.changed,
+        forked=result.forked,
+        delta=WorkflowEditorGraphDeltaOut(
+            node_count_delta=result.delta.node_count_delta,
+            link_count_delta=result.delta.link_count_delta,
+            added_node_types=result.delta.added_node_types,
+            removed_node_types=result.delta.removed_node_types,
+            added_asset_filenames=result.delta.added_asset_filenames,
+            removed_asset_filenames=result.delta.removed_asset_filenames,
+        ),
+        expires_at=result.expires_at,
     )
 
 
