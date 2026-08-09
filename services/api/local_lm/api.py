@@ -131,6 +131,7 @@ from .models import (
     ModelProfile,
     Project,
     ProjectWorkflowSelection,
+    ReferenceSubject,
     ResponseFeedback,
     ResponseRevision,
     ResponseRevisionPart,
@@ -175,6 +176,16 @@ from .prompt_helpers import (
     prompt_preview_settings,
 )
 from .recipes import get_reference_recipe, list_reference_recipes
+from .reference_library import (
+    DEFAULT_PAGE,
+    create_subject,
+    deletion_impact,
+    list_subjects,
+    rename_subject,
+    set_archived,
+    set_favorite,
+)
+from .references import ReferenceError
 from .routing import RouteConfirmationRequired
 from .runtime_config import persist_runtime_values
 from .schemas import (
@@ -245,7 +256,12 @@ from .schemas import (
     PromptHelperCreate,
     PromptHelperDetail,
     PromptHelperUpdate,
+    ReferenceDeletionImpact,
     ReferenceRecipe,
+    ReferenceSubjectCreate,
+    ReferenceSubjectOut,
+    ReferenceSubjectPage,
+    ReferenceSubjectUpdate,
     RegenerateRequest,
     RegistryInstallOut,
     RegistryInstallReviewOut,
@@ -4175,6 +4191,140 @@ async def list_models(request: Request, session: SessionDep) -> list[ModelInstal
         )
         for install in installs
     ]
+
+
+@router.post("/references", response_model=ReferenceSubjectOut, status_code=201)
+async def create_reference_subject(
+    payload: ReferenceSubjectCreate,
+    session: SessionDep,
+) -> ReferenceSubject:
+    try:
+        subject = create_subject(
+            session,
+            name=payload.name,
+            kind=payload.kind,
+            mention_slug=payload.mention_slug,
+            description=payload.description,
+            aliases=payload.aliases,
+            tags=payload.tags,
+        )
+    except ReferenceError as exc:
+        raise api_error(422, "reference-invalid", str(exc)) from exc
+    session.commit()
+    session.refresh(subject)
+    return subject
+
+
+@router.get("/references", response_model=ReferenceSubjectPage)
+async def list_reference_subjects(
+    session: SessionDep,
+    kind: str | None = None,
+    search: str | None = None,
+    include_archived: bool = False,
+    limit: int = DEFAULT_PAGE,
+    offset: int = 0,
+) -> ReferenceSubjectPage:
+    try:
+        rows, total = list_subjects(
+            session,
+            kind=kind,
+            include_archived=include_archived,
+            search=search,
+            limit=limit,
+            offset=offset,
+        )
+    except ReferenceError as exc:
+        raise api_error(422, "reference-query-invalid", str(exc)) from exc
+    return ReferenceSubjectPage(
+        items=[ReferenceSubjectOut.model_validate(row, from_attributes=True) for row in rows],
+        total=total,
+        limit=limit,
+        offset=offset,
+    )
+
+
+def _subject_or_404(session: Session, subject_id: str) -> ReferenceSubject:
+    subject = session.get(ReferenceSubject, subject_id)
+    if not subject:
+        raise api_error(404, "reference-not-found", "That reference does not exist.")
+    return subject
+
+
+@router.get("/references/{subject_id}", response_model=ReferenceSubjectOut)
+async def read_reference_subject(subject_id: str, session: SessionDep) -> ReferenceSubject:
+    return _subject_or_404(session, subject_id)
+
+
+@router.patch("/references/{subject_id}", response_model=ReferenceSubjectOut)
+async def update_reference_subject(
+    subject_id: str,
+    payload: ReferenceSubjectUpdate,
+    session: SessionDep,
+) -> ReferenceSubject:
+    subject = _subject_or_404(session, subject_id)
+    try:
+        if payload.name is not None:
+            rename_subject(
+                session, subject, name=payload.name, follow_mention=payload.follow_mention
+            )
+        if payload.archived is not None:
+            set_archived(session, subject, payload.archived)
+        if payload.favorite is not None:
+            set_favorite(session, subject, payload.favorite)
+    except ReferenceError as exc:
+        raise api_error(422, "reference-invalid", str(exc)) from exc
+    session.commit()
+    session.refresh(subject)
+    return subject
+
+
+@router.get("/references/{subject_id}/deletion-impact", response_model=ReferenceDeletionImpact)
+async def read_reference_deletion_impact(
+    subject_id: str, session: SessionDep
+) -> ReferenceDeletionImpact:
+    """What deleting would destroy, answered before anything is destroyed.
+
+    A separate read rather than a field on the subject: it is a question about
+    consequences, asked at the moment someone is deciding, and computing it on
+    every list would cost a scan per subject to answer a question nobody asked.
+    """
+
+    subject = _subject_or_404(session, subject_id)
+    impact = deletion_impact(session, subject)
+    return ReferenceDeletionImpact(
+        reference_subject_id=impact.reference_subject_id,
+        name=impact.name,
+        asset_count=impact.asset_count,
+        exclusive_artifact_ids=list(impact.exclusive_artifact_ids),
+    )
+
+
+@router.delete("/references/{subject_id}", status_code=204)
+async def delete_reference_subject(
+    subject_id: str,
+    session: SessionDep,
+    acknowledged_assets: int | None = None,
+) -> Response:
+    """Permanently delete a subject, but only against a seen impact.
+
+    `acknowledged_assets` must match what `deletion-impact` currently reports.
+    Archiving is the ordinary removal; this path destroys membership rows and is
+    not undoable, so it refuses unless the caller is deleting the thing they
+    were shown rather than something that has changed since.
+    """
+
+    subject = _subject_or_404(session, subject_id)
+    impact = deletion_impact(session, subject)
+    if acknowledged_assets is None or acknowledged_assets != impact.asset_count:
+        raise api_error(
+            409,
+            "reference-impact-not-acknowledged",
+            "Confirm the deletion impact first; this reference now holds "
+            f"{impact.asset_count} image(s).",
+        )
+    session.delete(subject)
+    session.commit()
+    return Response(status_code=204)
 
 
 @router.get("/model-assets", response_model=list[ModelAssetOut])

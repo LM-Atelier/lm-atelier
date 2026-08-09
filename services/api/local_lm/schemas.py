@@ -1709,6 +1709,72 @@ class AdapterPromptGrammarOut(ApiModel):
     reviewed_at: datetime | None
 
 
+class ReferenceSubjectCreate(ApiModel):
+    """A new subject. The mention is derived unless one is asked for by name.
+
+    Leaving `mention_slug` unset is the ordinary path and collides gracefully -
+    two real people can share a name, so a derived mention is suffixed rather
+    than refused. Asking for one explicitly is refused on collision instead,
+    because the user asked for that exact mention and quietly giving them a
+    different one would be worse than saying no.
+    """
+
+    name: str = Field(min_length=1, max_length=120)
+    kind: str
+    mention_slug: str | None = Field(default=None, max_length=64)
+    description: str | None = Field(default=None, max_length=4_000)
+    aliases: list[str] = Field(default_factory=list, max_length=32)
+    tags: list[str] = Field(default_factory=list, max_length=32)
+
+
+class ReferenceSubjectUpdate(ApiModel):
+    """Rename, archive or favourite. Every field is optional and independent.
+
+    `follow_mention` defaults to false: a rename does not move the mention,
+    because a live chat draft may already hold the old one and silently
+    breaking it is worse than a mention that no longer matches the name.
+    """
+
+    name: str | None = Field(default=None, min_length=1, max_length=120)
+    follow_mention: bool = False
+    archived: bool | None = None
+    favorite: bool | None = None
+
+
+class ReferenceSubjectOut(ApiModel):
+    id: str
+    name: str
+    mention_slug: str
+    kind: str
+    description: str | None
+    aliases_json: list[str]
+    tags_json: list[str]
+    cover_artifact_id: str | None
+    favorite: bool
+    archived: bool
+
+
+class ReferenceSubjectPage(ApiModel):
+    items: list[ReferenceSubjectOut]
+    total: int
+    limit: int
+    offset: int
+
+
+class ReferenceDeletionImpact(ApiModel):
+    """What deleting would destroy, offered before it is done.
+
+    `exclusive_artifact_ids` counts only images nobody else references. A
+    photograph showing two subjects belongs to both, and removing one of them
+    is not permission to delete the picture.
+    """
+
+    reference_subject_id: str
+    name: str
+    asset_count: int
+    exclusive_artifact_ids: list[str]
+
+
 class RecipeFile(ApiModel):
     path: str
     size_bytes: int | None = None
