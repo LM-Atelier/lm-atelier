@@ -669,7 +669,7 @@ async def engine_capabilities(request: Request) -> list[EngineCapabilities]:
     try:
         return await _services(request).engines.capabilities()
     except EngineSchemaUnavailableError as exc:
-        raise HTTPException(503, str(exc)) from exc
+        raise api_error(503, "engine-schema-unavailable", str(exc)) from exc
 
 
 @router.post("/engines/chat/tool-probe", response_model=ToolCapabilityProbe)
@@ -1345,12 +1345,20 @@ async def _validate_generation_defaults(
         if preset_id is None:
             continue
         if len(preset_id) > 40:
-            raise HTTPException(422, f"{role} generation preset id is too long")
+            raise api_error(
+                422, "generation-preset-id-too-long", f"{role} generation preset id is too long"
+            )
         preset = session.get(GenerationPreset, preset_id)
         if not preset:
-            raise HTTPException(404, f"{role} generation preset not found")
+            raise api_error(
+                404, "generation-preset-not-found", f"{role} generation preset not found"
+            )
         if preset.role != role:
-            raise HTTPException(422, f"{role} generation preset has an incompatible role")
+            raise api_error(
+                422,
+                "generation-preset-role-mismatch",
+                f"{role} generation preset has an incompatible role",
+            )
 
 
 @router.post("/projects", response_model=ProjectOut, status_code=201)
@@ -1471,7 +1479,7 @@ async def export_project(
             session, project_id, include_media=include_media
         )
     except LookupError as exc:
-        raise HTTPException(404, str(exc)) from exc
+        raise api_error(404, "project-not-found", str(exc)) from exc
     session.commit()
     result = ArtifactOut.model_validate(artifact)
     result.url = f"/api/artifacts/{artifact.id}/content"
@@ -1865,9 +1873,9 @@ async def update_chat(
             continue
         profile = session.get(ModelProfile, profile_id)
         if not profile:
-            raise HTTPException(404, f"{role} profile not found")
+            raise api_error(404, "profile-not-found", f"{role} profile not found")
         if profile.role != role:
-            raise HTTPException(422, f"{field} requires a {role} profile")
+            raise api_error(422, "profile-required", f"{field} requires a {role} profile")
         _validated_profile_install(
             session,
             model_install_id=profile.model_install_id,
@@ -1887,8 +1895,9 @@ async def update_chat(
                 else None
             )
             if "image" not in evidence_input_modalities(evidence):
-                raise HTTPException(
+                raise api_error(
                     422,
+                    "vision-profile-not-verified",
                     "active_vision_profile_id requires a runtime-verified vision profile",
                 )
     for key, value in values.items():
@@ -3019,7 +3028,7 @@ async def catalog_search(
     try:
         catalog: CatalogSource = services.catalog_sources.get(source)
     except CatalogSourceNotFound as exc:
-        raise HTTPException(404, str(exc)) from exc
+        raise api_error(404, "catalog-source-not-found", str(exc)) from exc
     try:
         media_catalog = role in {"image", "video"} and services.settings.media_engine == "comfyui"
         page = await catalog.search(
@@ -3091,7 +3100,7 @@ async def catalog_search(
             }
         )
     except ValueError as exc:
-        raise HTTPException(422, f"invalid catalog request: {exc}") from exc
+        raise api_error(422, "catalog-request-invalid", f"invalid catalog request: {exc}") from exc
     except Exception as exc:
         raise HTTPException(
             503,
@@ -3144,7 +3153,7 @@ async def catalog_item_detail(
     try:
         selected_source = services.catalog_sources.get(source)
     except CatalogSourceNotFound as exc:
-        raise HTTPException(404, str(exc)) from exc
+        raise api_error(404, "catalog-source-not-found", str(exc)) from exc
     if not selected_source.validate_item_id(item_id):
         raise api_error(422, "catalog-item-id-invalid", "invalid catalog item id")
     try:
@@ -3219,7 +3228,7 @@ async def catalog_preflight(
             payload,
         )
     except CatalogUnavailableError as exc:
-        raise HTTPException(503, str(exc)) from exc
+        raise api_error(503, "catalog-unavailable", str(exc)) from exc
 
 
 async def resolve_catalog_preflight(
@@ -4118,7 +4127,7 @@ async def install_recipe(recipe_id: str, request: Request, session: SessionDep) 
             validate_resolved=lambda resolved: _assert_recipe_pins_hold(recipe, resolved),
         )
     except CatalogUnavailableError as exc:
-        raise HTTPException(503, str(exc)) from exc
+        raise api_error(503, "catalog-unavailable", str(exc)) from exc
     except ValueError as exc:
         # Refused before persistence, so no installable plan is left behind.
         session.rollback()
@@ -4535,7 +4544,7 @@ async def update_model_asset(
     for field in ("default_model_strength", "default_clip_strength"):
         value = values.get(field)
         if value is not None and not math.isfinite(value):
-            raise HTTPException(422, f"{field} must be finite")
+            raise api_error(422, "number-not-finite", f"{field} must be finite")
     next_use_case = values.get("use_case", asset.use_case).strip()
     next_auto_apply = values.get("auto_apply", asset.auto_apply)
     if next_auto_apply and not next_use_case:
@@ -5586,7 +5595,7 @@ async def update_profile(
     try:
         validate_profile_binding(session, profile)
     except LookupError as exc:
-        raise HTTPException(404, str(exc)) from exc
+        raise api_error(404, "profile-not-found", str(exc)) from exc
     except ValueError as exc:
         raise HTTPException(422, str(exc)) from exc
     values = payload.model_dump(exclude_unset=True)
@@ -5691,7 +5700,7 @@ async def reset_profile(profile_id: str, session: SessionDep) -> ModelProfile:
     try:
         validate_profile_binding(session, profile)
     except LookupError as exc:
-        raise HTTPException(404, str(exc)) from exc
+        raise api_error(404, "profile-not-found", str(exc)) from exc
     except ValueError as exc:
         raise HTTPException(422, str(exc)) from exc
     profile.load_settings_json = {}
