@@ -458,9 +458,13 @@ _ORDINAL_WORDS = {
 }
 _LIST_ITEM = re.compile(r"^\s*(?:\d{1,2}[.)]\s+|[-*\u2022\u2023\u25e6]\s+)(?P<item>\S.*?)\s*$")
 _OUTPUT_COUNT = re.compile(
+    # The whitespace runs are possessive because nothing that follows them can
+    # begin with whitespace, so giving characters back can never turn a failure
+    # into a match - it only lets the engine retry a run of spaces one length at
+    # a time against input it can never satisfy.
     r"\b(?P<count>\d{1,2}|one|two|three|four|five|six|seven|eight|nine|ten|"
-    r"eleven|twelve|thirteen|fourteen|fifteen|sixteen)\s+"
-    r"(?:different\s+|distinct\s+)?"
+    r"eleven|twelve|thirteen|fourteen|fifteen|sixteen)\s++"
+    r"(?:(?:different|distinct)\s++)?"
     r"(?:images?|pictures?|videos?|clips?|variations?|versions?|options?|renders?)\b",
     re.IGNORECASE,
 )

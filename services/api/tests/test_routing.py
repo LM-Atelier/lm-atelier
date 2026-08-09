@@ -1057,3 +1057,30 @@ def test_whitespace_before_punctuation_is_dropped_in_one_pass() -> None:
     started = time.perf_counter()
     assert _tighten_punctuation(" " * 200_000 + "x").endswith("x")
     assert time.perf_counter() - started < 1.0
+
+
+def test_a_run_of_spaces_is_never_retried_one_length_at_a_time() -> None:
+    """The count pattern's whitespace runs are possessive.
+
+    Nothing that can follow those runs begins with whitespace, so giving
+    characters back can never turn a failure into a match - it only lets the
+    engine retry a long run of spaces against input it cannot satisfy. Making
+    them possessive removes that path without changing what matches, which the
+    equivalence assertions below are here to hold.
+    """
+
+    from local_lm.routing import _OUTPUT_COUNT
+
+    assert _OUTPUT_COUNT.search("make 5 images").group("count") == "5"
+    assert _OUTPUT_COUNT.search("two   distinct   videos").group("count") == "two"
+    assert _OUTPUT_COUNT.search("SIX  DIFFERENT  CLIPS").group("count").casefold() == "six"
+
+    # Near-misses that must still not match.
+    for text in ("5different images", "5 differentimages", "no count here"):
+        assert _OUTPUT_COUNT.search(text) is None, text
+
+    # A long run of whitespace resolves promptly rather than being explored.
+    hostile = "5" + " " * 20_000 + "x"
+    start = time.perf_counter()
+    assert _OUTPUT_COUNT.search(hostile) is None
+    assert time.perf_counter() - start < 1.0
