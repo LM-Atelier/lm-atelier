@@ -1,6 +1,7 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
+import { useEffect } from "react";
 import { StudioView } from "./StudioView";
 import { api } from "./api";
 import { useStudioSession } from "./useStudioSession";
@@ -14,6 +15,17 @@ vi.mock("./api", () => ({
   },
 }));
 vi.mock("./useStudioSession", () => ({ useStudioSession: vi.fn() }));
+vi.mock("./StudioWorkflowSelector", () => ({
+  StudioWorkflowSelector: ({
+    onAvailabilityChange,
+  }: {
+    onAvailabilityChange: (reason: string | null) => void;
+    onSelectionChange: () => void;
+  }) => {
+    useEffect(() => onAvailabilityChange(null), [onAvailabilityChange]);
+    return <div>Workflow chooser</div>;
+  },
+}));
 // The canvas stack needs a real 2D context; none of it is under test here.
 vi.mock("./StudioCanvas", () => ({ StudioCanvas: () => <div /> }));
 vi.mock("./messageMedia", () => ({ artifactSource: () => "blob:picture" }));
@@ -21,6 +33,7 @@ vi.mock("./messageMedia", () => ({ artifactSource: () => "blob:picture" }));
 function renderStudio() {
   vi.mocked(useStudioSession).mockReturnValue({
     steps: [{ artifactId: "art-1", instruction: null }],
+    sessionId: "chat-studio",
     busy: false,
     error: null,
     apply: vi.fn(),
@@ -50,6 +63,7 @@ describe("applying an edit", () => {
     const apply = vi.fn();
     vi.mocked(useStudioSession).mockReturnValue({
       steps: [{ artifactId: "art-1", instruction: null }],
+      sessionId: "chat-studio",
       busy: false,
       error: null,
       apply,
@@ -132,6 +146,7 @@ describe("what the studio believes it can do", () => {
     // back was told by the same sentence that it still was not installed.
     vi.mocked(useStudioSession).mockReturnValue({
       steps: [{ artifactId: "art-1", instruction: null }],
+      sessionId: "chat-studio",
       busy: false,
       error: null,
       apply: vi.fn(),
