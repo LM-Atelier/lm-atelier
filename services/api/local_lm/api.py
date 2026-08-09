@@ -2028,7 +2028,7 @@ async def get_message(message_id: str, session: ConversationSessionDep) -> Messa
         .where(Message.id == message_id)
     )
     if not message:
-        raise HTTPException(404, "message not found")
+        raise api_error(404, "message-not-found", "message not found")
     return message
 
 
@@ -2098,7 +2098,9 @@ async def regenerate_message(
         or not source_assistant.transcript_visible
         or source_assistant.status != MessageStatus.COMPLETE.value
     ):
-        raise HTTPException(409, "only a completed visible response can be regenerated")
+        raise api_error(
+            409, "response-not-regenerable", "only a completed visible response can be regenerated"
+        )
     pending_revision = session.scalar(
         select(ResponseRevision.id).where(
             ResponseRevision.message_id == message_id,
@@ -2106,7 +2108,9 @@ async def regenerate_message(
         )
     )
     if pending_revision:
-        raise HTTPException(409, "this response is already being regenerated")
+        raise api_error(
+            409, "response-regeneration-in-progress", "this response is already being regenerated"
+        )
     active_revision = (
         session.get(ResponseRevision, source_assistant.active_response_revision_id)
         if source_assistant.active_response_revision_id
@@ -2120,14 +2124,14 @@ async def regenerate_message(
     if not prior_run:
         prior_run = session.scalar(select(Run).where(Run.assistant_message_id == message_id))
     if not prior_run:
-        raise HTTPException(404, "assistant run not found")
+        raise api_error(404, "assistant-run-not-found", "assistant run not found")
     user_message = session.scalar(
         select(Message)
         .options(selectinload(Message.parts))
         .where(Message.id == prior_run.user_message_id)
     )
     if not user_message:
-        raise HTTPException(404, "source user message not found")
+        raise api_error(404, "source-user-message-not-found", "source user message not found")
     text = "\n".join(part.text for part in user_message.parts if part.text).strip()
     mode = _mode_for_operation(Operation(prior_run.operation))
     prior_revision = (
@@ -2210,7 +2214,7 @@ async def edit_and_branch(
 ) -> TurnAccepted:
     source = session.get(Message, message_id)
     if not source or source.role != MessageRole.USER.value:
-        raise HTTPException(404, "user message not found")
+        raise api_error(404, "user-message-not-found", "user message not found")
     prior_run = session.scalar(select(Run).where(Run.user_message_id == source.id))
     updates: dict[str, Any] = {"parent_message_id": source.parent_id}
     inherited_image_edit_strength: dict[str, Any] | None = None
@@ -2280,7 +2284,7 @@ def _mode_for_operation(operation: Operation) -> RoutingMode:
 async def get_run(run_id: str, session: ConversationSessionDep) -> Run:
     run = session.get(Run, run_id)
     if not run:
-        raise HTTPException(404, "run not found")
+        raise api_error(404, "run-not-found", "run not found")
     return run
 
 
@@ -2315,7 +2319,7 @@ async def get_work_plan(plan_id: str, session: ConversationSessionDep) -> WorkPl
 async def get_work_step(step_id: str, session: ConversationSessionDep) -> WorkStep:
     step = session.get(WorkStep, step_id)
     if not step:
-        raise HTTPException(404, "work step not found")
+        raise api_error(404, "work-step-not-found", "work step not found")
     return step
 
 
@@ -2341,7 +2345,7 @@ async def cancel_work_plan(
         ).all()
     )
     if not jobs:
-        raise HTTPException(409, "work plan has no cancellable steps")
+        raise api_error(409, "work-plan-not-cancellable", "work plan has no cancellable steps")
     for job in jobs:
         await _services(request).orchestrator.cancel(job.id)
     session.expire_all()
@@ -2361,7 +2365,7 @@ async def cancel_work_step(
 ) -> Job | JobOut:
     job = session.scalar(select(Job).where(Job.work_step_id == step_id))
     if not job:
-        raise HTTPException(404, "work step job not found")
+        raise api_error(404, "work-step-job-not-found", "work step job not found")
     return await cancel_job(job.id, request, session)
 
 
@@ -2387,7 +2391,7 @@ async def retry_work_plan(
         ).all()
     )
     if not jobs:
-        raise HTTPException(409, "work plan has no retryable steps")
+        raise api_error(409, "work-plan-not-retryable", "work plan has no retryable steps")
     for job in jobs:
         await retry_job(job.id, request, session)
     session.expire_all()
@@ -2407,7 +2411,7 @@ async def retry_work_step(
 ) -> Job:
     job = session.scalar(select(Job).where(Job.work_step_id == step_id))
     if not job:
-        raise HTTPException(404, "work step job not found")
+        raise api_error(404, "work-step-job-not-found", "work step job not found")
     return await retry_job(job.id, request, session)
 
 
@@ -2445,7 +2449,9 @@ async def cancel_job(
     else:
         changed = await _services(request).orchestrator.cancel(job_id)
     if not changed:
-        raise HTTPException(409, "job is already terminal or cannot be cancelled")
+        raise api_error(
+            409, "job-not-cancellable", "job is already terminal or cannot be cancelled"
+        )
     session.expire_all()
     refreshed = session.get(Job, job_id)
     if not refreshed:
@@ -2509,10 +2515,12 @@ async def cancel_active_chat_run(
     if not session.get(Chat, chat_id):
         raise api_error(404, "chat-not-found", "chat not found")
     if not _current_chat_job(session, chat_id):
-        raise HTTPException(409, "chat has no cancellable run")
+        raise api_error(409, "chat-run-absent", "chat has no cancellable run")
     refreshed = await _cancel_current_chat_work(request, session, chat_id)
     if not refreshed:
-        raise HTTPException(409, "chat run is already terminal or cannot be cancelled")
+        raise api_error(
+            409, "chat-run-not-cancellable", "chat run is already terminal or cannot be cancelled"
+        )
     return refreshed
 
 
