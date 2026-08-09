@@ -36,6 +36,10 @@ _SLUG_SEPARATORS = re.compile(r"[\s._-]+")
 _SLUG_STRIPPED = re.compile(r"[^a-z0-9-]+")
 
 
+class ReferenceError(ValueError):
+    """A Reference request could not be understood, so it is not guessed at."""
+
+
 class ReferenceKind(StrEnum):
     """What a subject is. A closed set, because compatibility depends on it.
 
@@ -70,8 +74,52 @@ class MentionSource(StrEnum):
     INHERITED_CONTEXT = "inherited_context"
 
 
-class ReferenceError(ValueError):
-    """A Reference request could not be understood, so it is not guessed at."""
+class ReferencePurpose(StrEnum):
+    """What one image of a subject is for.
+
+    Closed for the same reason `ReferenceKind` is: a preparation recipe decides
+    what to do with an image from its purpose, so a purpose nobody implements
+    would be an image that silently contributes nothing.
+    """
+
+    IDENTITY = "identity"
+    APPEARANCE = "appearance"
+    CLOTHING = "clothing"
+    POSE = "pose"
+    STYLE = "style"
+    ENVIRONMENT = "environment"
+    DETAIL = "detail"
+    PRODUCT_VIEW = "product_view"
+    OTHER = "other"
+
+
+class ValidationState(StrEnum):
+    """Whether an image has been checked well enough to rely on.
+
+    `UNCHECKED` is the honest starting point and deliberately not a synonym for
+    `USABLE`. An image nobody has looked at is not the same as one that passed,
+    and collapsing the two would let an unreviewed set claim the fidelity of a
+    reviewed one.
+    """
+
+    UNCHECKED = "unchecked"
+    USABLE = "usable"
+    WEAK = "weak"
+    REJECTED = "rejected"
+
+
+def parse_purpose(value: object) -> ReferencePurpose:
+    if isinstance(value, ReferencePurpose):
+        return value
+    if not isinstance(value, str):
+        raise ReferenceError("a reference purpose must be text")
+    try:
+        return ReferencePurpose(value.strip().casefold())
+    except ValueError as error:
+        permitted = ", ".join(sorted(item.value for item in ReferencePurpose))
+        raise ReferenceError(
+            f"{value!r} is not a reference purpose; expected one of: {permitted}"
+        ) from error
 
 
 def slugify_mention(name: str) -> str:
