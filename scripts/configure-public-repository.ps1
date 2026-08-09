@@ -11,7 +11,7 @@ $RepositoryRoot = (Resolve-Path (Join-Path $PSScriptRoot "..")).Path
 $ApiVersion = "2026-03-10"
 $ExpectedOwnerId = 32660587
 $AllowedActionPatterns = @(
-    "actions/attest@f7c74d28b9d84cb8768d0b8ca14a4bac6ef463e6",
+    "actions/attest@508db95dd578ae2727ebd6217d5ba78e4fbda05d",
     "actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1",
     "actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c",
     "actions/setup-node@820762786026740c76f36085b0efc47a31fe5020",
@@ -238,7 +238,11 @@ if ($RepositoryState.owner.id -ne $ExpectedOwnerId) {
 }
 
 Invoke-GitHubApi -Method PATCH -Endpoint "repos/$Repository" -Body @{
-    allow_auto_merge = $false
+    # Enabled deliberately, and this file is the reviewed record of that. It
+    # read $false while the repository had it on, so running this script would
+    # have switched auto-merge off and the symptom would have surfaced later as
+    # queued merges quietly not happening, with nothing pointing back here.
+    allow_auto_merge = $true
     allow_merge_commit = $true
     allow_rebase_merge = $false
     allow_squash_merge = $true
@@ -386,7 +390,10 @@ $ActualTagCreationRules = Invoke-GitHubApi `
     ConvertFrom-Json
 
 Assert-JsonSubset -Label "Repository settings" -Actual $FinalRepository -Expected @{
-    allow_auto_merge = $false
+    # Must match what is applied above. These two are the same fact written
+    # twice - one sets it, one proves it - so a disagreement between them makes
+    # the script apply a correct configuration and then refuse to believe it.
+    allow_auto_merge = $true
     allow_merge_commit = $true
     allow_rebase_merge = $false
     allow_squash_merge = $true

@@ -11,9 +11,10 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from .adapters.contracts import ADAPTER_CONTRACT_VERSION
+from .auxiliary_assets import AUXILIARY_ASSET_KINDS
 from .comfy_templates import COMFY_TEMPLATE_COMPILER_VERSION
 from .domain import new_id
-from .model_manifests import ModelManifestInspection
+from .model_manifests import ModelManifestInspection, comfy_folder_for_kind
 from .models import InstallPlan, ModelComponentManifest
 
 INSTALL_RESOLVER_VERSION = "install-resolver-v9"
@@ -87,6 +88,11 @@ WORKFLOW_ARTIFACT_CONTRACT_VERSION = 1
 _EXECUTION_DEPENDENCY_KEYS = (
     "model_files",
     "custom_nodes",
+    # A Registry package changes what runs exactly as a git-installed node does,
+    # so it belongs in the artifact's identity. Adding the key does not disturb
+    # anything already stored: the payload is built by reading only the keys a
+    # revision actually carries, and no existing revision carries this one.
+    "registry_packages",
     "extensions",
 )
 
@@ -380,6 +386,13 @@ def resolve_install_plan(
     workflow_reference_kind: str | None = None,
     provider: str = "huggingface",
 ) -> ResolvedInstallPlan:
+    auxiliary_folder = None
+    if auxiliary_kind:
+        if auxiliary_kind not in AUXILIARY_ASSET_KINDS:
+            raise ValueError("unsupported auxiliary asset kind")
+        auxiliary_folder = comfy_folder_for_kind(auxiliary_kind)
+        if auxiliary_folder is None:
+            raise ValueError("auxiliary asset has no ComfyUI model folder")
     metadata_by_path = {component.path: component for component in inspection.components}
     workflow_contracts = {
         path: contract
@@ -412,15 +425,8 @@ def resolve_install_plan(
                 )
             ),
             target_folder=(
-                {
-                    "lora": "loras",
-                    "vae": "vae",
-                    "controlnet": "controlnet",
-                    "upscaler": "upscale_models",
-                    "embedding": "embeddings",
-                    "ip_adapter": "ipadapter",
-                }[auxiliary_kind]
-                if auxiliary_kind
+                auxiliary_folder
+                if auxiliary_folder
                 else workflow_contracts.get(
                     str(item["filename"]),
                     (
@@ -681,13 +687,23 @@ def persist_install_plan(session: Session, resolved: ResolvedInstallPlan) -> Ins
         select(InstallPlan).where(InstallPlan.plan_hash == resolved.plan_hash)
     )
     if existing:
-        if resolved.compatibility == "supported" and existing.status not in {
-            "planned",
-            "downloading",
-        }:
-            existing.status = "planned"
-            existing.failure_code = None
-            existing.failure_reason = None
+        # A plan already being fetched is left exactly as it is: the transfer
+        # reads these fields, and rewriting them underneath it would change
+        # what is being downloaded while it is being downloaded.
+        if existing.status == "downloading":
+            return existing
+        # Otherwise the fresh resolution is the truth, including its failure.
+        #
+        # Plans are reused by hash and the failure fields are not part of that
+        # hash, so two resolves of one install can disagree about why it failed.
+        # A row sitting in "planned" was never rewritten, so the first reason
+        # recorded was the reason reported from then on - which is how a
+        # malformed request's error came back, unchanged, to well-formed
+        # requests made afterwards, about an attempt nobody remembered making.
+        existing.status = "planned"
+        existing.compatibility = resolved.compatibility
+        existing.failure_code = resolved.failure_code
+        existing.failure_reason = resolved.failure_reason
         return existing
     plan = InstallPlan(
         id=new_id("plan"),

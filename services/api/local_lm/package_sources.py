@@ -116,6 +116,24 @@ def source_refusal(source: SourceDependency) -> tuple[str, str]:
     )
 
 
+def bare_source_url(line: str) -> str | None:
+    """A dependency written as a URL alone, with no distribution name.
+
+    pip takes this spelling and PEP 508 does not, so the packaging parser
+    refuses it and every reader that asks the parser what a line points at
+    hears "nothing". Two of them care: the one that explains a refusal, and
+    the one that decides whether an unpinned source may be set aside.
+
+    Deliberately narrow: only a line that is entirely one scheme-bearing URL
+    counts. Anything with whitespace is a malformed requirement rather than a
+    source, and reading that as a source would set aside a line nobody parsed.
+    """
+    if len(line.split()) != 1:
+        return None
+    scheme = line.partition("://")[0]
+    return line if scheme and scheme != line else None
+
+
 def partition_unpinned_sources(
     declarations: Sequence[str], *, authorized: bool
 ) -> tuple[tuple[str, ...], tuple[str, ...]]:
@@ -161,6 +179,14 @@ def declared_source_url(declaration: str) -> str | None:
     try:
         return Requirement(line).url
     except InvalidRequirement:
-        # A line the planner will refuse on its own terms. Nothing is set
-        # aside on the strength of something nobody could parse.
-        return None
+        # One spelling the parser refuses is still a source, and plainly so: a
+        # line that is nothing but a URL points where it says. pip accepts it,
+        # so real packages ship it - four of them among the two this product
+        # has to install - and reading it as unparseable meant an unpinned
+        # dependency written this way could never be set aside, while the same
+        # dependency written `name @ url` could. The spelling is not the
+        # question; whether the source names an exact commit is.
+        #
+        # Anything else here is genuinely unparseable, and nothing is set
+        # aside on the strength of a line nobody could read.
+        return bare_source_url(line)

@@ -196,10 +196,6 @@ class Settings(BaseSettings):
         return f"sqlite:///{(self.state_dir / 'local-lm.sqlite3').resolve()}"
 
     @property
-    def session_secret_path(self) -> Path:
-        return self.state_dir / "session-secret"
-
-    @property
     def backup_dir(self) -> Path:
         return self.data_dir / "backups"
 

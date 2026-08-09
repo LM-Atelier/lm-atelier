@@ -50,6 +50,9 @@ import type {
   WorkflowAssetReview,
   WorkflowPackageAnalysis,
   WorkflowRevision,
+  WorkflowEditorDraft,
+  WorkflowEditorReturn,
+  WorkflowEditorSession,
   WorkerLogLocation,
   WorkerLogTail,
   WorkerResetResult,
@@ -534,6 +537,8 @@ export const api = {
     if (favorites) parameters.set("favorites", "true");
     return request<ArtifactLibraryItem[]>(`/api/artifacts?${parameters}`);
   },
+  artifact: (artifactId: string) =>
+    request<Artifact>(`/api/artifacts/${encodeURIComponent(artifactId)}`),
   favoriteArtifact: (artifactId: string, favorite: boolean) =>
     request<Artifact>(`/api/artifacts/${encodeURIComponent(artifactId)}`, {
       method: "PATCH",
@@ -733,6 +738,34 @@ export const api = {
     request<Workflow>(`/api/workflows/${id}/clone`, { method: "POST", body: JSON.stringify({ name }) }),
   exportWorkflow: (id: string) => request<WorkflowBundle>(`/api/workflows/${id}/export`),
   workflowOpenTarget: (id: string) => request<{ url: string; filename: string; ui_graph: Record<string, unknown> }>(`/api/workflows/${id}/open-target`),
+  startWorkflowEditor: (id: string) =>
+    request<WorkflowEditorSession>(`/api/workflows/${encodeURIComponent(id)}/editor-sessions`, {
+      method: "POST",
+    }),
+  consumeWorkflowEditor: (
+    workflowId: string,
+    sessionId: string,
+    payload: {
+      nonce: string;
+      base_revision_id: string;
+      ui_graph: Record<string, unknown>;
+      api_prompt: Record<string, unknown>;
+    },
+  ) =>
+    request<WorkflowEditorReturn>(
+      `/api/workflows/${encodeURIComponent(workflowId)}/editor-sessions/${encodeURIComponent(sessionId)}/consume`,
+      { method: "POST", body: JSON.stringify(payload) },
+    ),
+  createWorkflowEditorDraft: (workflowId: string, validatedReturnId: string) =>
+    request<WorkflowEditorDraft>(
+      `/api/workflows/${encodeURIComponent(workflowId)}/editor-drafts`,
+      { method: "POST", body: JSON.stringify({ validated_return_id: validatedReturnId }) },
+    ),
+  cancelWorkflowEditor: (workflowId: string, sessionId: string, nonce: string) =>
+    request<void>(
+      `/api/workflows/${encodeURIComponent(workflowId)}/editor-sessions/${encodeURIComponent(sessionId)}/cancel`,
+      { method: "POST", body: JSON.stringify({ nonce }) },
+    ),
   importWorkflow: (bundle: WorkflowBundle) =>
     request<Workflow>("/api/workflows/import", { method: "POST", body: JSON.stringify(bundle) }),
   editTemplates: () => request<EditTemplate[]>("/api/edit-templates"),
@@ -859,6 +892,21 @@ export const api = {
   },
 };
 
+/** Read one event frame, or nothing if it is not one we can act on. */
+export function readEvent(data: unknown): AppEvent | null {
+  if (typeof data !== "string") return null;
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(data);
+  } catch {
+    return null;
+  }
+  if (!parsed || typeof parsed !== "object") return null;
+  const event = parsed as Partial<AppEvent>;
+  if (!Number.isFinite(event.sequence) || typeof event.type !== "string") return null;
+  return event as AppEvent;
+}
+
 export async function connectEvents(
   onEvent: (event: AppEvent) => void,
   onStatus: (connected: boolean) => void,
@@ -905,7 +953,13 @@ export async function connectEvents(
         hasOpened = true;
       };
       socket.onmessage = (message) => {
-        const event = JSON.parse(message.data as string) as AppEvent;
+        // onmessage is called by the browser long after the try around the
+        // connection has returned, so anything thrown here escapes it: the
+        // stream would keep its socket open while delivering nothing, and a
+        // non-numeric sequence would carry NaN into the ?after= of every
+        // later reconnect. Drop the frame instead; the next one still counts.
+        const event = readEvent(message.data);
+        if (!event) return;
         lastSequence = Math.max(lastSequence, event.sequence);
         eventSequence = lastSequence;
         onEvent(event);

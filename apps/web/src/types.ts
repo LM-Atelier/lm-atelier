@@ -747,6 +747,56 @@ export interface Workflow {
   revisions: WorkflowRevision[];
 }
 
+export interface WorkflowEditorSession {
+  id: string;
+  protocol_version: number;
+  workflow_id: string;
+  base_revision_id: string;
+  base_graph_sha256: string;
+  base_prompt_sha256: string;
+  created_at: string;
+  expires_at: string;
+  ui_graph: Record<string, unknown>;
+  nonce: string;
+}
+
+export interface WorkflowEditorGraphDelta {
+  node_count_delta: number;
+  link_count_delta: number;
+  added_node_types: string[];
+  removed_node_types: string[];
+  added_asset_filenames: string[];
+  removed_asset_filenames: string[];
+}
+
+export interface WorkflowEditorReturn {
+  validated_return_id: string;
+  session_id: string;
+  workflow_id: string;
+  base_revision_id: string;
+  current_revision_id: string;
+  base_graph_sha256: string;
+  returned_graph_sha256: string;
+  base_prompt_sha256: string;
+  returned_prompt_sha256: string;
+  changed: boolean;
+  forked: boolean;
+  delta: WorkflowEditorGraphDelta;
+  expires_at: string;
+}
+
+export interface WorkflowEditorDraft {
+  workflow_id: string;
+  base_revision_id: string;
+  draft_revision_id: string;
+  current_revision_id: string | null;
+  version: number;
+  created: boolean;
+  forked: boolean;
+  trusted: false;
+  review_required: true;
+}
+
 export interface CustomNodeInstall {
   id: string;
   name: string;
@@ -1021,7 +1071,14 @@ export interface RegistryInstall {
 export type WorkflowSelectorCapability = "chat" | "vision" | "image" | "video";
 
 /** Whether a variant can actually run right now, and why not when it cannot. */
-export type WorkflowVariantReadiness = "ready" | "setup_required" | "unavailable";
+export type WorkflowVariantReadiness =
+  | "ready"
+  | "setup_required"
+  // The revision runs here, but nobody has vouched for it yet. Absent
+  // from this union it fell through to "cannot run on this machine",
+  // which is untrue and points at the wrong remedy.
+  | "review_required"
+  | "unavailable";
 
 export type WorkflowSelectionMode =
   | "default"

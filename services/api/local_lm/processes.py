@@ -7,6 +7,7 @@ import json
 import logging
 import os
 import re
+import secrets
 import socket
 import sys
 import threading
@@ -20,13 +21,20 @@ from urllib.parse import urlparse
 import httpx
 import psutil
 
-from .comfy_editor_bridge import ComfyEditorBridgeError, prepare_comfy_editor_bridge
+from .comfy_editor_bridge import (
+    ComfyEditorBridgeError,
+    ComfyEditorBridgeSupport,
+    prepare_comfy_editor_bridge,
+)
+from .comfy_registry_paths import registry_wheel_environment_root
 from .config import Settings
 from .events import EventBroker
 from .gguf import GGUFSelectionError, automatic_mmproj_selection, validate_gguf_selection
+from .model_manifests import COMFY_MODEL_FOLDERS, comfy_folder_for_kind
 from .models import ModelAssetInstall, ModelInstall, ModelProfile
 from .network import shared_tls_context
 from .schemas import WorkerStatus
+from .security import trusted_browser_origins
 from .subprocess_env import python_subprocess_environment
 from .worker_failures import WorkerFailure, WorkerFailureCode, classify_worker_failure
 
@@ -240,6 +248,8 @@ class WorkerRecord:
     monitor_task: asyncio.Task[None] | None = None
     failure_detail: str | None = None
     launch_scope_sha256: str | None = None
+    editor_bridge_launch_id: str | None = None
+    editor_bridge_support: ComfyEditorBridgeSupport | None = None
 
 
 class ProcessSupervisor:
@@ -265,29 +275,10 @@ class ProcessSupervisor:
         self._liveness_failure_threshold = liveness_failure_threshold
         self._workers: dict[str, WorkerRecord] = {}
         self._locks = {"chat": asyncio.Lock(), "media": asyncio.Lock()}
-        self._private_output_suppression_depth = 0
         self._identity_path = self.settings.state_dir / "worker-processes.json"
         self._identity_lock = threading.Lock()
         self._worker_identities = self._load_worker_identities()
         self._reap_persisted_workers()
-
-    @property
-    def private_output_suppressed(self) -> bool:
-        return self._private_output_suppression_depth > 0
-
-    def begin_private_session(self) -> None:
-        """Keep backend output from entering durable logs during private work."""
-        self._private_output_suppression_depth += 1
-        for record in self._workers.values():
-            record.stderr_tail.clear()
-            record.stderr_pending.clear()
-
-    def end_private_session(self) -> None:
-        if self._private_output_suppression_depth > 0:
-            self._private_output_suppression_depth -= 1
-        for record in self._workers.values():
-            record.stderr_tail.clear()
-            record.stderr_pending.clear()
 
     def statuses(self) -> list[WorkerStatus]:
         result: list[WorkerStatus] = []
@@ -354,6 +345,30 @@ class ProcessSupervisor:
         if record is None or record.process.returncode is not None or record.state != "ready":
             return None
         return record.launch_scope_sha256
+
+    def workflow_editor_runtime_identity(self) -> str | None:
+        """Return authority for the ready launch that whitelisted the verified bridge."""
+
+        record = self._workers.get("media")
+        if record is None or record.process.returncode is not None or record.state != "ready":
+            return None
+        support = record.editor_bridge_support
+        if support is None or not support.supported:
+            return None
+        return record.editor_bridge_launch_id
+
+    def workflow_editor_bridge_support(self) -> ComfyEditorBridgeSupport | None:
+        """Return the exact editor support fact bound to the live ready media launch."""
+
+        record = self._workers.get("media")
+        if record is None or record.process.returncode is not None or record.state != "ready":
+            return None
+        support = record.editor_bridge_support
+        if support is None:
+            return None
+        if support.supported != (record.editor_bridge_launch_id is not None):
+            return None
+        return support
 
     async def load_chat(self, profile: ModelProfile, install: ModelInstall) -> WorkerStatus:
         if profile.engine == "vllm":
@@ -516,6 +531,7 @@ class ProcessSupervisor:
         if directory not in entrypoint.parents:
             raise ValueError("ComfyUI entrypoint escapes its configured directory")
         parsed = urlparse(self.settings.comfy_url)
+        editor_bridge_support: ComfyEditorBridgeSupport | None = None
         await report_phase("Validating media dependencies")
         custom_node_types: tuple[str, ...] = ()
         if activation_scope is None:
@@ -555,12 +571,27 @@ class ProcessSupervisor:
                 comfy_executable=executable,
                 comfy_directory=directory,
                 custom_node_root=self.settings.custom_node_dir,
+                coordinator_origins=trusted_browser_origins(self.settings),
             )
         except ComfyEditorBridgeError as exc:
+            editor_bridge_support = ComfyEditorBridgeSupport(False, exc.code, str(exc))
             logger.warning("Native workflow editing is unavailable: %s", exc)
         else:
-            if editor_bridge.folder is not None:
+            editor_bridge_support = editor_bridge.support
+            if editor_bridge.folder is not None and editor_bridge.support.supported:
                 trusted_custom_nodes.append(editor_bridge.folder.name)
+            elif editor_bridge.folder is not None or editor_bridge.support.supported:
+                editor_bridge_support = ComfyEditorBridgeSupport(
+                    False,
+                    "workflow-editor-bridge-staging-failed",
+                    "The verified workflow editor bridge was not staged for this launch.",
+                    editor_bridge.support.comfyui_version,
+                    editor_bridge.support.frontend_version,
+                )
+                logger.warning(
+                    "Native workflow editing is unavailable: %s",
+                    editor_bridge_support.message,
+                )
             elif editor_bridge.support.code != "workflow-editor-runtime-unavailable":
                 logger.debug(
                     "Native workflow editing is unavailable: %s",
@@ -618,6 +649,7 @@ class ProcessSupervisor:
                     else None
                 ),
                 launch_scope_sha256=activation_scope.launch_sha256,
+                editor_bridge_support=editor_bridge_support,
             )
         elif registry_contract.site_packages:
             await self._replace(
@@ -626,9 +658,15 @@ class ProcessSupervisor:
                 self.settings.comfy_url + "/system_stats",
                 environment_overrides=environment_overrides,
                 ready_check=lambda: self._verify_comfy_node_types(registry_contract.node_types),
+                editor_bridge_support=editor_bridge_support,
             )
         else:
-            await self._replace("media", command, self.settings.comfy_url + "/system_stats")
+            await self._replace(
+                "media",
+                command,
+                self.settings.comfy_url + "/system_stats",
+                editor_bridge_support=editor_bridge_support,
+            )
         return self.statuses()[1]
 
     def _scoped_comfy_registry_contract(
@@ -646,7 +684,7 @@ class ProcessSupervisor:
                 session,
                 scope.registry_packages,
                 custom_node_root=self.settings.custom_node_dir,
-                environment_root=self.settings.registry_dir / "registry-wheel-environments",
+                environment_root=registry_wheel_environment_root(self.settings.registry_dir),
             )
 
     def _trusted_comfy_registry_contract(self) -> ComfyRegistryLaunchContract:
@@ -657,7 +695,7 @@ class ProcessSupervisor:
             return trusted_comfy_registry_launch_contract(
                 session,
                 custom_node_root=self.settings.custom_node_dir,
-                environment_root=self.settings.registry_dir / "registry-wheel-environments",
+                environment_root=registry_wheel_environment_root(self.settings.registry_dir),
             )
 
     async def comfy_node_inventory(self) -> frozenset[str]:
@@ -849,14 +887,7 @@ class ProcessSupervisor:
                 select(ModelAssetInstall).where(ModelAssetInstall.active.is_(True))
             ).all()
             for asset in assets:
-                folder = {
-                    "lora": "loras",
-                    "vae": "vae",
-                    "controlnet": "controlnet",
-                    "upscaler": "upscale_models",
-                    "embedding": "embeddings",
-                    "ip_adapter": "ipadapter",
-                }.get(asset.kind)
+                folder = comfy_folder_for_kind(asset.kind)
                 if not folder:
                     continue
                 base_path = str(Path(asset.local_path).resolve())
@@ -888,21 +919,9 @@ class ProcessSupervisor:
     def _validated_comfy_paths(value: object) -> dict[str, str]:
         if not isinstance(value, dict):
             return {}
-        allowed = {
-            "checkpoints",
-            "diffusion_models",
-            "text_encoders",
-            "vae",
-            "clip_vision",
-            "loras",
-            "controlnet",
-            "upscale_models",
-            "embeddings",
-            "ipadapter",
-        }
         result: dict[str, str] = {}
         for key, item in value.items():
-            if key not in allowed or not isinstance(item, str):
+            if key not in COMFY_MODEL_FOLDERS or not isinstance(item, str):
                 continue
             path = Path(item)
             if path.is_absolute() or ".." in path.parts:
@@ -930,6 +949,7 @@ class ProcessSupervisor:
         environment_overrides: Mapping[str, str] | None = None,
         ready_check: Callable[[], Awaitable[None]] | None = None,
         launch_scope_sha256: str | None = None,
+        editor_bridge_support: ComfyEditorBridgeSupport | None = None,
     ) -> None:
         if launch_scope_sha256 is not None and not re.fullmatch(
             r"[0-9a-f]{64}", launch_scope_sha256
@@ -944,6 +964,9 @@ class ProcessSupervisor:
                 and current.state == "ready"
                 and current.command == command
                 and current.launch_scope_sha256 == launch_scope_sha256
+                and current.editor_bridge_support == editor_bridge_support
+                and (current.editor_bridge_launch_id is not None)
+                == bool(editor_bridge_support and editor_bridge_support.supported)
             ):
                 return
             await self._stop_unlocked(name)
@@ -986,6 +1009,12 @@ class ProcessSupervisor:
                 profile_id,
                 estimated_memory_bytes=estimated_memory_bytes,
                 launch_scope_sha256=launch_scope_sha256,
+                editor_bridge_launch_id=(
+                    secrets.token_urlsafe(24)
+                    if editor_bridge_support and editor_bridge_support.supported
+                    else None
+                ),
+                editor_bridge_support=editor_bridge_support,
             )
             record.output_task = asyncio.create_task(self._capture_process_output(record))
             self._workers[name] = record
@@ -1504,8 +1533,6 @@ class ProcessSupervisor:
                 return
             try:
                 while chunk := await stream.read(16 * 1024):
-                    if self.private_output_suppressed:
-                        continue
                     if stderr:
                         self._append_stderr_tail(record, chunk)
                     if not log_failed:

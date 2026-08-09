@@ -516,7 +516,6 @@ async def test_image_turn_automatically_selects_lora_unless_stack_is_explicit(
         )
         session.add(lora)
         session.commit()
-        lora_id = lora.id
 
     chat = (await client.post("/api/chats", json={"title": "Automatic LoRA"})).json()
     automatic = await client.post(
@@ -525,18 +524,20 @@ async def test_image_turn_automatically_selects_lora_unless_stack_is_explicit(
     )
     assert automatic.status_code == 202
     automatic_run = await wait_for_run(client, automatic.json()["run"]["id"])
+    # This revision says where a LoRA goes but not what architecture it runs, so
+    # nothing is selected: an adapter for another architecture does not refuse to
+    # load, it degrades the image while provenance reports success. Selection
+    # with a known family, and refusal without, are covered directly in
+    # test_auxiliary_assets.test_an_unknown_architecture_receives_no_automatic_lora.
+    assert automatic_run["settings_json"].get("loras") in (None, [])
     automatic_auxiliary = automatic_run["provenance_json"]["auxiliary_assets"]
-    assert automatic_run["settings_json"]["loras"] == [
-        {
-            "asset_id": lora_id,
-            "model_strength": 0.72,
-            "clip_strength": 0.61,
-            "enabled": True,
-        }
-    ]
-    assert automatic_auxiliary["selection"]["mode"] == "automatic"
-    assert automatic_auxiliary["selection"]["selected"][0]["reason"] == "exact use case"
-    assert "Create an ink workshop at night" not in str(automatic_auxiliary)
+    assert automatic_auxiliary["selection"] == {
+        "mode": "automatic",
+        "selector_version": "lora-use-case-v1",
+        "selected": [],
+        "skipped_reason": "workflow_architecture_unknown",
+    }
+    assert "Create an ink workshop at night" not in json.dumps(automatic_auxiliary)
 
     explicit_empty = await client.post(
         f"/api/chats/{chat['id']}/turns",
@@ -2127,6 +2128,16 @@ async def test_ordered_text_image_video_text_plan_resolves_typed_outputs(
         assert video_artifact and video_artifact.media_type.startswith("video/")
         for resolved_step, resolved_run in zip(steps, runs, strict=True):
             assert resolved_run
+            assert resolved_step.workflow_revision_id == resolved_run.workflow_revision_id
+            workflow_witness = resolved_run.provenance_json.get("workflow")
+            if resolved_run.workflow_revision_id:
+                assert workflow_witness["revision_id"] == resolved_run.workflow_revision_id
+                assert workflow_witness["definition_id"]
+                assert workflow_witness["definition_name"]
+                assert workflow_witness["operation"] == resolved_step.operation
+                assert resolved_run.provenance_json["model_selection"]["compatibility_only"] is True
+            else:
+                assert workflow_witness is None
             if resolved_run.profile_id:
                 profile = session.get(ModelProfile, resolved_run.profile_id)
                 assert profile

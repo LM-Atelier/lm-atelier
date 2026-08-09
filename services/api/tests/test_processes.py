@@ -18,13 +18,20 @@ import pytest
 from sqlalchemy.orm import object_session
 
 import local_lm.comfy_registry_interpreter as registry_interpreter_module
-from local_lm.comfy_editor_bridge import BRIDGE_DIRECTORY_NAME
+import local_lm.processes as processes_module
+from local_lm.comfy_editor_bridge import (
+    BRIDGE_COORDINATOR_CONFIG,
+    ComfyEditorBridgeError,
+    ComfyEditorBridgeSupport,
+    bridge_directory_name,
+)
 from local_lm.comfy_registry_installs import ComfyRegistryLaunchContract
+from local_lm.comfy_registry_paths import registry_wheel_environment_root
 from local_lm.comfy_registry_runtime import ComfyRegistryRuntimeDistribution
 from local_lm.custom_nodes import CustomNodeManager
 from local_lm.db import SessionLocal
 from local_lm.events import EventBroker
-from local_lm.models import CustomNodeInstall, ModelInstall, ModelProfile
+from local_lm.models import CustomNodeInstall, ModelAssetInstall, ModelInstall, ModelProfile
 from local_lm.network import shared_tls_context
 from local_lm.processes import (
     WORKER_STDERR_DISPLAY_CHARS,
@@ -35,6 +42,7 @@ from local_lm.processes import (
     _RotatingWorkerLog,
     _with_comfy_registry_overlays,
 )
+from local_lm.security import trusted_browser_origins
 from local_lm.worker_failures import WorkerFailureCode
 from local_lm.workflow_activations import (
     WorkflowActivationLaunchScope,
@@ -128,6 +136,73 @@ def test_llama_arguments_are_explicit_and_shell_free() -> None:
         "--no-mmap",
         "--mlock",
     ]
+
+
+def test_workflow_editor_authority_requires_the_live_ready_verified_launch(
+    settings,
+    tmp_path: Path,  # type: ignore[no-untyped-def]
+) -> None:
+    supervisor = ProcessSupervisor(settings)
+    process = FakeRunningProcess(34567, terminate_code=0)
+    record = WorkerRecord(
+        "media",
+        process,  # type: ignore[arg-type]
+        ["comfy"],
+        _RotatingWorkerLog(tmp_path / "media.log"),
+        editor_bridge_launch_id="verified-launch",
+        editor_bridge_support=ComfyEditorBridgeSupport(
+            True,
+            "ready",
+            "Native workflow editing is available.",
+            "0.28.0",
+            "1.45.21",
+        ),
+    )
+    supervisor._workers["media"] = record
+
+    assert supervisor.workflow_editor_runtime_identity() is None
+    assert supervisor.workflow_editor_bridge_support() is None
+    record.state = "ready"
+    assert supervisor.workflow_editor_runtime_identity() == "verified-launch"
+    assert supervisor.workflow_editor_bridge_support() == record.editor_bridge_support
+    record.editor_bridge_launch_id = None
+    assert supervisor.workflow_editor_runtime_identity() is None
+    assert supervisor.workflow_editor_bridge_support() is None
+    record.editor_bridge_launch_id = "verified-launch"
+    process.returncode = 1
+    assert supervisor.workflow_editor_runtime_identity() is None
+    assert supervisor.workflow_editor_bridge_support() is None
+    record.log.close()
+
+
+def test_workflow_editor_support_reports_a_live_ready_refusal(
+    settings,
+    tmp_path: Path,  # type: ignore[no-untyped-def]
+) -> None:
+    supervisor = ProcessSupervisor(settings)
+    support = ComfyEditorBridgeSupport(
+        False,
+        "workflow-editor-frontend-unsupported",
+        "The configured frontend is not certified for native workflow editing.",
+        "0.28.0",
+        "1.46.0",
+    )
+    record = WorkerRecord(
+        "media",
+        FakeRunningProcess(34568, terminate_code=0),  # type: ignore[arg-type]
+        ["comfy"],
+        _RotatingWorkerLog(tmp_path / "media-unsupported.log"),
+        state="ready",
+        editor_bridge_support=support,
+    )
+    supervisor._workers["media"] = record
+
+    assert supervisor.workflow_editor_runtime_identity() is None
+    assert supervisor.workflow_editor_bridge_support() == support
+    record.editor_bridge_launch_id = "invalid-authority"
+    assert supervisor.workflow_editor_runtime_identity() is None
+    assert supervisor.workflow_editor_bridge_support() is None
+    record.log.close()
 
 
 def test_gguf_resolution_rejects_ambiguous_installs(tmp_path: Path) -> None:
@@ -239,35 +314,6 @@ def test_worker_log_rotation_enforces_file_and_retention_bounds(tmp_path: Path) 
     assert all(path.stat().st_size <= 32 for path in retained)
     assert not log_path.with_name("chat-worker.log.3").exists()
     assert sum(path.stat().st_size for path in retained) <= 32 * 3
-
-
-async def test_private_session_suppresses_worker_logs_and_diagnostic_tail(
-    settings,
-) -> None:  # type: ignore[no-untyped-def]
-    settings.prepare()
-    supervisor = ProcessSupervisor(settings)
-    stdout = asyncio.StreamReader()
-    stderr = asyncio.StreamReader()
-    marker = b"PRIVATE-WORKER-MARKER-19f25a"
-    stdout.feed_data(marker)
-    stdout.feed_eof()
-    stderr.feed_data(marker)
-    stderr.feed_eof()
-    log_path = settings.log_dir / "private-worker.log"
-    record = WorkerRecord(
-        name="chat",
-        process=SimpleNamespace(stdout=stdout, stderr=stderr),  # type: ignore[arg-type]
-        command=[],
-        log=_RotatingWorkerLog(log_path),
-    )
-
-    supervisor.begin_private_session()
-    await supervisor._capture_process_output(record)
-    supervisor.end_private_session()
-
-    assert supervisor.private_output_suppressed is False
-    assert record.stderr_tail == b""
-    assert marker not in log_path.read_bytes()
 
 
 async def test_startup_exit_retains_redacted_stderr_and_actionable_status(
@@ -839,6 +885,51 @@ async def test_runtime_exit_captures_only_a_bounded_stderr_tail(
     await supervisor.close()
 
 
+async def test_media_replacement_rotates_verified_editor_launch_authority(
+    settings,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:  # type: ignore[no-untyped-def]
+    settings.prepare()
+    supervisor = ProcessSupervisor(settings)
+
+    async def healthy_immediately(*_args: object) -> None:
+        return None
+
+    monkeypatch.setattr(supervisor, "_wait_healthy", healthy_immediately)
+    monkeypatch.setattr(supervisor, "_ensure_port_available", AsyncMock())
+    command = [sys.executable, "-c", "import time; time.sleep(30)"]
+    support = ComfyEditorBridgeSupport(
+        True,
+        "ready",
+        "Native workflow editing is available.",
+        "0.28.0",
+        "1.45.21",
+    )
+
+    await supervisor._replace(
+        "media",
+        command,
+        "http://127.0.0.1:9/health",
+        editor_bridge_support=support,
+    )
+    first = supervisor.workflow_editor_runtime_identity()
+    await supervisor._replace(
+        "media",
+        command,
+        "http://127.0.0.1:9/health",
+        editor_bridge_support=support,
+    )
+    second = supervisor.workflow_editor_runtime_identity()
+
+    assert first
+    assert second
+    assert second != first
+    assert supervisor.workflow_editor_bridge_support() == support
+    await supervisor.stop("media")
+    assert supervisor.workflow_editor_runtime_identity() is None
+    assert supervisor.workflow_editor_bridge_support() is None
+
+
 async def test_loading_health_503_lines_do_not_displace_stderr_tail(
     settings,
 ) -> None:  # type: ignore[no-untyped-def]
@@ -1150,8 +1241,11 @@ async def test_media_first_use_provisions_missing_runtime(
         _profile_id: str | None = None,
         *,
         estimated_memory_bytes: int | None = None,
+        editor_bridge_support: ComfyEditorBridgeSupport | None = None,
     ) -> None:
         del estimated_memory_bytes
+        assert editor_bridge_support is not None
+        assert not editor_bridge_support.supported
         assert name == "media"
         captured["command"] = command
         captured["health_url"] = health_url
@@ -1436,9 +1530,12 @@ async def test_media_start_disables_unapproved_custom_nodes(
         _profile_id: str | None = None,
         *,
         estimated_memory_bytes: int | None = None,
+        editor_bridge_support: ComfyEditorBridgeSupport | None = None,
     ) -> None:
         assert name == "media"
         assert estimated_memory_bytes is None
+        assert editor_bridge_support is not None
+        assert not editor_bridge_support.supported
         captured["command"] = command
 
     monkeypatch.setattr(supervisor, "_trusted_comfy_node_folders", trusted_nodes)
@@ -1454,6 +1551,60 @@ async def test_media_start_disables_unapproved_custom_nodes(
     assert command[command.index("--preview-method") + 1] == "latent2rgb"
     assert "--disable-all-custom-nodes" in command
     assert command[command.index("--whitelist-custom-nodes") + 1 :] == ["lm-atelier-node_reviewed"]
+
+
+async def test_media_start_retains_a_bridge_staging_refusal_without_blocking_media(
+    settings,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,  # type: ignore[no-untyped-def]
+) -> None:
+    runtime = tmp_path / "comfyui"
+    runtime.mkdir()
+    (runtime / "main.py").touch()
+    executable = tmp_path / "python.exe"
+    executable.touch()
+    model_paths = tmp_path / "extra-model-paths.yaml"
+    model_paths.touch()
+    settings.comfy_directory = runtime
+    settings.comfy_executable = executable
+    supervisor = ProcessSupervisor(settings)
+    captured: dict[str, object] = {}
+
+    def refuse_staging(**_kwargs: object) -> None:
+        raise ComfyEditorBridgeError(
+            "workflow-editor-bridge-staging-failed",
+            "The verified workflow editor bridge could not be staged.",
+        )
+
+    async def replace(
+        name: str,
+        command: list[str],
+        _health_url: str,
+        _profile_id: str | None = None,
+        *,
+        estimated_memory_bytes: int | None = None,
+        editor_bridge_support: ComfyEditorBridgeSupport | None = None,
+    ) -> None:
+        assert name == "media"
+        assert estimated_memory_bytes is None
+        captured["command"] = command
+        captured["support"] = editor_bridge_support
+
+    monkeypatch.setattr(processes_module, "prepare_comfy_editor_bridge", refuse_staging)
+    monkeypatch.setattr(supervisor, "_trusted_comfy_node_folders", AsyncMock(return_value=[]))
+    monkeypatch.setattr(supervisor, "_write_comfy_model_paths", lambda: model_paths)
+    monkeypatch.setattr(supervisor, "_replace", replace)
+
+    await supervisor.start_media()
+
+    support = captured["support"]
+    assert isinstance(support, ComfyEditorBridgeSupport)
+    assert support == ComfyEditorBridgeSupport(
+        False,
+        "workflow-editor-bridge-staging-failed",
+        "The verified workflow editor bridge could not be staged.",
+    )
+    assert "--whitelist-custom-nodes" not in captured["command"]
 
 
 async def test_media_start_whitelists_only_the_verified_first_party_editor_bridge(
@@ -1497,8 +1648,14 @@ async def test_media_start_whitelists_only_the_verified_first_party_editor_bridg
         _profile_id: str | None = None,
         *,
         estimated_memory_bytes: int | None = None,
+        editor_bridge_support: ComfyEditorBridgeSupport | None = None,
     ) -> None:
         assert estimated_memory_bytes is None
+        assert editor_bridge_support is not None
+        assert editor_bridge_support.supported
+        assert editor_bridge_support.code == "ready"
+        assert editor_bridge_support.comfyui_version == "0.28.0"
+        assert editor_bridge_support.frontend_version == "1.45.21"
         captured["command"] = command
 
     monkeypatch.setattr(supervisor, "_trusted_comfy_node_folders", trusted_nodes)
@@ -1508,10 +1665,76 @@ async def test_media_start_whitelists_only_the_verified_first_party_editor_bridg
     await supervisor.start_media()
 
     command = captured["command"]
-    assert command[command.index("--whitelist-custom-nodes") + 1 :] == [BRIDGE_DIRECTORY_NAME]
-    staged = runtime / "custom_nodes" / BRIDGE_DIRECTORY_NAME
+    bridge_name = bridge_directory_name(trusted_browser_origins(settings))
+    assert command[command.index("--whitelist-custom-nodes") + 1 :] == [bridge_name]
+    staged = runtime / "custom_nodes" / bridge_name
     assert (staged / "__init__.py").is_file()
     assert (staged / "js" / "lm_atelier_workflow_editor.js").is_file()
+    config = (staged / BRIDGE_COORDINATOR_CONFIG).read_text(encoding="utf-8")
+    assert f"http://127.0.0.1:{settings.port}" in config
+
+
+async def test_media_start_retains_the_exact_unsupported_runtime_fact(
+    settings,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,  # type: ignore[no-untyped-def]
+) -> None:
+    portable = tmp_path / "ComfyUI_windows_portable"
+    runtime = portable / "ComfyUI"
+    runtime.mkdir(parents=True)
+    (runtime / "main.py").touch()
+    executable = portable / "python_embeded" / "python.exe"
+    executable.parent.mkdir()
+    executable.touch()
+    dist_info = (
+        executable.parent / "Lib" / "site-packages" / "comfyui_frontend_package-1.45.21.dist-info"
+    )
+    dist_info.mkdir(parents=True)
+    (runtime / "comfyui_version.py").write_text(
+        '__version__ = "0.27.0"' + chr(10),
+        encoding="utf-8",
+    )
+    (dist_info / "METADATA").write_text(
+        chr(10).join(["Name: comfyui-frontend-package", "Version: 1.45.21", ""]),
+        encoding="utf-8",
+    )
+    model_paths = tmp_path / "extra-model-paths.yaml"
+    model_paths.touch()
+    settings.comfy_directory = runtime
+    settings.comfy_executable = executable
+    supervisor = ProcessSupervisor(settings)
+    captured: dict[str, object] = {}
+
+    async def replace(
+        _name: str,
+        command: list[str],
+        _health_url: str,
+        _profile_id: str | None = None,
+        *,
+        estimated_memory_bytes: int | None = None,
+        editor_bridge_support: ComfyEditorBridgeSupport | None = None,
+    ) -> None:
+        assert estimated_memory_bytes is None
+        captured["command"] = command
+        captured["support"] = editor_bridge_support
+
+    monkeypatch.setattr(supervisor, "_trusted_comfy_node_folders", AsyncMock(return_value=[]))
+    monkeypatch.setattr(supervisor, "_write_comfy_model_paths", lambda: model_paths)
+    monkeypatch.setattr(supervisor, "_replace", replace)
+
+    await supervisor.start_media()
+
+    support = captured["support"]
+    assert support == ComfyEditorBridgeSupport(
+        False,
+        "workflow-editor-comfyui-unsupported",
+        "Native workflow editing requires ComfyUI 0.28.0; the configured runtime uses 0.27.0.",
+        "0.27.0",
+        "1.45.21",
+    )
+    command = captured["command"]
+    assert isinstance(command, list)
+    assert "--whitelist-custom-nodes" not in command
 
 
 async def test_media_start_uses_only_the_exact_activation_scope(
@@ -1586,7 +1809,10 @@ async def test_media_start_uses_only_the_exact_activation_scope(
         environment_overrides: dict[str, str] | None = None,
         ready_check=None,  # type: ignore[no-untyped-def]
         launch_scope_sha256: str | None = None,
+        editor_bridge_support: ComfyEditorBridgeSupport | None = None,
     ) -> None:
+        assert editor_bridge_support is not None
+        assert not editor_bridge_support.supported
         captured.update(
             name=name,
             command=command,
@@ -1653,6 +1879,13 @@ async def test_activation_scoped_worker_is_reused_only_for_the_same_ready_launch
     command = ["python", "worker.py"]
     process = FakeRunningProcess(12345, terminate_code=0)
     log = _RotatingWorkerLog(tmp_path / "reuse.log")
+    support = ComfyEditorBridgeSupport(
+        True,
+        "ready",
+        "Native workflow editing is available.",
+        "0.28.0",
+        "1.45.21",
+    )
     record = WorkerRecord(
         "media",
         process,  # type: ignore[arg-type]
@@ -1660,6 +1893,8 @@ async def test_activation_scoped_worker_is_reused_only_for_the_same_ready_launch
         log,
         state="ready",
         launch_scope_sha256="a" * 64,
+        editor_bridge_launch_id="same-launch",
+        editor_bridge_support=support,
     )
     supervisor._workers["media"] = record
     stopped = AsyncMock(side_effect=AssertionError("matching worker was restarted"))
@@ -1670,10 +1905,30 @@ async def test_activation_scoped_worker_is_reused_only_for_the_same_ready_launch
         list(command),
         "http://127.0.0.1:8289/system_stats",
         launch_scope_sha256="a" * 64,
+        editor_bridge_support=support,
     )
 
     stopped.assert_not_awaited()
     assert supervisor._workers["media"] is record
+    assert supervisor.workflow_editor_runtime_identity() == "same-launch"
+    assert supervisor.workflow_editor_bridge_support() == support
+
+    changed_support = ComfyEditorBridgeSupport(
+        False,
+        "workflow-editor-frontend-unsupported",
+        "The configured frontend is not certified for native workflow editing.",
+        "0.28.0",
+        "1.46.0",
+    )
+    with pytest.raises(AssertionError, match="matching worker was restarted"):
+        await supervisor._replace(
+            "media",
+            list(command),
+            "http://127.0.0.1:8289/system_stats",
+            launch_scope_sha256="a" * 64,
+            editor_bridge_support=changed_support,
+        )
+    stopped.assert_awaited_once_with("media")
     log.close()
 
 
@@ -1735,7 +1990,10 @@ async def test_media_start_uses_only_verified_registry_overlay_contract(
         *,
         environment_overrides: dict[str, str] | None = None,
         ready_check=None,  # type: ignore[no-untyped-def]
+        editor_bridge_support: ComfyEditorBridgeSupport | None = None,
     ) -> None:
+        assert editor_bridge_support is not None
+        assert not editor_bridge_support.supported
         captured.update(
             name=name,
             command=command,
@@ -1786,7 +2044,7 @@ def test_registry_launch_contracts_use_the_managed_registry_root(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:  # type: ignore[no-untyped-def]
     supervisor = ProcessSupervisor(settings)
-    expected_root = settings.registry_dir / "registry-wheel-environments"
+    expected_root = registry_wheel_environment_root(settings.registry_dir)
     observed: list[Path] = []
 
     def trusted_contract(_session, *, custom_node_root, environment_root):  # type: ignore[no-untyped-def]
@@ -1990,6 +2248,63 @@ async def test_media_whitelist_contains_only_active_verified_trusted_installs(
 
     assert folders == ["lm-atelier-node_trusted"]
     assert verified == folders
+
+
+async def test_every_installed_asset_kind_reaches_the_runtime(
+    client,
+    settings,
+    tmp_path: Path,  # type: ignore[no-untyped-def]
+) -> None:
+    """A verified asset the runtime cannot see is a download that bought nothing."""
+
+    del client
+    settings.prepare()
+    kinds = {
+        "diffusion_model": "diffusion_models",
+        "text_encoder": "text_encoders",
+        "clip_vision": "clip_vision",
+        "checkpoint": "checkpoints",
+        "vae": "vae",
+        "lora": "loras",
+    }
+    with SessionLocal() as session:
+        for kind in (*kinds, "configuration"):
+            directory = tmp_path / f"asset-{kind}"
+            directory.mkdir()
+            session.add(
+                ModelAssetInstall(
+                    name=kind,
+                    kind=kind,
+                    local_path=str(directory),
+                    size_bytes=1024,
+                    manifest_json={},
+                    active=True,
+                )
+            )
+        inactive = tmp_path / "asset-retired"
+        inactive.mkdir()
+        session.add(
+            ModelAssetInstall(
+                name="retired",
+                kind="lora",
+                local_path=str(inactive),
+                size_bytes=1024,
+                manifest_json={},
+                active=False,
+            )
+        )
+        session.commit()
+
+    destination = ProcessSupervisor(settings)._write_comfy_model_paths()
+
+    published = json.loads(destination.read_text(encoding="utf-8"))
+    served = {
+        Path(entry["base_path"]).name: folder
+        for entry in published.values()
+        for folder in entry
+        if folder != "base_path"
+    }
+    assert served == {f"asset-{kind}": folder for kind, folder in kinds.items()}
 
 
 async def test_liveness_probe_requires_success_from_the_owned_listener(

@@ -15,6 +15,7 @@ from datetime import UTC, datetime, timedelta
 from pathlib import Path, PurePosixPath
 
 from .config import Settings
+from .filesystem_links import is_link_or_reparse
 from .schemas import BackupInfo
 
 _BACKUP_NAME = re.compile(r"^local-lm-(?P<stamp>\d{8}T\d{6}Z)-[0-9a-f]{8}\.sqlite3$")
@@ -147,6 +148,19 @@ class BackupManager:
             result.restore_pending = True
             return result
 
+    def cancel_restore(self) -> bool:
+        """Withdraw a restore that is no longer wanted.
+
+        Pairs with `request_restore` for callers that arm a restore before doing
+        something they might not survive, and withdraw it once they have.
+        """
+
+        with self._lock:
+            marker = self.settings.state_dir / "restore-on-next-start.json"
+            existed = marker.is_file()
+            marker.unlink(missing_ok=True)
+            return existed
+
     def delete(self, name: str) -> None:
         with self._lock:
             path = self._path(name)
@@ -277,7 +291,7 @@ class BackupManager:
         staged: list[tuple[Path, Path]] = []
         try:
             for original in originals:
-                if not original.exists() and not original.is_symlink():
+                if not original.exists() and not self._is_link(original):
                     continue
                 temporary = transaction / original.name
                 os.replace(original, temporary)
@@ -320,14 +334,14 @@ class BackupManager:
                 entries = [path for path in transaction.iterdir() if path.name != "COMMITTED"]
                 if committed:
                     for path in entries:
-                        if path.is_file() or path.is_symlink():
+                        if path.is_file() or self._is_link(path):
                             path.unlink(missing_ok=True)
                 else:
                     for path in entries:
                         if self._is_link(path) or not path.is_file():
                             continue
                         original = self.settings.backup_dir / path.name
-                        if original.exists() or original.is_symlink():
+                        if original.exists() or self._is_link(original):
                             logger.error(
                                 "Could not recover interrupted backup deletion for %s",
                                 path.name,
@@ -411,10 +425,11 @@ class BackupManager:
 
     @staticmethod
     def _is_link(path: Path) -> bool:
-        try:
-            return path.is_symlink() or (hasattr(path, "is_junction") and path.is_junction())
-        except OSError:
-            return True
+        return is_link_or_reparse(
+            path,
+            missing="assume_regular",
+            unreadable="assume_link",
+        )
 
     def _database_path(self) -> Path:
         return self.settings.state_dir / "local-lm.sqlite3"
@@ -661,11 +676,7 @@ class BackupManager:
                 digest.update(chunk)
         stat = path.stat()
         media_path = BackupManager._media_path(path)
-        media_exists = (
-            media_path.is_file()
-            and not media_path.is_symlink()
-            and not (hasattr(media_path, "is_junction") and media_path.is_junction())
-        )
+        media_exists = media_path.is_file() and not BackupManager._is_link(media_path)
         return BackupInfo(
             name=path.name,
             size_bytes=stat.st_size,

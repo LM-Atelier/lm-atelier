@@ -34,6 +34,7 @@ from .capability_evidence import (
     evidence_input_modalities,
     record_capability_evidence,
 )
+from .comfy_registry_paths import registry_wheel_environment_root
 from .comfy_templates import COMFY_TEMPLATE_COMPILER_VERSION
 from .context_compaction import (
     CONTEXT_COMPACTION_VERSION,
@@ -41,7 +42,6 @@ from .context_compaction import (
     MIN_COMPACTION_CHARACTERS,
     compact_context_messages,
 )
-from .custom_nodes import custom_node_dependency_errors
 from .db import SessionLocal
 from .domain import (
     ArtifactKind,
@@ -182,6 +182,7 @@ from .workflow_compatibility import (
     resolve_chat_workflow_selection,
     resolve_project_workflow_selection,
 )
+from .workflow_node_dependencies import node_dependency_errors
 from .workflow_selection import (
     ResolvedWorkflowFamily,
     WorkflowFamilySelectionError,
@@ -254,6 +255,60 @@ def _queued_workflow_activation(
         "binding_sha256": activation.binding_sha256,
         "launch_sha256": launch_sha256,
     }
+
+
+def _workflow_execution_witness(
+    session: Session,
+    revision: WorkflowRevision | None,
+    activation: dict[str, str] | None,
+    model_selection: dict[str, Any],
+) -> dict[str, Any] | None:
+    """Describe the workflow that will execute, independently of legacy routing."""
+
+    if revision is None:
+        return None
+    definition = session.get(WorkflowDefinition, revision.workflow_id)
+    if definition is None:
+        raise RuntimeError("A queued workflow revision has no definition.")
+    family = session.get(WorkflowFamily, definition.family_id) if definition.family_id else None
+    family_selected = bool(
+        family
+        and model_selection.get("workflow_family_id") == family.id
+        and model_selection.get("workflow_definition_id") == definition.id
+        and model_selection.get("workflow_revision_id") == revision.id
+    )
+    selection: dict[str, Any] = {
+        "source": "workflow_family" if family_selected else "resolved_revision",
+        "mode": model_selection.get("mode") if family_selected else "revision",
+    }
+    for key in ("score", "matched_terms", "fallback"):
+        if family_selected and key in model_selection:
+            selection[key] = copy.deepcopy(model_selection[key])
+    if family_selected:
+        selection["compatibility"] = bool(model_selection.get("workflow_compatibility"))
+    return {
+        "family_id": family.id if family else None,
+        "family_name": family.name if family else None,
+        "definition_id": definition.id,
+        "definition_name": definition.name,
+        "variant_key": definition.variant_key,
+        "operation": definition.operation,
+        "revision_id": revision.id,
+        "version": revision.version,
+        "engine": revision.engine,
+        "engine_version": revision.engine_version,
+        "trusted": revision.trusted,
+        "dependencies": revision.dependencies_json,
+        "activation": activation,
+        "selection": selection,
+    }
+
+
+def _require_consistent_workflow_witness(work_step: WorkStep, run: Run) -> None:
+    witness = run.provenance_json.get("workflow")
+    witness_revision_id = witness.get("revision_id") if isinstance(witness, dict) else None
+    if not (work_step.workflow_revision_id == run.workflow_revision_id == witness_revision_id):
+        raise RuntimeError("Queued workflow execution identity is inconsistent.")
 
 
 class ResponseRevisionConflict(ValueError):
@@ -895,6 +950,9 @@ class ConversationOrchestrator:
         plan.input_artifact_ids = resolved_input_ids
         visual_prompt = await self._compiled_visual_prompt(chat, plan, request.text)
 
+        preferred_workflow_revision_id = (
+            self._setup_verification_workflow_id(session, chat) or request.workflow_revision_id
+        )
         profile, model_selection, workflow_revision = self._profile_and_workflow_for_operation(
             session,
             chat,
@@ -903,9 +961,7 @@ class ConversationOrchestrator:
             # A recipe's recorded workflow wins over selection, and setup
             # verification wins over both: it is the run that decides whether
             # anything works at all.
-            preferred_revision_id=(
-                self._setup_verification_workflow_id(session, chat) or request.workflow_revision_id
-            ),
+            preferred_revision_id=preferred_workflow_revision_id,
         )
         profile_id = profile.id if profile else None
         vision_profile = (
@@ -940,6 +996,8 @@ class ConversationOrchestrator:
                     "No ready workflow matches the active media engine. Install a supported "
                     "image or video model and LM Atelier will configure it automatically."
                 )
+        if workflow_revision:
+            model_selection = {**model_selection, "compatibility_only": True}
         workflow_activation = _queued_workflow_activation(session, workflow_revision)
         role = self._role_for_operation(plan.operation)
         engine = (
@@ -1018,6 +1076,7 @@ class ConversationOrchestrator:
                 session,
                 workflow_revision,
                 plan.standalone_prompt if accepted_offer else request.text,
+                workflow_activation_id=(workflow_activation["id"] if workflow_activation else None),
             )
             if lora_selection.settings:
                 effective_settings["loras"] = lora_selection.settings
@@ -1274,19 +1333,11 @@ class ConversationOrchestrator:
                     if source
                     else None,
                 }
-        workflow_provenance = (
-            {
-                "definition_id": workflow_revision.workflow_id,
-                "revision_id": workflow_revision.id,
-                "version": workflow_revision.version,
-                "engine": workflow_revision.engine,
-                "engine_version": workflow_revision.engine_version,
-                "trusted": workflow_revision.trusted,
-                "dependencies": workflow_revision.dependencies_json,
-                "activation": workflow_activation,
-            }
-            if workflow_revision
-            else None
+        workflow_provenance = _workflow_execution_witness(
+            session,
+            workflow_revision,
+            workflow_activation,
+            model_selection,
         )
 
         transcript_sequence = (
@@ -1455,9 +1506,18 @@ class ConversationOrchestrator:
                             if lora_resolution
                             else {}
                         ),
+                        **(
+                            {"selection": lora_selection.provenance}
+                            if lora_selection
+                            and lora_selection.provenance.get("skipped_reason")
+                            and not lora_resolution
+                            else {}
+                        ),
                         **trigger_word_provenance,
                     }
-                    if lora_resolution or trigger_word_provenance["trigger_words_applied"]
+                    if lora_resolution
+                    or (lora_selection and lora_selection.provenance.get("skipped_reason"))
+                    or trigger_word_provenance["trigger_words_applied"]
                     else None
                 ),
                 **(
@@ -1487,6 +1547,7 @@ class ConversationOrchestrator:
                 settings_json=output_settings,
                 provenance_json=provenance,
             )
+            _require_consistent_workflow_witness(work_step, run)
             session.add(run)
             session.flush()
             work_step.run_id = run.id
@@ -1665,6 +1726,8 @@ class ConversationOrchestrator:
                 operation,
                 step_intent.prompt,
             )
+            if workflow_revision:
+                model_selection = {**model_selection, "compatibility_only": True}
             if profile and profile.model_install_id:
                 install = session.get(ModelInstall, profile.model_install_id)
                 if not install or not install.active:
@@ -1689,9 +1752,9 @@ class ConversationOrchestrator:
             if workflow_revision:
                 if workflow_revision.engine == "comfyui" and not workflow_revision.trusted:
                     raise ValueError(f"Ordered step {index + 1} selected an untrusted workflow.")
-                dependency_errors = custom_node_dependency_errors(
+                dependency_errors = node_dependency_errors(
                     session,
-                    workflow_revision.dependencies_json.get("custom_nodes"),
+                    workflow_revision.dependencies_json,
                 )
                 if dependency_errors:
                     raise ValueError(
@@ -1765,6 +1828,9 @@ class ConversationOrchestrator:
                     session,
                     workflow_revision,
                     step_intent.prompt,
+                    workflow_activation_id=(
+                        workflow_activation["id"] if workflow_activation else None
+                    ),
                 )
                 if lora_selection.settings:
                     effective_settings["loras"] = lora_selection.settings
@@ -2035,19 +2101,11 @@ class ConversationOrchestrator:
                 ]
             )
             model_provenance = self._model_provenance(session, profile)
-            workflow_provenance = (
-                {
-                    "definition_id": workflow_revision.workflow_id,
-                    "revision_id": workflow_revision.id,
-                    "version": workflow_revision.version,
-                    "engine": workflow_revision.engine,
-                    "engine_version": workflow_revision.engine_version,
-                    "trusted": workflow_revision.trusted,
-                    "dependencies": workflow_revision.dependencies_json,
-                    "activation": resolved["workflow_activation"],
-                }
-                if workflow_revision
-                else None
+            workflow_provenance = _workflow_execution_witness(
+                session,
+                workflow_revision,
+                resolved["workflow_activation"],
+                resolved["model_selection"],
             )
             effective_preset = resolved["effective_preset"]
             trigger_word_provenance = prompt_trigger_word_provenance(
@@ -2121,14 +2179,26 @@ class ConversationOrchestrator:
                                 if resolved["lora_resolution"]
                                 else {}
                             ),
+                            **(
+                                {"selection": resolved["lora_selection"].provenance}
+                                if resolved["lora_selection"]
+                                and resolved["lora_selection"].provenance.get("skipped_reason")
+                                and not resolved["lora_resolution"]
+                                else {}
+                            ),
                             **trigger_word_provenance,
                         }
                         if resolved["lora_resolution"]
+                        or (
+                            resolved["lora_selection"]
+                            and resolved["lora_selection"].provenance.get("skipped_reason")
+                        )
                         or trigger_word_provenance["trigger_words_applied"]
                         else None
                     ),
                 },
             )
+            _require_consistent_workflow_witness(work_step, run)
             session.add(run)
             session.flush()
             work_step.run_id = run.id
@@ -3829,8 +3899,8 @@ class ConversationOrchestrator:
                 activation,
                 runtime_materializer=runtime_materializer,
                 custom_node_root=self.engines.settings.custom_node_dir,
-                registry_environment_root=(
-                    self.engines.settings.state_dir / "registry-wheel-environments"
+                registry_environment_root=registry_wheel_environment_root(
+                    self.engines.settings.registry_dir
                 ),
             )
         except WorkflowActivationError as exc:
@@ -3976,9 +4046,7 @@ class ConversationOrchestrator:
                             "The selected ComfyUI workflow is not trusted. Review its nodes and "
                             "create a trusted revision before execution."
                         )
-                    dependency_errors = custom_node_dependency_errors(
-                        session, revision.dependencies_json.get("custom_nodes")
-                    )
+                    dependency_errors = node_dependency_errors(session, revision.dependencies_json)
                     if dependency_errors:
                         raise RuntimeError("; ".join(dependency_errors))
                     workflow = revision.api_graph_json

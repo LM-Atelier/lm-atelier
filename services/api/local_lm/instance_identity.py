@@ -10,6 +10,8 @@ import time
 from contextlib import suppress
 from pathlib import Path
 
+from .filesystem_links import is_link_or_reparse
+
 INSTANCE_ID_HEADER = "X-LM-Atelier-Instance"
 _INSTANCE_SEED_NAME = "desktop-instance-seed"
 _SEED_PATTERN = re.compile(r"^[0-9a-f]{64}$")
@@ -119,12 +121,8 @@ def _derive_identity(seed: bytes, root: Path) -> str:
 
 
 def _is_link(path: Path) -> bool:
-    try:
-        if path.is_symlink() or (hasattr(path, "is_junction") and path.is_junction()):
-            return True
-        attributes = getattr(path.lstat(), "st_file_attributes", 0)
-        return bool(attributes & getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0))
-    except FileNotFoundError:
-        return False
-    except OSError:
-        return True
+    return is_link_or_reparse(
+        path,
+        missing="assume_regular",
+        unreadable="assume_link",
+    )

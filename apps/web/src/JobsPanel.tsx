@@ -43,6 +43,21 @@ export function JobsPanel() {
     localStorage.setItem(DISMISSED_JOB_ISSUES_KEY, String(cutoff));
     setDismissedBefore(cutoff);
   };
+  // A jobs read that failed is not "no jobs". Returning null took away the
+  // one surface that would have explained what was happening, at exactly the
+  // moment something was - and left the workspace looking idle instead.
+  if (jobs.error) {
+    return (
+      <aside className="jobs-panel" aria-label="Jobs">
+        <div className="jobs-error" role="alert">
+          {(jobs.error as Error).message}
+          <button className="secondary compact-button" onClick={() => void jobs.refetch()}>
+            Try again
+          </button>
+        </div>
+      </aside>
+    );
+  }
   if (!active.length && !recentUnsuccessful.length) return null;
   return (
     <aside className="jobs-panel" aria-label="Jobs">
@@ -141,7 +156,11 @@ export function JobsPanel() {
           </span>
         </div>
       ))}
-      {retry.error && <div className="jobs-error" role="alert">{retry.error.message}</div>}
+      {(retry.error || cancel.error || pause.error || resume.error) && (
+        <div className="jobs-error" role="alert">
+          {(retry.error ?? cancel.error ?? pause.error ?? resume.error)!.message}
+        </div>
+      )}
     </aside>
   );
 }

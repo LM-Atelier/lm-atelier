@@ -149,6 +149,10 @@ async def test_an_unresolved_package_can_be_persisted_as_an_exact_non_executable
     assert revision["dependencies_json"]["workflow_package_draft"]["graph_sha256"]
     listed = (await client.get("/api/workflows")).json()
     assert all(workflow["id"] != draft["id"] for workflow in listed)
+    draft_families = (await client.get("/api/workflow-families?selector_capability=image")).json()
+    assert all(
+        variant["id"] != draft["id"] for family in draft_families for variant in family["variants"]
+    )
 
 
 async def test_a_draft_identity_collision_refuses_instead_of_reusing_another_graph(
@@ -211,6 +215,17 @@ async def test_a_ready_draft_finalizes_in_place_and_retry_is_idempotent(
     assert current["api_graph_json"]["1"]["class_type"] == "Source"
     listed = (await client.get("/api/workflows")).json()
     assert any(workflow["id"] == draft["id"] for workflow in listed)
+    finalized_families = (
+        await client.get("/api/workflow-families?selector_capability=image")
+    ).json()
+    assert (
+        sum(
+            variant["id"] == draft["id"]
+            for family in finalized_families
+            for variant in family["variants"]
+        )
+        == 1
+    )
 
     retry_response = await client.post(
         "/api/workflows/packages/import",
@@ -280,6 +295,71 @@ async def test_a_ready_package_imports_as_an_untrusted_workflow(
     compiled = revision["api_graph_json"]
     assert compiled["1"]["class_type"] == "Source"
     assert compiled["2"]["inputs"]["images"] == ["1", 0]
+
+
+async def test_plain_package_import_ignores_an_unsupported_frontend_version(
+    client: AsyncClient, app: FastAPI, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _wire_runtime(app, monkeypatch)
+    graph = _ui_graph()
+    graph["extra"] = {"frontendVersion": "99.0.0"}
+
+    response = await client.post(
+        "/api/workflows/packages/import",
+        json={"ui_graph": graph, "name": "Headless import", "operation": "text_to_image"},
+    )
+
+    assert response.status_code == 201, response.json()
+
+
+@pytest.mark.parametrize("frontend_version", [None, "1.45.22"])
+async def test_package_import_refuses_uncertified_frontend_semantics(
+    client: AsyncClient,
+    app: FastAPI,
+    monkeypatch: pytest.MonkeyPatch,
+    frontend_version: str | None,
+) -> None:
+    _wire_runtime(app, monkeypatch)
+    graph = _ui_graph()
+    if frontend_version is not None:
+        graph["extra"] = {"frontendVersion": frontend_version}
+    graph["nodes"].append({"id": 3, "type": "Reroute", "mode": 0, "inputs": [], "outputs": []})
+
+    response = await client.post(
+        "/api/workflows/packages/import",
+        json={
+            "ui_graph": graph,
+            "name": f"Uncertified frontend {frontend_version}",
+            "operation": "text_to_image",
+        },
+    )
+
+    assert response.status_code == 422
+    assert response.json()["code"] == "unsupported_frontend_version"
+    assert response.json()["detail"] == (
+        "workflow uses PrimitiveNode or Reroute semantics without a certified "
+        "ComfyUI frontend version"
+    )
+
+
+async def test_package_import_accepts_certified_frontend_semantics(
+    client: AsyncClient, app: FastAPI, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _wire_runtime(app, monkeypatch)
+    graph = _ui_graph()
+    graph["extra"] = {"frontendVersion": "1.45.21"}
+    graph["nodes"].append({"id": 3, "type": "Reroute", "mode": 0, "inputs": [], "outputs": []})
+
+    response = await client.post(
+        "/api/workflows/packages/import",
+        json={
+            "ui_graph": graph,
+            "name": "Certified frontend",
+            "operation": "text_to_image",
+        },
+    )
+
+    assert response.status_code == 201, response.json()
 
 
 async def test_compilation_refusals_keep_their_stable_codes(

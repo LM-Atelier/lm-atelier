@@ -42,6 +42,7 @@ FRONTEND_SYSTEM_NODE_TYPES = frozenset(
         "PrimitiveNode",
         "Reroute",
         "Fast Groups Bypasser (rgthree)",
+        "Label (rgthree)",
         "Mute / Bypass Relay (rgthree)",
         "Mute / Bypass Repeater (rgthree)",
     }
@@ -100,6 +101,30 @@ class WorkflowMissingNode:
 
 
 @dataclass(frozen=True)
+class WorkflowNodeProvenance:
+    """What a graph claims about where one node type comes from.
+
+    The distinction that matters is between a node whose author wrote
+    `comfy-core` and one that carries no attribution at all. Everything that
+    reads provenance today collapses them - `_package_requirements` treats a
+    missing `cnr_id` and `comfy-core` identically, and
+    `comfy_templates._uses_only_core_nodes` reads both as core - so an
+    unidentified node is indistinguishable from a core one.
+
+    That is not academic. The published Krea 2 workflow names
+    `Save Image (LoraManager)` with no `cnr_id`, no `aux_id` and no version, and
+    anything treating absent attribution as core would admit it as though the
+    runtime shipped it.
+    """
+
+    node_type: str
+    package_ids: tuple[str, ...]
+    package_versions: tuple[str, ...]
+    core_claimed: bool
+    unattributed: bool
+
+
+@dataclass(frozen=True)
 class ComfyWorkflowPackageAnalysis:
     format_version: str
     frontend_version: str | None
@@ -115,6 +140,7 @@ class ComfyWorkflowPackageAnalysis:
     missing_nodes: tuple[WorkflowMissingNode, ...]
     operation_guess: OperationGuess
     truncated: bool
+    node_provenance: tuple[WorkflowNodeProvenance, ...] = ()
 
     @property
     def runtime_nodes_available(self) -> bool:
@@ -250,6 +276,51 @@ def _analysis(
         _missing_node_requirements(records, missing),
         _operation_guess(required),
         False,
+        _node_provenance(records, required),
+    )
+
+
+def _node_provenance(
+    records: Sequence[_NodeRecord],
+    required: set[str],
+) -> tuple[WorkflowNodeProvenance, ...]:
+    """Say, per executable node type, what the graph claims about its origin.
+
+    Deliberately does not feed `ready`. This reports what a graph asserts; it
+    decides nothing, so import behaves exactly as it did before.
+
+    Case-sensitive throughout, because `/object_info` keys are and the compiler
+    looks a node type up by exact match. Folding case here would let two node
+    types that the runtime treats as different share one provenance answer.
+    """
+
+    package_ids: dict[str, set[str]] = {}
+    versions: dict[str, set[str]] = {}
+    core_claimed: set[str] = set()
+    unattributed: set[str] = set()
+    for record in records:
+        if record.node_type not in required:
+            continue
+        package_ids.setdefault(record.node_type, set())
+        versions.setdefault(record.node_type, set())
+        if record.package_id is None:
+            # No attribution at all, which is not the same claim as "core".
+            unattributed.add(record.node_type)
+        elif record.package_id == "comfy-core":
+            core_claimed.add(record.node_type)
+        else:
+            package_ids[record.node_type].add(record.package_id)
+            if record.package_version:
+                versions[record.node_type].add(record.package_version)
+    return tuple(
+        WorkflowNodeProvenance(
+            node_type=node_type,
+            package_ids=tuple(sorted(package_ids[node_type])),
+            package_versions=tuple(sorted(versions[node_type])),
+            core_claimed=node_type in core_claimed,
+            unattributed=node_type in unattributed,
+        )
+        for node_type in sorted(package_ids)
     )
 
 
@@ -294,6 +365,12 @@ def _validate_bounded_json(value: object) -> None:
         raise WorkflowPackageError("invalid_json", "workflow is not valid JSON") from exc
     if len(encoded) > MAX_UI_GRAPH_BYTES:
         raise WorkflowPackageError("too_large", "workflow exceeds the UI graph size limit")
+
+
+def validate_bounded_workflow_json(value: object) -> None:
+    """Validate a workflow-shaped JSON value without interpreting its graph form."""
+
+    _validate_bounded_json(value)
 
 
 def _format_version(value: object) -> str:

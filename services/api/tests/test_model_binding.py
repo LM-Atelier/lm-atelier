@@ -9,9 +9,16 @@ from __future__ import annotations
 
 import itertools
 
+import local_lm.model_manifests as manifests_module
+from local_lm.auxiliary_assets import AUXILIARY_ASSET_KINDS
 from local_lm.config import Settings
 from local_lm.db import SessionLocal
-from local_lm.model_manifests import inspect_repository_metadata
+from local_lm.model_manifests import (
+    COMFY_MODEL_ASSET_KINDS,
+    COMFY_MODEL_FOLDERS,
+    comfy_folder_for_kind,
+    inspect_repository_metadata,
+)
 from local_lm.model_planner import (
     declared_model_components,
     install_satisfies_components,
@@ -25,6 +32,41 @@ _COUNTER = itertools.count()
 
 def _unique() -> str:
     return f"case{next(_COUNTER)}"
+
+
+def test_comfy_model_folder_contract_has_one_complete_source() -> None:
+    expected = {
+        "checkpoint": "checkpoints",
+        "diffusion_model": "diffusion_models",
+        "text_encoder": "text_encoders",
+        "vae": "vae",
+        "clip_vision": "clip_vision",
+        "lora": "loras",
+        "controlnet": "controlnet",
+        "upscaler": "upscale_models",
+        "embedding": "embeddings",
+        "ip_adapter": "ipadapter",
+    }
+
+    assert {kind: comfy_folder_for_kind(kind) for kind in expected} == expected
+    assert frozenset(expected) == COMFY_MODEL_ASSET_KINDS
+    assert frozenset(expected.values()) == COMFY_MODEL_FOLDERS
+    assert comfy_folder_for_kind("gguf_model") is None
+    assert comfy_folder_for_kind("unet") is None
+    assert comfy_folder_for_kind("unknown") is None
+
+
+def test_standalone_auxiliary_kinds_do_not_enable_every_workflow_component() -> None:
+    assert (
+        frozenset({"lora", "vae", "controlnet", "upscaler", "embedding", "ip_adapter"})
+        == AUXILIARY_ASSET_KINDS
+    )
+    assert AUXILIARY_ASSET_KINDS < COMFY_MODEL_ASSET_KINDS
+
+
+def test_repository_paths_recognize_every_canonical_comfy_folder() -> None:
+    for folder in COMFY_MODEL_FOLDERS:
+        assert manifests_module._target_folder(f"bundle/{folder}/weights.bin", "image") == folder
 
 
 def _install(session, suffix: str, components: list[tuple[str, str]]) -> ModelInstall:  # type: ignore[no-untyped-def]
@@ -216,3 +258,32 @@ def test_an_undeclared_component_is_left_exactly_as_it_was() -> None:
     assert [item.target_folder for item in with_others_declared.components] == [
         item.target_folder for item in untouched.components
     ]
+
+
+def test_a_lycoris_adapter_is_recognised_as_a_lora() -> None:
+    """LoKr, LoHa and DoRA are LoRAs in every way that matters here.
+
+    ComfyUI loads them through the same loader and providers list them as
+    LoRAs, but none of them spells "lora" in a tensor name: LoKr factorises
+    into `lokr_w1`/`lokr_w2`, LoHa into `hada_w1_a`/`hada_w2_b`, DoRA adds a
+    `dora_scale`. Classified as an unknown blob, a real 1.5 GB adapter finished
+    downloading and was then discarded at the contract check for not being what
+    it plainly is.
+    """
+    lokr = [
+        "diffusion_model.blocks.0.attn.gate.alpha",
+        "diffusion_model.blocks.0.attn.gate.lokr_w1",
+        "diffusion_model.blocks.0.attn.gate.lokr_w2",
+    ]
+    loha = ["diffusion_model.blocks.0.attn.hada_w1_a", "diffusion_model.blocks.0.attn.hada_w2_b"]
+    dora = ["diffusion_model.blocks.0.attn.wk.dora_scale"]
+    for names in (lokr, loha, dora):
+        assert manifests_module._safetensors_kind(names, {}) == "lora"
+
+    # A checkpoint stays a checkpoint: these names mean nothing outside an
+    # adapter, so nothing ordinary is promoted by matching them.
+    plain = [
+        "model.diffusion_model.input_blocks.0.0.weight",
+        "model.diffusion_model.output_blocks.0.0.bias",
+    ]
+    assert manifests_module._safetensors_kind(plain, {}) != "lora"

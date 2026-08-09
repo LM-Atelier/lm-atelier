@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+from dataclasses import replace
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
@@ -23,7 +24,6 @@ from local_lm.workflow_package_preparation import (
     PreparationContext,
     WorkflowPackagePreparationError,
     prepare_workflow_package,
-    refuse_interpreter_probe,
 )
 
 pytestmark = pytest.mark.asyncio
@@ -69,14 +69,27 @@ def _clients() -> dict[str, Any]:
 
 
 class _NullSessionFactory:
+    """A session that knows nothing, unless a test hands it an install to find.
+
+    Renewal reads the install it is refreshing - where its reviewed tree is,
+    and what that install already records as omitted - so the double has to
+    answer `get` rather than be a bare object.
+    """
+
+    def __init__(self, install: object | None = None) -> None:
+        self._install = install
+
     def __call__(self) -> _NullSessionFactory:
         return self
 
-    def __enter__(self) -> object:
-        return object()
+    def __enter__(self) -> _NullSessionFactory:
+        return self
 
     def __exit__(self, *args: object) -> None:
         return None
+
+    def get(self, _model: object, _identity: object) -> object | None:
+        return self._install
 
 
 async def test_composes_resolve_close_prepare_in_order(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -170,6 +183,181 @@ async def test_renewal_reuses_resolution_and_closure_without_replacing_node_code
     )
 
     assert result is prepared
+
+
+def _staged_install(tmp_path: Path, requirements: str, *, recorded: tuple[str, ...] = ()) -> Any:
+    """An install whose reviewed tree is already on disk, as a renewal finds it."""
+    folder = tmp_path / "lm-atelier-registry_staged"
+    folder.mkdir(parents=True, exist_ok=True)
+    (folder / "requirements.txt").write_text(requirements, encoding="utf-8")
+    review: dict[str, Any] = {}
+    if recorded:
+        review["pending_source_omission"] = {
+            "install_id": "install_1",
+            "manifest_sha256": "a" * 64,
+            "omitted_declarations": list(recorded),
+            "workflow_revision_id": "revision-1",
+            "required_node_types": ["ExampleNode"],
+        }
+    return SimpleNamespace(
+        installed_path=folder.name,
+        review_json=review,
+        # Staging learns these; a renewal reuses the archive they name.
+        registry_record_id="github-commit:" + "b" * 60,
+        download_url="https://codeload.github.com/example/example-pack/zip/" + "a" * 40,
+    )
+
+
+async def test_a_commit_pinned_renewal_reads_the_tree_it_already_reviewed(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A commit is the most immutable identity there is, and it could not renew.
+
+    Renewal reuses the node code it already reviewed rather than fetching it
+    again, and a commit-pinned package states its dependencies inside that
+    tree - so the declarations had nowhere to come from and the whole path
+    refused, telling the reader to remove the package. Nothing offers a way to
+    remove one, which left a commit-pinned install unable to follow its runtime
+    anywhere.
+
+    The tree is on disk and already reviewed. This reads it.
+    """
+    seen: dict[str, Any] = {}
+
+    async def fake_drive(resolution: Any, **_kwargs: Any) -> Any:
+        seen["planned"] = resolution.pip_dependencies
+        seen["identity"] = (resolution.registry_record_id, resolution.download_url)
+        return SimpleNamespace(closure="closure-object")
+
+    async def fake_renew(_session: Any, **kwargs: Any) -> Any:
+        seen["renewed"] = kwargs["install_id"]
+        return SimpleNamespace(install_id="install_1")
+
+    async def unexpected_stage(**_kwargs: Any) -> Any:
+        raise AssertionError("renewal must not fetch the node code again")
+
+    monkeypatch.setattr(composition, "drive_comfy_registry_wheel_closure", fake_drive)
+    monkeypatch.setattr(composition, "renew_comfy_registry_install_environment", fake_renew)
+    monkeypatch.setattr(composition, "stage_comfy_registry_install_archive", unexpected_stage)
+
+    revision = "a" * 40
+    install = _staged_install(tmp_path, "numpy" + chr(10) + "requests>=2" + chr(10))
+
+    await prepare_workflow_package(
+        _NullSessionFactory(install),
+        package_id="example-pack",
+        node_types=("ExampleNode",),
+        version=revision,
+        context=replace(_CONTEXT, custom_node_root=tmp_path),
+        media_worker_stopped=True,
+        interpreter_probe=_probe,
+        registry_client=_Registry(
+            _resolution(
+                declared_version=revision,
+                install_kind="git_commit",
+                repository_url="https://github.com/example/example-pack.git",
+            )
+        ),  # type: ignore[arg-type]
+        renew_install_id="install_1",
+        **_clients(),
+    )
+
+    assert seen["planned"] == ("numpy", "requests>=2")
+    assert seen["renewed"] == "install_1"
+    # The archive identity travels with it, so the lifecycle's check compares
+    # the renewal against the install it is renewing rather than against gaps.
+    assert seen["identity"] == (
+        "github-commit:" + "b" * 60,
+        "https://codeload.github.com/example/example-pack/zip/" + "a" * 40,
+    )
+
+
+async def test_a_renewal_may_rederive_an_omission_it_already_carries(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Finding the same omission again is agreement, not news."""
+    seen: dict[str, Any] = {}
+
+    async def fake_drive(resolution: Any, **_kwargs: Any) -> Any:
+        seen["planned"] = resolution.pip_dependencies
+        return SimpleNamespace(closure="closure-object")
+
+    async def fake_renew(_session: Any, **_kwargs: Any) -> Any:
+        return SimpleNamespace(install_id="install_1")
+
+    monkeypatch.setattr(composition, "drive_comfy_registry_wheel_closure", fake_drive)
+    monkeypatch.setattr(composition, "renew_comfy_registry_install_environment", fake_renew)
+
+    source = "git+https://github.com/owner/repo"
+    install = _staged_install(tmp_path, "numpy" + chr(10) + source + chr(10), recorded=(source,))
+
+    await prepare_workflow_package(
+        _NullSessionFactory(install),
+        package_id="example-pack",
+        node_types=("ExampleNode",),
+        version="a" * 40,
+        context=replace(_CONTEXT, custom_node_root=tmp_path),
+        media_worker_stopped=True,
+        interpreter_probe=_probe,
+        registry_client=_Registry(
+            _resolution(
+                declared_version="a" * 40,
+                install_kind="git_commit",
+                repository_url="https://github.com/example/example-pack.git",
+            )
+        ),  # type: ignore[arg-type]
+        renew_install_id="install_1",
+        authorized_workflow=("revision-1", ("ExampleNode",)),
+        **_clients(),
+    )
+
+    assert seen["planned"] == ("numpy",)
+
+
+async def test_a_renewal_may_not_set_aside_something_new(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An omission is only trustworthy proven against the workflow that allowed it.
+
+    A renewal authorizes nothing, so a declaration this install has never had
+    set aside must stop it - and the refusal names which one.
+    """
+
+    async def fake_drive(_resolution: Any, **_kwargs: Any) -> Any:
+        return SimpleNamespace(closure="closure-object")
+
+    monkeypatch.setattr(composition, "drive_comfy_registry_wheel_closure", fake_drive)
+
+    install = _staged_install(
+        tmp_path, "numpy" + chr(10) + "git+https://github.com/owner/newcomer" + chr(10)
+    )
+
+    with pytest.raises(WorkflowPackagePreparationError) as refused:
+        await prepare_workflow_package(
+            _NullSessionFactory(install),
+            package_id="example-pack",
+            node_types=("ExampleNode",),
+            version="a" * 40,
+            context=replace(_CONTEXT, custom_node_root=tmp_path),
+            media_worker_stopped=True,
+            interpreter_probe=_probe,
+            registry_client=_Registry(
+                _resolution(
+                    declared_version="a" * 40,
+                    install_kind="git_commit",
+                    repository_url="https://github.com/example/example-pack.git",
+                )
+            ),  # type: ignore[arg-type]
+            renew_install_id="install_1",
+            authorized_workflow=("revision-1", ("ExampleNode",)),
+            **_clients(),
+        )
+
+    assert refused.value.code == "omission_not_renewable"
+    assert "newcomer" in str(refused.value)
 
 
 async def test_commit_pin_renewal_refuses_before_probe_or_archive_download(
@@ -420,12 +608,6 @@ async def test_each_stage_refuses_with_its_own_code(monkeypatch: pytest.MonkeyPa
     assert prepared.value.code == "media_worker_running"
 
 
-async def test_the_probe_placeholder_refuses_rather_than_guessing() -> None:
-    with pytest.raises(WorkflowPackagePreparationError) as refused:
-        await refuse_interpreter_probe(Path("C:/synthetic/python.exe"))
-    assert refused.value.code == "interpreter_probe_unavailable"
-
-
 async def test_context_requires_a_configured_managed_runtime(tmp_path: Path) -> None:
     unconfigured = Settings(data_dir=tmp_path, comfy_executable=None, comfy_directory=None)
     with pytest.raises(WorkflowPackagePreparationError) as refused:
@@ -634,6 +816,188 @@ async def test_without_an_authorized_workflow_nothing_is_set_aside(
 
     assert seen["planned"] == declarations
     assert seen["pending"] is None
+
+
+async def test_a_dependency_with_no_wheel_anywhere_is_set_aside(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The live WAS case: fairscale publishes source distributions and no wheels.
+
+    There is nothing malformed about the requirement and nothing wrong with the
+    index. The distribution simply cannot be installed the one safe way this
+    product installs anything, and refusing the whole package for it left a
+    workflow uninstallable over a dependency its nodes may never touch.
+
+    Set aside like any other, recorded, and proven at activation - which is
+    where a wrong guess is caught, because activation refuses if the workflow
+    turns out to need what was left out.
+    """
+    seen: dict[str, Any] = {}
+    attempts: list[tuple[str, ...]] = []
+
+    async def fake_drive(resolution: Any, **_kwargs: Any) -> Any:
+        attempts.append(tuple(resolution.pip_dependencies))
+        for declaration in resolution.pip_dependencies:
+            if declaration.startswith("fairscale"):
+                raise ComfyRegistryWheelClosureDriverError(
+                    "no_compatible_wheel",
+                    "No non-yanked, hash-bound compatible wheel exists for fairscale>=0.4.4",
+                    requirement="fairscale>=0.4.4",
+                )
+        seen["planned"] = resolution.pip_dependencies
+        return SimpleNamespace(closure="closure-object")
+
+    async def fake_prepare(session: Any, **kwargs: Any) -> Any:
+        seen["pending"] = kwargs["pending_omission"]
+        return SimpleNamespace(install_id="install_1")
+
+    monkeypatch.setattr(composition, "drive_comfy_registry_wheel_closure", fake_drive)
+    monkeypatch.setattr(composition, "prepare_comfy_registry_install", fake_prepare)
+
+    declarations = ("numpy", "fairscale>=0.4.4", "git+https://github.com/ltdrdata/cstr")
+    registry = _Registry(_resolution(pip_dependencies=declarations))
+
+    await prepare_workflow_package(
+        _NullSessionFactory(),
+        package_id="was-ns",
+        node_types=("ExampleNode",),
+        version="3.0.1",
+        context=_CONTEXT,
+        media_worker_stopped=True,
+        interpreter_probe=_probe,
+        registry_client=registry,  # type: ignore[arg-type]
+        authorized_workflow=("revision-1", ("ExampleNode",)),
+        **_clients(),
+    )
+
+    # The bare source never reaches the closure; fairscale is withdrawn only
+    # after the closure says it cannot satisfy it.
+    assert attempts[0] == ("numpy", "fairscale>=0.4.4")
+    assert seen["planned"] == ("numpy",)
+    assert seen["pending"].omitted_declarations == (
+        "git+https://github.com/ltdrdata/cstr",
+        "fairscale>=0.4.4",
+    )
+
+
+async def test_a_transitive_requirement_with_no_wheel_still_refuses(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Only what the package declared may be withdrawn.
+
+    A requirement pulled in by some other distribution belongs to that
+    distribution. Dropping it would hollow out whatever asked for it, while
+    this package - which never mentioned it - appears to have installed
+    cleanly.
+    """
+
+    async def fake_drive(_resolution: Any, **_kwargs: Any) -> Any:
+        raise ComfyRegistryWheelClosureDriverError(
+            "no_compatible_wheel",
+            "No non-yanked, hash-bound compatible wheel exists for someone-elses-dep",
+            requirement="someone-elses-dep",
+        )
+
+    monkeypatch.setattr(composition, "drive_comfy_registry_wheel_closure", fake_drive)
+    registry = _Registry(_resolution(pip_dependencies=("numpy",)))
+
+    with pytest.raises(WorkflowPackagePreparationError) as refusal:
+        await prepare_workflow_package(
+            _NullSessionFactory(),
+            package_id="example-pack",
+            node_types=("ExampleNode",),
+            version="1.2.3",
+            context=_CONTEXT,
+            media_worker_stopped=True,
+            interpreter_probe=_probe,
+            registry_client=registry,  # type: ignore[arg-type]
+            authorized_workflow=("revision-1", ("ExampleNode",)),
+            **_clients(),
+        )
+
+    assert refusal.value.code == "no_compatible_wheel"
+
+
+async def test_without_an_authorized_workflow_a_missing_wheel_still_refuses(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Nothing an omission could later be proven against, so nothing is set aside."""
+
+    async def fake_drive(_resolution: Any, **_kwargs: Any) -> Any:
+        raise ComfyRegistryWheelClosureDriverError(
+            "no_compatible_wheel",
+            "No non-yanked, hash-bound compatible wheel exists for fairscale>=0.4.4",
+            requirement="fairscale>=0.4.4",
+        )
+
+    monkeypatch.setattr(composition, "drive_comfy_registry_wheel_closure", fake_drive)
+    registry = _Registry(_resolution(pip_dependencies=("fairscale>=0.4.4",)))
+
+    with pytest.raises(WorkflowPackagePreparationError) as refusal:
+        await prepare_workflow_package(
+            _NullSessionFactory(),
+            package_id="was-ns",
+            node_types=("ExampleNode",),
+            version="3.0.1",
+            context=_CONTEXT,
+            media_worker_stopped=True,
+            interpreter_probe=_probe,
+            registry_client=registry,  # type: ignore[arg-type]
+            **_clients(),
+        )
+
+    assert refusal.value.code == "no_compatible_wheel"
+
+
+async def test_the_live_packages_declare_their_sources_bare_and_still_prepare(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The exact declarations of the two packages this product has to install.
+
+    Both write their VCS dependencies as a URL with no distribution name -
+    pip's spelling, not PEP 508's. Read through the parser alone that is
+    nothing, so neither package could be set aside and both refused outright,
+    while a package writing `name @ url` prepared. Same situation, so the
+    same outcome: planned without them, and every one recorded.
+    """
+    seen: dict[str, Any] = {}
+
+    async def fake_drive(resolution: Any, **_kwargs: Any) -> Any:
+        seen["planned"] = resolution.pip_dependencies
+        return SimpleNamespace(closure="closure-object")
+
+    async def fake_prepare(session: Any, **kwargs: Any) -> Any:
+        seen["pending"] = kwargs["pending_omission"]
+        return SimpleNamespace(install_id="install_1")
+
+    monkeypatch.setattr(composition, "drive_comfy_registry_wheel_closure", fake_drive)
+    monkeypatch.setattr(composition, "prepare_comfy_registry_install", fake_prepare)
+
+    declarations = (
+        "numpy",
+        "git+https://github.com/facebookresearch/sam2",
+        "git+https://github.com/ltdrdata/img2texture.git",
+        "git+https://github.com/ltdrdata/cstr",
+        "git+https://github.com/ltdrdata/ffmpy.git",
+    )
+    registry = _Registry(_resolution(pip_dependencies=declarations))
+
+    await prepare_workflow_package(
+        _NullSessionFactory(),
+        package_id="example-pack",
+        node_types=("ExampleNode",),
+        version="1.2.3",
+        context=_CONTEXT,
+        media_worker_stopped=True,
+        interpreter_probe=_probe,
+        registry_client=registry,  # type: ignore[arg-type]
+        authorized_workflow=("revision-1", ("ExampleNode",)),
+        **_clients(),
+    )
+
+    assert seen["planned"] == ("numpy",)
+    assert seen["pending"] is not None
+    assert seen["pending"].omitted_declarations == declarations[1:]
 
 
 async def test_a_renewal_cannot_omit_a_source_dependency(

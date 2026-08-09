@@ -354,7 +354,12 @@ async def test_security_headers_block_remote_active_content_and_preserve_stricte
     csp = response.headers["content-security-policy"]
     assert "script-src 'self'" in csp
     assert "img-src 'self' data: blob:" in csp
-    assert "connect-src 'self' ws://127.0.0.1:* ws://localhost:*" in csp
+    connect_directive = next(
+        directive.strip()
+        for directive in csp.split(";")
+        if directive.strip().startswith("connect-src")
+    )
+    assert connect_directive == "connect-src 'self' ws://127.0.0.1:* ws://localhost:*"
     assert "frame-ancestors 'none'" in csp
     assert "https:" not in csp
     assert response.headers["referrer-policy"] == "no-referrer"
@@ -403,3 +408,30 @@ async def test_each_refusal_says_which_one_it_was(tmp_path) -> None:  # type: ig
             # The prose is unchanged, so anything already matching on it keeps
             # working; the code is a sibling rather than a replacement.
             assert bad_origin.json()["detail"] == "untrusted browser origin"
+
+
+def test_the_session_cookie_is_not_a_durable_on_disk_secret(tmp_path: Path) -> None:
+    """It used to be the secret itself, read from state/session-secret and
+    handed to the browser unchanged, so it was identical after every restart and
+    the CSRF token derived from it could never rotate."""
+
+    from local_lm.config import Settings
+    from local_lm.security import SessionSecurity
+
+    settings = Settings(data_dir=tmp_path / "session")
+    settings.prepare()
+
+    first = SessionSecurity(settings)
+    second = SessionSecurity(settings)
+
+    response = Response()
+    first.issue_session(response)
+    cookie = response.headers["set-cookie"]
+
+    # Nothing on disk carries it, so nothing on disk leaks it.
+    assert not list(settings.state_dir.glob("session-secret*"))
+    # A later run of the service does not reissue the same session.
+    assert first.csrf_token != second.csrf_token
+    assert not first._valid_cookie(second._session_token)
+    assert first._session_token in cookie
+    assert first.csrf_token not in cookie

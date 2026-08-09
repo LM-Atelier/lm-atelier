@@ -132,11 +132,33 @@ def test_an_allowed_source_host_is_refused_by_what_would_fix_it(
 
 
 @pytest.mark.parametrize(
+    "declaration",
+    [
+        "git+https://github.com/example/example",
+        "git+https://github.com/example/example.git",
+    ],
+)
+def test_a_bare_source_url_is_refused_by_what_would_fix_it_too(declaration: str) -> None:
+    """pip takes a URL with no name; PEP 508 does not, and both are one case.
+
+    Two real packages this product must install declare their sources this
+    way. Written as `name @ url` the refusal names the repository and says
+    the package must pin it; written bare it failed to parse first and came
+    back "invalid", which names nothing and suggests the declaration is
+    malformed rather than unpinnable. Same situation, so the same answer.
+    """
+    _assert_error("unpinned_source_dependency", [declaration])
+
+
+@pytest.mark.parametrize(
     "declarations",
     [
         "example==1",
         ["example==1\nother==2"],
         [123],
+        # Still genuinely malformed, and still generic: nothing here is a URL,
+        # so nothing more specific can honestly be said about it.
+        ["not a requirement at all!!"],
     ],
 )
 def test_rejects_invalid_dependency_declarations(declarations: object) -> None:

@@ -15,6 +15,7 @@ from sqlalchemy import event, select
 from sqlalchemy.orm import Session, selectinload
 
 from .artifacts import ArtifactStore
+from .auxiliary_assets import AUXILIARY_ASSET_KINDS
 from .config import Settings
 from .domain import (
     ArtifactKind,
@@ -53,14 +54,6 @@ from .schemas import ChatDetail, ProjectOut, RunOut, SettingField, VisionSetting
 from .settings_registry import validate_settings
 
 _CAS_IMPORT_SESSION_KEY = "lm_atelier_project_import_cas"
-_AUXILIARY_ASSET_KINDS = {
-    "lora",
-    "vae",
-    "controlnet",
-    "upscaler",
-    "embedding",
-    "ip_adapter",
-}
 
 
 class _ImportCasTransaction:
@@ -390,7 +383,7 @@ class ProjectExporter:
                 raise ValueError(
                     f"auxiliary asset {asset.name!r} has no immutable verified checksum"
                 )
-            if asset.kind not in _AUXILIARY_ASSET_KINDS:
+            if asset.kind not in AUXILIARY_ASSET_KINDS:
                 raise ValueError(f"auxiliary asset {asset.name!r} has an unsupported kind")
             reference = f"auxiliary:{asset.kind}:sha256:{digest}"
             source = sources.get(asset.source_id or "")
@@ -441,7 +434,7 @@ class ProjectExporter:
             reference = requirement.get("id")
             if (
                 not isinstance(kind, str)
-                or kind not in _AUXILIARY_ASSET_KINDS
+                or kind not in AUXILIARY_ASSET_KINDS
                 or not isinstance(digest, str)
                 or len(digest) != 64
                 or any(character not in "0123456789abcdef" for character in digest)
@@ -637,6 +630,10 @@ class ProjectExporter:
 
         workflow = provenance.get("workflow")
         if isinstance(workflow, dict):
+            # Families are local library presentation records. The executable
+            # definition and revision are portable dependencies; a family id
+            # must not claim to identify a record on another machine.
+            workflow["family_id"] = None
             source_revision_id = self._portable_revision_reference(
                 workflow.get("revision_id"),
                 dependencies,
@@ -736,6 +733,7 @@ class ProjectExporter:
 
         workflow = provenance.get("workflow")
         if isinstance(workflow, dict):
+            workflow["family_id"] = None
             source_revision_id = workflow.get("revision_id")
             if dependencies and source_revision_id is not None:
                 imported_revision_id = dependencies.revision(
@@ -1465,6 +1463,8 @@ class ProjectExporter:
         workflow = value.get("workflow")
         if not isinstance(workflow, dict):
             return
+        if workflow.get("family_id") is not None:
+            raise ValueError("project provenance contains a local workflow family")
         activation = workflow.get("activation")
         if isinstance(activation, dict) and ("id" in activation or "launch_sha256" in activation):
             raise ValueError("project provenance contains a local workflow activation")

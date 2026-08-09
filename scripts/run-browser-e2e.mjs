@@ -57,8 +57,6 @@ async function firstExistingPath(candidates) {
 }
 
 async function pythonExecutable() {
-  const configured = process.env.LM_ATELIER_E2E_PYTHON?.trim();
-  if (configured) return configured;
   const environmentPython = process.platform === "win32"
     ? path.join(repositoryRoot, ".venv", "Scripts", "python.exe")
     : path.join(repositoryRoot, ".venv", "bin", "python");

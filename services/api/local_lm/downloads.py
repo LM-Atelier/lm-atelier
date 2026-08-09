@@ -26,7 +26,7 @@ from sqlalchemy.orm import Session
 
 from .adapters.base import ChatAdapter, ChatRequest, MediaRequest
 from .auxiliary_assets import (
-    COMFY_AUXILIARY_FOLDERS,
+    AUXILIARY_ASSET_KINDS,
     detect_lora_extension,
     validate_lora_workflow_contract,
 )
@@ -40,6 +40,7 @@ from .comfy_templates import (
 from .config import Settings
 from .domain import CompatibilityLevel, JobKind, JobStatus, new_id, utcnow
 from .events import EventBroker
+from .filesystem_links import is_link_or_reparse
 from .gguf import (
     GGUFSelectionError,
     automatic_gguf_selection,
@@ -47,9 +48,12 @@ from .gguf import (
     validate_gguf_selection,
 )
 from .model_manifests import (
+    COMFY_MODEL_ASSET_KINDS,
+    COMFY_MODEL_FOLDERS,
     MAX_METADATA_BYTES,
     MAX_WEIGHT_HEADER_BYTES,
     ModelManifestInspection,
+    comfy_folder_for_kind,
     inspect_repository_metadata,
 )
 from .model_planner import (
@@ -90,6 +94,7 @@ from .upscale_workflows import (
     upscale_capability,
 )
 from .workflow_edit_calibration import validate_workflow_edit_calibration
+from .workflow_ownership import ensure_workflow_family_ownership
 
 if TYPE_CHECKING:
     from .adapters.comfyui import ComfyUIAdapter
@@ -97,28 +102,21 @@ if TYPE_CHECKING:
 
 _REMOTE_ID = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]*/[A-Za-z0-9][A-Za-z0-9_.-]*$")
 _CIVITAI_ID = re.compile(r"^[1-9][0-9]{0,11}$")
-_CIVITAI_ALLOWED_DOWNLOAD_HOSTS = ("civitai.com", "b2.civitai.com")
+# civitai.com issues the redirect, b2 serves smaller files, and anything of
+# any size comes from their Cloudflare R2 delivery domain. Without the last of
+# these every large model refused with "untrusted host" at the second hop.
+_CIVITAI_ALLOWED_DOWNLOAD_HOSTS = (
+    "civitai.com",
+    "b2.civitai.com",
+    ".r2.cloudflarestorage.com",
+)
 _TRANSFER_ATTEMPTS = 3
 # How often a running transfer records a byte sample. Must stay comfortably
 # under the five-second window `progress._byte_rate` allows between samples,
 # or the displayed transfer rate silently disappears.
 _TRANSFER_SAMPLE_SECONDS = 1.0
 _PROVISIONAL_INSTALL_KEY = "_provisional_install"
-_WORKFLOW_ASSET_KINDS = frozenset(
-    {
-        "checkpoint",
-        "clip_vision",
-        "controlnet",
-        "diffusion_model",
-        "embedding",
-        "gguf_model",
-        "ip_adapter",
-        "lora",
-        "text_encoder",
-        "upscaler",
-        "vae",
-    }
-)
+_WORKFLOW_ASSET_KINDS = COMFY_MODEL_ASSET_KINDS | {"gguf_model"}
 logger = logging.getLogger(__name__)
 _VISION_PROBE_DATA_URL = (
     "data:image/png;base64,"
@@ -126,6 +124,16 @@ _VISION_PROBE_DATA_URL = (
     "BmIAE1GqkMCoBmIAyaEEAEAuAR9UPEsJAAAAAElFTkSuQmCC"
 )
 _ACTIVATION_PROBE_PNG = base64.b64decode(_VISION_PROBE_DATA_URL.partition(",")[2])
+
+
+def _path_is_link(path: Path) -> bool:
+    return is_link_or_reparse(
+        path,
+        missing="assume_regular",
+        unreadable="assume_link",
+    )
+
+
 _NUMBERED_WORKFLOW_INPUT_IMAGE = re.compile(r"input_image_(?P<index>\d{1,2})\Z")
 
 
@@ -217,6 +225,13 @@ class DownloadManager:
             raise ValueError(f"unsupported download provider: {provider}")
         if request.auxiliary_kind and request.workflow_asset_kind:
             raise ValueError("a download cannot be both auxiliary and workflow-owned")
+        auxiliary_folder = None
+        if request.auxiliary_kind:
+            if request.auxiliary_kind not in AUXILIARY_ASSET_KINDS:
+                raise ValueError("unsupported auxiliary asset kind")
+            auxiliary_folder = comfy_folder_for_kind(request.auxiliary_kind)
+            if auxiliary_folder is None:
+                raise ValueError("auxiliary asset has no ComfyUI model folder")
         if (request.auxiliary_kind or request.workflow_asset_kind) and not request.install_plan_id:
             raise ValueError("model assets require a verified install plan")
         if request.workflow_asset_kind and (
@@ -237,8 +252,8 @@ class DownloadManager:
             request = request.model_copy(
                 update={
                     "comfy_paths": (
-                        {COMFY_AUXILIARY_FOLDERS[request.auxiliary_kind]: "."}
-                        if request.auxiliary_kind
+                        {auxiliary_folder: "."}
+                        if auxiliary_folder
                         else self._automatic_comfy_paths(request.allow_patterns)
                     )
                 }
@@ -262,21 +277,9 @@ class DownloadManager:
                 raise ValueError("expected hash paths must be safe relative paths")
             if not re.fullmatch(r"[0-9a-f]{64}", digest):
                 raise ValueError("expected SHA-256 values must be lowercase hexadecimal")
-        allowed_comfy_folders = {
-            "checkpoints",
-            "diffusion_models",
-            "text_encoders",
-            "vae",
-            "clip_vision",
-            "loras",
-            "controlnet",
-            "upscale_models",
-            "embeddings",
-            "ipadapter",
-        }
         for folder, relative_path in request.comfy_paths.items():
             path = PurePosixPath(relative_path)
-            if folder not in allowed_comfy_folders:
+            if folder not in COMFY_MODEL_FOLDERS:
                 raise ValueError(f"unsupported ComfyUI model folder: {folder}")
             if path.is_absolute() or ".." in path.parts:
                 raise ValueError("ComfyUI model paths must be safe relative paths")
@@ -337,23 +340,11 @@ class DownloadManager:
 
     @staticmethod
     def _automatic_comfy_paths(filenames: list[str]) -> dict[str, str]:
-        known_folders = {
-            "checkpoints",
-            "diffusion_models",
-            "text_encoders",
-            "vae",
-            "clip_vision",
-            "loras",
-            "controlnet",
-            "upscale_models",
-            "embeddings",
-            "ipadapter",
-        }
         paths: dict[str, str] = {}
         for filename in filenames:
             parts = PurePosixPath(filename).parts
             for index, part in enumerate(parts[:-1]):
-                if part in known_folders:
+                if part in COMFY_MODEL_FOLDERS:
                     paths[part] = str(PurePosixPath(*parts[: index + 1]))
         if paths:
             return paths
@@ -584,7 +575,7 @@ class DownloadManager:
         staging_root = staging.resolve()
         for root in sorted(download_root.glob("plan-*.partial")):
             if (
-                root.is_symlink()
+                _path_is_link(root)
                 or not root.is_dir()
                 or not re.fullmatch(r"plan-[0-9a-f]{64}\.partial", root.name)
             ):
@@ -611,7 +602,7 @@ class DownloadManager:
         relative = PurePosixPath(filename)
         target = staging.joinpath(*relative.parts)
         for candidate in candidates:
-            if not candidate.is_file() or candidate.is_symlink():
+            if not candidate.is_file() or _path_is_link(candidate):
                 continue
             size = candidate.stat().st_size
             if expected_size and size != expected_size:
@@ -1089,19 +1080,19 @@ class DownloadManager:
             ):
                 continue
             reclaimed_bytes += self._path_size(candidate)
-            if candidate.is_dir() and not candidate.is_symlink():
+            if candidate.is_dir() and not _path_is_link(candidate):
                 shutil.rmtree(candidate)
             else:
                 candidate.unlink(missing_ok=True)
             removed_count += 1
         quarantine_parent = self.settings.download_dir / ".discarded-installs"
-        if quarantine_parent.is_dir() and not quarantine_parent.is_symlink():
+        if quarantine_parent.is_dir() and not _path_is_link(quarantine_parent):
             for candidate in quarantine_parent.iterdir():
                 if any(candidate.name.startswith(f"{job_id}-") for job_id in active_ids):
                     continue
-                if not candidate.is_symlink():
+                if not _path_is_link(candidate):
                     reclaimed_bytes += self._path_size(candidate)
-                if candidate.is_dir() and not candidate.is_symlink():
+                if candidate.is_dir() and not _path_is_link(candidate):
                     shutil.rmtree(candidate)
                 else:
                     candidate.unlink(missing_ok=True)
@@ -2449,6 +2440,7 @@ class DownloadManager:
             and install.id in declared_installs
             and current_lora_extension == lora_extension
         ):
+            ensure_workflow_family_ownership(session, definition, current)
             return current
         version = max((item.version for item in definition.revisions), default=0) + 1
         input_schema = copy.deepcopy(compiled.input_schema)
@@ -2532,6 +2524,7 @@ class DownloadManager:
         session.add(revision)
         session.flush()
         definition.current_revision_id = revision.id
+        ensure_workflow_family_ownership(session, definition, revision)
         return revision
 
     async def _cleanup_provisional_install_serialized(
@@ -2628,7 +2621,7 @@ class DownloadManager:
                 raise
         if quarantined_root:
             try:
-                if quarantined_root.is_dir() and not quarantined_root.is_symlink():
+                if quarantined_root.is_dir() and not _path_is_link(quarantined_root):
                     shutil.rmtree(quarantined_root)
                 else:
                     quarantined_root.unlink(missing_ok=True)
@@ -2716,7 +2709,7 @@ class DownloadManager:
         if not re.fullmatch(r"[A-Za-z0-9_-]+", job_id):
             return
         partial = self.settings.download_dir / f"{job_id}.partial"
-        if partial.is_dir() and not partial.is_symlink():
+        if partial.is_dir() and not _path_is_link(partial):
             shutil.rmtree(partial)
         else:
             partial.unlink(missing_ok=True)
@@ -3360,7 +3353,7 @@ class DownloadManager:
     ) -> None:
         """Move only this failed plan's verified files back to resumable staging."""
 
-        if install_path.is_symlink() or staging.is_symlink():
+        if _path_is_link(install_path) or _path_is_link(staging):
             raise ValueError("model staging cannot use filesystem links")
         staging.mkdir(parents=True, exist_ok=True)
         for filename in filenames:
@@ -3369,7 +3362,7 @@ class DownloadManager:
                 raise ValueError("model staging path is unsafe")
             source = install_path.joinpath(*relative.parts)
             target = staging.joinpath(*relative.parts)
-            if not source.is_file() or source.is_symlink():
+            if not source.is_file() or _path_is_link(source):
                 continue
             target.parent.mkdir(parents=True, exist_ok=True)
             if target.exists():
@@ -3414,7 +3407,7 @@ class DownloadManager:
         expected_source = staging.joinpath(*PurePosixPath(source_filename).parts)
         source = Path(downloaded_path)
         if (
-            source.is_symlink()
+            _path_is_link(source)
             or not source.is_file()
             or source.resolve(strict=True) != expected_source.resolve(strict=True)
             or staging_root not in expected_source.resolve(strict=True).parents
@@ -3423,7 +3416,7 @@ class DownloadManager:
         target = staging.joinpath(*PurePosixPath(destination_filename).parts)
         target.parent.mkdir(parents=True, exist_ok=True)
         if target.exists():
-            if target.is_symlink() or not target.is_file():
+            if _path_is_link(target) or not target.is_file():
                 raise ValueError("companion destination is not a regular staged file")
             target.unlink()
         os.replace(source, target)

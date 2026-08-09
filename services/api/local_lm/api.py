@@ -10,7 +10,6 @@ import math
 import os
 import re
 import shutil
-import stat
 from collections.abc import AsyncGenerator, AsyncIterator, Callable, Mapping
 from contextlib import suppress
 from pathlib import Path, PurePosixPath
@@ -19,13 +18,13 @@ from typing import TYPE_CHECKING, Annotated, Any, Literal, cast
 import httpx
 from fastapi import APIRouter, Depends, File, HTTPException, Query, Request, Response, UploadFile
 from sqlalchemy import Select, and_, func, or_, select, text
-from sqlalchemy.exc import SQLAlchemyError
+from sqlalchemy.exc import IntegrityError, SQLAlchemyError
 from sqlalchemy.orm import Session, selectinload
-from starlette.responses import FileResponse
+from starlette.responses import FileResponse, HTMLResponse
 
 from . import __version__
 from .api_errors import api_error
-from .auxiliary_assets import COMFY_AUXILIARY_FOLDERS, validate_lora_workflow_contract
+from .auxiliary_assets import AUXILIARY_ASSET_KINDS, validate_lora_workflow_contract
 from .capability_evidence import current_capability_evidence, evidence_input_modalities
 from .capability_probe import probe_structured_tools
 from .catalog_sources import CatalogSource, CatalogSourceNotFound
@@ -37,6 +36,7 @@ from .chat_deletion import (
 )
 from .chat_forking import ForkSourceNotFound, fork_chat_from_message
 from .civitai_catalog import CivitaiCatalog
+from .comfy_editor_bridge import ComfyEditorBridgeError
 from .comfy_registry import ComfyRegistryClient
 from .comfy_registry_activation import (
     ComfyRegistryActivationError,
@@ -48,6 +48,7 @@ from .comfy_registry_closure_driver import ComfyRegistryWheelMetadataClient
 from .comfy_registry_downloads import ComfyRegistryArchiveDownloader
 from .comfy_registry_installs import installed_comfy_registry_versions
 from .comfy_registry_interpreter import probe_comfy_registry_runtime_target
+from .comfy_registry_paths import registry_wheel_environment_root
 from .comfy_registry_wheel_downloads import ComfyRegistryWheelDownloader
 from .comfy_registry_wheel_projects import ComfyRegistryWheelProjectClient
 from .comfy_templates import (
@@ -66,7 +67,6 @@ from .credentials import (
     CredentialVaultUnavailable,
     credential_provider,
 )
-from .custom_nodes import custom_node_dependency_errors
 from .db import SessionLocal, get_session
 from .domain import (
     ArtifactKind,
@@ -88,6 +88,7 @@ from .engines import (
     EngineRegistry,
     EngineSchemaUnavailableError,
 )
+from .filesystem_links import is_link_or_reparse
 from .gguf import (
     GGUFSelectionError,
     automatic_gguf_selection,
@@ -99,6 +100,7 @@ from .model_manifests import (
     MAX_METADATA_BYTES,
     MAX_WEIGHT_HEADER_BYTES,
     ModelManifestError,
+    comfy_folder_for_kind,
     inspect_repository_metadata,
 )
 from .model_planner import (
@@ -276,6 +278,13 @@ from .schemas import (
     WorkflowCreate,
     WorkflowDependencyImpactOut,
     WorkflowDependencyResourceKind,
+    WorkflowEditorCancelIn,
+    WorkflowEditorConsumeIn,
+    WorkflowEditorDraftCreateIn,
+    WorkflowEditorDraftOut,
+    WorkflowEditorGraphDeltaOut,
+    WorkflowEditorReturnOut,
+    WorkflowEditorSessionOut,
     WorkflowFamilyOut,
     WorkflowFamilyPreferenceOut,
     WorkflowFamilyPreferenceUpdate,
@@ -353,6 +362,19 @@ from .workflow_compatibility import (
     retire_legacy_profile_workflow,
 )
 from .workflow_edit_calibration import validate_workflow_edit_calibration
+from .workflow_editor_sessions import (
+    WorkflowEditorSessionError,
+    workflow_api_graph_sha256,
+    workflow_ui_graph_sha256,
+)
+from .workflow_editor_shell import (
+    SHELL_SCRIPT_ROUTE,
+    SHELL_STYLE_ROUTE,
+    workflow_editor_origins_conflict,
+    workflow_editor_shell_asset,
+    workflow_editor_shell_csp,
+    workflow_editor_shell_document,
+)
 from .workflow_install_offers import (
     WorkflowInstallOfferError,
     create_workflow_install_offer,
@@ -367,6 +389,8 @@ from .workflow_library import (
     workflow_resource_consumers,
     workflow_resource_name,
 )
+from .workflow_node_dependencies import node_dependency_errors
+from .workflow_ownership import ensure_workflow_family_ownership
 from .workflow_package_drafts import (
     is_workflow_package_draft,
     workflow_package_draft_dependencies,
@@ -1049,7 +1073,7 @@ async def _load_chat_profile(services: Services, session: Session, profile_id: s
     try:
         status = await services.processes.load_chat(profile, install)
     except (OSError, RuntimeError, ValueError, TimeoutError) as exc:
-        raise HTTPException(422, str(exc)) from exc
+        raise api_error(422, "chat-worker-start-failed", str(exc)) from exc
     setting = session.get(AppSetting, LAST_CHAT_PROFILE_KEY)
     if setting:
         setting.value_json = profile.id
@@ -1071,7 +1095,7 @@ async def start_media_worker(request: Request, session: SessionDep) -> WorkerSta
         try:
             return await services.processes.start_media()
         except (OSError, RuntimeError, ValueError, TimeoutError) as exc:
-            raise HTTPException(422, str(exc)) from exc
+            raise api_error(422, "media-worker-start-failed", str(exc)) from exc
 
 
 @router.post("/workers/{name}/stop", response_model=WorkerStatus)
@@ -1086,7 +1110,7 @@ async def stop_worker(name: str, request: Request, session: SessionDep) -> Worke
         try:
             return await services.processes.stop(name)
         except ValueError as exc:
-            raise HTTPException(422, str(exc)) from exc
+            raise api_error(422, "worker-stop-failed", str(exc)) from exc
 
 
 @router.post("/workers/{name}/restart", response_model=WorkerStatus)
@@ -1100,12 +1124,14 @@ async def restart_worker(name: str, request: Request, session: SessionDep) -> Wo
         _ensure_worker_idle(session, name)
         if name == "media":
             if services.settings.media_engine != "comfyui":
-                raise HTTPException(422, "The ComfyUI media engine is not active.")
+                raise api_error(
+                    422, "media-engine-inactive", "The ComfyUI media engine is not active."
+                )
             try:
                 await services.processes.stop("media")
                 return await services.processes.start_media()
             except (OSError, RuntimeError, ValueError, TimeoutError) as exc:
-                raise HTTPException(422, str(exc)) from exc
+                raise api_error(422, "media-worker-restart-failed", str(exc)) from exc
         # The chat worker restarts with the model it ran last, whether or not it
         # is currently running - a crashed worker still knows what to reload.
         record = next((item for item in services.processes.statuses() if item.name == "chat"), None)
@@ -1150,7 +1176,7 @@ async def reset_worker(name: str, request: Request, session: SessionDep) -> Work
     try:
         worker = await services.processes.stop(name)
     except ValueError as exc:
-        raise HTTPException(422, str(exc)) from exc
+        raise api_error(422, "worker-stop-failed", str(exc)) from exc
     session.expire_all()
     return WorkerResetResult(worker=worker, cancelled_jobs=cancelled)
 
@@ -1905,7 +1931,7 @@ async def _accept_turn(
             inherited_image_edit_strength=inherited_image_edit_strength,
         )
     except LookupError as exc:
-        raise HTTPException(404, str(exc)) from exc
+        raise api_error(404, "turn-subject-not-found", str(exc)) from exc
     except RouteConfirmationRequired as exc:
         raise HTTPException(
             409,
@@ -1952,13 +1978,13 @@ async def _accept_turn(
             },
         ) from exc
     except ResponseRevisionConflict as exc:
-        raise HTTPException(409, str(exc)) from exc
+        raise api_error(409, "response-revision-conflict", str(exc)) from exc
     except EngineNotConfiguredError as exc:
-        raise HTTPException(409, str(exc)) from exc
+        raise api_error(409, "engine-not-configured", str(exc)) from exc
     except EngineSchemaUnavailableError as exc:
-        raise HTTPException(503, str(exc)) from exc
+        raise api_error(503, "engine-schema-unavailable", str(exc)) from exc
     except ValueError as exc:
-        raise HTTPException(422, str(exc)) from exc
+        raise api_error(422, "turn-invalid", str(exc)) from exc
 
 
 @router.get("/messages/{message_id}", response_model=MessageOut)
@@ -2092,11 +2118,11 @@ async def regenerate_message(
             engine=prior_profile.engine if prior_profile else None,
         )
     except EngineNotConfiguredError as exc:
-        raise HTTPException(409, str(exc)) from exc
+        raise api_error(409, "engine-not-configured", str(exc)) from exc
     except EngineSchemaUnavailableError as exc:
-        raise HTTPException(503, str(exc)) from exc
+        raise api_error(503, "engine-schema-unavailable", str(exc)) from exc
     except ValueError as exc:
-        raise HTTPException(422, str(exc)) from exc
+        raise api_error(422, "generation-settings-invalid", str(exc)) from exc
     turn = TurnRequest(
         text=text,
         mode=mode,
@@ -2142,9 +2168,9 @@ async def select_response_revision(
             revision_id,
         )
     except LookupError as exc:
-        raise HTTPException(404, str(exc)) from exc
+        raise api_error(404, "response-revision-not-found", str(exc)) from exc
     except ValueError as exc:
-        raise HTTPException(409, str(exc)) from exc
+        raise api_error(409, "response-revision-not-selectable", str(exc)) from exc
 
 
 @router.post("/messages/{message_id}/branch", response_model=TurnAccepted, status_code=202)
@@ -2197,11 +2223,11 @@ async def edit_and_branch(
                 )
                 inherited_image_edit_strength = _inherited_auto_image_edit_strength(prior_run)
             except EngineNotConfiguredError as exc:
-                raise HTTPException(409, str(exc)) from exc
+                raise api_error(409, "engine-not-configured", str(exc)) from exc
             except EngineSchemaUnavailableError as exc:
-                raise HTTPException(503, str(exc)) from exc
+                raise api_error(503, "engine-schema-unavailable", str(exc)) from exc
             except ValueError as exc:
-                raise HTTPException(422, str(exc)) from exc
+                raise api_error(422, "generation-settings-invalid", str(exc)) from exc
     turn = payload.model_copy(update=updates)
     return await _accept_turn(
         _services(request).orchestrator,
@@ -3502,6 +3528,13 @@ async def resolve_catalog_preflight(
         return result.model_copy(update={"install_plan": plan, "file_variants": variants})
 
     if payload.auxiliary_kind:
+        auxiliary_folder = comfy_folder_for_kind(payload.auxiliary_kind)
+        if payload.auxiliary_kind not in AUXILIARY_ASSET_KINDS or auxiliary_folder is None:
+            raise api_error(
+                422,
+                "auxiliary-kind-unsupported",
+                "Unsupported model asset kind.",
+            )
         if payload.role != "image":
             result = assess(detail)
             return await finalize(
@@ -3524,7 +3557,7 @@ async def resolve_catalog_preflight(
         return await finalize(
             assess(detail).model_copy(
                 update={
-                    "comfy_paths": {COMFY_AUXILIARY_FOLDERS[payload.auxiliary_kind]: "."},
+                    "comfy_paths": {auxiliary_folder: "."},
                 }
             ),
             detail,
@@ -4146,7 +4179,7 @@ async def list_model_assets(
 ) -> list[ModelAssetInstall]:
     statement = select(ModelAssetInstall)
     if kind:
-        if kind not in COMFY_AUXILIARY_FOLDERS:
+        if kind not in AUXILIARY_ASSET_KINDS:
             raise HTTPException(422, "unsupported model asset kind")
         statement = statement.where(ModelAssetInstall.kind == kind)
     return list(
@@ -4734,18 +4767,11 @@ def _managed_model_path(model_root: Path, value: str) -> Path | None:
 
 
 def _model_path_is_link(path: Path) -> bool:
-    try:
-        if path.is_symlink():
-            return True
-        is_junction = getattr(path, "is_junction", None)
-        if is_junction is not None and is_junction():
-            return True
-        attributes = getattr(path.lstat(), "st_file_attributes", 0)
-        return bool(attributes & getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0))
-    except FileNotFoundError:
-        return False
-    except OSError:
-        return True
+    return is_link_or_reparse(
+        path,
+        missing="assume_regular",
+        unreadable="assume_link",
+    )
 
 
 def _ensure_model_tree_link_free(path: Path) -> None:
@@ -6528,6 +6554,7 @@ async def create_workflow(payload: WorkflowCreate, session: SessionDep) -> Workf
     session.add(revision)
     session.flush()
     definition.current_revision_id = revision.id
+    ensure_workflow_family_ownership(session, definition, revision)
     session.commit()
     created = session.scalar(
         select(WorkflowDefinition)
@@ -6681,6 +6708,58 @@ async def derive_workflow_trust(
     return TrustDerivation(**decision.as_dict())
 
 
+def _workflow_editor_shell_asset_response(name: str, media_type: str) -> Response:
+    try:
+        content = workflow_editor_shell_asset(name)
+    except ComfyEditorBridgeError as exc:
+        raise api_error(500, exc.code, str(exc)) from exc
+    return Response(
+        content=content,
+        media_type=media_type,
+        headers={"Cache-Control": "no-store"},
+    )
+
+
+@router.get(SHELL_SCRIPT_ROUTE.removeprefix("/api"), include_in_schema=False)
+async def workflow_editor_shell_script() -> Response:
+    return _workflow_editor_shell_asset_response("shell.js", "application/javascript")
+
+
+@router.get(SHELL_STYLE_ROUTE.removeprefix("/api"), include_in_schema=False)
+async def workflow_editor_shell_style() -> Response:
+    return _workflow_editor_shell_asset_response("shell.css", "text/css")
+
+
+@router.get("/workflow-editor/shell", include_in_schema=False)
+async def workflow_editor_shell(request: Request) -> HTMLResponse:
+    services = _services(request)
+    if services.processes.workflow_editor_runtime_identity() is None:
+        raise api_error(
+            409,
+            "workflow-editor-runtime-not-ready",
+            "Start the supported media runtime before opening this workflow.",
+        )
+    shell_origin = f"{request.url.scheme}://{request.url.netloc}"
+    if workflow_editor_origins_conflict(services.settings.comfy_url, shell_origin):
+        raise api_error(
+            409,
+            "workflow-editor-origin-conflict",
+            "The media runtime must use a separate loopback origin for native editing.",
+        )
+    try:
+        document = workflow_editor_shell_document(services.settings.comfy_url)
+        csp = workflow_editor_shell_csp(services.settings.comfy_url)
+    except ComfyEditorBridgeError as exc:
+        raise api_error(500, exc.code, str(exc)) from exc
+    return HTMLResponse(
+        document,
+        headers={
+            "Cache-Control": "no-store",
+            "Content-Security-Policy": csp,
+        },
+    )
+
+
 @router.get("/workflows/{workflow_id}/open-target", response_model=WorkflowOpenTarget)
 async def workflow_open_target(
     workflow_id: str, request: Request, session: SessionDep
@@ -6697,6 +6776,660 @@ async def workflow_open_target(
         filename=f"{filename or 'workflow'}.comfyui.json",
         ui_graph=revision.ui_graph_json,
     )
+
+
+@router.post(
+    "/workflows/{workflow_id}/editor-sessions",
+    response_model=WorkflowEditorSessionOut,
+    status_code=201,
+)
+async def start_workflow_editor_session(
+    workflow_id: str,
+    request: Request,
+    response: Response,
+    session: SessionDep,
+) -> WorkflowEditorSessionOut:
+    _definition, revision = _workflow_and_revision(session, workflow_id)
+    if revision.engine != "comfyui":
+        raise api_error(
+            422,
+            "workflow-editor-engine-unsupported",
+            "Native editing requires a ComfyUI workflow.",
+        )
+    if not revision.ui_graph_json:
+        raise api_error(
+            422,
+            "workflow-editor-ui-graph-missing",
+            "This workflow has no ComfyUI user-interface graph.",
+        )
+    if not revision.api_graph_json:
+        raise api_error(
+            409,
+            "workflow-editor-api-graph-missing",
+            "This workflow has no executable ComfyUI prompt to verify.",
+        )
+
+    services = _services(request)
+    runtime_identity = services.processes.workflow_editor_runtime_identity()
+    if runtime_identity is None:
+        raise api_error(
+            409,
+            "workflow-editor-runtime-not-ready",
+            "Start the supported media runtime before opening this workflow.",
+        )
+    describe_nodes = getattr(services.engines.media, "object_info", None)
+    if not callable(describe_nodes):
+        raise api_error(
+            503,
+            "workflow-editor-node-inventory-unavailable",
+            "The media runtime cannot describe its workflow nodes.",
+        )
+    invalidate_nodes = getattr(services.engines.media, "invalidate_object_info_cache", None)
+    if callable(invalidate_nodes):
+        invalidate_nodes()
+    try:
+        object_info = await describe_nodes()
+    except Exception as exc:  # noqa: BLE001 - every runtime failure is unavailable here
+        raise api_error(
+            503,
+            "workflow-editor-node-inventory-unavailable",
+            "The media runtime could not describe its workflow nodes.",
+        ) from exc
+    if not isinstance(object_info, Mapping):
+        raise api_error(
+            503,
+            "workflow-editor-node-inventory-invalid",
+            "The media runtime returned an invalid workflow node inventory.",
+        )
+    try:
+        compilation = compile_comfyui_ui_graph(revision.ui_graph_json, object_info)
+        compiled_api_graph = {key: dict(value) for key, value in compilation.api_graph.items()}
+        compiled_sha256 = workflow_api_graph_sha256(compiled_api_graph)
+        stored_sha256 = workflow_api_graph_sha256(revision.api_graph_json)
+    except WorkflowCompilationError as exc:
+        raise api_error(
+            422,
+            "workflow-editor-graph-cannot-compile",
+            "This workflow cannot be opened for verified native editing.",
+            reason_code=exc.code,
+        ) from exc
+    except WorkflowEditorSessionError as exc:
+        raise api_error(
+            422,
+            "workflow-editor-graph-invalid",
+            "This workflow cannot be opened for verified native editing.",
+            reason_code=exc.code,
+        ) from exc
+    if compiled_sha256 != stored_sha256:
+        raise api_error(
+            409,
+            "workflow-editor-graph-prompt-mismatch",
+            "The visual workflow no longer matches its executable prompt.",
+        )
+    if services.processes.workflow_editor_runtime_identity() != runtime_identity:
+        raise api_error(
+            409,
+            "workflow-editor-runtime-changed",
+            "The media runtime changed while the workflow editor was opening.",
+        )
+    try:
+        editor_session = services.workflow_editor_sessions.start(
+            workflow_id=workflow_id,
+            base_revision_id=revision.id,
+            base_ui_graph=revision.ui_graph_json,
+            base_api_graph=revision.api_graph_json,
+            runtime_identity=runtime_identity,
+        )
+    except WorkflowEditorSessionError as exc:
+        if exc.code == "workflow-editor-capacity":
+            raise api_error(429, exc.code, str(exc)) from exc
+        raise api_error(
+            422,
+            "workflow-editor-session-invalid",
+            "The workflow editor session could not be created.",
+            reason_code=exc.code,
+        ) from exc
+    response.headers["Cache-Control"] = "no-store"
+    return WorkflowEditorSessionOut(
+        id=editor_session.id,
+        protocol_version=editor_session.protocol_version,
+        workflow_id=editor_session.workflow_id,
+        base_revision_id=editor_session.base_revision_id,
+        base_graph_sha256=editor_session.base_graph_sha256,
+        base_prompt_sha256=editor_session.base_prompt_sha256,
+        created_at=editor_session.created_at,
+        expires_at=editor_session.expires_at,
+        ui_graph=revision.ui_graph_json,
+        nonce=editor_session.nonce,
+    )
+
+
+@router.post(
+    "/workflows/{workflow_id}/editor-sessions/{session_id}/consume",
+    response_model=WorkflowEditorReturnOut,
+)
+async def consume_workflow_editor_session(
+    workflow_id: str,
+    session_id: str,
+    payload: WorkflowEditorConsumeIn,
+    request: Request,
+    response: Response,
+    session: SessionDep,
+) -> WorkflowEditorReturnOut:
+    services = _services(request)
+    runtime_identity = services.processes.workflow_editor_runtime_identity()
+    if runtime_identity is None:
+        raise api_error(
+            409,
+            "workflow-editor-runtime-not-ready",
+            "The supported media runtime is no longer available.",
+        )
+    try:
+        editor_session = services.workflow_editor_sessions.authorize_return(
+            session_id=session_id,
+            nonce=payload.nonce,
+            workflow_id=workflow_id,
+            base_revision_id=payload.base_revision_id,
+            runtime_identity=runtime_identity,
+        )
+    except WorkflowEditorSessionError as exc:
+        if exc.code == "workflow-editor-session-not-found":
+            raise api_error(404, exc.code, str(exc)) from exc
+        if exc.code == "workflow-editor-session-authentication-failed":
+            raise api_error(403, exc.code, str(exc)) from exc
+        if exc.code in {
+            "workflow-editor-session-mismatch",
+            "workflow-editor-runtime-changed",
+        }:
+            raise api_error(409, exc.code, str(exc)) from exc
+        raise api_error(
+            422,
+            "workflow-editor-session-invalid",
+            "The workflow editor return could not be authenticated.",
+            reason_code=exc.code,
+        ) from exc
+
+    definition = session.get(WorkflowDefinition, editor_session.workflow_id)
+    base_revision = session.get(WorkflowRevision, editor_session.base_revision_id)
+    if (
+        definition is None
+        or base_revision is None
+        or base_revision.workflow_id != definition.id
+        or not base_revision.ui_graph_json
+        or not base_revision.api_graph_json
+    ):
+        raise api_error(
+            409,
+            "workflow-editor-base-revision-changed",
+            "The workflow revision opened by this editor session is no longer available.",
+        )
+    try:
+        base_graph_sha256 = workflow_ui_graph_sha256(base_revision.ui_graph_json)
+        base_prompt_sha256 = workflow_api_graph_sha256(base_revision.api_graph_json)
+    except WorkflowEditorSessionError as exc:
+        raise api_error(
+            409,
+            "workflow-editor-base-revision-invalid",
+            "The workflow revision opened by this editor session can no longer be verified.",
+            reason_code=exc.code,
+        ) from exc
+    if (
+        base_graph_sha256 != editor_session.base_graph_sha256
+        or base_prompt_sha256 != editor_session.base_prompt_sha256
+    ):
+        raise api_error(
+            409,
+            "workflow-editor-base-revision-changed",
+            "The workflow revision changed while the native editor was open.",
+        )
+
+    try:
+        workflow_ui_graph_sha256(payload.ui_graph)
+        returned_prompt_sha256 = workflow_api_graph_sha256(payload.api_prompt)
+    except WorkflowEditorSessionError as exc:
+        raise api_error(
+            422,
+            "workflow-editor-return-invalid",
+            "The workflow editor returned an invalid graph or prompt.",
+            reason_code=exc.code,
+        ) from exc
+
+    describe_nodes = getattr(services.engines.media, "object_info", None)
+    if not callable(describe_nodes):
+        raise api_error(
+            503,
+            "workflow-editor-node-inventory-unavailable",
+            "The media runtime cannot describe its workflow nodes.",
+        )
+    invalidate_nodes = getattr(services.engines.media, "invalidate_object_info_cache", None)
+    if callable(invalidate_nodes):
+        invalidate_nodes()
+    try:
+        object_info = await describe_nodes()
+    except Exception as exc:  # noqa: BLE001 - every runtime failure is unavailable here
+        raise api_error(
+            503,
+            "workflow-editor-node-inventory-unavailable",
+            "The media runtime could not describe its workflow nodes.",
+        ) from exc
+    if not isinstance(object_info, Mapping):
+        raise api_error(
+            503,
+            "workflow-editor-node-inventory-invalid",
+            "The media runtime returned an invalid workflow node inventory.",
+        )
+    try:
+        compilation = compile_comfyui_ui_graph(payload.ui_graph, object_info)
+        compiled_api_graph = {key: dict(value) for key, value in compilation.api_graph.items()}
+        compiled_prompt_sha256 = workflow_api_graph_sha256(compiled_api_graph)
+    except WorkflowCompilationError as exc:
+        raise api_error(
+            422,
+            "workflow-editor-return-cannot-compile",
+            "The returned visual workflow cannot be compiled.",
+            reason_code=exc.code,
+        ) from exc
+    except WorkflowEditorSessionError as exc:
+        raise api_error(
+            422,
+            "workflow-editor-return-invalid",
+            "The workflow editor returned an invalid graph or prompt.",
+            reason_code=exc.code,
+        ) from exc
+    if compiled_prompt_sha256 != returned_prompt_sha256:
+        raise api_error(
+            422,
+            "workflow-editor-return-prompt-mismatch",
+            "The returned visual workflow does not match its executable prompt.",
+        )
+    if services.processes.workflow_editor_runtime_identity() != runtime_identity:
+        raise api_error(
+            409,
+            "workflow-editor-runtime-changed",
+            "The media runtime changed while the workflow editor return was verified.",
+        )
+
+    session.refresh(definition, attribute_names=["current_revision_id"])
+    if not definition.current_revision_id:
+        raise api_error(
+            409,
+            "workflow-editor-current-revision-missing",
+            "The workflow no longer has a current revision.",
+        )
+    try:
+        result = services.workflow_editor_sessions.consume(
+            session_id=session_id,
+            nonce=payload.nonce,
+            workflow_id=workflow_id,
+            base_revision_id=payload.base_revision_id,
+            current_revision_id=definition.current_revision_id,
+            returned_ui_graph=payload.ui_graph,
+            returned_api_graph=compiled_api_graph,
+            runtime_identity=runtime_identity,
+        )
+    except WorkflowEditorSessionError as exc:
+        if exc.code == "workflow-editor-session-not-found":
+            raise api_error(404, exc.code, str(exc)) from exc
+        if exc.code == "workflow-editor-session-authentication-failed":
+            raise api_error(403, exc.code, str(exc)) from exc
+        if exc.code in {
+            "workflow-editor-session-mismatch",
+            "workflow-editor-runtime-changed",
+        }:
+            raise api_error(409, exc.code, str(exc)) from exc
+        raise api_error(
+            422,
+            "workflow-editor-return-invalid",
+            "The workflow editor return could not be consumed.",
+            reason_code=exc.code,
+        ) from exc
+    response.headers["Cache-Control"] = "no-store"
+    return WorkflowEditorReturnOut(
+        validated_return_id=result.validated_return_id,
+        session_id=result.session_id,
+        workflow_id=result.workflow_id,
+        base_revision_id=result.base_revision_id,
+        current_revision_id=result.current_revision_id,
+        base_graph_sha256=result.base_graph_sha256,
+        returned_graph_sha256=result.returned_graph_sha256,
+        base_prompt_sha256=result.base_prompt_sha256,
+        returned_prompt_sha256=result.returned_prompt_sha256,
+        changed=result.changed,
+        forked=result.forked,
+        delta=WorkflowEditorGraphDeltaOut(
+            node_count_delta=result.delta.node_count_delta,
+            link_count_delta=result.delta.link_count_delta,
+            added_node_types=result.delta.added_node_types,
+            removed_node_types=result.delta.removed_node_types,
+            added_asset_filenames=result.delta.added_asset_filenames,
+            removed_asset_filenames=result.delta.removed_asset_filenames,
+        ),
+        expires_at=result.expires_at,
+    )
+
+
+def _workflow_editor_draft_revision_id(validated_return_id: str) -> str:
+    digest = hashlib.sha256(validated_return_id.encode("utf-8")).hexdigest()
+    return f"wfrev_editor_{digest[:27]}"
+
+
+def _workflow_runtime_binding_paths(
+    graph: Mapping[str, Any],
+) -> frozenset[tuple[tuple[str | int, ...], str]]:
+    bindings: set[tuple[tuple[str | int, ...], str]] = set()
+    stack: list[tuple[tuple[str | int, ...], Any]] = [((), graph)]
+    while stack:
+        path, value = stack.pop()
+        if isinstance(value, Mapping):
+            stack.extend(((*path, str(key)), item) for key, item in value.items())
+        elif isinstance(value, list):
+            stack.extend(((*path, index), item) for index, item in enumerate(value))
+        elif isinstance(value, str) and value.startswith("${") and value.endswith("}"):
+            bindings.add((path, value))
+    return frozenset(bindings)
+
+
+def _workflow_editor_draft_dependencies(
+    dependencies: Mapping[str, Any],
+) -> dict[str, Any]:
+    copied = copy.deepcopy(dict(dependencies))
+    for provenance_key in ("template_id", "template_sha256", "compiler_version"):
+        copied.pop(provenance_key, None)
+    return copied
+
+
+def _workflow_editor_dependency_signature(
+    ui_graph: Mapping[str, Any],
+) -> tuple[Any, ...]:
+    analysis = analyze_comfyui_workflow_package(ui_graph)
+    assets = tuple(
+        (
+            asset.filename,
+            asset.suffix,
+            asset.policy,
+            asset.kind,
+            asset.source_url,
+        )
+        for asset in analysis.asset_references
+    )
+    return (
+        analysis.required_node_types,
+        analysis.custom_packages,
+        assets,
+        analysis.node_provenance,
+        analysis.operation_guess,
+    )
+
+
+def _workflow_editor_draft_matches(
+    revision: WorkflowRevision,
+    *,
+    workflow_id: str,
+    engine: str,
+    engine_version: str | None,
+    ui_graph: Mapping[str, Any],
+    api_graph: Mapping[str, Any],
+    input_schema: Mapping[str, Any],
+    capabilities: list[str],
+    dependencies: Mapping[str, Any],
+    artifact_sha256: str,
+) -> bool:
+    return (
+        revision.workflow_id == workflow_id
+        and revision.engine == engine
+        and revision.engine_version == engine_version
+        and revision.ui_graph_json == dict(ui_graph)
+        and revision.api_graph_json == dict(api_graph)
+        and revision.input_schema_json == dict(input_schema)
+        and revision.capabilities_json == capabilities
+        and revision.dependencies_json == dict(dependencies)
+        and revision.dependency_contract_sha256 is None
+        and revision.artifact_sha256 == artifact_sha256
+        and not revision.trusted
+    )
+
+
+@router.post(
+    "/workflows/{workflow_id}/editor-drafts",
+    response_model=WorkflowEditorDraftOut,
+)
+async def create_workflow_editor_draft(
+    workflow_id: str,
+    payload: WorkflowEditorDraftCreateIn,
+    request: Request,
+    session: SessionDep,
+) -> WorkflowEditorDraftOut:
+    services = _services(request)
+    runtime_identity = services.processes.workflow_editor_runtime_identity()
+    if runtime_identity is None:
+        raise api_error(
+            409,
+            "workflow-editor-runtime-not-ready",
+            "The supported media runtime is no longer available.",
+        )
+    try:
+        validated = services.workflow_editor_sessions.validated_return(
+            validated_return_id=payload.validated_return_id,
+            workflow_id=workflow_id,
+            runtime_identity=runtime_identity,
+        )
+    except WorkflowEditorSessionError as exc:
+        if exc.code == "workflow-editor-validated-return-not-found":
+            raise api_error(404, exc.code, str(exc)) from exc
+        if exc.code in {
+            "workflow-editor-validated-return-mismatch",
+            "workflow-editor-runtime-changed",
+        }:
+            raise api_error(409, exc.code, str(exc)) from exc
+        raise api_error(
+            422,
+            "workflow-editor-validated-return-invalid",
+            "The validated editor return could not be used.",
+            reason_code=exc.code,
+        ) from exc
+    if not validated.result.changed:
+        raise api_error(
+            409,
+            "workflow-editor-return-unchanged",
+            "The editor return contains no workflow changes to save.",
+        )
+
+    definition = session.get(WorkflowDefinition, workflow_id)
+    base_revision = session.get(WorkflowRevision, validated.result.base_revision_id)
+    if definition is None or base_revision is None or base_revision.workflow_id != definition.id:
+        raise api_error(
+            409,
+            "workflow-editor-base-revision-changed",
+            "The workflow revision opened by this editor session is no longer available.",
+        )
+    try:
+        returned_ui_graph = json.loads(validated.returned_ui_graph_json)
+        returned_api_graph = json.loads(validated.returned_api_graph_json)
+    except json.JSONDecodeError as exc:
+        raise api_error(
+            409,
+            "workflow-editor-validated-return-corrupt",
+            "The validated editor return can no longer be read.",
+        ) from exc
+    if not isinstance(returned_ui_graph, dict) or not isinstance(returned_api_graph, dict):
+        raise api_error(
+            409,
+            "workflow-editor-validated-return-corrupt",
+            "The validated editor return does not contain workflow graphs.",
+        )
+    try:
+        base_dependency_signature = _workflow_editor_dependency_signature(
+            base_revision.ui_graph_json
+        )
+        returned_dependency_signature = _workflow_editor_dependency_signature(returned_ui_graph)
+    except WorkflowPackageError as exc:
+        raise api_error(
+            409,
+            "workflow-editor-validated-return-corrupt",
+            "The validated editor return can no longer be analyzed.",
+            reason_code=exc.code,
+        ) from exc
+    if base_dependency_signature != returned_dependency_signature:
+        raise api_error(
+            422,
+            "workflow-editor-draft-dependencies-changed",
+            "Review and prepare dependency-changing edits before saving them as a revision.",
+        )
+    if _workflow_runtime_binding_paths(
+        base_revision.api_graph_json
+    ) != _workflow_runtime_binding_paths(returned_api_graph):
+        raise api_error(
+            422,
+            "workflow-editor-draft-bindings-changed",
+            "Review and prepare runtime input changes before saving them as a revision.",
+        )
+    try:
+        validate_lora_workflow_contract(
+            returned_api_graph,
+            base_revision.input_schema_json,
+            base_revision.dependencies_json,
+        )
+        validate_workflow_edit_calibration(base_revision.input_schema_json)
+    except ValueError as exc:
+        raise api_error(
+            422,
+            "workflow-editor-draft-contract-invalid",
+            "The edited workflow does not satisfy its declared input contract.",
+        ) from exc
+
+    draft_revision_id = _workflow_editor_draft_revision_id(payload.validated_return_id)
+    try:
+        services.workflow_editor_sessions.bind_validated_return_to_draft(
+            validated_return_id=payload.validated_return_id,
+            workflow_id=workflow_id,
+            runtime_identity=runtime_identity,
+            draft_revision_id=draft_revision_id,
+        )
+    except WorkflowEditorSessionError as exc:
+        if exc.code in {
+            "workflow-editor-validated-return-not-found",
+            "workflow-editor-validated-return-mismatch",
+            "workflow-editor-validated-return-already-applied",
+            "workflow-editor-runtime-changed",
+        }:
+            raise api_error(409, exc.code, str(exc)) from exc
+        raise api_error(
+            422,
+            "workflow-editor-validated-return-invalid",
+            "The validated editor return could not be bound to a draft.",
+            reason_code=exc.code,
+        ) from exc
+
+    capabilities: list[str] = []
+    dependencies = _workflow_editor_draft_dependencies(base_revision.dependencies_json)
+    input_schema = dict(base_revision.input_schema_json)
+    artifact_sha256 = workflow_artifact_contract(
+        operation=definition.operation,
+        engine=base_revision.engine,
+        api_graph=returned_api_graph,
+        input_schema=input_schema,
+        dependencies=dependencies,
+    )
+    existing = session.get(WorkflowRevision, draft_revision_id)
+    created = False
+    if existing is None:
+        version = (
+            session.scalar(
+                select(func.max(WorkflowRevision.version)).where(
+                    WorkflowRevision.workflow_id == workflow_id
+                )
+            )
+            or 0
+        )
+        existing = WorkflowRevision(
+            id=draft_revision_id,
+            workflow_id=workflow_id,
+            version=version + 1,
+            engine=base_revision.engine,
+            engine_version=base_revision.engine_version,
+            ui_graph_json=returned_ui_graph,
+            api_graph_json=returned_api_graph,
+            input_schema_json=input_schema,
+            capabilities_json=capabilities,
+            dependencies_json=dependencies,
+            dependency_contract_sha256=None,
+            trusted=False,
+            artifact_sha256=artifact_sha256,
+        )
+        session.add(existing)
+        try:
+            session.commit()
+            created = True
+        except IntegrityError:
+            session.rollback()
+            existing = session.get(WorkflowRevision, draft_revision_id)
+            if existing is None:
+                raise api_error(
+                    409,
+                    "workflow-editor-draft-version-conflict",
+                    "The workflow changed while the editor draft was being saved. Retry the save.",
+                ) from None
+    if not _workflow_editor_draft_matches(
+        existing,
+        workflow_id=workflow_id,
+        engine=base_revision.engine,
+        engine_version=base_revision.engine_version,
+        ui_graph=returned_ui_graph,
+        api_graph=returned_api_graph,
+        input_schema=input_schema,
+        capabilities=capabilities,
+        dependencies=dependencies,
+        artifact_sha256=artifact_sha256,
+    ):
+        raise api_error(
+            409,
+            "workflow-editor-draft-collision",
+            "The validated editor return conflicts with an existing draft.",
+        )
+    session.refresh(definition, attribute_names=["current_revision_id"])
+    return WorkflowEditorDraftOut(
+        workflow_id=workflow_id,
+        base_revision_id=base_revision.id,
+        draft_revision_id=existing.id,
+        current_revision_id=definition.current_revision_id,
+        version=existing.version,
+        created=created,
+        forked=definition.current_revision_id != base_revision.id,
+        trusted=False,
+        review_required=True,
+    )
+
+
+@router.post(
+    "/workflows/{workflow_id}/editor-sessions/{session_id}/cancel",
+    status_code=204,
+)
+async def cancel_workflow_editor_session(
+    workflow_id: str,
+    session_id: str,
+    payload: WorkflowEditorCancelIn,
+    request: Request,
+) -> Response:
+    try:
+        _services(request).workflow_editor_sessions.cancel(
+            session_id=session_id,
+            nonce=payload.nonce,
+            workflow_id=workflow_id,
+        )
+    except WorkflowEditorSessionError as exc:
+        if exc.code == "workflow-editor-session-not-found":
+            raise api_error(404, exc.code, str(exc)) from exc
+        if exc.code == "workflow-editor-session-authentication-failed":
+            raise api_error(403, exc.code, str(exc)) from exc
+        if exc.code == "workflow-editor-session-mismatch":
+            raise api_error(409, exc.code, str(exc)) from exc
+        raise api_error(
+            422,
+            "workflow-editor-session-invalid",
+            "The workflow editor session could not be cancelled.",
+            reason_code=exc.code,
+        ) from exc
+    return Response(status_code=204)
 
 
 def _local_asset_filenames(session: Session) -> set[str]:
@@ -6837,14 +7570,25 @@ def _analyzed_package_node_types(
         raise api_error(
             422,
             "workflow-package-requirement-not-found",
-            "The workflow does not declare exactly one matching custom-node package.",
+            f"The workflow does not declare exactly one custom-node package named "
+            f"{package_id}; it declares "
+            + (", ".join(sorted(item.package_id for item in analysis.custom_packages)) or "none")
+            + ".",
         )
     requirement = matches[0]
     if requirement.versions != (version,):
+        # Both halves named. A workflow can declare a version that cannot be
+        # installed at all - a Registry release whose own pins have no wheels
+        # for this interpreter, say - and the reader's next move depends
+        # entirely on knowing which version was asked for and which the
+        # workflow wrote down. Saying only that they differ leaves them to go
+        # and find both.
+        declared = ", ".join(requirement.versions) or "no version"
         raise api_error(
             422,
             "workflow-package-version-mismatch",
-            "The selected package version does not exactly match the workflow declaration.",
+            f"This asked to prepare {package_id} {version}, but the workflow declares "
+            f"{declared}. A workflow is prepared with the version it names.",
         )
     return _prepared_node_types(list(requirement.node_types))
 
@@ -7393,7 +8137,7 @@ async def review_registry_install(
                 install_id=install_id,
                 trusted=payload.trusted,
                 custom_node_root=context.custom_node_root,
-                environment_root=context.state_root / "registry-wheel-environments",
+                environment_root=registry_wheel_environment_root(context.state_root),
                 media_worker_stopped=_media_worker_truly_stopped(services),
             )
         except ComfyRegistryActivationError as exc:
@@ -7418,7 +8162,7 @@ async def activate_registry_install(
                 session,
                 install_id=install_id,
                 custom_node_root=context.custom_node_root,
-                environment_root=context.state_root / "registry-wheel-environments",
+                environment_root=registry_wheel_environment_root(context.state_root),
                 media_worker_stopped=_media_worker_truly_stopped(services),
                 start_media=services.processes.start_media,
                 # The same read startup verifies against, so a proof cannot be
@@ -8015,6 +8759,7 @@ async def create_workflow_revision(
     session.add(revision)
     session.flush()
     definition.current_revision_id = revision.id
+    ensure_workflow_family_ownership(session, definition, revision)
     session.commit()
     session.refresh(revision)
     return revision
@@ -8062,21 +8807,29 @@ async def validate_workflow(
             "workflow revision is not trusted; review it and create a trusted revision "
             "before execution"
         )
+    # Asking the engine what a role offers is I/O and can fail for reasons that
+    # have nothing to do with this schema. It stays outside the block below so
+    # its failure cannot be reported as "invalid workflow input schema", and so
+    # whatever it says about the engine's internals does not reach the caller
+    # through an error text meant to describe the user's own document.
+    role = "video" if "video" in definition.operation else "image"
+    base_fields = await _engine_role_fields(
+        request,
+        role,
+        engine=revision.engine,
+        allow_inactive=True,
+    )
     try:
-        role = "video" if "video" in definition.operation else "image"
-        base_fields = await _engine_role_fields(
-            request,
-            role,
-            engine=revision.engine,
-            allow_inactive=True,
-        )
         declared_fields = workflow_settings(base_fields, revision.input_schema_json)
         validate_settings(defaults(declared_fields), declared_fields)
         validate_workflow_edit_calibration(revision.input_schema_json)
     except ValueError as exc:
+        # Explaining why a schema is invalid is what this endpoint is for, so the
+        # message survives - but it now comes only from our own validators,
+        # which describe the document the caller supplied.
         errors.append(f"invalid workflow input schema: {exc}")
     dependencies = revision.dependencies_json
-    errors.extend(custom_node_dependency_errors(session, dependencies.get("custom_nodes")))
+    errors.extend(node_dependency_errors(session, dependencies))
     required_models = dependencies.get("models", [])
     installed = session.scalars(select(ModelInstall).where(ModelInstall.active.is_(True))).all()
     installed_values = {

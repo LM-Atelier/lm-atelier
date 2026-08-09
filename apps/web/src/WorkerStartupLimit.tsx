@@ -14,14 +14,23 @@ export function WorkerLogFolderButton() {
     },
   });
   return (
-    <button
-      className="secondary"
-      disabled={copyPath.isPending}
-      title="Copies the full path of the folder holding the worker logs"
-      onClick={() => copyPath.mutate()}
-    >
-      {copyPath.isSuccess ? "Path copied" : "Copy log folder path"}
-    </button>
+    <>
+      <button
+        className="secondary"
+        disabled={copyPath.isPending}
+        title="Copies the full path of the folder holding the worker logs"
+        onClick={() => copyPath.mutate()}
+      >
+        {copyPath.isSuccess ? "Path copied" : "Copy log folder path"}
+      </button>
+      {/* The label is the only confirmation this button gives, so a refused
+          clipboard write left it reading as an invitation to press again. */}
+      {copyPath.error && (
+        <div className="callout error" role="alert">
+          <span>{copyPath.error.message}</span>
+        </div>
+      )}
+    </>
   );
 }
 

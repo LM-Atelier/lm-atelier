@@ -4,7 +4,6 @@ import asyncio
 import hashlib
 import logging
 import shutil
-import stat
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from pathlib import Path
@@ -29,6 +28,7 @@ from .comfy_registry_installs import (
     bind_comfy_registry_wheel_environment,
     persist_comfy_registry_install,
 )
+from .comfy_registry_paths import registry_wheel_environment_root
 from .comfy_registry_sources import ComfyPackageSourceError, resolve_comfy_package_source
 from .comfy_registry_wheel_artifacts import (
     ComfyRegistryWheelArtifact,
@@ -49,10 +49,10 @@ from .comfy_registry_wheel_environments import (
     assemble_comfy_registry_wheel_environment,
     verify_comfy_registry_wheel_environment,
 )
+from .filesystem_links import is_link_or_reparse
 from .models import ComfyRegistryInstall
 from .source_omission_proof import PendingOmission, record_pending_omission
 
-_REPARSE_POINT = getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0x400)
 logger = logging.getLogger(__name__)
 
 
@@ -196,7 +196,10 @@ async def prepare_comfy_registry_install(
     artifacts = _complete_closure(closure, resolution)
     node_root = _managed_root(custom_node_root, "custom node")
     managed_state = _managed_root(state_root, "state")
-    environment_root = _managed_child(managed_state, "registry-wheel-environments")
+    environment_root = _managed_child(
+        managed_state,
+        registry_wheel_environment_root(managed_state).name,
+    )
     staging_root = _managed_child(managed_state, "registry-wheel-staging")
     installed_path = _installed_path(package_id, package_version, record_id)
     node_destination = node_root / installed_path
@@ -345,7 +348,10 @@ async def renew_comfy_registry_install_environment(
     artifacts = _complete_closure(closure, resolution)
     node_root = _managed_root(custom_node_root, "custom node")
     managed_state = _managed_root(state_root, "state")
-    environment_root = _managed_child(managed_state, "registry-wheel-environments")
+    environment_root = _managed_child(
+        managed_state,
+        registry_wheel_environment_root(managed_state).name,
+    )
     staging_root = _managed_child(managed_state, "registry-wheel-staging")
     node_destination = _existing_managed_child(node_root, install.installed_path, "node")
     _verify_existing_archive(install, node_destination)
@@ -705,8 +711,8 @@ async def _remove_tree(path: Path, root: Path) -> None:
 
 
 def _is_link_or_reparse(path: Path) -> bool:
-    try:
-        info = path.lstat()
-    except OSError:
-        return False
-    return path.is_symlink() or bool(getattr(info, "st_file_attributes", 0) & _REPARSE_POINT)
+    return is_link_or_reparse(
+        path,
+        missing="assume_regular",
+        unreadable="assume_regular",
+    )

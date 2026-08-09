@@ -264,8 +264,21 @@ def _bounded_json_object_with_limit(content: bytes, limit: int) -> dict[str, Any
 def _safetensors_kind(tensor_names: list[str], metadata: Mapping[str, Any]) -> str:
     lowered = [name.casefold() for name in tensor_names]
     metadata_text = " ".join(f"{key}={value}" for key, value in metadata.items()).casefold()
-    if "lora" in metadata_text or any(
-        name.startswith(("lora_", "lycoris_")) or ".lora_" in name for name in lowered
+    # LyCORIS adapters are LoRAs in every way that matters here - ComfyUI loads
+    # them through the same loader and providers list them as LoRAs - but none
+    # of them spells "lora" in a tensor name. LoKr factorises into `lokr_w1`
+    # and `lokr_w2`, LoHa into `hada_w1_a` and `hada_w2_b`, and DoRA adds a
+    # `dora_scale`. A file full of those was classified as an unknown
+    # safetensors blob, so a download that had already finished was thrown away
+    # at the contract check for not being what it plainly is.
+    #
+    # These names carry no other meaning in a checkpoint, so matching them
+    # cannot promote something that is not an adapter.
+    adapter_markers = ("lokr_", "hada_w", "dora_scale", "oft_blocks", "oft_diag")
+    if (
+        "lora" in metadata_text
+        or any(name.startswith(("lora_", "lycoris_")) or ".lora_" in name for name in lowered)
+        or any(marker in name for name in lowered for marker in adapter_markers)
     ):
         return "lora"
     has_diffusion = any(
@@ -502,32 +515,41 @@ def _component_kind_from_path(path: str, role: str) -> str:
 
 def _target_folder(path: str, role: str) -> str:
     parts = PurePosixPath(path).parts
-    known = {
-        "checkpoints",
-        "diffusion_models",
-        "text_encoders",
-        "vae",
-        "clip_vision",
-        "loras",
-        "controlnet",
-        "upscale_models",
-        "embeddings",
-    }
-    folder = next((part for part in parts[:-1] if part in known), None)
+    folder = next((part for part in parts[:-1] if part in COMFY_MODEL_FOLDERS), None)
     if folder:
         return folder
     return "models" if role == "chat" else "checkpoints"
 
 
+_COMFY_FOLDER_BY_KIND = {
+    "checkpoint": "checkpoints",
+    "diffusion_model": "diffusion_models",
+    "text_encoder": "text_encoders",
+    "vae": "vae",
+    "clip_vision": "clip_vision",
+    "lora": "loras",
+    "controlnet": "controlnet",
+    "upscaler": "upscale_models",
+    "embedding": "embeddings",
+    "ip_adapter": "ipadapter",
+}
+COMFY_MODEL_ASSET_KINDS: frozenset[str] = frozenset(_COMFY_FOLDER_BY_KIND)
+COMFY_MODEL_FOLDERS: frozenset[str] = frozenset(_COMFY_FOLDER_BY_KIND.values())
+
+
+def comfy_folder_for_kind(kind: str) -> str | None:
+    """Name the ComfyUI folder that serves a component kind.
+
+    One table, because a second copy drifts: a kind missing from the copy that
+    publishes model paths leaves the file downloaded, verified, recorded, and
+    invisible to the runtime that needs it.
+    """
+
+    return _COMFY_FOLDER_BY_KIND.get(kind)
+
+
 def _target_folder_for_kind(kind: str) -> str:
-    return {
-        "checkpoint": "checkpoints",
-        "diffusion_model": "diffusion_models",
-        "text_encoder": "text_encoders",
-        "vae": "vae",
-        "clip_vision": "clip_vision",
-        "lora": "loras",
-    }.get(kind, "checkpoints")
+    return comfy_folder_for_kind(kind) or "checkpoints"
 
 
 def _kind_from_comfy_folder(folder: str) -> str | None:

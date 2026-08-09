@@ -1051,6 +1051,71 @@ class WorkflowOpenTarget(ApiModel):
     ui_graph: dict[str, Any]
 
 
+class WorkflowEditorSessionOut(ApiModel):
+    id: str
+    protocol_version: int
+    workflow_id: str
+    base_revision_id: str
+    base_graph_sha256: str
+    base_prompt_sha256: str
+    created_at: datetime
+    expires_at: datetime
+    ui_graph: dict[str, Any]
+    nonce: str
+
+
+class WorkflowEditorCancelIn(ApiModel):
+    nonce: str = Field(min_length=1, max_length=200)
+
+
+class WorkflowEditorConsumeIn(ApiModel):
+    nonce: str = Field(min_length=1, max_length=200)
+    base_revision_id: str = Field(min_length=1, max_length=40)
+    ui_graph: dict[str, Any]
+    api_prompt: dict[str, Any]
+
+
+class WorkflowEditorGraphDeltaOut(ApiModel):
+    node_count_delta: int
+    link_count_delta: int
+    added_node_types: list[str]
+    removed_node_types: list[str]
+    added_asset_filenames: list[str]
+    removed_asset_filenames: list[str]
+
+
+class WorkflowEditorReturnOut(ApiModel):
+    validated_return_id: str
+    session_id: str
+    workflow_id: str
+    base_revision_id: str
+    current_revision_id: str
+    base_graph_sha256: str
+    returned_graph_sha256: str
+    base_prompt_sha256: str
+    returned_prompt_sha256: str
+    changed: bool
+    forked: bool
+    delta: WorkflowEditorGraphDeltaOut
+    expires_at: datetime
+
+
+class WorkflowEditorDraftCreateIn(ApiModel):
+    validated_return_id: str = Field(min_length=1, max_length=200)
+
+
+class WorkflowEditorDraftOut(ApiModel):
+    workflow_id: str
+    base_revision_id: str
+    draft_revision_id: str
+    current_revision_id: str | None
+    version: int
+    created: bool
+    forked: bool
+    trusted: Literal[False]
+    review_required: Literal[True]
+
+
 class EditTemplateCreate(ApiModel):
     name: str = Field(min_length=1, max_length=200)
     description: str = Field(default="", max_length=2_000)
@@ -1269,6 +1334,14 @@ class WorkflowSourceCandidateOut(ApiModel):
 # What the workflow analyzer can say a referenced file is. One definition, so
 # a caller naming an exact file cannot name a kind the analyzer never emits.
 WorkflowAssetKind = Literal["checkpoint", "configuration", "embedding", "lora", "upscaler", "vae"]
+AuxiliaryAssetKind = Literal[
+    "lora",
+    "vae",
+    "controlnet",
+    "upscaler",
+    "embedding",
+    "ip_adapter",
+]
 
 
 class WorkflowAssetReferenceOut(ApiModel):
@@ -1481,17 +1554,7 @@ class CatalogPreflightRequest(ApiModel):
     # ranking a repository's official bundle over it would install several
     # gigabytes nobody asked for.
     workflow_reference_kind: WorkflowAssetKind | None = None
-    auxiliary_kind: (
-        Literal[
-            "lora",
-            "vae",
-            "controlnet",
-            "upscaler",
-            "embedding",
-            "ip_adapter",
-        ]
-        | None
-    ) = None
+    auxiliary_kind: AuxiliaryAssetKind | None = None
 
 
 class CatalogPreflightCheck(ApiModel):
@@ -1558,17 +1621,7 @@ class DownloadRequest(ApiModel):
     workflow_template_sha256: str | None = None
     content_rating: ContentRating = "unknown"
     default_settings: dict[str, Any] = Field(default_factory=dict)
-    auxiliary_kind: (
-        Literal[
-            "lora",
-            "vae",
-            "controlnet",
-            "upscaler",
-            "embedding",
-            "ip_adapter",
-        ]
-        | None
-    ) = None
+    auxiliary_kind: AuxiliaryAssetKind | None = None
     # A dependency owned by one reviewed workflow binding. Unlike an
     # auxiliary asset it is never offered for auto-application or activated as
     # a standalone profile.

@@ -66,7 +66,12 @@ export function StudioToolRail({
             className={`icon-button ${active === kind ? "selected" : ""} ${unavailable ? "unavailable" : ""}`}
             aria-label={unavailable ? `${label} - ${unavailable}` : label}
             aria-pressed={active === kind}
-            aria-describedby={unavailable ? "studio-tool-guidance" : undefined}
+            // Only the active tool's reason is on screen, so every other
+            // unavailable button pointed at an element that was not there -
+            // and when it was there, it explained a different tool.
+            aria-describedby={
+              unavailable && active === kind ? "studio-tool-guidance" : undefined
+            }
             title={unavailable ? `${label}
 ${unavailable}` : label}
             disabled={disabled}

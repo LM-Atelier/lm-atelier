@@ -93,13 +93,18 @@ describe("style contract", () => {
     expect(footer).not.toContain("ThemeToggle");
   });
 
-  it("gives the studio both a keep and an export, not one word for two acts", () => {
-    // "Save" was one download link, which is export. Keeping a picture in the
+  it("gives the studio both a mark and an export, not one word for two acts", () => {
+    // "Save" was one download link, which is export. Marking a picture in the
     // library is a different act with a different result, and collapsing them
     // into one verb left no way to do the other.
+    //
+    // The mark is named for what it does. It was called "Save to library"
+    // while the close dialog beside it said every result is already there -
+    // two sentences in one header that could not both be true.
     const view = readFileSync(join(SOURCE_DIR, "StudioView.tsx"), "utf8");
-    expect(view).toContain("Save to library");
     expect(view).toContain("favoriteArtifact");
+    expect(view).toMatch(/aria-pressed=\{isFavorite\}/);
+    expect(view).not.toContain("Save to library");
     expect(view).toMatch(/download/);
   });
 
@@ -560,5 +565,95 @@ describe("the collapsed sidebar", () => {
     // back by its own edge - so that edge must still be there and hittable.
     expect(css).toMatch(/\[data-sidebar="collapsed"\] \.sidebar-resizer \{[^}]*width:/);
     expect(css).not.toContain(".reveal-sidebar");
+  });
+});
+
+describe("one selector, one rule", () => {
+  const css = readFileSync(STYLESHEET, "utf8");
+
+  it("never declares a top-level selector twice over the same property", () => {
+    // Moving the appearance control out of the sidebar and onto the screen
+    // left its old rule in place directly below the new one. Both said
+    // `padding`, so document order handed the pill the sidebar's vertical-
+    // only value and the two buttons sat flush against its rounded edge.
+    // Nothing was misspelled and no class was missing, so the class-coverage
+    // check above saw a fully styled element.
+    //
+    // Responsive and room overrides are exactly this pattern used on purpose,
+    // so only rules outside any block qualify - a second top-level rule for
+    // the same selector is a leftover, not an override.
+    const declarations = new Map<string, Array<{ line: number; properties: Set<string> }>>();
+    let depth = 0;
+    css.split("\n").forEach((line, index) => {
+      const rule = /^([^{@}]+)\{([^}]*)\}\s*$/.exec(line.trim());
+      if (rule && depth === 0) {
+        const selector = rule[1].trim().replace(/\s+/g, " ");
+        const properties = new Set(
+          rule[2]
+            .split(";")
+            .filter((part) => part.includes(":"))
+            .map((part) => part.slice(0, part.indexOf(":")).trim()),
+        );
+        declarations.set(selector, [
+          ...(declarations.get(selector) ?? []),
+          { line: index + 1, properties },
+        ]);
+        return;
+      }
+      const trimmed = line.trim();
+      depth = Math.max(0, depth + (trimmed.split("{").length - trimmed.split("}").length));
+    });
+
+    const shadowed: string[] = [];
+    for (const [selector, rules] of declarations) {
+      for (let a = 0; a < rules.length; a += 1) {
+        for (let b = a + 1; b < rules.length; b += 1) {
+          const both = [...rules[a].properties].filter((name) => rules[b].properties.has(name));
+          if (both.length) {
+            shadowed.push(
+              `${selector} sets ${both.join(", ")} at line ${rules[a].line} and again at ${rules[b].line}`,
+            );
+          }
+        }
+      }
+    }
+    expect(shadowed).toEqual([]);
+  });
+});
+
+describe("the two things that float in the corner", () => {
+  const css = readFileSync(STYLESHEET, "utf8");
+
+  function fixedRule(selector: string): Record<string, string> {
+    const opening = `\n${selector} {`;
+    const start = css.indexOf(opening);
+    const body = start < 0 ? "" : css.slice(start + opening.length, css.indexOf("}", start));
+    return Object.fromEntries(
+      body
+        .split(";")
+        .filter((part) => part.includes(":"))
+        .map((part) => [
+          part.slice(0, part.indexOf(":")).trim(),
+          part.slice(part.indexOf(":") + 1).trim(),
+        ]),
+    );
+  }
+
+  it("keeps the jobs panel clear of the appearance control", () => {
+    // Both are fixed to the bottom right. The panel is 310px wide and was
+    // stacked above the pill, so while any job ran it covered the control
+    // completely: the work sat on the thing meant to sit above the work.
+    const panel = fixedRule(".jobs-panel");
+    const toggle = fixedRule(".theme-toggle");
+
+    const px = (value: string) => Number.parseInt(value, 10);
+    expect(panel.position).toBe("fixed");
+    expect(toggle.position).toBe("fixed");
+
+    // The pill occupies roughly 40px above its own offset; the panel has to
+    // begin above that rather than share the space.
+    expect(px(panel.bottom)).toBeGreaterThan(px(toggle.bottom) + 40);
+    // And whatever else is on screen, the control stays reachable.
+    expect(px(toggle["z-index"])).toBeGreaterThan(px(panel["z-index"]));
   });
 });

@@ -992,6 +992,19 @@ def test_public_repository_configuration_verifies_every_applied_control() -> Non
     assert "-Expected $TagCreationRules" in script
     assert "sha_pinning_required = $true" in script
     assert 'secret_scanning_push_protection = @{ status = "enabled" }' in script
+    assert script.count("allow_auto_merge = $true") == 2
+    assert "allow_auto_merge = $false" not in script
+
+
+def test_browser_runners_do_not_execute_an_environment_selected_program() -> None:
+    for runner in (
+        ROOT / "scripts/run-browser-e2e.mjs",
+        ROOT / "scripts/run-workflow-editor-e2e.mjs",
+    ):
+        source = runner.read_text()
+        assert "LM_ATELIER_E2E_PYTHON" not in source
+        assert "firstExistingPath([environmentPython, projectPython])" in source
+        assert 'process.platform === "win32" ? "python.exe" : "python3"' in source
 
 
 def test_frozen_installer_contracts_are_explicit() -> None:
@@ -1012,10 +1025,11 @@ def test_frozen_installer_contracts_are_explicit() -> None:
     assert '"local_lm" / "capability_packs"' in spec
     assert '"local_lm" / "comfy_editor_bridge_assets"' in spec
     assert "*editor_bridge_datas" in spec
-    assert (
-        'artifacts = ["local_lm/comfy_editor_bridge_assets/**/*.js"]'
-        in (ROOT / "services/api/pyproject.toml").read_text()
-    )
+    assert '"local_lm" / "workflow_editor_shell_assets"' in spec
+    assert "*editor_shell_datas" in spec
+    pyproject = (ROOT / "services/api/pyproject.toml").read_text()
+    assert '"local_lm/comfy_editor_bridge_assets/**/*.js"' in pyproject
+    assert '"local_lm/workflow_editor_shell_assets/*"' in pyproject
     assert '"__pycache__" not in source.parts' in spec
     assert 'source.suffix not in {".pyc", ".pyo"}' in spec
     assert '"PIL",' not in spec
@@ -1214,3 +1228,40 @@ def test_api_mypy_config_rejects_a_strict_only_fixture(tmp_path: Path) -> None:
     )
 
     assert result.returncode != 0, result.stdout + result.stderr
+
+
+def test_a_file_that_declares_it_must_not_ship_is_refused(tmp_path: Path) -> None:
+    """Some files carry handling flags saying they must never be published, and
+    nothing enforced them, so the rule held only as long as nobody copied the
+    content somewhere tracked.
+
+    Matching the declaration rather than a path means a rename, a copy, or an
+    excerpt embedded in another document is still caught, which is how this kind
+    of content actually escapes.
+    """
+
+    namespace = runpy.run_path(str(ROOT / "scripts/check-repository-hygiene.py"))
+    refused = namespace["declares_it_must_not_ship"]
+
+    # Assembled rather than written out, so this file does not trip the very
+    # check it tests - the same discipline the secret scan test follows.
+    committable = '"never' + '_commit"'
+    publishable = '"never' + '_publish"'
+    documentable = '"never' + '_include_in_public_documentation"'
+
+    for ordinal, flag in enumerate((committable, publishable, documentable)):
+        declared = tmp_path / f"declared-{ordinal}.json"
+        declared.write_text("{" + flag + ": true}", encoding="utf-8")
+        assert refused(str(declared)), flag
+
+    excerpt = tmp_path / "notes.md"
+    excerpt.write_text(
+        "Pasted from elsewhere:\n\n    " + committable + ": true\n", encoding="utf-8"
+    )
+    assert refused(str(excerpt))
+
+    ordinary = tmp_path / "settings.json"
+    ordinary.write_text(
+        '{"classification": "public", ' + committable + ": false}", encoding="utf-8"
+    )
+    assert not refused(str(ordinary))

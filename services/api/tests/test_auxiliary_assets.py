@@ -21,7 +21,10 @@ from local_lm.domain import utcnow
 from local_lm.models import (
     ModelAssetInstall,
     ModelInstall,
+    WorkflowActivation,
     WorkflowDefinition,
+    WorkflowDependencyBinding,
+    WorkflowDependencySlot,
     WorkflowRevision,
 )
 
@@ -100,6 +103,58 @@ def _asset(session, name: str, digest: str) -> ModelAssetInstall:  # type: ignor
     session.add(asset)
     session.flush()
     return asset
+
+
+def _activation(session, revision: WorkflowRevision) -> WorkflowActivation:  # type: ignore[no-untyped-def]
+    activation = WorkflowActivation(
+        id="wfact_lora_test",
+        workflow_revision_id=revision.id,
+        resolver_version="workflow-bindings-v1",
+        dependency_contract_sha256="a" * 64,
+        binding_sha256="b" * 64,
+        state="ready",
+        is_active=True,
+        details_json={"launch_sha256": "c" * 64},
+    )
+    session.add(activation)
+    session.flush()
+    return activation
+
+
+def _bind_model(  # type: ignore[no-untyped-def]
+    session,
+    revision: WorkflowRevision,
+    activation: WorkflowActivation,
+    install: ModelInstall,
+    ordinal: int,
+) -> None:
+    slot = WorkflowDependencySlot(
+        id=f"wfslot_lora_{ordinal}",
+        workflow_revision_id=revision.id,
+        name=f"model_{ordinal}",
+        resource_kind="model_install",
+        required=True,
+        satisfaction="all_of",
+        requirements_json=[{"key": "default", "constraints": {}}],
+        contract_sha256=f"{ordinal + 1:x}" * 64,
+        ordinal=ordinal,
+    )
+    session.add(slot)
+    session.flush()
+    session.add(
+        WorkflowDependencyBinding(
+            id=f"wfbind_lora_{ordinal}",
+            workflow_revision_id=revision.id,
+            workflow_activation_id=activation.id,
+            workflow_dependency_slot_id=slot.id,
+            requirement_key="default",
+            model_install_id=install.id,
+            mount_json={},
+            resource_identity_json={},
+            resource_identity_sha256=f"{ordinal + 3:x}" * 64,
+        )
+    )
+    session.flush()
 
 
 def test_lora_workflow_contract_requires_a_real_typed_extension() -> None:
@@ -412,3 +467,95 @@ def test_model_and_lora_trigger_words_share_one_deduplicated_snapshot() -> None:
         "lora_trigger_words_applied": ["atelier ink"],
         "trigger_words_applied": ["portrait-style", "soft light", "atelier ink"],
     }
+
+
+async def test_an_unknown_architecture_receives_no_automatic_lora(
+    client: AsyncClient,
+) -> None:
+    """The compatibility test can only skip an asset when the workflow's family
+    is known, so an unknown family used to mean no test at all - every auto-apply
+    LoRA was eligible for every workflow. An adapter for another architecture
+    does not refuse to load; it degrades the image while provenance reports
+    success."""
+
+    del client
+    with SessionLocal() as session:
+        revision = _workflow(session)
+        asset = _asset(session, "anything", "d" * 64)
+        asset.auto_apply = True
+        asset.family = "sdxl"
+        asset.use_case = "portrait"
+        session.flush()
+
+        # The same asset against a workflow that does say what it runs, so the
+        # assertion below cannot pass merely because nothing was ever eligible.
+        eligible = select_automatic_lora_stack(session, revision, "a detailed portrait")
+        assert eligible.settings, "fixture no longer selects; the test would prove nothing"
+
+        revision.dependencies_json = {
+            "extensions": {"lora": revision.dependencies_json["extensions"]["lora"]}
+        }
+        session.flush()
+
+        refused = select_automatic_lora_stack(session, revision, "a detailed portrait")
+        assert refused.settings == []
+        assert refused.provenance == {
+            "mode": "automatic",
+            "selector_version": "lora-use-case-v1",
+            "selected": [],
+            "skipped_reason": "workflow_architecture_unknown",
+        }
+
+
+async def test_automatic_lora_uses_complete_activation_bindings(
+    client: AsyncClient,
+) -> None:
+    del client
+    with SessionLocal() as session:
+        revision = _workflow(session)
+        base_id = revision.dependencies_json["model_install_ids"][0]
+        base = session.get(ModelInstall, base_id)
+        assert base
+        asset = _asset(session, "Portrait", "e" * 64)
+        asset.auto_apply = True
+        asset.use_case = "portrait"
+        activation = _activation(session, revision)
+        _bind_model(session, revision, activation, base, 0)
+
+        # Portable workflow metadata may carry a foreign install ID. The
+        # activation is the content-resolved local binding and must win.
+        revision.dependencies_json = {
+            "model_install_ids": ["portable-origin-id"],
+            "extensions": revision.dependencies_json["extensions"],
+        }
+        session.flush()
+        selected = select_automatic_lora_stack(
+            session,
+            revision,
+            "a detailed portrait",
+            workflow_activation_id=activation.id,
+        )
+        assert [item["asset_id"] for item in selected.settings] == [asset.id]
+
+        # One known family must not conceal another unresolved model binding.
+        unresolved = ModelInstall(
+            id="model_without_family",
+            name="Unclassified component",
+            role="image",
+            engine="comfyui",
+            local_path="C:/managed/unclassified",
+            manifest_json={},
+            active=True,
+        )
+        session.add(unresolved)
+        session.flush()
+        _bind_model(session, revision, activation, unresolved, 1)
+
+        refused = select_automatic_lora_stack(
+            session,
+            revision,
+            "a detailed portrait",
+            workflow_activation_id=activation.id,
+        )
+        assert refused.settings == []
+        assert refused.provenance["skipped_reason"] == "workflow_architecture_unknown"

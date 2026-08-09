@@ -123,19 +123,57 @@ def test_only_the_unpinned_allowed_host_declaration_is_set_aside() -> None:
     )
 
 
-def test_a_line_no_parser_accepts_is_not_set_aside() -> None:
-    """A bare URL is not a PEP 508 requirement, so the planner refuses it.
+def test_a_source_written_bare_is_set_aside_like_any_other() -> None:
+    """A line that is only a URL points where it says, so it is read that way.
 
-    Leaving it in the installable set is the fail-closed answer: the package
-    is refused for declaring something unreadable, rather than having a line
-    quietly skipped on the strength of a guess about what it meant.
+    This used to be left in the installable set, on the grounds that setting
+    aside a line no parser accepts would be a guess about what it meant. It is
+    not a guess: pip takes this spelling, real packages ship it - four of them
+    across the two this product must install - and the URL is the whole line.
+
+    What the old behaviour actually did was decide by spelling. The same
+    dependency written `name @ url` was set aside and the package prepared;
+    written bare it refused the package outright. The question worth asking is
+    whether the source names an exact commit, and that answer is the same
+    either way.
+
+    The guarantee is unchanged and is asserted below: an unpinned source is
+    never installed. It is omitted, recorded, and provable.
     """
     installable, omitted = partition_unpinned_sources(
-        ("git+https://github.com/owner/repo",), authorized=True
+        ("git+https://github.com/owner/repo", "git+https://github.com/owner/repo.git"),
+        authorized=True,
     )
 
+    assert installable == ()
+    assert omitted == (
+        "git+https://github.com/owner/repo",
+        "git+https://github.com/owner/repo.git",
+    )
+
+
+def test_a_bare_pinned_source_is_still_never_set_aside() -> None:
+    """Omission is for what cannot be installed exactly, not for convenience."""
+    pinned = "git+https://github.com/owner/repo@" + "a" * 40
+
+    installable, omitted = partition_unpinned_sources((pinned,), authorized=True)
+
     assert omitted == ()
-    assert installable == ("git+https://github.com/owner/repo",)
+    assert installable == (pinned,)
+
+
+def test_a_line_no_parser_accepts_is_still_not_set_aside() -> None:
+    """Reading a URL is not the same as reading anything at all.
+
+    Nothing here points anywhere, so there is nothing to set aside and the
+    package is still refused for declaring something unreadable.
+    """
+    declarations = ("not a requirement at all!!", "two urls https://a.example https://b.example")
+
+    installable, omitted = partition_unpinned_sources(declarations, authorized=True)
+
+    assert omitted == ()
+    assert installable == declarations
 
 
 def test_comments_and_installer_options_are_never_set_aside() -> None:

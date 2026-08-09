@@ -8,6 +8,7 @@ from unittest.mock import AsyncMock, Mock
 import pytest
 
 from local_lm.adapters.base import ChatEvent, MediaEvent, estimate_chat_tokens
+from local_lm.comfy_registry_paths import registry_wheel_environment_root
 from local_lm.comfy_templates import COMFY_TEMPLATE_COMPILER_VERSION
 from local_lm.models import (
     Job,
@@ -627,6 +628,7 @@ def test_media_execution_revalidates_the_exact_queued_activation(
     settings = SimpleNamespace(
         custom_node_dir=tmp_path / "nodes",
         state_dir=tmp_path / "state",
+        registry_dir=tmp_path / "registry",
     )
     orchestrator = ConversationOrchestrator(
         engines=SimpleNamespace(settings=settings),
@@ -640,7 +642,7 @@ def test_media_execution_revalidates_the_exact_queued_activation(
     assert revalidate.call_args.kwargs == {
         "runtime_materializer": None,
         "custom_node_root": settings.custom_node_dir,
-        "registry_environment_root": settings.state_dir / "registry-wheel-environments",
+        "registry_environment_root": registry_wheel_environment_root(settings.registry_dir),
     }
 
     run.provenance_json["workflow"]["activation"]["launch_sha256"] = "d" * 64

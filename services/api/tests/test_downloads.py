@@ -9,6 +9,7 @@ from types import SimpleNamespace
 from typing import Any
 
 import pytest
+from sqlalchemy import select
 
 from local_lm.adapters.base import ChatEvent, ChatRequest, MediaRequest
 from local_lm.auxiliary_assets import workflow_lora_extension
@@ -41,6 +42,7 @@ from local_lm.models import (
     ModelInstall,
     ModelProfile,
     WorkflowDefinition,
+    WorkflowPreference,
     WorkflowRevision,
 )
 from local_lm.scheduler import ResourceScheduler
@@ -1318,7 +1320,9 @@ async def test_civitai_download_worker_receives_a_verified_redacted_envelope(
         "local_dir": str(Path("C:/staging")),
         "expected_sha256": "a" * 64,
         "expected_size": 17,
-        "allowed_hosts": ["civitai.com", "b2.civitai.com"],
+        # civitai.com redirects, b2 serves the small files, and anything large
+        # comes from their Cloudflare R2 delivery domain.
+        "allowed_hosts": ["civitai.com", "b2.civitai.com", ".r2.cloudflarestorage.com"],
         "bearer_token": "secret-civitai-token",
     }
     assert "CIVITAI_TOKEN" not in environments[0]
@@ -2371,6 +2375,14 @@ async def test_template_workflow_exposes_model_only_loras(
 
         revision = DownloadManager._ensure_template_workflow(session, compiled, install)
 
+        assert revision.definition.family_id is not None
+        preference = session.scalar(
+            select(WorkflowPreference).where(
+                WorkflowPreference.workflow_family_id == revision.definition.family_id,
+                WorkflowPreference.selector_capability == "image",
+            )
+        )
+        assert preference is not None and preference.enabled
         assert workflow_lora_extension(revision) == {
             "mode": "model_only",
             "model": ["switch", 0],

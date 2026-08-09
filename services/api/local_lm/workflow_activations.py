@@ -12,8 +12,8 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from .adapters.contracts import ADAPTER_CONTRACT_VERSION
-from .auxiliary_assets import COMFY_AUXILIARY_FOLDERS
 from .domain import new_id, utcnow
+from .model_manifests import COMFY_MODEL_FOLDERS, comfy_folder_for_kind
 from .model_planner import LAUNCH_CONTRACT_VERSION
 from .models import (
     ComfyRegistryInstall,
@@ -60,20 +60,6 @@ MAX_NODE_TYPE_LENGTH = 200
 
 _DIGEST = re.compile(r"^[0-9a-f]{64}$")
 _RESOLVER_VERSION = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.+-]{0,39}$")
-_COMFY_MODEL_FOLDERS = frozenset(
-    {
-        "checkpoints",
-        "diffusion_models",
-        "text_encoders",
-        "vae",
-        "clip_vision",
-        "loras",
-        "controlnet",
-        "upscale_models",
-        "embeddings",
-        "ipadapter",
-    }
-)
 
 
 class WorkflowActivationError(ValueError):
@@ -683,7 +669,7 @@ def _asset_launch_binding(session: Session, asset_id: str) -> WorkflowAssetLaunc
     root = _directory(Path(asset.local_path), "Selected model asset directory is unavailable")
     runtime_reference = _identity_text(identity, "runtime_reference")
     digest = _identity_digest(identity, "sha256")
-    loader_folder = COMFY_AUXILIARY_FOLDERS.get(asset.kind)
+    loader_folder = comfy_folder_for_kind(asset.kind)
     if loader_folder is None:
         raise WorkflowActivationError(
             "invalid_dependency_identity", "Selected model asset loader is invalid"
@@ -789,7 +775,7 @@ def _comfy_paths(install: ModelInstall) -> tuple[tuple[str, str], ...]:
         )
     result: list[tuple[str, str]] = []
     for key, value in raw.items():
-        if not isinstance(key, str) or key not in _COMFY_MODEL_FOLDERS:
+        if not isinstance(key, str) or key not in COMFY_MODEL_FOLDERS:
             raise WorkflowActivationError(
                 "invalid_dependency_identity", "Selected Comfy model path mapping is invalid"
             )

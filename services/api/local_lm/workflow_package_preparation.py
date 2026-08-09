@@ -20,10 +20,12 @@ from .comfy_package_requirements import (
     StagedRequirementsError,
     read_staged_requirements,
     select_requirements_manifest,
+    staged_requirements_manifests,
 )
-from .comfy_registry import ComfyRegistryClient
+from .comfy_registry import ComfyNodeResolution, ComfyRegistryClient
 from .comfy_registry_closure_driver import (
     ComfyRegistryWheelClosureDriverError,
+    ComfyRegistryWheelClosureResult,
     ComfyRegistryWheelMetadataClient,
     drive_comfy_registry_wheel_closure,
 )
@@ -43,8 +45,9 @@ from .comfy_registry_wheel_downloads import ComfyRegistryWheelDownloader
 from .comfy_registry_wheel_projects import ComfyRegistryWheelProjectClient
 from .comfy_workflow_packages import WorkflowPackageRequirement
 from .config import Settings
+from .models import ComfyRegistryInstall
 from .package_sources import partition_unpinned_sources
-from .source_omission_proof import PendingOmission
+from .source_omission_proof import PendingOmission, pending_omission_requirement
 
 # One target interpreter probe: markers, wheel tags, and installed distributions for the
 # managed ComfyUI python. Owned as its own contract because target-binding
@@ -93,6 +96,63 @@ class PreparationContext:
             custom_node_root=Path(settings.comfy_directory) / "custom_nodes",
             state_root=settings.registry_dir,
         )
+
+
+@dataclass(frozen=True)
+class _RenewedInstall:
+    """What a renewal needs to know about the install it is refreshing."""
+
+    installed_path: str
+    recorded_omissions: frozenset[str]
+    # Staging is what learns these, and a renewal deliberately does not stage.
+    # They name the archive already on disk - the one being reused - so the
+    # renewal carries them forward rather than resolving to nothing and
+    # tripping the identity check against itself.
+    registry_record_id: str | None
+    download_url: str | None
+
+
+def _renewed_install(session: Session, install_id: str) -> _RenewedInstall | None:
+    install = session.get(ComfyRegistryInstall, install_id)
+    if install is None or not install.installed_path:
+        return None
+    recorded = pending_omission_requirement(install_id, install.review_json)
+    return _RenewedInstall(
+        installed_path=install.installed_path,
+        recorded_omissions=frozenset(recorded.omitted_declarations if recorded else ()),
+        registry_record_id=install.registry_record_id,
+        download_url=install.download_url,
+    )
+
+
+def _withdrawable_declaration(
+    exc: ComfyRegistryWheelClosureDriverError,
+    resolution: ComfyNodeResolution,
+    authorized_workflow: tuple[str, tuple[str, ...]] | None,
+) -> str | None:
+    """The declaration to set aside for this refusal, if any may be.
+
+    Narrow on purpose, and every clause earns its place:
+
+    - only `no_compatible_wheel`, because that is the one refusal where the
+      distribution exists and simply cannot be installed the safe way. A
+      malformed requirement, an unreachable index or a hash mismatch all mean
+      something else and must keep failing;
+    - only under an authorized workflow, because an omission that cannot be
+      proven against a stored revision is an omission nobody can check;
+    - only a declaration the package itself made. A transitive requirement
+      belongs to whichever distribution asked for it, and withdrawing it would
+      quietly hollow out that distribution instead of this package.
+    """
+    if exc.code != "no_compatible_wheel" or authorized_workflow is None:
+        return None
+    requirement = exc.requirement
+    if not requirement:
+        return None
+    return next(
+        (item for item in resolution.pip_dependencies if item.strip() == requirement.strip()),
+        None,
+    )
 
 
 async def prepare_workflow_package(
@@ -147,10 +207,22 @@ async def prepare_workflow_package(
             resolution.error_code,
             f"The Registry could not resolve {package_id}.",
         )
-    if renew_install_id is not None and resolution.install_kind == "git_commit":
+    renewed_install: _RenewedInstall | None = None
+    if renew_install_id is not None:
+        with session_factory() as session:
+            renewed_install = _renewed_install(session, renew_install_id)
+    if (
+        renew_install_id is not None
+        and resolution.install_kind == "git_commit"
+        and renewed_install is None
+    ):
+        # Fail closed if the install cannot be read: a commit-pinned package
+        # states its dependencies inside its own tree, and renewal deliberately
+        # does not fetch that tree again, so without the staged copy there is
+        # nothing to read them from.
         raise WorkflowPackagePreparationError(
             "registry_renewal_source_unsupported",
-            "Commit-pinned Registry packages must be removed and reviewed again",
+            "The staged package this renewal would reuse could not be read",
         )
 
     _phase("Probing the target runtime")
@@ -182,7 +254,24 @@ async def prepare_workflow_package(
     # tree, so only that path can set anything aside; every other resolution
     # reaches the recording step with nothing omitted.
     omitted: tuple[str, ...] = ()
-    if resolution.install_kind == "git_commit":
+    if resolution.install_kind == "git_commit" and renewed_install is not None:
+        # Renewal reuses the node code it already reviewed and never fetches it
+        # again, so the declarations are read from the copy already on disk.
+        # Refusing instead - which is what this did - left a commit-pinned
+        # package unable to follow its runtime anywhere, and told the reader to
+        # remove it, which nothing offers a way to do.
+        _phase("Reading package dependencies")
+        staged = context.custom_node_root / renewed_install.installed_path
+        manifest = select_requirements_manifest(staged_requirements_manifests(staged))
+        effective_resolution = replace(
+            resolution,
+            pip_dependencies=(
+                read_staged_requirements(staged, manifest) if manifest is not None else ()
+            ),
+            registry_record_id=renewed_install.registry_record_id,
+            download_url=renewed_install.download_url,
+        )
+    elif resolution.install_kind == "git_commit":
         try:
             staged_archive = await stage_comfy_registry_install_archive(
                 resolution=resolution,
@@ -240,9 +329,9 @@ async def prepare_workflow_package(
     async def _closure_progress(name: str, round_number: int, items: tuple[str, ...]) -> None:
         _phase(f"Dependencies: {name.replace('_', ' ')} (round {round_number})", len(items), None)
 
-    try:
-        closure_result = await drive_comfy_registry_wheel_closure(
-            effective_resolution,
+    async def _resolve_closure(resolution: ComfyNodeResolution) -> ComfyRegistryWheelClosureResult:
+        return await drive_comfy_registry_wheel_closure(
+            resolution,
             project_fetcher=project_client.fetch,
             metadata_fetcher=metadata_client.fetch,
             marker_environment=marker_environment,
@@ -250,6 +339,46 @@ async def prepare_workflow_package(
             runtime_distributions=runtime_distributions,
             progress=_closure_progress,
         )
+
+    try:
+        # A dependency with no wheel is set aside on the same terms as an
+        # unpinned source: only under an authorized workflow, only when it is
+        # one the package itself declared, and always recorded.
+        #
+        # It cannot be decided up front the way a source URL can. Whether a
+        # distribution publishes a hash-bound wheel for this interpreter and
+        # platform is only knowable after asking, so the closure says which
+        # requirement it could not satisfy and the declaration is withdrawn
+        # before asking again. Installing it from source instead would run a
+        # build backend nobody reviewed, which is the thing this refuses.
+        #
+        # Bounded by the number of declarations, and each round must actually
+        # remove one, so a refusal this does not understand ends the loop
+        # rather than repeating it.
+        while True:
+            try:
+                closure_result = await _resolve_closure(effective_resolution)
+                break
+            except ComfyRegistryWheelClosureDriverError as exc:
+                withdrawn = (
+                    _withdrawable_declaration(exc, effective_resolution, authorized_workflow)
+                    if authorized_workflow is not None
+                    else None
+                )
+                if withdrawn is None or authorized_workflow is None:
+                    raise
+                effective_resolution = replace(
+                    effective_resolution,
+                    pip_dependencies=tuple(
+                        item for item in effective_resolution.pip_dependencies if item != withdrawn
+                    ),
+                )
+                omitted = (*omitted, withdrawn)
+                pending_omission = PendingOmission(
+                    omitted_declarations=omitted,
+                    workflow_revision_id=authorized_workflow[0],
+                    required_node_types=authorized_workflow[1],
+                )
     except asyncio.CancelledError:
         if staged_archive is not None:
             await discard_comfy_registry_staged_archive(
@@ -279,11 +408,21 @@ async def prepare_workflow_package(
             # Renewal refreshes an existing install's dependencies and is not
             # the act that can set a declaration aside, so an omission reaching
             # it is a contradiction rather than something to record quietly.
-            if omitted and renew_install_id is not None:
-                raise WorkflowPackagePreparationError(
-                    "omission_not_renewable",
-                    "A dependency renewal cannot omit a source dependency",
-                )
+            if renew_install_id is not None:
+                # A renewal may re-derive the omissions this install already
+                # carries - it is reading the same declarations from the same
+                # reviewed tree, so finding them again is agreement, not news.
+                # What it may not do is set aside something new, because an
+                # omission is only trustworthy when it was proven against the
+                # workflow that authorized it, and a renewal authorizes nothing.
+                recorded = renewed_install.recorded_omissions if renewed_install else frozenset()
+                introduced = sorted(set(omitted) - recorded)
+                if introduced:
+                    raise WorkflowPackagePreparationError(
+                        "omission_not_renewable",
+                        "A dependency renewal cannot set aside something new: "
+                        + ", ".join(introduced),
+                    )
             if renew_install_id is None:
                 preparation = await prepare_comfy_registry_install(
                     session,
@@ -323,19 +462,3 @@ async def prepare_workflow_package(
                 custom_node_root=context.custom_node_root,
             )
         raise WorkflowPackagePreparationError(exc.code, str(exc)) from exc
-
-
-async def refuse_interpreter_probe(
-    python_executable: Path,
-) -> tuple[Mapping[str, str], Sequence[str]]:
-    """Fail closed until a verified probe for the managed python exists.
-
-    Guessing the host interpreter's markers or tags for the managed one would
-    bind wheel selection to the wrong target - the exact inference the chain
-    exists to prevent.
-    """
-
-    raise WorkflowPackagePreparationError(
-        "interpreter_probe_unavailable",
-        "Determining the managed runtime's package target is not supported yet.",
-    )

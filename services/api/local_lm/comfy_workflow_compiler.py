@@ -5,6 +5,7 @@ from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 
 from .comfy_subgraphs import SubgraphExpansionError, expand_workflow
+from .comfy_version_support import COMFY_VERSION_SUPPORT
 from .comfy_workflow_packages import (
     WorkflowPackageError,
     analyze_comfyui_workflow_package,
@@ -12,7 +13,15 @@ from .comfy_workflow_packages import (
 
 _SUPPORTED_WIDGET_TYPES = frozenset({"BOOLEAN", "COMBO", "FLOAT", "INT", "STRING"})
 _CONTROL_AFTER_GENERATE = frozenset({"decrement", "fixed", "increment", "randomize"})
-_IGNORED_FRONTEND_NODE_TYPES = frozenset({"MarkdownNote", "Note", "PrimitiveNode"})
+# Nodes that draw something and carry nothing. Dropping one loses a caption.
+_IGNORED_FRONTEND_NODE_TYPES = frozenset(
+    {"MarkdownNote", "Note", "PrimitiveNode", "Label (rgthree)"}
+)
+# Nodes that carry a wire and nothing else. They are resolved away before
+# compilation rather than ignored: ignoring one drops the edge it was
+# carrying, which is a different graph, not a smaller one.
+_PASS_THROUGH_TYPES = frozenset({"Reroute"})
+_FRONTEND_SEMANTIC_NODE_TYPES = frozenset({"PrimitiveNode", "Reroute"})
 
 
 class WorkflowCompilationError(WorkflowPackageError):
@@ -69,7 +78,9 @@ def compile_comfyui_ui_graph(
             "unsupported_subgraphs",
             "workflow subgraphs require the ComfyUI frontend to compile",
         )
-    unsupported_frontend = set(analysis.frontend_node_types) - _IGNORED_FRONTEND_NODE_TYPES
+    unsupported_frontend = (
+        set(analysis.frontend_node_types) - _IGNORED_FRONTEND_NODE_TYPES - _PASS_THROUGH_TYPES
+    )
     if unsupported_frontend:
         node_type = sorted(unsupported_frontend, key=str.casefold)[0]
         raise WorkflowCompilationError(
@@ -81,8 +92,23 @@ def compile_comfyui_ui_graph(
         raise WorkflowCompilationError(
             "missing_node_type", f"ComfyUI does not provide node type {node_type}"
         )
+    frontend_semantic_nodes = set(analysis.frontend_node_types) & _FRONTEND_SEMANTIC_NODE_TYPES
+    if frontend_semantic_nodes:
+        frontend_support = COMFY_VERSION_SUPPORT.evaluate_frontend_semantics(
+            analysis.frontend_version
+        )
+        if not frontend_support.supported:
+            raise WorkflowCompilationError(
+                "unsupported_frontend_version",
+                (
+                    "workflow uses PrimitiveNode or Reroute semantics without a "
+                    "certified ComfyUI frontend version"
+                ),
+            )
 
     nodes = _nodes_by_id(workflow)
+    links = tuple(_parse_link(value) for value in _sequence(workflow.get("links"), "links"))
+    nodes, links = _elide_pass_through_nodes(nodes, links)
     runtime_nodes = {
         node_id: node
         for node_id, node in nodes.items()
@@ -93,7 +119,6 @@ def compile_comfyui_ui_graph(
             "empty_executable_workflow", "workflow contains no executable nodes"
         )
     slots = {node_id: _node_slots(node_id, node) for node_id, node in nodes.items()}
-    links = tuple(_parse_link(value) for value in _sequence(workflow.get("links"), "links"))
     primitive_values, primitive_link_ids = _primitive_widget_values(
         nodes,
         runtime_nodes,
@@ -209,6 +234,84 @@ def _parse_link(value: object) -> _Link:
     )
 
 
+def _elide_pass_through_nodes(
+    nodes: Mapping[str, Mapping[str, object]],
+    links: Sequence[_Link],
+) -> tuple[dict[str, Mapping[str, object]], tuple[_Link, ...]]:
+    """Remove nodes that only carry a wire, reconnecting what they carried.
+
+    A `Reroute` exists to make a graph readable. It registers no class with the
+    runtime and holds no value, so it cannot be compiled - but it also cannot
+    simply be dropped, because dropping it takes an edge with it and yields a
+    graph that runs and quietly makes a different picture. It has to be resolved:
+    every consumer reconnects to whatever fed the reroute, through however many
+    reroutes stand between them.
+
+    The refusal that matters is a reroute with consumers and nothing feeding it.
+    Dropping that silently would leave a required input unfilled, so it is named
+    instead.
+    """
+
+    pass_through = {
+        node_id for node_id, node in nodes.items() if str(node.get("type")) in _PASS_THROUGH_TYPES
+    }
+    if not pass_through:
+        return dict(nodes), tuple(links)
+
+    incoming = {link.target: link for link in links if link.target in pass_through}
+
+    def resolve(link: _Link) -> _Link:
+        origin, origin_slot = link.origin, link.origin_slot
+        seen: set[str] = set()
+        while origin in pass_through:
+            if origin in seen:
+                raise WorkflowCompilationError(
+                    "pass_through_cycle",
+                    f"reroute node {origin} feeds itself",
+                )
+            seen.add(origin)
+            feeding = incoming.get(origin)
+            if feeding is None:
+                raise WorkflowCompilationError(
+                    "unconnected_pass_through",
+                    f"reroute node {origin} carries a connection but nothing feeds it",
+                )
+            origin, origin_slot = feeding.origin, feeding.origin_slot
+        if origin == link.origin and origin_slot == link.origin_slot:
+            return link
+        return _Link(link.identifier, origin, origin_slot, link.target, link.target_slot)
+
+    # A link into a reroute is consumed by the resolution; only links leaving the
+    # elided set survive, each keeping its own identity so the graph downstream
+    # is untouched.
+    rewritten = tuple(resolve(link) for link in links if link.target not in pass_through)
+
+    # A node also declares, on each output slot, which links leave it. Rewiring
+    # moves links onto a node that never listed them and away from one that did,
+    # and the compiler checks that declaration against the links themselves - so
+    # it is restated here from the resolved set rather than left contradicting it.
+    outgoing: dict[tuple[str, int], list[str]] = {}
+    for link in rewritten:
+        outgoing.setdefault((link.origin, link.origin_slot), []).append(link.identifier)
+
+    remaining: dict[str, Mapping[str, object]] = {}
+    for node_id, node in nodes.items():
+        if node_id in pass_through:
+            continue
+        outputs = node.get("outputs")
+        if isinstance(outputs, Sequence) and not isinstance(outputs, str | bytes):
+            restated = [
+                {**slot, "links": outgoing.get((node_id, index), [])}
+                if isinstance(slot, Mapping)
+                else slot
+                for index, slot in enumerate(outputs)
+            ]
+            remaining[node_id] = {**node, "outputs": restated}
+        else:
+            remaining[node_id] = node
+    return remaining, rewritten
+
+
 def _validate_links(
     nodes: Mapping[str, Mapping[str, object]],
     runtime_nodes: Mapping[str, Mapping[str, object]],
@@ -310,7 +413,7 @@ def _primitive_widget_values(
     links: Sequence[_Link],
     object_info: Mapping[str, object],
 ) -> tuple[dict[tuple[str, str], object], frozenset[str]]:
-    """Resolve the pinned frontend's fixed PrimitiveNode widget propagation."""
+    """Resolve PrimitiveNode propagation after the shared version preflight."""
 
     primitive_ids = {
         node_id for node_id, node in nodes.items() if node.get("type") == "PrimitiveNode"
@@ -661,7 +764,7 @@ def _serialize_widget_value(
             "invalid_widget_choice", f"node {node_id} has invalid value for {name}"
         )
     if isinstance(value, Sequence) and not isinstance(value, str | bytes):
-        return {"__value__": list(value)}
+        return list(value)
     if isinstance(value, Mapping):
         return dict(value)
     return value

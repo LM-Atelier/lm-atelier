@@ -15,6 +15,9 @@ export function ConfirmDialog({
   detail,
   confirmLabel,
   tone = "danger",
+  /** While true the action cannot be asked for: it is already running, or
+   *  what it would do is not known well enough to offer it. */
+  confirmDisabled = false,
   onConfirm,
   onCancel,
 }: {
@@ -23,6 +26,7 @@ export function ConfirmDialog({
   detail?: ReactNode;
   confirmLabel: string;
   tone?: "danger" | "trust";
+  confirmDisabled?: boolean;
   onConfirm: () => void;
   onCancel: () => void;
 }) {
@@ -40,7 +44,11 @@ export function ConfirmDialog({
         <button className="secondary" onClick={onCancel}>
           Cancel
         </button>
-        <button className={tone === "trust" ? "primary" : "secondary danger"} onClick={onConfirm}>
+        <button
+          className={tone === "trust" ? "primary" : "secondary danger"}
+          disabled={confirmDisabled}
+          onClick={onConfirm}
+        >
           {confirmLabel}
         </button>
       </footer>

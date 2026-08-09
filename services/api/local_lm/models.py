@@ -1227,6 +1227,238 @@ class WorkflowDependencyBinding(TimestampMixin, Base):
     )
 
 
+class WorkflowTrustAttestation(TimestampMixin, Base):
+    """What this machine verified about one revision, and what it verified it against.
+
+    Deliberately not a boolean on the revision. Derived trust proves a revision
+    came from a template this build compiled; attestation proves something
+    weaker - that at one moment, on this machine, every node type the graph
+    executes resolved to something installed and reviewed, and every asset it
+    names was present. Recording the evidence rather than a verdict is what
+    keeps the two from being confused, because conflating them would turn
+    import into a way to run an unreviewed package.
+
+    The identity columns are what make the claim checkable later. An attestation
+    is about one artifact on one runtime carrying one whitelist, so if any of
+    those move, the answer is stale rather than wrong - and staleness is
+    computed when read, never stored, because the thing that invalidates it
+    happens elsewhere and would not come back to update a row.
+    """
+
+    __tablename__ = "workflow_trust_attestations"
+    __table_args__ = (
+        UniqueConstraint("workflow_revision_id", name="uq_workflow_trust_attestation_revision"),
+        CheckConstraint(
+            _lowercase_sha256_check("artifact_sha256"),
+            name="ck_workflow_trust_attestation_artifact_sha256",
+        ),
+        CheckConstraint(
+            _lowercase_sha256_check("node_inventory_sha256"),
+            name="ck_workflow_trust_attestation_node_inventory_sha256",
+        ),
+        CheckConstraint(
+            _lowercase_sha256_check("whitelist_sha256"),
+            name="ck_workflow_trust_attestation_whitelist_sha256",
+        ),
+        CheckConstraint(
+            "runtime_contract_sha256 IS NULL OR ("
+            + _lowercase_sha256_check("runtime_contract_sha256")
+            + ")",
+            name="ck_workflow_trust_attestation_runtime_contract_sha256",
+        ),
+        CheckConstraint(
+            "launch_scope_sha256 IS NULL OR ("
+            + _lowercase_sha256_check("launch_scope_sha256")
+            + ")",
+            name="ck_workflow_trust_attestation_launch_scope_sha256",
+        ),
+    )
+
+    # "wfattest_" plus 32 hex is 41 characters, so String(40) would truncate.
+    id: Mapped[str] = mapped_column(
+        String(48), primary_key=True, default=lambda: new_id("wfattest")
+    )
+    workflow_revision_id: Mapped[str] = mapped_column(
+        ForeignKey("workflow_revisions.id", ondelete="CASCADE"), index=True
+    )
+    artifact_sha256: Mapped[str] = mapped_column(String(64), index=True)
+    runtime_contract_sha256: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    runtime_managed: Mapped[bool] = mapped_column(Boolean, default=False)
+    node_inventory_sha256: Mapped[str] = mapped_column(String(64))
+    whitelist_sha256: Mapped[str] = mapped_column(String(64))
+    launch_scope_sha256: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    required_node_types_json: Mapped[list[str]] = mapped_column(JSON, default=list)
+    declared_dependencies_json: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
+    resolution_json: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
+    attested_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+
+
+class AdapterPromptGrammar(TimestampMixin, Base):
+    """How one installed adapter expects to be prompted, and what file that was true of.
+
+    An adapter can be trained to expect a particular prompt shape, and one
+    prompted the wrong way does not fail - it produces confident output in the
+    wrong form. Recording the shape is what lets a prompt be written correctly,
+    and what lets the application say a request is outside what the loaded stack
+    can express instead of rendering something adjacent.
+
+    Keyed to the asset's content digest and not only to the install row. An
+    install row is mutable and a file can be replaced underneath it, so binding
+    the grammar to the row alone would let a new file silently inherit the old
+    file's description of itself. `asset_sha256` is what the grammar was written
+    about; if the install no longer hashes to it, the grammar is stale rather
+    than wrong, and staleness is computed on read for the same reason it is for
+    an attestation.
+
+    `grammar_json` holds the normalized form only. The document it came from is
+    third-party text on its way to a model that rewrites what the user wrote,
+    which makes it an instruction channel, so the raw file is quarantined
+    outside this row and only its digest is kept. `examples_reviewed` gates the
+    one part of a normalized grammar that is still free text.
+    """
+
+    __tablename__ = "adapter_prompt_grammars"
+    __table_args__ = (
+        # One grammar per install. A second would raise the question of which one
+        # a rewriter believed, and the answer has to be that there is only one.
+        UniqueConstraint("model_asset_install_id", name="uq_adapter_prompt_grammar_install"),
+        CheckConstraint(
+            _lowercase_sha256_check("asset_sha256"),
+            name="ck_adapter_prompt_grammar_asset_sha256",
+        ),
+        CheckConstraint(
+            _lowercase_sha256_check("source_sha256"),
+            name="ck_adapter_prompt_grammar_source_sha256",
+        ),
+    )
+
+    # "promptgrammar_" plus 32 hex is 46 characters, so String(40) would truncate.
+    id: Mapped[str] = mapped_column(
+        String(48), primary_key=True, default=lambda: new_id("promptgrammar")
+    )
+    model_asset_install_id: Mapped[str] = mapped_column(
+        ForeignKey("model_asset_installs.id", ondelete="CASCADE"), index=True
+    )
+    asset_sha256: Mapped[str] = mapped_column(String(64), index=True)
+    source_identity: Mapped[str] = mapped_column(Text)
+    source_sha256: Mapped[str] = mapped_column(String(64))
+    schema_version: Mapped[int] = mapped_column(Integer, default=1)
+    grammar_json: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
+    # The digest of what a rewriter would actually act on, including the two
+    # overlays that change emitted text. Storing the grammar alone would leave
+    # the overlays unauthenticated, so widening approval or verification would
+    # change the output without changing anything review is bound to.
+    grammar_sha256: Mapped[str] = mapped_column(String(64), default="")
+    approved_prose_json: Mapped[list[str]] = mapped_column(JSON, default=list)
+    # Reviewed evidence, not observations. Nothing generated may write here; a
+    # future observations table accumulates separately and can only promote a
+    # value through an explicit review.
+    verified_values_json: Mapped[dict[str, list[str]]] = mapped_column(JSON, default=dict)
+    # What the fit was judged against. A compiler change must make the evidence
+    # stale rather than overflow at turn time.
+    compiler_version: Mapped[str] = mapped_column(String(64), default="")
+    compiler_ceiling: Mapped[int] = mapped_column(Integer, default=0)
+    fits: Mapped[bool] = mapped_column(Boolean, default=False)
+    reviewed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+
+
+class ReferenceSubject(TimestampMixin, Base):
+    """A subject the user has taught this application about, addressable by name.
+
+    The name and the mention are deliberately separate columns. A display name is
+    whatever a person actually calls someone; a mention slug is an addressing
+    token with exactly one canonical form, so that two subjects can never occupy
+    what a reader sees as the same `@name`.
+
+    Nothing here is a quality signal. `favorite` is organisation only - it says a
+    person wanted this near the top of a list, not that its images are good - and
+    reading it as ranking input would quietly turn a bookmark into a preference
+    the user never expressed.
+    """
+
+    __tablename__ = "reference_subjects"
+    __table_args__ = (
+        # The mention is the addressing key, so uniqueness is the whole point.
+        # Slugs are canonicalised before they arrive, which is what makes a
+        # plain unique index sufficient rather than needing a case-folded one.
+        UniqueConstraint("mention_slug", name="uq_reference_subject_mention_slug"),
+        CheckConstraint("length(trim(name)) > 0", name="ck_reference_subject_name_present"),
+        CheckConstraint("length(trim(mention_slug)) > 0", name="ck_reference_subject_slug_present"),
+    )
+
+    # "refsubject_" plus 32 hex is 43 characters, so String(40) would truncate.
+    id: Mapped[str] = mapped_column(
+        String(48), primary_key=True, default=lambda: new_id("refsubject")
+    )
+    name: Mapped[str] = mapped_column(String(120))
+    mention_slug: Mapped[str] = mapped_column(String(64), index=True)
+    kind: Mapped[str] = mapped_column(String(40), index=True)
+    description: Mapped[str | None] = mapped_column(Text, nullable=True)
+    aliases_json: Mapped[list[str]] = mapped_column(JSON, default=list)
+    tags_json: Mapped[list[str]] = mapped_column(JSON, default=list)
+    # Cleared rather than cascading: losing a cover image must not lose the
+    # subject, because the images are replaceable and the identity is not.
+    cover_artifact_id: Mapped[str | None] = mapped_column(
+        ForeignKey("artifacts.id", ondelete="SET NULL"), nullable=True
+    )
+    favorite: Mapped[bool] = mapped_column(Boolean, default=False, index=True)
+    # Archive is the normal way to remove a subject. Permanent deletion has to
+    # be impact-aware, because past runs recorded what they used and that record
+    # is history rather than a pointer to a current row.
+    archived: Mapped[bool] = mapped_column(Boolean, default=False, index=True)
+
+    assets: Mapped[list[ReferenceAsset]] = relationship(
+        back_populates="subject",
+        cascade="all, delete-orphan",
+        order_by="ReferenceAsset.sort_order",
+    )
+
+
+class ReferenceAsset(TimestampMixin, Base):
+    """One image belonging to a subject, and what it is there to show.
+
+    This row expresses membership and role. It does not own bytes: the image
+    lives in the content-addressed artifact store, which already counts
+    references, so the same photograph used by two subjects is stored once.
+    Creating a second media filesystem here would mean two things to keep
+    consistent and two things to leak.
+    """
+
+    __tablename__ = "reference_assets"
+    __table_args__ = (
+        # The same image twice under one subject is a duplicate, not a second
+        # view of it. Detecting that here costs nothing and stops a set being
+        # silently weighted toward whichever picture was added twice.
+        UniqueConstraint(
+            "reference_subject_id", "artifact_id", name="uq_reference_asset_membership"
+        ),
+    )
+
+    id: Mapped[str] = mapped_column(
+        String(48), primary_key=True, default=lambda: new_id("refasset")
+    )
+    reference_subject_id: Mapped[str] = mapped_column(
+        ForeignKey("reference_subjects.id", ondelete="CASCADE"), index=True
+    )
+    # Restricted, not cascading: an artifact still used by a Reference must not
+    # be removable out from under it by an unrelated cleanup.
+    artifact_id: Mapped[str] = mapped_column(
+        ForeignKey("artifacts.id", ondelete="RESTRICT"), index=True
+    )
+    caption: Mapped[str | None] = mapped_column(Text, nullable=True)
+    purpose: Mapped[str] = mapped_column(String(40), default="other")
+    view_label: Mapped[str | None] = mapped_column(String(60), nullable=True)
+    sort_order: Mapped[int] = mapped_column(Integer, default=0)
+    # Starts unchecked, which is not the same as usable. An image nobody has
+    # looked at must not let an unreviewed set claim a reviewed set's fidelity.
+    validation_state: Mapped[str] = mapped_column(String(30), default="unchecked")
+    validation_reasons_json: Mapped[list[str]] = mapped_column(JSON, default=list)
+    width: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    height: Mapped[int | None] = mapped_column(Integer, nullable=True)
+
+    subject: Mapped[ReferenceSubject] = relationship(back_populates="assets")
+
+
 class WorkflowInstallOffer(TimestampMixin, Base):
     """One reviewed, content-bound way to make a workflow locally installable."""
 

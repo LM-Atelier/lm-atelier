@@ -1,6 +1,6 @@
 import { Download, Star, X } from "lucide-react";
 import { useEffect, useMemo, useReducer, useState } from "react";
-import { useMutation, useQuery } from "@tanstack/react-query";
+import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { api } from "./api";
 import { StudioOpenImage } from "./StudioOpenImage";
 import { ErrorCallout } from "./ErrorCallout";
@@ -13,10 +13,13 @@ import { artifactSource } from "./messageMedia";
 import { coverage, encodeMaskPng, isEmpty } from "./studioMasks";
 import {
   initialToolState,
+  defaultInstruction,
   studioToolReducer,
   toolFor,
+  toolUsesMask,
   type StudioToolKind,
 } from "./studioToolState";
+import { useStudioImage } from "./useStudioImage";
 import { useStudioSession, type StudioStep } from "./useStudioSession";
 import { useConfirm } from "./useConfirm";
 import type { EditTemplate } from "./types";
@@ -48,18 +51,18 @@ export function StudioView({
   // Every result is already an artifact in the library - the studio's turns
   // are ordinary turns. What was missing is a way to say "keep this one",
   // because a picture among hundreds is findable only in principle.
-  const [kept, setKept] = useState<string | null>(null);
-  const keep = useMutation({
-    mutationFn: (artifactId: string) => api.favoriteArtifact(artifactId, true),
-    onSuccess: (_result, artifactId) => setKept(artifactId),
-  });
+  //
+  // Read from the artifact rather than remembered locally. A local flag knew
+  // only what this visit had done: reopening a picture already marked - from
+  // here or from the library - showed it as unmarked, and the control could
+  // only ever mark, never take it back.
+  const client = useQueryClient();
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [instruction, setInstruction] = useState("");
   // The recipe an apply should run under. Cleared whenever the instruction is
   // edited by hand: at that point the words are no longer the recipe's, and
   // running its workflow would attribute a result to something it did not do.
   const [recipe, setRecipe] = useState<EditTemplate | null>(null);
-  const [bitmap, setBitmap] = useState<ImageBitmap | null>(null);
   const [tools, dispatch] = useReducer(studioToolReducer, undefined, initialToolState);
   // The pointer tool is rebuilt whenever the mode or brush changes; each one
   // is a cheap wrapper over the shared raster, never a copy of it.
@@ -74,7 +77,11 @@ export function StudioView({
   const capabilities = useQuery({
     queryKey: ["studio-capabilities"],
     queryFn: api.studioCapabilities,
-    staleTime: 60_000,
+    // Asked again on every entry, which is what the line above already
+    // claimed. Held for a minute instead, the studio told someone who had
+    // just followed its own "Browse workflows" button and installed the
+    // workflow that the tool was still not installed.
+    refetchOnMount: "always",
   });
   const activeTool = capabilities.data?.tools.find((tool) => tool.kind === tools.kind);
   const unavailable = activeTool && !activeTool.available ? activeTool.reason : null;
@@ -84,32 +91,26 @@ export function StudioView({
   const current = steps.find((step) => step.artifactId === selectedId) ?? steps.at(-1) ?? null;
 
   const currentArtifactId = current?.artifactId ?? null;
+  const artifact = useQuery({
+    queryKey: ["artifact", currentArtifactId],
+    queryFn: () => api.artifact(currentArtifactId!),
+    enabled: Boolean(currentArtifactId),
+  });
+  const isFavorite = artifact.data?.favorite ?? false;
+  const keep = useMutation({
+    mutationFn: (next: boolean) => api.favoriteArtifact(currentArtifactId!, next),
+    onSuccess: () => {
+      void client.invalidateQueries({ queryKey: ["artifact", currentArtifactId] });
+      // The library is looking at the same picture.
+      void client.invalidateQueries({ queryKey: ["artifacts"] });
+    },
+  });
+  const { bitmap, error: imageError, reload } = useStudioImage(currentArtifactId);
   useEffect(() => {
-    let live = true;
-    if (!currentArtifactId) {
-      // Async so the clear never runs synchronously inside the effect.
-      void Promise.resolve().then(() => {
-        if (live) setBitmap(null);
-      });
-      return () => {
-        live = false;
-      };
+    if (bitmap) {
+      dispatch({ type: "image-changed", width: bitmap.width, height: bitmap.height });
     }
-    void fetch(`/api/artifacts/${encodeURIComponent(currentArtifactId)}/content`)
-      .then((response) => response.blob())
-      .then((blob) => createImageBitmap(blob))
-      .then((decoded) => {
-        if (!live) return;
-        setBitmap(decoded);
-        dispatch({ type: "image-changed", width: decoded.width, height: decoded.height });
-      })
-      .catch(() => {
-        if (live) setBitmap(null);
-      });
-    return () => {
-      live = false;
-    };
-  }, [currentArtifactId]);
+  }, [bitmap]);
 
   if (!sourceArtifactId) {
     return (
@@ -127,13 +128,18 @@ export function StudioView({
         <div className="studio-header-actions">
           {current && (
             <>
+              {/* Every result is already in the library - the close dialog
+                  beside this says so. What this does is mark one, which is
+                  what makes it findable among hundreds, and it is named for
+                  that now rather than for saving something already saved. */}
               <button
                 className="secondary compact-button"
-                disabled={keep.isPending || kept === current.artifactId}
-                onClick={() => keep.mutate(current.artifactId)}
+                disabled={keep.isPending || artifact.isLoading}
+                aria-pressed={isFavorite}
+                onClick={() => keep.mutate(!isFavorite)}
               >
-                <Star size={14} aria-hidden="true" />
-                {kept === current.artifactId ? "Kept in the library" : "Save to library"}
+                <Star size={14} aria-hidden="true" fill={isFavorite ? "currentColor" : "none"} />
+                {isFavorite ? "Favorited" : "Favorite"}
               </button>
               <a
                 className="secondary compact-button"
@@ -174,7 +180,12 @@ export function StudioView({
         </div>
       </header>
       {confirmDialog}
-      {error && <ErrorCallout message={(error as Error).message} />}
+      {/* A save that fails must not look like a save that worked. The button
+          only changes on success, so without this the picture silently stays
+          unmarked while the label still invites the same press. */}
+      {(error || keep.error) && (
+        <ErrorCallout message={((error ?? keep.error) as Error).message} />
+      )}
       <div className="studio-layout">
         <StudioToolRail
           active={tools.kind}
@@ -196,6 +207,13 @@ export function StudioView({
               onGestureStart={() => dispatch({ type: "gesture-start" })}
               onStrokeEnd={() => dispatch({ type: "stroke-end" })}
             />
+          ) : imageError ? (
+            // A picture that cannot be read is not one still arriving, and
+            // "Loading the image" forever is the more comfortable of the two.
+            <div className="studio-stage-loading" role="alert">
+              <p>{imageError}</p>
+              <button className="secondary compact-button" onClick={reload}>Try again</button>
+            </div>
           ) : (
             // Not an empty state: the empty-state tile is styled to say
             // "nothing here", which is the opposite of what is happening.
@@ -334,12 +352,16 @@ export function StudioView({
             }
             onClick={() => {
               if (!current) return;
-              const selection = tools.kind !== "instruct" && tools.mask && !isEmpty(tools.mask)
+              const selection = toolUsesMask(tools.kind) && tools.mask && !isEmpty(tools.mask)
                 ? tools.mask
                 : null;
+              // Enhance and Extend ask for no words, and the turn requires
+              // some: both were reaching the server and being refused before
+              // anything ran. The user's words win whenever there are any.
+              const words = instruction.trim() || defaultInstruction(tools);
               const send = (mask: Blob | null) => {
                 apply(
-                  instruction.trim(),
+                  words,
                   current.artifactId,
                   mask ? { blob: mask, featherPx: tools.featherPx, invert: false } : undefined,
                   tools.kind === "enhance"
@@ -350,9 +372,11 @@ export function StudioView({
                         ? recipe.settings_json
                         : undefined,
                   recipe?.workflow_revision_id ?? undefined,
+                  () => {
+                    setInstruction("");
+                    setSelectedId(null);
+                  },
                 );
-                setInstruction("");
-                setSelectedId(null);
               };
               if (selection) void encodeMaskPng(selection).then(send);
               else send(null);

@@ -22,6 +22,7 @@ from .profile_service import AUTO_PROFILE_ID
 from .project_portability import redact_local_paths
 from .settings_registry import ROLE_SETTINGS
 from .workflow_edit_calibration import validate_workflow_edit_calibration
+from .workflow_ownership import ensure_workflow_family_ownership
 
 ModelRoleName = Literal["chat", "image", "video"]
 OperationName = Literal[
@@ -442,6 +443,7 @@ def install_dependency_manifest(
             definition.current_revision_id = matched_revisions[
                 workflow_source.current_revision_source_id
             ].id
+        ensure_workflow_family_ownership(session, definition)
         imported_workflow_ids[workflow_source.source_id] = definition.id
         for source_revision in workflow_source.revisions:
             revision = matched_revisions[source_revision.source_id]

@@ -43,6 +43,7 @@ import {
   X,
 } from "lucide-react";
 import { AccessibleDialog } from "./AccessibleDialog";
+import { ActiveChatWorkflowSelector } from "./ActiveChatWorkflowSelector";
 import { CopyTextButton } from "./CopyTextButton";
 import { InstallConfirmDialog } from "./InstallConfirmDialog";
 import { api } from "./api";
@@ -65,6 +66,8 @@ import {
 } from "./messageMedia";
 import { useLiveEvents } from "./useLiveEvents";
 import { ErrorCallout } from "./ErrorCallout";
+import { FirstFailure } from "./FirstFailure";
+import { openLibraryEditTargets, type VisualTarget } from "./libraryEditTargets";
 import { EmptyState } from "./EmptyState";
 import { AtelierMark } from "./AtelierMark";
 import { EditingStudio } from "./EditingStudio";
@@ -137,20 +140,6 @@ import type {
 } from "./types";
 
 type PendingTurn = { id: string; text: string; mode: RoutingMode };
-type VisualTarget = {
-  attachment: ComposerAttachment;
-  // null means "attach only", used by Reference: quoting a picture says what
-  // the next turn is about; it must not silently change the generation mode
-  // the user chose, the way Edit and Animate deliberately do.
-  mode: "image" | "video" | null;
-  requestId: number;
-  // Open the editing studio once the image is attached - the library's Edit
-  // entry point, where no instruction has been drafted yet.
-  studio?: boolean;
-  // Companions from a library multi-select; the studio's "Apply to each"
-  // path then runs one turn per image.
-  extraAttachments?: ComposerAttachment[];
-};
 type SendTurnVariables = PendingTurn & {
   chatId: string;
   artifacts: string[];
@@ -158,51 +147,12 @@ type SendTurnVariables = PendingTurn & {
   stopCurrent?: boolean;
 };
 
-const AUTO_PROFILE_ID = "__auto__";
 const SETUP_DISMISSED_KEY = "lm-atelier-setup-dismissed";
 const CURRENT_CHAT_KEY = "local-lm-chat";
 
 
 /** The library's Edit action: attach the selection in the chat composer,
  * switch to image mode, and open the studio. */
-function libraryEditTarget(artifacts: ArtifactLibraryItem[]): VisualTarget | null {
-  const [first, ...rest] = artifacts.map((artifact): ComposerAttachment => ({
-    id: artifact.id,
-    kind: "image",
-    artifact,
-    // Stored uploads keep their filename; generated media has none.
-    origin: artifact.original_name ? "uploaded" : "generated",
-  }));
-  if (!first) return null;
-  return {
-    attachment: first,
-    mode: "image",
-    requestId: Date.now(),
-    studio: true,
-    extraAttachments: rest,
-  };
-}
-
-/** One image opens the studio canvas; a selection keeps the composer's
- * apply-to-each batch path. */
-function openLibraryEditTargets(
-  artifacts: ArtifactLibraryItem[],
-  handlers: {
-    openStudio: (artifactId: string) => void;
-    openComposer: (target: VisualTarget) => void;
-  },
-): void {
-  if (artifacts.length === 1) {
-    handlers.openStudio(artifacts[0].id);
-    focusMainContent();
-    return;
-  }
-  const target = libraryEditTarget(artifacts);
-  if (!target) return;
-  handlers.openComposer(target);
-  focusMainContent();
-}
-
 function PartView({
   part,
   liveText,
@@ -925,14 +875,20 @@ function Composer({
     attachments.some((attachment) => attachment.kind === "image")
     || (priorImage && usePriorVisual)
   );
-  const families = useQuery({ queryKey: ["workflow-families"], queryFn: () => api.workflowFamilies() });
+  const needsWorkflowSchema = mode === "image" || mode === "video";
+  const families = useQuery({
+    queryKey: ["workflow-families"],
+    queryFn: () => api.workflowFamilies(),
+    enabled: needsWorkflowSchema,
+  });
   const selections = useQuery({
     queryKey: ["chat", chat?.id, "workflow-selections"],
     queryFn: () => api.chatWorkflowSelections(chat!.id),
-    enabled: Boolean(chat?.id),
+    enabled: needsWorkflowSchema && Boolean(chat?.id),
   });
   const projectSelections = useQuery({ queryKey: ["project", project?.id, "workflow-selections"],
-    queryFn: () => api.projectWorkflowSelections(project!.id), enabled: Boolean(project?.id) });
+    queryFn: () => api.projectWorkflowSelections(project!.id),
+    enabled: needsWorkflowSchema && Boolean(project?.id) });
   const imageProfile = profiles.find((profile) => profile.id === chat.active_image_profile_id)
     ?? profiles.find((profile) => profile.role === "image" && profile.is_default);
   const profileValues = {
@@ -1096,6 +1052,10 @@ function Composer({
                 </select>
                 <ChevronDown size={13} />
               </label>
+              <div className="composer-workflow-selector">
+                <WorkflowIcon aria-hidden="true" size={15} />
+                <ActiveChatWorkflowSelector chatId={chat.id} routingMode={mode} />
+              </div>
               {imageEdit && <button className="icon-button" onClick={() => setStudioOpen(true)} aria-label="Open editing studio" title="One-click edits"><Wand2 size={18} /></button>}
               <button className="icon-button" onClick={() => setSettingsOpen(true)} aria-label="Turn settings"><SlidersHorizontal size={18} /></button>
             </div>
@@ -1235,7 +1195,6 @@ function ChatView({
   onPreset,
   onMode,
   onSend,
-  onProfile,
   onRegenerate,
   onSelectRevision,
   onEdit,
@@ -1264,7 +1223,6 @@ function ChatView({
   onPreset: (presetId: string | null) => void;
   onMode: (mode: RoutingMode) => void;
   onSend: (text: string, mode: RoutingMode, artifacts: string[], settings: Record<string, unknown>) => void;
-  onProfile: (field: "active_chat_profile_id" | "active_vision_profile_id" | "active_image_profile_id" | "active_video_profile_id", id: string | null) => void;
   onRegenerate: (messageId: string, settings: Record<string, unknown>) => void;
   onSelectRevision: (messageId: string, revisionId: string) => void;
   onEdit: (
@@ -1362,23 +1320,10 @@ function ChatView({
     <div className="chat-view">
       <div className="chat-header">
         <div><small>{chat.project_id ? "Project chat" : "Unfiled chat"}</small><h1>{chat.title}</h1></div>
-        <div className="chat-profile-selectors">
-          {(["chat", "vision", "image", "video"] as const).map((role) => {
-            const field = `active_${role}_profile_id` as "active_chat_profile_id" | "active_vision_profile_id" | "active_image_profile_id" | "active_video_profile_id";
-            const defaultProfile = role === "vision"
-              ? undefined
-              : profiles.find((profile) => profile.role === role && profile.is_default);
-            const selected = profiles.find((profile) => profile.id === chat[field]);
-            const value = role !== "vision" && selected?.is_default ? "" : chat[field] ?? "";
-            const options = profiles.filter((profile) => (
-              role === "vision"
-                ? profile.role === "chat" && profile.input_modalities?.includes("image")
-                : profile.role === role
-            ) && (role === "vision" || !profile.is_default));
-            return <label key={role}><span>{role}</span><select value={value} onChange={(event) => onProfile(field, event.target.value || null)}><option value={AUTO_PROFILE_ID}>Auto</option><option value="">{role === "vision" ? "Off" : `Default${defaultProfile ? ` · ${defaultProfile.name}` : ""}`}</option>{options.map((profile) => <option key={profile.id} value={profile.id}>{profile.name}</option>)}</select></label>;
-          })}
-        </div>
       </div>
+      {/* Reported here because the global list belongs to a component the
+          transcript cannot reach. */}
+      <FirstFailure of={[feedback, toggleFavorite]} />
       <div className="messages" ref={messagesRef} onScroll={trackMessageScroll}>
         {messages.length === 0 && pendingTurns.length === 0 ? (
           <EmptyState icon={<Sparkles />} title="What should we make?" body="Ask anything or create an image or video. Auto mode picks the model." />
@@ -1921,8 +1866,7 @@ function ModelsView({ initialRole }: { initialRole: EngineRole }) {
       <section className="recipe-section">
         <div className="section-heading"><div><h2>Reference recipes</h2></div></div>
         {recipes.isLoading && <div className="loading-line" />}
-        {recipes.error && <ErrorCallout message={recipes.error.message} />}
-        {installRecipe.error && <ErrorCallout message={installRecipe.error.message} />}
+        <FirstFailure of={[recipes, installRecipe]} />
         <div className="recipe-grid">{recipes.data?.map((recipe) => <RecipeCard key={recipe.id} recipe={recipe} pending={installRecipe.isPending && installRecipe.variables === recipe.id} onInstall={() => installRecipe.mutate(recipe.id)} />)}</div>
       </section>
       <div className="toolbar">
@@ -2001,7 +1945,7 @@ function ModelsView({ initialRole }: { initialRole: EngineRole }) {
           onCancel={() => setPendingInstall(null)}
         />
       )}
-      {(download.error || confirmInstall.error || deleteModel.error || cleanupDownloads.error || updateUseCase.error || setDefaultModel.error || updateModelAsset.error || deleteModelAsset.error) && <ErrorCallout message={download.error?.message || confirmInstall.error?.message || deleteModel.error?.message || cleanupDownloads.error?.message || updateUseCase.error?.message || setDefaultModel.error?.message || updateModelAsset.error?.message || deleteModelAsset.error?.message} />}
+      <FirstFailure of={[createProfile, download, confirmInstall, deleteModel, cleanupDownloads, updateUseCase, setDefaultModel, updateModelAsset, deleteModelAsset]} />
       {/* isFetching, not isLoading: the latter is only true the first
           time, so changing a filter swapped the results with no sign
           anything had happened - which reads as the page refreshing
@@ -2461,8 +2405,6 @@ export default function App() {
       persistActiveChat({ generation_preset_ids_json: bindings });
     }} onMode={(mode) => {
       persistActiveChat({ routing_mode: mode });
-    }} onProfile={(field, id) => {
-      persistActiveChat({ [field]: id });
     }} onRegenerate={(messageId, settings) => {
       if (displayedChat) regenerate.mutate({ chatId: displayedChat.id, messageId, settings });
     }} onSelectRevision={(messageId, revisionId) => {
@@ -2544,7 +2486,7 @@ export default function App() {
         onOpenWorkflows={() => { setSetupOpen(false); openWorkflows(); }}
       />
       <JobsPanel />
-      <GlobalNotices connected={eventsConnected} mutations={[send, regenerate, selectResponseRevision, branch, stop, cancelWorkPlan, cancelWorkStep, retryWorkStep, updateChat, createChat, createProject, exportProject, importProject, manageChat, deleteChat, updateProject, deleteProject]} />
+      <GlobalNotices connected={eventsConnected} mutations={[send, regenerate, selectResponseRevision, branch, stop, cancelWorkPlan, cancelWorkStep, retryWorkStep, updateChat, createChat, createProject, exportProject, importProject, manageChat, deleteChat, updateProject, deleteProject, deleteExchange, forkThread]} />
     </div>
   );
 }

@@ -234,6 +234,8 @@ def resolve_workflow_family(
         family = session.get(WorkflowFamily, preference.workflow_family_id)
         if family is None:
             continue
+        if not _automatic_family_eligible(session, family, preference):
+            continue
         try:
             candidates.append(
                 _candidate(
@@ -261,6 +263,25 @@ def resolve_workflow_family(
         )
     )
     return _resolved(candidates[0], mode)
+
+
+def _automatic_family_eligible(
+    session: Session,
+    family: WorkflowFamily,
+    preference: WorkflowPreference,
+) -> bool:
+    if preference.is_default or family.use_case.strip():
+        return True
+    if any(isinstance(tag, str) and tag.strip() for tag in family.tags_json):
+        return True
+    return (
+        session.scalar(
+            select(WorkflowProfileCompatibility.model_profile_id).where(
+                WorkflowProfileCompatibility.workflow_family_id == family.id
+            )
+        )
+        is not None
+    )
 
 
 def _candidate(

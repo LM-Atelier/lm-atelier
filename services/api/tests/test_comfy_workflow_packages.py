@@ -255,6 +255,27 @@ def test_conflicting_custom_package_versions_are_reported() -> None:
     assert not analysis.dependencies_resolved
 
 
+def test_a_canvas_label_never_becomes_a_runtime_dependency() -> None:
+    """rgthree draws its label in the browser and registers no node for it.
+
+    Installing the package it names cannot satisfy it, so counting it as
+    missing refuses the workflow over a caption.
+    """
+
+    analysis = analyze_comfyui_workflow_package(
+        workflow(
+            nodes=[
+                node(1, "Label (rgthree)"),
+                node(2, "Lora Loader Stack (rgthree)"),
+            ]
+        ),
+        available_node_types={"Lora Loader Stack (rgthree)"},
+    )
+
+    assert analysis.runtime_nodes_available
+    assert "Label (rgthree)" in analysis.frontend_node_types
+
+
 @pytest.mark.parametrize("node_type", sorted(FRONTEND_SYSTEM_NODE_TYPES))
 def test_frontend_system_nodes_are_not_runtime_dependencies(node_type: str) -> None:
     analysis = analyze_comfyui_workflow_package(
@@ -414,3 +435,53 @@ def test_rgthree_group_controls_are_frontend_even_with_their_links() -> None:
         available_node_types={"KSampler"},
     )
     assert unknown.missing_node_types == ("SomeOtherUnpackagedNode",)
+
+
+def test_a_node_with_no_attribution_is_not_the_same_claim_as_core() -> None:
+    """Everything reading provenance today collapses these two. The published
+    Krea 2 workflow names `Save Image (LoraManager)` with no cnr_id at all, and
+    treating that as core would admit it as though the runtime shipped it."""
+
+    analysis = analyze_comfyui_workflow_package(
+        workflow(
+            nodes=[
+                node(1, "KSampler", package="comfy-core", version="0.28.0"),
+                node(2, "Save Image (LoraManager)"),
+                node(3, "Lora Loader Stack (rgthree)", package="rgthree-comfy", version="1.2.3"),
+            ]
+        ),
+        available_node_types={
+            "KSampler",
+            "Save Image (LoraManager)",
+            "Lora Loader Stack (rgthree)",
+        },
+    )
+    provenance = {item.node_type: item for item in analysis.node_provenance}
+
+    assert provenance["KSampler"].core_claimed
+    assert not provenance["KSampler"].unattributed
+
+    assert provenance["Save Image (LoraManager)"].unattributed
+    assert not provenance["Save Image (LoraManager)"].core_claimed
+    assert provenance["Save Image (LoraManager)"].package_ids == ()
+
+    assert provenance["Lora Loader Stack (rgthree)"].package_ids == ("rgthree-comfy",)
+    assert provenance["Lora Loader Stack (rgthree)"].package_versions == ("1.2.3",)
+    assert not provenance["Lora Loader Stack (rgthree)"].unattributed
+
+
+def test_provenance_reports_and_decides_nothing() -> None:
+    """It must not feed readiness: import has to behave exactly as before."""
+
+    unattributed = workflow(nodes=[node(1, "KSampler")])
+    attributed = workflow(nodes=[node(1, "KSampler", package="comfy-core", version="0.28.0")])
+
+    first = analyze_comfyui_workflow_package(unattributed, available_node_types={"KSampler"})
+    second = analyze_comfyui_workflow_package(attributed, available_node_types={"KSampler"})
+
+    assert first.ready == second.ready
+    assert first.runtime_nodes_available == second.runtime_nodes_available
+    assert first.missing_node_types == second.missing_node_types
+    # ...while still telling them apart.
+    assert first.node_provenance[0].unattributed
+    assert second.node_provenance[0].core_claimed
