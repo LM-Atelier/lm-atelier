@@ -992,6 +992,8 @@ def test_public_repository_configuration_verifies_every_applied_control() -> Non
     assert "-Expected $TagCreationRules" in script
     assert "sha_pinning_required = $true" in script
     assert 'secret_scanning_push_protection = @{ status = "enabled" }' in script
+    assert script.count("allow_auto_merge = $true") == 2
+    assert "allow_auto_merge = $false" not in script
 
 
 def test_frozen_installer_contracts_are_explicit() -> None:

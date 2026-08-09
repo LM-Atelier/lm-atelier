@@ -390,7 +390,10 @@ $ActualTagCreationRules = Invoke-GitHubApi `
     ConvertFrom-Json
 
 Assert-JsonSubset -Label "Repository settings" -Actual $FinalRepository -Expected @{
-    allow_auto_merge = $false
+    # Must match what is applied above. These two are the same fact written
+    # twice - one sets it, one proves it - so a disagreement between them makes
+    # the script apply a correct configuration and then refuse to believe it.
+    allow_auto_merge = $true
     allow_merge_commit = $true
     allow_rebase_merge = $false
     allow_squash_merge = $true
