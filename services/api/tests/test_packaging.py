@@ -996,6 +996,17 @@ def test_public_repository_configuration_verifies_every_applied_control() -> Non
     assert "allow_auto_merge = $false" not in script
 
 
+def test_browser_runners_do_not_execute_an_environment_selected_program() -> None:
+    for runner in (
+        ROOT / "scripts/run-browser-e2e.mjs",
+        ROOT / "scripts/run-workflow-editor-e2e.mjs",
+    ):
+        source = runner.read_text()
+        assert "LM_ATELIER_E2E_PYTHON" not in source
+        assert "firstExistingPath([environmentPython, projectPython])" in source
+        assert 'process.platform === "win32" ? "python.exe" : "python3"' in source
+
+
 def test_frozen_installer_contracts_are_explicit() -> None:
     spec = (ROOT / "packaging/LMAtelier.spec").read_text()
     frozen_smoke = (ROOT / "scripts/smoke-frozen.py").read_text()
