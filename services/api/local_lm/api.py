@@ -1381,7 +1381,9 @@ async def import_project(
     size = archive.file.tell()
     archive.file.seek(0)
     if size > _services(request).settings.max_project_import_bytes:
-        raise HTTPException(413, "project archive exceeds the configured limit")
+        raise api_error(
+            413, "project-archive-too-large", "project archive exceeds the configured limit"
+        )
     # Resolve the live engine schema per role so imported settings are validated
     # the way the REST API validates them. Best effort: a role whose engine is
     # not configured, or whose schema cannot be read now, imports unvalidated
@@ -2708,7 +2710,7 @@ async def upload_artifact(
     size = file.file.tell()
     file.file.seek(0)
     if size > services.settings.max_upload_bytes:
-        raise HTTPException(413, "upload exceeds configured limit")
+        raise api_error(413, "upload-too-large", "upload exceeds configured limit")
     artifact = services.artifacts.ingest_stream(
         session,
         file.file,
@@ -2907,7 +2909,9 @@ async def artifact_content(
     try:
         path, media_type, disposition = _services(request).artifacts.delivery_metadata(artifact)
     except (FileNotFoundError, ValueError) as exc:
-        raise HTTPException(410, "artifact file is missing or corrupt") from exc
+        raise api_error(
+            410, "artifact-file-unreadable", "artifact file is missing or corrupt"
+        ) from exc
     return FileResponse(
         path,
         media_type=media_type,
@@ -3142,7 +3146,7 @@ async def catalog_item_detail(
     except CatalogSourceNotFound as exc:
         raise HTTPException(404, str(exc)) from exc
     if not selected_source.validate_item_id(item_id):
-        raise HTTPException(422, "invalid catalog item id")
+        raise api_error(422, "catalog-item-id-invalid", "invalid catalog item id")
     try:
         detail = await selected_source.inspect(item_id, revision, role)
         return CatalogDetail.model_validate(detail)
@@ -3981,22 +3985,24 @@ async def cleanup_partial_downloads(request: Request, session: SessionDep) -> St
 @router.post("/downloads/{job_id}/pause", response_model=JobOut)
 async def pause_download(job_id: str, request: Request, session: SessionDep) -> Job:
     if not await _services(request).downloads.pause(job_id):
-        raise HTTPException(409, "download is not running or cannot be paused")
+        raise api_error(409, "download-not-pausable", "download is not running or cannot be paused")
     session.expire_all()
     job = session.get(Job, job_id)
     if not job:
-        raise HTTPException(404, "download job not found")
+        raise api_error(404, "download-job-not-found", "download job not found")
     return job
 
 
 @router.post("/downloads/{job_id}/resume", response_model=JobOut)
 async def resume_download(job_id: str, request: Request, session: SessionDep) -> Job:
     if not _services(request).downloads.resume(job_id):
-        raise HTTPException(409, "download is not paused, failed, or interrupted")
+        raise api_error(
+            409, "download-not-resumable", "download is not paused, failed, or interrupted"
+        )
     session.expire_all()
     job = session.get(Job, job_id)
     if not job:
-        raise HTTPException(404, "download job not found")
+        raise api_error(404, "download-job-not-found", "download job not found")
     return job
 
 
@@ -4074,7 +4080,7 @@ async def list_recipes() -> list[ReferenceRecipe]:
 async def get_recipe(recipe_id: str) -> ReferenceRecipe:
     recipe = get_reference_recipe(recipe_id)
     if not recipe:
-        raise HTTPException(404, "reference recipe not found")
+        raise api_error(404, "reference-recipe-not-found", "reference recipe not found")
     return recipe
 
 
@@ -4091,9 +4097,13 @@ async def install_recipe(recipe_id: str, request: Request, session: SessionDep) 
 
     recipe = get_reference_recipe(recipe_id)
     if not recipe:
-        raise HTTPException(404, "reference recipe not found")
+        raise api_error(404, "reference-recipe-not-found", "reference recipe not found")
     if not all(recipe.remote_id.partition("/")[::2]):
-        raise HTTPException(422, "this recipe does not name a valid repository")
+        raise api_error(
+            422,
+            "reference-recipe-repository-invalid",
+            "this recipe does not name a valid repository",
+        )
     try:
         preflight = await resolve_catalog_preflight(
             _services(request),
@@ -4426,7 +4436,7 @@ async def list_model_assets(
     statement = select(ModelAssetInstall)
     if kind:
         if kind not in AUXILIARY_ASSET_KINDS:
-            raise HTTPException(422, "unsupported model asset kind")
+            raise api_error(422, "model-asset-kind-unsupported", "unsupported model asset kind")
         statement = statement.where(ModelAssetInstall.kind == kind)
     return list(
         session.scalars(statement.order_by(ModelAssetInstall.name, ModelAssetInstall.id)).all()
@@ -4504,7 +4514,7 @@ async def update_model_asset(
     services = _services(request)
     asset = session.get(ModelAssetInstall, asset_id)
     if not asset:
-        raise HTTPException(404, "model asset not found")
+        raise api_error(404, "model-asset-not-found", "model asset not found")
     values = payload.model_dump(exclude_unset=True, exclude_none=True)
     if not values:
         return asset
@@ -4515,7 +4525,11 @@ async def update_model_asset(
         "default_clip_strength",
     }
     if set(values) & lora_fields and asset.kind != "lora":
-        raise HTTPException(422, "automatic selection metadata is only available for LoRAs")
+        raise api_error(
+            422,
+            "automatic-selection-lora-only",
+            "automatic selection metadata is only available for LoRAs",
+        )
     if "use_case" in values:
         values["use_case"] = values["use_case"].strip()
     for field in ("default_model_strength", "default_clip_strength"):
@@ -4525,11 +4539,21 @@ async def update_model_asset(
     next_use_case = values.get("use_case", asset.use_case).strip()
     next_auto_apply = values.get("auto_apply", asset.auto_apply)
     if next_auto_apply and not next_use_case:
-        raise HTTPException(422, "automatic LoRA selection requires a use case")
+        raise api_error(
+            422,
+            "automatic-selection-use-case-required",
+            "automatic LoRA selection requires a use case",
+        )
     if next_auto_apply and not asset.verified_at:
-        raise HTTPException(409, "only a verified LoRA can be selected automatically")
+        raise api_error(
+            409,
+            "automatic-selection-needs-verified-lora",
+            "only a verified LoRA can be selected automatically",
+        )
     if values.get("active") is True and not asset.verified_at:
-        raise HTTPException(409, "only a verified model asset can be enabled")
+        raise api_error(
+            409, "model-asset-not-verified", "only a verified model asset can be enabled"
+        )
 
     active_changed = "active" in values and values["active"] != asset.active
 
@@ -4571,7 +4595,7 @@ async def delete_model_asset(
     async with services.scheduler.lease("primary"):
         asset = session.get(ModelAssetInstall, asset_id)
         if not asset:
-            raise HTTPException(404, "model asset not found")
+            raise api_error(404, "model-asset-not-found", "model asset not found")
         was_running = next(
             worker.running for worker in services.processes.statuses() if worker.name == "media"
         )
@@ -4842,7 +4866,9 @@ async def import_model(payload: ModelImport, session: SessionDep) -> ModelInstal
     files = [child for child in path.rglob("*") if child.is_file()] if path.is_dir() else [path]
     unsafe = [child for child in files if child.suffix.lower() in blocked]
     if unsafe:
-        raise HTTPException(422, "pickle-compatible model files are blocked by default")
+        raise api_error(
+            422, "model-file-format-blocked", "pickle-compatible model files are blocked by default"
+        )
     size = sum(child.stat().st_size for child in files)
     install = ModelInstall(
         id=new_id("model"),
@@ -4903,7 +4929,9 @@ async def delete_model(
         if worker_name == "media" and any(
             worker.name == "media" and worker.running for worker in services.processes.statuses()
         ):
-            raise HTTPException(409, "stop the media worker before deleting this model")
+            raise api_error(
+                409, "media-worker-running", "stop the media worker before deleting this model"
+            )
         quarantine = _delete_model_locked(
             model_id,
             request,
@@ -4946,13 +4974,17 @@ def _delete_model_locked(
         ).all()
     )
     if profiles and not delete_profiles:
-        raise HTTPException(409, "delete profiles that use this model before deleting it")
+        raise api_error(
+            409, "model-in-use-by-profile", "delete profiles that use this model before deleting it"
+        )
     profile_ids = {profile.id for profile in profiles}
     if profile_ids and any(
         worker.running and worker.profile_id in profile_ids
         for worker in _services(request).processes.statuses()
     ):
-        raise HTTPException(409, "unload the active worker before deleting this model")
+        raise api_error(
+            409, "model-loaded-by-worker", "unload the active worker before deleting this model"
+        )
     if profile_ids:
         affected_chats = session.scalars(
             select(Chat).where(
@@ -5613,7 +5645,11 @@ async def delete_profile(profile_id: str, request: Request, session: SessionDep)
             worker.running and worker.profile_id == profile.id
             for worker in services.processes.statuses()
         ):
-            raise HTTPException(409, "unload the active worker before deleting its profile")
+            raise api_error(
+                409,
+                "profile-loaded-by-worker",
+                "unload the active worker before deleting its profile",
+            )
         retire_legacy_profile_workflow(session, profile)
         session.delete(profile)
         session.flush()
@@ -5873,7 +5909,9 @@ def _require_media_worker_stopped(request: Request) -> None:
         worker.name == "media" and worker.running
         for worker in _services(request).processes.statuses()
     ):
-        raise HTTPException(409, "stop the media worker before changing custom nodes")
+        raise api_error(
+            409, "media-worker-running", "stop the media worker before changing custom nodes"
+        )
 
 
 async def _custom_node_lifecycle(
@@ -5910,7 +5948,9 @@ async def install_custom_node(
         select(CustomNodeInstall).where(CustomNodeInstall.source_url == source_url)
     )
     if existing:
-        raise HTTPException(409, "this custom node source is already managed")
+        raise api_error(
+            409, "custom-node-source-duplicate", "this custom node source is already managed"
+        )
     try:
         install = await _services(request).custom_nodes.install(
             session,
@@ -7073,7 +7113,9 @@ async def workflow_open_target(
 ) -> WorkflowOpenTarget:
     definition, revision = _workflow_and_revision(session, workflow_id)
     if not revision.ui_graph_json:
-        raise HTTPException(422, "this workflow has no ComfyUI user-interface graph")
+        raise api_error(
+            422, "workflow-ui-graph-absent", "this workflow has no ComfyUI user-interface graph"
+        )
     filename = "".join(
         character if character.isalnum() or character in "-_" else "-"
         for character in definition.name
