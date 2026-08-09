@@ -11,7 +11,7 @@ $RepositoryRoot = (Resolve-Path (Join-Path $PSScriptRoot "..")).Path
 $ApiVersion = "2026-03-10"
 $ExpectedOwnerId = 32660587
 $AllowedActionPatterns = @(
-    "actions/attest@f7c74d28b9d84cb8768d0b8ca14a4bac6ef463e6",
+    "actions/attest@508db95dd578ae2727ebd6217d5ba78e4fbda05d",
     "actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1",
     "actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c",
     "actions/setup-node@820762786026740c76f36085b0efc47a31fe5020",
