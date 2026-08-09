@@ -3,13 +3,14 @@ import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/re
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { ReferenceDetail } from "./ReferenceDetail";
 import { api } from "./api";
-import type { ReferenceAsset, ReferenceSubject } from "./types";
+import type { ArtifactLibraryItem, ReferenceAsset, ReferenceSubject } from "./types";
 
 vi.mock("./api", () => ({
   api: {
     referenceAssets: vi.fn(),
     attachReferenceAsset: vi.fn(),
     detachReferenceAsset: vi.fn(),
+    artifacts: vi.fn(),
   },
 }));
 
@@ -42,14 +43,40 @@ function asset(overrides: Partial<ReferenceAsset> = {}): ReferenceAsset {
   };
 }
 
-function show(assets: ReferenceAsset[] = []) {
+function libraryItem(id: string): ArtifactLibraryItem {
+  return {
+    id,
+    sha256: `sha-${id}`,
+    kind: "image",
+    media_type: "image/png",
+    size_bytes: 1024,
+    original_name: `${id}.png`,
+    metadata_json: {},
+    created_at: "2026-01-01T00:00:00Z",
+    reference_count: 0,
+    chat_ids: [],
+    project_ids: [],
+  };
+}
+
+function show(assets: ReferenceAsset[] = [], library = [libraryItem("art-2"), libraryItem("art-3")]) {
   mocked.referenceAssets.mockResolvedValue(assets);
+  mocked.artifacts.mockResolvedValue(library);
   const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
   return render(
     <QueryClientProvider client={client}>
       <ReferenceDetail subject={SUBJECT} onBack={() => {}} />
     </QueryClientProvider>,
   );
+}
+
+/** Open the picker, choose images by their library name, and confirm. */
+async function pick(names: string[]) {
+  fireEvent.click(await screen.findByText("Add images"));
+  for (const name of names) {
+    fireEvent.click(await screen.findByLabelText(name));
+  }
+  fireEvent.click(screen.getByRole("button", { name: `Add ${names.length}` }));
 }
 
 afterEach(() => {
@@ -70,6 +97,28 @@ describe("reference detail", () => {
     expect(await screen.findByText("unchecked")).toBeTruthy();
   });
 
+  it("attaches what was picked from the library, under the chosen purpose", async () => {
+    mocked.attachReferenceAsset.mockResolvedValue({
+      asset: asset({ id: "asset-2", artifact_id: "art-2" }),
+      similar: [],
+    });
+    show([asset()]);
+
+    fireEvent.click(await screen.findByText("Add images"));
+    fireEvent.change(screen.getByRole("combobox"), { target: { value: "pose" } });
+    fireEvent.click(await screen.findByLabelText("art-2.png"));
+    fireEvent.click(screen.getByRole("button", { name: "Add 1" }));
+
+    // The id never has to be typed, and the purpose chosen in the picker is the
+    // one the image arrives with.
+    await waitFor(() =>
+      expect(mocked.attachReferenceAsset).toHaveBeenCalledWith("ref-1", {
+        artifact_id: "art-2",
+        purpose: "pose",
+      }),
+    );
+  });
+
   it("keeps a near-duplicate image and says so, rather than refusing it", async () => {
     mocked.attachReferenceAsset.mockResolvedValue({
       asset: asset({ id: "asset-2", artifact_id: "art-2" }),
@@ -79,20 +128,11 @@ describe("reference detail", () => {
     });
     show([asset()]);
 
-    fireEvent.change(await screen.findByLabelText("Artifact id to attach"), {
-      target: { value: "art-2" },
-    });
-    fireEvent.click(screen.getByText("Add image"));
+    await pick(["art-2.png"]);
 
     // The wording has to make clear the image is in, not rejected: two close
     // shots are often deliberate and only the person adding them can judge.
     expect(await screen.findByText(/It was added anyway/)).toBeTruthy();
-    await waitFor(() =>
-      expect(mocked.attachReferenceAsset).toHaveBeenCalledWith("ref-1", {
-        artifact_id: "art-2",
-        purpose: "identity",
-      }),
-    );
   });
 
   it("says nothing when an image resembles nothing already held", async () => {
@@ -102,27 +142,32 @@ describe("reference detail", () => {
     });
     show([asset()]);
 
-    fireEvent.change(await screen.findByLabelText("Artifact id to attach"), {
-      target: { value: "art-2" },
-    });
-    fireEvent.click(screen.getByText("Add image"));
+    await pick(["art-2.png"]);
 
     await waitFor(() => expect(mocked.attachReferenceAsset).toHaveBeenCalled());
     expect(screen.queryByText(/It was added anyway/)).toBeNull();
   });
 
-  it("surfaces a refusal instead of failing quietly", async () => {
-    mocked.attachReferenceAsset.mockRejectedValue(
-      new Error("Ada Lovelace already holds that exact image"),
-    );
+  it("adds the images it can when one of them is refused", async () => {
+    mocked.attachReferenceAsset.mockImplementation(async (_id, body) => {
+      if (body.artifact_id === "art-2") {
+        throw new Error("Ada Lovelace already holds that exact image");
+      }
+      return { asset: asset({ id: "asset-9", artifact_id: body.artifact_id }), similar: [] };
+    });
     show([asset()]);
 
-    fireEvent.change(await screen.findByLabelText("Artifact id to attach"), {
-      target: { value: "art-1" },
-    });
-    fireEvent.click(screen.getByText("Add image"));
+    await pick(["art-2.png", "art-3.png"]);
 
+    // A refusal on one image is not a reason to drop the others, and the report
+    // has to name what happened rather than fail the whole batch silently.
     expect(await screen.findByText(/already holds that exact image/)).toBeTruthy();
+    await waitFor(() =>
+      expect(mocked.attachReferenceAsset).toHaveBeenCalledWith("ref-1", {
+        artifact_id: "art-3",
+        purpose: "identity",
+      }),
+    );
   });
 
   it("removes only the membership when an image is detached", async () => {
