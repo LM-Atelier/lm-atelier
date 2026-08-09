@@ -1669,6 +1669,46 @@ class ModelAssetUpdate(ApiModel):
     default_clip_strength: float | None = Field(default=None, ge=-4, le=4)
 
 
+class AdapterPromptGrammarReview(ApiModel):
+    """A reviewer recording how one adapter must be prompted.
+
+    `verified_values` is the reviewer asserting what they have *seen work here*,
+    not what the source document claims. That separation is the point of the
+    whole record: one published vocabulary already turned out to contain a value
+    the model does not implement, and prompting it degraded silently to the stem
+    rather than failing.
+
+    `approve_prose` carries exact text rather than a flag, and is accepted only
+    when that text actually appears in `source_text`. Approving prose nobody
+    read would mean nothing.
+    """
+
+    asset_sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
+    source_identity: str = Field(max_length=1_000)
+    source_text: str = Field(max_length=20_000)
+    grammar: dict[str, Any]
+    approve_prose: list[str] = Field(default_factory=list, max_length=16)
+    verified_values: dict[str, list[str]] = Field(default_factory=dict)
+
+
+class AdapterPromptGrammarOut(ApiModel):
+    """What was recorded. Digests and decisions only - never the source text."""
+
+    id: str
+    model_asset_install_id: str
+    asset_sha256: str
+    source_identity: str
+    source_sha256: str
+    schema_version: int
+    grammar_sha256: str
+    approved_prose_json: list[str]
+    verified_values_json: dict[str, list[str]]
+    compiler_version: str
+    compiler_ceiling: int
+    fits: bool
+    reviewed_at: datetime | None
+
+
 class RecipeFile(ApiModel):
     path: str
     size_bytes: int | None = None
