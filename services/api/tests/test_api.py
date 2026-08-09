@@ -15,6 +15,7 @@ from types import SimpleNamespace
 import pytest
 from fastapi import FastAPI
 from httpx2 import ASGITransport, AsyncClient
+from PIL import Image
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
@@ -7933,3 +7934,105 @@ async def test_a_kind_outside_the_vocabulary_is_refused(client: AsyncClient) -> 
     refused = await client.post("/api/references", json={"name": "Thing", "kind": "spaceship"})
     assert refused.status_code == 422
     assert "person" in refused.json()["detail"], "the refusal names what is permitted"
+
+
+async def _stored_image(client: AsyncClient, shade: int, name: str) -> str:
+    """Put a real image through the ingest path so its checksum is genuine."""
+
+    buffer = io.BytesIO()
+    Image.new("RGB", (48, 48), (shade, shade, shade)).save(buffer, format="PNG")
+    response = await client.post(
+        "/api/artifacts",
+        files={"file": (name, buffer.getvalue(), "image/png")},
+    )
+    assert response.status_code in (200, 201), response.text
+    return response.json()["id"]
+
+
+@pytest.mark.anyio
+async def test_an_image_can_be_attached_and_listed(client: AsyncClient) -> None:
+    subject = (await client.post("/api/references", json={"name": "Ada", "kind": "person"})).json()
+    artifact_id = await _stored_image(client, 120, "one.png")
+
+    attached = await client.post(
+        f"/api/references/{subject['id']}/assets",
+        json={"artifact_id": artifact_id, "purpose": "identity", "view_label": "front"},
+    )
+    assert attached.status_code == 201, attached.text
+    body = attached.json()
+    assert body["asset"]["purpose"] == "identity"
+    assert body["asset"]["validation_state"] == "unchecked", "nobody has looked at it yet"
+    assert body["similar"] == []
+
+    listed = await client.get(f"/api/references/{subject['id']}/assets")
+    assert [item["id"] for item in listed.json()] == [body["asset"]["id"]]
+
+
+@pytest.mark.anyio
+async def test_the_same_image_twice_is_refused(client: AsyncClient) -> None:
+    subject = (await client.post("/api/references", json={"name": "Ada", "kind": "person"})).json()
+    artifact_id = await _stored_image(client, 90, "dup.png")
+
+    first = await client.post(
+        f"/api/references/{subject['id']}/assets", json={"artifact_id": artifact_id}
+    )
+    assert first.status_code == 201
+
+    again = await client.post(
+        f"/api/references/{subject['id']}/assets", json={"artifact_id": artifact_id}
+    )
+    assert again.status_code == 422
+    assert again.json()["code"] == "reference-asset-invalid"
+
+
+@pytest.mark.anyio
+async def test_a_near_duplicate_is_surfaced_but_still_attached(client: AsyncClient) -> None:
+    """Two close shots are often deliberate, so the caller decides. What the API
+    owes them is knowing the set may now lean toward one look."""
+
+    subject = (await client.post("/api/references", json={"name": "Ada", "kind": "person"})).json()
+    first_id = await _stored_image(client, 130, "a.png")
+    # One shade apart: genuinely different bytes, so content addressing keeps
+    # them as two artifacts, but visually the same picture. An identical colour
+    # would encode identically and be collapsed into one artifact, which the
+    # exact-repeat rule owns rather than this one.
+    second_id = await _stored_image(client, 131, "b.png")
+    assert first_id != second_id
+
+    await client.post(f"/api/references/{subject['id']}/assets", json={"artifact_id": first_id})
+    second = await client.post(
+        f"/api/references/{subject['id']}/assets", json={"artifact_id": second_id}
+    )
+    assert second.status_code == 201, "reported, not refused"
+    similar = second.json()["similar"]
+    assert [item["artifact_id"] for item in similar] == [first_id]
+    assert similar[0]["mean_absolute_difference"] < 2.0
+
+
+@pytest.mark.anyio
+async def test_detaching_removes_membership_and_answers_204(client: AsyncClient) -> None:
+    subject = (await client.post("/api/references", json={"name": "Ada", "kind": "person"})).json()
+    artifact_id = await _stored_image(client, 60, "gone.png")
+    asset = (
+        await client.post(
+            f"/api/references/{subject['id']}/assets", json={"artifact_id": artifact_id}
+        )
+    ).json()["asset"]
+
+    removed = await client.delete(f"/api/references/{subject['id']}/assets/{asset['id']}")
+    assert removed.status_code == 204
+    assert (await client.get(f"/api/references/{subject['id']}/assets")).json() == []
+
+    again = await client.delete(f"/api/references/{subject['id']}/assets/{asset['id']}")
+    assert again.status_code == 404
+    assert again.json()["code"] == "reference-asset-not-attached"
+
+
+@pytest.mark.anyio
+async def test_an_image_outside_the_store_cannot_be_attached(client: AsyncClient) -> None:
+    subject = (await client.post("/api/references", json={"name": "Ada", "kind": "person"})).json()
+    refused = await client.post(
+        f"/api/references/{subject['id']}/assets", json={"artifact_id": "art_nowhere"}
+    )
+    assert refused.status_code == 422
+    assert refused.json()["code"] == "reference-asset-invalid"
