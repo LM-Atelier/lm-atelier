@@ -17,18 +17,23 @@ reasonably be called the same thing.
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from dataclasses import dataclass
 
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 from sqlalchemy.sql.elements import ColumnElement
 
-from .models import ReferenceAsset, ReferenceSubject
+from .image_edit_difference import compare_images
+from .models import Artifact, ReferenceAsset, ReferenceSubject
 from .references import (
     MAX_NAME,
     ReferenceError,
     ReferenceKind,
+    ReferencePurpose,
+    ValidationState,
     parse_kind,
+    parse_purpose,
     slugify_mention,
     valid_mention_slug,
 )
@@ -243,3 +248,120 @@ def deletion_impact(session: Session, subject: ReferenceSubject) -> DeletionImpa
         asset_count=len(asset_rows),
         exclusive_artifact_ids=tuple(dict.fromkeys(exclusive)),
     )
+
+
+@dataclass(frozen=True)
+class SimilarAsset:
+    """An image already in this subject that closely resembles a new one."""
+
+    reference_asset_id: str
+    artifact_id: str
+    mean_absolute_difference: float
+
+
+@dataclass(frozen=True)
+class AttachedAsset:
+    """A newly attached image, and anything the caller should know about it."""
+
+    asset: ReferenceAsset
+    # Near-duplicates are reported rather than refused. Two similar shots of one
+    # subject are often deliberate - a second angle, a better exposure - so the
+    # person adding them is the only one who can say which. What is worth saying
+    # is that the set may now be weighted toward one look.
+    similar: tuple[SimilarAsset, ...] = ()
+
+
+def attach_asset(
+    session: Session,
+    subject: ReferenceSubject,
+    *,
+    artifact_id: str,
+    caption: str | None = None,
+    purpose: ReferencePurpose | str = ReferencePurpose.OTHER,
+    view_label: str | None = None,
+    read_bytes: Callable[[str], bytes] | None = None,
+) -> AttachedAsset:
+    """Add one image to a subject, refusing an exact repeat and flagging a near one.
+
+    The exact case is refused because it cannot be what anyone wanted: the
+    artifact store is content-addressed, so the same `artifact_id` is the same
+    bytes, and a set holding one picture twice is silently weighted toward it.
+
+    `read_bytes` is optional and injected rather than reached for. Without it the
+    near-duplicate scan is skipped and the attachment still succeeds - similarity
+    is advice, and advice that can fail must not be able to block the operation
+    it advises on.
+    """
+
+    artifact = session.get(Artifact, artifact_id)
+    if artifact is None:
+        raise ReferenceError("that image is not in the artifact store")
+
+    existing = session.scalars(
+        select(ReferenceAsset).where(ReferenceAsset.reference_subject_id == subject.id)
+    ).all()
+
+    if any(row.artifact_id == artifact_id for row in existing):
+        raise ReferenceError(
+            f"{subject.name} already holds that exact image; adding it twice would "
+            "weight the set toward one picture"
+        )
+
+    similar: list[SimilarAsset] = []
+    if read_bytes is not None:
+        try:
+            incoming = read_bytes(artifact_id)
+        except (OSError, KeyError):
+            incoming = b""
+        if incoming:
+            for row in existing:
+                try:
+                    other = read_bytes(row.artifact_id)
+                except (OSError, KeyError):
+                    continue
+                if not other:
+                    continue
+                difference = compare_images(incoming, other)
+                # `comparable` false means one of them could not be read at all.
+                # Reporting that as "identical" would be the worst possible
+                # reading of "we could not tell".
+                if difference.comparable and not difference.changed:
+                    similar.append(
+                        SimilarAsset(
+                            reference_asset_id=row.id,
+                            artifact_id=row.artifact_id,
+                            mean_absolute_difference=round(difference.mean_absolute_difference, 4),
+                        )
+                    )
+
+    next_order = 1 + max((row.sort_order for row in existing), default=-1)
+    asset = ReferenceAsset(
+        reference_subject_id=subject.id,
+        artifact_id=artifact_id,
+        caption=(caption or None),
+        purpose=parse_purpose(purpose).value,
+        view_label=(view_label or None),
+        sort_order=next_order,
+        validation_state=ValidationState.UNCHECKED.value,
+    )
+    session.add(asset)
+    session.flush()
+    return AttachedAsset(asset, tuple(similar))
+
+
+def detach_asset(session: Session, subject: ReferenceSubject, *, asset_id: str) -> None:
+    """Remove one image from a subject.
+
+    Only the membership goes. The artifact is content-addressed and may be in
+    use elsewhere, so ending this subject's claim on it is not permission to
+    destroy the bytes.
+    """
+
+    asset = session.get(ReferenceAsset, asset_id)
+    if asset is None or asset.reference_subject_id != subject.id:
+        raise ReferenceError("that image is not attached to this reference")
+    if subject.cover_artifact_id == asset.artifact_id:
+        # The cover would otherwise point at an image the subject no longer has.
+        subject.cover_artifact_id = None
+    session.delete(asset)
+    session.flush()
