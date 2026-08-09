@@ -1,10 +1,12 @@
 import { useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { Trash2 } from "lucide-react";
+import { Plus, Trash2 } from "lucide-react";
 import { api } from "./api";
 import { EmptyState } from "./EmptyState";
 import { ErrorCallout } from "./ErrorCallout";
-import type { ReferenceSimilarAsset, ReferenceSubject } from "./types";
+import { LibraryImagePicker } from "./LibraryImagePicker";
+import { artifactSource } from "./messageMedia";
+import type { ArtifactLibraryItem, ReferenceSimilarAsset, ReferenceSubject } from "./types";
 
 /** What one image is for. Closed, because a preparation recipe decides what to
  *  do with an image from its purpose - one nobody implements contributes
@@ -30,11 +32,15 @@ export function ReferenceDetail({
 }) {
   const client = useQueryClient();
   const [purpose, setPurpose] = useState<string>("identity");
-  const [artifactId, setArtifactId] = useState("");
+  const [picking, setPicking] = useState(false);
   const [error, setError] = useState<string | null>(null);
   // Held after an attach rather than shown transiently: the whole point is that
   // the person who just added the image gets to decide what to do about it.
   const [similar, setSimilar] = useState<ReferenceSimilarAsset[]>([]);
+  // Refusals are kept per image rather than collapsed into one message. Adding
+  // six pictures and being told only "that did not work" hides which five
+  // landed, and the answer changes what to do next.
+  const [refused, setRefused] = useState<string[]>([]);
 
   const assets = useQuery({
     queryKey: ["reference-assets", subject.id],
@@ -46,11 +52,28 @@ export function ReferenceDetail({
     setError(reason instanceof Error ? reason.message : "That did not work");
 
   const attach = useMutation({
-    mutationFn: () => api.attachReferenceAsset(subject.id, { artifact_id: artifactId, purpose }),
-    onSuccess: (result) => {
-      setArtifactId("");
+    mutationFn: async (items: ArtifactLibraryItem[]) => {
+      const reports: ReferenceSimilarAsset[] = [];
+      const failures: string[] = [];
+      // One at a time, and one refusal does not abandon the rest: the set
+      // already holding image three is no reason to drop four, five and six.
+      for (const item of items) {
+        try {
+          const result = await api.attachReferenceAsset(subject.id, {
+            artifact_id: item.id,
+            purpose,
+          });
+          reports.push(...result.similar);
+        } catch (reason) {
+          failures.push(reason instanceof Error ? reason.message : "That image was not added");
+        }
+      }
+      return { reports, failures };
+    },
+    onSuccess: ({ reports, failures }) => {
+      setSimilar(reports);
+      setRefused(failures);
       setError(null);
-      setSimilar(result.similar);
       void refresh();
     },
     onError: fail,
@@ -60,6 +83,7 @@ export function ReferenceDetail({
     mutationFn: (assetId: string) => api.detachReferenceAsset(subject.id, assetId),
     onSuccess: () => {
       setSimilar([]);
+      setRefused([]);
       void refresh();
     },
     onError: fail,
@@ -95,6 +119,17 @@ export function ReferenceDetail({
         />
       ) : null}
 
+      {refused.length > 0 ? (
+        <ErrorCallout
+          message={`${refused.length} image${refused.length === 1 ? " was" : "s were"} not added: ${refused.join("; ")}`}
+          action={
+            <button className="secondary compact-button" onClick={() => setRefused([])}>
+              Dismiss
+            </button>
+          }
+        />
+      ) : null}
+
       {similar.length > 0 ? (
         // Advice, not a refusal. The image was added; this only says the set may
         // now lean toward one look, which the person adding it is best placed
@@ -113,36 +148,15 @@ export function ReferenceDetail({
       ) : null}
 
       <div className="row-actions">
-        <label>
-          Image id
-          <input
-            value={artifactId}
-            aria-label="Artifact id to attach"
-            onChange={(event) => setArtifactId(event.target.value)}
-          />
-        </label>
-        <label>
-          Purpose
-          <select value={purpose} onChange={(event) => setPurpose(event.target.value)}>
-            {PURPOSES.map((option) => (
-              <option key={option} value={option}>
-                {option}
-              </option>
-            ))}
-          </select>
-        </label>
-        <button
-          className="primary"
-          disabled={!artifactId.trim() || attach.isPending}
-          onClick={() => attach.mutate()}
-        >
-          Add image
+        <button className="primary" disabled={attach.isPending} onClick={() => setPicking(true)}>
+          <Plus />
+          Add images
         </button>
       </div>
 
       {items.length === 0 && !assets.isLoading ? (
         <EmptyState
-          icon={<Trash2 />}
+          icon={<Plus />}
           title="No images yet"
           body="Add a few from the media library so generations have something to work from."
         />
@@ -152,7 +166,7 @@ export function ReferenceDetail({
         {items.map((asset) => (
           <li key={asset.id}>
             <img
-              src={`/api/artifacts/${encodeURIComponent(asset.artifact_id)}/content`}
+              src={artifactSource(asset.artifact_id) ?? undefined}
               alt={asset.caption ?? `${subject.name}, ${asset.purpose}`}
               loading="lazy"
             />
@@ -173,6 +187,29 @@ export function ReferenceDetail({
           </li>
         ))}
       </ul>
+
+      {picking ? (
+        <LibraryImagePicker
+          title={`Add images of ${subject.name}`}
+          confirmLabel="Add"
+          onClose={() => setPicking(false)}
+          onConfirm={(chosen) => attach.mutate(chosen)}
+        >
+          {/* Chosen here rather than after the fact: the purpose applies to
+              everything picked in this pass, and asking once is the difference
+              between labelling a set and labelling six images one at a time. */}
+          <label>
+            Purpose
+            <select value={purpose} onChange={(event) => setPurpose(event.target.value)}>
+              {PURPOSES.map((option) => (
+                <option key={option} value={option}>
+                  {option}
+                </option>
+              ))}
+            </select>
+          </label>
+        </LibraryImagePicker>
+      ) : null}
     </section>
   );
 }
