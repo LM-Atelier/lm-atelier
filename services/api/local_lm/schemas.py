@@ -1775,6 +1775,45 @@ class ReferenceDeletionImpact(ApiModel):
     exclusive_artifact_ids: list[str]
 
 
+class ReferenceAssetAttach(ApiModel):
+    artifact_id: str = Field(min_length=1, max_length=80)
+    caption: str | None = Field(default=None, max_length=2_000)
+    purpose: str = "other"
+    view_label: str | None = Field(default=None, max_length=60)
+
+
+class ReferenceAssetOut(ApiModel):
+    id: str
+    reference_subject_id: str
+    artifact_id: str
+    caption: str | None
+    purpose: str
+    view_label: str | None
+    sort_order: int
+    validation_state: str
+
+
+class ReferenceSimilarAsset(ApiModel):
+    """An image already held that closely resembles the one just added."""
+
+    reference_asset_id: str
+    artifact_id: str
+    mean_absolute_difference: float
+
+
+class ReferenceAssetAttached(ApiModel):
+    """The attachment, plus anything the caller should weigh up afterwards.
+
+    `similar` is advice rather than a refusal: two close shots of one subject
+    are often deliberate, so the person adding them decides. An empty list means
+    nothing resembled it *or* the comparison could not run - never a claim that
+    the image is definitely new.
+    """
+
+    asset: ReferenceAssetOut
+    similar: list[ReferenceSimilarAsset]
+
+
 class RecipeFile(ApiModel):
     path: str
     size_bytes: int | None = None

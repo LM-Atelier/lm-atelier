@@ -131,6 +131,7 @@ from .models import (
     ModelProfile,
     Project,
     ProjectWorkflowSelection,
+    ReferenceAsset,
     ReferenceSubject,
     ResponseFeedback,
     ResponseRevision,
@@ -178,8 +179,10 @@ from .prompt_helpers import (
 from .recipes import get_reference_recipe, list_reference_recipes
 from .reference_library import (
     DEFAULT_PAGE,
+    attach_asset,
     create_subject,
     deletion_impact,
+    detach_asset,
     list_subjects,
     rename_subject,
     set_archived,
@@ -256,8 +259,12 @@ from .schemas import (
     PromptHelperCreate,
     PromptHelperDetail,
     PromptHelperUpdate,
+    ReferenceAssetAttach,
+    ReferenceAssetAttached,
+    ReferenceAssetOut,
     ReferenceDeletionImpact,
     ReferenceRecipe,
+    ReferenceSimilarAsset,
     ReferenceSubjectCreate,
     ReferenceSubjectOut,
     ReferenceSubjectPage,
@@ -4323,6 +4330,82 @@ async def delete_reference_subject(
             f"{impact.asset_count} image(s).",
         )
     session.delete(subject)
+    session.commit()
+    return Response(status_code=204)
+
+
+@router.post(
+    "/references/{subject_id}/assets",
+    response_model=ReferenceAssetAttached,
+    status_code=201,
+)
+async def attach_reference_asset(
+    subject_id: str,
+    payload: ReferenceAssetAttach,
+    request: Request,
+    session: SessionDep,
+) -> ReferenceAssetAttached:
+    """Add one image to a reference, reporting anything it closely resembles.
+
+    The similarity scan reads image bytes, so it is given a reader that verifies
+    each file against its recorded checksum. A file that fails that check is
+    skipped rather than compared, because an unverifiable image is not evidence
+    of anything - least of all of being a duplicate.
+    """
+
+    subject = _subject_or_404(session, subject_id)
+    services = _services(request)
+
+    def read_verified(artifact_id: str) -> bytes:
+        artifact = session.get(Artifact, artifact_id)
+        if artifact is None:
+            raise KeyError(artifact_id)
+        return services.artifacts.verified_path(artifact).read_bytes()
+
+    try:
+        attached = attach_asset(
+            session,
+            subject,
+            artifact_id=payload.artifact_id,
+            caption=payload.caption,
+            purpose=payload.purpose,
+            view_label=payload.view_label,
+            read_bytes=read_verified,
+        )
+    except ReferenceError as exc:
+        raise api_error(422, "reference-asset-invalid", str(exc)) from exc
+    session.commit()
+    session.refresh(attached.asset)
+    return ReferenceAssetAttached(
+        asset=ReferenceAssetOut.model_validate(attached.asset, from_attributes=True),
+        similar=[
+            ReferenceSimilarAsset(
+                reference_asset_id=item.reference_asset_id,
+                artifact_id=item.artifact_id,
+                mean_absolute_difference=item.mean_absolute_difference,
+            )
+            for item in attached.similar
+        ],
+    )
+
+
+@router.get("/references/{subject_id}/assets", response_model=list[ReferenceAssetOut])
+async def list_reference_assets(subject_id: str, session: SessionDep) -> list[ReferenceAsset]:
+    subject = _subject_or_404(session, subject_id)
+    return list(subject.assets)
+
+
+@router.delete("/references/{subject_id}/assets/{asset_id}", status_code=204)
+async def detach_reference_asset(
+    subject_id: str,
+    asset_id: str,
+    session: SessionDep,
+) -> Response:
+    subject = _subject_or_404(session, subject_id)
+    try:
+        detach_asset(session, subject, asset_id=asset_id)
+    except ReferenceError as exc:
+        raise api_error(404, "reference-asset-not-attached", str(exc)) from exc
     session.commit()
     return Response(status_code=204)
 
