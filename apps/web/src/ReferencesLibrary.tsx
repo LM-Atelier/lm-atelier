@@ -5,6 +5,7 @@ import { api } from "./api";
 import { AccessibleDialog } from "./AccessibleDialog";
 import { EmptyState } from "./EmptyState";
 import { ErrorCallout } from "./ErrorCallout";
+import { ReferenceDetail } from "./ReferenceDetail";
 import type { ReferenceDeletionImpact, ReferenceSubject } from "./types";
 
 /** The kinds the server accepts. A closed set, because a workflow declares
@@ -33,6 +34,7 @@ export function ReferencesLibrary() {
   // Deletion is confirmed against the impact the user was actually shown, so
   // the impact is held here rather than re-fetched at the moment of deleting.
   const [pendingDelete, setPendingDelete] = useState<ReferenceDeletionImpact | null>(null);
+  const [opened, setOpened] = useState<ReferenceSubject | null>(null);
 
   const references = useQuery({
     queryKey: ["references", search, includeArchived],
@@ -80,6 +82,13 @@ export function ReferencesLibrary() {
   };
 
   const items = references.data?.items ?? [];
+
+  // The detail view replaces the list rather than nesting inside it, so the
+  // back control is the only way out and cannot be confused with the nav.
+  if (opened) {
+    const current = items.find((item) => item.id === opened.id) ?? opened;
+    return <ReferenceDetail subject={current} onBack={() => setOpened(null)} />;
+  }
 
   return (
     <section className="page-view reference-library" aria-labelledby="references-heading">
@@ -132,7 +141,9 @@ export function ReferencesLibrary() {
         {items.map((subject) => (
           <li key={subject.id} className={subject.archived ? "archived" : ""}>
             <div className="detail-title">
-              <strong>{subject.name}</strong>
+              <button className="link-button" onClick={() => setOpened(subject)}>
+                <strong>{subject.name}</strong>
+              </button>
               {/* The mention is the addressing token and never changes silently
                   with the name, so it is shown next to it rather than implied. */}
               <code>@{subject.mention_slug}</code>

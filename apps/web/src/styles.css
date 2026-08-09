@@ -605,6 +605,9 @@ h1, h2, h3 { margin: 0; }
 @keyframes load { from { transform: translateX(-50%); } to { transform: translateX(50%); } }
 
 .workflow-layout { display: grid; grid-template-columns: 300px minmax(0, 1fr); min-height: 540px; background: var(--panel); border: 1px solid var(--border); border-radius: 14px; overflow: hidden; }
+.reference-detail .reference-asset-grid { list-style: none; margin: 20px 0 0; padding: 0; display: grid; grid-template-columns: repeat(auto-fill, minmax(180px, 1fr)); gap: 16px; }
+.reference-detail .reference-asset-grid li { display: flex; flex-direction: column; gap: 8px; padding: 8px; border: 1px solid var(--border); border-radius: 14px; background: var(--surface); }
+.reference-detail .reference-asset-grid img { width: 100%; aspect-ratio: 1; object-fit: cover; border-radius: 10px; display: block; }
 .reference-library .reference-list { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 8px; }
 .reference-library .reference-list li { display: flex; align-items: center; justify-content: space-between; gap: 16px; padding: 12px 14px; border: 1px solid var(--border); border-radius: 14px; background: var(--surface); }
 .reference-library .reference-list li.archived { opacity: .62; }
