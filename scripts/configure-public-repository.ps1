@@ -238,7 +238,11 @@ if ($RepositoryState.owner.id -ne $ExpectedOwnerId) {
 }
 
 Invoke-GitHubApi -Method PATCH -Endpoint "repos/$Repository" -Body @{
-    allow_auto_merge = $false
+    # Enabled deliberately, and this file is the reviewed record of that. It
+    # read $false while the repository had it on, so running this script would
+    # have switched auto-merge off and the symptom would have surfaced later as
+    # queued merges quietly not happening, with nothing pointing back here.
+    allow_auto_merge = $true
     allow_merge_commit = $true
     allow_rebase_merge = $false
     allow_squash_merge = $true
