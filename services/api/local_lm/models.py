@@ -1362,6 +1362,103 @@ class AdapterPromptGrammar(TimestampMixin, Base):
     reviewed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
 
 
+class ReferenceSubject(TimestampMixin, Base):
+    """A subject the user has taught this application about, addressable by name.
+
+    The name and the mention are deliberately separate columns. A display name is
+    whatever a person actually calls someone; a mention slug is an addressing
+    token with exactly one canonical form, so that two subjects can never occupy
+    what a reader sees as the same `@name`.
+
+    Nothing here is a quality signal. `favorite` is organisation only - it says a
+    person wanted this near the top of a list, not that its images are good - and
+    reading it as ranking input would quietly turn a bookmark into a preference
+    the user never expressed.
+    """
+
+    __tablename__ = "reference_subjects"
+    __table_args__ = (
+        # The mention is the addressing key, so uniqueness is the whole point.
+        # Slugs are canonicalised before they arrive, which is what makes a
+        # plain unique index sufficient rather than needing a case-folded one.
+        UniqueConstraint("mention_slug", name="uq_reference_subject_mention_slug"),
+        CheckConstraint("length(trim(name)) > 0", name="ck_reference_subject_name_present"),
+        CheckConstraint("length(trim(mention_slug)) > 0", name="ck_reference_subject_slug_present"),
+    )
+
+    # "refsubject_" plus 32 hex is 43 characters, so String(40) would truncate.
+    id: Mapped[str] = mapped_column(
+        String(48), primary_key=True, default=lambda: new_id("refsubject")
+    )
+    name: Mapped[str] = mapped_column(String(120))
+    mention_slug: Mapped[str] = mapped_column(String(64), index=True)
+    kind: Mapped[str] = mapped_column(String(40), index=True)
+    description: Mapped[str | None] = mapped_column(Text, nullable=True)
+    aliases_json: Mapped[list[str]] = mapped_column(JSON, default=list)
+    tags_json: Mapped[list[str]] = mapped_column(JSON, default=list)
+    # Cleared rather than cascading: losing a cover image must not lose the
+    # subject, because the images are replaceable and the identity is not.
+    cover_artifact_id: Mapped[str | None] = mapped_column(
+        ForeignKey("artifacts.id", ondelete="SET NULL"), nullable=True
+    )
+    favorite: Mapped[bool] = mapped_column(Boolean, default=False, index=True)
+    # Archive is the normal way to remove a subject. Permanent deletion has to
+    # be impact-aware, because past runs recorded what they used and that record
+    # is history rather than a pointer to a current row.
+    archived: Mapped[bool] = mapped_column(Boolean, default=False, index=True)
+
+    assets: Mapped[list[ReferenceAsset]] = relationship(
+        back_populates="subject",
+        cascade="all, delete-orphan",
+        order_by="ReferenceAsset.sort_order",
+    )
+
+
+class ReferenceAsset(TimestampMixin, Base):
+    """One image belonging to a subject, and what it is there to show.
+
+    This row expresses membership and role. It does not own bytes: the image
+    lives in the content-addressed artifact store, which already counts
+    references, so the same photograph used by two subjects is stored once.
+    Creating a second media filesystem here would mean two things to keep
+    consistent and two things to leak.
+    """
+
+    __tablename__ = "reference_assets"
+    __table_args__ = (
+        # The same image twice under one subject is a duplicate, not a second
+        # view of it. Detecting that here costs nothing and stops a set being
+        # silently weighted toward whichever picture was added twice.
+        UniqueConstraint(
+            "reference_subject_id", "artifact_id", name="uq_reference_asset_membership"
+        ),
+    )
+
+    id: Mapped[str] = mapped_column(
+        String(48), primary_key=True, default=lambda: new_id("refasset")
+    )
+    reference_subject_id: Mapped[str] = mapped_column(
+        ForeignKey("reference_subjects.id", ondelete="CASCADE"), index=True
+    )
+    # Restricted, not cascading: an artifact still used by a Reference must not
+    # be removable out from under it by an unrelated cleanup.
+    artifact_id: Mapped[str] = mapped_column(
+        ForeignKey("artifacts.id", ondelete="RESTRICT"), index=True
+    )
+    caption: Mapped[str | None] = mapped_column(Text, nullable=True)
+    purpose: Mapped[str] = mapped_column(String(40), default="other")
+    view_label: Mapped[str | None] = mapped_column(String(60), nullable=True)
+    sort_order: Mapped[int] = mapped_column(Integer, default=0)
+    # Starts unchecked, which is not the same as usable. An image nobody has
+    # looked at must not let an unreviewed set claim a reviewed set's fidelity.
+    validation_state: Mapped[str] = mapped_column(String(30), default="unchecked")
+    validation_reasons_json: Mapped[list[str]] = mapped_column(JSON, default=list)
+    width: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    height: Mapped[int | None] = mapped_column(Integer, nullable=True)
+
+    subject: Mapped[ReferenceSubject] = relationship(back_populates="assets")
+
+
 class WorkflowInstallOffer(TimestampMixin, Base):
     """One reviewed, content-bound way to make a workflow locally installable."""
 
