@@ -8,6 +8,11 @@ import type {
   ArtifactLibraryItem,
   ArtifactStorageInfo,
   BackupInfo,
+  ReferenceAsset,
+  ReferenceAssetAttached,
+  ReferenceDeletionImpact,
+  ReferenceSubject,
+  ReferenceSubjectPage,
   CatalogModel,
   CatalogPage,
   CatalogDetail,
@@ -531,6 +536,48 @@ export const api = {
       body: form,
     });
   },
+  references: (search = "", includeArchived = false, limit = 50, offset = 0) => {
+    const parameters = new URLSearchParams({ limit: String(limit), offset: String(offset) });
+    if (search) parameters.set("search", search);
+    if (includeArchived) parameters.set("include_archived", "true");
+    return request<ReferenceSubjectPage>(`/api/references?${parameters}`);
+  },
+  createReference: (body: { name: string; kind: string; description?: string }) =>
+    request<ReferenceSubject>("/api/references", {
+      method: "POST",
+      body: JSON.stringify(body),
+    }),
+  updateReference: (
+    id: string,
+    body: { name?: string; follow_mention?: boolean; archived?: boolean; favorite?: boolean },
+  ) =>
+    request<ReferenceSubject>(`/api/references/${encodeURIComponent(id)}`, {
+      method: "PATCH",
+      body: JSON.stringify(body),
+    }),
+  referenceDeletionImpact: (id: string) =>
+    request<ReferenceDeletionImpact>(
+      `/api/references/${encodeURIComponent(id)}/deletion-impact`,
+    ),
+  // The acknowledgement is required by the server: it refuses to delete
+  // something other than what the caller was shown.
+  deleteReference: (id: string, acknowledgedAssets: number) =>
+    request<void>(
+      `/api/references/${encodeURIComponent(id)}?acknowledged_assets=${acknowledgedAssets}`,
+      { method: "DELETE" },
+    ),
+  referenceAssets: (id: string) =>
+    request<ReferenceAsset[]>(`/api/references/${encodeURIComponent(id)}/assets`),
+  attachReferenceAsset: (id: string, body: { artifact_id: string; purpose?: string }) =>
+    request<ReferenceAssetAttached>(`/api/references/${encodeURIComponent(id)}/assets`, {
+      method: "POST",
+      body: JSON.stringify(body),
+    }),
+  detachReferenceAsset: (id: string, assetId: string) =>
+    request<void>(
+      `/api/references/${encodeURIComponent(id)}/assets/${encodeURIComponent(assetId)}`,
+      { method: "DELETE" },
+    ),
   artifacts: (kind = "", query = "", favorites = false) => {
     const parameters = new URLSearchParams({ query });
     if (kind) parameters.set("kind", kind);

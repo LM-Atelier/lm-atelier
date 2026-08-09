@@ -1235,3 +1235,67 @@ export interface StudioToolCapability {
 export interface StudioCapabilityReport {
   tools: StudioToolCapability[];
 }
+
+export type ReferenceKind =
+  | "person"
+  | "character"
+  | "object"
+  | "product"
+  | "place"
+  | "style"
+  | "wardrobe"
+  | "pose"
+  | "composition"
+  | "other";
+
+export interface ReferenceSubject {
+  id: string;
+  name: string;
+  mention_slug: string;
+  kind: string;
+  description: string | null;
+  aliases_json: string[];
+  tags_json: string[];
+  cover_artifact_id: string | null;
+  favorite: boolean;
+  archived: boolean;
+}
+
+export interface ReferenceSubjectPage {
+  items: ReferenceSubject[];
+  total: number;
+  limit: number;
+  offset: number;
+}
+
+export interface ReferenceAsset {
+  id: string;
+  reference_subject_id: string;
+  artifact_id: string;
+  caption: string | null;
+  purpose: string;
+  view_label: string | null;
+  sort_order: number;
+  validation_state: string;
+}
+
+/** An image already held that closely resembles one just added. */
+export interface ReferenceSimilarAsset {
+  reference_asset_id: string;
+  artifact_id: string;
+  mean_absolute_difference: number;
+}
+
+export interface ReferenceAssetAttached {
+  asset: ReferenceAsset;
+  /** Advice, not a refusal - an empty list can also mean the scan could not run. */
+  similar: ReferenceSimilarAsset[];
+}
+
+/** What deleting a reference would destroy, answered before anything is. */
+export interface ReferenceDeletionImpact {
+  reference_subject_id: string;
+  name: string;
+  asset_count: number;
+  exclusive_artifact_ids: string[];
+}
