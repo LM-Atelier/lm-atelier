@@ -23,6 +23,7 @@ from sqlalchemy.orm import Session, selectinload
 from starlette.responses import FileResponse, HTMLResponse
 
 from . import __version__
+from .adapter_grammar_review import review_adapter_grammar
 from .api_errors import api_error
 from .auxiliary_assets import AUXILIARY_ASSET_KINDS, validate_lora_workflow_contract
 from .capability_evidence import current_capability_evidence, evidence_input_modalities
@@ -112,6 +113,7 @@ from .model_planner import (
 )
 from .model_updates import installed_civitai_identities, newer_version
 from .models import (
+    AdapterPromptGrammar,
     AppSetting,
     Artifact,
     Chat,
@@ -166,6 +168,7 @@ from .profile_service import (
     validate_profile_install,
 )
 from .progress import update_job_progress
+from .prompt_grammar import PromptGrammarError
 from .prompt_helpers import (
     PROMPT_HELPER_SCOPE,
     STANDARD_CHAT_SCOPE,
@@ -175,6 +178,8 @@ from .recipes import get_reference_recipe, list_reference_recipes
 from .routing import RouteConfirmationRequired
 from .runtime_config import persist_runtime_values
 from .schemas import (
+    AdapterPromptGrammarOut,
+    AdapterPromptGrammarReview,
     ApplicationInfo,
     ArtifactCleanupRequest,
     ArtifactCleanupResult,
@@ -4185,6 +4190,67 @@ async def list_model_assets(
     return list(
         session.scalars(statement.order_by(ModelAssetInstall.name, ModelAssetInstall.id)).all()
     )
+
+
+@router.put(
+    "/model-assets/{asset_id}/prompt-grammar",
+    response_model=AdapterPromptGrammarOut,
+)
+async def review_model_asset_prompt_grammar(
+    asset_id: str,
+    payload: AdapterPromptGrammarReview,
+    session: SessionDep,
+) -> AdapterPromptGrammar:
+    """Record how this adapter must be prompted, as reviewed on this machine.
+
+    A PUT rather than a POST: there is exactly one grammar per adapter, and a
+    second would raise the question of which one a rewriter believed. Re-review
+    replaces, and a re-review that fails leaves the previous one standing.
+    """
+
+    asset = session.get(ModelAssetInstall, asset_id)
+    if not asset:
+        raise api_error(404, "model-asset-not-found", "That model asset is not installed.")
+    try:
+        row = review_adapter_grammar(
+            session,
+            model_asset_install_id=asset.id,
+            asset_sha256=payload.asset_sha256,
+            source_identity=payload.source_identity,
+            source_text=payload.source_text,
+            payload=payload.grammar,
+            approve_prose=tuple(payload.approve_prose),
+            verified_values={
+                slot: frozenset(values) for slot, values in payload.verified_values.items()
+            },
+        )
+    except PromptGrammarError as exc:
+        # The grammar is refused rather than stored partially. A grammar this
+        # build cannot read is one it must never act on.
+        raise api_error(422, "prompt-grammar-invalid", str(exc)) from exc
+    session.commit()
+    session.refresh(row)
+    return row
+
+
+@router.get(
+    "/model-assets/{asset_id}/prompt-grammar",
+    response_model=AdapterPromptGrammarOut,
+)
+async def read_model_asset_prompt_grammar(
+    asset_id: str,
+    session: SessionDep,
+) -> AdapterPromptGrammar:
+    row = session.scalar(
+        select(AdapterPromptGrammar).where(AdapterPromptGrammar.model_asset_install_id == asset_id)
+    )
+    if not row:
+        raise api_error(
+            404,
+            "prompt-grammar-not-reviewed",
+            "No prompt grammar has been reviewed for this adapter on this machine.",
+        )
+    return row
 
 
 @router.patch("/model-assets/{asset_id}", response_model=ModelAssetOut)
