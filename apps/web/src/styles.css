@@ -617,6 +617,7 @@ h1, h2, h3 { margin: 0; }
 .mention-option { display: flex; align-items: center; gap: 8px; width: 100%; padding: 6px 8px; border: 0; border-radius: 10px; background: none; color: var(--ink-primary); text-align: left; cursor: pointer; }
 .mention-option:hover, .mention-option:focus-visible { background: var(--panel-3); }
 .mention-option code { color: var(--accent-2); font-size: 12px; }
+.message-mention { color: var(--accent-2); background: var(--panel-2); padding: 0 4px; border-radius: 6px; }
 .reference-library .detail-title { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; }
 .reference-library .detail-title code { color: var(--accent-2); font-size: 12px; }
 .workflow-list { padding: 8px; border-right: 1px solid var(--border); }

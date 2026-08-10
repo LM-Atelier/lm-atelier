@@ -75,6 +75,7 @@ import { EditingStudio } from "./EditingStudio";
 import { MessageTimestamp } from "./MessageTimestamp";
 import { PendingResponseStatus } from "./PendingResponseStatus";
 import { MarkdownText } from "./MarkdownText";
+import { MentionText } from "./MentionText";
 import { MessageField } from "./MessageField";
 import type { TurnReference } from "./mentionDraft";
 import { useComposerMentions } from "./useComposerMentions";
@@ -131,6 +132,7 @@ import type {
   EngineRole,
   GenerationPreset,
   Message,
+  MessageReference,
   MessagePart,
   ModelAssetInstall,
   ModelInstall,
@@ -163,6 +165,7 @@ function PartView({
   part,
   liveText,
   markdown = false,
+  references,
   origin,
   onEditImage,
   onOpenStudio,
@@ -175,6 +178,9 @@ function PartView({
   part: MessagePart;
   liveText?: string;
   markdown?: boolean;
+  /** What the turn recorded referring to, so a text part can mark exactly
+   *  those and nothing it found by reading the prose. */
+  references?: MessageReference[];
   origin: MediaOrigin | null;
   onEditImage?: (part: MessagePart, origin: MediaOrigin) => void;
   onOpenStudio?: (part: MessagePart) => void;
@@ -186,7 +192,7 @@ function PartView({
 }) {
   if (part.type === "text") {
     const text = liveText || part.text || "";
-    return markdown ? <MarkdownText text={text} /> : <div className="message-text">{text}</div>;
+    return markdown ? <MarkdownText text={text} /> : <MentionText text={text} references={references} />;
   }
   if (part.type === "image" || part.type === "video" || part.type === "attachment") {
     return <ArtifactPart part={part} origin={origin} onEditImage={onEditImage} onOpenStudio={onOpenStudio} onAnimateImage={onAnimateImage} onReferenceMedia={onReferenceMedia} onToggleFavorite={onToggleFavorite} compareSourceUrl={compareSourceUrl} lineage={lineage} />;
@@ -333,7 +339,7 @@ function MessageBubble({
     <article className={`message ${message.role}`}>
       <div className="avatar">{message.role === "user" ? "You" : <Bot size={19} />}</div>
       <div className="message-content">
-        {editing ? <div className="message-edit"><textarea aria-label="Edit message" rows={4} value={draft} onChange={(event) => setDraft(event.target.value)} /><div><button onClick={() => { setDraft(userText); setEditing(false); }}>Cancel</button><button className="primary" disabled={!draft.trim()} onClick={() => { onEdit?.(message.id, draft.trim()); setEditing(false); }}>Send edited message</button></div></div> : renderedParts.map((part) => <PartView key={part.id} part={part} liveText={liveText} markdown={message.role === "assistant"} origin={mediaOriginForPart(part, operation, message.role === "assistant" ? "generated" : null)} onEditImage={onEditImage} onOpenStudio={onOpenStudio} onAnimateImage={onAnimateImage} onReferenceMedia={onReferenceMedia} onToggleFavorite={onToggleFavorite} compareSourceUrl={message.role === "assistant" ? compareSourceUrl : undefined} lineage={message.role === "assistant" ? lineage : undefined} />)}
+        {editing ? <div className="message-edit"><textarea aria-label="Edit message" rows={4} value={draft} onChange={(event) => setDraft(event.target.value)} /><div><button onClick={() => { setDraft(userText); setEditing(false); }}>Cancel</button><button className="primary" disabled={!draft.trim()} onClick={() => { onEdit?.(message.id, draft.trim()); setEditing(false); }}>Send edited message</button></div></div> : renderedParts.map((part) => <PartView key={part.id} part={part} liveText={liveText} markdown={message.role === "assistant"} references={message.references} origin={mediaOriginForPart(part, operation, message.role === "assistant" ? "generated" : null)} onEditImage={onEditImage} onOpenStudio={onOpenStudio} onAnimateImage={onAnimateImage} onReferenceMedia={onReferenceMedia} onToggleFavorite={onToggleFavorite} compareSourceUrl={message.role === "assistant" ? compareSourceUrl : undefined} lineage={message.role === "assistant" ? lineage : undefined} />)}
         {liveText && !visibleParts.some((part) => part.type === "text") && (
           <MarkdownText text={liveText} />
         )}
