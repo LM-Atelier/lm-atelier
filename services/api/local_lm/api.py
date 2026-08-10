@@ -64,6 +64,7 @@ from .comfy_workflow_packages import (
     analyze_comfyui_workflow_package,
 )
 from .config import Settings
+from .custom_nodes import reviewed_custom_node_types
 from .credentials import (
     CredentialProvider,
     CredentialVaultUnavailable,
@@ -6073,14 +6074,23 @@ async def trust_custom_node(
     install = session.get(CustomNodeInstall, node_id)
     if not install:
         raise api_error(404, "custom-node-install-not-found", "custom node install not found")
+    reviewed_node_types: tuple[str, ...] | None = None
     if payload.trusted:
         try:
             await _services(request).custom_nodes.verify(install)
+            reviewed_node_types = reviewed_custom_node_types(
+                {"node_types": payload.node_types}
+            )
         except (OSError, RuntimeError, ValueError, TimeoutError) as exc:
             raise api_error(422, "custom-node-trust-failed", str(exc)) from exc
     install.trusted = payload.trusted
     install.security_json = {
         **install.security_json,
+        **(
+            {"node_types": list(reviewed_node_types)}
+            if reviewed_node_types is not None
+            else {}
+        ),
         "reviewed_at": utcnow().isoformat(),
         "trusted_by_local_user": payload.trusted,
     }
@@ -7896,7 +7906,12 @@ def _installed_package_versions(session: Session) -> dict[str, set[str]]:
     """
 
     versions = installed_comfy_registry_versions(session)
-    for install in session.scalars(select(CustomNodeInstall)).all():
+    for install in session.scalars(
+        select(CustomNodeInstall).where(
+            CustomNodeInstall.active.is_(True),
+            CustomNodeInstall.trusted.is_(True),
+        )
+    ).all():
         versions.setdefault(install.name, set()).add(install.revision)
     return versions
 
@@ -7920,6 +7935,47 @@ async def _verified_launchable_registry_packages(
         (str(key[0]), str(key[1])): frozenset(str(node_type) for node_type in node_types)
         for key, node_types in packages.items()
     }
+
+
+async def _verified_launchable_manual_packages(
+    services: Services,
+) -> dict[tuple[str, str], frozenset[str]]:
+    """Reviewed package-bound nodes an unscoped manual launch can load."""
+
+    resolver = getattr(services.processes, "trusted_comfy_custom_node_package_node_types", None)
+    if not callable(resolver):
+        return {}
+    try:
+        packages = await resolver()
+    except Exception:  # noqa: BLE001 - analysis must fail closed, not fail outright
+        logger.warning(
+            "Installed manual custom-node packages could not be verified for workflow package use."
+        )
+        return {}
+    return {
+        (str(key[0]), str(key[1])): frozenset(str(node_type) for node_type in node_types)
+        for key, node_types in packages.items()
+    }
+
+
+async def _verified_launchable_packages(
+    services: Services,
+) -> dict[tuple[str, str], frozenset[str]]:
+    registry = await _verified_launchable_registry_packages(services)
+    manual = await _verified_launchable_manual_packages(services)
+    combined = dict(registry)
+    for key, node_types in manual.items():
+        previous = combined.get(key)
+        if previous is not None and previous != node_types:
+            combined.pop(key)
+            logger.warning(
+                "Installed custom-node package identity %s %s has conflicting ownership.",
+                key[0],
+                key[1],
+            )
+            continue
+        combined[key] = node_types
+    return combined
 
 
 def _launchable_registry_node_types(
@@ -8963,7 +9019,7 @@ async def import_workflow_package(
     except WorkflowPackageError as exc:
         raise api_error(422, exc.code, str(exc)) from exc
     if not analysis.ready:
-        launchable_packages = await _verified_launchable_registry_packages(services)
+        launchable_packages = await _verified_launchable_packages(services)
         launchable_node_types = _launchable_registry_node_types(analysis, launchable_packages)
         if launchable_node_types - available_node_types:
             try:
@@ -9107,7 +9163,7 @@ async def analyze_workflow_package(
     except WorkflowPackageError as exc:
         raise api_error(422, exc.code, str(exc)) from exc
     if not analysis.ready:
-        launchable_packages = await _verified_launchable_registry_packages(services)
+        launchable_packages = await _verified_launchable_packages(services)
         launchable_node_types = _launchable_registry_node_types(analysis, launchable_packages)
         if launchable_node_types - available_node_types:
             try:
