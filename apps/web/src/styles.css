@@ -612,6 +612,11 @@ h1, h2, h3 { margin: 0; }
 .reference-library .reference-list li { display: flex; align-items: center; justify-content: space-between; gap: 16px; padding: 12px 14px; border: 1px solid var(--border); border-radius: 14px; background: var(--surface); }
 .reference-library .reference-list li.archived { opacity: .62; }
 .reference-library .reference-cover { width: 40px; height: 40px; object-fit: cover; border-radius: 10px; display: block; flex: none; }
+.message-field { position: relative; display: block; }
+.mention-picker { position: absolute; bottom: 100%; left: 0; right: 0; z-index: 5; max-height: 240px; overflow-y: auto; margin-bottom: 6px; padding: 6px; display: flex; flex-direction: column; gap: 2px; border: 1px solid var(--border); border-radius: 14px; background: var(--panel-2); box-shadow: var(--lift); }
+.mention-option { display: flex; align-items: center; gap: 8px; width: 100%; padding: 6px 8px; border: 0; border-radius: 10px; background: none; color: var(--ink-primary); text-align: left; cursor: pointer; }
+.mention-option:hover, .mention-option:focus-visible { background: var(--panel-3); }
+.mention-option code { color: var(--accent-2); font-size: 12px; }
 .reference-library .detail-title { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; }
 .reference-library .detail-title code { color: var(--accent-2); font-size: 12px; }
 .workflow-list { padding: 8px; border-right: 1px solid var(--border); }
