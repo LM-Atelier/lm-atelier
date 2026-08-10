@@ -27,7 +27,7 @@ def reviewed_custom_node_types(value: object, *, required: bool = False) -> tupl
 
     if not isinstance(value, dict):
         if required:
-            raise ValueError("Custom node has no reviewed node type evidence")
+            raise ValueError("Custom node has no verified node type evidence")
         return ()
     raw = value.get("node_types")
     if raw is None and not required:
@@ -37,7 +37,7 @@ def reviewed_custom_node_types(value: object, *, required: bool = False) -> tupl
         or len(raw) > MAX_REVIEWED_CUSTOM_NODE_TYPES
         or (required and not raw)
     ):
-        raise ValueError("Custom node has no reviewed node type evidence")
+        raise ValueError("Custom node has no verified node type evidence")
     result: list[str] = []
     folded: set[str] = set()
     for item in raw:
@@ -48,7 +48,7 @@ def reviewed_custom_node_types(value: object, *, required: bool = False) -> tupl
             or any(character < " " or ord(character) == 127 for character in item)
             or item.casefold() in folded
         ):
-            raise ValueError("Custom node has invalid reviewed node type evidence")
+            raise ValueError("Custom node has invalid node type evidence")
         folded.add(item.casefold())
         result.append(item)
     return tuple(sorted(result, key=lambda item: (item.casefold(), item)))
