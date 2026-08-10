@@ -20,7 +20,7 @@ from __future__ import annotations
 from collections.abc import Callable
 from dataclasses import dataclass
 
-from sqlalchemy import func, select
+from sqlalchemy import String, func, or_, select
 from sqlalchemy.orm import Session
 from sqlalchemy.sql.elements import ColumnElement
 
@@ -40,6 +40,11 @@ from .references import (
 
 MAX_PAGE = 200
 DEFAULT_PAGE = 50
+# Bounded so a subject cannot carry an unbounded JSON blob that every list
+# response then has to serialise.
+MAX_DESCRIPTION = 4000
+MAX_ALIASES = 32
+MAX_TAGS = 32
 
 
 @dataclass(frozen=True)
@@ -112,13 +117,16 @@ def create_subject(
             # renumbered: the user asked for that exact one.
             raise ReferenceError(f"another subject already answers to @{slug}")
 
+    cleaned_description = (description or "").strip()
+    if len(cleaned_description) > MAX_DESCRIPTION:
+        raise ReferenceError(f"a description is at most {MAX_DESCRIPTION} characters")
     subject = ReferenceSubject(
         name=cleaned,
         mention_slug=slug,
         kind=parse_kind(kind).value,
-        description=(description or None),
-        aliases_json=list(aliases or []),
-        tags_json=list(tags or []),
+        description=cleaned_description or None,
+        aliases_json=_clean_labels(list(aliases or []), MAX_ALIASES, "aliases"),
+        tags_json=_clean_labels(list(tags or []), MAX_TAGS, "tags"),
     )
     session.add(subject)
     session.flush()
@@ -148,6 +156,66 @@ def rename_subject(
         )
     session.flush()
     return subject
+
+
+def set_details(
+    session: Session,
+    subject: ReferenceSubject,
+    *,
+    description: str | None = None,
+    aliases: list[str] | None = None,
+    tags: list[str] | None = None,
+) -> ReferenceSubject:
+    """Correct what a subject says about itself.
+
+    These could be set when a subject was created and never afterwards, which
+    made a typo in a description permanent and an alias impossible to withdraw.
+
+    `None` means leave that field alone. An empty string or an empty list means
+    clear it - the distinction matters, because "I am not editing the aliases"
+    and "this subject has no aliases any more" are different instructions and a
+    single nullable value cannot carry both.
+    """
+
+    if description is not None:
+        cleaned = description.strip()
+        if len(cleaned) > MAX_DESCRIPTION:
+            raise ReferenceError(f"a description is at most {MAX_DESCRIPTION} characters")
+        subject.description = cleaned or None
+    if aliases is not None:
+        subject.aliases_json = _clean_labels(aliases, MAX_ALIASES, "aliases")
+    if tags is not None:
+        subject.tags_json = _clean_labels(tags, MAX_TAGS, "tags")
+    session.flush()
+    return subject
+
+
+def _clean_labels(values: list[str], limit: int, field: str) -> list[str]:
+    """Trim, drop blanks, and collapse repeats while keeping the order given.
+
+    Case-insensitive de-duplication, because two aliases differing only in case
+    are one alias to anyone reading them and would both have to be matched by
+    anything that later resolves a name.
+    """
+
+    cleaned: list[str] = []
+    seen: set[str] = set()
+    for value in values:
+        if not isinstance(value, str):
+            raise ReferenceError(f"{field} must be text")
+        trimmed = value.strip()
+        if not trimmed:
+            continue
+        if len(trimmed) > MAX_NAME:
+            raise ReferenceError(f"each of the {field} is at most {MAX_NAME} characters")
+        folded = trimmed.casefold()
+        if folded in seen:
+            continue
+        seen.add(folded)
+        cleaned.append(trimmed)
+    if len(cleaned) > limit:
+        raise ReferenceError(f"a subject has at most {limit} {field}")
+    return cleaned
 
 
 def set_archived(session: Session, subject: ReferenceSubject, archived: bool) -> ReferenceSubject:
@@ -198,7 +266,21 @@ def list_subjects(
         filters.append(ReferenceSubject.kind == parse_kind(kind).value)
     if search and search.strip():
         pattern = f"%{search.strip().casefold()}%"
-        filters.append(func.lower(ReferenceSubject.name).like(pattern))
+        # Aliases are searched as well as the name, because that is the whole
+        # reason a subject has them: the person who wrote "Ada Lovelace" and
+        # the person looking for "Countess Lovelace" mean the same subject, and
+        # a search that only knows the display name makes the alias decorative.
+        #
+        # Matched against the stored JSON text rather than a joined table. The
+        # alternative is a second table for what is usually two or three short
+        # strings, and the false positives this can produce need the search term
+        # to contain JSON punctuation, which no useful search does.
+        filters.append(
+            or_(
+                func.lower(ReferenceSubject.name).like(pattern),
+                func.lower(func.cast(ReferenceSubject.aliases_json, String)).like(pattern),
+            )
+        )
 
     total = session.scalar(select(func.count()).select_from(ReferenceSubject).where(*filters))
     rows = session.scalars(

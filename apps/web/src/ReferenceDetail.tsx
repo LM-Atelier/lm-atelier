@@ -79,6 +79,58 @@ export function ReferenceDetail({
     onError: fail,
   });
 
+  // A comma-separated string is what a person types; the array is what the
+  // server stores. Splitting on save rather than on every keystroke means a
+  // half-typed "Countess Lovelace" is never briefly two names.
+  const asText = (values: string[]) => values.join(", ");
+  const asList = (text: string) =>
+    text
+      .split(",")
+      .map((one) => one.trim())
+      .filter(Boolean);
+
+  const initialDetails = {
+    description: subject.description ?? "",
+    aliases: asText(subject.aliases_json),
+    tags: asText(subject.tags_json),
+  };
+  const [savedDetails, setSavedDetails] = useState(initialDetails);
+  const [draft, setDraft] = useState(initialDetails);
+  const edited =
+    draft.description !== savedDetails.description ||
+    draft.aliases !== savedDetails.aliases ||
+    draft.tags !== savedDetails.tags;
+
+  const details = useMutation({
+    mutationFn: () => {
+      const changed: {
+        description?: string;
+        aliases?: string[];
+        tags?: string[];
+      } = {};
+      if (draft.description !== savedDetails.description) changed.description = draft.description;
+      if (draft.aliases !== savedDetails.aliases) changed.aliases = asList(draft.aliases);
+      if (draft.tags !== savedDetails.tags) changed.tags = asList(draft.tags);
+      return api.updateReference(subject.id, changed);
+    },
+    onSuccess: (updated) => {
+      // The server trims and de-duplicates. Its response is the value that was
+      // actually saved; retaining the submitted draft would leave the form
+      // looking perpetually dirty after a canonicalisation.
+      const canonical = {
+        description: updated.description ?? "",
+        aliases: asText(updated.aliases_json),
+        tags: asText(updated.tags_json),
+      };
+      setSavedDetails(canonical);
+      setDraft(canonical);
+      setError(null);
+      void client.invalidateQueries({ queryKey: ["references"] });
+    },
+    onError: fail,
+  });
+  const save = () => details.mutate();
+
   // Invalidates the subject list rather than the asset list: the cover lives on
   // the subject, and this view reads the subject from the list it was opened
   // from, so refreshing the assets alone would leave the star where it was.
@@ -161,6 +213,40 @@ export function ReferenceDetail({
           }
         />
       ) : null}
+
+      {/* Held in local state and saved explicitly rather than on every
+          keystroke: an alias list that rewrites itself mid-word would fight
+          whoever is typing it. */}
+      <div className="row-actions">
+        <label>
+          Description
+          <input
+            value={draft.description}
+            aria-label="Description"
+            onChange={(event) => setDraft({ ...draft, description: event.target.value })}
+          />
+        </label>
+        <label>
+          Also known as
+          <input
+            value={draft.aliases}
+            aria-label="Other names, separated by commas"
+            placeholder="Countess Lovelace, AAL"
+            onChange={(event) => setDraft({ ...draft, aliases: event.target.value })}
+          />
+        </label>
+        <label>
+          Tags
+          <input
+            value={draft.tags}
+            aria-label="Tags, separated by commas"
+            onChange={(event) => setDraft({ ...draft, tags: event.target.value })}
+          />
+        </label>
+        <button className="secondary" disabled={!edited || details.isPending} onClick={save}>
+          Save details
+        </button>
+      </div>
 
       <div className="row-actions">
         <button className="primary" disabled={attach.isPending} onClick={() => setPicking(true)}>

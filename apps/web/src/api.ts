@@ -549,7 +549,18 @@ export const api = {
     }),
   updateReference: (
     id: string,
-    body: { name?: string; follow_mention?: boolean; archived?: boolean; favorite?: boolean },
+    // Omitting a field leaves it alone; sending "" or [] clears it. Those are
+    // different instructions, so the optional fields are genuinely optional
+    // rather than nullable.
+    body: {
+      name?: string;
+      follow_mention?: boolean;
+      archived?: boolean;
+      favorite?: boolean;
+      description?: string;
+      aliases?: string[];
+      tags?: string[];
+    },
   ) =>
     request<ReferenceSubject>(`/api/references/${encodeURIComponent(id)}`, {
       method: "PATCH",
