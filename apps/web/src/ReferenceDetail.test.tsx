@@ -11,6 +11,8 @@ vi.mock("./api", () => ({
     attachReferenceAsset: vi.fn(),
     detachReferenceAsset: vi.fn(),
     artifacts: vi.fn(),
+    setReferenceCover: vi.fn(),
+    clearReferenceCover: vi.fn(),
   },
 }));
 
@@ -178,5 +180,39 @@ describe("reference detail", () => {
     await waitFor(() =>
       expect(mocked.detachReferenceAsset).toHaveBeenCalledWith("ref-1", "asset-1"),
     );
+  });
+
+  it("lets an image stand for the reference", async () => {
+    mocked.setReferenceCover.mockResolvedValue({ ...SUBJECT, cover_artifact_id: "art-1" });
+    show([asset()]);
+
+    fireEvent.click(await screen.findByLabelText("Use image 1 for Ada Lovelace"));
+
+    await waitFor(() =>
+      expect(mocked.setReferenceCover).toHaveBeenCalledWith("ref-1", "art-1"),
+    );
+  });
+
+  it("pressing the current cover clears it rather than removing the image", async () => {
+    // There has to be a way back to no cover that is not "delete the picture".
+    mocked.clearReferenceCover.mockResolvedValue({ ...SUBJECT, cover_artifact_id: null });
+    const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+    mocked.referenceAssets.mockResolvedValue([asset()]);
+    mocked.artifacts.mockResolvedValue([]);
+    render(
+      <QueryClientProvider client={client}>
+        <ReferenceDetail
+          subject={{ ...SUBJECT, cover_artifact_id: "art-1" }}
+          onBack={() => {}}
+        />
+      </QueryClientProvider>,
+    );
+
+    fireEvent.click(
+      await screen.findByLabelText("Stop image 1 standing for Ada Lovelace"),
+    );
+
+    await waitFor(() => expect(mocked.clearReferenceCover).toHaveBeenCalledWith("ref-1"));
+    expect(mocked.detachReferenceAsset).not.toHaveBeenCalled();
   });
 });

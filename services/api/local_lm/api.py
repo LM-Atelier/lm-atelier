@@ -180,12 +180,14 @@ from .recipes import get_reference_recipe, list_reference_recipes
 from .reference_library import (
     DEFAULT_PAGE,
     attach_asset,
+    clear_cover,
     create_subject,
     deletion_impact,
     detach_asset,
     list_subjects,
     rename_subject,
     set_archived,
+    set_cover,
     set_favorite,
 )
 from .references import ReferenceError
@@ -262,6 +264,7 @@ from .schemas import (
     ReferenceAssetAttach,
     ReferenceAssetAttached,
     ReferenceAssetOut,
+    ReferenceCoverIn,
     ReferenceDeletionImpact,
     ReferenceRecipe,
     ReferenceSimilarAsset,
@@ -4311,6 +4314,31 @@ async def update_reference_subject(
             set_favorite(session, subject, payload.favorite)
     except ReferenceError as exc:
         raise api_error(422, "reference-invalid", str(exc)) from exc
+    session.commit()
+    session.refresh(subject)
+    return subject
+
+
+@router.put("/references/{subject_id}/cover", response_model=ReferenceSubjectOut)
+async def set_reference_cover(
+    subject_id: str,
+    payload: ReferenceCoverIn,
+    session: SessionDep,
+) -> ReferenceSubject:
+    subject = _subject_or_404(session, subject_id)
+    try:
+        set_cover(session, subject, artifact_id=payload.artifact_id)
+    except ReferenceError as exc:
+        raise api_error(422, "reference-cover-not-held", str(exc)) from exc
+    session.commit()
+    session.refresh(subject)
+    return subject
+
+
+@router.delete("/references/{subject_id}/cover", response_model=ReferenceSubjectOut)
+async def clear_reference_cover(subject_id: str, session: SessionDep) -> ReferenceSubject:
+    subject = _subject_or_404(session, subject_id)
+    clear_cover(session, subject)
     session.commit()
     session.refresh(subject)
     return subject

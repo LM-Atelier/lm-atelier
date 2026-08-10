@@ -365,3 +365,33 @@ def detach_asset(session: Session, subject: ReferenceSubject, *, asset_id: str) 
         subject.cover_artifact_id = None
     session.delete(asset)
     session.flush()
+
+
+def set_cover(session: Session, subject: ReferenceSubject, *, artifact_id: str) -> ReferenceSubject:
+    """Choose which of a subject's own images stands for it in a list.
+
+    Restricted to images the subject already holds. A cover allowed to point at
+    any artifact would be a second, weaker kind of membership - one the deletion
+    impact does not count and the detach rule above does not clear - so a
+    reference can only be represented by a picture it actually has.
+    """
+
+    held = session.scalar(
+        select(ReferenceAsset).where(
+            ReferenceAsset.reference_subject_id == subject.id,
+            ReferenceAsset.artifact_id == artifact_id,
+        )
+    )
+    if held is None:
+        raise ReferenceError("a cover has to be one of this reference's own images")
+    subject.cover_artifact_id = artifact_id
+    session.flush()
+    return subject
+
+
+def clear_cover(session: Session, subject: ReferenceSubject) -> ReferenceSubject:
+    """Stop an image standing for the subject without removing it from the set."""
+
+    subject.cover_artifact_id = None
+    session.flush()
+    return subject

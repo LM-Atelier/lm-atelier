@@ -128,4 +128,24 @@ describe("references library", () => {
     expect(options).toContain("person");
     expect(options).not.toContain("spaceship");
   });
+
+  it("shows the chosen cover beside the name", async () => {
+    // Queried by class rather than by role: the alt is deliberately empty
+    // because the name is right beside it, which makes the image decorative
+    // and gives it no accessible role to find.
+    const { container } = show([subject({ cover_artifact_id: "art-9" })]);
+
+    await screen.findByText("Ada Lovelace");
+    const image = container.querySelector("img.reference-cover");
+    expect(image?.getAttribute("src")).toContain("art-9");
+  });
+
+  it("shows no placeholder when no cover was chosen", async () => {
+    // A column of empty boxes would make the list harder to scan, which is the
+    // opposite of what a cover is for.
+    const { container } = show([subject({ cover_artifact_id: null })]);
+
+    await screen.findByText("Ada Lovelace");
+    expect(container.querySelector("img.reference-cover")).toBeNull();
+  });
 });

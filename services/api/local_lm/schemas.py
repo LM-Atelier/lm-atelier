@@ -1741,6 +1741,17 @@ class ReferenceSubjectUpdate(ApiModel):
     favorite: bool | None = None
 
 
+class ReferenceCoverIn(ApiModel):
+    """Which of a reference's images stands for it.
+
+    Its own request rather than a field on the update above, because "leave the
+    cover alone" and "remove the cover" are different intentions and one
+    optional field cannot say both. Clearing is the DELETE.
+    """
+
+    artifact_id: str = Field(min_length=1, max_length=80)
+
+
 class ReferenceSubjectOut(ApiModel):
     id: str
     name: str

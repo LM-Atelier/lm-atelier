@@ -6,6 +6,7 @@ import { AccessibleDialog } from "./AccessibleDialog";
 import { EmptyState } from "./EmptyState";
 import { ErrorCallout } from "./ErrorCallout";
 import { ReferenceDetail } from "./ReferenceDetail";
+import { artifactSource } from "./messageMedia";
 import type { ReferenceDeletionImpact, ReferenceSubject } from "./types";
 
 /** The kinds the server accepts. A closed set, because a workflow declares
@@ -140,6 +141,17 @@ export function ReferencesLibrary() {
       <ul className="reference-list">
         {items.map((subject) => (
           <li key={subject.id} className={subject.archived ? "archived" : ""}>
+            {/* Only when one was chosen. A placeholder for every subject
+                without a cover would add a column of empty boxes and make the
+                list harder to scan, which is the opposite of the point. */}
+            {subject.cover_artifact_id ? (
+              <img
+                className="reference-cover"
+                src={artifactSource(subject.cover_artifact_id) ?? undefined}
+                alt=""
+                loading="lazy"
+              />
+            ) : null}
             <div className="detail-title">
               <button className="link-button" onClick={() => setOpened(subject)}>
                 <strong>{subject.name}</strong>

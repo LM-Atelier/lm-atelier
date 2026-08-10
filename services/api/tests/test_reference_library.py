@@ -13,12 +13,14 @@ from local_lm.models import Artifact, ReferenceAsset, ReferenceSubject
 from local_lm.reference_library import (
     MAX_PAGE,
     attach_asset,
+    clear_cover,
     create_subject,
     deletion_impact,
     detach_asset,
     list_subjects,
     rename_subject,
     set_archived,
+    set_cover,
     set_favorite,
 )
 from local_lm.references import ReferenceError, ReferenceKind
@@ -346,3 +348,53 @@ def test_detaching_something_that_belongs_elsewhere_is_refused(session: Session)
     with pytest.raises(ReferenceError):
         detach_asset(session, second, asset_id=attached.id)
     assert session.query(ReferenceAsset).count() == 1
+
+
+def test_a_cover_has_to_be_one_of_the_subjects_own_images(session: Session) -> None:
+    """A cover allowed to point anywhere would be a second, weaker membership -
+    one deletion impact does not count and detaching does not clear."""
+
+    subject = create_subject(session, name="Ada Lovelace", kind="person")
+    stranger = _artifact(session)
+
+    with pytest.raises(ReferenceError, match="one of this reference's own images"):
+        set_cover(session, subject, artifact_id=stranger.id)
+    assert subject.cover_artifact_id is None
+
+
+def test_an_image_the_subject_holds_can_stand_for_it(session: Session) -> None:
+    subject = create_subject(session, name="Ada Lovelace", kind="person")
+    artifact = _artifact(session)
+    _attach(session, subject, artifact)
+
+    set_cover(session, subject, artifact_id=artifact.id)
+
+    assert subject.cover_artifact_id == artifact.id
+
+
+def test_clearing_a_cover_keeps_the_image(session: Session) -> None:
+    """Removing what represents a subject is not removing what it holds."""
+
+    subject = create_subject(session, name="Ada Lovelace", kind="person")
+    artifact = _artifact(session)
+    _attach(session, subject, artifact)
+    set_cover(session, subject, artifact_id=artifact.id)
+
+    clear_cover(session, subject)
+
+    assert subject.cover_artifact_id is None
+    assert subject.assets
+
+
+def test_detaching_the_cover_image_clears_the_cover(session: Session) -> None:
+    """Otherwise the cover points at a picture the subject no longer has."""
+
+    subject = create_subject(session, name="Ada Lovelace", kind="person")
+    artifact = _artifact(session)
+    _attach(session, subject, artifact)
+    set_cover(session, subject, artifact_id=artifact.id)
+    asset = subject.assets[0]
+
+    detach_asset(session, subject, asset_id=asset.id)
+
+    assert subject.cover_artifact_id is None
