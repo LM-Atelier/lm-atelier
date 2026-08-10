@@ -30,10 +30,10 @@ export interface PointerTool {
    * nothing until it closes, so repainting mid-gesture would only redraw what
    * is already on screen. */
   readonly appliesWhileMoving: boolean;
-  down(point: ImagePoint): void;
-  move(point: ImagePoint): void;
+  down(point: ImagePoint, viewportScale?: number): void;
+  move(point: ImagePoint, viewportScale?: number): void;
   /** Returns true when the gesture changed the mask (history push point). */
-  up(point: ImagePoint): boolean;
+  up(point: ImagePoint, viewportScale?: number): boolean;
   /** Abandon the gesture without committing what it has not applied yet.
    *
    * A rectangle or a lasso applies nothing until it closes, so abandoning
@@ -41,7 +41,7 @@ export interface PointerTool {
    * already painted stays and Undo is the way back - the snapshot taken at
    * gesture start is exactly what makes that work. */
   cancel(): void;
-  preview(): ToolPreview;
+  preview(viewportScale?: number): ToolPreview;
 }
 
 /** Brush and eraser: identical gesture, inverse stamp value. */
@@ -57,21 +57,23 @@ export class BrushTool implements PointerTool {
     private readonly value: number = 255,
   ) {}
 
-  down(point: ImagePoint): void {
-    strokeSegment(this.mask, point, point, this.radius, this.value);
+  down(point: ImagePoint, viewportScale = 1): void {
+    strokeSegment(this.mask, point, point, this.imageRadius(viewportScale), this.value);
     this.last = point;
     this.touched = true;
   }
 
-  move(point: ImagePoint): void {
+  move(point: ImagePoint, viewportScale = 1): void {
     this.hover = point;
     if (!this.last) return;
-    strokeSegment(this.mask, this.last, point, this.radius, this.value);
+    strokeSegment(this.mask, this.last, point, this.imageRadius(viewportScale), this.value);
     this.last = point;
   }
 
-  up(point: ImagePoint): boolean {
-    if (this.last) strokeSegment(this.mask, this.last, point, this.radius, this.value);
+  up(point: ImagePoint, viewportScale = 1): boolean {
+    if (this.last) {
+      strokeSegment(this.mask, this.last, point, this.imageRadius(viewportScale), this.value);
+    }
     const changed = this.touched;
     this.last = null;
     this.touched = false;
@@ -83,11 +85,17 @@ export class BrushTool implements PointerTool {
     this.touched = false;
   }
 
-  preview(): ToolPreview {
+  preview(viewportScale = 1): ToolPreview {
     const center = this.last ?? this.hover;
     return center
-      ? { kind: "brush-cursor", center, radius: this.radius }
+      ? { kind: "brush-cursor", center, radius: this.imageRadius(viewportScale) }
       : { kind: "none" };
+  }
+
+  /** Convert the user-facing CSS-pixel radius into image pixels. */
+  private imageRadius(viewportScale: number): number {
+    const scale = Number.isFinite(viewportScale) && viewportScale > 0 ? viewportScale : 1;
+    return this.radius / scale;
   }
 }
 

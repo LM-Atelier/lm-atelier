@@ -109,7 +109,7 @@ export function StudioCanvas({
     const context = layer?.getContext("2d");
     if (!layer || !context) return;
     context.clearRect(0, 0, layer.width, layer.height);
-    const preview = tool?.preview();
+    const preview = tool?.preview(viewport.scale);
     if (!preview || preview.kind === "none") return;
     context.strokeStyle = "rgba(80, 170, 255, 0.9)";
     context.lineWidth = Math.max(1, 1.5 / viewport.scale);
@@ -184,7 +184,7 @@ export function StudioCanvas({
       // move() paints only while a stroke is open and merely tracks the
       // hover otherwise, so this both extends a live selection and shows
       // the caret when there is none.
-      tool.move(moved);
+      tool.move(moved, viewport.scale);
       if (tool.appliesWhileMoving) paintMask();
       drawPreview();
       return;
@@ -194,14 +194,14 @@ export function StudioCanvas({
       const at = caretPoint();
       if (keyboardStroke.current) {
         keyboardStroke.current = false;
-        if (tool.up(at)) {
+        if (tool.up(at, viewport.scale)) {
           onStrokeEnd?.();
         }
         drawPreview();
       } else {
         onGestureStart?.();
         keyboardStroke.current = true;
-        tool.down(at);
+        tool.down(at, viewport.scale);
         if (tool.appliesWhileMoving) paintMask();
         drawPreview();
       }
@@ -259,7 +259,10 @@ export function StudioCanvas({
       if (drawingPointer.current !== null && tool) {
         const pointerId = drawingPointer.current;
         drawingPointer.current = null;
-        tool.up(toImagePoint(viewport, activePointers.current.get(pointerId) ?? screen));
+        tool.up(
+          toImagePoint(viewport, activePointers.current.get(pointerId) ?? screen),
+          viewport.scale,
+        );
         drawPreview();
       }
       setPanning(true);
@@ -273,7 +276,7 @@ export function StudioCanvas({
     }
     drawingPointer.current = event.pointerId;
     onGestureStart?.();
-    tool.down(toImagePoint(viewport, screen));
+    tool.down(toImagePoint(viewport, screen), viewport.scale);
     if (tool.appliesWhileMoving) paintMask();
     drawPreview();
   };
@@ -281,7 +284,7 @@ export function StudioCanvas({
   const endDrawing = (screen: { x: number; y: number }): boolean => {
     if (drawingPointer.current === null || !tool) return false;
     drawingPointer.current = null;
-    const changed = tool.up(toImagePoint(viewport, screen));
+    const changed = tool.up(toImagePoint(viewport, screen), viewport.scale);
     drawPreview();
     return changed;
   };
@@ -297,7 +300,7 @@ export function StudioCanvas({
       lastPointer.current = screen;
       return;
     }
-    tool?.move(toImagePoint(viewport, screen));
+    tool?.move(toImagePoint(viewport, screen), viewport.scale);
     if (tool?.appliesWhileMoving) paintMask();
     drawPreview();
   };

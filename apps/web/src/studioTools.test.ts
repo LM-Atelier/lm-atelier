@@ -39,6 +39,35 @@ describe("brush tool", () => {
     // Hover alone must not paint.
     expect(isEmpty(mask)).toBe(true);
   });
+
+  it("keeps the visible brush radius constant across viewport scales", () => {
+    const zoomedOutMask = createMask(200, 200);
+    const zoomedOut = new BrushTool(zoomedOutMask, 8);
+    zoomedOut.move({ x: 100, y: 100 }, 0.5);
+    expect(zoomedOut.preview(0.5)).toEqual({
+      kind: "brush-cursor",
+      center: { x: 100, y: 100 },
+      radius: 16,
+    });
+    zoomedOut.down({ x: 100, y: 100 }, 0.5);
+    zoomedOut.up({ x: 100, y: 100 }, 0.5);
+
+    const zoomedInMask = createMask(200, 200);
+    const zoomedIn = new BrushTool(zoomedInMask, 8);
+    zoomedIn.move({ x: 100, y: 100 }, 2);
+    expect(zoomedIn.preview(2)).toEqual({
+      kind: "brush-cursor",
+      center: { x: 100, y: 100 },
+      radius: 4,
+    });
+    zoomedIn.down({ x: 100, y: 100 }, 2);
+    zoomedIn.up({ x: 100, y: 100 }, 2);
+
+    // Each image-space radius multiplied by its viewport scale is 8 CSS px.
+    // The zoomed-out raster covers more pixels only because each image pixel
+    // is smaller on screen.
+    expect(coverage(zoomedOutMask)).toBeGreaterThan(coverage(zoomedInMask));
+  });
 });
 
 describe("rect tool", () => {
