@@ -31,7 +31,13 @@ from local_lm.comfy_registry_runtime import ComfyRegistryRuntimeDistribution
 from local_lm.custom_nodes import CustomNodeManager
 from local_lm.db import SessionLocal
 from local_lm.events import EventBroker
-from local_lm.models import CustomNodeInstall, ModelAssetInstall, ModelInstall, ModelProfile
+from local_lm.models import (
+    ComfyRegistryInstall,
+    CustomNodeInstall,
+    ModelAssetInstall,
+    ModelInstall,
+    ModelProfile,
+)
 from local_lm.network import shared_tls_context
 from local_lm.processes import (
     WORKER_STDERR_DISPLAY_CHARS,
@@ -85,6 +91,61 @@ async def wait_for_worker_event(events: EventBroker, event_type: str) -> None:
             return
         await asyncio.sleep(0.01)
     raise AssertionError(f"worker event {event_type!r} was not published")
+
+
+async def test_trusted_registry_node_types_preserve_package_version_ownership(
+    settings,
+    monkeypatch: pytest.MonkeyPatch,
+    request: pytest.FixtureRequest,
+) -> None:  # type: ignore[no-untyped-def]
+    install = ComfyRegistryInstall(
+        package_id="comfyui-kjnodes",
+        package_version="1.2.3",
+        registry_record_id="registry-record-kjnodes",
+        repository_url="https://github.com/kijai/ComfyUI-KJNodes.git",
+        download_url="https://cdn.comfy.org/kjnodes/1.2.3.zip",
+        archive_sha256="a" * 64,
+        manifest_sha256="b" * 64,
+        installed_path="lm-atelier-registry_kjnodes",
+        node_types_json=["GetNode", "SetNode"],
+        pip_dependencies_json=[],
+        review_json={"review_required": True},
+        trusted=True,
+        active=True,
+    )
+    with SessionLocal() as session:
+        session.add(install)
+        session.commit()
+        install_id = install.id
+
+    def cleanup_install() -> None:
+        with SessionLocal() as session:
+            persisted = session.get(ComfyRegistryInstall, install_id)
+            if persisted is not None:
+                session.delete(persisted)
+                session.commit()
+
+    request.addfinalizer(cleanup_install)
+
+    supervisor = ProcessSupervisor(settings)
+    packages = {("comfyui-kjnodes", "1.2.3"): frozenset({"GetNode", "SetNode"})}
+    monkeypatch.setattr(
+        "local_lm.comfy_registry_installs.trusted_comfy_registry_launch_contract",
+        lambda *_args, **_kwargs: ComfyRegistryLaunchContract(
+            ("lm-atelier-registry_kjnodes",), (), ("GetNode", "SetNode")
+        ),
+    )
+
+    assert await supervisor.trusted_comfy_registry_package_node_types() == packages
+
+    monkeypatch.setattr(
+        "local_lm.comfy_registry_installs.trusted_comfy_registry_launch_contract",
+        lambda *_args, **_kwargs: ComfyRegistryLaunchContract(
+            ("lm-atelier-registry_kjnodes",), (), ("OtherNode",)
+        ),
+    )
+    with pytest.raises(RuntimeError, match="node ownership is inconsistent"):
+        await supervisor.trusted_comfy_registry_package_node_types()
 
 
 class FakeRunningProcess:
