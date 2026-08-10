@@ -477,7 +477,8 @@ h1, h2, h3 { margin: 0; }
    images a stacking order, and this had none - so a picture scrolled up over
    the box being typed into. Below the jobs panel and the light toggle, which
    float over everything including this. */
-.composer-wrap { z-index: 2; position: absolute; bottom: 0; left: 0; right: 0; padding: 35px max(24px, calc((100% - 860px) / 2)) 18px; background: linear-gradient(transparent, var(--bg) 28%); }
+.composer-wrap { --composer-inline-padding: max(24px, calc((100% - 860px) / 2)); z-index: 2; position: absolute; isolation: isolate; bottom: 0; left: 0; right: 0; padding: 35px var(--composer-inline-padding) 18px; background: transparent; }
+.composer-wrap::before { content: ""; position: absolute; z-index: -1; inset: 0 var(--composer-inline-padding); background: linear-gradient(transparent, var(--bg) 28%); pointer-events: none; }
 .composer { background: var(--panel); border: 1px solid var(--border); border-radius: 14px; padding: 12px 13px 10px; box-shadow: 0 16px 50px #0007; }
 .composer:focus-within { border-color: var(--accent); box-shadow: 0 16px 50px #0007, 0 0 0 2px #315a9a26; }
 .composer textarea { display: block; width: 100%; max-height: 180px; min-height: 42px; overflow-y: auto; resize: none; border: 0; outline: 0; color: var(--ink-primary); background: transparent; padding: 4px 3px 9px; line-height: 1.5; }
@@ -908,7 +909,7 @@ h1, h2, h3 { margin: 0; }
   .lora-auto-editor > label:first-child, .lora-auto-editor > .row-actions { grid-column: 1 / -1; }
   .preset-create { grid-template-columns: 1fr; }
   .messages { padding-inline: 16px; }
-  .composer-wrap { padding-inline: 12px; }
+  .composer-wrap { --composer-inline-padding: 12px; }
   .page-view { padding-inline: 18px; }
   .page-header { flex-direction: column; }
   .section-heading { align-items: flex-start; flex-direction: column; gap: 6px; }
