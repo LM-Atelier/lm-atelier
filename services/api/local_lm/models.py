@@ -1439,19 +1439,24 @@ class ReferenceAsset(TimestampMixin, Base):
         UniqueConstraint(
             "reference_subject_id", "artifact_id", name="uq_reference_asset_membership"
         ),
+        # Named here rather than left to `index=True`, because these are the
+        # names the migration created and therefore the names every existing
+        # database has. Letting the model derive its own would mean a schema
+        # built by migration and one built from this metadata differ by index
+        # name, and autogenerate would propose renaming them on real data.
+        Index("ix_reference_assets_subject", "reference_subject_id"),
+        Index("ix_reference_assets_artifact", "artifact_id"),
     )
 
     id: Mapped[str] = mapped_column(
         String(48), primary_key=True, default=lambda: new_id("refasset")
     )
     reference_subject_id: Mapped[str] = mapped_column(
-        ForeignKey("reference_subjects.id", ondelete="CASCADE"), index=True
+        ForeignKey("reference_subjects.id", ondelete="CASCADE")
     )
     # Restricted, not cascading: an artifact still used by a Reference must not
     # be removable out from under it by an unrelated cleanup.
-    artifact_id: Mapped[str] = mapped_column(
-        ForeignKey("artifacts.id", ondelete="RESTRICT"), index=True
-    )
+    artifact_id: Mapped[str] = mapped_column(ForeignKey("artifacts.id", ondelete="RESTRICT"))
     caption: Mapped[str | None] = mapped_column(Text, nullable=True)
     purpose: Mapped[str] = mapped_column(String(40), default="other")
     view_label: Mapped[str | None] = mapped_column(String(60), nullable=True)
@@ -1495,17 +1500,19 @@ class MessageReference(TimestampMixin, Base):
             "length(trim(reference_subject_id)) > 0",
             name="ck_message_reference_subject_present",
         ),
+        # Named for the same reason as on `reference_assets`: these are what the
+        # migration created, so this metadata has to agree with it.
+        Index("ix_message_references_message", "message_id"),
+        Index("ix_message_references_subject", "reference_subject_id"),
     )
 
     id: Mapped[str] = mapped_column(String(48), primary_key=True, default=lambda: new_id("msgref"))
     # The turn that referred to it. This one is a real foreign key: deleting a
     # user's turn is meant to remove what it produced, and a reference record
     # outliving its own message would be an orphan nobody could interpret.
-    message_id: Mapped[str] = mapped_column(
-        ForeignKey("messages.id", ondelete="CASCADE"), index=True
-    )
+    message_id: Mapped[str] = mapped_column(ForeignKey("messages.id", ondelete="CASCADE"))
     position: Mapped[int] = mapped_column(Integer, default=0)
-    reference_subject_id: Mapped[str] = mapped_column(String(48), index=True)
+    reference_subject_id: Mapped[str] = mapped_column(String(48))
     mention_slug: Mapped[str] = mapped_column(String(64))
     subject_name: Mapped[str] = mapped_column(String(120))
     subject_kind: Mapped[str] = mapped_column(String(40))
