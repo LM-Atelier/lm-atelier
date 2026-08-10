@@ -5283,9 +5283,13 @@ describe("App", () => {
       </QueryClientProvider>,
     );
 
-    expect(await screen.findByRole("img", { name: "Uploaded image" })).toBeVisible();
+    const uploadedImage = await screen.findByRole("img", { name: "Uploaded image" });
+    expect(uploadedImage).toBeVisible();
     expect(screen.getByRole("img", { name: "Edited image" })).toBeVisible();
     expect(screen.queryByText("Attached image")).not.toBeInTheDocument();
+    const messageMeta = screen.getByRole("button", { name: "Edit message" }).closest(".message-meta")!;
+    expect(screen.getByText("Use this synthetic source").compareDocumentPosition(messageMeta) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+    expect(messageMeta.compareDocumentPosition(uploadedImage) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
 
     // The result of an edit can be held against its source directly.
     fireEvent.click(screen.getByRole("button", { name: "Compare with the source" }));
