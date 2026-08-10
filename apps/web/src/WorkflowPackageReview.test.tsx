@@ -172,3 +172,43 @@ describe("WorkflowPackageReview sources", () => {
     expect(screen.queryByText("Sources this workflow mentions")).toBeNull();
   });
 });
+
+describe("WorkflowPackageReview runtime inventory", () => {
+  afterEach(() => {
+    cleanup();
+  });
+
+  it("does not present inventory-derived package findings as facts while offline", () => {
+    renderReview(analysis({
+      ready: false,
+      runtime_nodes_available: false,
+      dependencies_resolved: false,
+      node_inventory_available: false,
+      issues: [
+        {
+          code: "unidentified_custom_node_package",
+          count: 1,
+          node_types: ["KSampler"],
+          severity: "blocking",
+        },
+        {
+          code: "unresolved_custom_node_package",
+          count: 1,
+          node_types: ["RegistrySampler"],
+          severity: "blocking",
+        },
+        {
+          code: "unversioned_custom_node_package",
+          count: 1,
+          node_types: ["UnpinnedNode"],
+          severity: "blocking",
+        },
+      ],
+    }));
+
+    expect(screen.getByText(/node availability is unknown/i)).toBeInTheDocument();
+    expect(screen.queryByText("Uses custom nodes with no declared package")).toBeNull();
+    expect(screen.queryByText("Needs a package version this machine does not have installed")).toBeNull();
+    expect(screen.getByText("Uses a package without a pinned version")).toBeInTheDocument();
+  });
+});

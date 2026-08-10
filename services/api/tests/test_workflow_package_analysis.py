@@ -8,6 +8,8 @@ import pytest
 from fastapi import FastAPI
 from httpx2 import AsyncClient
 
+from local_lm import api as api_module
+
 pytestmark = pytest.mark.asyncio
 
 
@@ -270,6 +272,114 @@ async def test_a_trusted_active_registry_version_counts_as_resolved(
     packages = {package["package_id"]: package for package in payload["custom_packages"]}
     assert packages["rgthree-comfy"]["locally_resolved"] is True
     assert payload["ready"] is True
+
+
+async def test_a_verified_registry_package_can_resolve_before_its_nodes_are_loaded(
+    client: AsyncClient,
+    app: FastAPI,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Analysis describes an installed launchable package without restarting Comfy."""
+
+    from local_lm.db import SessionLocal
+    from local_lm.models import ComfyRegistryInstall
+
+    with SessionLocal() as session:
+        session.add(
+            ComfyRegistryInstall(
+                package_id="comfyui-kjnodes",
+                package_version="1.2.3",
+                registry_record_id="registry-record-kjnodes",
+                repository_url="https://github.com/kijai/ComfyUI-KJNodes.git",
+                download_url="https://cdn.comfy.org/kjnodes/1.2.3.zip",
+                archive_sha256="c" * 64,
+                manifest_sha256="d" * 64,
+                installed_path="lm-atelier-registry_kjnodes",
+                node_types_json=["GetNode"],
+                pip_dependencies_json=[],
+                review_json={"review_required": True},
+                trusted=True,
+                active=True,
+            )
+        )
+        session.commit()
+
+    async def object_info() -> dict[str, Any]:
+        return {"KSampler": {}}
+
+    async def launchable_packages() -> dict[tuple[str, str], frozenset[str]]:
+        return {("comfyui-kjnodes", "1.2.3"): frozenset({"GetNode"})}
+
+    monkeypatch.setattr(
+        app.state.services.engines.media,
+        "object_info",
+        object_info,
+        raising=False,
+    )
+    monkeypatch.setattr(
+        app.state.services.processes,
+        "trusted_comfy_registry_package_node_types",
+        launchable_packages,
+    )
+
+    response = await client.post(
+        "/api/workflows/packages/analyze",
+        json={
+            "ui_graph": _workflow([_node(1, "GetNode", package="comfyui-kjnodes", version="1.2.3")])
+        },
+    )
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["node_inventory_available"] is True
+    assert payload["missing_node_types"] == []
+    assert payload["custom_packages"][0]["locally_resolved"] is True
+    assert payload["ready"] is True
+
+
+async def test_launchable_nodes_cannot_be_laundered_between_registry_packages(
+    client: AsyncClient,
+    app: FastAPI,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    async def object_info() -> dict[str, Any]:
+        return {}
+
+    async def launchable_packages() -> dict[tuple[str, str], frozenset[str]]:
+        return {
+            ("comfyui-kjnodes", "1.2.3"): frozenset({"SetNode"}),
+            ("another-package", "1.2.3"): frozenset({"GetNode"}),
+        }
+
+    monkeypatch.setattr(
+        api_module,
+        "_installed_package_versions",
+        lambda _session: {"comfyui-kjnodes": {"1.2.3"}},
+    )
+    monkeypatch.setattr(
+        app.state.services.engines.media,
+        "object_info",
+        object_info,
+        raising=False,
+    )
+    monkeypatch.setattr(
+        app.state.services.processes,
+        "trusted_comfy_registry_package_node_types",
+        launchable_packages,
+    )
+
+    response = await client.post(
+        "/api/workflows/packages/analyze",
+        json={
+            "ui_graph": _workflow([_node(1, "GetNode", package="comfyui-kjnodes", version="1.2.3")])
+        },
+    )
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["missing_node_types"] == ["GetNode"]
+    assert payload["custom_packages"][0]["locally_resolved"] is False
+    assert payload["ready"] is False
 
 
 async def test_a_referenced_model_this_machine_holds_counts_as_present(
