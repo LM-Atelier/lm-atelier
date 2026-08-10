@@ -148,6 +148,87 @@ async def test_trusted_registry_node_types_preserve_package_version_ownership(
         await supervisor.trusted_comfy_registry_package_node_types()
 
 
+async def test_trusted_manual_node_types_preserve_reviewed_package_ownership(
+    settings,
+    monkeypatch: pytest.MonkeyPatch,
+    request: pytest.FixtureRequest,
+) -> None:  # type: ignore[no-untyped-def]
+    install = CustomNodeInstall(
+        id="node_reviewed_inventory",
+        name="comfyui-kjnodes",
+        source_url="https://github.com/example/comfyui-kjnodes.git",
+        revision="a" * 40,
+        installed_path="lm-atelier-node_reviewed-inventory",
+        tree_hash="b" * 40,
+        trusted=True,
+        active=True,
+        security_json={"node_types": ["SetNode", "GetNode"]},
+    )
+    with SessionLocal() as session:
+        session.add(install)
+        session.commit()
+
+    def cleanup_install() -> None:
+        with SessionLocal() as session:
+            persisted = session.get(CustomNodeInstall, install.id)
+            if persisted is not None:
+                session.delete(persisted)
+                session.commit()
+
+    request.addfinalizer(cleanup_install)
+    verified: list[str] = []
+
+    async def verify(_manager: CustomNodeManager, current: CustomNodeInstall) -> None:
+        verified.append(current.id)
+
+    monkeypatch.setattr(CustomNodeManager, "verify", verify)
+    supervisor = ProcessSupervisor(settings)
+
+    assert await supervisor.trusted_comfy_custom_node_package_node_types() == {
+        ("comfyui-kjnodes", "a" * 40): frozenset({"GetNode", "SetNode"})
+    }
+    assert verified == [install.id]
+
+
+async def test_unreviewed_manual_node_types_are_not_launchable_package_evidence(
+    settings,
+    monkeypatch: pytest.MonkeyPatch,
+    request: pytest.FixtureRequest,
+) -> None:  # type: ignore[no-untyped-def]
+    install = CustomNodeInstall(
+        id="node_unreviewed_inventory",
+        name="comfyui-kjnodes",
+        source_url="https://github.com/example/comfyui-kjnodes.git",
+        revision="c" * 40,
+        installed_path="lm-atelier-node_unreviewed-inventory",
+        tree_hash="d" * 40,
+        trusted=True,
+        active=True,
+        security_json={"review_required": True},
+    )
+    with SessionLocal() as session:
+        session.add(install)
+        session.commit()
+
+    def cleanup_install() -> None:
+        with SessionLocal() as session:
+            persisted = session.get(CustomNodeInstall, install.id)
+            if persisted is not None:
+                session.delete(persisted)
+                session.commit()
+
+    request.addfinalizer(cleanup_install)
+
+    async def verify(_manager: CustomNodeManager, _current: CustomNodeInstall) -> None:
+        return None
+
+    monkeypatch.setattr(CustomNodeManager, "verify", verify)
+
+    assert await ProcessSupervisor(
+        settings
+    ).trusted_comfy_custom_node_package_node_types() == {}
+
+
 class FakeRunningProcess:
     stdout = None
     stderr = None
