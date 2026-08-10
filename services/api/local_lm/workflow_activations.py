@@ -12,6 +12,7 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from .adapters.contracts import ADAPTER_CONTRACT_VERSION
+from .custom_nodes import reviewed_custom_node_types
 from .domain import new_id, utcnow
 from .model_manifests import COMFY_MODEL_FOLDERS, comfy_folder_for_kind
 from .model_planner import LAUNCH_CONTRACT_VERSION
@@ -55,7 +56,6 @@ if TYPE_CHECKING:
     from .runtime_provisioning import RuntimeProvisioner
 
 WORKFLOW_ACTIVATION_RESOLVER_VERSION = "workflow-activation-v1"
-MAX_CUSTOM_NODE_TYPES = 4_096
 MAX_NODE_TYPE_LENGTH = 200
 
 _DIGEST = re.compile(r"^[0-9a-f]{64}$")
@@ -483,31 +483,10 @@ def _resolve(
 
 
 def _custom_node_types(value: object) -> tuple[str, ...]:
-    if not isinstance(value, dict):
-        raise WorkflowBindingError(
-            "dependency_unavailable", "Custom node has no verified node type evidence"
-        )
-    raw = value.get("node_types")
-    if not isinstance(raw, list) or not raw or len(raw) > MAX_CUSTOM_NODE_TYPES:
-        raise WorkflowBindingError(
-            "dependency_unavailable", "Custom node has no verified node type evidence"
-        )
-    result: list[str] = []
-    folded: set[str] = set()
-    for item in raw:
-        if (
-            not isinstance(item, str)
-            or not item
-            or len(item) > MAX_NODE_TYPE_LENGTH
-            or any(character < " " or ord(character) == 127 for character in item)
-            or item.casefold() in folded
-        ):
-            raise WorkflowBindingError(
-                "dependency_unavailable", "Custom node has invalid node type evidence"
-            )
-        folded.add(item.casefold())
-        result.append(item)
-    return tuple(sorted(result, key=lambda item: (item.casefold(), item)))
+    try:
+        return reviewed_custom_node_types(value, required=True)
+    except ValueError as exc:
+        raise WorkflowBindingError("dependency_unavailable", str(exc)) from exc
 
 
 def _launch_resources(

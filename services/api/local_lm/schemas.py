@@ -1454,6 +1454,7 @@ class CustomNodeUpdateRequest(ApiModel):
 
 class CustomNodeTrustRequest(ApiModel):
     trusted: bool
+    node_types: list[str] = Field(default_factory=list, max_length=4_096)
 
 
 class CustomNodeOut(ApiModel):
