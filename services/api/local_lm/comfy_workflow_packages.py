@@ -192,6 +192,7 @@ def analyze_comfyui_workflow_package(
     available_asset_filenames: Collection[str] = (),
     installed_package_versions: Mapping[str, Collection[str]] | None = None,
     packages_awaiting_review: Collection[tuple[str, str]] = (),
+    runtime_node_types: Collection[str] | None = None,
 ) -> ComfyWorkflowPackageAnalysis:
     """Inspect a ComfyUI v0.4 UI workflow without executing or persisting it."""
     _validate_bounded_json(workflow)
@@ -232,6 +233,7 @@ def analyze_comfyui_workflow_package(
         installed_package_versions,
         structural_issues,
         packages_awaiting_review,
+        runtime_node_types,
     )
 
 
@@ -246,6 +248,7 @@ def _analysis(
     installed_package_versions: Mapping[str, Collection[str]] | None,
     structural_issues: tuple[WorkflowPackageIssue, ...],
     packages_awaiting_review: Collection[tuple[str, str]] = (),
+    runtime_node_types: Collection[str] | None = None,
 ) -> ComfyWorkflowPackageAnalysis:
     all_types = {record.node_type for record in records}
     frontend = all_types & (FRONTEND_SYSTEM_NODE_TYPES | subgraph_ids)
@@ -259,6 +262,9 @@ def _analysis(
         available,
         installed_package_versions or {},
         packages_awaiting_review,
+        # The runtime is the authority on what actually loaded. Reviewed
+        # evidence only stands in for it while there is no runtime to ask.
+        set(runtime_node_types) if runtime_node_types is not None else None,
     )
     assets, asset_issues = _asset_references(records, available_asset_filenames)
     return ComfyWorkflowPackageAnalysis(
@@ -545,6 +551,7 @@ def _package_requirements(
     available_types: set[str],
     installed_package_versions: Mapping[str, Collection[str]],
     packages_awaiting_review: Collection[tuple[str, str]] = (),
+    runtime_types: set[str] | None = None,
 ) -> tuple[tuple[WorkflowPackageRequirement, ...], tuple[WorkflowPackageIssue, ...]]:
     packages: dict[str, dict[str, set[str]]] = defaultdict(lambda: defaultdict(set))
     unidentified: set[str] = set()
@@ -571,8 +578,12 @@ def _package_requirements(
                     key=str.casefold,
                 )
             ),
+            # A package is resolved when the nodes it owns are really loadable,
+            # not when a record says it owns them. With a runtime to ask, ask it:
+            # a package can be installed, pinned, trusted and unable to import,
+            # and calling that resolved hides the one action that repairs it.
             {node_type for node_types in versions.values() for node_type in node_types}
-            <= available_types
+            <= (available_types if runtime_types is None else runtime_types)
             and bool({version for version in versions if version})
             and {version for version in versions if version}
             <= {str(version) for version in installed_package_versions.get(package_id, ())},
