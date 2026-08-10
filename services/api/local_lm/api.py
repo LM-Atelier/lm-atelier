@@ -7972,7 +7972,7 @@ async def _verified_launchable_packages(
     return combined
 
 
-def _launchable_registry_node_types(
+def _launchable_package_node_types(
     analysis: ComfyWorkflowPackageAnalysis,
     packages: Mapping[tuple[str, str], frozenset[str]],
 ) -> set[str]:
@@ -7988,6 +7988,21 @@ def _launchable_registry_node_types(
         ):
             launchable.update(required)
     return launchable
+
+
+def _verified_package_versions(
+    analysis: ComfyWorkflowPackageAnalysis,
+    packages: Mapping[tuple[str, str], frozenset[str]],
+) -> dict[str, set[str]]:
+    """Only versions whose reviewed owner covers every node the graph attributes."""
+
+    verified: dict[str, set[str]] = {}
+    for requirement in analysis.custom_packages:
+        required = set(requirement.node_types)
+        for version in requirement.versions:
+            if required <= packages.get((requirement.package_id, version), frozenset()):
+                verified.setdefault(requirement.package_id, set()).add(version)
+    return verified
 
 
 _REGISTRY_PREPARE_TASKS: dict[str, asyncio.Task[None]] = {}
@@ -9012,19 +9027,20 @@ async def import_workflow_package(
         )
     except WorkflowPackageError as exc:
         raise api_error(422, exc.code, str(exc)) from exc
-    if not analysis.ready:
+    verified_package_versions = package_versions
+    if analysis.custom_packages:
         launchable_packages = await _verified_launchable_packages(services)
-        launchable_node_types = _launchable_registry_node_types(analysis, launchable_packages)
-        if launchable_node_types - available_node_types:
-            try:
-                analysis = analyze_comfyui_workflow_package(
-                    payload.ui_graph,
-                    available_node_types=available_node_types | launchable_node_types,
-                    available_asset_filenames=asset_filenames,
-                    installed_package_versions=package_versions,
-                )
-            except WorkflowPackageError as exc:
-                raise api_error(422, exc.code, str(exc)) from exc
+        launchable_node_types = _launchable_package_node_types(analysis, launchable_packages)
+        verified_package_versions = _verified_package_versions(analysis, launchable_packages)
+        try:
+            analysis = analyze_comfyui_workflow_package(
+                payload.ui_graph,
+                available_node_types=available_node_types | launchable_node_types,
+                available_asset_filenames=asset_filenames,
+                installed_package_versions=verified_package_versions,
+            )
+        except WorkflowPackageError as exc:
+            raise api_error(422, exc.code, str(exc)) from exc
     if not analysis.ready:
         raise api_error(
             422,
@@ -9051,7 +9067,7 @@ async def import_workflow_package(
                 payload.ui_graph,
                 available_node_types=available_node_types,
                 available_asset_filenames=asset_filenames,
-                installed_package_versions=package_versions,
+                installed_package_versions=verified_package_versions,
             )
         except WorkflowPackageError as exc:
             raise api_error(422, exc.code, str(exc)) from exc
@@ -9156,19 +9172,20 @@ async def analyze_workflow_package(
         )
     except WorkflowPackageError as exc:
         raise api_error(422, exc.code, str(exc)) from exc
-    if not analysis.ready:
+    verified_package_versions = package_versions
+    if analysis.custom_packages:
         launchable_packages = await _verified_launchable_packages(services)
-        launchable_node_types = _launchable_registry_node_types(analysis, launchable_packages)
-        if launchable_node_types - available_node_types:
-            try:
-                analysis = analyze_comfyui_workflow_package(
-                    payload.ui_graph,
-                    available_node_types=available_node_types | launchable_node_types,
-                    available_asset_filenames=asset_filenames,
-                    installed_package_versions=package_versions,
-                )
-            except WorkflowPackageError as exc:
-                raise api_error(422, exc.code, str(exc)) from exc
+        launchable_node_types = _launchable_package_node_types(analysis, launchable_packages)
+        verified_package_versions = _verified_package_versions(analysis, launchable_packages)
+        try:
+            analysis = analyze_comfyui_workflow_package(
+                payload.ui_graph,
+                available_node_types=available_node_types | launchable_node_types,
+                available_asset_filenames=asset_filenames,
+                installed_package_versions=verified_package_versions,
+            )
+        except WorkflowPackageError as exc:
+            raise api_error(422, exc.code, str(exc)) from exc
     # Authors often record where a model came from. A filename search cannot
     # find a file inside a repository, so those links are frequently the only
     # way an asset is findable at all - read from the graph, validated here,
