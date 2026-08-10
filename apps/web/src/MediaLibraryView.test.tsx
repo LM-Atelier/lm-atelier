@@ -41,6 +41,36 @@ describe("a library that cannot be read", () => {
   });
 });
 
+describe("generation details", () => {
+  it("shows the captured model and workflow on generated media", async () => {
+    vi.mocked(api.artifacts).mockResolvedValue([{
+      id: "artifact-1",
+      sha256: "abcdef0123456789",
+      kind: "image",
+      media_type: "image/png",
+      size_bytes: 1024,
+      original_name: "edited.png",
+      metadata_json: {},
+      favorite: false,
+      created_at: "2026-08-10T00:00:00Z",
+      reference_count: 1,
+      chat_ids: ["chat-1"],
+      project_ids: [],
+      generation_identity: {
+        model_profile_name: "Krea 2 edit",
+        workflow_family_name: "Krea 2 edits",
+        workflow_definition_name: "Krea 2 inpaint",
+        workflow_version: 7,
+      },
+    }]);
+    renderLibrary();
+
+    const details = await screen.findByLabelText("Generation details");
+    expect(details).toHaveTextContent("ModelKrea 2 edit");
+    expect(details).toHaveTextContent("WorkflowKrea 2 edits · Krea 2 inpaint · v7");
+  });
+});
+
 describe("the storage summary", () => {
   it("renders what the library is using and offers cleanup", async () => {
     // This section was never exercised: the mock named a function the

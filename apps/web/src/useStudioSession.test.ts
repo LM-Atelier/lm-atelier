@@ -80,6 +80,43 @@ describe("studio filmstrip", () => {
     expect(steps[2].instruction).toBe("warmer light");
   });
 
+  it("keeps the captured model and workflow with a durable result", () => {
+    const detail = session([
+      message({
+        id: "user-identity",
+        role: "user",
+        parts: [part({ type: "text", text: "edit this" })],
+      }),
+      message({
+        id: "answer-identity",
+        parts: [
+          part({ type: "image", artifact_id: "art-result" }),
+          part({
+            type: "generation_metadata",
+            metadata_json: {
+              provenance: {
+                model: { profile_name: "Krea 2 edit", local_path: "private/model" },
+                workflow: {
+                  family_name: "Krea 2 edits",
+                  definition_name: "Krea 2 inpaint",
+                  version: 7,
+                  dependencies: { private: true },
+                },
+              },
+            },
+          }),
+        ],
+      }),
+    ]);
+
+    expect(studioSteps(detail, "art-source")[1].generationIdentity).toEqual({
+      model_profile_name: "Krea 2 edit",
+      workflow_family_name: "Krea 2 edits",
+      workflow_definition_name: "Krea 2 inpaint",
+      workflow_version: 7,
+    });
+  });
+
   it("keeps a pending preview separate from durable edit history", () => {
     const preview = part({ id: "p", type: "image", artifact_id: "art-preview" });
     preview.metadata_json = { preview: true };

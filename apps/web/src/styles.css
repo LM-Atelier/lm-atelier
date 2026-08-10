@@ -852,6 +852,9 @@ h1, h2, h3 { margin: 0; }
 .gallery-card > img, .gallery-card > video { width: 100%; height: 210px; display: block; object-fit: contain; background: var(--surface-0); }
 .gallery-card > div { display: grid; gap: 4px; padding: 11px; }.gallery-card strong { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 12px; }.gallery-card small { color: var(--muted); font-size: 10px; }
 .gallery-card span { display: flex; align-items: center; gap: 8px; }.gallery-card a { color: var(--accent-2); font-size: 11px; }.gallery-card code { color: var(--muted); font-size: 9px; margin-right: auto; }
+.generation-identity { display: grid; grid-template-columns: auto minmax(0, 1fr); gap: 2px 7px; margin: 0; color: var(--muted); font-size: 10px; }
+.generation-identity dt { color: var(--cream); font-weight: 600; }
+.generation-identity dd { min-width: 0; margin: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 
 .jobs-panel { position: fixed; right: 16px; bottom: 68px; width: 310px; max-height: min(70vh, 560px); overflow-y: auto; z-index: 15; border: 1px solid var(--border); border-radius: 14px; background: var(--surface-1); backdrop-filter: blur(12px); box-shadow: 0 16px 45px var(--shadow); padding: 11px; }
 .jobs-panel > header { display: flex; align-items: center; gap: 6px; color: var(--ink-primary); font-size: 12px; padding: 2px 3px 9px; }
@@ -1008,6 +1011,7 @@ h1, h2, h3 { margin: 0; }
 .studio-selection-controls { display: grid; gap: 8px; }
 .studio-selection-controls label { display: grid; gap: 4px; color: var(--muted); font-size: 11px; }
 .studio-selection-controls input[type="range"] { accent-color: var(--atelier); width: 100%; }
+.studio-view > .generation-identity { justify-self: center; max-width: min(100%, 720px); }
 .studio-filmstrip { display: flex; gap: 6px; overflow-x: auto; padding: 2px; list-style: none; margin: 0; }
 .studio-filmstrip button { padding: 0; border: 1px solid var(--border); border-radius: 10px; overflow: hidden; background: var(--panel-2); cursor: pointer; }
 .studio-filmstrip button.selected { border-color: var(--atelier); }

@@ -3505,6 +3505,24 @@ async def test_artifact_upload_deduplicates_content(client: AsyncClient) -> None
     assert first.json()["id"] == second.json()["id"]
 
 
+def test_generation_identity_rejects_malformed_private_provenance() -> None:
+    assert (
+        api_module._generation_identity(
+            {
+                "model": {"profile_name": "x" * 501, "local_path": "private/model"},
+                "workflow": {
+                    "family_name": [],
+                    "definition_name": False,
+                    "version": True,
+                    "dependencies": {"private": True},
+                },
+            }
+        )
+        is None
+    )
+    assert api_module._generation_identity(None) is None
+
+
 async def test_media_library_reports_references_and_storage(client: AsyncClient) -> None:
     chat = (await client.post("/api/chats", json={"title": "Gallery"})).json()
     turn = await client.post(
@@ -3513,12 +3531,36 @@ async def test_media_library_reports_references_and_storage(client: AsyncClient)
     )
     message = await wait_for_assistant(client, chat["id"], "image")
     image = next(part for part in message["parts"] if part["type"] == "image")
+    with SessionLocal() as session:
+        run = session.get(Run, turn.json()["run"]["id"])
+        assert run
+        run.provenance_json = {
+            **run.provenance_json,
+            "model": {"profile_name": "Krea 2 edit", "local_path": "private/model.safetensors"},
+            "workflow": {
+                "family_name": "Krea 2 edits",
+                "definition_name": "Krea 2 inpaint",
+                "version": 7,
+                "dependencies": {"private": "not for the library"},
+            },
+        }
+        session.commit()
 
     gallery = await client.get("/api/artifacts", params={"kind": "image"})
     assert gallery.status_code == 200
     item = next(artifact for artifact in gallery.json() if artifact["id"] == image["artifact_id"])
     assert item["reference_count"] == 1
     assert item["chat_ids"] == [chat["id"]]
+    assert item["generation_identity"] == {
+        "model_profile_name": "Krea 2 edit",
+        "workflow_family_name": "Krea 2 edits",
+        "workflow_definition_name": "Krea 2 inpaint",
+        "workflow_version": 7,
+    }
+    assert "private" not in json.dumps(item["generation_identity"])
+    detail = await client.get(f"/api/artifacts/{image['artifact_id']}")
+    assert detail.status_code == 200
+    assert detail.json()["generation_identity"] == item["generation_identity"]
 
     storage = await client.get("/api/artifacts/storage")
     assert storage.status_code == 200

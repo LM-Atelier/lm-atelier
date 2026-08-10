@@ -1,7 +1,8 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useEffect, useState } from "react";
 import { api } from "./api";
-import type { ChatDetail, Message } from "./types";
+import { generationIdentityFromProvenance } from "./generationIdentity";
+import type { ChatDetail, GenerationIdentity, Message } from "./types";
 
 const STUDIO_SESSION_KEY = "local-lm-studio-session";
 
@@ -36,6 +37,7 @@ export type StudioStep = {
   /** The instruction that produced this result; empty for the source. */
   instruction: string;
   isSource: boolean;
+  generationIdentity: GenerationIdentity | null;
 };
 
 /** A session is only ever usable for the picture it was opened for.
@@ -211,6 +213,7 @@ export function studioSteps(
       artifactId: sourceArtifactId,
       instruction: "",
       isSource: true,
+      generationIdentity: null,
     });
   }
   for (const message of session.messages) {
@@ -219,11 +222,13 @@ export function studioSteps(
       (part) => part.type === "image" && part.artifact_id && !part.metadata_json.preview,
     );
     if (!image?.artifact_id) continue;
+    const metadata = message.parts.find((part) => part.type === "generation_metadata");
     steps.push({
       messageId: message.id,
       artifactId: image.artifact_id,
       instruction: instructionFor(session.messages, message),
       isSource: false,
+      generationIdentity: generationIdentityFromProvenance(metadata?.metadata_json.provenance),
     });
   }
   return steps;

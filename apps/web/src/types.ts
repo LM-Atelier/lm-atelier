@@ -31,12 +31,20 @@ export interface Artifact {
   favorite?: boolean;
   created_at: string;
   url?: string | null;
+  generation_identity?: GenerationIdentity | null;
 }
 
 export interface ArtifactLibraryItem extends Artifact {
   reference_count: number;
   chat_ids: string[];
   project_ids: string[];
+}
+
+export interface GenerationIdentity {
+  model_profile_name: string | null;
+  workflow_family_name: string | null;
+  workflow_definition_name: string | null;
+  workflow_version: number | null;
 }
 
 export interface ArtifactStorageInfo {

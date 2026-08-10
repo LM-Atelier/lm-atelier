@@ -236,6 +236,7 @@ from .schemas import (
     EditTemplateOut,
     EngineCapabilities,
     ExchangeDeletionOut,
+    GenerationIdentityOut,
     HealthOut,
     JobOut,
     MessageOut,
@@ -2760,6 +2761,59 @@ async def upload_artifact(
     return result
 
 
+def _captured_generation_name(value: object) -> str | None:
+    if not isinstance(value, str):
+        return None
+    name = value.strip()
+    return name if name and len(name) <= 500 else None
+
+
+def _generation_identity(provenance: object) -> GenerationIdentityOut | None:
+    if not isinstance(provenance, dict):
+        return None
+    model = provenance.get("model")
+    workflow = provenance.get("workflow")
+    model_name = (
+        _captured_generation_name(model.get("profile_name")) if isinstance(model, dict) else None
+    )
+    family_name = (
+        _captured_generation_name(workflow.get("family_name"))
+        if isinstance(workflow, dict)
+        else None
+    )
+    definition_name = (
+        _captured_generation_name(workflow.get("definition_name"))
+        if isinstance(workflow, dict)
+        else None
+    )
+    raw_version = workflow.get("version") if isinstance(workflow, dict) else None
+    version = (
+        raw_version
+        if isinstance(raw_version, int)
+        and not isinstance(raw_version, bool)
+        and 0 < raw_version <= 2_147_483_647
+        and bool(family_name or definition_name)
+        else None
+    )
+    if not any((model_name, family_name, definition_name)):
+        return None
+    return GenerationIdentityOut(
+        model_profile_name=model_name,
+        workflow_family_name=family_name,
+        workflow_definition_name=definition_name,
+        workflow_version=version,
+    )
+
+
+def _artifact_generation_identity(
+    session: Session,
+    artifact: Artifact,
+) -> GenerationIdentityOut | None:
+    run_id = artifact.metadata_json.get("run_id")
+    run = session.get(Run, run_id) if isinstance(run_id, str) else None
+    return _generation_identity(run.provenance_json) if run is not None else None
+
+
 @router.get("/artifacts", response_model=list[ArtifactLibraryItem])
 async def list_artifacts(
     session: ConversationSessionDep,
@@ -2793,6 +2847,18 @@ async def list_artifacts(
             )
         )
     artifacts = session.scalars(statement.order_by(Artifact.created_at.desc())).all()
+    run_ids = {
+        run_id
+        for artifact in artifacts
+        if isinstance((run_id := artifact.metadata_json.get("run_id")), str)
+    }
+    runs_by_id: dict[str, Run] = {}
+    ordered_run_ids = sorted(run_ids)
+    for offset in range(0, len(ordered_run_ids), 400):
+        batch = ordered_run_ids[offset : offset + 400]
+        runs_by_id.update(
+            (run.id, run) for run in session.scalars(select(Run).where(Run.id.in_(batch))).all()
+        )
     results: list[ArtifactLibraryItem] = []
     for artifact in artifacts:
         artifact_references = references.get(artifact.id, [])
@@ -2806,6 +2872,11 @@ async def list_artifacts(
         result.reference_count = len(artifact_references)
         result.chat_ids = chat_ids
         result.project_ids = project_ids
+        run_id = artifact.metadata_json.get("run_id")
+        run = runs_by_id.get(run_id) if isinstance(run_id, str) else None
+        result.generation_identity = (
+            _generation_identity(run.provenance_json) if run is not None else None
+        )
         result.url = f"/api/artifacts/{artifact.id}/content"
         results.append(result)
     return results
@@ -2824,6 +2895,7 @@ async def update_artifact(
     session.commit()
     session.refresh(artifact)
     result = ArtifactOut.model_validate(artifact)
+    result.generation_identity = _artifact_generation_identity(session, artifact)
     result.url = f"/api/artifacts/{artifact.id}/content"
     return result
 
@@ -2928,6 +3000,7 @@ async def get_artifact(
     if not artifact:
         raise api_error(404, "artifact-not-found", "artifact not found")
     result = ArtifactOut.model_validate(artifact)
+    result.generation_identity = _artifact_generation_identity(session, artifact)
     result.url = f"/api/artifacts/{artifact.id}/content"
     return result
 

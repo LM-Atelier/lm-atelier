@@ -37,9 +37,12 @@ vi.mock("./messageMedia", () => ({
     artifactId ? `/api/artifacts/${encodeURIComponent(artifactId)}/content` : null,
 }));
 
-function renderStudio(previewArtifactId: string | null = null) {
+function renderStudio(
+  previewArtifactId: string | null = null,
+  generationIdentity: ReturnType<typeof useStudioSession>["steps"][number]["generationIdentity"] = null,
+) {
   vi.mocked(useStudioSession).mockReturnValue({
-    steps: [{ artifactId: "art-1", instruction: null }],
+    steps: [{ artifactId: "art-1", instruction: null, generationIdentity }],
     previewArtifactId,
     sessionId: "chat-studio",
     busy: Boolean(previewArtifactId),
@@ -66,6 +69,37 @@ afterEach(() => {
 });
 
 describe("applying an edit", () => {
+  it("shows the captured model and workflow for the selected result", async () => {
+    renderStudio(null, {
+      model_profile_name: "Krea 2 edit",
+      workflow_family_name: "Krea 2 edits",
+      workflow_definition_name: "Krea 2 inpaint",
+      workflow_version: 7,
+    });
+
+    const details = await screen.findByLabelText("Generation details");
+    expect(details).toHaveTextContent("ModelKrea 2 edit");
+    expect(details).toHaveTextContent("WorkflowKrea 2 edits · Krea 2 inpaint · v7");
+  });
+
+  it("keeps generation details when a generated edit is reopened as the source", async () => {
+    vi.mocked(api.artifact).mockResolvedValueOnce({
+      id: "art-1",
+      favorite: false,
+      generation_identity: {
+        model_profile_name: "Reopened Krea edit",
+        workflow_family_name: "Krea 2 edits",
+        workflow_definition_name: "Krea 2 inpaint",
+        workflow_version: 8,
+      },
+    } as never);
+    renderStudio();
+
+    const details = await screen.findByLabelText("Generation details");
+    expect(details).toHaveTextContent("ModelReopened Krea edit");
+    expect(details).toHaveTextContent("v8");
+  });
+
   it("shows a pending generation preview without making it the current result", async () => {
     renderStudio("sha256:preview");
 
