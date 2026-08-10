@@ -900,6 +900,10 @@ describe("App", () => {
       </QueryClientProvider>,
     );
     expect(await screen.findByText("Model notes")).toBeInTheDocument();
+    const studioNavigation = screen.getByRole("button", { name: "Image Studio" });
+    expect(
+      studioNavigation.querySelector('[data-image-studio-icon="true"]'),
+    ).not.toBeNull();
     fireEvent.change(screen.getByLabelText("Search projects and chats"), { target: { value: "notes" } });
     fireEvent.click(screen.getByRole("button", { name: "Manage Model notes" }));
     fireEvent.change(screen.getByDisplayValue("Model notes"), { target: { value: "Renamed notes" } });
@@ -5008,6 +5012,8 @@ describe("App", () => {
     fireEvent.click(screen.getByText("2-step plan"));
     expect(screen.getByText("Step 1 · Text")).toBeInTheDocument();
     expect(screen.getByText("Step 2 · Image")).toBeInTheDocument();
+    client.setQueryData(["work-plans", chat.id], [{ ...plan, status: "complete", steps: plan.steps.map((item) => ({ ...item, status: "complete", error: null })) }]);
+    await waitFor(() => expect(screen.queryByText("2-step plan")).not.toBeInTheDocument());
   });
 
   it("keeps a deferred turn and its pending state on the originating chat", async () => {
@@ -5279,9 +5285,13 @@ describe("App", () => {
       </QueryClientProvider>,
     );
 
-    expect(await screen.findByRole("img", { name: "Uploaded image" })).toBeVisible();
+    const uploadedImage = await screen.findByRole("img", { name: "Uploaded image" });
+    expect(uploadedImage).toBeVisible();
     expect(screen.getByRole("img", { name: "Edited image" })).toBeVisible();
     expect(screen.queryByText("Attached image")).not.toBeInTheDocument();
+    const messageMeta = screen.getByRole("button", { name: "Edit message" }).closest(".message-meta")!;
+    expect(screen.getByText("Use this synthetic source").compareDocumentPosition(messageMeta) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+    expect(messageMeta.compareDocumentPosition(uploadedImage) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
 
     // The result of an edit can be held against its source directly.
     fireEvent.click(screen.getByRole("button", { name: "Compare with the source" }));
@@ -6263,5 +6273,12 @@ describe("App", () => {
     expect(await screen.findByRole("link", { name: "Preview first.png" })).toBeInTheDocument();
     expect(await screen.findByRole("link", { name: "Preview third.png" })).toBeInTheDocument();
     expect(screen.getByRole("alert")).toHaveTextContent("huge.png: upload exceeds the size limit");
+    const pasted = new File(["paste"], "clipboard.png", { type: "image/png" });
+    const ignoredPaste = new File(["text"], "notes.txt", { type: "text/plain" });
+    vi.mocked(api.upload).mockReset().mockResolvedValue({ id: "art_pasted", sha256: "pasted", kind: "input", media_type: "image/png", size_bytes: 5, original_name: "clipboard.png", metadata_json: { origin: "uploaded" }, created_at: stamp, url: "/api/artifacts/art_pasted/content" });
+    fireEvent.paste(textarea, { clipboardData: { files: [pasted, ignoredPaste] } });
+    await waitFor(() => expect(vi.mocked(api.upload)).toHaveBeenCalledWith(pasted));
+    expect(await screen.findByRole("link", { name: "Preview clipboard.png" })).toBeInTheDocument();
+    expect(screen.getByRole("alert")).toHaveTextContent("Only images can be pasted.");
   });
 });

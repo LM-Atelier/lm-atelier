@@ -745,6 +745,43 @@ class ProcessSupervisor:
 
         return await asyncio.to_thread(self._trusted_comfy_registry_package_node_types)
 
+    async def trusted_comfy_custom_node_package_node_types(
+        self,
+    ) -> dict[tuple[str, str], frozenset[str]]:
+        """Reviewed ownership from exact trusted manual installs on disk."""
+
+        from sqlalchemy import select
+
+        from .custom_nodes import CustomNodeManager, reviewed_custom_node_types
+        from .db import SessionLocal
+        from .models import CustomNodeInstall
+
+        with SessionLocal() as session:
+            installs = list(
+                session.scalars(
+                    select(CustomNodeInstall)
+                    .where(
+                        CustomNodeInstall.active.is_(True),
+                        CustomNodeInstall.trusted.is_(True),
+                    )
+                    .order_by(CustomNodeInstall.name, CustomNodeInstall.revision)
+                ).all()
+            )
+            manager = CustomNodeManager(self.settings)
+            for install in installs:
+                session.expunge(install)
+        result: dict[tuple[str, str], frozenset[str]] = {}
+        for install in installs:
+            await manager.verify(install)
+            node_types = reviewed_custom_node_types(install.security_json)
+            if not node_types:
+                continue
+            key = (install.name, install.revision)
+            if key in result:
+                raise RuntimeError("Manual custom-node package identity is duplicated")
+            result[key] = frozenset(node_types)
+        return result
+
     async def comfy_node_inventory(self) -> frozenset[str]:
         """Every node type the running worker loaded.
 

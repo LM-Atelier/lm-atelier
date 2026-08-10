@@ -82,6 +82,7 @@ import { useComposerMentions } from "./useComposerMentions";
 import { useConfirm } from "./useConfirm";
 import { focusMainContent, roleForMode } from "./viewHelpers";
 import { ArtifactPart } from "./ArtifactPart";
+import { ImageStudioIcon } from "./ImageStudioIcon";
 import { FirstRunSetup } from "./SetupWizard";
 import { ChatManager } from "./ChatManager";
 import { type View } from "./rooms";
@@ -335,16 +336,18 @@ function MessageBubble({
   const regenerationPending = (message.response_revisions ?? []).some(
     (revision) => revision.status === "pending",
   );
+  const userMessageMeta = message.role === "user" && message.status === "complete" && !editing ? <div className="message-meta"><MessageTimestamp at={message.created_at} />{confirmingDelete ? <span className="delete-confirm"><span>Also deletes the answer and its media.</span><button className="danger" onClick={() => { setConfirmingDelete(false); onDeleteExchange?.(message.id); }}>Delete turn</button><button onClick={() => setConfirmingDelete(false)}>Keep</button></span> : <span className="message-actions">{onEdit && <button onClick={() => setEditing(true)} aria-label="Edit message" title="Edit"><Pencil size={14} /></button>}{copyableText && <CopyTextButton text={copyableText} label="Copy user message" buttonText="" />}{onDeleteExchange && <button aria-label="Delete this turn" title="Delete turn" onClick={() => setConfirmingDelete(true)}><Trash2 size={14} /></button>}</span>}</div> : null;
+  const messageActionPartIndex = userMessageMeta ? renderedParts.map((part) => part.type).lastIndexOf("text") : -1;
   return (
     <article className={`message ${message.role}`}>
       <div className="avatar">{message.role === "user" ? "You" : <Bot size={19} />}</div>
       <div className="message-content">
-        {editing ? <div className="message-edit"><textarea aria-label="Edit message" rows={4} value={draft} onChange={(event) => setDraft(event.target.value)} /><div><button onClick={() => { setDraft(userText); setEditing(false); }}>Cancel</button><button className="primary" disabled={!draft.trim()} onClick={() => { onEdit?.(message.id, draft.trim()); setEditing(false); }}>Send edited message</button></div></div> : renderedParts.map((part) => <PartView key={part.id} part={part} liveText={liveText} markdown={message.role === "assistant"} references={message.references} origin={mediaOriginForPart(part, operation, message.role === "assistant" ? "generated" : null)} onEditImage={onEditImage} onOpenStudio={onOpenStudio} onAnimateImage={onAnimateImage} onReferenceMedia={onReferenceMedia} onToggleFavorite={onToggleFavorite} compareSourceUrl={message.role === "assistant" ? compareSourceUrl : undefined} lineage={message.role === "assistant" ? lineage : undefined} />)}
+        {editing ? <div className="message-edit"><textarea aria-label="Edit message" rows={4} value={draft} onChange={(event) => setDraft(event.target.value)} /><div><button onClick={() => { setDraft(userText); setEditing(false); }}>Cancel</button><button className="primary" disabled={!draft.trim()} onClick={() => { onEdit?.(message.id, draft.trim()); setEditing(false); }}>Send edited message</button></div></div> : renderedParts.map((part, index) => <Fragment key={part.id}><PartView part={part} liveText={liveText} markdown={message.role === "assistant"} references={message.references} origin={mediaOriginForPart(part, operation, message.role === "assistant" ? "generated" : null)} onEditImage={onEditImage} onOpenStudio={onOpenStudio} onAnimateImage={onAnimateImage} onReferenceMedia={onReferenceMedia} onToggleFavorite={onToggleFavorite} compareSourceUrl={message.role === "assistant" ? compareSourceUrl : undefined} lineage={message.role === "assistant" ? lineage : undefined} />{index === messageActionPartIndex && userMessageMeta}</Fragment>)}
         {liveText && !visibleParts.some((part) => part.type === "text") && (
           <MarkdownText text={liveText} />
         )}
         {showChatStartup && <PendingResponseStatus label={chatProgress?.text || "Starting chat"} startedAt={message.created_at} />}
-        {message.role === "user" && message.status === "complete" && !editing && <div className="message-meta"><MessageTimestamp at={message.created_at} />{confirmingDelete ? <span className="delete-confirm"><span>Also deletes the answer and its media.</span><button className="danger" onClick={() => { setConfirmingDelete(false); onDeleteExchange?.(message.id); }}>Delete turn</button><button onClick={() => setConfirmingDelete(false)}>Keep</button></span> : <span className="message-actions">{onEdit && <button onClick={() => setEditing(true)} aria-label="Edit message" title="Edit"><Pencil size={14} /></button>}{copyableText && <CopyTextButton text={copyableText} label="Copy user message" buttonText="" />}{onDeleteExchange && <button aria-label="Delete this turn" title="Delete turn" onClick={() => setConfirmingDelete(true)}><Trash2 size={14} /></button>}</span>}</div>}
+        {messageActionPartIndex < 0 && userMessageMeta}
         {message.role === "assistant" && message.status === "cancelled" && !visibleParts.some((part) => part.type === "error") && (
           <div className="message-meta"><span>Generation cancelled</span></div>
         )}
@@ -830,7 +833,7 @@ function Composer({
   const [studioOpen, setStudioOpen] = useState(false);
   const [templateSettings, setTemplateSettings] = useState<{ name: string; settings: Record<string, unknown> } | null>(null);
   const [attachments, setAttachments] = useState<ComposerAttachment[]>([]);
-  const { uploading, uploadError, setUploadError, uploadFiles } = useComposerUploads(
+  const { uploading, uploadError, setUploadError, uploadFiles, uploadPastedImages } = useComposerUploads(
     (attachment) => setAttachments((current) => [...current, attachment]),
   );
   const [dropActive, setDropActive] = useState(false);
@@ -1044,7 +1047,7 @@ function Composer({
           </div>
         )}
         <div className="composer">
-          <MessageField field={textInput} value={text} onChange={setText} onSubmit={submit} onMention={mentions.add} />
+          <MessageField field={textInput} value={text} onChange={setText} onSubmit={submit} onMention={mentions.add} onPasteFiles={(files) => { void uploadPastedImages(files); }} />
           <div className="composer-tools">
             <div className="left-tools">
               <AttachControls disabled={uploading} onPickFile={() => fileInput.current?.click()} onAttach={(attachment) => setAttachments((current) => [...current, attachment])} />
@@ -1356,7 +1359,7 @@ function ChatView({
           const isPrimaryOutput = messagePlan?.summary_json.assistant_message_id === message.id;
           return (
             <Fragment key={message.id}>
-              {messagePlan && messagePlan.steps.length > 1 && isPrimaryOutput && (
+              {messagePlan && messagePlan.steps.length > 1 && isPrimaryOutput && messagePlan.steps.some((step) => step.status !== "complete") && (
                 <MediaOutputPlan
                   plan={messagePlan}
                   onCancelStep={onCancelStep}
@@ -2068,7 +2071,7 @@ function Sidebar({
     <aside className={`sidebar ${mobileOpen ? "mobile-open" : ""}`}>
       <div className="brand"><div className="brand-mark"><AtelierMark /></div><span>LM Atelier<small>Local creative studio</small></span><button className="icon-button mobile-menu" aria-label="Toggle navigation" aria-expanded={mobileOpen} onClick={() => setMobileOpen((open) => !open)}><Menu /></button></div>
       <button className="new-chat" onClick={() => { onNewChat(null); setMobileOpen(false); }}><Plus size={18} />New chat</button>
-      <nav className="primary-nav"><button className={view === "media" ? "active" : ""} aria-current={view === "media" ? "page" : undefined} onClick={() => { onView("media"); setMobileOpen(false); }}><ImageIcon />Media library</button><button className={view === "models" ? "active" : ""} aria-current={view === "models" ? "page" : undefined} onClick={() => { onView("models"); setMobileOpen(false); }}><Library />Model library</button><button className={view === "references" ? "active" : ""} aria-current={view === "references" ? "page" : undefined} onClick={() => { onView("references"); setMobileOpen(false); }}><Star />References</button><button className={view === "workflows" ? "active" : ""} aria-current={view === "workflows" ? "page" : undefined} onClick={() => { onView("workflows"); setMobileOpen(false); }}><WorkflowIcon />Workflows</button><button className={view === "studio" ? "active" : ""} aria-current={view === "studio" ? "page" : undefined} onClick={() => { onView("studio"); setMobileOpen(false); }}><Wand2 />Image Studio</button></nav>
+      <nav className="primary-nav"><button className={view === "media" ? "active" : ""} aria-current={view === "media" ? "page" : undefined} onClick={() => { onView("media"); setMobileOpen(false); }}><ImageIcon />Media library</button><button className={view === "models" ? "active" : ""} aria-current={view === "models" ? "page" : undefined} onClick={() => { onView("models"); setMobileOpen(false); }}><Library />Model library</button><button className={view === "references" ? "active" : ""} aria-current={view === "references" ? "page" : undefined} onClick={() => { onView("references"); setMobileOpen(false); }}><Star />References</button><button className={view === "workflows" ? "active" : ""} aria-current={view === "workflows" ? "page" : undefined} onClick={() => { onView("workflows"); setMobileOpen(false); }}><WorkflowIcon />Workflows</button><button className={view === "studio" ? "active" : ""} aria-current={view === "studio" ? "page" : undefined} onClick={() => { onView("studio"); setMobileOpen(false); }}><ImageStudioIcon />Image Studio</button></nav>
       <div className="workspace-search"><Search size={14} /><input aria-label="Search projects and chats" placeholder="Search workspace" value={search} onChange={(event) => setSearch(event.target.value)} /><button className={showArchived ? "active" : ""} aria-pressed={showArchived} onClick={() => setShowArchived((value) => !value)}>Archived</button></div>
       <div className="workspace-tree" role="region" aria-label="Projects and chats">
         <div className="sidebar-section">

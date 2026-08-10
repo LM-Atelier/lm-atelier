@@ -5,10 +5,10 @@ import { cleanup, fireEvent, render, screen } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { MessageField } from "./MessageField";
 
-function Harness({ onSubmit = vi.fn() }: { onSubmit?: () => void }) {
+function Harness({ onSubmit = vi.fn(), onPasteFiles }: { onSubmit?: () => void; onPasteFiles?: (files: File[]) => void }) {
   const field = useRef<HTMLTextAreaElement | null>(null);
   const [text, setText] = useState("");
-  return <MessageField field={field} value={text} onChange={setText} onSubmit={onSubmit} />;
+  return <MessageField field={field} value={text} onChange={setText} onSubmit={onSubmit} onPasteFiles={onPasteFiles} />;
 }
 
 /** jsdom lays nothing out, so scrollHeight is whatever we say it is. */
@@ -62,5 +62,16 @@ describe("MessageField", () => {
     // must not cost the caller its handle on the element.
     fireEvent.click(screen.getByRole("button", { name: "Focus" }));
     expect(document.activeElement).toBe(screen.getByLabelText("Message"));
+  });
+
+  it("passes clipboard files to its caller without intercepting ordinary text paste", () => {
+    const onPasteFiles = vi.fn();
+    render(<Harness onPasteFiles={onPasteFiles} />);
+    const field = screen.getByLabelText("Message");
+    expect(fireEvent.paste(field, { clipboardData: { files: [] } })).toBe(true);
+    expect(onPasteFiles).not.toHaveBeenCalled();
+    const image = new File(["pixels"], "clipboard.png", { type: "image/png" });
+    expect(fireEvent.paste(field, { clipboardData: { files: [image] } })).toBe(false);
+    expect(onPasteFiles).toHaveBeenCalledWith([image]);
   });
 });

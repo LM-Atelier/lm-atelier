@@ -1,6 +1,7 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
+import { useEffect } from "react";
 import { StudioView } from "./StudioView";
 import { api } from "./api";
 import { useStudioSession } from "./useStudioSession";
@@ -14,14 +15,37 @@ vi.mock("./api", () => ({
   },
 }));
 vi.mock("./useStudioSession", () => ({ useStudioSession: vi.fn() }));
+let workflowAvailabilityReason: string | null = null;
+vi.mock("./StudioWorkflowSelector", () => ({
+  StudioWorkflowSelector: ({
+    onAvailabilityChange,
+  }: {
+    onAvailabilityChange: (reason: string | null) => void;
+    onSelectionChange: () => void;
+  }) => {
+    useEffect(
+      () => onAvailabilityChange(workflowAvailabilityReason),
+      [onAvailabilityChange],
+    );
+    return <div>Workflow chooser</div>;
+  },
+}));
 // The canvas stack needs a real 2D context; none of it is under test here.
-vi.mock("./StudioCanvas", () => ({ StudioCanvas: () => <div /> }));
-vi.mock("./messageMedia", () => ({ artifactSource: () => "blob:picture" }));
+vi.mock("./StudioCanvas", () => ({ StudioCanvas: () => <div data-testid="studio-canvas" /> }));
+vi.mock("./messageMedia", () => ({
+  artifactSource: (artifactId: string | null) =>
+    artifactId ? `/api/artifacts/${encodeURIComponent(artifactId)}/content` : null,
+}));
 
-function renderStudio() {
+function renderStudio(
+  previewArtifactId: string | null = null,
+  generationIdentity: ReturnType<typeof useStudioSession>["steps"][number]["generationIdentity"] = null,
+) {
   vi.mocked(useStudioSession).mockReturnValue({
-    steps: [{ artifactId: "art-1", instruction: null }],
-    busy: false,
+    steps: [{ artifactId: "art-1", instruction: null, generationIdentity }],
+    previewArtifactId,
+    sessionId: "chat-studio",
+    busy: Boolean(previewArtifactId),
     error: null,
     apply: vi.fn(),
   } as unknown as ReturnType<typeof useStudioSession>);
@@ -39,17 +63,117 @@ function renderStudio() {
 }
 
 afterEach(() => {
+  workflowAvailabilityReason = null;
   cleanup();
   vi.clearAllMocks();
 });
 
 describe("applying an edit", () => {
+  it("shows the captured model and workflow for the selected result", async () => {
+    renderStudio(null, {
+      model_profile_name: "Krea 2 edit",
+      workflow_family_name: "Krea 2 edits",
+      workflow_definition_name: "Krea 2 inpaint",
+      workflow_version: 7,
+    });
+
+    const details = await screen.findByLabelText("Generation details");
+    expect(details).toHaveTextContent("ModelKrea 2 edit");
+    expect(details).toHaveTextContent("WorkflowKrea 2 edits · Krea 2 inpaint · v7");
+  });
+
+  it("keeps generation details when a generated edit is reopened as the source", async () => {
+    vi.mocked(api.artifact).mockResolvedValueOnce({
+      id: "art-1",
+      favorite: false,
+      generation_identity: {
+        model_profile_name: "Reopened Krea edit",
+        workflow_family_name: "Krea 2 edits",
+        workflow_definition_name: "Krea 2 inpaint",
+        workflow_version: 8,
+      },
+    } as never);
+    renderStudio();
+
+    const details = await screen.findByLabelText("Generation details");
+    expect(details).toHaveTextContent("ModelReopened Krea edit");
+    expect(details).toHaveTextContent("v8");
+  });
+
+  it("shows a pending generation preview without making it the current result", async () => {
+    renderStudio("sha256:preview");
+
+    const preview = await screen.findByRole("img", { name: "Generation preview" });
+    expect(preview).toHaveAttribute("src", "/api/artifacts/sha256%3Apreview/content");
+    expect(screen.getByRole("status")).toHaveTextContent("Generation preview");
+    expect(screen.queryByRole("button", { name: /favorite/i })).toBeNull();
+    expect(screen.queryByRole("link", { name: /export/i })).toBeNull();
+    expect(screen.queryByTestId("studio-canvas")).toBeNull();
+    expect(screen.getByRole("button", { name: /apply/i })).toBeDisabled();
+  });
+
+  it("says when a pinned recipe overrides the displayed workflow choice", async () => {
+    workflowAvailabilityReason = "Loading the current workflow choice.";
+    vi.mocked(api.editTemplates).mockResolvedValue([{
+      id: "recipe-1",
+      name: "Pinned portrait edit",
+      description: "",
+      instruction: "make it warmer",
+      operation: "image_to_image",
+      settings_json: {},
+      workflow_revision_id: "revision-pinned",
+      model_profile_id: null,
+      mask_mode: "none",
+      trigger_words_json: [],
+      content_rating: "general",
+      builtin: false,
+      enabled: true,
+    }]);
+    renderStudio();
+
+    fireEvent.click(await screen.findByRole("button", { name: "Pinned portrait edit" }));
+
+    expect(screen.getByRole("status")).toHaveTextContent(
+      "Pinned portrait edit supplies the workflow for this edit.",
+    );
+    expect(screen.getByRole("button", { name: "Apply edit" })).toBeEnabled();
+
+    fireEvent.change(screen.getByRole("textbox"), { target: { value: "make it cooler" } });
+    expect(screen.queryByText(/supplies the workflow for this edit/i)).toBeNull();
+  });
+
+  it("does not let an unpinned recipe bypass an unavailable workflow choice", async () => {
+    workflowAvailabilityReason = "Loading the current workflow choice.";
+    vi.mocked(api.editTemplates).mockResolvedValue([{
+      id: "recipe-1",
+      name: "Unpinned portrait edit",
+      description: "",
+      instruction: "make it warmer",
+      operation: "image_to_image",
+      settings_json: {},
+      workflow_revision_id: null,
+      model_profile_id: null,
+      mask_mode: "none",
+      trigger_words_json: [],
+      content_rating: "general",
+      builtin: false,
+      enabled: true,
+    }]);
+    renderStudio();
+
+    fireEvent.click(await screen.findByRole("button", { name: "Unpinned portrait edit" }));
+
+    expect(screen.queryByText(/supplies the workflow for this edit/i)).toBeNull();
+    expect(screen.getByRole("button", { name: "Apply edit" })).toBeDisabled();
+  });
+
   it("keeps the instruction when the turn is refused", async () => {
     // The words were cleared at dispatch, so a refusal erased exactly what
     // would have been retyped to try again.
     const apply = vi.fn();
     vi.mocked(useStudioSession).mockReturnValue({
       steps: [{ artifactId: "art-1", instruction: null }],
+      sessionId: "chat-studio",
       busy: false,
       error: null,
       apply,
@@ -132,6 +256,7 @@ describe("what the studio believes it can do", () => {
     // back was told by the same sentence that it still was not installed.
     vi.mocked(useStudioSession).mockReturnValue({
       steps: [{ artifactId: "art-1", instruction: null }],
+      sessionId: "chat-studio",
       busy: false,
       error: null,
       apply: vi.fn(),

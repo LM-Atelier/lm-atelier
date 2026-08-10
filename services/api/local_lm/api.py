@@ -69,6 +69,7 @@ from .credentials import (
     CredentialVaultUnavailable,
     credential_provider,
 )
+from .custom_nodes import reviewed_custom_node_types
 from .db import SessionLocal, get_session
 from .domain import (
     ArtifactKind,
@@ -192,7 +193,7 @@ from .reference_library import (
     set_details,
     set_favorite,
 )
-from .references import ReferenceError
+from .references import ReferenceError, ReferenceNotFoundError
 from .routing import RouteConfirmationRequired
 from .runtime_config import persist_runtime_values
 from .schemas import (
@@ -235,6 +236,7 @@ from .schemas import (
     EditTemplateOut,
     EngineCapabilities,
     ExchangeDeletionOut,
+    GenerationIdentityOut,
     HealthOut,
     JobOut,
     MessageOut,
@@ -2035,6 +2037,8 @@ async def _accept_turn(
         raise api_error(409, "engine-not-configured", str(exc)) from exc
     except EngineSchemaUnavailableError as exc:
         raise api_error(503, "engine-schema-unavailable", str(exc)) from exc
+    except ReferenceNotFoundError as exc:
+        raise api_error(404, "reference-not-found", str(exc)) from exc
     except ValueError as exc:
         raise api_error(422, "turn-invalid", str(exc)) from exc
 
@@ -2757,6 +2761,59 @@ async def upload_artifact(
     return result
 
 
+def _captured_generation_name(value: object) -> str | None:
+    if not isinstance(value, str):
+        return None
+    name = value.strip()
+    return name if name and len(name) <= 500 else None
+
+
+def _generation_identity(provenance: object) -> GenerationIdentityOut | None:
+    if not isinstance(provenance, dict):
+        return None
+    model = provenance.get("model")
+    workflow = provenance.get("workflow")
+    model_name = (
+        _captured_generation_name(model.get("profile_name")) if isinstance(model, dict) else None
+    )
+    family_name = (
+        _captured_generation_name(workflow.get("family_name"))
+        if isinstance(workflow, dict)
+        else None
+    )
+    definition_name = (
+        _captured_generation_name(workflow.get("definition_name"))
+        if isinstance(workflow, dict)
+        else None
+    )
+    raw_version = workflow.get("version") if isinstance(workflow, dict) else None
+    version = (
+        raw_version
+        if isinstance(raw_version, int)
+        and not isinstance(raw_version, bool)
+        and 0 < raw_version <= 2_147_483_647
+        and bool(family_name or definition_name)
+        else None
+    )
+    if not any((model_name, family_name, definition_name)):
+        return None
+    return GenerationIdentityOut(
+        model_profile_name=model_name,
+        workflow_family_name=family_name,
+        workflow_definition_name=definition_name,
+        workflow_version=version,
+    )
+
+
+def _artifact_generation_identity(
+    session: Session,
+    artifact: Artifact,
+) -> GenerationIdentityOut | None:
+    run_id = artifact.metadata_json.get("run_id")
+    run = session.get(Run, run_id) if isinstance(run_id, str) else None
+    return _generation_identity(run.provenance_json) if run is not None else None
+
+
 @router.get("/artifacts", response_model=list[ArtifactLibraryItem])
 async def list_artifacts(
     session: ConversationSessionDep,
@@ -2790,6 +2847,18 @@ async def list_artifacts(
             )
         )
     artifacts = session.scalars(statement.order_by(Artifact.created_at.desc())).all()
+    run_ids = {
+        run_id
+        for artifact in artifacts
+        if isinstance((run_id := artifact.metadata_json.get("run_id")), str)
+    }
+    runs_by_id: dict[str, Run] = {}
+    ordered_run_ids = sorted(run_ids)
+    for offset in range(0, len(ordered_run_ids), 400):
+        batch = ordered_run_ids[offset : offset + 400]
+        runs_by_id.update(
+            (run.id, run) for run in session.scalars(select(Run).where(Run.id.in_(batch))).all()
+        )
     results: list[ArtifactLibraryItem] = []
     for artifact in artifacts:
         artifact_references = references.get(artifact.id, [])
@@ -2803,6 +2872,11 @@ async def list_artifacts(
         result.reference_count = len(artifact_references)
         result.chat_ids = chat_ids
         result.project_ids = project_ids
+        run_id = artifact.metadata_json.get("run_id")
+        run = runs_by_id.get(run_id) if isinstance(run_id, str) else None
+        result.generation_identity = (
+            _generation_identity(run.provenance_json) if run is not None else None
+        )
         result.url = f"/api/artifacts/{artifact.id}/content"
         results.append(result)
     return results
@@ -2821,6 +2895,7 @@ async def update_artifact(
     session.commit()
     session.refresh(artifact)
     result = ArtifactOut.model_validate(artifact)
+    result.generation_identity = _artifact_generation_identity(session, artifact)
     result.url = f"/api/artifacts/{artifact.id}/content"
     return result
 
@@ -2925,6 +3000,7 @@ async def get_artifact(
     if not artifact:
         raise api_error(404, "artifact-not-found", "artifact not found")
     result = ArtifactOut.model_validate(artifact)
+    result.generation_identity = _artifact_generation_identity(session, artifact)
     result.url = f"/api/artifacts/{artifact.id}/content"
     return result
 
@@ -6071,14 +6147,17 @@ async def trust_custom_node(
     install = session.get(CustomNodeInstall, node_id)
     if not install:
         raise api_error(404, "custom-node-install-not-found", "custom node install not found")
+    reviewed_node_types: tuple[str, ...] | None = None
     if payload.trusted:
         try:
             await _services(request).custom_nodes.verify(install)
+            reviewed_node_types = reviewed_custom_node_types({"node_types": payload.node_types})
         except (OSError, RuntimeError, ValueError, TimeoutError) as exc:
             raise api_error(422, "custom-node-trust-failed", str(exc)) from exc
     install.trusted = payload.trusted
     install.security_json = {
         **install.security_json,
+        **({"node_types": list(reviewed_node_types)} if reviewed_node_types is not None else {}),
         "reviewed_at": utcnow().isoformat(),
         "trusted_by_local_user": payload.trusted,
     }
@@ -7894,7 +7973,12 @@ def _installed_package_versions(session: Session) -> dict[str, set[str]]:
     """
 
     versions = installed_comfy_registry_versions(session)
-    for install in session.scalars(select(CustomNodeInstall)).all():
+    for install in session.scalars(
+        select(CustomNodeInstall).where(
+            CustomNodeInstall.active.is_(True),
+            CustomNodeInstall.trusted.is_(True),
+        )
+    ).all():
         versions.setdefault(install.name, set()).add(install.revision)
     return versions
 
@@ -7920,7 +8004,48 @@ async def _verified_launchable_registry_packages(
     }
 
 
-def _launchable_registry_node_types(
+async def _verified_launchable_manual_packages(
+    services: Services,
+) -> dict[tuple[str, str], frozenset[str]]:
+    """Reviewed package-bound nodes an unscoped manual launch can load."""
+
+    resolver = getattr(services.processes, "trusted_comfy_custom_node_package_node_types", None)
+    if not callable(resolver):
+        return {}
+    try:
+        packages = await resolver()
+    except Exception:  # noqa: BLE001 - analysis must fail closed, not fail outright
+        logger.warning(
+            "Installed manual custom-node packages could not be verified for workflow package use."
+        )
+        return {}
+    return {
+        (str(key[0]), str(key[1])): frozenset(str(node_type) for node_type in node_types)
+        for key, node_types in packages.items()
+    }
+
+
+async def _verified_launchable_packages(
+    services: Services,
+) -> dict[tuple[str, str], frozenset[str]]:
+    registry = await _verified_launchable_registry_packages(services)
+    manual = await _verified_launchable_manual_packages(services)
+    combined = dict(registry)
+    for key, node_types in manual.items():
+        previous = combined.get(key)
+        if previous is not None and previous != node_types:
+            combined.pop(key)
+            logger.warning(
+                "Installed custom-node package identity %s %s has conflicting ownership.",
+                key[0],
+                key[1],
+            )
+            continue
+        combined[key] = node_types
+    return combined
+
+
+def _launchable_package_node_types(
     analysis: ComfyWorkflowPackageAnalysis,
     packages: Mapping[tuple[str, str], frozenset[str]],
 ) -> set[str]:
@@ -7936,6 +8061,21 @@ def _launchable_registry_node_types(
         ):
             launchable.update(required)
     return launchable
+
+
+def _verified_package_versions(
+    analysis: ComfyWorkflowPackageAnalysis,
+    packages: Mapping[tuple[str, str], frozenset[str]],
+) -> dict[str, set[str]]:
+    """Only versions whose reviewed owner covers every node the graph attributes."""
+
+    verified: dict[str, set[str]] = {}
+    for requirement in analysis.custom_packages:
+        required = set(requirement.node_types)
+        for version in requirement.versions:
+            if required <= packages.get((requirement.package_id, version), frozenset()):
+                verified.setdefault(requirement.package_id, set()).add(version)
+    return verified
 
 
 _REGISTRY_PREPARE_TASKS: dict[str, asyncio.Task[None]] = {}
@@ -8960,19 +9100,20 @@ async def import_workflow_package(
         )
     except WorkflowPackageError as exc:
         raise api_error(422, exc.code, str(exc)) from exc
-    if not analysis.ready:
-        launchable_packages = await _verified_launchable_registry_packages(services)
-        launchable_node_types = _launchable_registry_node_types(analysis, launchable_packages)
-        if launchable_node_types - available_node_types:
-            try:
-                analysis = analyze_comfyui_workflow_package(
-                    payload.ui_graph,
-                    available_node_types=available_node_types | launchable_node_types,
-                    available_asset_filenames=asset_filenames,
-                    installed_package_versions=package_versions,
-                )
-            except WorkflowPackageError as exc:
-                raise api_error(422, exc.code, str(exc)) from exc
+    verified_package_versions = package_versions
+    if analysis.custom_packages:
+        launchable_packages = await _verified_launchable_packages(services)
+        launchable_node_types = _launchable_package_node_types(analysis, launchable_packages)
+        verified_package_versions = _verified_package_versions(analysis, launchable_packages)
+        try:
+            analysis = analyze_comfyui_workflow_package(
+                payload.ui_graph,
+                available_node_types=available_node_types | launchable_node_types,
+                available_asset_filenames=asset_filenames,
+                installed_package_versions=verified_package_versions,
+            )
+        except WorkflowPackageError as exc:
+            raise api_error(422, exc.code, str(exc)) from exc
     if not analysis.ready:
         raise api_error(
             422,
@@ -8999,7 +9140,7 @@ async def import_workflow_package(
                 payload.ui_graph,
                 available_node_types=available_node_types,
                 available_asset_filenames=asset_filenames,
-                installed_package_versions=package_versions,
+                installed_package_versions=verified_package_versions,
             )
         except WorkflowPackageError as exc:
             raise api_error(422, exc.code, str(exc)) from exc
@@ -9104,19 +9245,20 @@ async def analyze_workflow_package(
         )
     except WorkflowPackageError as exc:
         raise api_error(422, exc.code, str(exc)) from exc
-    if not analysis.ready:
-        launchable_packages = await _verified_launchable_registry_packages(services)
-        launchable_node_types = _launchable_registry_node_types(analysis, launchable_packages)
-        if launchable_node_types - available_node_types:
-            try:
-                analysis = analyze_comfyui_workflow_package(
-                    payload.ui_graph,
-                    available_node_types=available_node_types | launchable_node_types,
-                    available_asset_filenames=asset_filenames,
-                    installed_package_versions=package_versions,
-                )
-            except WorkflowPackageError as exc:
-                raise api_error(422, exc.code, str(exc)) from exc
+    verified_package_versions = package_versions
+    if analysis.custom_packages:
+        launchable_packages = await _verified_launchable_packages(services)
+        launchable_node_types = _launchable_package_node_types(analysis, launchable_packages)
+        verified_package_versions = _verified_package_versions(analysis, launchable_packages)
+        try:
+            analysis = analyze_comfyui_workflow_package(
+                payload.ui_graph,
+                available_node_types=available_node_types | launchable_node_types,
+                available_asset_filenames=asset_filenames,
+                installed_package_versions=verified_package_versions,
+            )
+        except WorkflowPackageError as exc:
+            raise api_error(422, exc.code, str(exc)) from exc
     # Authors often record where a model came from. A filename search cannot
     # find a file inside a repository, so those links are frequently the only
     # way an asset is findable at all - read from the graph, validated here,

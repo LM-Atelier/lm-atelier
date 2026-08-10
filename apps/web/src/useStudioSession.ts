@@ -1,7 +1,8 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useEffect, useState } from "react";
 import { api } from "./api";
-import type { ChatDetail, Message } from "./types";
+import { generationIdentityFromProvenance } from "./generationIdentity";
+import type { ChatDetail, GenerationIdentity, Message } from "./types";
 
 const STUDIO_SESSION_KEY = "local-lm-studio-session";
 
@@ -36,6 +37,7 @@ export type StudioStep = {
   /** The instruction that produced this result; empty for the source. */
   instruction: string;
   isSource: boolean;
+  generationIdentity: GenerationIdentity | null;
 };
 
 /** A session is only ever usable for the picture it was opened for.
@@ -139,6 +141,7 @@ export function useStudioSession(sourceArtifactId: string | null, sourceChatId: 
     sessionId,
     session: session.data ?? null,
     steps: session.data ? studioSteps(session.data, sourceArtifactId) : [],
+    previewArtifactId: session.data ? studioPreviewArtifactId(session.data) : null,
     busy: open.isPending || apply.isPending || hasPendingWork(session.data),
     error: open.error ?? session.error ?? apply.error,
     /** `onAccepted` runs only once the turn has been taken.
@@ -178,6 +181,26 @@ function hasPendingWork(session?: ChatDetail | null): boolean {
   return Boolean(session?.messages.some((message) => message.status === "pending"));
 }
 
+/** The newest provisional image from work that is still running.
+ *
+ * A preview is deliberately not a StudioStep: it is temporary server state,
+ * not an edit result that can enter history or become the input to another
+ * edit. */
+export function studioPreviewArtifactId(session: ChatDetail): string | null {
+  for (let index = session.messages.length - 1; index >= 0; index -= 1) {
+    const message = session.messages[index];
+    if (message.role !== "assistant" || message.status !== "pending") continue;
+    const preview = message.parts.find(
+      (part) =>
+        part.type === "image"
+        && Boolean(part.artifact_id)
+        && part.metadata_json.preview === true,
+    );
+    if (preview?.artifact_id) return preview.artifact_id;
+  }
+  return null;
+}
+
 /** The filmstrip: the source, then one entry per generated result. */
 export function studioSteps(
   session: ChatDetail,
@@ -190,6 +213,7 @@ export function studioSteps(
       artifactId: sourceArtifactId,
       instruction: "",
       isSource: true,
+      generationIdentity: null,
     });
   }
   for (const message of session.messages) {
@@ -198,11 +222,13 @@ export function studioSteps(
       (part) => part.type === "image" && part.artifact_id && !part.metadata_json.preview,
     );
     if (!image?.artifact_id) continue;
+    const metadata = message.parts.find((part) => part.type === "generation_metadata");
     steps.push({
       messageId: message.id,
       artifactId: image.artifact_id,
       instruction: instructionFor(session.messages, message),
       isSource: false,
+      generationIdentity: generationIdentityFromProvenance(metadata?.metadata_json.provenance),
     });
   }
   return steps;

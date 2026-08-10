@@ -1,10 +1,10 @@
 from __future__ import annotations
 
-from datetime import datetime
+from datetime import UTC, datetime
 from enum import StrEnum
 from typing import Annotated, Any, Literal
 
-from pydantic import BaseModel, ConfigDict, Field, StringConstraints
+from pydantic import BaseModel, ConfigDict, Field, StringConstraints, field_serializer
 
 from .domain import Operation, RoutingMode
 from .references import MAX_REFERENCES_PER_TURN, MAX_ROLE, MentionSource
@@ -116,6 +116,13 @@ class ChatUpdate(ApiModel):
     web_settings_json: WebSettings | None = None
 
 
+class GenerationIdentityOut(ApiModel):
+    model_profile_name: str | None = None
+    workflow_family_name: str | None = None
+    workflow_definition_name: str | None = None
+    workflow_version: int | None = None
+
+
 class ArtifactOut(ApiModel):
     id: str
     sha256: str
@@ -127,6 +134,7 @@ class ArtifactOut(ApiModel):
     favorite: bool = False
     created_at: datetime
     url: str | None = None
+    generation_identity: GenerationIdentityOut | None = None
 
 
 class ArtifactUpdate(ApiModel):
@@ -235,6 +243,12 @@ class MessageOut(ApiModel):
     feedback: Literal["up", "down"] | None = None
     created_at: datetime
     updated_at: datetime
+
+    @field_serializer("created_at", "updated_at", when_used="json")
+    def serialize_timestamp_as_utc(self, value: datetime) -> str:
+        """Keep SQLite-naive UTC instants explicit at the browser boundary."""
+        normalized = value.replace(tzinfo=UTC) if value.tzinfo is None else value.astimezone(UTC)
+        return normalized.isoformat().replace("+00:00", "Z")
 
 
 class ResponseFeedbackUpdate(ApiModel):
@@ -1454,6 +1468,7 @@ class CustomNodeUpdateRequest(ApiModel):
 
 class CustomNodeTrustRequest(ApiModel):
     trusted: bool
+    node_types: list[str] = Field(default_factory=list, max_length=4_096)
 
 
 class CustomNodeOut(ApiModel):

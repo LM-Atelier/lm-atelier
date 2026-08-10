@@ -272,6 +272,15 @@ test("persists a streamed text and contextual image golden path", async ({
       (element) => element.scrollWidth <= element.clientWidth,
     );
     expect(mainFitsViewport, "the mobile chat header must not overflow the main viewport").toBe(true);
+    const gradient = await mobilePage.locator(".composer-wrap").evaluate((element) => {
+      const backdrop = getComputedStyle(element, "::before");
+      const messages = document.querySelector<HTMLElement>(".messages")!;
+      return { wrap: getComputedStyle(element).backgroundImage, backdrop: backdrop.backgroundImage, right: Number.parseFloat(backdrop.right), scrollbar: messages.offsetWidth - messages.clientWidth };
+    });
+    expect(gradient.wrap).toBe("none");
+    expect(gradient.backdrop).toContain("linear-gradient");
+    expect(gradient.right).toBeGreaterThan(0);
+    expect(gradient.right).toBeGreaterThanOrEqual(gradient.scrollbar);
 
     const menu = mobilePage.getByRole("button", { name: "Toggle navigation" });
     await menu.click();
