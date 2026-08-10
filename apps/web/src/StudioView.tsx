@@ -364,6 +364,11 @@ export function StudioView({
               setInstruction(chosen.instruction);
             }}
           />
+          {recipe?.workflow_revision_id && (
+            <small role="status">
+              {recipe.name} supplies the workflow for this edit.
+            </small>
+          )}
           {unavailable && (
             // Beside the button that would fail, and named by the tools that
             // cannot run, so the sentence arrives before the drawing does.
@@ -379,7 +384,7 @@ export function StudioView({
               busy ||
               !current ||
               Boolean(unavailable) ||
-              Boolean(workflowUnavailable && !recipe)
+              Boolean(workflowUnavailable && !recipe?.workflow_revision_id)
             }
             onClick={() => {
               if (!current) return;
