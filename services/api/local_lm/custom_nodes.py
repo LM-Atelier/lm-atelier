@@ -154,6 +154,28 @@ class CustomNodeManager:
         if revision.lower() != install.revision.lower() or tree_hash != install.tree_hash:
             raise ValueError("custom node files no longer match the recorded pinned revision")
 
+    def declares_python_requirements(self, install: CustomNodeInstall) -> bool:
+        """Whether this package ships a requirements file nothing installs.
+
+        Cloning a pinned repository does not install what it imports, so a
+        package can be present, trusted and unable to load. The runtime reports
+        that as an absent node type, which reads as though the package were
+        never installed - and the person who just installed it has no reason to
+        believe that.
+
+        Read from disk rather than from the recorded inspection, because the
+        packages this matters for were installed before anything asked.
+        """
+
+        try:
+            destination = self._destination(install.installed_path, require_exists=True)
+        except (ValueError, FileNotFoundError):
+            return False
+        return any(
+            (destination / name).is_file()
+            for name in ("requirements.txt", "requirements-comfyui.txt")
+        )
+
     def remove(self, install: CustomNodeInstall) -> None:
         destination = self._destination(install.installed_path)
         shutil.rmtree(destination, ignore_errors=True)

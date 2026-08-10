@@ -8069,6 +8069,44 @@ async def _packages_awaiting_review(services: Services) -> frozenset[tuple[str, 
     return frozenset((str(name), str(revision)) for name, revision in packages)
 
 
+def _packages_that_did_not_load(
+    services: Services, available_node_types: set[str]
+) -> list[tuple[str, bool]]:
+    """Trusted packages whose reviewed nodes are absent from a live runtime.
+
+    The runtime is the authority on what loaded. A package can be installed,
+    pinned, trusted and still fail to import - most often because it declares
+    Python requirements that cloning a repository does not install - and the
+    only symptom is that its node types never appear. Reported as "a node is
+    missing", that sends somebody to install what is already on disk.
+
+    Returns each package name with whether it ships a requirements file, so the
+    refusal can say which of the two situations this is.
+    """
+
+    from .custom_nodes import CustomNodeManager, reviewed_custom_node_types
+    from .db import SessionLocal
+    from .models import CustomNodeInstall
+
+    failed: list[tuple[str, bool]] = []
+    with SessionLocal() as session:
+        installs = list(
+            session.scalars(
+                select(CustomNodeInstall).where(
+                    CustomNodeInstall.active.is_(True),
+                    CustomNodeInstall.trusted.is_(True),
+                )
+            ).all()
+        )
+        manager = CustomNodeManager(services.settings)
+        for install in installs:
+            reviewed = set(reviewed_custom_node_types(install.security_json))
+            if not reviewed or reviewed <= available_node_types:
+                continue
+            failed.append((install.name, manager.declares_python_requirements(install)))
+    return failed
+
+
 def _launchable_package_node_types(
     analysis: ComfyWorkflowPackageAnalysis,
     packages: Mapping[tuple[str, str], frozenset[str]],
@@ -9170,6 +9208,30 @@ async def import_workflow_package(
         except WorkflowPackageError as exc:
             raise api_error(422, exc.code, str(exc)) from exc
         if not analysis.ready:
+            # Name the package rather than the symptom. "A node is missing" is
+            # true and useless: the node is missing because something that owns
+            # it did not load, and that has a different fix from installing
+            # anything at all.
+            unloaded = _packages_that_did_not_load(services, available_node_types)
+            if unloaded:
+                needing = [name for name, requires in unloaded if requires]
+                detail = ", ".join(name for name, _ in unloaded)
+                if needing:
+                    raise api_error(
+                        422,
+                        "custom-node-package-requirements-missing",
+                        f"{detail} is installed and trusted but did not load. It declares "
+                        "Python requirements, and installing a pinned repository does not "
+                        "install what it imports, so its nodes never register with the "
+                        "runtime.",
+                    )
+                raise api_error(
+                    422,
+                    "custom-node-package-did-not-load",
+                    f"{detail} is installed and trusted but did not load, so the nodes it "
+                    "provides are unavailable. The media worker log records why the import "
+                    "failed.",
+                )
             raise api_error(
                 422,
                 "package-not-resolved",

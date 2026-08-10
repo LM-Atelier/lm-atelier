@@ -5,6 +5,7 @@ import { AccessibleDialog } from "./AccessibleDialog";
 import { api } from "./api";
 import { preparationErrorDescription } from "./registryPreparationErrors";
 import { WorkflowAssetInstaller } from "./WorkflowAssetInstaller";
+import { ErrorCallout } from "./ErrorCallout";
 import type { WorkflowPackageAnalysis } from "./types";
 
 const ISSUE_DESCRIPTIONS: Record<string, string> = {
@@ -272,9 +273,13 @@ export function WorkflowPackageReview({
         </section>
       )}
       {prepareError && (
-        <p role="alert" className="package-review-note">
-          {prepareError.code ? preparationErrorDescription(prepareError.code) : prepareError.message}
-        </p>
+        <ErrorCallout
+          message={
+            prepareError.code
+              ? preparationErrorDescription(prepareError.code)
+              : prepareError.message
+          }
+        />
       )}
       {analysis.ready && uiGraph && onImported && (
         <div className="package-import-form">
@@ -296,7 +301,7 @@ export function WorkflowPackageReview({
             </select>
           </label>
           {importWorkflow.error && (
-            <p role="alert" className="package-review-note">{importWorkflow.error.message}</p>
+            <ErrorCallout message={importWorkflow.error.message} />
           )}
         </div>
       )}

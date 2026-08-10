@@ -258,4 +258,19 @@ describe("WorkflowPackageReview runtime inventory", () => {
 
     expect(screen.queryByText(/review it again to confirm/i)).toBeNull();
   });
+  it("presents a refusal as an error rather than as another note", async () => {
+    // Both refusals rendered with the same muted class as ordinary explanatory
+    // text, so a blocking failure read as a caption.
+    vi.mocked(api.ensureWorkflowPackageDraft).mockRejectedValue(
+      Object.assign(new Error("comfyui-videohelpersuite did not load."), { code: "x" }),
+    );
+    renderReview(analysis({ ready: true, dependencies_resolved: true }), vi.fn());
+
+    fireEvent.click(screen.getByRole("button", { name: /Import workflow/i }));
+
+    const alert = await screen.findByRole("alert");
+    expect(alert.className).toContain("callout");
+    expect(alert.className).toContain("error");
+    expect(alert.className).not.toContain("package-review-note");
+  });
 });
