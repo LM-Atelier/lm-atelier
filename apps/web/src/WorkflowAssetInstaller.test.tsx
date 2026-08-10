@@ -173,6 +173,24 @@ describe("workflow asset installer", () => {
     expect(screen.getByRole("button", { name: /Review 0 selected/ })).toBeDisabled();
   });
 
+  it("never claims a workflow asset is auxiliary as well", async () => {
+    // A LoRA a workflow names is owned by that workflow. Asking for both
+    // ownerships at once is refused as `conflicting_asset_ownership`, and
+    // because the auxiliary kind was only ever set for LoRAs, every other kind
+    // installed cleanly and only LoRAs failed - which is exactly how this
+    // reached a user: five of seven files installed, the two LoRAs would not.
+    renderInstaller();
+
+    fireEvent.click(screen.getByRole("button", { name: /Search/ }));
+    fireEvent.click(await screen.findByRole("button", { name: "Detail slider" }));
+
+    await waitFor(() => expect(api.catalogPreflight).toHaveBeenCalled());
+    const auxiliaryKind = vi.mocked(api.catalogPreflight).mock.calls[0][5];
+    const workflowReferenceKind = vi.mocked(api.catalogPreflight).mock.calls[0][8];
+    expect(auxiliaryKind).toBeNull();
+    expect(workflowReferenceKind).toBe("lora");
+  });
+
   it("says why a source that does not hold the file produced nothing", async () => {
     // The case that made a recorded source look like a dead button: the
     // preflight succeeds, raises no error, and simply names no file.

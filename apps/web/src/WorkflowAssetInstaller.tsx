@@ -246,7 +246,10 @@ function AssetRow({
         // repository's own bundle be ranked instead, which is how one text
         // encoder turned into a four-file, 19GB install.
         [asset.filename],
-        asset.kind === "lora" ? "lora" : null,
+        // Never an auxiliary kind here. Everything this component installs is
+        // owned by the workflow that named it, and asking for both ownerships
+        // at once is a contradiction the planner refuses outright.
+        null,
         null,
         model.provider,
         asset.kind,
@@ -291,7 +294,8 @@ function AssetRow({
         // request that names a file both ways, and an exact id is the answer
         // to a filename that could not settle the choice.
         fileIds.length > 0 ? [] : [candidate.filename || asset.filename],
-        asset.kind === "lora" ? "lora" : null,
+        // Workflow-owned, never auxiliary - see the note on the search path.
+        null,
         null,
         candidate.provider,
         asset.kind,
