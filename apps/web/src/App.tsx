@@ -1359,7 +1359,7 @@ function ChatView({
           const isPrimaryOutput = messagePlan?.summary_json.assistant_message_id === message.id;
           return (
             <Fragment key={message.id}>
-              {messagePlan && messagePlan.steps.length > 1 && isPrimaryOutput && (
+              {messagePlan && messagePlan.steps.length > 1 && isPrimaryOutput && messagePlan.steps.some((step) => step.status !== "complete") && (
                 <MediaOutputPlan
                   plan={messagePlan}
                   onCancelStep={onCancelStep}

@@ -5012,6 +5012,8 @@ describe("App", () => {
     fireEvent.click(screen.getByText("2-step plan"));
     expect(screen.getByText("Step 1 · Text")).toBeInTheDocument();
     expect(screen.getByText("Step 2 · Image")).toBeInTheDocument();
+    client.setQueryData(["work-plans", chat.id], [{ ...plan, status: "complete", steps: plan.steps.map((item) => ({ ...item, status: "complete", error: null })) }]);
+    await waitFor(() => expect(screen.queryByText("2-step plan")).not.toBeInTheDocument());
   });
 
   it("keeps a deferred turn and its pending state on the originating chat", async () => {
