@@ -86,7 +86,7 @@ describe("applying an edit", () => {
     expect(screen.getByRole("status")).toHaveTextContent(
       "Pinned portrait edit supplies the workflow for this edit.",
     );
-    expect(screen.getByRole("button", { name: "Apply" })).toBeEnabled();
+    expect(screen.getByRole("button", { name: "Apply edit" })).toBeEnabled();
 
     fireEvent.change(screen.getByRole("textbox"), { target: { value: "make it cooler" } });
     expect(screen.queryByText(/supplies the workflow for this edit/i)).toBeNull();
@@ -114,7 +114,7 @@ describe("applying an edit", () => {
     fireEvent.click(await screen.findByRole("button", { name: "Unpinned portrait edit" }));
 
     expect(screen.queryByText(/supplies the workflow for this edit/i)).toBeNull();
-    expect(screen.getByRole("button", { name: "Apply" })).toBeDisabled();
+    expect(screen.getByRole("button", { name: "Apply edit" })).toBeDisabled();
   });
 
   it("keeps the instruction when the turn is refused", async () => {
