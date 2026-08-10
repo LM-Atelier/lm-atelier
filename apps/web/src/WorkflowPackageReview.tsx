@@ -29,6 +29,11 @@ function issueDescription(code: string): string {
   return ISSUE_DESCRIPTIONS[code] ?? code.replaceAll("_", " ");
 }
 
+const INVENTORY_DEPENDENT_ISSUES = new Set([
+  "unidentified_custom_node_package",
+  "unresolved_custom_node_package",
+]);
+
 /** Review a raw ComfyUI package before anything is imported or trusted.
  *
  * Everything shown comes from the analyzer report; the only gate this surface
@@ -50,6 +55,9 @@ export function WorkflowPackageReview({
   onClose: () => void;
 }) {
   const missingKnown = analysis.node_inventory_available;
+  const visibleIssues = missingKnown
+    ? analysis.issues
+    : analysis.issues.filter((issue) => !INVENTORY_DEPENDENT_ISSUES.has(issue.code));
   const [queuedPackages, setQueuedPackages] = useState<string[]>([]);
   const [importName, setImportName] = useState(fileName.replace(/\.json$/i, ""));
   // The analyzer's guess prefills the form; the user confirms, nothing is
@@ -234,11 +242,11 @@ export function WorkflowPackageReview({
           </ul>
         </section>
       )}
-      {analysis.issues.length > 0 && (
+      {visibleIssues.length > 0 && (
         <section>
           <h3>Findings</h3>
           <ul>
-            {analysis.issues.map((issue) => (
+            {visibleIssues.map((issue) => (
               <li key={issue.code}>
                 {issue.severity === "blocking"
                   ? <span className="badge advanced_import">blocking</span>

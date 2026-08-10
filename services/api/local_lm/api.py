@@ -59,6 +59,7 @@ from .comfy_templates import (
 )
 from .comfy_workflow_compiler import WorkflowCompilationError, compile_comfyui_ui_graph
 from .comfy_workflow_packages import (
+    ComfyWorkflowPackageAnalysis,
     WorkflowPackageError,
     analyze_comfyui_workflow_package,
 )
@@ -7898,6 +7899,45 @@ def _installed_package_versions(session: Session) -> dict[str, set[str]]:
     return versions
 
 
+async def _verified_launchable_registry_packages(
+    services: Services,
+) -> dict[tuple[str, str], frozenset[str]]:
+    """Package-bound nodes an unscoped launch can load after exact verification."""
+
+    resolver = getattr(services.processes, "trusted_comfy_registry_package_node_types", None)
+    if not callable(resolver):
+        return {}
+    try:
+        packages = await resolver()
+    except Exception:  # noqa: BLE001 - analysis must fail closed, not fail outright
+        logger.warning(
+            "Installed Registry packages could not be verified for workflow package use."
+        )
+        return {}
+    return {
+        (str(key[0]), str(key[1])): frozenset(str(node_type) for node_type in node_types)
+        for key, node_types in packages.items()
+    }
+
+
+def _launchable_registry_node_types(
+    analysis: ComfyWorkflowPackageAnalysis,
+    packages: Mapping[tuple[str, str], frozenset[str]],
+) -> set[str]:
+    """Nodes owned by every exact package/version declared for the requirement."""
+
+    launchable: set[str] = set()
+    for requirement in analysis.custom_packages:
+        required = set(requirement.node_types)
+        versions = set(requirement.versions)
+        if versions and all(
+            required <= packages.get((requirement.package_id, version), frozenset())
+            for version in versions
+        ):
+            launchable.update(required)
+    return launchable
+
+
 _REGISTRY_PREPARE_TASKS: dict[str, asyncio.Task[None]] = {}
 
 
@@ -8908,21 +8948,67 @@ async def import_workflow_package(
         raise api_error(
             503, "media-runtime-unavailable", "Start the media worker to compile workflows"
         ) from exc
+    available_node_types = {str(node_type) for node_type in object_info}
+    asset_filenames = _local_asset_filenames(session)
+    package_versions = _installed_package_versions(session)
     try:
         analysis = analyze_comfyui_workflow_package(
             payload.ui_graph,
-            available_node_types={str(node_type) for node_type in object_info},
-            available_asset_filenames=_local_asset_filenames(session),
-            installed_package_versions=_installed_package_versions(session),
+            available_node_types=available_node_types,
+            available_asset_filenames=asset_filenames,
+            installed_package_versions=package_versions,
         )
     except WorkflowPackageError as exc:
         raise api_error(422, exc.code, str(exc)) from exc
+    if not analysis.ready:
+        launchable_packages = await _verified_launchable_registry_packages(services)
+        launchable_node_types = _launchable_registry_node_types(analysis, launchable_packages)
+        if launchable_node_types - available_node_types:
+            try:
+                analysis = analyze_comfyui_workflow_package(
+                    payload.ui_graph,
+                    available_node_types=available_node_types | launchable_node_types,
+                    available_asset_filenames=asset_filenames,
+                    installed_package_versions=package_versions,
+                )
+            except WorkflowPackageError as exc:
+                raise api_error(422, exc.code, str(exc)) from exc
     if not analysis.ready:
         raise api_error(
             422,
             "package-not-resolved",
             "Resolve everything in the package review before importing",
         )
+    if not set(analysis.required_node_types) <= available_node_types:
+        _ensure_worker_idle(session, "media")
+        async with services.scheduler.lease("primary"):
+            session.expire_all()
+            _ensure_worker_idle(session, "media")
+            try:
+                await services.processes.start_media()
+                object_info = await describe_nodes()
+            except (OSError, RuntimeError, ValueError, TimeoutError) as exc:
+                raise api_error(
+                    422,
+                    "workflow-package-node-refresh-failed",
+                    "The installed custom-node packages could not be loaded for workflow import.",
+                ) from exc
+        available_node_types = {str(node_type) for node_type in object_info}
+        try:
+            analysis = analyze_comfyui_workflow_package(
+                payload.ui_graph,
+                available_node_types=available_node_types,
+                available_asset_filenames=asset_filenames,
+                installed_package_versions=package_versions,
+            )
+        except WorkflowPackageError as exc:
+            raise api_error(422, exc.code, str(exc)) from exc
+        if not analysis.ready:
+            raise api_error(
+                422,
+                "package-not-resolved",
+                "The refreshed media runtime did not load every required workflow node.",
+            )
     try:
         compilation = compile_comfyui_ui_graph(payload.ui_graph, object_info)
     except WorkflowCompilationError as exc:
@@ -9007,15 +9093,30 @@ async def analyze_workflow_package(
             # The report says so instead of failing - and instead of letting
             # "every node missing" masquerade as a finding.
             node_inventory_available = False
+    asset_filenames = _local_asset_filenames(session)
+    package_versions = _installed_package_versions(session)
     try:
         analysis = analyze_comfyui_workflow_package(
             payload.ui_graph,
             available_node_types=available_node_types,
-            available_asset_filenames=_local_asset_filenames(session),
-            installed_package_versions=_installed_package_versions(session),
+            available_asset_filenames=asset_filenames,
+            installed_package_versions=package_versions,
         )
     except WorkflowPackageError as exc:
         raise api_error(422, exc.code, str(exc)) from exc
+    if not analysis.ready:
+        launchable_packages = await _verified_launchable_registry_packages(services)
+        launchable_node_types = _launchable_registry_node_types(analysis, launchable_packages)
+        if launchable_node_types - available_node_types:
+            try:
+                analysis = analyze_comfyui_workflow_package(
+                    payload.ui_graph,
+                    available_node_types=available_node_types | launchable_node_types,
+                    available_asset_filenames=asset_filenames,
+                    installed_package_versions=package_versions,
+                )
+            except WorkflowPackageError as exc:
+                raise api_error(422, exc.code, str(exc)) from exc
     # Authors often record where a model came from. A filename search cannot
     # find a file inside a repository, so those links are frequently the only
     # way an asset is findable at all - read from the graph, validated here,
