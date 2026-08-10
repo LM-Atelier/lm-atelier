@@ -144,6 +144,13 @@ class Message(TimestampMixin, Base):
     feedback_rows: Mapped[list[ResponseFeedback]] = relationship(
         cascade="all, delete-orphan", foreign_keys="ResponseFeedback.message_id"
     )
+    # Read-only here. `message_references` is the sole writer, because these
+    # rows are written once and never revised - a relationship that could
+    # append or reorder them would be a way to rewrite history from the side.
+    references: Mapped[list[MessageReference]] = relationship(
+        order_by="MessageReference.position",
+        viewonly=True,
+    )
 
     @property
     def feedback(self) -> str | None:
