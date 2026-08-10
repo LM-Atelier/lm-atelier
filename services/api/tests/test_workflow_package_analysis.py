@@ -382,6 +382,130 @@ async def test_launchable_nodes_cannot_be_laundered_between_registry_packages(
     assert payload["ready"] is False
 
 
+async def test_a_reviewed_manual_package_can_resolve_before_its_nodes_are_loaded(
+    client: AsyncClient,
+    app: FastAPI,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from local_lm.db import SessionLocal
+    from local_lm.models import CustomNodeInstall
+
+    revision = "a" * 40
+    with SessionLocal() as session:
+        session.add(
+            CustomNodeInstall(
+                id="node_reviewed_kjnodes",
+                name="comfyui-kjnodes",
+                source_url="https://github.com/example/comfyui-kjnodes.git",
+                revision=revision,
+                installed_path="lm-atelier-node_reviewed-kjnodes",
+                tree_hash="b" * 40,
+                trusted=True,
+                active=True,
+                security_json={"node_types": ["GetNode"]},
+            )
+        )
+        session.commit()
+
+    async def object_info() -> dict[str, Any]:
+        return {"KSampler": {}}
+
+    async def no_registry_packages() -> dict[tuple[str, str], frozenset[str]]:
+        return {}
+
+    async def manual_packages() -> dict[tuple[str, str], frozenset[str]]:
+        return {("comfyui-kjnodes", revision): frozenset({"GetNode"})}
+
+    monkeypatch.setattr(
+        app.state.services.engines.media,
+        "object_info",
+        object_info,
+        raising=False,
+    )
+    monkeypatch.setattr(
+        app.state.services.processes,
+        "trusted_comfy_registry_package_node_types",
+        no_registry_packages,
+    )
+    monkeypatch.setattr(
+        app.state.services.processes,
+        "trusted_comfy_custom_node_package_node_types",
+        manual_packages,
+    )
+
+    response = await client.post(
+        "/api/workflows/packages/analyze",
+        json={
+            "ui_graph": _workflow(
+                [_node(1, "GetNode", package="comfyui-kjnodes", version=revision)]
+            )
+        },
+    )
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["missing_node_types"] == []
+    assert payload["custom_packages"][0]["locally_resolved"] is True
+    assert payload["ready"] is True
+
+
+async def test_reviewed_manual_nodes_cannot_be_laundered_between_packages(
+    client: AsyncClient,
+    app: FastAPI,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    revision = "c" * 40
+
+    async def object_info() -> dict[str, Any]:
+        return {}
+
+    async def no_registry_packages() -> dict[tuple[str, str], frozenset[str]]:
+        return {}
+
+    async def manual_packages() -> dict[tuple[str, str], frozenset[str]]:
+        return {
+            ("comfyui-kjnodes", revision): frozenset({"SetNode"}),
+            ("another-package", revision): frozenset({"GetNode"}),
+        }
+
+    monkeypatch.setattr(
+        api_module,
+        "_installed_package_versions",
+        lambda _session: {"comfyui-kjnodes": {revision}},
+    )
+    monkeypatch.setattr(
+        app.state.services.engines.media,
+        "object_info",
+        object_info,
+        raising=False,
+    )
+    monkeypatch.setattr(
+        app.state.services.processes,
+        "trusted_comfy_registry_package_node_types",
+        no_registry_packages,
+    )
+    monkeypatch.setattr(
+        app.state.services.processes,
+        "trusted_comfy_custom_node_package_node_types",
+        manual_packages,
+    )
+
+    response = await client.post(
+        "/api/workflows/packages/analyze",
+        json={
+            "ui_graph": _workflow(
+                [_node(1, "GetNode", package="comfyui-kjnodes", version=revision)]
+            )
+        },
+    )
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["missing_node_types"] == ["GetNode"]
+    assert payload["custom_packages"][0]["locally_resolved"] is False
+    assert payload["ready"] is False
+
+
 async def test_a_referenced_model_this_machine_holds_counts_as_present(
     client: AsyncClient,
     app: FastAPI,
