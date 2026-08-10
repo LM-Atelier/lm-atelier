@@ -79,4 +79,31 @@ describe("CustomNodesPanel reviewed node inventory", () => {
     expect(screen.getByRole("textbox", { name: "Reviewed node types" }))
       .toHaveValue("GetNode\nSetNode");
   });
+  it("says what an empty inventory will cost before it is confirmed", async () => {
+    // A blank box was previously recommended by the placeholder and accepted in
+    // silence. What it produces is a package that is trusted and satisfies no
+    // workflow, reported everywhere else as simply not installed - so the cost
+    // has to be visible at the moment somebody chooses it.
+    vi.mocked(api.customNodes).mockResolvedValue([node()]);
+    renderPanel();
+
+    fireEvent.click(await screen.findByRole("button", { name: "Trust revision" }));
+
+    expect(screen.getByText(/satisfies no workflow/i)).toBeInTheDocument();
+
+    fireEvent.change(screen.getByRole("textbox", { name: "Reviewed node types" }), {
+      target: { value: "GetNode" },
+    });
+    expect(screen.queryByText(/satisfies no workflow/i)).toBeNull();
+  });
+
+  it("no longer offers leaving the inventory blank as an option", async () => {
+    vi.mocked(api.customNodes).mockResolvedValue([node()]);
+    renderPanel();
+
+    fireEvent.click(await screen.findByRole("button", { name: "Trust revision" }));
+
+    const inventory = screen.getByRole("textbox", { name: "Reviewed node types" });
+    expect(inventory.getAttribute("placeholder")).not.toMatch(/leave blank/i);
+  });
 });
