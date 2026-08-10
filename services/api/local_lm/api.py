@@ -64,12 +64,12 @@ from .comfy_workflow_packages import (
     analyze_comfyui_workflow_package,
 )
 from .config import Settings
-from .custom_nodes import reviewed_custom_node_types
 from .credentials import (
     CredentialProvider,
     CredentialVaultUnavailable,
     credential_provider,
 )
+from .custom_nodes import reviewed_custom_node_types
 from .db import SessionLocal, get_session
 from .domain import (
     ArtifactKind,
@@ -6078,19 +6078,13 @@ async def trust_custom_node(
     if payload.trusted:
         try:
             await _services(request).custom_nodes.verify(install)
-            reviewed_node_types = reviewed_custom_node_types(
-                {"node_types": payload.node_types}
-            )
+            reviewed_node_types = reviewed_custom_node_types({"node_types": payload.node_types})
         except (OSError, RuntimeError, ValueError, TimeoutError) as exc:
             raise api_error(422, "custom-node-trust-failed", str(exc)) from exc
     install.trusted = payload.trusted
     install.security_json = {
         **install.security_json,
-        **(
-            {"node_types": list(reviewed_node_types)}
-            if reviewed_node_types is not None
-            else {}
-        ),
+        **({"node_types": list(reviewed_node_types)} if reviewed_node_types is not None else {}),
         "reviewed_at": utcnow().isoformat(),
         "trusted_by_local_user": payload.trusted,
     }
