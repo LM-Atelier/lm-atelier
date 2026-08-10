@@ -20,7 +20,12 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from .models import MessageReference, ReferenceAsset, ReferenceSubject
-from .references import MentionSource, ReferenceError, ReferenceRequest
+from .references import (
+    MentionSource,
+    ReferenceError,
+    ReferenceNotFoundError,
+    ReferenceRequest,
+)
 
 
 @dataclass(frozen=True)
@@ -61,7 +66,7 @@ def resolve_reference_requests(
     for request in requests:
         subject = session.get(ReferenceSubject, request.reference_subject_id)
         if subject is None:
-            raise ReferenceError(
+            raise ReferenceNotFoundError(
                 f"reference {request.reference_subject_id!r} no longer exists; "
                 "remove it from the turn or create it again"
             )
