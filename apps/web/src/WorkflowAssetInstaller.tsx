@@ -167,7 +167,7 @@ function AssetRow({
   >(null);
 
   const search = useMutation({
-    mutationFn: () => api.catalog(query, catalogRoleFor(asset.kind), "downloads", null, {}, source),
+    mutationFn: () => api.catalog(query, catalogRoleFor(), "downloads", null, {}, source),
     onSuccess: (page) => setResults(page.items.slice(0, 5)),
   });
 
@@ -250,7 +250,7 @@ function AssetRow({
     }) =>
       api.catalogPreflight(
         candidate.remote_id,
-        catalogRoleFor(asset.kind),
+        catalogRoleFor(),
         "comfyui",
         candidate.revision ?? "main",
         // Naming the file the author pointed at keeps a multi-file repository
