@@ -18,6 +18,40 @@ from .models import CustomNodeInstall
 from .subprocess_env import git_subprocess_environment
 
 _COMMIT = re.compile(r"^[0-9a-fA-F]{40}$")
+MAX_REVIEWED_CUSTOM_NODE_TYPES = 4_096
+MAX_REVIEWED_CUSTOM_NODE_TYPE_LENGTH = 200
+
+
+def reviewed_custom_node_types(value: object, *, required: bool = False) -> tuple[str, ...]:
+    """Return the exact node inventory explicitly reviewed for one pinned source."""
+
+    if not isinstance(value, dict):
+        if required:
+            raise ValueError("Custom node has no reviewed node type evidence")
+        return ()
+    raw = value.get("node_types")
+    if raw is None and not required:
+        return ()
+    if (
+        not isinstance(raw, list)
+        or len(raw) > MAX_REVIEWED_CUSTOM_NODE_TYPES
+        or (required and not raw)
+    ):
+        raise ValueError("Custom node has no reviewed node type evidence")
+    result: list[str] = []
+    folded: set[str] = set()
+    for item in raw:
+        if (
+            not isinstance(item, str)
+            or not item
+            or len(item) > MAX_REVIEWED_CUSTOM_NODE_TYPE_LENGTH
+            or any(character < " " or ord(character) == 127 for character in item)
+            or item.casefold() in folded
+        ):
+            raise ValueError("Custom node has invalid reviewed node type evidence")
+        folded.add(item.casefold())
+        result.append(item)
+    return tuple(sorted(result, key=lambda item: (item.casefold(), item)))
 
 
 class CustomNodeManager:
