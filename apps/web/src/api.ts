@@ -578,6 +578,17 @@ export const api = {
       `/api/references/${encodeURIComponent(id)}/assets/${encodeURIComponent(assetId)}`,
       { method: "DELETE" },
     ),
+  // Setting and clearing are separate calls rather than one nullable field,
+  // because "leave the cover alone" and "remove it" are different intentions.
+  setReferenceCover: (id: string, artifactId: string) =>
+    request<ReferenceSubject>(`/api/references/${encodeURIComponent(id)}/cover`, {
+      method: "PUT",
+      body: JSON.stringify({ artifact_id: artifactId }),
+    }),
+  clearReferenceCover: (id: string) =>
+    request<ReferenceSubject>(`/api/references/${encodeURIComponent(id)}/cover`, {
+      method: "DELETE",
+    }),
   artifacts: (kind = "", query = "", favorites = false) => {
     const parameters = new URLSearchParams({ query });
     if (kind) parameters.set("kind", kind);

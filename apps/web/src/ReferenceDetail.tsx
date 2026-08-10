@@ -1,6 +1,6 @@
 import { useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { Plus, Trash2 } from "lucide-react";
+import { ImageIcon, Plus, Trash2 } from "lucide-react";
 import { api } from "./api";
 import { EmptyState } from "./EmptyState";
 import { ErrorCallout } from "./ErrorCallout";
@@ -75,6 +75,21 @@ export function ReferenceDetail({
       setRefused(failures);
       setError(null);
       void refresh();
+    },
+    onError: fail,
+  });
+
+  // Invalidates the subject list rather than the asset list: the cover lives on
+  // the subject, and this view reads the subject from the list it was opened
+  // from, so refreshing the assets alone would leave the star where it was.
+  const cover = useMutation({
+    mutationFn: (artifactId: string | null) =>
+      artifactId === null
+        ? api.clearReferenceCover(subject.id)
+        : api.setReferenceCover(subject.id, artifactId),
+    onSuccess: () => {
+      setError(null);
+      void client.invalidateQueries({ queryKey: ["references"] });
     },
     onError: fail,
   });
@@ -177,13 +192,34 @@ export function ReferenceDetail({
                   fidelity. */}
               <span className="badge">{asset.validation_state}</span>
             </div>
-            <button
-              className="secondary compact-button danger"
-              aria-label={`Remove image ${asset.sort_order + 1}`}
-              onClick={() => detach.mutate(asset.id)}
-            >
-              <Trash2 />
-            </button>
+            <div className="row-actions">
+              {/* Pressing the current cover clears it, so there is a way back
+                  to no cover at all without removing the picture. */}
+              <button
+                className="secondary compact-button"
+                aria-pressed={subject.cover_artifact_id === asset.artifact_id}
+                aria-label={
+                  subject.cover_artifact_id === asset.artifact_id
+                    ? `Stop image ${asset.sort_order + 1} standing for ${subject.name}`
+                    : `Use image ${asset.sort_order + 1} for ${subject.name}`
+                }
+                disabled={cover.isPending}
+                onClick={() =>
+                  cover.mutate(
+                    subject.cover_artifact_id === asset.artifact_id ? null : asset.artifact_id,
+                  )
+                }
+              >
+                <ImageIcon />
+              </button>
+              <button
+                className="secondary compact-button danger"
+                aria-label={`Remove image ${asset.sort_order + 1}`}
+                onClick={() => detach.mutate(asset.id)}
+              >
+                <Trash2 />
+              </button>
+            </div>
           </li>
         ))}
       </ul>
