@@ -1414,7 +1414,7 @@ async def import_project(
         )
     except ValueError as exc:
         session.rollback()
-        raise HTTPException(422, str(exc)) from exc
+        raise api_error(422, "project-import-invalid", str(exc)) from exc
     reconcile_legacy_workflow_compatibility(session)
     session.commit()
     session.refresh(project)
@@ -2700,7 +2700,7 @@ async def retry_job(
         try:
             orchestrator.prepare_retry(session, run)
         except LookupError as exc:
-            raise HTTPException(422, str(exc)) from exc
+            raise api_error(422, "job-not-retryable", str(exc)) from exc
         session.commit()
         orchestrator.start(job.id, run.id)
         session.refresh(job)
@@ -2883,7 +2883,7 @@ async def delete_artifact(
             session, artifact
         )
     except ValueError as exc:
-        raise HTTPException(409, str(exc)) from exc
+        raise api_error(409, "artifact-in-use", str(exc)) from exc
     session.commit()
     return ArtifactDeleteResult(
         artifact_id=artifact_id,
@@ -3102,8 +3102,9 @@ async def catalog_search(
     except ValueError as exc:
         raise api_error(422, "catalog-request-invalid", f"invalid catalog request: {exc}") from exc
     except Exception as exc:
-        raise HTTPException(
+        raise api_error(
             503,
+            "catalog-unavailable",
             f"{catalog.display_name} is temporarily unavailable. Check your connection and retry.",
         ) from exc
 
@@ -3160,8 +3161,9 @@ async def catalog_item_detail(
         detail = await selected_source.inspect(item_id, revision, role)
         return CatalogDetail.model_validate(detail)
     except Exception as exc:
-        raise HTTPException(
+        raise api_error(
             503,
+            "catalog-unavailable",
             f"{selected_source.display_name} is temporarily unavailable. "
             "Check your connection and retry.",
         ) from exc
@@ -3202,8 +3204,9 @@ async def catalog_detail(
         detail = await _services(request).catalog.inspect(f"{owner}/{name}", revision, role)
         return CatalogDetail.model_validate(detail)
     except Exception as exc:
-        raise HTTPException(
+        raise api_error(
             503,
+            "catalog-unavailable",
             "Hugging Face is temporarily unavailable. Check your connection and retry.",
         ) from exc
 
@@ -3673,8 +3676,9 @@ async def resolve_catalog_preflight(
         # once installed a speech-to-video workflow with an audio encoder.
         candidates = [item for item in candidates if item.id == requested_template]
         if not candidates:
-            raise HTTPException(
+            raise api_error(
                 422,
+                "workflow-template-mismatch",
                 "The selected workflow does not belong to this repository and role. "
                 "Refresh the catalog and choose a workflow again.",
             )
@@ -3982,7 +3986,7 @@ async def create_download(payload: DownloadRequest, request: Request, session: S
                 )
         return manager.create(session, payload)
     except ValueError as exc:
-        raise HTTPException(422, str(exc)) from exc
+        raise api_error(422, "download-request-invalid", str(exc)) from exc
 
 
 @router.post("/downloads/cleanup", response_model=StorageCleanupResult)
@@ -4131,7 +4135,7 @@ async def install_recipe(recipe_id: str, request: Request, session: SessionDep) 
     except ValueError as exc:
         # Refused before persistence, so no installable plan is left behind.
         session.rollback()
-        raise HTTPException(422, str(exc)) from exc
+        raise api_error(422, "recipe-plan-unresolvable", str(exc)) from exc
     plan = preflight.install_plan
     try:
         fields = _planned_download_fields(session.get(InstallPlan, plan.id) if plan else None)
@@ -4146,7 +4150,7 @@ async def install_recipe(recipe_id: str, request: Request, session: SessionDep) 
             ),
         )
     except ValueError as exc:
-        raise HTTPException(422, str(exc)) from exc
+        raise api_error(422, "recipe-settings-invalid", str(exc)) from exc
 
 
 def _assert_recipe_pins_hold(recipe: ReferenceRecipe, plan: ResolvedInstallPlan | None) -> None:
@@ -4649,7 +4653,7 @@ def _delete_model_asset_locked(
         path = _managed_model_path(model_root, asset.local_path)
         recover_model_delete_quarantines(session, model_root, strict=True)
     except ValueError as exc:
-        raise HTTPException(422, str(exc)) from exc
+        raise api_error(422, "model-asset-delete-refused", str(exc)) from exc
     moves: list[tuple[Path, Path]] = []
     quarantine: Path | None = None
     commit_started = False
@@ -4918,7 +4922,7 @@ async def activate_model(model_id: str, request: Request, session: SessionDep) -
     try:
         return _services(request).downloads.reactivate(session, install)
     except ValueError as exc:
-        raise HTTPException(422, str(exc)) from exc
+        raise api_error(422, "model-activation-invalid", str(exc)) from exc
 
 
 @router.delete("/models/{model_id}", status_code=204)
@@ -4975,7 +4979,7 @@ def _delete_model_locked(
         path = _managed_model_path(model_root, install.local_path)
         recover_model_delete_quarantines(session, model_root, strict=True)
     except ValueError as exc:
-        raise HTTPException(422, str(exc)) from exc
+        raise api_error(422, "model-delete-refused", str(exc)) from exc
 
     profiles = list(
         session.scalars(
@@ -5073,7 +5077,7 @@ def _delete_model_locked(
                     exc_info=True,
                 )
         if isinstance(exc, ValueError):
-            raise HTTPException(422, str(exc)) from exc
+            raise api_error(422, "model-delete-refused", str(exc)) from exc
         raise
     return quarantine
 
@@ -5563,7 +5567,7 @@ async def create_profile(
             payload.request_settings, [field for field in fields if field.scope != "load"]
         )
     except ValueError as exc:
-        raise HTTPException(422, str(exc)) from exc
+        raise api_error(422, "profile-settings-invalid", str(exc)) from exc
     profile = ModelProfile(
         name=payload.name,
         use_case=payload.use_case,
@@ -5597,7 +5601,7 @@ async def update_profile(
     except LookupError as exc:
         raise api_error(404, "profile-not-found", str(exc)) from exc
     except ValueError as exc:
-        raise HTTPException(422, str(exc)) from exc
+        raise api_error(422, "profile-binding-invalid", str(exc)) from exc
     values = payload.model_dump(exclude_unset=True)
     fields = (
         await _engine_role_fields(
@@ -5624,7 +5628,7 @@ async def update_profile(
                 [field for field in fields if field.scope == "load"],
             )
         except ValueError as exc:
-            raise HTTPException(422, str(exc)) from exc
+            raise api_error(422, "profile-load-settings-invalid", str(exc)) from exc
     if "request_settings" in values:
         try:
             profile.request_settings_json = validate_settings(
@@ -5632,7 +5636,7 @@ async def update_profile(
                 [field for field in fields if field.scope != "load"],
             )
         except ValueError as exc:
-            raise HTTPException(422, str(exc)) from exc
+            raise api_error(422, "profile-request-settings-invalid", str(exc)) from exc
     for key, value in values.items():
         setattr(profile, key, value)
     reconcile_legacy_workflow_compatibility(session)
@@ -5702,7 +5706,7 @@ async def reset_profile(profile_id: str, session: SessionDep) -> ModelProfile:
     except LookupError as exc:
         raise api_error(404, "profile-not-found", str(exc)) from exc
     except ValueError as exc:
-        raise HTTPException(422, str(exc)) from exc
+        raise api_error(422, "profile-settings-invalid", str(exc)) from exc
     profile.load_settings_json = {}
     profile.request_settings_json = {}
     ensure_legacy_profile_workflow(session, profile)
@@ -5769,7 +5773,7 @@ async def create_preset(
             [field for field in fields if field.scope != "load"],
         )
     except ValueError as exc:
-        raise HTTPException(422, str(exc)) from exc
+        raise api_error(422, "preset-invalid", str(exc)) from exc
     if payload.is_default:
         for sibling in session.scalars(
             select(GenerationPreset).where(GenerationPreset.role == payload.role)
@@ -5806,7 +5810,7 @@ async def update_preset(
                 [field for field in fields if field.scope != "load"],
             )
         except ValueError as exc:
-            raise HTTPException(422, str(exc)) from exc
+            raise api_error(422, "preset-invalid", str(exc)) from exc
     if "is_default" in values:
         is_default = bool(values.pop("is_default"))
         if is_default:
@@ -5952,7 +5956,7 @@ async def install_custom_node(
     try:
         source_url = _services(request).custom_nodes.normalize_source(payload.source_url)
     except ValueError as exc:
-        raise HTTPException(422, str(exc)) from exc
+        raise api_error(422, "custom-node-request-invalid", str(exc)) from exc
     existing = session.scalar(
         select(CustomNodeInstall).where(CustomNodeInstall.source_url == source_url)
     )
@@ -5969,7 +5973,7 @@ async def install_custom_node(
         )
     except (OSError, RuntimeError, ValueError, TimeoutError) as exc:
         session.rollback()
-        raise HTTPException(422, str(exc)) from exc
+        raise api_error(422, "custom-node-install-failed", str(exc)) from exc
     session.commit()
     session.refresh(install)
     return install
@@ -5990,7 +5994,7 @@ async def update_custom_node(
         await _services(request).custom_nodes.update(install, payload.revision)
     except (OSError, RuntimeError, ValueError, TimeoutError) as exc:
         session.rollback()
-        raise HTTPException(422, str(exc)) from exc
+        raise api_error(422, "custom-node-update-failed", str(exc)) from exc
     session.commit()
     session.refresh(install)
     return install
@@ -6011,7 +6015,7 @@ async def trust_custom_node(
         try:
             await _services(request).custom_nodes.verify(install)
         except (OSError, RuntimeError, ValueError, TimeoutError) as exc:
-            raise HTTPException(422, str(exc)) from exc
+            raise api_error(422, "custom-node-trust-failed", str(exc)) from exc
     install.trusted = payload.trusted
     install.security_json = {
         **install.security_json,
@@ -6037,7 +6041,7 @@ async def rollback_custom_node(
         await _services(request).custom_nodes.rollback(install)
     except (OSError, RuntimeError, ValueError, TimeoutError) as exc:
         session.rollback()
-        raise HTTPException(422, str(exc)) from exc
+        raise api_error(422, "custom-node-rollback-failed", str(exc)) from exc
     session.commit()
     session.refresh(install)
     return install
@@ -6878,7 +6882,7 @@ async def create_workflow(payload: WorkflowCreate, session: SessionDep) -> Workf
         )
         validate_workflow_edit_calibration(payload.input_schema)
     except ValueError as exc:
-        raise HTTPException(422, str(exc)) from exc
+        raise api_error(422, "workflow-invalid", str(exc)) from exc
     definition = WorkflowDefinition(
         name=payload.name,
         operation=payload.operation.value,
@@ -9085,7 +9089,7 @@ async def create_workflow_revision(
         )
         validate_workflow_edit_calibration(payload.input_schema)
     except ValueError as exc:
-        raise HTTPException(422, str(exc)) from exc
+        raise api_error(422, "workflow-revision-invalid", str(exc)) from exc
     version = (
         session.scalar(
             select(func.max(WorkflowRevision.version)).where(
