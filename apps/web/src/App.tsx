@@ -76,6 +76,8 @@ import { MessageTimestamp } from "./MessageTimestamp";
 import { PendingResponseStatus } from "./PendingResponseStatus";
 import { MarkdownText } from "./MarkdownText";
 import { MessageField } from "./MessageField";
+import type { TurnReference } from "./mentionDraft";
+import { useComposerMentions } from "./useComposerMentions";
 import { useConfirm } from "./useConfirm";
 import { focusMainContent, roleForMode } from "./viewHelpers";
 import { ArtifactPart } from "./ArtifactPart";
@@ -146,6 +148,8 @@ type SendTurnVariables = PendingTurn & {
   chatId: string;
   artifacts: string[];
   settings: Record<string, unknown>;
+  /** Subject ids chosen from the mention picker, never parsed from the text. */
+  references: TurnReference[];
   stopCurrent?: boolean;
 };
 
@@ -798,13 +802,14 @@ function Composer({
   presetId: string | null;
   onPreset: (presetId: string | null) => void;
   onMode: (mode: RoutingMode) => void;
-  onSend: (text: string, mode: RoutingMode, artifacts: string[], settings: Record<string, unknown>) => void;
+  onSend: (text: string, mode: RoutingMode, artifacts: string[], settings: Record<string, unknown>, references: TurnReference[]) => void;
   onStop: () => void;
   onStopAndSend: (
     text: string,
     mode: RoutingMode,
     artifacts: string[],
     settings: Record<string, unknown>,
+    references: TurnReference[],
   ) => void;
   workflows: Workflow[];
   project?: Project;
@@ -812,6 +817,7 @@ function Composer({
   quoteTarget?: { text: string; requestId: number } | null;
 }) {
   const [text, setText] = useState("");
+  const mentions = useComposerMentions();
   const { mode, changeMode, currentMode } = useGenerationModeSelection(chat.routing_mode, onMode);
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [promptHelperDraft, setPromptHelperDraft] = useState<string | null>(null);
@@ -926,8 +932,10 @@ function Composer({
             templateSettings ? { ...settings, ...templateSettings.settings } : settings,
             fields,
           ),
+      mentions.forText(text),
     );
     setText("");
+    mentions.clear();
     setAttachments([]);
     setTemplateSettings(null);
   };
@@ -1030,7 +1038,7 @@ function Composer({
           </div>
         )}
         <div className="composer">
-          <MessageField field={textInput} value={text} onChange={setText} onSubmit={submit} />
+          <MessageField field={textInput} value={text} onChange={setText} onSubmit={submit} onMention={mentions.add} />
           <div className="composer-tools">
             <div className="left-tools">
               <AttachControls disabled={uploading} onPickFile={() => fileInput.current?.click()} onAttach={(attachment) => setAttachments((current) => [...current, attachment])} />
@@ -1100,7 +1108,10 @@ function Composer({
         const merged = normalizeSettingsForFields({ ...settings, ...template.settings_json }, fields);
         // One ordinary edit turn per image: each queues, verifies, and retries
         // alone; the pending-work bound errs clearly rather than truncating.
-        for (const item of attachments.filter((entry) => entry.kind === "image")) onSend(instruction, "image", [item.id], merged);
+        // No references: these are edits of the attached images themselves,
+        // not a mention-driven turn, and the instruction was not composed in
+        // the field that tracks mentions.
+        for (const item of attachments.filter((entry) => entry.kind === "image")) onSend(instruction, "image", [item.id], merged, []);
         setAttachments([]); setText(""); setTemplateSettings(null); setStudioOpen(false);
       }} />}
       {promptHelperDraft !== null && (
@@ -1224,7 +1235,7 @@ function ChatView({
   onSettings: (settings: Record<string, unknown>) => void;
   onPreset: (presetId: string | null) => void;
   onMode: (mode: RoutingMode) => void;
-  onSend: (text: string, mode: RoutingMode, artifacts: string[], settings: Record<string, unknown>) => void;
+  onSend: (text: string, mode: RoutingMode, artifacts: string[], settings: Record<string, unknown>, references: TurnReference[]) => void;
   onRegenerate: (messageId: string, settings: Record<string, unknown>) => void;
   onSelectRevision: (messageId: string, revisionId: string) => void;
   onEdit: (
@@ -1239,6 +1250,7 @@ function ChatView({
     mode: RoutingMode,
     artifacts: string[],
     settings: Record<string, unknown>,
+    references: TurnReference[],
   ) => void;
   onCancelPlan: (planId: string) => void;
   onCancelStep: (stepId: string) => void;
@@ -2164,10 +2176,10 @@ export default function App() {
     void client.invalidateQueries({ queryKey: ["work-plans", chatId] });
   };
   const send = useMutation({
-    mutationFn: ({ chatId, id, text, mode, artifacts, settings, stopCurrent }: SendTurnVariables) =>
+    mutationFn: ({ chatId, id, text, mode, artifacts, settings, references, stopCurrent }: SendTurnVariables) =>
       stopCurrent
-        ? api.stopAndSendTurn(chatId, text, mode, artifacts, settings, id)
-        : api.sendTurn(chatId, text, mode, artifacts, settings, id),
+        ? api.stopAndSendTurn(chatId, text, mode, artifacts, settings, id, references)
+        : api.sendTurn(chatId, text, mode, artifacts, settings, id, "turns", undefined, references),
     onMutate: ({ chatId, id, text, mode }) => {
       setPendingTurns((current) => ({
         ...current,
@@ -2428,17 +2440,9 @@ export default function App() {
       });
     }} onStop={() => {
       if (displayedChat) stop.mutate(displayedChat.id);
-    }} onStopAndSend={(text, mode, artifacts, settings) => {
+    }} onStopAndSend={(text, mode, artifacts, settings, references) => {
       if (displayedChat) {
-        send.mutate({
-          chatId: displayedChat.id,
-          id: crypto.randomUUID(),
-          text,
-          mode,
-          artifacts,
-          settings,
-          stopCurrent: true,
-        });
+        send.mutate({ chatId: displayedChat.id, id: crypto.randomUUID(), text, mode, artifacts, settings, references, stopCurrent: true });
       }
     }} onDeleteExchange={deleteExchange.mutate} onForkThread={forkThread.mutate} onCancelPlan={(planId) => {
       cancelWorkPlan.mutate(planId);
@@ -2446,16 +2450,9 @@ export default function App() {
       cancelWorkStep.mutate(stepId);
     }} onRetryStep={(stepId) => {
       retryWorkStep.mutate(stepId);
-    }} onSend={(text, mode, artifacts, settings) => {
+    }} onSend={(text, mode, artifacts, settings, references) => {
       if (displayedChat) {
-        send.mutate({
-          chatId: displayedChat.id,
-          id: crypto.randomUUID(),
-          text,
-          mode,
-          artifacts,
-          settings,
-        });
+        send.mutate({ chatId: displayedChat.id, id: crypto.randomUUID(), text, mode, artifacts, settings, references });
       }
     }} />;
   }, [studioSource, view, modelLibraryRole, engines.data, profiles.data, presets.data, workflows.data, allProjects, chat.data, chatDrafts, liveText, pendingTurns, workPlans.data, send, regenerate, selectResponseRevision, branch, stop, cancelWorkPlan, cancelWorkStep, retryWorkStep, updateChat, deleteExchange, forkThread, client, libraryEdit, openLibraryEdit]);

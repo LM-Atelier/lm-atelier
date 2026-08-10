@@ -1,3 +1,4 @@
+import type { TurnReference } from "./mentionDraft";
 import type {
   StudioCapabilityReport,
   ApplicationInfo,
@@ -269,6 +270,10 @@ export const api = {
     idempotencyKey: string = crypto.randomUUID(),
     endpoint: string = "turns",
     workflowRevisionId?: string,
+    // Ids the person chose from the mention picker. Never derived from the
+    // text: the server refuses to recover references by reading a prompt,
+    // because that binds whoever the words most resemble.
+    references: TurnReference[] = [],
   ) => {
     const submit = (selectedMode: RoutingMode, confirmed = false) => request<TurnAccepted>(`/api/chats/${chatId}/${endpoint}`, {
       method: "POST",
@@ -276,6 +281,7 @@ export const api = {
         text,
         mode: selectedMode,
         input_artifact_ids: inputArtifactIds,
+        references,
         settings,
         workflow_revision_id: workflowRevisionId,
         confirm_media: confirmed,
@@ -341,6 +347,7 @@ export const api = {
     inputArtifactIds: string[],
     settings: Record<string, unknown>,
     idempotencyKey: string = crypto.randomUUID(),
+    references: TurnReference[] = [],
   ) => api.sendTurn(
     chatId,
     text,
@@ -349,6 +356,8 @@ export const api = {
     settings,
     idempotencyKey,
     "stop-and-send",
+    undefined,
+    references,
   ),
   regenerateMessage: (messageId: string, settings: Record<string, unknown>) =>
     request<TurnAccepted>(`/api/messages/${messageId}/regenerate`, {

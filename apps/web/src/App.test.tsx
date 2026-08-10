@@ -4741,12 +4741,7 @@ describe("App", () => {
 
     expect(await screen.findByText("Surprise me with a tiny story")).toBeVisible();
     expect(api.sendTurn).toHaveBeenCalledWith(
-      chat.id,
-      "Surprise me with a tiny story",
-      "auto",
-      [],
-      {},
-      expect.any(String),
+      chat.id, "Surprise me with a tiny story", "auto", [], {}, expect.any(String), "turns", undefined, [],
     );
     expect(screen.getByText("Choosing mode and model…")).toBeVisible();
     expect(screen.getByRole("button", { name: "Send" })).toBeDisabled();
@@ -4875,12 +4870,7 @@ describe("App", () => {
     expect(screen.getByRole("button", { name: "Stop current response" })).toBeEnabled();
     fireEvent.click(screen.getByRole("button", { name: "Stop current response and send" }));
     await waitFor(() => expect(api.stopAndSendTurn).toHaveBeenCalledWith(
-      chat.id,
-      "Use this instead",
-      "text",
-      [],
-      {},
-      expect.any(String),
+      chat.id, "Use this instead", "text", [], {}, expect.any(String), [],
     ));
   });
 
@@ -5674,12 +5664,7 @@ describe("App", () => {
     fireEvent.click(screen.getByRole("button", { name: "Send" }));
 
     await waitFor(() => expect(api.sendTurn).toHaveBeenCalledWith(
-      chat.id,
-      "Animate this image",
-      "video",
-      ["sha256:animate-source"],
-      {},
-      expect.any(String),
+      chat.id, "Animate this image", "video", ["sha256:animate-source"], {}, expect.any(String), "turns", undefined, [],
     ));
   });
   it("offers image editing immediately after an image is attached", async () => {
@@ -5861,12 +5846,7 @@ describe("App", () => {
     fireEvent.change(screen.getByRole("textbox", { name: "Message" }), { target: { value: "Count to 1000" } });
     fireEvent.click(screen.getByRole("button", { name: "Send" }));
     await waitFor(() => expect(api.sendTurn).toHaveBeenCalledWith(
-      chat.id,
-      "Count to 1000",
-      "text",
-      [],
-      { max_tokens: 4096 },
-      expect.any(String),
+      chat.id, "Count to 1000", "text", [], { max_tokens: 4096 }, expect.any(String), "turns", undefined, [],
     ));
   });
 
