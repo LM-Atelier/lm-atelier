@@ -13,8 +13,11 @@ function reviewedNodeTypes(node: CustomNodeInstall): string[] {
 }
 
 function parseNodeTypes(value: string): string[] {
-  return [...new Set(value.split(/[\n,]/).map((item) => item.trim()).filter(Boolean))]
-    .sort((left, right) => left.localeCompare(right));
+  const reviewed = new Map<string, string>();
+  for (const item of value.split(/[\n,]/).map((candidate) => candidate.trim()).filter(Boolean)) {
+    if (!reviewed.has(item.toLowerCase())) reviewed.set(item.toLowerCase(), item);
+  }
+  return [...reviewed.values()].sort((left, right) => left.localeCompare(right));
 }
 
 export function CustomNodesPanel() {
