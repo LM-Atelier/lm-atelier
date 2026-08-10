@@ -1,8 +1,11 @@
 from __future__ import annotations
 
+import asyncio
 from contextlib import asynccontextmanager
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, Mock
+
+import pytest
 
 from local_lm.domain import JobKind, JobStatus, Operation, PartType, RoutingMode, RunStatus
 from local_lm.image_edit_verification import (
@@ -57,7 +60,7 @@ def _orchestrator(*, session_factory=None) -> ConversationOrchestrator:  # type:
     )
 
 
-def test_successful_edit_queues_one_dependent_low_priority_verifier(monkeypatch) -> None:
+def test_successful_edit_queues_one_detached_low_priority_verifier(monkeypatch) -> None:
     source = SimpleNamespace(id="artifact-source", media_type="image/png")
     result = SimpleNamespace(id="artifact-result", media_type="image/png")
     chat = SimpleNamespace(
@@ -132,10 +135,22 @@ def test_successful_edit_queues_one_dependent_low_priority_verifier(monkeypatch)
     jobs = [value for value in added if isinstance(value, Job)]
     steps = [value for value in added if isinstance(value, WorkStep)]
     dependencies = [value for value in added if isinstance(value, WorkStepDependency)]
-    assert len(jobs) == len(steps) == len(dependencies) == 1
+    assert len(jobs) == 1
+    assert steps == []
+    assert dependencies == []
     job = jobs[0]
-    assert (job.kind, job.run_id, job.queue_resource, job.queue_group, job.queue_priority) == (
+    assert (
+        job.kind,
+        job.run_id,
+        job.work_plan_id,
+        job.work_step_id,
+        job.queue_resource,
+        job.queue_group,
+        job.queue_priority,
+    ) == (
         JobKind.EDIT_VERIFY.value,
+        None,
+        None,
         None,
         "interactive_compute",
         "primary",
@@ -153,7 +168,6 @@ def test_successful_edit_queues_one_dependent_low_priority_verifier(monkeypatch)
         payload.maximum,
     ) == ("denoise", 0.66, 0.3, 0.8)
     assert payload.automatic_strength is True
-    assert dependencies[0].depends_on_step_id == run.work_step_id
 
 
 async def test_verifier_starts_after_media_handoff_and_inside_primary_lease(
@@ -232,6 +246,102 @@ async def test_verifier_starts_after_media_handoff_and_inside_primary_lease(
         "verifier started",
         "lease released",
     ]
+
+
+async def test_foreground_dispatch_preempts_a_running_image_edit_check() -> None:
+    verification_job = Job(
+        id="job-running-check",
+        kind=JobKind.EDIT_VERIFY.value,
+        status=JobStatus.RUNNING.value,
+        progress=0,
+        progress_json={},
+        payload_json={},
+    )
+    started = asyncio.Event()
+
+    class FakeSession:
+        def __enter__(self):  # type: ignore[no-untyped-def]
+            return self
+
+        def __exit__(self, *_args):  # type: ignore[no-untyped-def]
+            return None
+
+        def get(self, model, identity):  # type: ignore[no-untyped-def]
+            if model is Job and identity == verification_job.id:
+                return verification_job
+            return None
+
+        def commit(self) -> None:
+            return None
+
+    @asynccontextmanager
+    async def lease(*_args, **_kwargs):  # type: ignore[no-untyped-def]
+        yield
+
+    async def block(_job_id: str) -> None:
+        started.set()
+        await asyncio.Event().wait()
+
+    orchestrator = _orchestrator(session_factory=FakeSession)
+    orchestrator.scheduler.job_lease = lease
+    orchestrator._execute_image_edit_verification = block  # type: ignore[method-assign]
+    task = asyncio.create_task(orchestrator._execute(verification_job.id, None))
+    await started.wait()
+
+    orchestrator._tasks[verification_job.id] = task
+    orchestrator._preempted_image_edit_verifications.add(verification_job.id)
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+
+    assert verification_job.status == JobStatus.COMPLETE.value
+    assert verification_job.result_json == {
+        "version": "image-edit-verification-v1",
+        "status": "skipped",
+        "reason": VerificationReason.ASSESSMENT_INTERRUPTED.value,
+        "automatic_retry_executed": False,
+    }
+
+
+async def test_preemption_cancels_the_running_check_before_foreground_execution() -> None:
+    verification_job_id = "job-running-check"
+    blocker = asyncio.create_task(asyncio.Event().wait())
+
+    class Result:
+        @staticmethod
+        def all() -> list[str]:
+            return [verification_job_id]
+
+    class FakeSession:
+        def __enter__(self):  # type: ignore[no-untyped-def]
+            return self
+
+        def __exit__(self, *_args):  # type: ignore[no-untyped-def]
+            return None
+
+        def scalars(self, _statement):  # type: ignore[no-untyped-def]
+            return Result()
+
+    orchestrator = _orchestrator(session_factory=FakeSession)
+    orchestrator._tasks[verification_job_id] = blocker
+
+    await orchestrator._preempt_running_image_edit_verifications()
+
+    assert blocker.cancelled()
+    orchestrator.engines.chat.cancel.assert_awaited_once_with(verification_job_id)
+    assert orchestrator._preempted_image_edit_verifications == set()
+
+
+async def test_automatic_edit_retry_does_not_preempt_its_own_check() -> None:
+    orchestrator = _orchestrator()
+    orchestrator._is_image_edit_verification_retry = Mock(return_value=True)  # type: ignore[method-assign]
+    orchestrator._preempt_running_image_edit_verifications = AsyncMock()  # type: ignore[method-assign]
+    orchestrator._execute = AsyncMock()  # type: ignore[method-assign]
+
+    await orchestrator._execute_after_preempting_verification("job-retry", "run-retry")
+
+    orchestrator._preempt_running_image_edit_verifications.assert_not_awaited()
+    orchestrator._execute.assert_awaited_once_with("job-retry", "run-retry")
 
 
 async def test_invalid_verifier_payload_falls_back_without_a_failed_job() -> None:
