@@ -10,7 +10,6 @@ from local_lm.db import Base
 from local_lm.domain import MessageRole, MessageStatus
 from local_lm.message_references import (
     ResolvedReference,
-    carry_message_references,
     carry_message_references_if_absent,
     message_references,
     record_message_references,
@@ -229,7 +228,9 @@ def test_a_regeneration_carries_the_original_references_verbatim(session: Sessio
     session.delete(subject)
     session.flush()
 
-    carry_message_references(session, source_message_id=original.id, target_message_id=repeat.id)
+    carry_message_references_if_absent(
+        session, source_message_id=original.id, target_message_id=repeat.id
+    )
     session.flush()
 
     assert message_references(session, repeat.id) == message_references(session, original.id)
