@@ -1,10 +1,10 @@
 from __future__ import annotations
 
-from datetime import datetime
+from datetime import UTC, datetime
 from enum import StrEnum
 from typing import Annotated, Any, Literal
 
-from pydantic import BaseModel, ConfigDict, Field, StringConstraints
+from pydantic import BaseModel, ConfigDict, Field, StringConstraints, field_serializer
 
 from .domain import Operation, RoutingMode
 from .references import MAX_REFERENCES_PER_TURN, MAX_ROLE, MentionSource
@@ -235,6 +235,12 @@ class MessageOut(ApiModel):
     feedback: Literal["up", "down"] | None = None
     created_at: datetime
     updated_at: datetime
+
+    @field_serializer("created_at", "updated_at", when_used="json")
+    def serialize_timestamp_as_utc(self, value: datetime) -> str:
+        """Keep SQLite-naive UTC instants explicit at the browser boundary."""
+        normalized = value.replace(tzinfo=UTC) if value.tzinfo is None else value.astimezone(UTC)
+        return normalized.isoformat().replace("+00:00", "Z")
 
 
 class ResponseFeedbackUpdate(ApiModel):
