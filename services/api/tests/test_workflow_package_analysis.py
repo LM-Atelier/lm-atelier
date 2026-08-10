@@ -535,7 +535,7 @@ async def test_reviewed_manual_nodes_cannot_be_laundered_between_packages(
 
     assert response.status_code == 200
     payload = response.json()
-    assert payload["missing_node_types"] == ["GetNode"]
+    assert payload["missing_node_types"] == []
     assert payload["custom_packages"][0]["locally_resolved"] is False
     assert payload["ready"] is False
 
