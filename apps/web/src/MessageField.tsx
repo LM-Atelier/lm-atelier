@@ -24,11 +24,13 @@ export function MessageField({
   onChange,
   onSubmit,
   onMention,
+  onPasteFiles,
 }: {
   field: RefObject<HTMLTextAreaElement | null>;
   value: string;
   onChange: (value: string) => void;
   onSubmit: () => void;
+  onPasteFiles?: (files: File[]) => void;
   /** Called when a subject is chosen from the picker. Omit to disable
    *  mentions entirely - every other caller of this field is unaffected. */
   onMention?: (mention: TrackedMention) => void;
@@ -94,6 +96,13 @@ export function MessageField({
         // the person has already walked away from.
         onSelect={(event) => track(event.currentTarget)}
         onBlur={() => setQuery(null)}
+        onPaste={(event) => {
+          if (!onPasteFiles) return;
+          const files = Array.from(event.clipboardData.files);
+          if (!files.length) return;
+          event.preventDefault();
+          onPasteFiles(files);
+        }}
         onKeyDown={(event) => {
           if (event.key === "Escape" && query !== null) {
             event.preventDefault();
