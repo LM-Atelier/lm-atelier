@@ -7,9 +7,13 @@ from pathlib import Path
 
 import pytest
 from alembic import command
+from alembic.autogenerate import compare_metadata
+from alembic.migration import MigrationContext
 from alembic.script import ScriptDirectory
 from alembic.util.exc import CommandError
+from sqlalchemy import UniqueConstraint, create_engine
 
+from local_lm import db, models  # noqa: F401 - importing registers every table to compare
 from local_lm.backups import BackupManager
 from local_lm.config import Settings
 from local_lm.database_migrations import (
@@ -18,6 +22,7 @@ from local_lm.database_migrations import (
     alembic_config,
     upgrade_database,
 )
+from local_lm.db import Base, configure_database
 
 
 def test_unknown_database_revision_has_actionable_error(tmp_path: Path) -> None:
@@ -1215,3 +1220,64 @@ def test_a_brand_new_database_is_not_snapshotted(
 def _recorded_revisions_for(settings: Settings) -> set[str]:
     with closing(sqlite3.connect(settings.state_dir / "local-lm.sqlite3")) as connection:
         return {row[0] for row in connection.execute("SELECT version_num FROM alembic_version")}
+
+
+def test_the_migrated_schema_matches_the_models(tmp_path: Path) -> None:
+    """The two ways this schema gets built have to produce the same thing.
+
+    Migrations build it on real installs. `Base.metadata` builds it wherever
+    something calls `create_all`, which several suites do. Nothing compared
+    them, and they had drifted: four indexes existed under one name in a
+    migrated database and a different name in a created one, so which names a
+    database had depended on how it came to exist.
+
+    That is worth a test rather than a one-time fix because the failure is
+    silent and arrives late. Autogenerate compares the models against the
+    database, so a drifted name makes the next generated migration propose
+    dropping and recreating indexes on real data - a rename nobody asked for,
+    inside a migration somebody would reasonably trust because a tool wrote it.
+
+    One blind spot, stated rather than silenced: `runs` and `work_steps` refer
+    to each other, and the comparison skips foreign keys on tables it cannot
+    order, which is what the warning this emits is saying. Everything else is
+    compared; foreign keys between those two are not.
+    """
+
+    settings = Settings(data_dir=tmp_path / "parity", dev=True)
+    settings.prepare()
+    configure_database(settings)
+    upgrade_database(settings)
+    db.engine.dispose()
+
+    engine = create_engine(f"sqlite:///{settings.state_dir / 'local-lm.sqlite3'}")
+    try:
+        with engine.connect() as connection:
+            difference = compare_metadata(MigrationContext.configure(connection), Base.metadata)
+    finally:
+        engine.dispose()
+
+    assert [one for one in difference if not _is_the_recorded_uniqueness_allowance(one)] == []
+
+
+def _is_the_recorded_uniqueness_allowance(entry: object) -> bool:
+    """SQLite enforces uniqueness one way, so these two spellings are one thing.
+
+    `runs.work_step_id` is declared as a unique constraint on the model and was
+    migrated as a unique index. Both produce the same guarantee, and alembic
+    reports the pair as a difference for as long as they coexist. Matched by
+    table and column rather than by operation name, so a genuinely new
+    uniqueness mismatch anywhere else still fails the test above.
+    """
+
+    if not isinstance(entry, tuple) or len(entry) != 2:
+        return False
+    operation, obj = entry
+    table = getattr(getattr(obj, "table", None), "name", None)
+    if table != "runs":
+        return False
+    columns = [column.name for column in getattr(obj, "columns", [])]
+    if columns != ["work_step_id"]:
+        return False
+    return (
+        operation == "remove_index" and getattr(obj, "name", None) == "uq_runs_work_step_id"
+    ) or (operation == "add_constraint" and isinstance(obj, UniqueConstraint))
