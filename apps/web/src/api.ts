@@ -947,8 +947,11 @@ export const api = {
     request<CustomNodeInstall>("/api/custom-nodes", { method: "POST", body: JSON.stringify(payload) }),
   updateCustomNode: (id: string, revision: string) =>
     request<CustomNodeInstall>(`/api/custom-nodes/${id}`, { method: "PATCH", body: JSON.stringify({ revision }) }),
-  trustCustomNode: (id: string, trusted: boolean) =>
-    request<CustomNodeInstall>(`/api/custom-nodes/${id}/trust`, { method: "POST", body: JSON.stringify({ trusted }) }),
+  trustCustomNode: (id: string, trusted: boolean, nodeTypes: string[] = []) =>
+    request<CustomNodeInstall>(`/api/custom-nodes/${id}/trust`, {
+      method: "POST",
+      body: JSON.stringify({ trusted, node_types: nodeTypes }),
+    }),
   rollbackCustomNode: (id: string) =>
     request<CustomNodeInstall>(`/api/custom-nodes/${id}/rollback`, { method: "POST" }),
   removeCustomNode: (id: string) => request<void>(`/api/custom-nodes/${id}`, { method: "DELETE" }),
