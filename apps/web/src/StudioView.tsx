@@ -106,7 +106,6 @@ export function StudioView({
   });
   const activeTool = capabilities.data?.tools.find((tool) => tool.kind === tools.kind);
   const unavailable = activeTool && !activeTool.available ? activeTool.reason : null;
-
   // Derived, never synced: with nothing chosen the studio shows the newest
   // result, so a finished apply lands on the canvas without an effect.
   const current = steps.find((step) => step.artifactId === selectedId) ?? steps.at(-1) ?? null;
@@ -364,11 +363,7 @@ export function StudioView({
               setInstruction(chosen.instruction);
             }}
           />
-          {recipe?.workflow_revision_id && (
-            <small role="status">
-              {recipe.name} supplies the workflow for this edit.
-            </small>
-          )}
+          <StudioRecipeWorkflowNotice recipe={recipe} />
           {unavailable && (
             // Beside the button that would fail, and named by the tools that
             // cannot run, so the sentence arrives before the drawing does.
@@ -436,6 +431,15 @@ export function StudioView({
         onSelect={setSelectedId}
       />
     </div>
+  );
+}
+
+function StudioRecipeWorkflowNotice({ recipe }: { recipe: EditTemplate | null }) {
+  if (!recipe?.workflow_revision_id) return null;
+  return (
+    <small role="status">
+      {recipe.name} supplies the workflow for this edit.
+    </small>
   );
 }
 
