@@ -12,8 +12,8 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from .adapters.contracts import ADAPTER_CONTRACT_VERSION
-from .domain import new_id, utcnow
 from .custom_nodes import reviewed_custom_node_types
+from .domain import new_id, utcnow
 from .model_manifests import COMFY_MODEL_FOLDERS, comfy_folder_for_kind
 from .model_planner import LAUNCH_CONTRACT_VERSION
 from .models import (
@@ -56,6 +56,8 @@ if TYPE_CHECKING:
     from .runtime_provisioning import RuntimeProvisioner
 
 WORKFLOW_ACTIVATION_RESOLVER_VERSION = "workflow-activation-v1"
+MAX_NODE_TYPE_LENGTH = 200
+
 _DIGEST = re.compile(r"^[0-9a-f]{64}$")
 _RESOLVER_VERSION = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.+-]{0,39}$")
 
@@ -485,6 +487,7 @@ def _custom_node_types(value: object) -> tuple[str, ...]:
         return reviewed_custom_node_types(value, required=True)
     except ValueError as exc:
         raise WorkflowBindingError("dependency_unavailable", str(exc)) from exc
+
 
 def _launch_resources(
     session: Session,
