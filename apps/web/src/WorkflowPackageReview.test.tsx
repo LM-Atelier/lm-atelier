@@ -211,4 +211,51 @@ describe("WorkflowPackageReview runtime inventory", () => {
     expect(screen.queryByText("Needs a package version this machine does not have installed")).toBeNull();
     expect(screen.getByText("Uses a package without a pinned version")).toBeInTheDocument();
   });
+  it("tells you to re-read a package you already installed, not to fetch it", () => {
+    // Reachable by upgrading rather than by doing anything wrong: the reviewed
+    // node inventory began being recorded after people had already trusted
+    // packages, and until this had its own wording the application told them to
+    // install what was already sitting on disk.
+    renderReview(analysis({
+      ready: false,
+      runtime_nodes_available: true,
+      dependencies_resolved: false,
+      node_inventory_available: true,
+      issues: [
+        {
+          code: "custom_node_package_awaiting_review",
+          count: 1,
+          node_types: ["GetNode", "SetNode"],
+          severity: "blocking",
+        },
+      ],
+    }));
+
+    expect(screen.getByText(/review it again to confirm/i)).toBeInTheDocument();
+    expect(
+      screen.queryByText("Needs a package version this machine does not have installed"),
+    ).toBeNull();
+  });
+
+  it("does not claim a package needs re-reading while node availability is unknown", () => {
+    // Whether a package resolves is read against the runtime inventory, so
+    // without one every package looks unresolved and this would send somebody
+    // to re-review packages that are fine.
+    renderReview(analysis({
+      ready: false,
+      runtime_nodes_available: false,
+      dependencies_resolved: false,
+      node_inventory_available: false,
+      issues: [
+        {
+          code: "custom_node_package_awaiting_review",
+          count: 1,
+          node_types: ["GetNode"],
+          severity: "blocking",
+        },
+      ],
+    }));
+
+    expect(screen.queryByText(/review it again to confirm/i)).toBeNull();
+  });
 });

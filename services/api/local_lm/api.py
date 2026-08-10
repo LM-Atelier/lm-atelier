@@ -8045,6 +8045,30 @@ async def _verified_launchable_packages(
     return combined
 
 
+async def _packages_awaiting_review(services: Services) -> frozenset[tuple[str, str]]:
+    """Trusted installs whose reviewed node inventory was never recorded.
+
+    Absent evidence and an absent package resolve identically and need opposite
+    actions, so the analysis is told which is which. Failing closed here means
+    reporting the package as simply unresolved, which is the older, less helpful
+    answer rather than a wrong one.
+    """
+
+    resolver = getattr(
+        services.processes, "trusted_comfy_custom_node_packages_awaiting_review", None
+    )
+    if not callable(resolver):
+        return frozenset()
+    try:
+        packages = await resolver()
+    except Exception:  # noqa: BLE001 - analysis must not fail outright over advice
+        logger.warning("Installed custom-node packages could not be checked for review state.")
+        return frozenset()
+    # Rebuilt rather than returned, so an untyped resolver cannot widen what
+    # this promises - the same shape the launchable-package reader uses.
+    return frozenset((str(name), str(revision)) for name, revision in packages)
+
+
 def _launchable_package_node_types(
     analysis: ComfyWorkflowPackageAnalysis,
     packages: Mapping[tuple[str, str], frozenset[str]],
@@ -9111,6 +9135,7 @@ async def import_workflow_package(
                 available_node_types=available_node_types | launchable_node_types,
                 available_asset_filenames=asset_filenames,
                 installed_package_versions=verified_package_versions,
+                packages_awaiting_review=await _packages_awaiting_review(services),
             )
         except WorkflowPackageError as exc:
             raise api_error(422, exc.code, str(exc)) from exc
@@ -9256,6 +9281,7 @@ async def analyze_workflow_package(
                 available_node_types=available_node_types | launchable_node_types,
                 available_asset_filenames=asset_filenames,
                 installed_package_versions=verified_package_versions,
+                packages_awaiting_review=await _packages_awaiting_review(services),
             )
         except WorkflowPackageError as exc:
             raise api_error(422, exc.code, str(exc)) from exc

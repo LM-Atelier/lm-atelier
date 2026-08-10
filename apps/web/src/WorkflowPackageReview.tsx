@@ -17,6 +17,12 @@ const ISSUE_DESCRIPTIONS: Record<string, string> = {
   unidentified_custom_node_package: "Uses custom nodes with no declared package",
   unresolved_custom_node_package: "Needs a package version this machine does not have installed",
   unversioned_custom_node_package: "Uses a package without a pinned version",
+  // Installed and trusted already. What is missing is the record of which nodes
+  // were reviewed, so the remedy is to read that revision again rather than to
+  // go and fetch anything - which is what the wording has to convey, because
+  // the two states are indistinguishable from the outside otherwise.
+  custom_node_package_awaiting_review:
+    "Uses an installed package whose review did not record which nodes it provides - review it again to confirm",
 };
 
 function installableAssets(analysis: WorkflowPackageAnalysis) {
@@ -32,6 +38,10 @@ function issueDescription(code: string): string {
 const INVENTORY_DEPENDENT_ISSUES = new Set([
   "unidentified_custom_node_package",
   "unresolved_custom_node_package",
+  // Whether a package resolves is read against the runtime's node inventory, so
+  // without one every package looks unresolved and this would tell people to
+  // re-review packages that are fine.
+  "custom_node_package_awaiting_review",
 ]);
 
 /** Review a raw ComfyUI package before anything is imported or trusted.

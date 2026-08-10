@@ -485,3 +485,80 @@ def test_provenance_reports_and_decides_nothing() -> None:
     # ...while still telling them apart.
     assert first.node_provenance[0].unattributed
     assert second.node_provenance[0].core_claimed
+
+
+def test_a_package_trusted_before_its_inventory_was_recorded_says_so() -> None:
+    """Absent evidence resolves exactly as poorly as an absent package and needs
+    the opposite action: one is fixed by fetching something, the other by
+    reading what is already installed.
+
+    This is reachable by upgrading rather than by doing anything wrong. The
+    reviewed inventory began being recorded after people had already trusted
+    packages, so every such install reports as unresolved until somebody reads
+    that exact revision again - and until this distinction existed, the
+    application sent them to install what they already had.
+    """
+
+    value = workflow(
+        nodes=[
+            node(1, "KSampler", package="comfy-core", version="0.28.0"),
+            node(2, "CustomNode", package="example-pack", version="a" * 40),
+        ]
+    )
+
+    analysis = analyze_comfyui_workflow_package(
+        value,
+        available_node_types={"KSampler", "CustomNode"},
+        packages_awaiting_review={("example-pack", "a" * 40)},
+    )
+
+    codes = {issue.code for issue in analysis.issues}
+    assert "custom_node_package_awaiting_review" in codes
+    assert "unresolved_custom_node_package" not in codes
+    # Still blocking: the workflow genuinely cannot run. Only the remedy differs.
+    assert not analysis.dependencies_resolved
+    assert not analysis.ready
+
+
+def test_an_absent_package_is_still_reported_as_absent() -> None:
+    """The new state must not swallow the old one, or a package nobody
+    installed would be reported as merely needing a read."""
+
+    value = workflow(
+        nodes=[
+            node(1, "KSampler", package="comfy-core", version="0.28.0"),
+            node(2, "CustomNode", package="example-pack", version="a" * 40),
+        ]
+    )
+
+    analysis = analyze_comfyui_workflow_package(
+        value,
+        available_node_types={"KSampler", "CustomNode"},
+        packages_awaiting_review=set(),
+    )
+
+    codes = {issue.code for issue in analysis.issues}
+    assert "unresolved_custom_node_package" in codes
+    assert "custom_node_package_awaiting_review" not in codes
+
+
+def test_a_reviewed_package_is_neither() -> None:
+    """Recording the inventory is what makes the package resolve, so a package
+    that has it must report no issue at all."""
+
+    value = workflow(
+        nodes=[
+            node(1, "KSampler", package="comfy-core", version="0.28.0"),
+            node(2, "CustomNode", package="example-pack", version="a" * 40),
+        ]
+    )
+
+    analysis = analyze_comfyui_workflow_package(
+        value,
+        available_node_types={"KSampler", "CustomNode"},
+        installed_package_versions={"example-pack": {"a" * 40}},
+        packages_awaiting_review={("example-pack", "a" * 40)},
+    )
+
+    assert analysis.issues == ()
+    assert analysis.ready
