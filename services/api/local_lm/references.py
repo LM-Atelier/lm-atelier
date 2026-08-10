@@ -40,6 +40,10 @@ class ReferenceError(ValueError):
     """A Reference request could not be understood, so it is not guessed at."""
 
 
+class ReferenceNotFoundError(ReferenceError):
+    """A turn named a Reference subject that no longer exists."""
+
+
 class ReferenceKind(StrEnum):
     """What a subject is. A closed set, because compatibility depends on it.
 

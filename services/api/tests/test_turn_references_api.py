@@ -75,9 +75,32 @@ async def test_an_unknown_reference_refuses_before_writing_the_turn(client: Asyn
         },
     )
 
-    assert refused.status_code == 422
-    assert refused.json()["code"] == "turn-invalid"
+    assert refused.status_code == 404
+    assert refused.json()["code"] == "reference-not-found"
     assert "no longer exists" in refused.json()["detail"]
+    assert (await client.get(f"/api/chats/{chat['id']}")).json()["messages"] == []
+
+
+async def test_an_ordered_turn_names_the_same_missing_reference_error(
+    client: AsyncClient,
+) -> None:
+    chat = await _chat(client, "Missing ordered reference")
+
+    refused = await client.post(
+        f"/api/chats/{chat['id']}/turns",
+        json={
+            "text": (
+                "Write a short story, then create an image from it, then animate "
+                "the image, then summarize the video"
+            ),
+            "mode": "auto",
+            "confirm_media": True,
+            "references": [{"reference_subject_id": "refsubject_missing"}],
+        },
+    )
+
+    assert refused.status_code == 404
+    assert refused.json()["code"] == "reference-not-found"
     assert (await client.get(f"/api/chats/{chat['id']}")).json()["messages"] == []
 
 

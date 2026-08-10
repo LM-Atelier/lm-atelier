@@ -18,7 +18,12 @@ from local_lm.message_references import (
 )
 from local_lm.models import Artifact, Chat, Message, MessageReference, ReferenceAsset
 from local_lm.reference_library import create_subject, rename_subject
-from local_lm.references import MentionSource, ReferenceError, ReferenceRequest
+from local_lm.references import (
+    MentionSource,
+    ReferenceError,
+    ReferenceNotFoundError,
+    ReferenceRequest,
+)
 
 
 @pytest.fixture
@@ -83,7 +88,7 @@ def test_a_subject_that_no_longer_exists_refuses_the_turn(session: Session) -> N
     """Dropping it would generate an image the request did not ask for and then
     report success, which is worse than refusing."""
 
-    with pytest.raises(ReferenceError, match="no longer exists"):
+    with pytest.raises(ReferenceNotFoundError, match="no longer exists"):
         resolve_reference_requests(session, [ReferenceRequest("refsubject_missing")])
 
 

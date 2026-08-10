@@ -192,7 +192,7 @@ from .reference_library import (
     set_details,
     set_favorite,
 )
-from .references import ReferenceError
+from .references import ReferenceError, ReferenceNotFoundError
 from .routing import RouteConfirmationRequired
 from .runtime_config import persist_runtime_values
 from .schemas import (
@@ -2035,6 +2035,8 @@ async def _accept_turn(
         raise api_error(409, "engine-not-configured", str(exc)) from exc
     except EngineSchemaUnavailableError as exc:
         raise api_error(503, "engine-schema-unavailable", str(exc)) from exc
+    except ReferenceNotFoundError as exc:
+        raise api_error(404, "reference-not-found", str(exc)) from exc
     except ValueError as exc:
         raise api_error(422, "turn-invalid", str(exc)) from exc
 
