@@ -91,11 +91,34 @@ export interface Message {
   transcript_visible?: boolean;
   active_response_revision_id?: string | null;
   parts: MessagePart[];
+  /** What this turn referred to, as it stood when the turn was accepted.
+   *  Empty for every message that named nothing, which is almost all of them. */
+  references?: MessageReference[];
   response_revisions?: ResponseRevision[];
   /** The local preference verdict on the base response; revisions carry their own. */
   feedback?: "up" | "down" | null;
   created_at: string;
   updated_at: string;
+}
+
+/** One recorded reference, snapshotted rather than joined.
+ *
+ * The name and mention are the values the turn used, not the subject's current
+ * ones, and `reference_subject_id` carries no promise the subject still
+ * exists. Rendering a mention from this - never by scanning the message text -
+ * is what keeps a renamed subject from rewriting an old message, and a deleted
+ * one from erasing the record that it was used.
+ */
+export interface MessageReference {
+  reference_subject_id: string;
+  mention_slug: string;
+  subject_name: string;
+  subject_kind: string;
+  role?: string | null;
+  strength?: number | null;
+  source: string;
+  reference_asset_ids_json: string[];
+  artifact_ids_json: string[];
 }
 
 export interface ResponseRevision {

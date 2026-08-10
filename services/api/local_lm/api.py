@@ -1550,6 +1550,11 @@ async def get_chat(chat_id: str, session: ConversationSessionDep) -> Chat:
             .selectinload(ResponseRevision.parts)
             .selectinload(ResponseRevisionPart.artifact),
             selectinload(Chat.messages).selectinload(Message.feedback_rows),
+            # One query for the whole chat rather than one per message. Almost
+            # every message names nothing, so this is usually an empty result
+            # rather than a cost. Every loader that returns a ChatDetail needs
+            # it, or the transcript falls back to a query per message.
+            selectinload(Chat.messages).selectinload(Message.references),
             selectinload(Chat.messages)
             .selectinload(Message.response_revisions)
             .selectinload(ResponseRevision.feedback_rows),
@@ -1744,6 +1749,11 @@ def _studio_session_query(session_id: str) -> Select[tuple[Chat]]:
             .selectinload(ResponseRevision.parts)
             .selectinload(ResponseRevisionPart.artifact),
             selectinload(Chat.messages).selectinload(Message.feedback_rows),
+            # One query for the whole chat rather than one per message. Almost
+            # every message names nothing, so this is usually an empty result
+            # rather than a cost. Every loader that returns a ChatDetail needs
+            # it, or the transcript falls back to a query per message.
+            selectinload(Chat.messages).selectinload(Message.references),
             selectinload(Chat.messages)
             .selectinload(Message.response_revisions)
             .selectinload(ResponseRevision.feedback_rows),

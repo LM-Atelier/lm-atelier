@@ -198,6 +198,28 @@ class ResponseRevisionOut(ApiModel):
     updated_at: datetime
 
 
+class MessageReferenceOut(ApiModel):
+    """What one turn referred to, as it stood when the turn was accepted.
+
+    The name and mention are the recorded ones, not the subject's current
+    values, and the subject id carries no promise that the subject still
+    exists. That is the point: a renamed subject must not rewrite an old
+    message, and a deleted one must not erase the record that it was used.
+    """
+
+    reference_subject_id: str
+    mention_slug: str
+    subject_name: str
+    subject_kind: str
+    role: str | None = None
+    strength: float | None = None
+    source: str
+    # The _json suffix matches the columns and the shape every other
+    # reference field already takes in this API.
+    reference_asset_ids_json: list[str] = Field(default_factory=list)
+    artifact_ids_json: list[str] = Field(default_factory=list)
+
+
 class MessageOut(ApiModel):
     id: str
     chat_id: str
@@ -207,6 +229,8 @@ class MessageOut(ApiModel):
     transcript_visible: bool
     active_response_revision_id: str | None
     parts: list[MessagePartOut]
+    # Empty for every message that named nothing, which is almost all of them.
+    references: list[MessageReferenceOut] = Field(default_factory=list)
     response_revisions: list[ResponseRevisionOut] = Field(default_factory=list)
     feedback: Literal["up", "down"] | None = None
     created_at: datetime
