@@ -87,7 +87,7 @@ from .image_edit_verification import (
 )
 from .media_references import exceeds_capacity
 from .message_references import (
-    carry_message_references,
+    carry_message_references_if_absent,
     record_message_references,
     resolve_reference_requests,
 )
@@ -766,7 +766,7 @@ class ConversationOrchestrator:
         source_message_id: str | None,
     ) -> None:
         if source_message_id is not None:
-            carry_message_references(
+            carry_message_references_if_absent(
                 session,
                 source_message_id=source_message_id,
                 target_message_id=user_message_id,

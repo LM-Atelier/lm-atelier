@@ -11,6 +11,7 @@ from local_lm.domain import MessageRole, MessageStatus
 from local_lm.message_references import (
     ResolvedReference,
     carry_message_references,
+    carry_message_references_if_absent,
     message_references,
     record_message_references,
     resolve_reference_requests,
@@ -228,6 +229,45 @@ def test_a_regeneration_carries_the_original_references_verbatim(session: Sessio
 
     assert message_references(session, repeat.id) == message_references(session, original.id)
     assert message_references(session, repeat.id)[0].subject_name == "Ada Lovelace"
+
+
+def test_an_identical_retry_carry_is_a_no_op(session: Session) -> None:
+    subject = create_subject(session, name="Ada Lovelace", kind="person")
+    original = _message(session)
+    repeat = _message(session)
+    resolved = resolve_reference_requests(session, [ReferenceRequest(subject.id)])
+    record_message_references(session, original.id, resolved)
+    record_message_references(session, repeat.id, resolved)
+    session.flush()
+
+    carry_message_references_if_absent(
+        session, source_message_id=original.id, target_message_id=repeat.id
+    )
+
+    assert message_references(session, repeat.id) == message_references(session, original.id)
+
+
+def test_a_retry_carry_refuses_conflicting_existing_provenance(session: Session) -> None:
+    original_subject = create_subject(session, name="Ada Lovelace", kind="person")
+    other_subject = create_subject(session, name="Grace Hopper", kind="person")
+    original = _message(session)
+    repeat = _message(session)
+    record_message_references(
+        session,
+        original.id,
+        resolve_reference_requests(session, [ReferenceRequest(original_subject.id)]),
+    )
+    record_message_references(
+        session,
+        repeat.id,
+        resolve_reference_requests(session, [ReferenceRequest(other_subject.id)]),
+    )
+    session.flush()
+
+    with pytest.raises(ReferenceError, match="already records different references"):
+        carry_message_references_if_absent(
+            session, source_message_id=original.id, target_message_id=repeat.id
+        )
 
 
 def test_the_source_of_a_reference_survives_the_round_trip(session: Session) -> None:

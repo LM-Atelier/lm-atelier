@@ -169,6 +169,28 @@ def message_references(session: Session, message_id: str) -> tuple[ResolvedRefer
     )
 
 
+def carry_message_references_if_absent(
+    session: Session, *, source_message_id: str, target_message_id: str
+) -> None:
+    """Idempotently carry one immutable snapshot, but never hide a conflict.
+
+    A retry may re-enter after the target snapshot was committed. Identical
+    provenance is already the requested outcome, so that is a no-op. Different
+    provenance remains an error: silently replacing or accepting it would make
+    the historical answer depend on retry timing.
+    """
+
+    expected = message_references(session, source_message_id)
+    existing = message_references(session, target_message_id)
+    if existing:
+        if existing != expected:
+            raise ReferenceError(
+                f"message {target_message_id} already records different references"
+            )
+        return
+    record_message_references(session, target_message_id, expected)
+
+
 def carry_message_references(
     session: Session, *, source_message_id: str, target_message_id: str
 ) -> tuple[MessageReference, ...]:
