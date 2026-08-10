@@ -1,6 +1,7 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
+import { useEffect } from "react";
 import { StudioView } from "./StudioView";
 import { api } from "./api";
 import { useStudioSession } from "./useStudioSession";
@@ -14,6 +15,21 @@ vi.mock("./api", () => ({
   },
 }));
 vi.mock("./useStudioSession", () => ({ useStudioSession: vi.fn() }));
+let workflowAvailabilityReason: string | null = null;
+vi.mock("./StudioWorkflowSelector", () => ({
+  StudioWorkflowSelector: ({
+    onAvailabilityChange,
+  }: {
+    onAvailabilityChange: (reason: string | null) => void;
+    onSelectionChange: () => void;
+  }) => {
+    useEffect(
+      () => onAvailabilityChange(workflowAvailabilityReason),
+      [onAvailabilityChange],
+    );
+    return <div>Workflow chooser</div>;
+  },
+}));
 // The canvas stack needs a real 2D context; none of it is under test here.
 vi.mock("./StudioCanvas", () => ({ StudioCanvas: () => <div /> }));
 vi.mock("./messageMedia", () => ({ artifactSource: () => "blob:picture" }));
@@ -21,6 +37,7 @@ vi.mock("./messageMedia", () => ({ artifactSource: () => "blob:picture" }));
 function renderStudio() {
   vi.mocked(useStudioSession).mockReturnValue({
     steps: [{ artifactId: "art-1", instruction: null }],
+    sessionId: "chat-studio",
     busy: false,
     error: null,
     apply: vi.fn(),
@@ -39,17 +56,74 @@ function renderStudio() {
 }
 
 afterEach(() => {
+  workflowAvailabilityReason = null;
   cleanup();
   vi.clearAllMocks();
 });
 
 describe("applying an edit", () => {
+  it("says when a pinned recipe overrides the displayed workflow choice", async () => {
+    workflowAvailabilityReason = "Loading the current workflow choice.";
+    vi.mocked(api.editTemplates).mockResolvedValue([{
+      id: "recipe-1",
+      name: "Pinned portrait edit",
+      description: "",
+      instruction: "make it warmer",
+      operation: "image_to_image",
+      settings_json: {},
+      workflow_revision_id: "revision-pinned",
+      model_profile_id: null,
+      mask_mode: "none",
+      trigger_words_json: [],
+      content_rating: "general",
+      builtin: false,
+      enabled: true,
+    }]);
+    renderStudio();
+
+    fireEvent.click(await screen.findByRole("button", { name: "Pinned portrait edit" }));
+
+    expect(screen.getByRole("status")).toHaveTextContent(
+      "Pinned portrait edit supplies the workflow for this edit.",
+    );
+    expect(screen.getByRole("button", { name: "Apply edit" })).toBeEnabled();
+
+    fireEvent.change(screen.getByRole("textbox"), { target: { value: "make it cooler" } });
+    expect(screen.queryByText(/supplies the workflow for this edit/i)).toBeNull();
+  });
+
+  it("does not let an unpinned recipe bypass an unavailable workflow choice", async () => {
+    workflowAvailabilityReason = "Loading the current workflow choice.";
+    vi.mocked(api.editTemplates).mockResolvedValue([{
+      id: "recipe-1",
+      name: "Unpinned portrait edit",
+      description: "",
+      instruction: "make it warmer",
+      operation: "image_to_image",
+      settings_json: {},
+      workflow_revision_id: null,
+      model_profile_id: null,
+      mask_mode: "none",
+      trigger_words_json: [],
+      content_rating: "general",
+      builtin: false,
+      enabled: true,
+    }]);
+    renderStudio();
+
+    fireEvent.click(await screen.findByRole("button", { name: "Unpinned portrait edit" }));
+
+    expect(screen.queryByText(/supplies the workflow for this edit/i)).toBeNull();
+    expect(screen.getByRole("button", { name: "Apply edit" })).toBeDisabled();
+  });
+
   it("keeps the instruction when the turn is refused", async () => {
     // The words were cleared at dispatch, so a refusal erased exactly what
     // would have been retyped to try again.
     const apply = vi.fn();
     vi.mocked(useStudioSession).mockReturnValue({
       steps: [{ artifactId: "art-1", instruction: null }],
+      sessionId: "chat-studio",
       busy: false,
       error: null,
       apply,
@@ -132,6 +206,7 @@ describe("what the studio believes it can do", () => {
     // back was told by the same sentence that it still was not installed.
     vi.mocked(useStudioSession).mockReturnValue({
       steps: [{ artifactId: "art-1", instruction: null }],
+      sessionId: "chat-studio",
       busy: false,
       error: null,
       apply: vi.fn(),

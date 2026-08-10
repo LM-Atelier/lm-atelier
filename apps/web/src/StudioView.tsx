@@ -1,5 +1,5 @@
 import { Download, Star, X } from "lucide-react";
-import { useEffect, useMemo, useReducer, useState } from "react";
+import { useCallback, useEffect, useId, useMemo, useReducer, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { api } from "./api";
 import { StudioOpenImage } from "./StudioOpenImage";
@@ -9,6 +9,7 @@ import { StudioExtendHandles } from "./StudioExtendHandles";
 import { StudioRecipes } from "./StudioRecipes";
 import { StudioToolGuidance } from "./StudioToolGuidance";
 import { StudioToolRail } from "./StudioToolRail";
+import { StudioWorkflowSelector } from "./StudioWorkflowSelector";
 import { artifactSource } from "./messageMedia";
 import { coverage, encodeMaskPng, isEmpty } from "./studioMasks";
 import {
@@ -46,7 +47,10 @@ export function StudioView({
   /** Put the picture down and go back to an empty studio. */
   onClose: () => void;
 }) {
-  const { steps, busy, error, apply } = useStudioSession(sourceArtifactId, sourceChatId);
+  const { sessionId, steps, busy, error, apply } = useStudioSession(
+    sourceArtifactId,
+    sourceChatId,
+  );
   const [confirmDialog, confirm] = useConfirm();
   // Every result is already an artifact in the library - the studio's turns
   // are ordinary turns. What was missing is a way to say "keep this one",
@@ -63,6 +67,23 @@ export function StudioView({
   // edited by hand: at that point the words are no longer the recipe's, and
   // running its workflow would attribute a result to something it did not do.
   const [recipe, setRecipe] = useState<EditTemplate | null>(null);
+  const [workflowAvailability, setWorkflowAvailability] = useState<{
+    chatId: string;
+    reason: string | null;
+  } | null>(null);
+  const workflowSelectorId = useId();
+  const workflowUnavailable = sessionId && workflowAvailability?.chatId === sessionId
+    ? workflowAvailability.reason
+    : "Loading the current workflow choice.";
+  const recordWorkflowAvailability = useCallback((reason: string | null) => {
+    if (!sessionId) return;
+    setWorkflowAvailability((currentAvailability) => (
+      currentAvailability?.chatId === sessionId
+        && currentAvailability.reason === reason
+        ? currentAvailability
+        : { chatId: sessionId, reason }
+    ));
+  }, [sessionId]);
   const [tools, dispatch] = useReducer(studioToolReducer, undefined, initialToolState);
   // The pointer tool is rebuilt whenever the mode or brush changes; each one
   // is a cheap wrapper over the shared raster, never a copy of it.
@@ -85,7 +106,6 @@ export function StudioView({
   });
   const activeTool = capabilities.data?.tools.find((tool) => tool.kind === tools.kind);
   const unavailable = activeTool && !activeTool.available ? activeTool.reason : null;
-
   // Derived, never synced: with nothing chosen the studio shows the newest
   // result, so a finished apply lands on the canvas without an effect.
   const current = steps.find((step) => step.artifactId === selectedId) ?? steps.at(-1) ?? null;
@@ -111,7 +131,6 @@ export function StudioView({
       dispatch({ type: "image-changed", width: bitmap.width, height: bitmap.height });
     }
   }, [bitmap]);
-
   if (!sourceArtifactId) {
     return (
       <div className="page-view studio-view">
@@ -233,6 +252,16 @@ export function StudioView({
           )}
         </div>
         <aside className="studio-panel">
+          {sessionId ? (
+            <StudioWorkflowSelector
+              chatId={sessionId}
+              disabled={busy}
+              onAvailabilityChange={recordWorkflowAvailability}
+              onSelectionChange={() => setRecipe(null)}
+            />
+          ) : (
+            <StudioWorkflowOpening selectorId={workflowSelectorId} />
+          )}
           {tools.kind !== "instruct" && (
             <div className="studio-selection-controls">
               <label>
@@ -334,6 +363,7 @@ export function StudioView({
               setInstruction(chosen.instruction);
             }}
           />
+          <StudioRecipeWorkflowNotice recipe={recipe} />
           {unavailable && (
             // Beside the button that would fail, and named by the tools that
             // cannot run, so the sentence arrives before the drawing does.
@@ -348,7 +378,8 @@ export function StudioView({
               (tools.kind !== "enhance" && tools.kind !== "extend" && !instruction.trim()) ||
               busy ||
               !current ||
-              Boolean(unavailable)
+              Boolean(unavailable) ||
+              Boolean(workflowUnavailable && !recipe?.workflow_revision_id)
             }
             onClick={() => {
               if (!current) return;
@@ -399,6 +430,26 @@ export function StudioView({
         selectedId={current?.artifactId ?? null}
         onSelect={setSelectedId}
       />
+    </div>
+  );
+}
+
+function StudioRecipeWorkflowNotice({ recipe }: { recipe: EditTemplate | null }) {
+  if (!recipe?.workflow_revision_id) return null;
+  return (
+    <small role="status">
+      {recipe.name} supplies the workflow for this edit.
+    </small>
+  );
+}
+
+function StudioWorkflowOpening({ selectorId }: { selectorId: string }) {
+  return (
+    <div className="workflow-selector studio-workflow-selector">
+      <label htmlFor={selectorId}>Editing workflow</label>
+      <select id={selectorId} disabled value="">
+        <option value="">Opening Studio session…</option>
+      </select>
     </div>
   );
 }
