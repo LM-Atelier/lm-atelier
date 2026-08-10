@@ -13,7 +13,20 @@ API_SOURCE = (Path(__file__).resolve().parents[1] / "local_lm" / "api.py").read_
 
 # Lower this every time a bare HTTPException is converted to api_error; it
 # must never rise. The eslint test ceilings use the same one-way ratchet.
-BARE_HTTP_EXCEPTIONS_CEILING = 89
+#
+# It cannot reach zero, and the floor is not four raises' worth of laziness.
+# Four sites already put a "code" in their detail dict alongside a plan or an
+# estimate, so they are programmatically identifiable already - which is the
+# thing this ratchet exists to get. Two of those codes,
+# route_confirmation_required and ordered_plan_confirmation_required, are
+# matched by name in apps/web/src/api.ts, so converting them to api_error's
+# kebab case would break the composer's confirmation flow. Counting them is an
+# artefact of measuring by regex; converting them would be a regression.
+#
+# The ratchet is now AT that floor. Every remaining raise is one of those four,
+# so this number should not move again. A rise means a new untyped error was
+# added; the fix is api_error with a code, never a higher ceiling.
+BARE_HTTP_EXCEPTIONS_CEILING = 4
 
 
 async def test_a_typed_error_keeps_detail_and_adds_a_stable_code(

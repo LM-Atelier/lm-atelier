@@ -698,6 +698,53 @@ class ProcessSupervisor:
                 environment_root=registry_wheel_environment_root(self.settings.registry_dir),
             )
 
+    def _trusted_comfy_registry_package_node_types(
+        self,
+    ) -> dict[tuple[str, str], frozenset[str]]:
+        from sqlalchemy import select
+
+        from .comfy_registry_installs import trusted_comfy_registry_launch_contract
+        from .db import SessionLocal
+        from .models import ComfyRegistryInstall
+
+        with SessionLocal() as session:
+            contract = trusted_comfy_registry_launch_contract(
+                session,
+                custom_node_root=self.settings.custom_node_dir,
+                environment_root=registry_wheel_environment_root(self.settings.registry_dir),
+            )
+            installs = session.scalars(
+                select(ComfyRegistryInstall).where(
+                    ComfyRegistryInstall.trusted.is_(True),
+                    ComfyRegistryInstall.active.is_(True),
+                )
+            ).all()
+            result: dict[tuple[str, str], frozenset[str]] = {}
+            for install in installs:
+                key = (install.package_id, install.package_version)
+                if key in result:
+                    raise RuntimeError("Registry launch package identity is duplicated")
+                result[key] = frozenset(str(value) for value in install.node_types_json)
+        declared_node_types = {node_type for values in result.values() for node_type in values}
+        if declared_node_types != set(contract.node_types):
+            raise RuntimeError("Registry launch package node ownership is inconsistent")
+        return result
+
+    async def trusted_comfy_registry_package_node_types(
+        self,
+    ) -> dict[tuple[str, str], frozenset[str]]:
+        """Node ownership an unscoped launch can load from verified installs.
+
+        This deliberately runs the same disk and environment verification used
+        by ``start_media``. Database declarations alone are not enough to make
+        a package importable, and package/version ownership prevents one
+        installed package from laundering another package's node types. The
+        returned names are not compiler schemas; callers must still start the
+        worker and read its live ``object_info`` before compilation.
+        """
+
+        return await asyncio.to_thread(self._trusted_comfy_registry_package_node_types)
+
     async def comfy_node_inventory(self) -> frozenset[str]:
         """Every node type the running worker loaded.
 

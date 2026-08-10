@@ -25,10 +25,10 @@ export function JobsPanel() {
   const pause = useMutation({ mutationFn: api.pauseDownload, onSuccess: refresh });
   const resume = useMutation({ mutationFn: api.resumeDownload, onSuccess: refresh });
   const retry = useMutation({ mutationFn: api.retryJob, onSuccess: refresh });
-  const active = jobs.data?.filter((job) => ["queued", "running", "paused"].includes(job.status)) ?? [];
-  const recentUnsuccessful = (jobs.data ?? [])
+  const visibleJobs = jobs.data?.filter((job) => job.kind !== "edit_verify") ?? [];
+  const active = visibleJobs.filter((job) => ["queued", "running", "paused"].includes(job.status));
+  const recentUnsuccessful = visibleJobs
     .filter((job) => ["failed", "cancelled", "interrupted"].includes(job.status))
-    .filter((job) => job.kind !== "edit_verify" || job.status === "failed")
     .filter((job) => Date.parse(job.updated_at) > dismissedBefore)
     .sort((left, right) => Date.parse(right.updated_at) - Date.parse(left.updated_at))
     .slice(0, RECENT_UNSUCCESSFUL_JOB_LIMIT);
@@ -39,7 +39,7 @@ export function JobsPanel() {
         .map((job) => Date.parse(job.updated_at))
         .filter((updatedAt) => Number.isFinite(updatedAt)),
     );
-    const cutoff = newestIssue > 0 ? newestIssue : Date.now();
+    const cutoff = newestIssue;
     localStorage.setItem(DISMISSED_JOB_ISSUES_KEY, String(cutoff));
     setDismissedBefore(cutoff);
   };

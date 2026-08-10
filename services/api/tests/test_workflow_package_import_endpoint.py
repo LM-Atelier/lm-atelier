@@ -79,6 +79,38 @@ def _wire_runtime(app: FastAPI, monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(app.state.services.engines.media, "object_info", object_info, raising=False)
 
 
+def _record_registry_install(package_id: str, node_type: str) -> None:
+    from local_lm.db import SessionLocal
+    from local_lm.models import ComfyRegistryInstall
+
+    with SessionLocal() as session:
+        session.add(
+            ComfyRegistryInstall(
+                package_id=package_id,
+                package_version="1.2.3",
+                registry_record_id=f"registry-record-{package_id}",
+                repository_url=f"https://github.com/example/{package_id}.git",
+                download_url=f"https://cdn.comfy.org/{package_id}/1.2.3.zip",
+                archive_sha256="a" * 64,
+                manifest_sha256="b" * 64,
+                installed_path=f"lm-atelier-registry_{package_id}",
+                node_types_json=[node_type],
+                pip_dependencies_json=[],
+                review_json={"review_required": True},
+                trusted=True,
+                active=True,
+            )
+        )
+        session.commit()
+
+
+def _registry_graph(package_id: str, node_type: str) -> dict[str, Any]:
+    graph = _ui_graph()
+    graph["nodes"][0]["type"] = node_type
+    graph["nodes"][0]["properties"] = {"cnr_id": package_id, "ver": "1.2.3"}
+    return graph
+
+
 async def test_a_stopped_runtime_refuses_before_compiling(
     client: AsyncClient, app: FastAPI, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -115,6 +147,113 @@ async def test_an_unresolved_package_refuses_with_the_analyzer_verdict(
     assert response.json()["code"] == "package-not-resolved"
     listed = (await client.get("/api/workflows")).json()
     assert all(workflow["name"] != "Unresolved" for workflow in listed)
+
+
+async def test_import_restarts_unscoped_for_a_verified_registry_package(
+    client: AsyncClient,
+    app: FastAPI,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    package_id = "comfyui-kjnodes"
+    node_type = "GetNode"
+    _record_registry_install(package_id, node_type)
+    reads = 0
+    starts = 0
+
+    async def object_info() -> dict[str, Any]:
+        nonlocal reads
+        reads += 1
+        inventory = _object_info()
+        if reads > 1:
+            inventory[node_type] = inventory["Source"]
+        return inventory
+
+    async def launchable_packages() -> dict[tuple[str, str], frozenset[str]]:
+        return {(package_id, "1.2.3"): frozenset({node_type})}
+
+    async def start_media() -> None:
+        nonlocal starts
+        starts += 1
+
+    monkeypatch.setattr(
+        app.state.services.engines.media,
+        "object_info",
+        object_info,
+        raising=False,
+    )
+    monkeypatch.setattr(
+        app.state.services.processes,
+        "trusted_comfy_registry_package_node_types",
+        launchable_packages,
+    )
+    monkeypatch.setattr(app.state.services.processes, "start_media", start_media)
+
+    response = await client.post(
+        "/api/workflows/packages/import",
+        json={
+            "ui_graph": _registry_graph(package_id, node_type),
+            "name": "KJ Nodes import",
+            "operation": "text_to_image",
+        },
+    )
+
+    assert response.status_code == 201, response.json()
+    assert starts == 1
+    assert reads == 2
+    current_id = response.json()["current_revision_id"]
+    current = next(
+        revision for revision in response.json()["revisions"] if revision["id"] == current_id
+    )
+    assert current["api_graph_json"]["1"]["class_type"] == node_type
+
+
+async def test_import_fails_closed_when_verified_registry_nodes_cannot_load(
+    client: AsyncClient,
+    app: FastAPI,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    package_id = "comfyui-videohelpersuite"
+    node_type = "VHS_VideoCombine"
+    _record_registry_install(package_id, node_type)
+
+    async def object_info() -> dict[str, Any]:
+        return _object_info()
+
+    async def launchable_packages() -> dict[tuple[str, str], frozenset[str]]:
+        return {(package_id, "1.2.3"): frozenset({node_type})}
+
+    async def start_media() -> None:
+        raise RuntimeError(r"C:\private\managed-runtime\failure")
+
+    monkeypatch.setattr(
+        app.state.services.engines.media,
+        "object_info",
+        object_info,
+        raising=False,
+    )
+    monkeypatch.setattr(
+        app.state.services.processes,
+        "trusted_comfy_registry_package_node_types",
+        launchable_packages,
+    )
+    monkeypatch.setattr(app.state.services.processes, "start_media", start_media)
+
+    response = await client.post(
+        "/api/workflows/packages/import",
+        json={
+            "ui_graph": _registry_graph(package_id, node_type),
+            "name": "Must not persist",
+            "operation": "text_to_video",
+        },
+    )
+
+    assert response.status_code == 422
+    assert response.json() == {
+        "code": "workflow-package-node-refresh-failed",
+        "detail": "The installed custom-node packages could not be loaded for workflow import.",
+    }
+    listed = (await client.get("/api/workflows")).json()
+    assert all(workflow["name"] != "Must not persist" for workflow in listed)
 
 
 async def test_an_unresolved_package_can_be_persisted_as_an_exact_non_executable_draft(

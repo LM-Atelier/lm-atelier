@@ -56,6 +56,39 @@ def test_queue_order_uses_priority_aging_and_stable_tickets(settings: Settings) 
     ]
 
 
+def test_image_edit_checks_never_age_ahead_of_foreground_work(settings: Settings) -> None:
+    settings.prepare()
+    configure_database(settings)
+    init_db()
+    now = utcnow()
+    with SessionLocal() as session:
+        session.add_all(
+            [
+                Job(
+                    id="job_background_check",
+                    kind="edit_verify",
+                    status=JobStatus.QUEUED.value,
+                    queue_group="primary",
+                    queue_priority=10_000,
+                    enqueued_at=now - timedelta(days=30),
+                ),
+                Job(
+                    id="job_foreground",
+                    kind="image",
+                    status=JobStatus.QUEUED.value,
+                    queue_group="primary",
+                    queue_priority=-10_000,
+                    enqueued_at=now,
+                ),
+            ]
+        )
+        session.flush()
+
+        ordered = ResourceScheduler._eligible_jobs(session, "primary", now)
+
+    assert [job.id for job in ordered] == ["job_foreground", "job_background_check"]
+
+
 def test_peek_next_eligible_job_does_not_claim_or_change_it(settings: Settings) -> None:
     settings.prepare()
     configure_database(settings)

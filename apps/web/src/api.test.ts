@@ -956,3 +956,63 @@ it("drops event frames it cannot act on, and keeps the ones it can", async () =>
   );
   expect(good?.sequence).toBe(7);
 });
+
+it("sends the references the person chose, and nothing it inferred", async () => {
+  // The whole reference path in one assertion: ids travel as data. The server
+  // refuses to recover references by reading a prompt, so the client must
+  // never send something it worked out from the text.
+  const fetchMock = vi.fn()
+    .mockResolvedValueOnce(
+      new Response(JSON.stringify({ csrf_token: "csrf" }), {
+        status: 200,
+        headers: { "content-type": "application/json" },
+      }),
+    )
+    .mockResolvedValueOnce(
+      new Response(JSON.stringify({ accepted: true }), {
+        status: 202,
+        headers: { "content-type": "application/json" },
+      }),
+    );
+  vi.stubGlobal("fetch", fetchMock);
+
+  const { api } = await import("./api");
+  await api.sendTurn(
+    "chat-1",
+    // Two mentions written, one of them never chosen from the picker.
+    "draw @ada-lovelace beside @grace-hopper",
+    "image",
+    [],
+    {},
+    "reference-key",
+    "turns",
+    undefined,
+    [{ reference_subject_id: "ref-1", source: "mention" }],
+  );
+
+  const body = JSON.parse(String(fetchMock.mock.calls[1][1]?.body));
+  expect(body.references).toEqual([{ reference_subject_id: "ref-1", source: "mention" }]);
+});
+
+it("sends an empty reference list when nothing was chosen", async () => {
+  const fetchMock = vi.fn()
+    .mockResolvedValueOnce(
+      new Response(JSON.stringify({ csrf_token: "csrf" }), {
+        status: 200,
+        headers: { "content-type": "application/json" },
+      }),
+    )
+    .mockResolvedValueOnce(
+      new Response(JSON.stringify({ accepted: true }), {
+        status: 202,
+        headers: { "content-type": "application/json" },
+      }),
+    );
+  vi.stubGlobal("fetch", fetchMock);
+
+  const { api } = await import("./api");
+  await api.sendTurn("chat-1", "draw @ada-lovelace", "image", [], {}, "no-reference-key");
+
+  const body = JSON.parse(String(fetchMock.mock.calls[1][1]?.body));
+  expect(body.references).toEqual([]);
+});

@@ -1,3 +1,4 @@
+import type { TurnReference } from "./mentionDraft";
 import type {
   StudioCapabilityReport,
   ApplicationInfo,
@@ -8,6 +9,11 @@ import type {
   ArtifactLibraryItem,
   ArtifactStorageInfo,
   BackupInfo,
+  ReferenceAsset,
+  ReferenceAssetAttached,
+  ReferenceDeletionImpact,
+  ReferenceSubject,
+  ReferenceSubjectPage,
   CatalogModel,
   CatalogPage,
   CatalogDetail,
@@ -264,6 +270,10 @@ export const api = {
     idempotencyKey: string = crypto.randomUUID(),
     endpoint: string = "turns",
     workflowRevisionId?: string,
+    // Ids the person chose from the mention picker. Never derived from the
+    // text: the server refuses to recover references by reading a prompt,
+    // because that binds whoever the words most resemble.
+    references: TurnReference[] = [],
   ) => {
     const submit = (selectedMode: RoutingMode, confirmed = false) => request<TurnAccepted>(`/api/chats/${chatId}/${endpoint}`, {
       method: "POST",
@@ -271,6 +281,7 @@ export const api = {
         text,
         mode: selectedMode,
         input_artifact_ids: inputArtifactIds,
+        references,
         settings,
         workflow_revision_id: workflowRevisionId,
         confirm_media: confirmed,
@@ -336,6 +347,7 @@ export const api = {
     inputArtifactIds: string[],
     settings: Record<string, unknown>,
     idempotencyKey: string = crypto.randomUUID(),
+    references: TurnReference[] = [],
   ) => api.sendTurn(
     chatId,
     text,
@@ -344,6 +356,8 @@ export const api = {
     settings,
     idempotencyKey,
     "stop-and-send",
+    undefined,
+    references,
   ),
   regenerateMessage: (messageId: string, settings: Record<string, unknown>) =>
     request<TurnAccepted>(`/api/messages/${messageId}/regenerate`, {
@@ -531,6 +545,70 @@ export const api = {
       body: form,
     });
   },
+  references: (search = "", includeArchived = false, limit = 50, offset = 0) => {
+    const parameters = new URLSearchParams({ limit: String(limit), offset: String(offset) });
+    if (search) parameters.set("search", search);
+    if (includeArchived) parameters.set("include_archived", "true");
+    return request<ReferenceSubjectPage>(`/api/references?${parameters}`);
+  },
+  createReference: (body: { name: string; kind: string; description?: string }) =>
+    request<ReferenceSubject>("/api/references", {
+      method: "POST",
+      body: JSON.stringify(body),
+    }),
+  updateReference: (
+    id: string,
+    // Omitting a field leaves it alone; sending "" or [] clears it. Those are
+    // different instructions, so the optional fields are genuinely optional
+    // rather than nullable.
+    body: {
+      name?: string;
+      follow_mention?: boolean;
+      archived?: boolean;
+      favorite?: boolean;
+      description?: string;
+      aliases?: string[];
+      tags?: string[];
+    },
+  ) =>
+    request<ReferenceSubject>(`/api/references/${encodeURIComponent(id)}`, {
+      method: "PATCH",
+      body: JSON.stringify(body),
+    }),
+  referenceDeletionImpact: (id: string) =>
+    request<ReferenceDeletionImpact>(
+      `/api/references/${encodeURIComponent(id)}/deletion-impact`,
+    ),
+  // The acknowledgement is required by the server: it refuses to delete
+  // something other than what the caller was shown.
+  deleteReference: (id: string, acknowledgedAssets: number) =>
+    request<void>(
+      `/api/references/${encodeURIComponent(id)}?acknowledged_assets=${acknowledgedAssets}`,
+      { method: "DELETE" },
+    ),
+  referenceAssets: (id: string) =>
+    request<ReferenceAsset[]>(`/api/references/${encodeURIComponent(id)}/assets`),
+  attachReferenceAsset: (id: string, body: { artifact_id: string; purpose?: string }) =>
+    request<ReferenceAssetAttached>(`/api/references/${encodeURIComponent(id)}/assets`, {
+      method: "POST",
+      body: JSON.stringify(body),
+    }),
+  detachReferenceAsset: (id: string, assetId: string) =>
+    request<void>(
+      `/api/references/${encodeURIComponent(id)}/assets/${encodeURIComponent(assetId)}`,
+      { method: "DELETE" },
+    ),
+  // Setting and clearing are separate calls rather than one nullable field,
+  // because "leave the cover alone" and "remove it" are different intentions.
+  setReferenceCover: (id: string, artifactId: string) =>
+    request<ReferenceSubject>(`/api/references/${encodeURIComponent(id)}/cover`, {
+      method: "PUT",
+      body: JSON.stringify({ artifact_id: artifactId }),
+    }),
+  clearReferenceCover: (id: string) =>
+    request<ReferenceSubject>(`/api/references/${encodeURIComponent(id)}/cover`, {
+      method: "DELETE",
+    }),
   artifacts: (kind = "", query = "", favorites = false) => {
     const parameters = new URLSearchParams({ query });
     if (kind) parameters.set("kind", kind);

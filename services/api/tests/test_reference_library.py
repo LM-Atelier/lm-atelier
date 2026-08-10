@@ -1,8 +1,10 @@
 from __future__ import annotations
 
+import io
 from collections.abc import Generator
 
 import pytest
+from PIL import Image
 from sqlalchemy import create_engine, event
 from sqlalchemy.orm import Session
 
@@ -10,11 +12,16 @@ from local_lm.db import Base
 from local_lm.models import Artifact, ReferenceAsset, ReferenceSubject
 from local_lm.reference_library import (
     MAX_PAGE,
+    attach_asset,
+    clear_cover,
     create_subject,
     deletion_impact,
+    detach_asset,
     list_subjects,
     rename_subject,
     set_archived,
+    set_cover,
+    set_details,
     set_favorite,
 )
 from local_lm.references import ReferenceError, ReferenceKind
@@ -198,3 +205,281 @@ def test_deletion_impact_is_computed_before_anything_is_destroyed(
     assert session.query(ReferenceSubject).count() == 1
     assert session.query(ReferenceAsset).count() == 1
     assert session.query(Artifact).count() == 1
+
+
+def _png(shade: int, size: tuple[int, int] = (48, 48)) -> bytes:
+    buffer = io.BytesIO()
+    Image.new("RGB", size, (shade, shade, shade)).save(buffer, format="PNG")
+    return buffer.getvalue()
+
+
+def _named_artifact(session: Session, marker: str) -> Artifact:
+    artifact = Artifact(
+        id=f"art_{marker}",
+        sha256=f"{abs(hash(marker)):064x}"[:64],
+        kind="image",
+        media_type="image/png",
+        size_bytes=1,
+        relative_path=f"{marker}/a",
+    )
+    session.add(artifact)
+    session.flush()
+    return artifact
+
+
+def test_the_same_image_twice_is_refused_with_a_reason(session: Session) -> None:
+    """The store is content-addressed, so the same id is the same bytes. A set
+    holding one picture twice is silently weighted toward it."""
+
+    subject = create_subject(session, name="Ada", kind="person")
+    _named_artifact(session, "one")
+    attach_asset(session, subject, artifact_id="art_one")
+
+    with pytest.raises(ReferenceError) as caught:
+        attach_asset(session, subject, artifact_id="art_one")
+    assert "already holds that exact image" in str(caught.value)
+    assert session.query(ReferenceAsset).count() == 1
+
+
+def test_a_near_duplicate_is_reported_rather_than_refused(session: Session) -> None:
+    """Two similar shots are often deliberate - a second angle, a better
+    exposure - so the person adding them is the only one who can decide."""
+
+    subject = create_subject(session, name="Ada", kind="person")
+    _named_artifact(session, "first")
+    _named_artifact(session, "second")
+    images = {"art_first": _png(120), "art_second": _png(120)}
+
+    attach_asset(session, subject, artifact_id="art_first", read_bytes=images.__getitem__)
+    result = attach_asset(session, subject, artifact_id="art_second", read_bytes=images.__getitem__)
+
+    assert result.asset.id, "the attachment still happened"
+    assert len(result.similar) == 1
+    assert result.similar[0].artifact_id == "art_first"
+    assert session.query(ReferenceAsset).count() == 2
+
+
+def test_a_genuinely_different_image_is_not_flagged(session: Session) -> None:
+    subject = create_subject(session, name="Ada", kind="person")
+    _named_artifact(session, "dark")
+    _named_artifact(session, "light")
+    images = {"art_dark": _png(10), "art_light": _png(240)}
+
+    attach_asset(session, subject, artifact_id="art_dark", read_bytes=images.__getitem__)
+    result = attach_asset(session, subject, artifact_id="art_light", read_bytes=images.__getitem__)
+    assert result.similar == ()
+
+
+def test_similarity_is_advice_and_cannot_block_the_attachment(session: Session) -> None:
+    """Advice that can fail must not be able to block the operation it advises
+    on. An unreadable neighbour is skipped, not treated as identical."""
+
+    subject = create_subject(session, name="Ada", kind="person")
+    _named_artifact(session, "good")
+    _named_artifact(session, "broken")
+    images = {"art_good": _png(120), "art_broken": b"not an image"}
+
+    attach_asset(session, subject, artifact_id="art_good", read_bytes=images.__getitem__)
+    result = attach_asset(session, subject, artifact_id="art_broken", read_bytes=images.__getitem__)
+    assert result.asset.id
+    assert result.similar == (), "unreadable is not a similarity claim"
+
+    # A reader that raises outright is also survivable.
+    _named_artifact(session, "third")
+
+    def explode(_artifact_id: str) -> bytes:
+        raise OSError("disk gone")
+
+    assert attach_asset(session, subject, artifact_id="art_third", read_bytes=explode).asset.id
+
+
+def test_without_a_reader_the_scan_is_skipped_not_faked(session: Session) -> None:
+    subject = create_subject(session, name="Ada", kind="person")
+    _named_artifact(session, "a1")
+    _named_artifact(session, "a2")
+    attach_asset(session, subject, artifact_id="art_a1")
+    assert attach_asset(session, subject, artifact_id="art_a2").similar == ()
+
+
+def test_an_image_outside_the_store_cannot_be_attached(session: Session) -> None:
+    subject = create_subject(session, name="Ada", kind="person")
+    with pytest.raises(ReferenceError):
+        attach_asset(session, subject, artifact_id="art_nowhere")
+
+
+def test_attachments_keep_the_order_they_arrived_in(session: Session) -> None:
+    subject = create_subject(session, name="Ada", kind="person")
+    for marker in ("p1", "p2", "p3"):
+        _named_artifact(session, marker)
+        attach_asset(session, subject, artifact_id=f"art_{marker}")
+    session.refresh(subject)
+    assert [row.sort_order for row in subject.assets] == [0, 1, 2]
+
+
+def test_detaching_takes_the_membership_and_leaves_the_bytes(session: Session) -> None:
+    """The artifact may be in use elsewhere, so ending this subject's claim is
+    not permission to destroy it."""
+
+    subject = create_subject(session, name="Ada", kind="person")
+    _named_artifact(session, "keep")
+    attached = attach_asset(session, subject, artifact_id="art_keep").asset
+
+    detach_asset(session, subject, asset_id=attached.id)
+    assert session.query(ReferenceAsset).count() == 0
+    assert session.get(Artifact, "art_keep") is not None
+
+
+def test_detaching_the_cover_clears_it_rather_than_dangling(session: Session) -> None:
+    subject = create_subject(session, name="Ada", kind="person")
+    _named_artifact(session, "cover")
+    attached = attach_asset(session, subject, artifact_id="art_cover").asset
+    subject.cover_artifact_id = "art_cover"
+    session.flush()
+
+    detach_asset(session, subject, asset_id=attached.id)
+    assert subject.cover_artifact_id is None
+
+
+def test_detaching_something_that_belongs_elsewhere_is_refused(session: Session) -> None:
+    first = create_subject(session, name="Ada", kind="person")
+    second = create_subject(session, name="Grace", kind="person")
+    _named_artifact(session, "shared")
+    attached = attach_asset(session, first, artifact_id="art_shared").asset
+
+    with pytest.raises(ReferenceError):
+        detach_asset(session, second, asset_id=attached.id)
+    assert session.query(ReferenceAsset).count() == 1
+
+
+def test_a_cover_has_to_be_one_of_the_subjects_own_images(session: Session) -> None:
+    """A cover allowed to point anywhere would be a second, weaker membership -
+    one deletion impact does not count and detaching does not clear."""
+
+    subject = create_subject(session, name="Ada Lovelace", kind="person")
+    stranger = _artifact(session)
+
+    with pytest.raises(ReferenceError, match="one of this reference's own images"):
+        set_cover(session, subject, artifact_id=stranger.id)
+    assert subject.cover_artifact_id is None
+
+
+def test_an_image_the_subject_holds_can_stand_for_it(session: Session) -> None:
+    subject = create_subject(session, name="Ada Lovelace", kind="person")
+    artifact = _artifact(session)
+    _attach(session, subject, artifact)
+
+    set_cover(session, subject, artifact_id=artifact.id)
+
+    assert subject.cover_artifact_id == artifact.id
+
+
+def test_clearing_a_cover_keeps_the_image(session: Session) -> None:
+    """Removing what represents a subject is not removing what it holds."""
+
+    subject = create_subject(session, name="Ada Lovelace", kind="person")
+    artifact = _artifact(session)
+    _attach(session, subject, artifact)
+    set_cover(session, subject, artifact_id=artifact.id)
+
+    clear_cover(session, subject)
+
+    assert subject.cover_artifact_id is None
+    assert subject.assets
+
+
+def test_detaching_the_cover_image_clears_the_cover(session: Session) -> None:
+    """Otherwise the cover points at a picture the subject no longer has."""
+
+    subject = create_subject(session, name="Ada Lovelace", kind="person")
+    artifact = _artifact(session)
+    _attach(session, subject, artifact)
+    set_cover(session, subject, artifact_id=artifact.id)
+    asset = subject.assets[0]
+
+    detach_asset(session, subject, asset_id=asset.id)
+
+    assert subject.cover_artifact_id is None
+
+
+def test_a_subject_is_found_by_an_alias_not_only_its_name(session: Session) -> None:
+    """The whole reason a subject has aliases. A search that only knows the
+    display name leaves them decorative, which is what they were."""
+
+    create_subject(session, name="Ada Lovelace", kind="person", aliases=["Countess Lovelace"])
+
+    found, total = list_subjects(session, search="countess")
+
+    assert total == 1
+    assert [one.name for one in found] == ["Ada Lovelace"]
+
+
+def test_searching_still_matches_the_name(session: Session) -> None:
+    create_subject(session, name="Ada Lovelace", kind="person", aliases=["AAL"])
+    create_subject(session, name="Grace Hopper", kind="person")
+
+    found, _ = list_subjects(session, search="hopper")
+
+    assert [one.name for one in found] == ["Grace Hopper"]
+
+
+def test_details_can_be_corrected_after_creation(session: Session) -> None:
+    """A typo in a description used to be permanent."""
+
+    subject = create_subject(
+        session, name="Ada Lovelace", kind="person", description="Mathemetician"
+    )
+
+    set_details(session, subject, description="Mathematician", aliases=["Countess Lovelace"])
+
+    assert subject.description == "Mathematician"
+    assert subject.aliases_json == ["Countess Lovelace"]
+
+
+def test_creation_and_correction_use_the_same_detail_rules(session: Session) -> None:
+    subject = create_subject(
+        session,
+        name="Ada Lovelace",
+        kind="person",
+        description="  Mathematician  ",
+        aliases=["Countess", " countess ", ""],
+        tags=["historic", " HISTORIC "],
+    )
+
+    assert subject.description == "Mathematician"
+    assert subject.aliases_json == ["Countess"]
+    assert subject.tags_json == ["historic"]
+
+
+def test_omitting_a_field_leaves_it_alone_and_emptying_it_clears_it(session: Session) -> None:
+    """Two different instructions that one nullable value could not carry."""
+
+    subject = create_subject(
+        session, name="Ada Lovelace", kind="person", description="Mathematician", tags=["historic"]
+    )
+
+    set_details(session, subject, aliases=["AAL"])
+    assert subject.description == "Mathematician", "an omitted field is not an instruction"
+    assert subject.tags_json == ["historic"]
+
+    set_details(session, subject, description="", tags=[])
+    assert subject.description is None
+    assert subject.tags_json == []
+    assert subject.aliases_json == ["AAL"], "clearing one field does not clear another"
+
+
+def test_aliases_differing_only_in_case_are_one_alias(session: Session) -> None:
+    """Both would have to be matched by anything resolving a name later, and to
+    a reader they are the same word twice."""
+
+    subject = create_subject(session, name="Ada Lovelace", kind="person")
+
+    set_details(session, subject, aliases=["Countess", "  countess  ", "COUNTESS", ""])
+
+    assert subject.aliases_json == ["Countess"]
+
+
+def test_too_many_aliases_are_refused(session: Session) -> None:
+    subject = create_subject(session, name="Ada Lovelace", kind="person")
+
+    with pytest.raises(ReferenceError, match="at most"):
+        set_details(session, subject, aliases=[f"name-{index}" for index in range(33)])

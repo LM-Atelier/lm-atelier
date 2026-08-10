@@ -23,6 +23,7 @@ from sqlalchemy.orm import Session, selectinload
 from starlette.responses import FileResponse, HTMLResponse
 
 from . import __version__
+from .adapter_grammar_review import review_adapter_grammar
 from .api_errors import api_error
 from .auxiliary_assets import AUXILIARY_ASSET_KINDS, validate_lora_workflow_contract
 from .capability_evidence import current_capability_evidence, evidence_input_modalities
@@ -58,6 +59,7 @@ from .comfy_templates import (
 )
 from .comfy_workflow_compiler import WorkflowCompilationError, compile_comfyui_ui_graph
 from .comfy_workflow_packages import (
+    ComfyWorkflowPackageAnalysis,
     WorkflowPackageError,
     analyze_comfyui_workflow_package,
 )
@@ -112,6 +114,7 @@ from .model_planner import (
 )
 from .model_updates import installed_civitai_identities, newer_version
 from .models import (
+    AdapterPromptGrammar,
     AppSetting,
     Artifact,
     Chat,
@@ -129,6 +132,8 @@ from .models import (
     ModelProfile,
     Project,
     ProjectWorkflowSelection,
+    ReferenceAsset,
+    ReferenceSubject,
     ResponseFeedback,
     ResponseRevision,
     ResponseRevisionPart,
@@ -166,15 +171,33 @@ from .profile_service import (
     validate_profile_install,
 )
 from .progress import update_job_progress
+from .prompt_grammar import PromptGrammarError
 from .prompt_helpers import (
     PROMPT_HELPER_SCOPE,
     STANDARD_CHAT_SCOPE,
     prompt_preview_settings,
 )
 from .recipes import get_reference_recipe, list_reference_recipes
+from .reference_library import (
+    DEFAULT_PAGE,
+    attach_asset,
+    clear_cover,
+    create_subject,
+    deletion_impact,
+    detach_asset,
+    list_subjects,
+    rename_subject,
+    set_archived,
+    set_cover,
+    set_details,
+    set_favorite,
+)
+from .references import ReferenceError
 from .routing import RouteConfirmationRequired
 from .runtime_config import persist_runtime_values
 from .schemas import (
+    AdapterPromptGrammarOut,
+    AdapterPromptGrammarReview,
     ApplicationInfo,
     ArtifactCleanupRequest,
     ArtifactCleanupResult,
@@ -240,7 +263,17 @@ from .schemas import (
     PromptHelperCreate,
     PromptHelperDetail,
     PromptHelperUpdate,
+    ReferenceAssetAttach,
+    ReferenceAssetAttached,
+    ReferenceAssetOut,
+    ReferenceCoverIn,
+    ReferenceDeletionImpact,
     ReferenceRecipe,
+    ReferenceSimilarAsset,
+    ReferenceSubjectCreate,
+    ReferenceSubjectOut,
+    ReferenceSubjectPage,
+    ReferenceSubjectUpdate,
     RegenerateRequest,
     RegistryInstallOut,
     RegistryInstallReviewOut,
@@ -641,7 +674,7 @@ async def engine_capabilities(request: Request) -> list[EngineCapabilities]:
     try:
         return await _services(request).engines.capabilities()
     except EngineSchemaUnavailableError as exc:
-        raise HTTPException(503, str(exc)) from exc
+        raise api_error(503, "engine-schema-unavailable", str(exc)) from exc
 
 
 @router.post("/engines/chat/tool-probe", response_model=ToolCapabilityProbe)
@@ -654,7 +687,7 @@ async def worker_status(request: Request, session: SessionDep) -> list[WorkerSta
     statuses = _services(request).processes.statuses()
     for index, status in enumerate(statuses):
         kinds = (
-            [JobKind.CHAT.value, JobKind.EDIT_VERIFY.value]
+            [JobKind.CHAT.value]
             if status.name == "chat"
             else [JobKind.IMAGE.value, JobKind.VIDEO.value]
         )
@@ -996,11 +1029,7 @@ async def install_runtime(engine: str, request: Request) -> RuntimeStatus:
 
 
 def _worker_job_kinds(name: str) -> list[str]:
-    return (
-        [JobKind.CHAT.value, JobKind.EDIT_VERIFY.value]
-        if name == "chat"
-        else [JobKind.IMAGE.value, JobKind.VIDEO.value]
-    )
+    return [JobKind.CHAT.value] if name == "chat" else [JobKind.IMAGE.value, JobKind.VIDEO.value]
 
 
 def _ensure_worker_idle(session: Session, name: str) -> None:
@@ -1317,12 +1346,20 @@ async def _validate_generation_defaults(
         if preset_id is None:
             continue
         if len(preset_id) > 40:
-            raise HTTPException(422, f"{role} generation preset id is too long")
+            raise api_error(
+                422, "generation-preset-id-too-long", f"{role} generation preset id is too long"
+            )
         preset = session.get(GenerationPreset, preset_id)
         if not preset:
-            raise HTTPException(404, f"{role} generation preset not found")
+            raise api_error(
+                404, "generation-preset-not-found", f"{role} generation preset not found"
+            )
         if preset.role != role:
-            raise HTTPException(422, f"{role} generation preset has an incompatible role")
+            raise api_error(
+                422,
+                "generation-preset-role-mismatch",
+                f"{role} generation preset has an incompatible role",
+            )
 
 
 @router.post("/projects", response_model=ProjectOut, status_code=201)
@@ -1353,7 +1390,9 @@ async def import_project(
     size = archive.file.tell()
     archive.file.seek(0)
     if size > _services(request).settings.max_project_import_bytes:
-        raise HTTPException(413, "project archive exceeds the configured limit")
+        raise api_error(
+            413, "project-archive-too-large", "project archive exceeds the configured limit"
+        )
     # Resolve the live engine schema per role so imported settings are validated
     # the way the REST API validates them. Best effort: a role whose engine is
     # not configured, or whose schema cannot be read now, imports unvalidated
@@ -1376,7 +1415,7 @@ async def import_project(
         )
     except ValueError as exc:
         session.rollback()
-        raise HTTPException(422, str(exc)) from exc
+        raise api_error(422, "project-import-invalid", str(exc)) from exc
     reconcile_legacy_workflow_compatibility(session)
     session.commit()
     session.refresh(project)
@@ -1441,7 +1480,7 @@ async def export_project(
             session, project_id, include_media=include_media
         )
     except LookupError as exc:
-        raise HTTPException(404, str(exc)) from exc
+        raise api_error(404, "project-not-found", str(exc)) from exc
     session.commit()
     result = ArtifactOut.model_validate(artifact)
     result.url = f"/api/artifacts/{artifact.id}/content"
@@ -1512,6 +1551,11 @@ async def get_chat(chat_id: str, session: ConversationSessionDep) -> Chat:
             .selectinload(ResponseRevision.parts)
             .selectinload(ResponseRevisionPart.artifact),
             selectinload(Chat.messages).selectinload(Message.feedback_rows),
+            # One query for the whole chat rather than one per message. Almost
+            # every message names nothing, so this is usually an empty result
+            # rather than a cost. Every loader that returns a ChatDetail needs
+            # it, or the transcript falls back to a query per message.
+            selectinload(Chat.messages).selectinload(Message.references),
             selectinload(Chat.messages)
             .selectinload(Message.response_revisions)
             .selectinload(ResponseRevision.feedback_rows),
@@ -1706,6 +1750,11 @@ def _studio_session_query(session_id: str) -> Select[tuple[Chat]]:
             .selectinload(ResponseRevision.parts)
             .selectinload(ResponseRevisionPart.artifact),
             selectinload(Chat.messages).selectinload(Message.feedback_rows),
+            # One query for the whole chat rather than one per message. Almost
+            # every message names nothing, so this is usually an empty result
+            # rather than a cost. Every loader that returns a ChatDetail needs
+            # it, or the transcript falls back to a query per message.
+            selectinload(Chat.messages).selectinload(Message.references),
             selectinload(Chat.messages)
             .selectinload(Message.response_revisions)
             .selectinload(ResponseRevision.feedback_rows),
@@ -1835,9 +1884,9 @@ async def update_chat(
             continue
         profile = session.get(ModelProfile, profile_id)
         if not profile:
-            raise HTTPException(404, f"{role} profile not found")
+            raise api_error(404, "profile-not-found", f"{role} profile not found")
         if profile.role != role:
-            raise HTTPException(422, f"{field} requires a {role} profile")
+            raise api_error(422, "profile-required", f"{field} requires a {role} profile")
         _validated_profile_install(
             session,
             model_install_id=profile.model_install_id,
@@ -1857,8 +1906,9 @@ async def update_chat(
                 else None
             )
             if "image" not in evidence_input_modalities(evidence):
-                raise HTTPException(
+                raise api_error(
                     422,
+                    "vision-profile-not-verified",
                     "active_vision_profile_id requires a runtime-verified vision profile",
                 )
     for key, value in values.items():
@@ -1919,6 +1969,7 @@ async def _accept_turn(
     replacement_message_id: str | None = None,
     source_action: str = "send",
     inherited_image_edit_strength: dict[str, Any] | None = None,
+    reference_source_message_id: str | None = None,
 ) -> TurnAccepted:
     try:
         return await orchestrator.create_turn(
@@ -1929,6 +1980,7 @@ async def _accept_turn(
             replacement_message_id=replacement_message_id,
             source_action=source_action,
             inherited_image_edit_strength=inherited_image_edit_strength,
+            reference_source_message_id=reference_source_message_id,
         )
     except LookupError as exc:
         raise api_error(404, "turn-subject-not-found", str(exc)) from exc
@@ -2000,7 +2052,7 @@ async def get_message(message_id: str, session: ConversationSessionDep) -> Messa
         .where(Message.id == message_id)
     )
     if not message:
-        raise HTTPException(404, "message not found")
+        raise api_error(404, "message-not-found", "message not found")
     return message
 
 
@@ -2070,7 +2122,9 @@ async def regenerate_message(
         or not source_assistant.transcript_visible
         or source_assistant.status != MessageStatus.COMPLETE.value
     ):
-        raise HTTPException(409, "only a completed visible response can be regenerated")
+        raise api_error(
+            409, "response-not-regenerable", "only a completed visible response can be regenerated"
+        )
     pending_revision = session.scalar(
         select(ResponseRevision.id).where(
             ResponseRevision.message_id == message_id,
@@ -2078,7 +2132,9 @@ async def regenerate_message(
         )
     )
     if pending_revision:
-        raise HTTPException(409, "this response is already being regenerated")
+        raise api_error(
+            409, "response-regeneration-in-progress", "this response is already being regenerated"
+        )
     active_revision = (
         session.get(ResponseRevision, source_assistant.active_response_revision_id)
         if source_assistant.active_response_revision_id
@@ -2092,14 +2148,14 @@ async def regenerate_message(
     if not prior_run:
         prior_run = session.scalar(select(Run).where(Run.assistant_message_id == message_id))
     if not prior_run:
-        raise HTTPException(404, "assistant run not found")
+        raise api_error(404, "assistant-run-not-found", "assistant run not found")
     user_message = session.scalar(
         select(Message)
         .options(selectinload(Message.parts))
         .where(Message.id == prior_run.user_message_id)
     )
     if not user_message:
-        raise HTTPException(404, "source user message not found")
+        raise api_error(404, "source-user-message-not-found", "source user message not found")
     text = "\n".join(part.text for part in user_message.parts if part.text).strip()
     mode = _mode_for_operation(Operation(prior_run.operation))
     prior_revision = (
@@ -2148,6 +2204,7 @@ async def regenerate_message(
         replacement_message_id=message_id,
         source_action="regenerate",
         inherited_image_edit_strength=inherited_image_edit_strength,
+        reference_source_message_id=user_message.id,
     )
 
 
@@ -2182,7 +2239,7 @@ async def edit_and_branch(
 ) -> TurnAccepted:
     source = session.get(Message, message_id)
     if not source or source.role != MessageRole.USER.value:
-        raise HTTPException(404, "user message not found")
+        raise api_error(404, "user-message-not-found", "user message not found")
     prior_run = session.scalar(select(Run).where(Run.user_message_id == source.id))
     updates: dict[str, Any] = {"parent_message_id": source.parent_id}
     inherited_image_edit_strength: dict[str, Any] | None = None
@@ -2229,6 +2286,9 @@ async def edit_and_branch(
             except ValueError as exc:
                 raise api_error(422, "generation-settings-invalid", str(exc)) from exc
     turn = payload.model_copy(update=updates)
+    reference_source_message_id = (
+        source.id if "references" not in payload.model_fields_set else None
+    )
     return await _accept_turn(
         _services(request).orchestrator,
         session,
@@ -2237,6 +2297,7 @@ async def edit_and_branch(
         use_explicit_parent=True,
         source_action="edit_and_branch",
         inherited_image_edit_strength=inherited_image_edit_strength,
+        reference_source_message_id=reference_source_message_id,
     )
 
 
@@ -2252,7 +2313,7 @@ def _mode_for_operation(operation: Operation) -> RoutingMode:
 async def get_run(run_id: str, session: ConversationSessionDep) -> Run:
     run = session.get(Run, run_id)
     if not run:
-        raise HTTPException(404, "run not found")
+        raise api_error(404, "run-not-found", "run not found")
     return run
 
 
@@ -2287,7 +2348,7 @@ async def get_work_plan(plan_id: str, session: ConversationSessionDep) -> WorkPl
 async def get_work_step(step_id: str, session: ConversationSessionDep) -> WorkStep:
     step = session.get(WorkStep, step_id)
     if not step:
-        raise HTTPException(404, "work step not found")
+        raise api_error(404, "work-step-not-found", "work step not found")
     return step
 
 
@@ -2313,7 +2374,7 @@ async def cancel_work_plan(
         ).all()
     )
     if not jobs:
-        raise HTTPException(409, "work plan has no cancellable steps")
+        raise api_error(409, "work-plan-not-cancellable", "work plan has no cancellable steps")
     for job in jobs:
         await _services(request).orchestrator.cancel(job.id)
     session.expire_all()
@@ -2333,7 +2394,7 @@ async def cancel_work_step(
 ) -> Job | JobOut:
     job = session.scalar(select(Job).where(Job.work_step_id == step_id))
     if not job:
-        raise HTTPException(404, "work step job not found")
+        raise api_error(404, "work-step-job-not-found", "work step job not found")
     return await cancel_job(job.id, request, session)
 
 
@@ -2359,7 +2420,7 @@ async def retry_work_plan(
         ).all()
     )
     if not jobs:
-        raise HTTPException(409, "work plan has no retryable steps")
+        raise api_error(409, "work-plan-not-retryable", "work plan has no retryable steps")
     for job in jobs:
         await retry_job(job.id, request, session)
     session.expire_all()
@@ -2379,7 +2440,7 @@ async def retry_work_step(
 ) -> Job:
     job = session.scalar(select(Job).where(Job.work_step_id == step_id))
     if not job:
-        raise HTTPException(404, "work step job not found")
+        raise api_error(404, "work-step-job-not-found", "work step job not found")
     return await retry_job(job.id, request, session)
 
 
@@ -2389,7 +2450,12 @@ async def list_jobs(
     status: str | None = None,
     limit: int = Query(default=100, ge=1, le=500),
 ) -> list[Job]:
-    statement = select(Job).order_by(Job.created_at.desc()).limit(limit)
+    statement = (
+        select(Job)
+        .where(Job.kind != JobKind.EDIT_VERIFY.value)
+        .order_by(Job.created_at.desc())
+        .limit(limit)
+    )
     if status:
         statement = statement.where(Job.status == status)
     return list(session.scalars(statement).all())
@@ -2417,7 +2483,9 @@ async def cancel_job(
     else:
         changed = await _services(request).orchestrator.cancel(job_id)
     if not changed:
-        raise HTTPException(409, "job is already terminal or cannot be cancelled")
+        raise api_error(
+            409, "job-not-cancellable", "job is already terminal or cannot be cancelled"
+        )
     session.expire_all()
     refreshed = session.get(Job, job_id)
     if not refreshed:
@@ -2481,10 +2549,12 @@ async def cancel_active_chat_run(
     if not session.get(Chat, chat_id):
         raise api_error(404, "chat-not-found", "chat not found")
     if not _current_chat_job(session, chat_id):
-        raise HTTPException(409, "chat has no cancellable run")
+        raise api_error(409, "chat-run-absent", "chat has no cancellable run")
     refreshed = await _cancel_current_chat_work(request, session, chat_id)
     if not refreshed:
-        raise HTTPException(409, "chat run is already terminal or cannot be cancelled")
+        raise api_error(
+            409, "chat-run-not-cancellable", "chat run is already terminal or cannot be cancelled"
+        )
     return refreshed
 
 
@@ -2653,7 +2723,7 @@ async def retry_job(
         try:
             orchestrator.prepare_retry(session, run)
         except LookupError as exc:
-            raise HTTPException(422, str(exc)) from exc
+            raise api_error(422, "job-not-retryable", str(exc)) from exc
         session.commit()
         orchestrator.start(job.id, run.id)
         session.refresh(job)
@@ -2672,7 +2742,7 @@ async def upload_artifact(
     size = file.file.tell()
     file.file.seek(0)
     if size > services.settings.max_upload_bytes:
-        raise HTTPException(413, "upload exceeds configured limit")
+        raise api_error(413, "upload-too-large", "upload exceeds configured limit")
     artifact = services.artifacts.ingest_stream(
         session,
         file.file,
@@ -2836,7 +2906,7 @@ async def delete_artifact(
             session, artifact
         )
     except ValueError as exc:
-        raise HTTPException(409, str(exc)) from exc
+        raise api_error(409, "artifact-in-use", str(exc)) from exc
     session.commit()
     return ArtifactDeleteResult(
         artifact_id=artifact_id,
@@ -2871,7 +2941,9 @@ async def artifact_content(
     try:
         path, media_type, disposition = _services(request).artifacts.delivery_metadata(artifact)
     except (FileNotFoundError, ValueError) as exc:
-        raise HTTPException(410, "artifact file is missing or corrupt") from exc
+        raise api_error(
+            410, "artifact-file-unreadable", "artifact file is missing or corrupt"
+        ) from exc
     return FileResponse(
         path,
         media_type=media_type,
@@ -2979,7 +3051,7 @@ async def catalog_search(
     try:
         catalog: CatalogSource = services.catalog_sources.get(source)
     except CatalogSourceNotFound as exc:
-        raise HTTPException(404, str(exc)) from exc
+        raise api_error(404, "catalog-source-not-found", str(exc)) from exc
     try:
         media_catalog = role in {"image", "video"} and services.settings.media_engine == "comfyui"
         page = await catalog.search(
@@ -3051,10 +3123,11 @@ async def catalog_search(
             }
         )
     except ValueError as exc:
-        raise HTTPException(422, f"invalid catalog request: {exc}") from exc
+        raise api_error(422, "catalog-request-invalid", f"invalid catalog request: {exc}") from exc
     except Exception as exc:
-        raise HTTPException(
+        raise api_error(
             503,
+            "catalog-unavailable",
             f"{catalog.display_name} is temporarily unavailable. Check your connection and retry.",
         ) from exc
 
@@ -3104,15 +3177,16 @@ async def catalog_item_detail(
     try:
         selected_source = services.catalog_sources.get(source)
     except CatalogSourceNotFound as exc:
-        raise HTTPException(404, str(exc)) from exc
+        raise api_error(404, "catalog-source-not-found", str(exc)) from exc
     if not selected_source.validate_item_id(item_id):
-        raise HTTPException(422, "invalid catalog item id")
+        raise api_error(422, "catalog-item-id-invalid", "invalid catalog item id")
     try:
         detail = await selected_source.inspect(item_id, revision, role)
         return CatalogDetail.model_validate(detail)
     except Exception as exc:
-        raise HTTPException(
+        raise api_error(
             503,
+            "catalog-unavailable",
             f"{selected_source.display_name} is temporarily unavailable. "
             "Check your connection and retry.",
         ) from exc
@@ -3153,8 +3227,9 @@ async def catalog_detail(
         detail = await _services(request).catalog.inspect(f"{owner}/{name}", revision, role)
         return CatalogDetail.model_validate(detail)
     except Exception as exc:
-        raise HTTPException(
+        raise api_error(
             503,
+            "catalog-unavailable",
             "Hugging Face is temporarily unavailable. Check your connection and retry.",
         ) from exc
 
@@ -3179,7 +3254,7 @@ async def catalog_preflight(
             payload,
         )
     except CatalogUnavailableError as exc:
-        raise HTTPException(503, str(exc)) from exc
+        raise api_error(503, "catalog-unavailable", str(exc)) from exc
 
 
 async def resolve_catalog_preflight(
@@ -3624,8 +3699,9 @@ async def resolve_catalog_preflight(
         # once installed a speech-to-video workflow with an audio encoder.
         candidates = [item for item in candidates if item.id == requested_template]
         if not candidates:
-            raise HTTPException(
+            raise api_error(
                 422,
+                "workflow-template-mismatch",
                 "The selected workflow does not belong to this repository and role. "
                 "Refresh the catalog and choose a workflow again.",
             )
@@ -3933,7 +4009,7 @@ async def create_download(payload: DownloadRequest, request: Request, session: S
                 )
         return manager.create(session, payload)
     except ValueError as exc:
-        raise HTTPException(422, str(exc)) from exc
+        raise api_error(422, "download-request-invalid", str(exc)) from exc
 
 
 @router.post("/downloads/cleanup", response_model=StorageCleanupResult)
@@ -3945,22 +4021,24 @@ async def cleanup_partial_downloads(request: Request, session: SessionDep) -> St
 @router.post("/downloads/{job_id}/pause", response_model=JobOut)
 async def pause_download(job_id: str, request: Request, session: SessionDep) -> Job:
     if not await _services(request).downloads.pause(job_id):
-        raise HTTPException(409, "download is not running or cannot be paused")
+        raise api_error(409, "download-not-pausable", "download is not running or cannot be paused")
     session.expire_all()
     job = session.get(Job, job_id)
     if not job:
-        raise HTTPException(404, "download job not found")
+        raise api_error(404, "download-job-not-found", "download job not found")
     return job
 
 
 @router.post("/downloads/{job_id}/resume", response_model=JobOut)
 async def resume_download(job_id: str, request: Request, session: SessionDep) -> Job:
     if not _services(request).downloads.resume(job_id):
-        raise HTTPException(409, "download is not paused, failed, or interrupted")
+        raise api_error(
+            409, "download-not-resumable", "download is not paused, failed, or interrupted"
+        )
     session.expire_all()
     job = session.get(Job, job_id)
     if not job:
-        raise HTTPException(404, "download job not found")
+        raise api_error(404, "download-job-not-found", "download job not found")
     return job
 
 
@@ -4038,7 +4116,7 @@ async def list_recipes() -> list[ReferenceRecipe]:
 async def get_recipe(recipe_id: str) -> ReferenceRecipe:
     recipe = get_reference_recipe(recipe_id)
     if not recipe:
-        raise HTTPException(404, "reference recipe not found")
+        raise api_error(404, "reference-recipe-not-found", "reference recipe not found")
     return recipe
 
 
@@ -4055,9 +4133,13 @@ async def install_recipe(recipe_id: str, request: Request, session: SessionDep) 
 
     recipe = get_reference_recipe(recipe_id)
     if not recipe:
-        raise HTTPException(404, "reference recipe not found")
+        raise api_error(404, "reference-recipe-not-found", "reference recipe not found")
     if not all(recipe.remote_id.partition("/")[::2]):
-        raise HTTPException(422, "this recipe does not name a valid repository")
+        raise api_error(
+            422,
+            "reference-recipe-repository-invalid",
+            "this recipe does not name a valid repository",
+        )
     try:
         preflight = await resolve_catalog_preflight(
             _services(request),
@@ -4072,11 +4154,11 @@ async def install_recipe(recipe_id: str, request: Request, session: SessionDep) 
             validate_resolved=lambda resolved: _assert_recipe_pins_hold(recipe, resolved),
         )
     except CatalogUnavailableError as exc:
-        raise HTTPException(503, str(exc)) from exc
+        raise api_error(503, "catalog-unavailable", str(exc)) from exc
     except ValueError as exc:
         # Refused before persistence, so no installable plan is left behind.
         session.rollback()
-        raise HTTPException(422, str(exc)) from exc
+        raise api_error(422, "recipe-plan-unresolvable", str(exc)) from exc
     plan = preflight.install_plan
     try:
         fields = _planned_download_fields(session.get(InstallPlan, plan.id) if plan else None)
@@ -4091,7 +4173,7 @@ async def install_recipe(recipe_id: str, request: Request, session: SessionDep) 
             ),
         )
     except ValueError as exc:
-        raise HTTPException(422, str(exc)) from exc
+        raise api_error(422, "recipe-settings-invalid", str(exc)) from exc
 
 
 def _assert_recipe_pins_hold(recipe: ReferenceRecipe, plan: ResolvedInstallPlan | None) -> None:
@@ -4172,6 +4254,253 @@ async def list_models(request: Request, session: SessionDep) -> list[ModelInstal
     ]
 
 
+@router.post("/references", response_model=ReferenceSubjectOut, status_code=201)
+async def create_reference_subject(
+    payload: ReferenceSubjectCreate,
+    session: SessionDep,
+) -> ReferenceSubject:
+    try:
+        subject = create_subject(
+            session,
+            name=payload.name,
+            kind=payload.kind,
+            mention_slug=payload.mention_slug,
+            description=payload.description,
+            aliases=payload.aliases,
+            tags=payload.tags,
+        )
+    except ReferenceError as exc:
+        raise api_error(422, "reference-invalid", str(exc)) from exc
+    session.commit()
+    session.refresh(subject)
+    return subject
+
+
+@router.get("/references", response_model=ReferenceSubjectPage)
+async def list_reference_subjects(
+    session: SessionDep,
+    kind: str | None = None,
+    search: str | None = None,
+    include_archived: bool = False,
+    limit: int = DEFAULT_PAGE,
+    offset: int = 0,
+) -> ReferenceSubjectPage:
+    try:
+        rows, total = list_subjects(
+            session,
+            kind=kind,
+            include_archived=include_archived,
+            search=search,
+            limit=limit,
+            offset=offset,
+        )
+    except ReferenceError as exc:
+        raise api_error(422, "reference-query-invalid", str(exc)) from exc
+    return ReferenceSubjectPage(
+        items=[ReferenceSubjectOut.model_validate(row, from_attributes=True) for row in rows],
+        total=total,
+        limit=limit,
+        offset=offset,
+    )
+
+
+def _subject_or_404(session: Session, subject_id: str) -> ReferenceSubject:
+    subject = session.get(ReferenceSubject, subject_id)
+    if not subject:
+        raise api_error(404, "reference-not-found", "That reference does not exist.")
+    return subject
+
+
+@router.get("/references/{subject_id}", response_model=ReferenceSubjectOut)
+async def read_reference_subject(subject_id: str, session: SessionDep) -> ReferenceSubject:
+    return _subject_or_404(session, subject_id)
+
+
+@router.patch("/references/{subject_id}", response_model=ReferenceSubjectOut)
+async def update_reference_subject(
+    subject_id: str,
+    payload: ReferenceSubjectUpdate,
+    session: SessionDep,
+) -> ReferenceSubject:
+    subject = _subject_or_404(session, subject_id)
+    try:
+        if payload.name is not None:
+            rename_subject(
+                session, subject, name=payload.name, follow_mention=payload.follow_mention
+            )
+        if payload.archived is not None:
+            set_archived(session, subject, payload.archived)
+        if payload.favorite is not None:
+            set_favorite(session, subject, payload.favorite)
+        if (
+            payload.description is not None
+            or payload.aliases is not None
+            or payload.tags is not None
+        ):
+            set_details(
+                session,
+                subject,
+                description=payload.description,
+                aliases=payload.aliases,
+                tags=payload.tags,
+            )
+    except ReferenceError as exc:
+        raise api_error(422, "reference-invalid", str(exc)) from exc
+    session.commit()
+    session.refresh(subject)
+    return subject
+
+
+@router.put("/references/{subject_id}/cover", response_model=ReferenceSubjectOut)
+async def set_reference_cover(
+    subject_id: str,
+    payload: ReferenceCoverIn,
+    session: SessionDep,
+) -> ReferenceSubject:
+    subject = _subject_or_404(session, subject_id)
+    try:
+        set_cover(session, subject, artifact_id=payload.artifact_id)
+    except ReferenceError as exc:
+        raise api_error(422, "reference-cover-not-held", str(exc)) from exc
+    session.commit()
+    session.refresh(subject)
+    return subject
+
+
+@router.delete("/references/{subject_id}/cover", response_model=ReferenceSubjectOut)
+async def clear_reference_cover(subject_id: str, session: SessionDep) -> ReferenceSubject:
+    subject = _subject_or_404(session, subject_id)
+    clear_cover(session, subject)
+    session.commit()
+    session.refresh(subject)
+    return subject
+
+
+@router.get("/references/{subject_id}/deletion-impact", response_model=ReferenceDeletionImpact)
+async def read_reference_deletion_impact(
+    subject_id: str, session: SessionDep
+) -> ReferenceDeletionImpact:
+    """What deleting would destroy, answered before anything is destroyed.
+
+    A separate read rather than a field on the subject: it is a question about
+    consequences, asked at the moment someone is deciding, and computing it on
+    every list would cost a scan per subject to answer a question nobody asked.
+    """
+
+    subject = _subject_or_404(session, subject_id)
+    impact = deletion_impact(session, subject)
+    return ReferenceDeletionImpact(
+        reference_subject_id=impact.reference_subject_id,
+        name=impact.name,
+        asset_count=impact.asset_count,
+        exclusive_artifact_ids=list(impact.exclusive_artifact_ids),
+    )
+
+
+@router.delete("/references/{subject_id}", status_code=204)
+async def delete_reference_subject(
+    subject_id: str,
+    session: SessionDep,
+    acknowledged_assets: int | None = None,
+) -> Response:
+    """Permanently delete a subject, but only against a seen impact.
+
+    `acknowledged_assets` must match what `deletion-impact` currently reports.
+    Archiving is the ordinary removal; this path destroys membership rows and is
+    not undoable, so it refuses unless the caller is deleting the thing they
+    were shown rather than something that has changed since.
+    """
+
+    subject = _subject_or_404(session, subject_id)
+    impact = deletion_impact(session, subject)
+    if acknowledged_assets is None or acknowledged_assets != impact.asset_count:
+        raise api_error(
+            409,
+            "reference-impact-not-acknowledged",
+            "Confirm the deletion impact first; this reference now holds "
+            f"{impact.asset_count} image(s).",
+        )
+    session.delete(subject)
+    session.commit()
+    return Response(status_code=204)
+
+
+@router.post(
+    "/references/{subject_id}/assets",
+    response_model=ReferenceAssetAttached,
+    status_code=201,
+)
+async def attach_reference_asset(
+    subject_id: str,
+    payload: ReferenceAssetAttach,
+    request: Request,
+    session: SessionDep,
+) -> ReferenceAssetAttached:
+    """Add one image to a reference, reporting anything it closely resembles.
+
+    The similarity scan reads image bytes, so it is given a reader that verifies
+    each file against its recorded checksum. A file that fails that check is
+    skipped rather than compared, because an unverifiable image is not evidence
+    of anything - least of all of being a duplicate.
+    """
+
+    subject = _subject_or_404(session, subject_id)
+    services = _services(request)
+
+    def read_verified(artifact_id: str) -> bytes:
+        artifact = session.get(Artifact, artifact_id)
+        if artifact is None:
+            raise KeyError(artifact_id)
+        return services.artifacts.verified_path(artifact).read_bytes()
+
+    try:
+        attached = attach_asset(
+            session,
+            subject,
+            artifact_id=payload.artifact_id,
+            caption=payload.caption,
+            purpose=payload.purpose,
+            view_label=payload.view_label,
+            read_bytes=read_verified,
+        )
+    except ReferenceError as exc:
+        raise api_error(422, "reference-asset-invalid", str(exc)) from exc
+    session.commit()
+    session.refresh(attached.asset)
+    return ReferenceAssetAttached(
+        asset=ReferenceAssetOut.model_validate(attached.asset, from_attributes=True),
+        similar=[
+            ReferenceSimilarAsset(
+                reference_asset_id=item.reference_asset_id,
+                artifact_id=item.artifact_id,
+                mean_absolute_difference=item.mean_absolute_difference,
+            )
+            for item in attached.similar
+        ],
+    )
+
+
+@router.get("/references/{subject_id}/assets", response_model=list[ReferenceAssetOut])
+async def list_reference_assets(subject_id: str, session: SessionDep) -> list[ReferenceAsset]:
+    subject = _subject_or_404(session, subject_id)
+    return list(subject.assets)
+
+
+@router.delete("/references/{subject_id}/assets/{asset_id}", status_code=204)
+async def detach_reference_asset(
+    subject_id: str,
+    asset_id: str,
+    session: SessionDep,
+) -> Response:
+    subject = _subject_or_404(session, subject_id)
+    try:
+        detach_asset(session, subject, asset_id=asset_id)
+    except ReferenceError as exc:
+        raise api_error(404, "reference-asset-not-attached", str(exc)) from exc
+    session.commit()
+    return Response(status_code=204)
+
+
 @router.get("/model-assets", response_model=list[ModelAssetOut])
 async def list_model_assets(
     session: SessionDep,
@@ -4180,11 +4509,72 @@ async def list_model_assets(
     statement = select(ModelAssetInstall)
     if kind:
         if kind not in AUXILIARY_ASSET_KINDS:
-            raise HTTPException(422, "unsupported model asset kind")
+            raise api_error(422, "model-asset-kind-unsupported", "unsupported model asset kind")
         statement = statement.where(ModelAssetInstall.kind == kind)
     return list(
         session.scalars(statement.order_by(ModelAssetInstall.name, ModelAssetInstall.id)).all()
     )
+
+
+@router.put(
+    "/model-assets/{asset_id}/prompt-grammar",
+    response_model=AdapterPromptGrammarOut,
+)
+async def review_model_asset_prompt_grammar(
+    asset_id: str,
+    payload: AdapterPromptGrammarReview,
+    session: SessionDep,
+) -> AdapterPromptGrammar:
+    """Record how this adapter must be prompted, as reviewed on this machine.
+
+    A PUT rather than a POST: there is exactly one grammar per adapter, and a
+    second would raise the question of which one a rewriter believed. Re-review
+    replaces, and a re-review that fails leaves the previous one standing.
+    """
+
+    asset = session.get(ModelAssetInstall, asset_id)
+    if not asset:
+        raise api_error(404, "model-asset-not-found", "That model asset is not installed.")
+    try:
+        row = review_adapter_grammar(
+            session,
+            model_asset_install_id=asset.id,
+            asset_sha256=payload.asset_sha256,
+            source_identity=payload.source_identity,
+            source_text=payload.source_text,
+            payload=payload.grammar,
+            approve_prose=tuple(payload.approve_prose),
+            verified_values={
+                slot: frozenset(values) for slot, values in payload.verified_values.items()
+            },
+        )
+    except PromptGrammarError as exc:
+        # The grammar is refused rather than stored partially. A grammar this
+        # build cannot read is one it must never act on.
+        raise api_error(422, "prompt-grammar-invalid", str(exc)) from exc
+    session.commit()
+    session.refresh(row)
+    return row
+
+
+@router.get(
+    "/model-assets/{asset_id}/prompt-grammar",
+    response_model=AdapterPromptGrammarOut,
+)
+async def read_model_asset_prompt_grammar(
+    asset_id: str,
+    session: SessionDep,
+) -> AdapterPromptGrammar:
+    row = session.scalar(
+        select(AdapterPromptGrammar).where(AdapterPromptGrammar.model_asset_install_id == asset_id)
+    )
+    if not row:
+        raise api_error(
+            404,
+            "prompt-grammar-not-reviewed",
+            "No prompt grammar has been reviewed for this adapter on this machine.",
+        )
+    return row
 
 
 @router.patch("/model-assets/{asset_id}", response_model=ModelAssetOut)
@@ -4197,7 +4587,7 @@ async def update_model_asset(
     services = _services(request)
     asset = session.get(ModelAssetInstall, asset_id)
     if not asset:
-        raise HTTPException(404, "model asset not found")
+        raise api_error(404, "model-asset-not-found", "model asset not found")
     values = payload.model_dump(exclude_unset=True, exclude_none=True)
     if not values:
         return asset
@@ -4208,21 +4598,35 @@ async def update_model_asset(
         "default_clip_strength",
     }
     if set(values) & lora_fields and asset.kind != "lora":
-        raise HTTPException(422, "automatic selection metadata is only available for LoRAs")
+        raise api_error(
+            422,
+            "automatic-selection-lora-only",
+            "automatic selection metadata is only available for LoRAs",
+        )
     if "use_case" in values:
         values["use_case"] = values["use_case"].strip()
     for field in ("default_model_strength", "default_clip_strength"):
         value = values.get(field)
         if value is not None and not math.isfinite(value):
-            raise HTTPException(422, f"{field} must be finite")
+            raise api_error(422, "number-not-finite", f"{field} must be finite")
     next_use_case = values.get("use_case", asset.use_case).strip()
     next_auto_apply = values.get("auto_apply", asset.auto_apply)
     if next_auto_apply and not next_use_case:
-        raise HTTPException(422, "automatic LoRA selection requires a use case")
+        raise api_error(
+            422,
+            "automatic-selection-use-case-required",
+            "automatic LoRA selection requires a use case",
+        )
     if next_auto_apply and not asset.verified_at:
-        raise HTTPException(409, "only a verified LoRA can be selected automatically")
+        raise api_error(
+            409,
+            "automatic-selection-needs-verified-lora",
+            "only a verified LoRA can be selected automatically",
+        )
     if values.get("active") is True and not asset.verified_at:
-        raise HTTPException(409, "only a verified model asset can be enabled")
+        raise api_error(
+            409, "model-asset-not-verified", "only a verified model asset can be enabled"
+        )
 
     active_changed = "active" in values and values["active"] != asset.active
 
@@ -4264,7 +4668,7 @@ async def delete_model_asset(
     async with services.scheduler.lease("primary"):
         asset = session.get(ModelAssetInstall, asset_id)
         if not asset:
-            raise HTTPException(404, "model asset not found")
+            raise api_error(404, "model-asset-not-found", "model asset not found")
         was_running = next(
             worker.running for worker in services.processes.statuses() if worker.name == "media"
         )
@@ -4309,7 +4713,7 @@ def _delete_model_asset_locked(
         path = _managed_model_path(model_root, asset.local_path)
         recover_model_delete_quarantines(session, model_root, strict=True)
     except ValueError as exc:
-        raise HTTPException(422, str(exc)) from exc
+        raise api_error(422, "model-asset-delete-refused", str(exc)) from exc
     moves: list[tuple[Path, Path]] = []
     quarantine: Path | None = None
     commit_started = False
@@ -4535,7 +4939,9 @@ async def import_model(payload: ModelImport, session: SessionDep) -> ModelInstal
     files = [child for child in path.rglob("*") if child.is_file()] if path.is_dir() else [path]
     unsafe = [child for child in files if child.suffix.lower() in blocked]
     if unsafe:
-        raise HTTPException(422, "pickle-compatible model files are blocked by default")
+        raise api_error(
+            422, "model-file-format-blocked", "pickle-compatible model files are blocked by default"
+        )
     size = sum(child.stat().st_size for child in files)
     install = ModelInstall(
         id=new_id("model"),
@@ -4576,7 +4982,7 @@ async def activate_model(model_id: str, request: Request, session: SessionDep) -
     try:
         return _services(request).downloads.reactivate(session, install)
     except ValueError as exc:
-        raise HTTPException(422, str(exc)) from exc
+        raise api_error(422, "model-activation-invalid", str(exc)) from exc
 
 
 @router.delete("/models/{model_id}", status_code=204)
@@ -4596,7 +5002,9 @@ async def delete_model(
         if worker_name == "media" and any(
             worker.name == "media" and worker.running for worker in services.processes.statuses()
         ):
-            raise HTTPException(409, "stop the media worker before deleting this model")
+            raise api_error(
+                409, "media-worker-running", "stop the media worker before deleting this model"
+            )
         quarantine = _delete_model_locked(
             model_id,
             request,
@@ -4631,7 +5039,7 @@ def _delete_model_locked(
         path = _managed_model_path(model_root, install.local_path)
         recover_model_delete_quarantines(session, model_root, strict=True)
     except ValueError as exc:
-        raise HTTPException(422, str(exc)) from exc
+        raise api_error(422, "model-delete-refused", str(exc)) from exc
 
     profiles = list(
         session.scalars(
@@ -4639,13 +5047,17 @@ def _delete_model_locked(
         ).all()
     )
     if profiles and not delete_profiles:
-        raise HTTPException(409, "delete profiles that use this model before deleting it")
+        raise api_error(
+            409, "model-in-use-by-profile", "delete profiles that use this model before deleting it"
+        )
     profile_ids = {profile.id for profile in profiles}
     if profile_ids and any(
         worker.running and worker.profile_id in profile_ids
         for worker in _services(request).processes.statuses()
     ):
-        raise HTTPException(409, "unload the active worker before deleting this model")
+        raise api_error(
+            409, "model-loaded-by-worker", "unload the active worker before deleting this model"
+        )
     if profile_ids:
         affected_chats = session.scalars(
             select(Chat).where(
@@ -4725,7 +5137,7 @@ def _delete_model_locked(
                     exc_info=True,
                 )
         if isinstance(exc, ValueError):
-            raise HTTPException(422, str(exc)) from exc
+            raise api_error(422, "model-delete-refused", str(exc)) from exc
         raise
     return quarantine
 
@@ -5215,7 +5627,7 @@ async def create_profile(
             payload.request_settings, [field for field in fields if field.scope != "load"]
         )
     except ValueError as exc:
-        raise HTTPException(422, str(exc)) from exc
+        raise api_error(422, "profile-settings-invalid", str(exc)) from exc
     profile = ModelProfile(
         name=payload.name,
         use_case=payload.use_case,
@@ -5247,9 +5659,9 @@ async def update_profile(
     try:
         validate_profile_binding(session, profile)
     except LookupError as exc:
-        raise HTTPException(404, str(exc)) from exc
+        raise api_error(404, "profile-not-found", str(exc)) from exc
     except ValueError as exc:
-        raise HTTPException(422, str(exc)) from exc
+        raise api_error(422, "profile-binding-invalid", str(exc)) from exc
     values = payload.model_dump(exclude_unset=True)
     fields = (
         await _engine_role_fields(
@@ -5276,7 +5688,7 @@ async def update_profile(
                 [field for field in fields if field.scope == "load"],
             )
         except ValueError as exc:
-            raise HTTPException(422, str(exc)) from exc
+            raise api_error(422, "profile-load-settings-invalid", str(exc)) from exc
     if "request_settings" in values:
         try:
             profile.request_settings_json = validate_settings(
@@ -5284,7 +5696,7 @@ async def update_profile(
                 [field for field in fields if field.scope != "load"],
             )
         except ValueError as exc:
-            raise HTTPException(422, str(exc)) from exc
+            raise api_error(422, "profile-request-settings-invalid", str(exc)) from exc
     for key, value in values.items():
         setattr(profile, key, value)
     reconcile_legacy_workflow_compatibility(session)
@@ -5306,7 +5718,11 @@ async def delete_profile(profile_id: str, request: Request, session: SessionDep)
             worker.running and worker.profile_id == profile.id
             for worker in services.processes.statuses()
         ):
-            raise HTTPException(409, "unload the active worker before deleting its profile")
+            raise api_error(
+                409,
+                "profile-loaded-by-worker",
+                "unload the active worker before deleting its profile",
+            )
         retire_legacy_profile_workflow(session, profile)
         session.delete(profile)
         session.flush()
@@ -5348,9 +5764,9 @@ async def reset_profile(profile_id: str, session: SessionDep) -> ModelProfile:
     try:
         validate_profile_binding(session, profile)
     except LookupError as exc:
-        raise HTTPException(404, str(exc)) from exc
+        raise api_error(404, "profile-not-found", str(exc)) from exc
     except ValueError as exc:
-        raise HTTPException(422, str(exc)) from exc
+        raise api_error(422, "profile-settings-invalid", str(exc)) from exc
     profile.load_settings_json = {}
     profile.request_settings_json = {}
     ensure_legacy_profile_workflow(session, profile)
@@ -5417,7 +5833,7 @@ async def create_preset(
             [field for field in fields if field.scope != "load"],
         )
     except ValueError as exc:
-        raise HTTPException(422, str(exc)) from exc
+        raise api_error(422, "preset-invalid", str(exc)) from exc
     if payload.is_default:
         for sibling in session.scalars(
             select(GenerationPreset).where(GenerationPreset.role == payload.role)
@@ -5454,7 +5870,7 @@ async def update_preset(
                 [field for field in fields if field.scope != "load"],
             )
         except ValueError as exc:
-            raise HTTPException(422, str(exc)) from exc
+            raise api_error(422, "preset-invalid", str(exc)) from exc
     if "is_default" in values:
         is_default = bool(values.pop("is_default"))
         if is_default:
@@ -5566,7 +5982,9 @@ def _require_media_worker_stopped(request: Request) -> None:
         worker.name == "media" and worker.running
         for worker in _services(request).processes.statuses()
     ):
-        raise HTTPException(409, "stop the media worker before changing custom nodes")
+        raise api_error(
+            409, "media-worker-running", "stop the media worker before changing custom nodes"
+        )
 
 
 async def _custom_node_lifecycle(
@@ -5598,12 +6016,14 @@ async def install_custom_node(
     try:
         source_url = _services(request).custom_nodes.normalize_source(payload.source_url)
     except ValueError as exc:
-        raise HTTPException(422, str(exc)) from exc
+        raise api_error(422, "custom-node-request-invalid", str(exc)) from exc
     existing = session.scalar(
         select(CustomNodeInstall).where(CustomNodeInstall.source_url == source_url)
     )
     if existing:
-        raise HTTPException(409, "this custom node source is already managed")
+        raise api_error(
+            409, "custom-node-source-duplicate", "this custom node source is already managed"
+        )
     try:
         install = await _services(request).custom_nodes.install(
             session,
@@ -5613,7 +6033,7 @@ async def install_custom_node(
         )
     except (OSError, RuntimeError, ValueError, TimeoutError) as exc:
         session.rollback()
-        raise HTTPException(422, str(exc)) from exc
+        raise api_error(422, "custom-node-install-failed", str(exc)) from exc
     session.commit()
     session.refresh(install)
     return install
@@ -5634,7 +6054,7 @@ async def update_custom_node(
         await _services(request).custom_nodes.update(install, payload.revision)
     except (OSError, RuntimeError, ValueError, TimeoutError) as exc:
         session.rollback()
-        raise HTTPException(422, str(exc)) from exc
+        raise api_error(422, "custom-node-update-failed", str(exc)) from exc
     session.commit()
     session.refresh(install)
     return install
@@ -5655,7 +6075,7 @@ async def trust_custom_node(
         try:
             await _services(request).custom_nodes.verify(install)
         except (OSError, RuntimeError, ValueError, TimeoutError) as exc:
-            raise HTTPException(422, str(exc)) from exc
+            raise api_error(422, "custom-node-trust-failed", str(exc)) from exc
     install.trusted = payload.trusted
     install.security_json = {
         **install.security_json,
@@ -5681,7 +6101,7 @@ async def rollback_custom_node(
         await _services(request).custom_nodes.rollback(install)
     except (OSError, RuntimeError, ValueError, TimeoutError) as exc:
         session.rollback()
-        raise HTTPException(422, str(exc)) from exc
+        raise api_error(422, "custom-node-rollback-failed", str(exc)) from exc
     session.commit()
     session.refresh(install)
     return install
@@ -6522,7 +6942,7 @@ async def create_workflow(payload: WorkflowCreate, session: SessionDep) -> Workf
         )
         validate_workflow_edit_calibration(payload.input_schema)
     except ValueError as exc:
-        raise HTTPException(422, str(exc)) from exc
+        raise api_error(422, "workflow-invalid", str(exc)) from exc
     definition = WorkflowDefinition(
         name=payload.name,
         operation=payload.operation.value,
@@ -6766,7 +7186,9 @@ async def workflow_open_target(
 ) -> WorkflowOpenTarget:
     definition, revision = _workflow_and_revision(session, workflow_id)
     if not revision.ui_graph_json:
-        raise HTTPException(422, "this workflow has no ComfyUI user-interface graph")
+        raise api_error(
+            422, "workflow-ui-graph-absent", "this workflow has no ComfyUI user-interface graph"
+        )
     filename = "".join(
         character if character.isalnum() or character in "-_" else "-"
         for character in definition.name
@@ -7475,6 +7897,45 @@ def _installed_package_versions(session: Session) -> dict[str, set[str]]:
     for install in session.scalars(select(CustomNodeInstall)).all():
         versions.setdefault(install.name, set()).add(install.revision)
     return versions
+
+
+async def _verified_launchable_registry_packages(
+    services: Services,
+) -> dict[tuple[str, str], frozenset[str]]:
+    """Package-bound nodes an unscoped launch can load after exact verification."""
+
+    resolver = getattr(services.processes, "trusted_comfy_registry_package_node_types", None)
+    if not callable(resolver):
+        return {}
+    try:
+        packages = await resolver()
+    except Exception:  # noqa: BLE001 - analysis must fail closed, not fail outright
+        logger.warning(
+            "Installed Registry packages could not be verified for workflow package use."
+        )
+        return {}
+    return {
+        (str(key[0]), str(key[1])): frozenset(str(node_type) for node_type in node_types)
+        for key, node_types in packages.items()
+    }
+
+
+def _launchable_registry_node_types(
+    analysis: ComfyWorkflowPackageAnalysis,
+    packages: Mapping[tuple[str, str], frozenset[str]],
+) -> set[str]:
+    """Nodes owned by every exact package/version declared for the requirement."""
+
+    launchable: set[str] = set()
+    for requirement in analysis.custom_packages:
+        required = set(requirement.node_types)
+        versions = set(requirement.versions)
+        if versions and all(
+            required <= packages.get((requirement.package_id, version), frozenset())
+            for version in versions
+        ):
+            launchable.update(required)
+    return launchable
 
 
 _REGISTRY_PREPARE_TASKS: dict[str, asyncio.Task[None]] = {}
@@ -8487,21 +8948,67 @@ async def import_workflow_package(
         raise api_error(
             503, "media-runtime-unavailable", "Start the media worker to compile workflows"
         ) from exc
+    available_node_types = {str(node_type) for node_type in object_info}
+    asset_filenames = _local_asset_filenames(session)
+    package_versions = _installed_package_versions(session)
     try:
         analysis = analyze_comfyui_workflow_package(
             payload.ui_graph,
-            available_node_types={str(node_type) for node_type in object_info},
-            available_asset_filenames=_local_asset_filenames(session),
-            installed_package_versions=_installed_package_versions(session),
+            available_node_types=available_node_types,
+            available_asset_filenames=asset_filenames,
+            installed_package_versions=package_versions,
         )
     except WorkflowPackageError as exc:
         raise api_error(422, exc.code, str(exc)) from exc
+    if not analysis.ready:
+        launchable_packages = await _verified_launchable_registry_packages(services)
+        launchable_node_types = _launchable_registry_node_types(analysis, launchable_packages)
+        if launchable_node_types - available_node_types:
+            try:
+                analysis = analyze_comfyui_workflow_package(
+                    payload.ui_graph,
+                    available_node_types=available_node_types | launchable_node_types,
+                    available_asset_filenames=asset_filenames,
+                    installed_package_versions=package_versions,
+                )
+            except WorkflowPackageError as exc:
+                raise api_error(422, exc.code, str(exc)) from exc
     if not analysis.ready:
         raise api_error(
             422,
             "package-not-resolved",
             "Resolve everything in the package review before importing",
         )
+    if not set(analysis.required_node_types) <= available_node_types:
+        _ensure_worker_idle(session, "media")
+        async with services.scheduler.lease("primary"):
+            session.expire_all()
+            _ensure_worker_idle(session, "media")
+            try:
+                await services.processes.start_media()
+                object_info = await describe_nodes()
+            except (OSError, RuntimeError, ValueError, TimeoutError) as exc:
+                raise api_error(
+                    422,
+                    "workflow-package-node-refresh-failed",
+                    "The installed custom-node packages could not be loaded for workflow import.",
+                ) from exc
+        available_node_types = {str(node_type) for node_type in object_info}
+        try:
+            analysis = analyze_comfyui_workflow_package(
+                payload.ui_graph,
+                available_node_types=available_node_types,
+                available_asset_filenames=asset_filenames,
+                installed_package_versions=package_versions,
+            )
+        except WorkflowPackageError as exc:
+            raise api_error(422, exc.code, str(exc)) from exc
+        if not analysis.ready:
+            raise api_error(
+                422,
+                "package-not-resolved",
+                "The refreshed media runtime did not load every required workflow node.",
+            )
     try:
         compilation = compile_comfyui_ui_graph(payload.ui_graph, object_info)
     except WorkflowCompilationError as exc:
@@ -8586,15 +9093,30 @@ async def analyze_workflow_package(
             # The report says so instead of failing - and instead of letting
             # "every node missing" masquerade as a finding.
             node_inventory_available = False
+    asset_filenames = _local_asset_filenames(session)
+    package_versions = _installed_package_versions(session)
     try:
         analysis = analyze_comfyui_workflow_package(
             payload.ui_graph,
             available_node_types=available_node_types,
-            available_asset_filenames=_local_asset_filenames(session),
-            installed_package_versions=_installed_package_versions(session),
+            available_asset_filenames=asset_filenames,
+            installed_package_versions=package_versions,
         )
     except WorkflowPackageError as exc:
         raise api_error(422, exc.code, str(exc)) from exc
+    if not analysis.ready:
+        launchable_packages = await _verified_launchable_registry_packages(services)
+        launchable_node_types = _launchable_registry_node_types(analysis, launchable_packages)
+        if launchable_node_types - available_node_types:
+            try:
+                analysis = analyze_comfyui_workflow_package(
+                    payload.ui_graph,
+                    available_node_types=available_node_types | launchable_node_types,
+                    available_asset_filenames=asset_filenames,
+                    installed_package_versions=package_versions,
+                )
+            except WorkflowPackageError as exc:
+                raise api_error(422, exc.code, str(exc)) from exc
     # Authors often record where a model came from. A filename search cannot
     # find a file inside a repository, so those links are frequently the only
     # way an asset is findable at all - read from the graph, validated here,
@@ -8727,7 +9249,7 @@ async def create_workflow_revision(
         )
         validate_workflow_edit_calibration(payload.input_schema)
     except ValueError as exc:
-        raise HTTPException(422, str(exc)) from exc
+        raise api_error(422, "workflow-revision-invalid", str(exc)) from exc
     version = (
         session.scalar(
             select(func.max(WorkflowRevision.version)).where(

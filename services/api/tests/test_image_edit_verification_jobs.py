@@ -25,9 +25,8 @@ from local_lm.models import (
     Run,
     WorkPlan,
     WorkStep,
-    WorkStepDependency,
 )
-from local_lm.schemas import EngineCapabilities
+from local_lm.schemas import EngineCapabilities, JobOut
 
 
 def _png(color: tuple[int, int, int]) -> bytes:
@@ -37,17 +36,20 @@ def _png(color: tuple[int, int, int]) -> bytes:
 
 
 async def _wait_for_job(client: AsyncClient, kind: str) -> dict:  # type: ignore[type-arg]
+    del client
     deadline = asyncio.get_running_loop().time() + 5
     while asyncio.get_running_loop().time() < deadline:
-        jobs = (await client.get("/api/jobs")).json()
-        matching = [job for job in jobs if job["kind"] == kind]
-        if matching and matching[0]["status"] in {
-            JobStatus.COMPLETE.value,
-            JobStatus.FAILED.value,
-            JobStatus.CANCELLED.value,
-            JobStatus.INTERRUPTED.value,
-        }:
-            return matching[0]
+        with SessionLocal() as session:
+            matching = session.scalar(
+                select(Job).where(Job.kind == kind).order_by(Job.created_at.desc())
+            )
+            if matching and matching.status in {
+                JobStatus.COMPLETE.value,
+                JobStatus.FAILED.value,
+                JobStatus.CANCELLED.value,
+                JobStatus.INTERRUPTED.value,
+            }:
+                return JobOut.model_validate(matching).model_dump(mode="json")
         await asyncio.sleep(0.03)
     raise AssertionError(f"{kind} job did not finish")
 
@@ -224,6 +226,9 @@ async def test_image_edit_verification_is_dependent_at_most_once_and_non_destruc
     assert accepted.status_code == 202
     verification_job = await _wait_for_job(client, JobKind.EDIT_VERIFY.value)
 
+    assert all(
+        job["kind"] != JobKind.EDIT_VERIFY.value for job in (await client.get("/api/jobs")).json()
+    )
     assert verification_job["run_id"] is None
     assert verification_job["status"] == JobStatus.COMPLETE.value
     assert verification_job["result_json"]["status"] == expected_status
@@ -249,17 +254,12 @@ async def test_image_edit_verification_is_dependent_at_most_once_and_non_destruc
         run = session.get(Run, run_id)
         message = session.get(Message, accepted.json()["assistant_message"]["id"])
         job = session.get(Job, verification_job["id"])
-        assert run and message and job and run.work_step_id and job.work_step_id
+        assert run and message and job and run.work_step_id
+        assert job.work_plan_id is None
+        assert job.work_step_id is None
         image_ids = [part.artifact_id for part in message.parts if part.type == "image"]
         revision_id = message.active_response_revision_id
-        dependency = session.scalar(
-            select(WorkStepDependency).where(
-                WorkStepDependency.step_id == job.work_step_id,
-                WorkStepDependency.depends_on_step_id == run.work_step_id,
-            )
-        )
         assert revision_id is not None
-        assert dependency is not None
         if expected_retry:
             assert retry_run_id is not None
             retry_run = session.get(Run, retry_run_id)
@@ -297,6 +297,27 @@ async def test_image_edit_verification_is_dependent_at_most_once_and_non_destruc
             for candidate in verification_jobs
             if candidate.payload_json.get("source_run_id") == run.id
         ] == [job]
+
+
+async def test_background_checks_are_absent_from_jobs_and_worker_counts(
+    client: AsyncClient,
+) -> None:
+    with SessionLocal() as session:
+        check = Job(
+            id="job_hidden_verification",
+            kind=JobKind.EDIT_VERIFY.value,
+            status=JobStatus.QUEUED.value,
+            queue_group="primary",
+            payload_json={},
+        )
+        session.add(check)
+        session.commit()
+
+    jobs = (await client.get("/api/jobs")).json()
+    assert all(job["id"] != check.id for job in jobs)
+    workers = {worker["name"]: worker for worker in (await client.get("/api/workers")).json()}
+    assert workers["chat"]["active_jobs"] == 0
+    assert workers["chat"]["queued_jobs"] == 0
 
 
 async def test_restart_requeues_waiting_verification_and_interrupts_active_one(

@@ -7,6 +7,7 @@ from typing import Annotated, Any, Literal
 from pydantic import BaseModel, ConfigDict, Field, StringConstraints
 
 from .domain import Operation, RoutingMode
+from .references import MAX_REFERENCES_PER_TURN, MAX_ROLE, MentionSource
 from .worker_failures import WorkerFailureCode
 
 
@@ -197,6 +198,28 @@ class ResponseRevisionOut(ApiModel):
     updated_at: datetime
 
 
+class MessageReferenceOut(ApiModel):
+    """What one turn referred to, as it stood when the turn was accepted.
+
+    The name and mention are the recorded ones, not the subject's current
+    values, and the subject id carries no promise that the subject still
+    exists. That is the point: a renamed subject must not rewrite an old
+    message, and a deleted one must not erase the record that it was used.
+    """
+
+    reference_subject_id: str
+    mention_slug: str
+    subject_name: str
+    subject_kind: str
+    role: str | None = None
+    strength: float | None = None
+    source: str
+    # The _json suffix matches the columns and the shape every other
+    # reference field already takes in this API.
+    reference_asset_ids_json: list[str] = Field(default_factory=list)
+    artifact_ids_json: list[str] = Field(default_factory=list)
+
+
 class MessageOut(ApiModel):
     id: str
     chat_id: str
@@ -206,6 +229,8 @@ class MessageOut(ApiModel):
     transcript_visible: bool
     active_response_revision_id: str | None
     parts: list[MessagePartOut]
+    # Empty for every message that named nothing, which is almost all of them.
+    references: list[MessageReferenceOut] = Field(default_factory=list)
     response_revisions: list[ResponseRevisionOut] = Field(default_factory=list)
     feedback: Literal["up", "down"] | None = None
     created_at: datetime
@@ -294,11 +319,24 @@ class PromptHelperDetail(ChatDetail):
     draft_prompt: str
 
 
+class TurnReferenceIn(ApiModel):
+    """One explicitly structured Reference attached to a turn."""
+
+    reference_subject_id: str = Field(min_length=1, max_length=80)
+    role: str | None = Field(default=None, min_length=1, max_length=MAX_ROLE)
+    selected_asset_ids: list[str] = Field(default_factory=list, max_length=16)
+    strength: float | None = Field(default=None, ge=0.0, le=2.0)
+    source: MentionSource = MentionSource.MENTION
+
+
 class TurnRequest(ApiModel):
     text: str = Field(min_length=1, max_length=200_000)
     mode: RoutingMode | None = None
     parent_message_id: str | None = None
     input_artifact_ids: list[str] = Field(default_factory=list, max_length=16)
+    references: list[TurnReferenceIn] = Field(
+        default_factory=list, max_length=MAX_REFERENCES_PER_TURN
+    )
     settings: dict[str, Any] = Field(default_factory=dict)
     ordered_settings: dict[str, dict[str, Any]] = Field(default_factory=dict, max_length=3)
     output_count: int | None = Field(default=None, ge=1, le=16)
@@ -1667,6 +1705,168 @@ class ModelAssetUpdate(ApiModel):
     auto_apply: bool | None = None
     default_model_strength: float | None = Field(default=None, ge=-4, le=4)
     default_clip_strength: float | None = Field(default=None, ge=-4, le=4)
+
+
+class AdapterPromptGrammarReview(ApiModel):
+    """A reviewer recording how one adapter must be prompted.
+
+    `verified_values` is the reviewer asserting what they have *seen work here*,
+    not what the source document claims. That separation is the point of the
+    whole record: one published vocabulary already turned out to contain a value
+    the model does not implement, and prompting it degraded silently to the stem
+    rather than failing.
+
+    `approve_prose` carries exact text rather than a flag, and is accepted only
+    when that text actually appears in `source_text`. Approving prose nobody
+    read would mean nothing.
+    """
+
+    asset_sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
+    source_identity: str = Field(max_length=1_000)
+    source_text: str = Field(max_length=20_000)
+    grammar: dict[str, Any]
+    approve_prose: list[str] = Field(default_factory=list, max_length=16)
+    verified_values: dict[str, list[str]] = Field(default_factory=dict)
+
+
+class AdapterPromptGrammarOut(ApiModel):
+    """What was recorded. Digests and decisions only - never the source text."""
+
+    id: str
+    model_asset_install_id: str
+    asset_sha256: str
+    source_identity: str
+    source_sha256: str
+    schema_version: int
+    grammar_sha256: str
+    approved_prose_json: list[str]
+    verified_values_json: dict[str, list[str]]
+    compiler_version: str
+    compiler_ceiling: int
+    fits: bool
+    reviewed_at: datetime | None
+
+
+class ReferenceSubjectCreate(ApiModel):
+    """A new subject. The mention is derived unless one is asked for by name.
+
+    Leaving `mention_slug` unset is the ordinary path and collides gracefully -
+    two real people can share a name, so a derived mention is suffixed rather
+    than refused. Asking for one explicitly is refused on collision instead,
+    because the user asked for that exact mention and quietly giving them a
+    different one would be worse than saying no.
+    """
+
+    name: str = Field(min_length=1, max_length=120)
+    kind: str
+    mention_slug: str | None = Field(default=None, max_length=64)
+    description: str | None = Field(default=None, max_length=4_000)
+    aliases: list[str] = Field(default_factory=list, max_length=32)
+    tags: list[str] = Field(default_factory=list, max_length=32)
+
+
+class ReferenceSubjectUpdate(ApiModel):
+    """Rename, archive or favourite. Every field is optional and independent.
+
+    `follow_mention` defaults to false: a rename does not move the mention,
+    because a live chat draft may already hold the old one and silently
+    breaking it is worse than a mention that no longer matches the name.
+    """
+
+    name: str | None = Field(default=None, min_length=1, max_length=120)
+    follow_mention: bool = False
+    archived: bool | None = None
+    favorite: bool | None = None
+    # Omitting one leaves it alone; sending an empty string or an empty list
+    # clears it. Those are different instructions and a single nullable value
+    # could not carry both.
+    description: str | None = Field(default=None, max_length=4_000)
+    aliases: list[str] | None = Field(default=None, max_length=32)
+    tags: list[str] | None = Field(default=None, max_length=32)
+
+
+class ReferenceCoverIn(ApiModel):
+    """Which of a reference's images stands for it.
+
+    Its own request rather than a field on the update above, because "leave the
+    cover alone" and "remove the cover" are different intentions and one
+    optional field cannot say both. Clearing is the DELETE.
+    """
+
+    artifact_id: str = Field(min_length=1, max_length=80)
+
+
+class ReferenceSubjectOut(ApiModel):
+    id: str
+    name: str
+    mention_slug: str
+    kind: str
+    description: str | None
+    aliases_json: list[str]
+    tags_json: list[str]
+    cover_artifact_id: str | None
+    favorite: bool
+    archived: bool
+
+
+class ReferenceSubjectPage(ApiModel):
+    items: list[ReferenceSubjectOut]
+    total: int
+    limit: int
+    offset: int
+
+
+class ReferenceDeletionImpact(ApiModel):
+    """What deleting would destroy, offered before it is done.
+
+    `exclusive_artifact_ids` counts only images nobody else references. A
+    photograph showing two subjects belongs to both, and removing one of them
+    is not permission to delete the picture.
+    """
+
+    reference_subject_id: str
+    name: str
+    asset_count: int
+    exclusive_artifact_ids: list[str]
+
+
+class ReferenceAssetAttach(ApiModel):
+    artifact_id: str = Field(min_length=1, max_length=80)
+    caption: str | None = Field(default=None, max_length=2_000)
+    purpose: str = "other"
+    view_label: str | None = Field(default=None, max_length=60)
+
+
+class ReferenceAssetOut(ApiModel):
+    id: str
+    reference_subject_id: str
+    artifact_id: str
+    caption: str | None
+    purpose: str
+    view_label: str | None
+    sort_order: int
+    validation_state: str
+
+
+class ReferenceSimilarAsset(ApiModel):
+    """An image already held that closely resembles the one just added."""
+
+    reference_asset_id: str
+    artifact_id: str
+    mean_absolute_difference: float
+
+
+class ReferenceAssetAttached(ApiModel):
+    """The attachment, plus anything the caller should weigh up afterwards.
+
+    `similar` is advice rather than a refusal: two close shots of one subject
+    are often deliberate, so the person adding them decides. An empty list means
+    nothing resembled it *or* the comparison could not run - never a claim that
+    the image is definitely new.
+    """
+
+    asset: ReferenceAssetOut
+    similar: list[ReferenceSimilarAsset]
 
 
 class RecipeFile(ApiModel):
