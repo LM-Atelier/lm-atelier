@@ -47,7 +47,7 @@ export function StudioView({
   /** Put the picture down and go back to an empty studio. */
   onClose: () => void;
 }) {
-  const { sessionId, steps, busy, error, apply } = useStudioSession(
+  const { sessionId, steps, previewArtifactId, busy, error, apply } = useStudioSession(
     sourceArtifactId,
     sourceChatId,
   );
@@ -145,7 +145,7 @@ export function StudioView({
       <header className="page-header">
         <div><h1>Image Studio</h1></div>
         <div className="studio-header-actions">
-          {current && (
+          {current && !previewArtifactId && (
             <>
               {/* Every result is already in the library - the close dialog
                   beside this says so. What this does is mark one, which is
@@ -213,11 +213,13 @@ export function StudioView({
           onRedo={() => dispatch({ type: "redo" })}
           canUndo={tools.history.canUndo}
           canRedo={tools.history.canRedo}
-          disabled={!bitmap}
+          disabled={!bitmap || Boolean(previewArtifactId)}
           capabilities={capabilities.data?.tools ?? []}
         />
         <div className="studio-stage">
-          {bitmap ? (
+          {previewArtifactId ? (
+            <StudioGenerationPreview artifactId={previewArtifactId} />
+          ) : bitmap ? (
             <StudioCanvas
               image={bitmap}
               mask={tools.mask}
@@ -226,22 +228,10 @@ export function StudioView({
               onGestureStart={() => dispatch({ type: "gesture-start" })}
               onStrokeEnd={() => dispatch({ type: "stroke-end" })}
             />
-          ) : imageError ? (
-            // A picture that cannot be read is not one still arriving, and
-            // "Loading the image" forever is the more comfortable of the two.
-            <div className="studio-stage-loading" role="alert">
-              <p>{imageError}</p>
-              <button className="secondary compact-button" onClick={reload}>Try again</button>
-            </div>
           ) : (
-            // Not an empty state: the empty-state tile is styled to say
-            // "nothing here", which is the opposite of what is happening.
-            <div className="studio-stage-loading" role="status">
-              <div className="loading-line" />
-              <p>Loading the image…</p>
-            </div>
+            <StudioStageLoading error={imageError} reload={reload} />
           )}
-          {bitmap && tools.kind === "extend" && (
+          {!previewArtifactId && bitmap && tools.kind === "extend" && (
             // Over the picture rather than beside it: the frame is the
             // control, so it has to be where the frame is.
             <StudioExtendHandles
@@ -430,6 +420,42 @@ export function StudioView({
         selectedId={current?.artifactId ?? null}
         onSelect={setSelectedId}
       />
+    </div>
+  );
+}
+
+function StudioGenerationPreview({ artifactId }: { artifactId: string }) {
+  return (
+    <figure className="studio-generation-preview">
+      <img src={artifactSource(artifactId) ?? undefined} alt="Generation preview" />
+      <figcaption role="status">Generation preview</figcaption>
+    </figure>
+  );
+}
+
+function StudioStageLoading({
+  error,
+  reload,
+}: {
+  error: string | null;
+  reload: () => void;
+}) {
+  if (error) {
+    // A picture that cannot be read is not one still arriving, and "Loading
+    // the image" forever is the more comfortable of the two.
+    return (
+      <div className="studio-stage-loading" role="alert">
+        <p>{error}</p>
+        <button className="secondary compact-button" onClick={reload}>Try again</button>
+      </div>
+    );
+  }
+  // Not an empty state: the empty-state tile is styled to say "nothing here",
+  // which is the opposite of what is happening.
+  return (
+    <div className="studio-stage-loading" role="status">
+      <div className="loading-line" />
+      <p>Loading the image…</p>
     </div>
   );
 }

@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
-import { studioSteps } from "./useStudioSession";
+import { studioPreviewArtifactId, studioSteps } from "./useStudioSession";
 import type { ChatDetail, Message, MessagePart } from "./types";
 
 const stamp = "2026-08-03T00:00:00Z";
@@ -80,18 +80,26 @@ describe("studio filmstrip", () => {
     expect(steps[2].instruction).toBe("warmer light");
   });
 
-  it("ignores previews and answers that produced no image", () => {
+  it("keeps a pending preview separate from durable edit history", () => {
     const preview = part({ id: "p", type: "image", artifact_id: "art-preview" });
     preview.metadata_json = { preview: true };
-    const steps = studioSteps(
-      session([
-        message({ id: "answer-preview", parts: [preview] }),
-        message({ id: "answer-text", parts: [part({ id: "t", type: "text", text: "hm" })] }),
-      ]),
-      "art-source",
-    );
+    const detail = session([
+      message({ id: "answer-preview", status: "pending", parts: [preview] }),
+      message({ id: "answer-text", parts: [part({ id: "t", type: "text", text: "hm" })] }),
+    ]);
 
-    expect(steps.map((step) => step.artifactId)).toEqual(["art-source"]);
+    expect(studioSteps(detail, "art-source").map((step) => step.artifactId)).toEqual([
+      "art-source",
+    ]);
+    expect(studioPreviewArtifactId(detail)).toBe("art-preview");
+  });
+
+  it("does not revive a preview-shaped part after its message is complete", () => {
+    const preview = part({ id: "p", type: "image", artifact_id: "art-preview" });
+    preview.metadata_json = { preview: true };
+    expect(studioPreviewArtifactId(session([
+      message({ id: "answer-preview", status: "complete", parts: [preview] }),
+    ]))).toBeNull();
   });
 
   it("works before any edit and without a known source", () => {
