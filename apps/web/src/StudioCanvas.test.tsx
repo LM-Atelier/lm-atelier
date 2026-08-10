@@ -9,19 +9,23 @@ import type { ImagePoint, PointerTool, ToolPreview } from "./studioTools";
 
 class SpyTool implements PointerTool {
   calls: Array<[string, ImagePoint]> = [];
+  viewportScales: number[] = [];
   changed = true;
   appliesWhileMoving = false;
 
-  down(point: ImagePoint): void {
+  down(point: ImagePoint, viewportScale = 1): void {
     this.calls.push(["down", point]);
+    this.viewportScales.push(viewportScale);
   }
 
-  move(point: ImagePoint): void {
+  move(point: ImagePoint, viewportScale = 1): void {
     this.calls.push(["move", point]);
+    this.viewportScales.push(viewportScale);
   }
 
-  up(point: ImagePoint): boolean {
+  up(point: ImagePoint, viewportScale = 1): boolean {
     this.calls.push(["up", point]);
+    this.viewportScales.push(viewportScale);
     return this.changed;
   }
 
@@ -158,6 +162,29 @@ describe("StudioCanvas", () => {
 
     expect(layers.style.transform).not.toBe(before);
     expect(layers.style.transform).toContain("scale(1.2");
+  });
+
+  it("passes the live viewport scale to drawing tools", () => {
+    const tool = new SpyTool();
+    const { container } = render(<StudioCanvas image={image} mask={null} tool={tool} />);
+    const surface = container.querySelector(".studio-canvas")!;
+
+    fireEvent.wheel(surface, { deltaY: -120, clientX: 200, clientY: 100 });
+    fireEvent.pointerDown(surface, {
+      pointerType: "mouse",
+      clientX: 100,
+      clientY: 50,
+      button: 0,
+      pointerId: 1,
+    });
+    fireEvent.pointerUp(surface, {
+      pointerType: "mouse",
+      clientX: 100,
+      clientY: 50,
+      pointerId: 1,
+    });
+
+    expect(tool.viewportScales).toEqual([1.2, 1.2]);
   });
 
   it("is reachable and steerable from the keyboard", () => {
