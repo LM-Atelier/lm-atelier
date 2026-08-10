@@ -8071,7 +8071,7 @@ async def _packages_awaiting_review(services: Services) -> frozenset[tuple[str, 
 
 def _packages_that_did_not_load(
     services: Services, available_node_types: set[str]
-) -> list[tuple[str, bool]]:
+) -> list[tuple[str, Path | None]]:
     """Trusted packages whose reviewed nodes are absent from a live runtime.
 
     The runtime is the authority on what loaded. A package can be installed,
@@ -8080,15 +8080,16 @@ def _packages_that_did_not_load(
     only symptom is that its node types never appear. Reported as "a node is
     missing", that sends somebody to install what is already on disk.
 
-    Returns each package name with whether it ships a requirements file, so the
-    refusal can say which of the two situations this is.
+    Returns each package name with the requirements file it ships, if any, so
+    the refusal can say which of the two situations this is and name the exact
+    file somebody has to install from.
     """
 
     from .custom_nodes import CustomNodeManager, reviewed_custom_node_types
     from .db import SessionLocal
     from .models import CustomNodeInstall
 
-    failed: list[tuple[str, bool]] = []
+    failed: list[tuple[str, Path | None]] = []
     with SessionLocal() as session:
         installs = list(
             session.scalars(
@@ -8103,7 +8104,7 @@ def _packages_that_did_not_load(
             reviewed = set(reviewed_custom_node_types(install.security_json))
             if not reviewed or reviewed <= available_node_types:
                 continue
-            failed.append((install.name, manager.declares_python_requirements(install)))
+            failed.append((install.name, manager.python_requirements_path(install)))
     return failed
 
 
@@ -9214,16 +9215,24 @@ async def import_workflow_package(
             # anything at all.
             unloaded = _packages_that_did_not_load(services, available_node_types)
             if unloaded:
-                needing = [name for name, requires in unloaded if requires]
+                needing = [(name, path) for name, path in unloaded if path is not None]
                 detail = ", ".join(name for name, _ in unloaded)
                 if needing:
+                    # Say what to run, not only what went wrong. Whoever hits
+                    # this has no reason to know that a ComfyUI runtime has its
+                    # own interpreter, let alone where it lives.
+                    interpreter = services.settings.comfy_executable
+                    steps = "; ".join(
+                        f'"{interpreter}" -m pip install -r "{path}"' for _, path in needing
+                    )
                     raise api_error(
                         422,
                         "custom-node-package-requirements-missing",
-                        f"{detail} is installed and trusted but did not load. It declares "
-                        "Python requirements, and installing a pinned repository does not "
-                        "install what it imports, so its nodes never register with the "
-                        "runtime.",
+                        f"{detail} is installed and trusted but did not load, because it "
+                        "declares Python requirements and installing a pinned repository "
+                        "does not install what it imports. Install them into the media "
+                        f"runtime's own interpreter, then start the media runtime again: "
+                        f"{steps}",
                     )
                 raise api_error(
                     422,
