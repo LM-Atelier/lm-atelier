@@ -833,7 +833,7 @@ function Composer({
   const [studioOpen, setStudioOpen] = useState(false);
   const [templateSettings, setTemplateSettings] = useState<{ name: string; settings: Record<string, unknown> } | null>(null);
   const [attachments, setAttachments] = useState<ComposerAttachment[]>([]);
-  const { uploading, uploadError, setUploadError, uploadFiles } = useComposerUploads(
+  const { uploading, uploadError, setUploadError, uploadFiles, uploadPastedImages } = useComposerUploads(
     (attachment) => setAttachments((current) => [...current, attachment]),
   );
   const [dropActive, setDropActive] = useState(false);
@@ -1047,7 +1047,7 @@ function Composer({
           </div>
         )}
         <div className="composer">
-          <MessageField field={textInput} value={text} onChange={setText} onSubmit={submit} onMention={mentions.add} />
+          <MessageField field={textInput} value={text} onChange={setText} onSubmit={submit} onMention={mentions.add} onPasteFiles={(files) => { void uploadPastedImages(files); }} />
           <div className="composer-tools">
             <div className="left-tools">
               <AttachControls disabled={uploading} onPickFile={() => fileInput.current?.click()} onAttach={(attachment) => setAttachments((current) => [...current, attachment])} />

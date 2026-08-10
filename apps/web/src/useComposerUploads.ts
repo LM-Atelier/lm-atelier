@@ -48,5 +48,11 @@ export function useComposerUploads(
     }
   };
 
-  return { uploading, uploadError, setUploadError, uploadFiles };
+  const uploadPastedImages = async (files: File[]) => {
+    const images = files.filter((file) => file.type.startsWith("image/"));
+    setUploadError(images.length < files.length ? "Only images can be pasted." : "");
+    await uploadFiles(images);
+  };
+
+  return { uploading, uploadError, setUploadError, uploadFiles, uploadPastedImages };
 }

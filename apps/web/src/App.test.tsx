@@ -6271,5 +6271,12 @@ describe("App", () => {
     expect(await screen.findByRole("link", { name: "Preview first.png" })).toBeInTheDocument();
     expect(await screen.findByRole("link", { name: "Preview third.png" })).toBeInTheDocument();
     expect(screen.getByRole("alert")).toHaveTextContent("huge.png: upload exceeds the size limit");
+    const pasted = new File(["paste"], "clipboard.png", { type: "image/png" });
+    const ignoredPaste = new File(["text"], "notes.txt", { type: "text/plain" });
+    vi.mocked(api.upload).mockReset().mockResolvedValue({ id: "art_pasted", sha256: "pasted", kind: "input", media_type: "image/png", size_bytes: 5, original_name: "clipboard.png", metadata_json: { origin: "uploaded" }, created_at: stamp, url: "/api/artifacts/art_pasted/content" });
+    fireEvent.paste(textarea, { clipboardData: { files: [pasted, ignoredPaste] } });
+    await waitFor(() => expect(vi.mocked(api.upload)).toHaveBeenCalledWith(pasted));
+    expect(await screen.findByRole("link", { name: "Preview clipboard.png" })).toBeInTheDocument();
+    expect(screen.getByRole("alert")).toHaveTextContent("Only images can be pasted.");
   });
 });
