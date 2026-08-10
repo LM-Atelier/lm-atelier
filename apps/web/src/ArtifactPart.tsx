@@ -4,12 +4,12 @@ import {
   Image as ImageIcon,
   LoaderCircle,
   Paperclip,
+  Pencil,
   Quote,
-  SlidersHorizontal,
   Star,
-  Wand2,
 } from "lucide-react";
 import { CompareButton } from "./CompareButton";
+import { ImageStudioIcon } from "./ImageStudioIcon";
 import { LineageButton } from "./LineageButton";
 import {
   artifactSource,
@@ -87,7 +87,7 @@ export function ArtifactPart({
               title="Edit"
               onClick={() => onEditImage(part, callbackOrigin)}
             >
-              <Wand2 size={14} aria-hidden="true" />
+              <Pencil size={14} aria-hidden="true" />
             </button>
           )}
           {!preview && onOpenStudio && (
@@ -98,7 +98,7 @@ export function ArtifactPart({
               title="Open in Image Studio"
               onClick={() => onOpenStudio(part)}
             >
-              <SlidersHorizontal size={14} aria-hidden="true" />
+              <ImageStudioIcon size={14} aria-hidden="true" />
             </button>
           )}
           {!preview && onAnimateImage && (

@@ -28,6 +28,7 @@ describe("media action row", () => {
         part={imagePart()}
         origin="generated"
         onEditImage={vi.fn()}
+        onOpenStudio={vi.fn()}
         onAnimateImage={vi.fn()}
         onReferenceMedia={vi.fn()}
         onToggleFavorite={vi.fn()}
@@ -36,6 +37,7 @@ describe("media action row", () => {
 
     for (const name of [
       "Edit this image",
+      "Open this image in the Image Studio",
       "Animate this image",
       "Reference this media",
       "Favorite this image",
@@ -43,6 +45,12 @@ describe("media action row", () => {
       expect(screen.getByRole("button", { name })).toBeInTheDocument();
     }
     expect(screen.getByRole("link", { name: "Download this image" })).toBeInTheDocument();
+    const edit = screen.getByRole("button", { name: "Edit this image" });
+    const studio = screen.getByRole("button", {
+      name: "Open this image in the Image Studio",
+    });
+    expect(studio.querySelector('[data-image-studio-icon="true"]')).not.toBeNull();
+    expect(edit.querySelector("[data-image-studio-icon]")).toBeNull();
     // The row is compact: no visible word labels on the actions.
     expect(screen.queryByText("Edit")).not.toBeInTheDocument();
     expect(screen.queryByText("Animate")).not.toBeInTheDocument();
