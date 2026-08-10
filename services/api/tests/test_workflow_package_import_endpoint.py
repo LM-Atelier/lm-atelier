@@ -296,9 +296,7 @@ async def test_import_restarts_unscoped_for_a_reviewed_manual_package(
     assert starts == 1
     assert reads == 2
     current_id = response.json()["current_revision_id"]
-    current = next(
-        item for item in response.json()["revisions"] if item["id"] == current_id
-    )
+    current = next(item for item in response.json()["revisions"] if item["id"] == current_id)
     assert current["api_graph_json"]["1"]["class_type"] == node_type
 
 
