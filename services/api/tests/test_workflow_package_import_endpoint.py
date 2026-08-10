@@ -111,6 +111,34 @@ def _registry_graph(package_id: str, node_type: str) -> dict[str, Any]:
     return graph
 
 
+def _record_manual_install(package_id: str, revision: str, node_type: str) -> None:
+    from local_lm.db import SessionLocal
+    from local_lm.models import CustomNodeInstall
+
+    with SessionLocal() as session:
+        session.add(
+            CustomNodeInstall(
+                id=f"node_{package_id}",
+                name=package_id,
+                source_url=f"https://github.com/example/{package_id}.git",
+                revision=revision,
+                installed_path=f"lm-atelier-node_{package_id}",
+                tree_hash="f" * 40,
+                trusted=True,
+                active=True,
+                security_json={"node_types": [node_type]},
+            )
+        )
+        session.commit()
+
+
+def _manual_graph(package_id: str, revision: str, node_type: str) -> dict[str, Any]:
+    graph = _ui_graph()
+    graph["nodes"][0]["type"] = node_type
+    graph["nodes"][0]["properties"] = {"cnr_id": package_id, "ver": revision}
+    return graph
+
+
 async def test_a_stopped_runtime_refuses_before_compiling(
     client: AsyncClient, app: FastAPI, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -203,6 +231,73 @@ async def test_import_restarts_unscoped_for_a_verified_registry_package(
     current_id = response.json()["current_revision_id"]
     current = next(
         revision for revision in response.json()["revisions"] if revision["id"] == current_id
+    )
+    assert current["api_graph_json"]["1"]["class_type"] == node_type
+
+
+async def test_import_restarts_unscoped_for_a_reviewed_manual_package(
+    client: AsyncClient,
+    app: FastAPI,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    package_id = "comfyui-kjnodes"
+    revision = "e" * 40
+    node_type = "GetNode"
+    _record_manual_install(package_id, revision, node_type)
+    reads = 0
+    starts = 0
+
+    async def object_info() -> dict[str, Any]:
+        nonlocal reads
+        reads += 1
+        inventory = _object_info()
+        if reads > 1:
+            inventory[node_type] = inventory["Source"]
+        return inventory
+
+    async def no_registry_packages() -> dict[tuple[str, str], frozenset[str]]:
+        return {}
+
+    async def manual_packages() -> dict[tuple[str, str], frozenset[str]]:
+        return {(package_id, revision): frozenset({node_type})}
+
+    async def start_media() -> None:
+        nonlocal starts
+        starts += 1
+
+    monkeypatch.setattr(
+        app.state.services.engines.media,
+        "object_info",
+        object_info,
+        raising=False,
+    )
+    monkeypatch.setattr(
+        app.state.services.processes,
+        "trusted_comfy_registry_package_node_types",
+        no_registry_packages,
+    )
+    monkeypatch.setattr(
+        app.state.services.processes,
+        "trusted_comfy_custom_node_package_node_types",
+        manual_packages,
+    )
+    monkeypatch.setattr(app.state.services.processes, "start_media", start_media)
+
+    response = await client.post(
+        "/api/workflows/packages/import",
+        json={
+            "ui_graph": _manual_graph(package_id, revision, node_type),
+            "name": "Reviewed manual import",
+            "operation": "text_to_image",
+        },
+    )
+
+    assert response.status_code == 201, response.json()
+    assert starts == 1
+    assert reads == 2
+    current_id = response.json()["current_revision_id"]
+    current = next(
+        item for item in response.json()["revisions"] if item["id"] == current_id
     )
     assert current["api_graph_json"]["1"]["class_type"] == node_type
 
