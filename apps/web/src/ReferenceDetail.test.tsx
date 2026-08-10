@@ -13,6 +13,7 @@ vi.mock("./api", () => ({
     artifacts: vi.fn(),
     setReferenceCover: vi.fn(),
     clearReferenceCover: vi.fn(),
+    updateReference: vi.fn(),
   },
 }));
 
@@ -214,5 +215,37 @@ describe("reference detail", () => {
 
     await waitFor(() => expect(mocked.clearReferenceCover).toHaveBeenCalledWith("ref-1"));
     expect(mocked.detachReferenceAsset).not.toHaveBeenCalled();
+  });
+
+  it("splits the other names on save rather than while they are typed", async () => {
+    // A list that rewrote itself mid-word would fight whoever is typing it, so
+    // a half-finished "Countess Lovelace" is never briefly two names.
+    mocked.updateReference.mockResolvedValue(SUBJECT);
+    show();
+
+    fireEvent.change(await screen.findByLabelText("Other names, separated by commas"), {
+      target: { value: "Countess Lovelace, AAL" },
+    });
+    fireEvent.click(screen.getByText("Save details"));
+
+    await waitFor(() =>
+      expect(mocked.updateReference).toHaveBeenCalledWith("ref-1", {
+        description: "",
+        aliases: ["Countess Lovelace", "AAL"],
+        tags: [],
+      }),
+    );
+  });
+
+  it("offers nothing to save until something is edited", async () => {
+    show();
+
+    const save = await screen.findByText("Save details");
+    expect(save.hasAttribute("disabled")).toBe(true);
+
+    fireEvent.change(screen.getByLabelText("Description"), {
+      target: { value: "Mathematician" },
+    });
+    expect(screen.getByText("Save details").hasAttribute("disabled")).toBe(false);
   });
 });

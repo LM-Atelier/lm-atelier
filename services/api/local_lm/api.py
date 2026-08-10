@@ -188,6 +188,7 @@ from .reference_library import (
     rename_subject,
     set_archived,
     set_cover,
+    set_details,
     set_favorite,
 )
 from .references import ReferenceError
@@ -4313,6 +4314,18 @@ async def update_reference_subject(
             set_archived(session, subject, payload.archived)
         if payload.favorite is not None:
             set_favorite(session, subject, payload.favorite)
+        if (
+            payload.description is not None
+            or payload.aliases is not None
+            or payload.tags is not None
+        ):
+            set_details(
+                session,
+                subject,
+                description=payload.description,
+                aliases=payload.aliases,
+                tags=payload.tags,
+            )
     except ReferenceError as exc:
         raise api_error(422, "reference-invalid", str(exc)) from exc
     session.commit()

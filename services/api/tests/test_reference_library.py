@@ -21,6 +21,7 @@ from local_lm.reference_library import (
     rename_subject,
     set_archived,
     set_cover,
+    set_details,
     set_favorite,
 )
 from local_lm.references import ReferenceError, ReferenceKind
@@ -398,3 +399,72 @@ def test_detaching_the_cover_image_clears_the_cover(session: Session) -> None:
     detach_asset(session, subject, asset_id=asset.id)
 
     assert subject.cover_artifact_id is None
+
+
+def test_a_subject_is_found_by_an_alias_not_only_its_name(session: Session) -> None:
+    """The whole reason a subject has aliases. A search that only knows the
+    display name leaves them decorative, which is what they were."""
+
+    create_subject(session, name="Ada Lovelace", kind="person", aliases=["Countess Lovelace"])
+
+    found, total = list_subjects(session, search="countess")
+
+    assert total == 1
+    assert [one.name for one in found] == ["Ada Lovelace"]
+
+
+def test_searching_still_matches_the_name(session: Session) -> None:
+    create_subject(session, name="Ada Lovelace", kind="person", aliases=["AAL"])
+    create_subject(session, name="Grace Hopper", kind="person")
+
+    found, _ = list_subjects(session, search="hopper")
+
+    assert [one.name for one in found] == ["Grace Hopper"]
+
+
+def test_details_can_be_corrected_after_creation(session: Session) -> None:
+    """A typo in a description used to be permanent."""
+
+    subject = create_subject(
+        session, name="Ada Lovelace", kind="person", description="Mathemetician"
+    )
+
+    set_details(session, subject, description="Mathematician", aliases=["Countess Lovelace"])
+
+    assert subject.description == "Mathematician"
+    assert subject.aliases_json == ["Countess Lovelace"]
+
+
+def test_omitting_a_field_leaves_it_alone_and_emptying_it_clears_it(session: Session) -> None:
+    """Two different instructions that one nullable value could not carry."""
+
+    subject = create_subject(
+        session, name="Ada Lovelace", kind="person", description="Mathematician", tags=["historic"]
+    )
+
+    set_details(session, subject, aliases=["AAL"])
+    assert subject.description == "Mathematician", "an omitted field is not an instruction"
+    assert subject.tags_json == ["historic"]
+
+    set_details(session, subject, description="", tags=[])
+    assert subject.description is None
+    assert subject.tags_json == []
+    assert subject.aliases_json == ["AAL"], "clearing one field does not clear another"
+
+
+def test_aliases_differing_only_in_case_are_one_alias(session: Session) -> None:
+    """Both would have to be matched by anything resolving a name later, and to
+    a reader they are the same word twice."""
+
+    subject = create_subject(session, name="Ada Lovelace", kind="person")
+
+    set_details(session, subject, aliases=["Countess", "  countess  ", "COUNTESS", ""])
+
+    assert subject.aliases_json == ["Countess"]
+
+
+def test_too_many_aliases_are_refused(session: Session) -> None:
+    subject = create_subject(session, name="Ada Lovelace", kind="person")
+
+    with pytest.raises(ReferenceError, match="at most"):
+        set_details(session, subject, aliases=[f"name-{index}" for index in range(25)])
