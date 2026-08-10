@@ -173,6 +173,92 @@ describe("workflow asset installer", () => {
     expect(screen.getByRole("button", { name: /Review 0 selected/ })).toBeDisabled();
   });
 
+  it("says why a source that does not hold the file produced nothing", async () => {
+    // The case that made a recorded source look like a dead button: the
+    // preflight succeeds, raises no error, and simply names no file.
+    vi.mocked(api.catalogPreflight).mockResolvedValue({
+      install_plan: { id: "plan-1", plan_hash: "a".repeat(64), compatibility: "supported" },
+      selected_files: [],
+      can_install: true,
+      checks: [],
+    } as never);
+    renderInstaller();
+
+    fireEvent.click(screen.getByRole("button", { name: /Search/ }));
+    fireEvent.click(await screen.findByRole("button", { name: "Detail slider" }));
+
+    expect(await screen.findByRole("alert")).toHaveTextContent(/does not contain this file/);
+    expect(screen.queryByText("Selected")).not.toBeInTheDocument();
+  });
+
+  it("says why a bundle holding several files produced nothing", async () => {
+    vi.mocked(api.catalogPreflight).mockResolvedValue({
+      install_plan: { id: "plan-1", plan_hash: "a".repeat(64), compatibility: "supported" },
+      selected_files: ["detail-slider.safetensors", "unrelated-vae.safetensors"],
+      can_install: true,
+      checks: [],
+    } as never);
+    renderInstaller();
+
+    fireEvent.click(screen.getByRole("button", { name: /Search/ }));
+    fireEvent.click(await screen.findByRole("button", { name: "Detail slider" }));
+
+    expect(await screen.findByRole("alert")).toHaveTextContent(/several files/);
+  });
+
+  it("says why an unsupported plan produced nothing", async () => {
+    vi.mocked(api.catalogPreflight).mockResolvedValue({
+      install_plan: { id: "plan-1", plan_hash: "a".repeat(64), compatibility: "unsupported" },
+      selected_files: ["detail-slider.safetensors"],
+      can_install: true,
+      checks: [],
+    } as never);
+    renderInstaller();
+
+    fireEvent.click(screen.getByRole("button", { name: /Search/ }));
+    fireEvent.click(await screen.findByRole("button", { name: "Detail slider" }));
+
+    expect(await screen.findByRole("alert")).toHaveTextContent(/cannot install/);
+  });
+
+  it("explains a recorded source that resolves to nothing rather than ignoring the click", async () => {
+    // The author recorded where the file came from, the user clicked it, and
+    // the application had nothing to show for it. Reported from a real import.
+    vi.mocked(api.catalogPreflight).mockResolvedValue({
+      install_plan: { id: "plan-1", plan_hash: "a".repeat(64), compatibility: "supported" },
+      selected_files: [],
+      can_install: true,
+      checks: [],
+    } as never);
+    const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+    render(
+      <QueryClientProvider client={client}>
+        <WorkflowAssetInstaller
+          uiGraph={uiGraph}
+          missing={[
+            {
+              ...missing[0],
+              source_candidates: [
+                {
+                  provider: "huggingface",
+                  remote_id: "org/repo",
+                  revision: "main",
+                  filename: "detail-slider.safetensors",
+                  url: "https://example.invalid/detail-slider.safetensors",
+                } as never,
+              ],
+            },
+          ]}
+          onInstalled={vi.fn()}
+        />
+      </QueryClientProvider>,
+    );
+
+    fireEvent.click(screen.getByRole("button", { name: "detail-slider.safetensors" }));
+
+    expect(await screen.findByRole("alert")).toHaveTextContent(/does not contain this file/);
+  });
+
   it("says nothing at all when every file is present", () => {
     const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
     const { container } = render(

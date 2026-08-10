@@ -31,9 +31,27 @@ function exactArtifact(result: {
   selected_files: string[];
   can_install: boolean;
   install_plan?: { compatibility: string } | null;
-}): string | null {
-  if (!result.can_install || result.install_plan?.compatibility !== "supported") return null;
-  return result.selected_files.length === 1 ? result.selected_files[0] : null;
+}): { artifact: string } | { refusal: string } {
+  // Each of these is a different thing to do about it, so each says which one
+  // happened. Returning one null for all of them is what made a source the
+  // author recorded look like a button that does nothing.
+  if (!result.can_install) {
+    return { refusal: "that source cannot be installed from here" };
+  }
+  if (result.install_plan?.compatibility !== "supported") {
+    return { refusal: "that source is in a format this application cannot install" };
+  }
+  if (result.selected_files.length === 0) {
+    return { refusal: "that source does not contain this file" };
+  }
+  if (result.selected_files.length > 1) {
+    return {
+      refusal:
+        "that source holds several files and none of them is clearly this one; " +
+        "search for it instead so the choice is explicit",
+    };
+  }
+  return { artifact: result.selected_files[0] };
 }
 
 /** Install the model files a workflow needs, one explicit choice at a time.
@@ -166,6 +184,11 @@ function AssetRow({
     { candidate: WorkflowSourceCandidate; variants: CatalogFileVariant[] } | null
   >(null);
 
+  // Why a preflight that raised no error still produced nothing to select. It
+  // is not an error - the request succeeded - so it has nowhere else to go, and
+  // without it the button reads as broken rather than as unable.
+  const [refusal, setRefusal] = useState<string | null>(null);
+
   const search = useMutation({
     mutationFn: () => api.catalog(query, catalogRoleFor(), "downloads", null, {}, source),
     onSuccess: (page) => setResults(page.items.slice(0, 5)),
@@ -195,12 +218,20 @@ function AssetRow({
     }
     setAmbiguous(null);
     const planId = result.install_plan?.id;
-    const artifact = exactArtifact(result);
-    if (!planId || !artifact) return;
+    const outcome = exactArtifact(result);
+    if (!planId) {
+      setRefusal("that source produced no install plan");
+      return;
+    }
+    if ("refusal" in outcome) {
+      setRefusal(outcome.refusal);
+      return;
+    }
+    setRefusal(null);
     onChoose({
       reference_filename: asset.filename,
       install_plan_id: planId,
-      artifact_path: artifact,
+      artifact_path: outcome.artifact,
     });
   };
 
@@ -231,6 +262,7 @@ function AssetRow({
           url: model.remote_id,
         } as WorkflowSourceCandidate,
       })),
+    onMutate: () => setRefusal(null),
     onSuccess: (payload) => handlePreflight(payload),
   });
 
@@ -265,6 +297,7 @@ function AssetRow({
         asset.kind,
         fileIds,
       ).then((result) => ({ result, candidate })),
+    onMutate: () => setRefusal(null),
     onSuccess: (payload) => handlePreflight(payload),
   });
 
@@ -341,6 +374,9 @@ function AssetRow({
             <small role="alert">
               {((search.error ?? preflight.error ?? preflightCandidate.error) as Error).message}
             </small>
+          )}
+          {refusal && !search.error && !preflight.error && !preflightCandidate.error && (
+            <small role="alert">{refusal}</small>
           )}
           <ul className="asset-install-candidates">
             {results.map((model) => (
