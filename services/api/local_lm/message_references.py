@@ -179,6 +179,10 @@ def carry_message_references_if_absent(
 ) -> None:
     """Idempotently carry one immutable snapshot, but never hide a conflict.
 
+    Deliberately a copy and not a re-resolution. Regenerating must use what the
+    original turn used, so a subject renamed or deleted in between cannot change
+    - or refuse - a repeat of something that already ran.
+
     A retry may re-enter after the target snapshot was committed. Identical
     provenance is already the requested outcome, so that is a no-op. Different
     provenance remains an error: silently replacing or accepting it would make
@@ -194,18 +198,3 @@ def carry_message_references_if_absent(
             )
         return
     record_message_references(session, target_message_id, expected)
-
-
-def carry_message_references(
-    session: Session, *, source_message_id: str, target_message_id: str
-) -> tuple[MessageReference, ...]:
-    """Carry a turn's references onto a regeneration, verbatim.
-
-    Deliberately a copy and not a re-resolution. Regenerating an image must use
-    what the original turn used, so a subject renamed or deleted in between
-    cannot change - or refuse - a repeat of something that already ran.
-    """
-
-    return record_message_references(
-        session, target_message_id, message_references(session, source_message_id)
-    )
