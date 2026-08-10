@@ -491,7 +491,7 @@ async def test_reviewed_manual_nodes_cannot_be_laundered_between_packages(
     revision = "c" * 40
 
     async def object_info() -> dict[str, Any]:
-        return {}
+        return {"GetNode": {}}
 
     async def no_registry_packages() -> dict[tuple[str, str], frozenset[str]]:
         return {}
