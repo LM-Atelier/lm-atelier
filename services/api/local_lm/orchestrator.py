@@ -417,6 +417,7 @@ class ConversationOrchestrator:
         self.router = ModalityRouter()
         self.vision = VisionContextService(engines.settings, artifacts)
         self._tasks: dict[str, asyncio.Task[None]] = {}
+        self._preempted_image_edit_verifications: set[str] = set()
         self._media_restart_task: asyncio.Task[None] | None = None
         self._media_restart_after_chat_activity = False
         self._step_prewarm_plan_id: str | None = None
@@ -2267,9 +2268,62 @@ class ConversationOrchestrator:
     def start(self, job_id: str, run_id: str | None) -> None:
         if job_id in self._tasks and not self._tasks[job_id].done():
             return
-        task = asyncio.create_task(self._execute(job_id, run_id), name=f"local-lm-{job_id}")
+        task = asyncio.create_task(
+            self._execute_after_preempting_verification(job_id, run_id),
+            name=f"local-lm-{job_id}",
+        )
         self._tasks[job_id] = task
         task.add_done_callback(lambda finished: self._task_done(job_id, finished))
+
+    async def _execute_after_preempting_verification(
+        self,
+        job_id: str,
+        run_id: str | None,
+    ) -> None:
+        if run_id and not self._is_image_edit_verification_retry(run_id):
+            await self._preempt_running_image_edit_verifications()
+        await self._execute(job_id, run_id)
+
+    def _is_image_edit_verification_retry(self, run_id: str) -> bool:
+        with self.session_factory() as session:
+            run = session.get(Run, run_id)
+            plan = session.get(WorkPlan, run.work_plan_id) if run and run.work_plan_id else None
+            return bool(plan and plan.source_action == "image_edit_verification_retry")
+
+    async def _preempt_running_image_edit_verifications(self) -> None:
+        """Yield best-effort assessment immediately when foreground work arrives."""
+        with self.session_factory() as session:
+            running_ids = set(
+                session.scalars(
+                    select(Job.id).where(
+                        Job.kind == JobKind.EDIT_VERIFY.value,
+                        Job.status == JobStatus.RUNNING.value,
+                    )
+                ).all()
+            )
+        tasks = {
+            job_id: task
+            for job_id in running_ids
+            if (task := self._tasks.get(job_id)) is not None and not task.done()
+        }
+        if not tasks:
+            return
+        self._preempted_image_edit_verifications.update(tasks)
+        try:
+            for job_id in tasks:
+                try:
+                    await self.engines.chat.cancel(job_id)
+                except Exception:
+                    logger.warning(
+                        "Could not signal image edit verification preemption for job %s",
+                        job_id,
+                        exc_info=True,
+                    )
+            for task in tasks.values():
+                task.cancel()
+            await asyncio.gather(*tasks.values(), return_exceptions=True)
+        finally:
+            self._preempted_image_edit_verifications.difference_update(tasks)
 
     def prepare_retry(self, session: Session, run: Run) -> None:
         """Reset the existing assistant slot before dispatching a retry."""
@@ -2588,7 +2642,14 @@ class ConversationOrchestrator:
             with self.session_factory() as session:
                 job = session.get(Job, job_id)
                 if job and job.status != JobStatus.CANCELLED.value:
-                    self._mark_cancelled(session, job)
+                    if verification_job and job_id in self._preempted_image_edit_verifications:
+                        self._finish_image_edit_verification(
+                            session,
+                            job,
+                            VerificationReason.ASSESSMENT_INTERRUPTED,
+                        )
+                    else:
+                        self._mark_cancelled(session, job)
                     session.commit()
             raise
         except Exception as exc:
@@ -4468,43 +4529,6 @@ class ConversationOrchestrator:
                 else None
             ),
         )
-        step: WorkStep | None = None
-        if run.work_plan_id and run.work_step_id:
-            step_id = f"step_edit_verify_{hashlib.sha256(run.id.encode()).hexdigest()[:22]}"
-            step = session.get(WorkStep, step_id)
-            if not step:
-                ordinal = (
-                    session.scalar(
-                        select(func.max(WorkStep.ordinal)).where(
-                            WorkStep.plan_id == run.work_plan_id
-                        )
-                    )
-                    or 0
-                ) + 1
-                step = WorkStep(
-                    id=step_id,
-                    plan_id=run.work_plan_id,
-                    ordinal=ordinal,
-                    display_group="Image edit check",
-                    operation=JobKind.EDIT_VERIFY.value,
-                    status=JobStatus.QUEUED.value,
-                    prompt="",
-                    profile_id=vision_profile.id,
-                    queue_class="interactive_compute",
-                    input_bindings_json=[
-                        {"artifact_id": source_artifact_id, "role": "source"},
-                        {"artifact_id": result_artifact_id, "role": "result"},
-                    ],
-                    output_contract_json=[],
-                )
-                session.add(step)
-                session.flush()
-                session.add(
-                    WorkStepDependency(
-                        step_id=step.id,
-                        depends_on_step_id=run.work_step_id,
-                    )
-                )
 
         now = utcnow()
         job = Job(
@@ -4513,8 +4537,8 @@ class ConversationOrchestrator:
             status=JobStatus.QUEUED.value,
             progress=0.0,
             progress_json={},
-            work_plan_id=run.work_plan_id if step else None,
-            work_step_id=step.id if step else None,
+            work_plan_id=None,
+            work_step_id=None,
             queue_resource="interactive_compute",
             queue_group="primary",
             queue_priority=-10,
@@ -4543,15 +4567,7 @@ class ConversationOrchestrator:
             **run.provenance_json,
             "image_edit_verification": verification,
         }
-        if step and run.work_plan_id:
-            session.flush()
-            refresh_plan_status(session, run.work_plan_id)
-            plan = session.get(WorkPlan, run.work_plan_id)
-            if plan:
-                plan.summary_json = {
-                    **plan.summary_json,
-                    "status_counts": plan_status_summary(session, plan.id),
-                }
+
         return job.id
 
     def _persist_image_edit_verification(
@@ -5019,7 +5035,8 @@ class ConversationOrchestrator:
                     )
                     session.commit()
         finally:
-            if restore_profile and restore_install:
+            preempted = job_id in self._preempted_image_edit_verifications
+            if restore_profile and restore_install and not preempted:
                 try:
                     await self.processes.load_chat(restore_profile, restore_install)
                 except Exception:
@@ -5027,9 +5044,9 @@ class ConversationOrchestrator:
                         "Could not restore the previous chat profile after image edit verification",
                         exc_info=True,
                     )
-            if media_stopped_for_verification:
+            if media_stopped_for_verification and not preempted:
                 self._schedule_media_restart()
-            else:
+            elif not preempted:
                 self._release_deferred_media_restart()
         await self.scheduler.publish_job(job_id)
 

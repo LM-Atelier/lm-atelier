@@ -38,6 +38,27 @@ describe("a read that failed", () => {
     await waitFor(() => expect(screen.getByRole("alert")).toHaveTextContent("jobs could not be read"));
   });
 
+  it("keeps image edit checks out of the ordinary jobs surface", async () => {
+    vi.mocked(api.jobs).mockResolvedValue([
+      {
+        id: "check-running",
+        kind: "edit_verify",
+        status: "running",
+      },
+      {
+        id: "check-failed",
+        kind: "edit_verify",
+        status: "failed",
+        error: "assessment unavailable",
+      },
+    ] as never);
+
+    wrap(<JobsPanel />);
+
+    await waitFor(() => expect(api.jobs).toHaveBeenCalledTimes(1));
+    expect(screen.queryByLabelText("Jobs")).toBeNull();
+  });
+
   it("will not offer to archive a family whose impact is unknown", async () => {
     // An impact that could not be read is not an impact of nothing, and an
     // empty "what changes" list reads as a finding rather than a silence.

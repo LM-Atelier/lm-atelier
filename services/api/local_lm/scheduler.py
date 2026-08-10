@@ -13,7 +13,7 @@ from sqlalchemy.engine import CursorResult
 from sqlalchemy.orm import Session
 
 from .db import SessionLocal
-from .domain import JobStatus, MessageStatus, PartType, RunStatus, utcnow
+from .domain import JobKind, JobStatus, MessageStatus, PartType, RunStatus, utcnow
 from .models import (
     Job,
     Message,
@@ -307,13 +307,27 @@ class ResourceScheduler:
             job.id for job in jobs if ResourceScheduler._blocking_steps(session, job.work_step_id)
         }
 
-        def rank(job: Job) -> tuple[int, datetime, str, str]:
+        def rank(job: Job) -> tuple[int, int, datetime, str, str]:
             enqueued = job.enqueued_at or job.created_at
             if enqueued.tzinfo is None:
                 enqueued = enqueued.replace(tzinfo=UTC)
+            # Verification is best-effort background work. Queue aging may
+            # reorder foreground jobs, but can never promote a check ahead of
+            # a user-requested generation.
+            background = job.kind == JobKind.EDIT_VERIFY.value
             waited = max(0.0, (now - enqueued).total_seconds())
-            effective_priority = job.queue_priority + math.floor(waited / _AGING_SECONDS)
-            return (-effective_priority, enqueued, job.queue_ticket or job.id, job.id)
+            effective_priority = (
+                job.queue_priority
+                if background
+                else job.queue_priority + math.floor(waited / _AGING_SECONDS)
+            )
+            return (
+                1 if background else 0,
+                -effective_priority,
+                enqueued,
+                job.queue_ticket or job.id,
+                job.id,
+            )
 
         return sorted((job for job in jobs if job.id not in blocked), key=rank)
 

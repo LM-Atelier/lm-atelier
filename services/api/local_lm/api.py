@@ -685,7 +685,7 @@ async def worker_status(request: Request, session: SessionDep) -> list[WorkerSta
     statuses = _services(request).processes.statuses()
     for index, status in enumerate(statuses):
         kinds = (
-            [JobKind.CHAT.value, JobKind.EDIT_VERIFY.value]
+            [JobKind.CHAT.value]
             if status.name == "chat"
             else [JobKind.IMAGE.value, JobKind.VIDEO.value]
         )
@@ -1027,11 +1027,7 @@ async def install_runtime(engine: str, request: Request) -> RuntimeStatus:
 
 
 def _worker_job_kinds(name: str) -> list[str]:
-    return (
-        [JobKind.CHAT.value, JobKind.EDIT_VERIFY.value]
-        if name == "chat"
-        else [JobKind.IMAGE.value, JobKind.VIDEO.value]
-    )
+    return [JobKind.CHAT.value] if name == "chat" else [JobKind.IMAGE.value, JobKind.VIDEO.value]
 
 
 def _ensure_worker_idle(session: Session, name: str) -> None:
@@ -2435,7 +2431,12 @@ async def list_jobs(
     status: str | None = None,
     limit: int = Query(default=100, ge=1, le=500),
 ) -> list[Job]:
-    statement = select(Job).order_by(Job.created_at.desc()).limit(limit)
+    statement = (
+        select(Job)
+        .where(Job.kind != JobKind.EDIT_VERIFY.value)
+        .order_by(Job.created_at.desc())
+        .limit(limit)
+    )
     if status:
         statement = statement.where(Job.status == status)
     return list(session.scalars(statement).all())
