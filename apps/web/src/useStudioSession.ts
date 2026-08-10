@@ -139,6 +139,7 @@ export function useStudioSession(sourceArtifactId: string | null, sourceChatId: 
     sessionId,
     session: session.data ?? null,
     steps: session.data ? studioSteps(session.data, sourceArtifactId) : [],
+    previewArtifactId: session.data ? studioPreviewArtifactId(session.data) : null,
     busy: open.isPending || apply.isPending || hasPendingWork(session.data),
     error: open.error ?? session.error ?? apply.error,
     /** `onAccepted` runs only once the turn has been taken.
@@ -176,6 +177,26 @@ async function uploadMask(mask: StudioMaskUpload) {
 
 function hasPendingWork(session?: ChatDetail | null): boolean {
   return Boolean(session?.messages.some((message) => message.status === "pending"));
+}
+
+/** The newest provisional image from work that is still running.
+ *
+ * A preview is deliberately not a StudioStep: it is temporary server state,
+ * not an edit result that can enter history or become the input to another
+ * edit. */
+export function studioPreviewArtifactId(session: ChatDetail): string | null {
+  for (let index = session.messages.length - 1; index >= 0; index -= 1) {
+    const message = session.messages[index];
+    if (message.role !== "assistant" || message.status !== "pending") continue;
+    const preview = message.parts.find(
+      (part) =>
+        part.type === "image"
+        && Boolean(part.artifact_id)
+        && part.metadata_json.preview === true,
+    );
+    if (preview?.artifact_id) return preview.artifact_id;
+  }
+  return null;
 }
 
 /** The filmstrip: the source, then one entry per generated result. */

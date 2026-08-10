@@ -31,14 +31,18 @@ vi.mock("./StudioWorkflowSelector", () => ({
   },
 }));
 // The canvas stack needs a real 2D context; none of it is under test here.
-vi.mock("./StudioCanvas", () => ({ StudioCanvas: () => <div /> }));
-vi.mock("./messageMedia", () => ({ artifactSource: () => "blob:picture" }));
+vi.mock("./StudioCanvas", () => ({ StudioCanvas: () => <div data-testid="studio-canvas" /> }));
+vi.mock("./messageMedia", () => ({
+  artifactSource: (artifactId: string | null) =>
+    artifactId ? `/api/artifacts/${encodeURIComponent(artifactId)}/content` : null,
+}));
 
-function renderStudio() {
+function renderStudio(previewArtifactId: string | null = null) {
   vi.mocked(useStudioSession).mockReturnValue({
     steps: [{ artifactId: "art-1", instruction: null }],
+    previewArtifactId,
     sessionId: "chat-studio",
-    busy: false,
+    busy: Boolean(previewArtifactId),
     error: null,
     apply: vi.fn(),
   } as unknown as ReturnType<typeof useStudioSession>);
@@ -62,6 +66,18 @@ afterEach(() => {
 });
 
 describe("applying an edit", () => {
+  it("shows a pending generation preview without making it the current result", async () => {
+    renderStudio("sha256:preview");
+
+    const preview = await screen.findByRole("img", { name: "Generation preview" });
+    expect(preview).toHaveAttribute("src", "/api/artifacts/sha256%3Apreview/content");
+    expect(screen.getByRole("status")).toHaveTextContent("Generation preview");
+    expect(screen.queryByRole("button", { name: /favorite/i })).toBeNull();
+    expect(screen.queryByRole("link", { name: /export/i })).toBeNull();
+    expect(screen.queryByTestId("studio-canvas")).toBeNull();
+    expect(screen.getByRole("button", { name: /apply/i })).toBeDisabled();
+  });
+
   it("says when a pinned recipe overrides the displayed workflow choice", async () => {
     workflowAvailabilityReason = "Loading the current workflow choice.";
     vi.mocked(api.editTemplates).mockResolvedValue([{

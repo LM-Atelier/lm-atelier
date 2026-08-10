@@ -990,6 +990,9 @@ h1, h2, h3 { margin: 0; }
 .studio-view { display: grid; grid-template-rows: auto 1fr; gap: 12px; height: 100%; min-height: 0; }
 .studio-layout { display: grid; grid-template-columns: auto minmax(0, 1fr) minmax(240px, 300px); gap: 12px; min-height: 0; }
 .studio-stage { display: grid; place-items: center; min-height: 0; min-width: 0; overflow: hidden; border: 1px solid var(--border); border-radius: var(--cut); background: var(--bg); }
+.studio-generation-preview { position: relative; display: grid; place-items: center; width: 100%; height: 100%; min-height: 0; margin: 0; }
+.studio-generation-preview img { display: block; width: 100%; height: 100%; min-height: 0; object-fit: contain; }
+.studio-generation-preview figcaption { position: absolute; left: 12px; bottom: 12px; border: 1px solid var(--border); border-radius: 999px; background: color-mix(in srgb, var(--panel) 88%, transparent); color: var(--cream); padding: 5px 9px; font-size: 12px; }
 .studio-canvas { position: relative; width: 100%; height: 100%; overflow: hidden; touch-action: none; cursor: crosshair; }
 .studio-canvas-layers { position: absolute; top: 0; left: 0; }
 .studio-canvas-layers > canvas { position: absolute; inset: 0; width: 100%; height: 100%; }
