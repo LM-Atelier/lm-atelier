@@ -900,6 +900,10 @@ describe("App", () => {
       </QueryClientProvider>,
     );
     expect(await screen.findByText("Model notes")).toBeInTheDocument();
+    const studioNavigation = screen.getByRole("button", { name: "Image Studio" });
+    expect(
+      studioNavigation.querySelector('[data-image-studio-icon="true"]'),
+    ).not.toBeNull();
     fireEvent.change(screen.getByLabelText("Search projects and chats"), { target: { value: "notes" } });
     fireEvent.click(screen.getByRole("button", { name: "Manage Model notes" }));
     fireEvent.change(screen.getByDisplayValue("Model notes"), { target: { value: "Renamed notes" } });
