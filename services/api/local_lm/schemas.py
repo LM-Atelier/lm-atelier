@@ -116,6 +116,13 @@ class ChatUpdate(ApiModel):
     web_settings_json: WebSettings | None = None
 
 
+class GenerationIdentityOut(ApiModel):
+    model_profile_name: str | None = None
+    workflow_family_name: str | None = None
+    workflow_definition_name: str | None = None
+    workflow_version: int | None = None
+
+
 class ArtifactOut(ApiModel):
     id: str
     sha256: str
@@ -127,6 +134,7 @@ class ArtifactOut(ApiModel):
     favorite: bool = False
     created_at: datetime
     url: str | None = None
+    generation_identity: GenerationIdentityOut | None = None
 
 
 class ArtifactUpdate(ApiModel):

@@ -2,6 +2,7 @@ import { Download, Star, X } from "lucide-react";
 import { useCallback, useEffect, useId, useMemo, useReducer, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { api } from "./api";
+import { GenerationIdentitySummary } from "./GenerationIdentitySummary";
 import { StudioOpenImage } from "./StudioOpenImage";
 import { ErrorCallout } from "./ErrorCallout";
 import { StudioCanvas } from "./StudioCanvas";
@@ -23,7 +24,7 @@ import {
 import { useStudioImage } from "./useStudioImage";
 import { useStudioSession, type StudioStep } from "./useStudioSession";
 import { useConfirm } from "./useConfirm";
-import type { EditTemplate } from "./types";
+import type { EditTemplate, GenerationIdentity } from "./types";
 
 /** The Image Studio: a canvas-first editing surface, not a conversation.
  *
@@ -416,8 +417,8 @@ export function StudioView({
         </aside>
       </div>
       <StudioFilmstrip
-        steps={steps}
-        selectedId={current?.artifactId ?? null}
+        steps={steps} generationIdentity={previewArtifactId ? null : current?.generationIdentity ?? artifact.data?.generation_identity}
+        selectedId={previewArtifactId ? null : current?.artifactId ?? null}
         onSelect={setSelectedId}
       />
     </div>
@@ -483,19 +484,21 @@ function StudioWorkflowOpening({ selectorId }: { selectorId: string }) {
 function StudioFilmstrip({
   steps,
   selectedId,
+  generationIdentity,
   onSelect,
 }: {
   steps: StudioStep[];
   selectedId: string | null;
+  generationIdentity?: GenerationIdentity | null;
   onSelect: (artifactId: string) => void;
 }) {
   if (steps.length === 0) return null;
+  // A group of buttons, not a listbox: a real listbox owns focus with a
+  // roving tabindex and aria-activedescendant, and role="option" would
+  // override the native button role so these stop announcing as activatable.
   return (
-    // A group of buttons, not a listbox: a real listbox owns focus with a
-    // roving tabindex and aria-activedescendant, and role="option" would
-    // override the native button role so these stop announcing as
-    // activatable at all.
-    <div className="studio-filmstrip" role="group" aria-label="Edit history">
+    <>
+      <div className="studio-filmstrip" role="group" aria-label="Edit history">
       {steps.map((step, index) => (
         <button
           key={`${step.messageId}-${step.artifactId}`}
@@ -511,6 +514,8 @@ function StudioFilmstrip({
           <small>{step.isSource ? "Original" : step.instruction || `Step ${index}`}</small>
         </button>
       ))}
-    </div>
+      </div>
+      <GenerationIdentitySummary identity={generationIdentity} />
+    </>
   );
 }
