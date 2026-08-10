@@ -176,8 +176,18 @@ async def test_custom_node_lifecycle_and_workflow_trust_gate(
     assert open_target.json()["url"] == "http://127.0.0.1:8188"
     assert open_target.json()["ui_graph"]["last_node_id"] == 1
 
-    trusted = await client.post(f"/api/custom-nodes/{node['id']}/trust", json={"trusted": True})
+    trusted = await client.post(
+        f"/api/custom-nodes/{node['id']}/trust",
+        json={
+            "trusted": True,
+            "node_types": ["ReviewedNode", "AnotherReviewedNode"],
+        },
+    )
     assert trusted.status_code == 200
+    assert trusted.json()["security_json"]["node_types"] == [
+        "AnotherReviewedNode",
+        "ReviewedNode",
+    ]
     validation = await client.post(f"/api/workflows/{workflow.json()['id']}/validate")
     assert validation.json()["valid"] is True
 
