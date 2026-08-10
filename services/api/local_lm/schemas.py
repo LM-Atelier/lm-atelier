@@ -1742,9 +1742,9 @@ class ReferenceSubjectUpdate(ApiModel):
     # Omitting one leaves it alone; sending an empty string or an empty list
     # clears it. Those are different instructions and a single nullable value
     # could not carry both.
-    description: str | None = Field(default=None, max_length=2000)
-    aliases: list[str] | None = Field(default=None, max_length=24)
-    tags: list[str] | None = Field(default=None, max_length=24)
+    description: str | None = Field(default=None, max_length=4_000)
+    aliases: list[str] | None = Field(default=None, max_length=32)
+    tags: list[str] | None = Field(default=None, max_length=32)
 
 
 class ReferenceCoverIn(ApiModel):

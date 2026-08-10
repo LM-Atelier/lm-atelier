@@ -7858,6 +7858,38 @@ async def test_a_rename_does_not_move_the_mention_unless_asked(client: AsyncClie
 
 
 @pytest.mark.anyio
+async def test_reference_details_are_correctable_and_aliases_are_searchable(
+    client: AsyncClient,
+) -> None:
+    created = (
+        await client.post(
+            "/api/references",
+            json={
+                "name": "Ada Lovelace",
+                "kind": "person",
+                "description": "  Mathematician  ",
+                "aliases": ["Countess Lovelace", " countess lovelace "],
+                "tags": ["historic"],
+            },
+        )
+    ).json()
+    assert created["description"] == "Mathematician"
+    assert created["aliases_json"] == ["Countess Lovelace"]
+
+    found = await client.get("/api/references", params={"search": "countess"})
+    assert [item["id"] for item in found.json()["items"]] == [created["id"]]
+
+    corrected = await client.patch(
+        f"/api/references/{created['id']}",
+        json={"description": "Analyst", "aliases": []},
+    )
+    assert corrected.status_code == 200
+    assert corrected.json()["description"] == "Analyst"
+    assert corrected.json()["aliases_json"] == []
+    assert corrected.json()["tags_json"] == ["historic"], "an omitted field is unchanged"
+
+
+@pytest.mark.anyio
 async def test_archiving_hides_a_reference_without_destroying_it(client: AsyncClient) -> None:
     created = (
         await client.post("/api/references", json={"name": "Retired", "kind": "object"})

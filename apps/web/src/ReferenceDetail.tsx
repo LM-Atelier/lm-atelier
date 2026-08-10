@@ -89,25 +89,41 @@ export function ReferenceDetail({
       .map((one) => one.trim())
       .filter(Boolean);
 
-  const stored = {
+  const initialDetails = {
     description: subject.description ?? "",
     aliases: asText(subject.aliases_json),
     tags: asText(subject.tags_json),
   };
-  const [draft, setDraft] = useState(stored);
+  const [savedDetails, setSavedDetails] = useState(initialDetails);
+  const [draft, setDraft] = useState(initialDetails);
   const edited =
-    draft.description !== stored.description ||
-    draft.aliases !== stored.aliases ||
-    draft.tags !== stored.tags;
+    draft.description !== savedDetails.description ||
+    draft.aliases !== savedDetails.aliases ||
+    draft.tags !== savedDetails.tags;
 
   const details = useMutation({
-    mutationFn: () =>
-      api.updateReference(subject.id, {
-        description: draft.description,
-        aliases: asList(draft.aliases),
-        tags: asList(draft.tags),
-      }),
-    onSuccess: () => {
+    mutationFn: () => {
+      const changed: {
+        description?: string;
+        aliases?: string[];
+        tags?: string[];
+      } = {};
+      if (draft.description !== savedDetails.description) changed.description = draft.description;
+      if (draft.aliases !== savedDetails.aliases) changed.aliases = asList(draft.aliases);
+      if (draft.tags !== savedDetails.tags) changed.tags = asList(draft.tags);
+      return api.updateReference(subject.id, changed);
+    },
+    onSuccess: (updated) => {
+      // The server trims and de-duplicates. Its response is the value that was
+      // actually saved; retaining the submitted draft would leave the form
+      // looking perpetually dirty after a canonicalisation.
+      const canonical = {
+        description: updated.description ?? "",
+        aliases: asText(updated.aliases_json),
+        tags: asText(updated.tags_json),
+      };
+      setSavedDetails(canonical);
+      setDraft(canonical);
       setError(null);
       void client.invalidateQueries({ queryKey: ["references"] });
     },

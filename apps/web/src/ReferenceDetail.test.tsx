@@ -230,9 +230,44 @@ describe("reference detail", () => {
 
     await waitFor(() =>
       expect(mocked.updateReference).toHaveBeenCalledWith("ref-1", {
-        description: "",
         aliases: ["Countess Lovelace", "AAL"],
-        tags: [],
+      }),
+    );
+  });
+
+  it("adopts the canonical saved details and does not stay dirty", async () => {
+    mocked.updateReference.mockResolvedValue({
+      ...SUBJECT,
+      aliases_json: ["Countess Lovelace"],
+    });
+    show();
+
+    fireEvent.change(await screen.findByLabelText("Other names, separated by commas"), {
+      target: { value: " Countess Lovelace, countess lovelace " },
+    });
+    fireEvent.click(screen.getByText("Save details"));
+
+    await waitFor(() =>
+      expect(screen.getByText("Save details").hasAttribute("disabled")).toBe(true),
+    );
+    expect(screen.getByLabelText("Other names, separated by commas")).toHaveProperty(
+      "value",
+      "Countess Lovelace",
+    );
+  });
+
+  it("does not overwrite details that were not edited", async () => {
+    mocked.updateReference.mockResolvedValue({ ...SUBJECT, description: "Mathematician" });
+    show();
+
+    fireEvent.change(await screen.findByLabelText("Description"), {
+      target: { value: "Mathematician" },
+    });
+    fireEvent.click(screen.getByText("Save details"));
+
+    await waitFor(() =>
+      expect(mocked.updateReference).toHaveBeenCalledWith("ref-1", {
+        description: "Mathematician",
       }),
     );
   });

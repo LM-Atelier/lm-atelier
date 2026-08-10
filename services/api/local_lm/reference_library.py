@@ -42,9 +42,9 @@ MAX_PAGE = 200
 DEFAULT_PAGE = 50
 # Bounded so a subject cannot carry an unbounded JSON blob that every list
 # response then has to serialise.
-MAX_DESCRIPTION = 2000
-MAX_ALIASES = 24
-MAX_TAGS = 24
+MAX_DESCRIPTION = 4000
+MAX_ALIASES = 32
+MAX_TAGS = 32
 
 
 @dataclass(frozen=True)
@@ -117,13 +117,16 @@ def create_subject(
             # renumbered: the user asked for that exact one.
             raise ReferenceError(f"another subject already answers to @{slug}")
 
+    cleaned_description = (description or "").strip()
+    if len(cleaned_description) > MAX_DESCRIPTION:
+        raise ReferenceError(f"a description is at most {MAX_DESCRIPTION} characters")
     subject = ReferenceSubject(
         name=cleaned,
         mention_slug=slug,
         kind=parse_kind(kind).value,
-        description=(description or None),
-        aliases_json=list(aliases or []),
-        tags_json=list(tags or []),
+        description=cleaned_description or None,
+        aliases_json=_clean_labels(list(aliases or []), MAX_ALIASES, "aliases"),
+        tags_json=_clean_labels(list(tags or []), MAX_TAGS, "tags"),
     )
     session.add(subject)
     session.flush()

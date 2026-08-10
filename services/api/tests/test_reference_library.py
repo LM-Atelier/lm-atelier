@@ -435,6 +435,21 @@ def test_details_can_be_corrected_after_creation(session: Session) -> None:
     assert subject.aliases_json == ["Countess Lovelace"]
 
 
+def test_creation_and_correction_use_the_same_detail_rules(session: Session) -> None:
+    subject = create_subject(
+        session,
+        name="Ada Lovelace",
+        kind="person",
+        description="  Mathematician  ",
+        aliases=["Countess", " countess ", ""],
+        tags=["historic", " HISTORIC "],
+    )
+
+    assert subject.description == "Mathematician"
+    assert subject.aliases_json == ["Countess"]
+    assert subject.tags_json == ["historic"]
+
+
 def test_omitting_a_field_leaves_it_alone_and_emptying_it_clears_it(session: Session) -> None:
     """Two different instructions that one nullable value could not carry."""
 
@@ -467,4 +482,4 @@ def test_too_many_aliases_are_refused(session: Session) -> None:
     subject = create_subject(session, name="Ada Lovelace", kind="person")
 
     with pytest.raises(ReferenceError, match="at most"):
-        set_details(session, subject, aliases=[f"name-{index}" for index in range(25)])
+        set_details(session, subject, aliases=[f"name-{index}" for index in range(33)])
