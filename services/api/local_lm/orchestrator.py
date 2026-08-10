@@ -86,6 +86,11 @@ from .image_edit_verification import (
     parse_image_edit_verification_assessment,
 )
 from .media_references import exceeds_capacity
+from .message_references import (
+    carry_message_references,
+    record_message_references,
+    resolve_reference_requests,
+)
 from .model_planner import revision_accepts_install, revision_declares_a_model
 from .models import (
     Artifact,
@@ -121,6 +126,7 @@ from .processes import ProcessSupervisor
 from .profile_service import AUTO_PROFILE_ID
 from .progress import completed_progress, update_job_progress
 from .prompt_helpers import PROMPT_HELPER_SCOPE, prompt_helper_system_message
+from .references import parse_reference_requests
 from .routing import ModalityRouter, RouteConfirmationRequired
 from .scheduler import ResourceScheduler
 from .schemas import (
@@ -558,6 +564,7 @@ class ConversationOrchestrator:
         replacement_message_id: str | None = None,
         source_action: str = "send",
         inherited_image_edit_strength: dict[str, Any] | None = None,
+        reference_source_message_id: str | None = None,
     ) -> TurnAccepted:
         if not self._admission_open:
             raise RuntimeError(
@@ -572,6 +579,7 @@ class ConversationOrchestrator:
                 replacement_message_id=replacement_message_id,
                 source_action=source_action,
                 inherited_image_edit_strength=inherited_image_edit_strength,
+                reference_source_message_id=reference_source_message_id,
             )
 
     async def _create_turn(
@@ -584,6 +592,7 @@ class ConversationOrchestrator:
         replacement_message_id: str | None = None,
         source_action: str = "send",
         inherited_image_edit_strength: dict[str, Any] | None = None,
+        reference_source_message_id: str | None = None,
     ) -> TurnAccepted:
         # Never resolve an idempotency key until its URL-scoped chat has been
         # validated. Otherwise a key from one chat could disclose another
@@ -621,6 +630,7 @@ class ConversationOrchestrator:
                 replacement_message_id=replacement_message_id,
                 source_action=source_action,
                 inherited_image_edit_strength=inherited_image_edit_strength,
+                reference_source_message_id=reference_source_message_id,
             )
 
         owner_token, replay = await self._claim_or_replay_turn(
@@ -650,6 +660,7 @@ class ConversationOrchestrator:
                 replacement_message_id=replacement_message_id,
                 source_action=source_action,
                 inherited_image_edit_strength=inherited_image_edit_strength,
+                reference_source_message_id=reference_source_message_id,
             )
         finally:
             self._release_turn_claim(session, chat_id, key, owner_token)
@@ -746,6 +757,28 @@ class ConversationOrchestrator:
                 chat_id,
             )
 
+    @staticmethod
+    def _record_turn_references(
+        session: Session,
+        *,
+        user_message_id: str,
+        request: TurnRequest,
+        source_message_id: str | None,
+    ) -> None:
+        if source_message_id is not None:
+            carry_message_references(
+                session,
+                source_message_id=source_message_id,
+                target_message_id=user_message_id,
+            )
+            return
+        requested = parse_reference_requests(
+            [reference.model_dump(mode="json") for reference in request.references]
+        )
+        record_message_references(
+            session, user_message_id, resolve_reference_requests(session, requested)
+        )
+
     async def _create_new_turn(
         self,
         session: Session,
@@ -756,6 +789,7 @@ class ConversationOrchestrator:
         replacement_message_id: str | None = None,
         source_action: str = "send",
         inherited_image_edit_strength: dict[str, Any] | None = None,
+        reference_source_message_id: str | None = None,
     ) -> TurnAccepted:
         chat = session.get(Chat, chat_id)
         if not chat:
@@ -899,6 +933,7 @@ class ConversationOrchestrator:
                 explicit_artifacts=explicit_artifacts,
                 pending_count=pending_count or 0,
                 source_action=source_action,
+                reference_source_message_id=reference_source_message_id,
             )
         prior_image, prior_image_prompt = self._latest_image_context(
             session,
@@ -1299,6 +1334,12 @@ class ConversationOrchestrator:
         ]
         session.add_all([user_message, *assistant_messages])
         session.flush()
+        self._record_turn_references(
+            session,
+            user_message_id=user_message.id,
+            request=request,
+            source_message_id=reference_source_message_id,
+        )
         previous_message_id = user_message.id
         for assistant_message in assistant_messages:
             assistant_message.parent_id = previous_message_id
@@ -1653,6 +1694,7 @@ class ConversationOrchestrator:
         explicit_artifacts: dict[str, Artifact],
         pending_count: int,
         source_action: str,
+        reference_source_message_id: str | None,
     ) -> TurnAccepted:
         intent = OrderedPlanCompiler.validate(intent)
         if pending_count + len(intent.steps) > MAX_PENDING_WORK_PER_CHAT:
@@ -1977,6 +2019,12 @@ class ConversationOrchestrator:
         ]
         session.add_all([user_message, *assistant_messages])
         session.flush()
+        self._record_turn_references(
+            session,
+            user_message_id=user_message.id,
+            request=request,
+            source_message_id=reference_source_message_id,
+        )
         previous_message_id = user_message.id
         for assistant_message in assistant_messages:
             assistant_message.parent_id = previous_message_id
@@ -4732,6 +4780,7 @@ class ConversationOrchestrator:
             replacement_message_id=source_assistant_id,
             source_action="image_edit_verification_retry",
             inherited_image_edit_strength=inherited_strength,
+            reference_source_message_id=source_user.id,
         )
         retry_run = session.get(Run, accepted.run.id)
         if retry_run:

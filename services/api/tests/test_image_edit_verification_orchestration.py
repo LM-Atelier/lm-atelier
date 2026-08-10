@@ -674,6 +674,7 @@ async def test_automatic_retry_reuses_source_turn_as_a_response_revision() -> No
         "use_explicit_parent": True,
         "replacement_message_id": source_assistant.id,
         "source_action": "image_edit_verification_retry",
+        "reference_source_message_id": source_user.id,
         "inherited_image_edit_strength": {
             "mode": "auto",
             "parameter": "denoise",
