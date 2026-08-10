@@ -7,6 +7,7 @@ from typing import Annotated, Any, Literal
 from pydantic import BaseModel, ConfigDict, Field, StringConstraints
 
 from .domain import Operation, RoutingMode
+from .references import MAX_REFERENCES_PER_TURN, MAX_ROLE, MentionSource
 from .worker_failures import WorkerFailureCode
 
 
@@ -294,11 +295,24 @@ class PromptHelperDetail(ChatDetail):
     draft_prompt: str
 
 
+class TurnReferenceIn(ApiModel):
+    """One explicitly structured Reference attached to a turn."""
+
+    reference_subject_id: str = Field(min_length=1, max_length=80)
+    role: str | None = Field(default=None, min_length=1, max_length=MAX_ROLE)
+    selected_asset_ids: list[str] = Field(default_factory=list, max_length=16)
+    strength: float | None = Field(default=None, ge=0.0, le=2.0)
+    source: MentionSource = MentionSource.MENTION
+
+
 class TurnRequest(ApiModel):
     text: str = Field(min_length=1, max_length=200_000)
     mode: RoutingMode | None = None
     parent_message_id: str | None = None
     input_artifact_ids: list[str] = Field(default_factory=list, max_length=16)
+    references: list[TurnReferenceIn] = Field(
+        default_factory=list, max_length=MAX_REFERENCES_PER_TURN
+    )
     settings: dict[str, Any] = Field(default_factory=dict)
     ordered_settings: dict[str, dict[str, Any]] = Field(default_factory=dict, max_length=3)
     output_count: int | None = Field(default=None, ge=1, le=16)

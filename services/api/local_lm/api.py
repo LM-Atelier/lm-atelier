@@ -1958,6 +1958,7 @@ async def _accept_turn(
     replacement_message_id: str | None = None,
     source_action: str = "send",
     inherited_image_edit_strength: dict[str, Any] | None = None,
+    reference_source_message_id: str | None = None,
 ) -> TurnAccepted:
     try:
         return await orchestrator.create_turn(
@@ -1968,6 +1969,7 @@ async def _accept_turn(
             replacement_message_id=replacement_message_id,
             source_action=source_action,
             inherited_image_edit_strength=inherited_image_edit_strength,
+            reference_source_message_id=reference_source_message_id,
         )
     except LookupError as exc:
         raise api_error(404, "turn-subject-not-found", str(exc)) from exc
@@ -2191,6 +2193,7 @@ async def regenerate_message(
         replacement_message_id=message_id,
         source_action="regenerate",
         inherited_image_edit_strength=inherited_image_edit_strength,
+        reference_source_message_id=user_message.id,
     )
 
 
@@ -2272,6 +2275,9 @@ async def edit_and_branch(
             except ValueError as exc:
                 raise api_error(422, "generation-settings-invalid", str(exc)) from exc
     turn = payload.model_copy(update=updates)
+    reference_source_message_id = (
+        source.id if "references" not in payload.model_fields_set else None
+    )
     return await _accept_turn(
         _services(request).orchestrator,
         session,
@@ -2280,6 +2286,7 @@ async def edit_and_branch(
         use_explicit_parent=True,
         source_action="edit_and_branch",
         inherited_image_edit_strength=inherited_image_edit_strength,
+        reference_source_message_id=reference_source_message_id,
     )
 
 
