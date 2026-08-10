@@ -224,9 +224,7 @@ async def test_unreviewed_manual_node_types_are_not_launchable_package_evidence(
 
     monkeypatch.setattr(CustomNodeManager, "verify", verify)
 
-    assert await ProcessSupervisor(
-        settings
-    ).trusted_comfy_custom_node_package_node_types() == {}
+    assert await ProcessSupervisor(settings).trusted_comfy_custom_node_package_node_types() == {}
 
 
 class FakeRunningProcess:
