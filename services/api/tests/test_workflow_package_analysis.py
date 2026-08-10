@@ -155,6 +155,8 @@ async def test_an_installed_package_at_the_pinned_revision_counts_as_resolved(
                 revision=revision,
                 installed_path="C:/synthetic/custom-nodes/rgthree-comfy",
                 tree_hash="c" * 64,
+                trusted=True,
+                active=True,
             )
         )
         session.commit()
