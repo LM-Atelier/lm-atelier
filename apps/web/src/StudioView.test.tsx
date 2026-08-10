@@ -15,6 +15,7 @@ vi.mock("./api", () => ({
   },
 }));
 vi.mock("./useStudioSession", () => ({ useStudioSession: vi.fn() }));
+let workflowAvailabilityReason: string | null = null;
 vi.mock("./StudioWorkflowSelector", () => ({
   StudioWorkflowSelector: ({
     onAvailabilityChange,
@@ -22,7 +23,10 @@ vi.mock("./StudioWorkflowSelector", () => ({
     onAvailabilityChange: (reason: string | null) => void;
     onSelectionChange: () => void;
   }) => {
-    useEffect(() => onAvailabilityChange(null), [onAvailabilityChange]);
+    useEffect(
+      () => onAvailabilityChange(workflowAvailabilityReason),
+      [onAvailabilityChange],
+    );
     return <div>Workflow chooser</div>;
   },
 }));
@@ -52,11 +56,67 @@ function renderStudio() {
 }
 
 afterEach(() => {
+  workflowAvailabilityReason = null;
   cleanup();
   vi.clearAllMocks();
 });
 
 describe("applying an edit", () => {
+  it("says when a pinned recipe overrides the displayed workflow choice", async () => {
+    workflowAvailabilityReason = "Loading the current workflow choice.";
+    vi.mocked(api.editTemplates).mockResolvedValue([{
+      id: "recipe-1",
+      name: "Pinned portrait edit",
+      description: "",
+      instruction: "make it warmer",
+      operation: "image_to_image",
+      settings_json: {},
+      workflow_revision_id: "revision-pinned",
+      model_profile_id: null,
+      mask_mode: "none",
+      trigger_words_json: [],
+      content_rating: "general",
+      builtin: false,
+      enabled: true,
+    }]);
+    renderStudio();
+
+    fireEvent.click(await screen.findByRole("button", { name: "Pinned portrait edit" }));
+
+    expect(screen.getByRole("status")).toHaveTextContent(
+      "Pinned portrait edit supplies the workflow for this edit.",
+    );
+    expect(screen.getByRole("button", { name: "Apply" })).toBeEnabled();
+
+    fireEvent.change(screen.getByRole("textbox"), { target: { value: "make it cooler" } });
+    expect(screen.queryByText(/supplies the workflow for this edit/i)).toBeNull();
+  });
+
+  it("does not let an unpinned recipe bypass an unavailable workflow choice", async () => {
+    workflowAvailabilityReason = "Loading the current workflow choice.";
+    vi.mocked(api.editTemplates).mockResolvedValue([{
+      id: "recipe-1",
+      name: "Unpinned portrait edit",
+      description: "",
+      instruction: "make it warmer",
+      operation: "image_to_image",
+      settings_json: {},
+      workflow_revision_id: null,
+      model_profile_id: null,
+      mask_mode: "none",
+      trigger_words_json: [],
+      content_rating: "general",
+      builtin: false,
+      enabled: true,
+    }]);
+    renderStudio();
+
+    fireEvent.click(await screen.findByRole("button", { name: "Unpinned portrait edit" }));
+
+    expect(screen.queryByText(/supplies the workflow for this edit/i)).toBeNull();
+    expect(screen.getByRole("button", { name: "Apply" })).toBeDisabled();
+  });
+
   it("keeps the instruction when the turn is refused", async () => {
     // The words were cleared at dispatch, so a refusal erased exactly what
     // would have been retyped to try again.
