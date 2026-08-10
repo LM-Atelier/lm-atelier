@@ -164,11 +164,27 @@ async def test_an_installed_package_at_the_pinned_revision_counts_as_resolved(
     async def object_info() -> dict[str, Any]:
         return {"Power Lora Loader": {}}
 
+    async def no_registry_packages() -> dict[tuple[str, str], frozenset[str]]:
+        return {}
+
+    async def manual_packages() -> dict[tuple[str, str], frozenset[str]]:
+        return {("rgthree-comfy", revision): frozenset({"Power Lora Loader"})}
+
     monkeypatch.setattr(
         app.state.services.engines.media,
         "object_info",
         object_info,
         raising=False,
+    )
+    monkeypatch.setattr(
+        app.state.services.processes,
+        "trusted_comfy_registry_package_node_types",
+        no_registry_packages,
+    )
+    monkeypatch.setattr(
+        app.state.services.processes,
+        "trusted_comfy_custom_node_package_node_types",
+        manual_packages,
     )
     response = await client.post(
         "/api/workflows/packages/analyze",
@@ -254,11 +270,27 @@ async def test_a_trusted_active_registry_version_counts_as_resolved(
     async def object_info() -> dict[str, Any]:
         return {"Power Lora Loader": {}}
 
+    async def registry_packages() -> dict[tuple[str, str], frozenset[str]]:
+        return {("rgthree-comfy", "1.2.3"): frozenset({"Power Lora Loader"})}
+
+    async def no_manual_packages() -> dict[tuple[str, str], frozenset[str]]:
+        return {}
+
     monkeypatch.setattr(
         app.state.services.engines.media,
         "object_info",
         object_info,
         raising=False,
+    )
+    monkeypatch.setattr(
+        app.state.services.processes,
+        "trusted_comfy_registry_package_node_types",
+        registry_packages,
+    )
+    monkeypatch.setattr(
+        app.state.services.processes,
+        "trusted_comfy_custom_node_package_node_types",
+        no_manual_packages,
     )
     response = await client.post(
         "/api/workflows/packages/analyze",
