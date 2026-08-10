@@ -9230,13 +9230,21 @@ async def import_workflow_package(
                     steps = "; ".join(
                         f'"{interpreter}" -m pip install -r "{path}"' for _, path in needing
                     )
+                    # Named last and framed as reference rather than as the
+                    # instruction. Running it does install what is missing, and
+                    # it also invalidates the prepared runtime contract, so the
+                    # next start refuses until the package is prepared anyway.
                     raise api_error(
                         422,
                         "custom-node-package-requirements-missing",
                         f"{detail} is installed and trusted but did not load, because it "
                         "declares Python requirements and installing a pinned repository "
-                        "does not install what it imports. Install them into the media "
-                        f"runtime's own interpreter, then start the media runtime again: "
+                        "does not install what it imports. Prepare the package from the "
+                        "workflow package review: preparation installs those requirements "
+                        "into the media runtime and records the runtime's package baseline, "
+                        "which the runtime checks before it starts. Installing them by hand "
+                        "leaves that baseline stale and the media runtime refusing to start "
+                        f"until it is prepared again. For reference, the requirements are: "
                         f"{steps}",
                     )
                 raise api_error(
