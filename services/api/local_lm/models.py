@@ -1459,6 +1459,59 @@ class ReferenceAsset(TimestampMixin, Base):
     subject: Mapped[ReferenceSubject] = relationship(back_populates="assets")
 
 
+class MessageReference(TimestampMixin, Base):
+    """What one turn referred to, recorded as it stood at the time.
+
+    This is history rather than a link. A subject can be renamed, archived or
+    deleted long after a turn used it, and the question this row exists to
+    answer - why does that picture look like that - has to keep its answer
+    afterwards. So the identifying fields are snapshots and not a join:
+    `reference_subject_id` is stored without a foreign key, and the mention,
+    name and kind are copied in beside it. A live foreign key would make the
+    record evaporate at exactly the moment someone asked.
+
+    That also means a later rename cannot rewrite what a past turn recorded.
+    The row is written once and never revised.
+
+    The artifact ids are copied for the same reason and are likewise not foreign
+    keys. A cleanup that removes unreferenced bytes must not be able to erase
+    the record that those bytes were once used.
+    """
+
+    __tablename__ = "message_references"
+    __table_args__ = (
+        # One entry per slot, so a retry that re-records a turn cannot quietly
+        # double what that turn referred to.
+        UniqueConstraint("message_id", "position", name="uq_message_reference_position"),
+        CheckConstraint("position >= 0", name="ck_message_reference_position"),
+        CheckConstraint(
+            "length(trim(reference_subject_id)) > 0",
+            name="ck_message_reference_subject_present",
+        ),
+    )
+
+    id: Mapped[str] = mapped_column(String(48), primary_key=True, default=lambda: new_id("msgref"))
+    # The turn that referred to it. This one is a real foreign key: deleting a
+    # user's turn is meant to remove what it produced, and a reference record
+    # outliving its own message would be an orphan nobody could interpret.
+    message_id: Mapped[str] = mapped_column(
+        ForeignKey("messages.id", ondelete="CASCADE"), index=True
+    )
+    position: Mapped[int] = mapped_column(Integer, default=0)
+    reference_subject_id: Mapped[str] = mapped_column(String(48), index=True)
+    mention_slug: Mapped[str] = mapped_column(String(64))
+    subject_name: Mapped[str] = mapped_column(String(120))
+    subject_kind: Mapped[str] = mapped_column(String(40))
+    role: Mapped[str | None] = mapped_column(String(40), nullable=True)
+    strength: Mapped[float | None] = mapped_column(Float, nullable=True)
+    # How it came to be here. A typed mention and something inherited from the
+    # surrounding context differ in how much the user actually asserted, and a
+    # later question about why an image contains someone must tell them apart.
+    source: Mapped[str] = mapped_column(String(40), default="mention")
+    reference_asset_ids_json: Mapped[list[str]] = mapped_column(JSON, default=list)
+    artifact_ids_json: Mapped[list[str]] = mapped_column(JSON, default=list)
+
+
 class WorkflowInstallOffer(TimestampMixin, Base):
     """One reviewed, content-bound way to make a workflow locally installable."""
 
