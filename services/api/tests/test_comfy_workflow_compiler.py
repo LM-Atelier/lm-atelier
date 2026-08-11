@@ -477,29 +477,41 @@ def test_rejects_widget_values_that_do_not_map_exactly() -> None:
     _assert_error("unsupported_widget_values", workflow, _object_info())
 
 
-def _package_drawn_widgets(properties: dict[str, Any] | None) -> dict[str, Any]:
+_UNREAD_NODE_TYPE = "Fancy Stack (someone)"
+
+
+def _package_drawn_widgets(
+    properties: dict[str, Any] | None,
+    node_type: str = _UNREAD_NODE_TYPE,
+    widgets_values: list[Any] | None = None,
+) -> dict[str, Any]:
     """A node whose settings live in objects only its own package understands.
 
     Shaped after rgthree's Power Lora Loader: the runtime declares the links and
     nothing else, because the node takes any number of further inputs, and the
     saved graph carries them as objects interleaved with the package's own
-    canvas furniture.
+    canvas furniture. The default node type is deliberately one no layout is
+    transcribed for, so these prove the refusal rather than a transcription.
     """
 
     workflow = _workflow()
     node: dict[str, Any] = {
         "id": 3,
-        "type": "Power Lora Loader (rgthree)",
+        "type": node_type,
         "mode": 0,
         "inputs": [],
         "outputs": [],
-        "widgets_values": [
-            {},
-            {"type": "PowerLoraLoaderHeaderWidget"},
-            {"on": True, "lora": "one.safetensors", "strength": 1, "strengthTwo": None},
-            {},
-            "",
-        ],
+        "widgets_values": (
+            [
+                {},
+                {"type": "PowerLoraLoaderHeaderWidget"},
+                {"on": True, "lora": "one.safetensors", "strength": 1, "strengthTwo": None},
+                {},
+                "",
+            ]
+            if widgets_values is None
+            else widgets_values
+        ),
     }
     if properties is not None:
         node["properties"] = properties
@@ -509,11 +521,13 @@ def _package_drawn_widgets(properties: dict[str, Any] | None) -> dict[str, Any]:
 
 def _drawn_object_info() -> dict[str, Any]:
     object_info = _object_info()
-    object_info["Power Lora Loader (rgthree)"] = {
+    definition = {
         "input": {"optional": {"model": ["MODEL"], "clip": ["CLIP"]}},
         "input_order": {"optional": ["model", "clip"]},
         "output": ["MODEL", "CLIP"],
     }
+    object_info[_UNREAD_NODE_TYPE] = definition
+    object_info["Power Lora Loader (rgthree)"] = definition
     return object_info
 
 
@@ -523,24 +537,22 @@ def test_widgets_only_a_package_can_read_are_refused_as_that_and_not_as_a_mappin
     the runtime can be asked. Reporting the second as the first sends someone
     looking for a defect in the compiler."""
 
-    workflow = _package_drawn_widgets(
-        {"cnr_id": "rgthree-comfy", "ver": "6b76ee6f2c5a007710b5a16f97c94330d6ecc871"}
-    )
+    workflow = _package_drawn_widgets({"cnr_id": "someone-comfy", "ver": "a" * 40})
 
     with pytest.raises(WorkflowCompilationError) as raised:
         compile_comfyui_ui_graph(workflow, _drawn_object_info())
 
     assert raised.value.code == "package_serialized_widgets"
     message = str(raised.value)
-    assert "Power Lora Loader (rgthree)" in message
-    assert "rgthree-comfy at 6b76ee6f2c5a007710b5a16f97c94330d6ecc871" in message
+    assert _UNREAD_NODE_TYPE in message
+    assert f"someone-comfy at {'a' * 40}" in message
 
 
 @pytest.mark.parametrize(
     ("properties", "expected"),
     [
-        ({"cnr_id": "rgthree-comfy"}, "rgthree-comfy"),
-        ({"aux_id": "rgthree/rgthree-comfy"}, "rgthree/rgthree-comfy"),
+        ({"cnr_id": "someone-comfy"}, "someone-comfy"),
+        ({"aux_id": "someone/fancy-stack"}, "someone/fancy-stack"),
         ({}, "its package"),
         (None, "its package"),
     ],
@@ -932,3 +944,142 @@ def test_a_value_that_reads_itself_is_refused() -> None:
     ]
 
     _assert_error("pass_through_cycle", workflow, _object_info())
+
+
+_RGTHREE = {"cnr_id": "rgthree-comfy", "ver": "6b76ee6f2c5a007710b5a16f97c94330d6ecc871"}
+
+
+def _power_loras(*entries: Any, properties: dict[str, Any] | None = None) -> dict[str, Any]:
+    """The node as rgthree saves it: divider, header, the loras, spacer, button."""
+
+    return _package_drawn_widgets(
+        _RGTHREE if properties is None else properties,
+        node_type="Power Lora Loader (rgthree)",
+        widgets_values=[{}, {"type": "PowerLoraLoaderHeaderWidget"}, *entries, {}, ""],
+    )
+
+
+def _compiled_loras(*entries: Any) -> dict[str, Any]:
+    compiled = compile_comfyui_ui_graph(_power_loras(*entries), _drawn_object_info())
+    return dict(compiled.api_graph["3"]["inputs"])
+
+
+def test_each_saved_lora_becomes_the_input_the_node_names_it() -> None:
+    """rgthree names them lora_1, lora_2 and so on in the order they appear,
+    counting from one, and its Python reads whatever keys it is given."""
+
+    inputs = _compiled_loras(
+        {"on": True, "lora": "first.safetensors", "strength": 1},
+        {"on": True, "lora": "second.safetensors", "strength": 0.5},
+    )
+
+    assert inputs == {
+        "lora_1": {"on": True, "lora": "first.safetensors", "strength": 1},
+        "lora_2": {"on": True, "lora": "second.safetensors", "strength": 0.5},
+    }
+
+
+def test_a_lora_switched_off_is_still_sent() -> None:
+    """Its own Python decides what an off entry does. Dropping it here would
+    silently rewrite a graph whose author left it in place to turn back on."""
+
+    inputs = _compiled_loras({"on": False, "lora": "held.safetensors", "strength": 1})
+
+    assert inputs == {"lora_1": {"on": False, "lora": "held.safetensors", "strength": 1}}
+
+
+@pytest.mark.parametrize("strength_two", [None, 0.8])
+def test_a_separate_clip_strength_is_carried_through_exactly(strength_two: Any) -> None:
+    """Absent and null mean the same thing to the node, so neither is invented
+    and neither is dropped."""
+
+    inputs = _compiled_loras(
+        {"on": True, "lora": "one.safetensors", "strength": 1, "strengthTwo": strength_two}
+    )
+
+    assert inputs["lora_1"]["strengthTwo"] == strength_two
+
+
+def test_a_node_with_no_loras_compiles_to_no_lora_inputs() -> None:
+    compiled = compile_comfyui_ui_graph(_power_loras(), _drawn_object_info())
+
+    assert compiled.api_graph["3"]["inputs"] == {}
+
+
+def test_the_links_the_node_carries_survive_its_widgets() -> None:
+    """A partial conversion would run and mean something different."""
+
+    workflow = _power_loras({"on": True, "lora": "one.safetensors", "strength": 1})
+    workflow["nodes"][0]["outputs"][0]["links"] = [7, 50]
+    workflow["nodes"][2]["inputs"] = [{"name": "model", "type": "MODEL", "link": 50}]
+    workflow["links"].append([50, 1, 0, 3, 0, "MODEL"])
+
+    compiled = compile_comfyui_ui_graph(workflow, _drawn_object_info())
+
+    assert compiled.api_graph["3"]["inputs"]["model"] == ["1", 0]
+    assert compiled.api_graph["3"]["inputs"]["lora_1"]["lora"] == "one.safetensors"
+
+
+@pytest.mark.parametrize(
+    "widgets_values",
+    [
+        [{}],
+        [{}, {"type": "PowerLoraLoaderHeaderWidget"}],
+        [{"type": "PowerLoraLoaderHeaderWidget"}, {}, {}, ""],
+        [{}, {"type": "SomethingElse"}, {}, ""],
+        [{}, {"type": "PowerLoraLoaderHeaderWidget"}, {}, "add"],
+        [{}, {"type": "PowerLoraLoaderHeaderWidget"}, "", {}],
+    ],
+)
+def test_a_layout_this_build_does_not_recognise_refuses(widgets_values: list[Any]) -> None:
+    """A package that moved its furniture would otherwise be read under the old
+    layout and produce a graph that runs and means something else."""
+
+    workflow = _package_drawn_widgets(
+        _RGTHREE,
+        node_type="Power Lora Loader (rgthree)",
+        widgets_values=widgets_values,
+    )
+
+    _assert_error("package_widget_layout", workflow, _drawn_object_info())
+
+
+@pytest.mark.parametrize(
+    "entry",
+    [
+        {"lora": "one.safetensors", "strength": 1},
+        {"on": True, "strength": 1},
+        {"on": True, "lora": "one.safetensors"},
+        {"on": True, "lora": "", "strength": 1},
+        {"on": True, "lora": 7, "strength": 1},
+        {"on": "yes", "lora": "one.safetensors", "strength": 1},
+        {"on": True, "lora": "one.safetensors", "strength": "1"},
+        {"on": True, "lora": "one.safetensors", "strength": True},
+        {"on": True, "lora": "one.safetensors", "strength": 1, "strengthTwo": "half"},
+        {"on": True, "lora": "one.safetensors", "strength": 1, "extra": 1},
+        "not an entry at all",
+    ],
+)
+def test_an_entry_that_is_not_the_transcribed_shape_refuses(entry: Any) -> None:
+    """Read exactly or not at all. A strength of True is an int in Python and
+    would quietly become 1.0, so it is reported rather than accepted."""
+
+    workflow = _package_drawn_widgets(
+        _RGTHREE,
+        node_type="Power Lora Loader (rgthree)",
+        widgets_values=[{}, {"type": "PowerLoraLoaderHeaderWidget"}, entry, {}, ""],
+    )
+
+    _assert_error("package_widget_layout", workflow, _drawn_object_info())
+
+
+def test_the_same_node_type_from_another_package_is_not_read() -> None:
+    """The layout belongs to the package that draws it, and a graph naming a
+    different package is not making the same claim."""
+
+    workflow = _power_loras(
+        {"on": True, "lora": "one.safetensors", "strength": 1},
+        properties={"cnr_id": "someone-else", "ver": "b" * 40},
+    )
+
+    _assert_error("package_serialized_widgets", workflow, _drawn_object_info())

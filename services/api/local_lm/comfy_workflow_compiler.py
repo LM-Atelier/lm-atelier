@@ -4,6 +4,7 @@ from collections import deque
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 
+from .comfy_package_widgets import PackageWidgetError, package_widget_inputs
 from .comfy_subgraphs import SubgraphExpansionError, expand_workflow
 from .comfy_version_support import COMFY_VERSION_SUPPORT
 from .comfy_workflow_packages import (
@@ -247,22 +248,36 @@ def _parse_link(value: object) -> _Link:
     )
 
 
-def _drawn_by(node: Mapping[str, object]) -> str:
-    """The package a node says defines it, for a refusal that can be acted on.
+def _drawn_by_package(node: Mapping[str, object]) -> str | None:
+    """The package a node says defines it.
 
-    Taken from what the graph records rather than from anything installed: the
-    question is which package's editor code would have to be reproduced, and the
-    saved graph is what states that. Empty when the graph does not say, because
-    naming the wrong package is worse than naming none.
+    Taken from what the graph records rather than from anything installed. The
+    question a layout answers is whose editor code has to be reproduced, and the
+    saved graph is what states that; an installed package of the same name is a
+    different claim and could disagree.
     """
 
     properties = node.get("properties")
     if not isinstance(properties, Mapping):
-        return " its package"
+        return None
     package = properties.get("cnr_id") or properties.get("aux_id")
     if not isinstance(package, str) or not package:
+        return None
+    return package
+
+
+def _drawn_by(node: Mapping[str, object]) -> str:
+    """The same, phrased for a refusal that can be acted on.
+
+    Empty when the graph does not say, because naming the wrong package is worse
+    than naming none.
+    """
+
+    package = _drawn_by_package(node)
+    if package is None:
         return " its package"
-    revision = properties.get("ver")
+    properties = node.get("properties")
+    revision = properties.get("ver") if isinstance(properties, Mapping) else None
     if isinstance(revision, str) and revision:
         return f" {package} at {revision}"
     return f" {package}"
@@ -756,6 +771,19 @@ def _compile_node_inputs(
             and values[cursor].casefold() in _CONTROL_AFTER_GENERATE
         ):
             cursor += 1
+    if cursor != len(values):
+        try:
+            drawn_inputs = package_widget_inputs(
+                str(node["type"]), _drawn_by_package(node), values[cursor:]
+            )
+        except PackageWidgetError as exc:
+            # The layout is transcribed and this graph does not match it. Saying
+            # so beats compiling it under a layout it no longer uses, which
+            # would run and mean something else.
+            raise WorkflowCompilationError(exc.code, f"node {node_id}: {exc}") from exc
+        if drawn_inputs is not None:
+            result.update(drawn_inputs)
+            cursor = len(values)
     if cursor != len(values):
         # A leftover scalar is a mapping this compiler got wrong. A leftover
         # object is something else entirely: a widget the node's own package
