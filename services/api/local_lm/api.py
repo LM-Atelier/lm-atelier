@@ -8070,24 +8070,38 @@ async def _packages_awaiting_review(services: Services) -> frozenset[tuple[str, 
 
 
 def _packages_that_did_not_load(
-    services: Services, available_node_types: set[str]
+    services: Services,
+    analysis: ComfyWorkflowPackageAnalysis,
+    available_node_types: set[str],
 ) -> list[tuple[str, Path | None]]:
-    """Trusted packages whose reviewed nodes are absent from a live runtime.
+    """Packages *this workflow requires* whose nodes are absent after a restart.
 
-    The runtime is the authority on what loaded. A package can be installed,
-    pinned, trusted and still fail to import - most often because it declares
-    Python requirements that cloning a repository does not install - and the
-    only symptom is that its node types never appear. Reported as "a node is
-    missing", that sends somebody to install what is already on disk.
+    Scoped to the analysis on purpose. The media runtime launches with only the
+    packages a particular activation needs, so most installed packages are
+    legitimately absent from any given inventory. Reporting every trusted
+    install whose nodes are missing would name whichever unrelated package
+    happened to be out of scope, and name it as the thing that broke an import
+    it has nothing to do with.
+
+    So a package is only a candidate when the workflow declares it, at the
+    revision the workflow declares, and the nodes still missing are nodes this
+    workflow actually asked that package for.
 
     Returns each package name with the requirements file it ships, if any, so
-    the refusal can say which of the two situations this is and name the exact
-    file somebody has to install from.
+    the refusal can distinguish a package that cannot import from one that
+    failed for a reason only the runtime log knows.
     """
 
     from .custom_nodes import CustomNodeManager, reviewed_custom_node_types
     from .db import SessionLocal
     from .models import CustomNodeInstall
+
+    required: dict[tuple[str, str], set[str]] = {}
+    for requirement in analysis.custom_packages:
+        for version in requirement.versions:
+            required[(requirement.package_id, version)] = set(requirement.node_types)
+    if not required:
+        return []
 
     failed: list[tuple[str, Path | None]] = []
     with SessionLocal() as session:
@@ -8101,8 +8115,14 @@ def _packages_that_did_not_load(
         )
         manager = CustomNodeManager(services.settings)
         for install in installs:
+            wanted = required.get((install.name, install.revision))
+            if wanted is None:
+                continue
             reviewed = set(reviewed_custom_node_types(install.security_json))
-            if not reviewed or reviewed <= available_node_types:
+            # Only the nodes this workflow asked this package for. A package can
+            # own nodes nobody here needs, and their absence proves nothing.
+            owed = reviewed & wanted
+            if not owed or owed <= available_node_types:
                 continue
             failed.append((install.name, manager.python_requirements_path(install)))
     return failed
@@ -9213,41 +9233,50 @@ async def import_workflow_package(
             # true and useless: the node is missing because something that owns
             # it did not load, and that has a different fix from installing
             # anything at all.
-            unloaded = _packages_that_did_not_load(services, available_node_types)
+            unloaded = _packages_that_did_not_load(services, analysis, available_node_types)
             if unloaded:
-                needing = [(name, path) for name, path in unloaded if path is not None]
-                detail = ", ".join(name for name, _ in unloaded)
-                if needing:
-                    # Say what to run, not only what went wrong. Whoever hits
-                    # this has no reason to know that a ComfyUI runtime has its
-                    # own interpreter, let alone where it lives.
-                    interpreter = services.settings.comfy_executable
-                    steps = "; ".join(
-                        f'"{interpreter}" -m pip install -r "{path}"' for _, path in needing
-                    )
-                    # Named last and framed as reference rather than as the
-                    # instruction. Running it does install what is missing, and
-                    # it also invalidates the prepared runtime contract, so the
-                    # next start refuses until the package is prepared anyway.
+                # Partitioned rather than summarised. A set where one package
+                # ships requirements and another does not has two causes, and
+                # asserting either for both would be a confident wrong answer.
+                needing = sorted(name for name, path in unloaded if path is not None)
+                other = sorted(name for name, path in unloaded if path is None)
+                # No pip command. Installing requirements by hand invalidates the
+                # prepared runtime baseline, which the worker compares for
+                # equality before it starts - so the command would fix the import
+                # and stop the runtime, which is worse than saying nothing.
+                remedy = (
+                    " Prepare the package from the workflow package review:"
+                    " preparation installs a package's dependency closure and records"
+                    " the runtime's package baseline, which installing by hand cannot do."
+                )
+                if needing and not other:
+                    listed = ", ".join(needing)
                     raise api_error(
                         422,
                         "custom-node-package-requirements-missing",
-                        f"{detail} is installed and trusted but did not load, because it "
-                        "declares Python requirements and installing a pinned repository "
-                        "does not install what it imports. Prepare the package from the "
-                        "workflow package review: preparation installs those requirements "
-                        "into the media runtime and records the runtime's package baseline, "
-                        "which the runtime checks before it starts. Installing them by hand "
-                        "leaves that baseline stale and the media runtime refusing to start "
-                        f"until it is prepared again. For reference, the requirements are: "
-                        f"{steps}",
+                        f"{listed} is installed and trusted but did not load. It declares"
+                        " Python requirements, and installing a pinned repository does not"
+                        " install what it imports, so its nodes never register with the"
+                        f" runtime.{remedy}",
                     )
+                if needing:
+                    listed = ", ".join(needing)
+                    others = ", ".join(other)
+                    raise api_error(
+                        422,
+                        "custom-node-package-did-not-load",
+                        f"{listed} and {others} are installed and trusted but did not load."
+                        f" {listed} declares Python requirements that installing a pinned"
+                        f" repository does not install. Why {others} failed is recorded in"
+                        f" the media worker log.{remedy}",
+                    )
+                listed = ", ".join(other)
                 raise api_error(
                     422,
                     "custom-node-package-did-not-load",
-                    f"{detail} is installed and trusted but did not load, so the nodes it "
-                    "provides are unavailable. The media worker log records why the import "
-                    "failed.",
+                    f"{listed} is installed and trusted but did not load, so the nodes it"
+                    " provides are unavailable. The media worker log records why the import"
+                    f" failed.{remedy}",
                 )
             raise api_error(
                 422,
