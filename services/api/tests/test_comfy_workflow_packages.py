@@ -589,3 +589,101 @@ def test_a_reviewed_package_is_neither() -> None:
 
     assert analysis.issues == ()
     assert analysis.ready
+
+
+_RGTHREE_AUDITED_REVISION = "1.0.2605082257"
+
+
+def _lora(name: str, *, on: bool = True, strength: float = 1, strength_two: object = ...) -> Any:
+    entry: dict[str, Any] = {"on": on, "lora": name, "strength": strength}
+    if strength_two is not ...:
+        entry["strengthTwo"] = strength_two
+    return entry
+
+
+def _loader(*entries: Any) -> dict[str, Any]:
+    return node(
+        1,
+        "Power Lora Loader (rgthree)",
+        package="rgthree-comfy",
+        version=_RGTHREE_AUDITED_REVISION,
+        widgets=[{}, {"type": "PowerLoraLoaderHeaderWidget"}, *entries, {}, ""],
+    )
+
+
+def _analysed(*entries: Any, available: tuple[str, ...] = ()) -> Any:
+    return analyze_comfyui_workflow_package(
+        workflow(nodes=[_loader(*entries), node(2, "KSampler")]),
+        available_node_types={"KSampler", "Power Lora Loader (rgthree)"},
+        available_asset_filenames=available,
+    )
+
+
+def test_a_lora_the_node_would_load_is_a_dependency() -> None:
+    analysis = _analysed(_lora("wanted.safetensors"))
+
+    assert [asset.filename for asset in analysis.asset_references] == ["wanted.safetensors"]
+    assert any(issue.code == "missing_asset" for issue in analysis.issues)
+
+
+@pytest.mark.parametrize(
+    "entry",
+    [
+        _lora("held.safetensors", on=False),
+        _lora("held.safetensors", strength=0),
+        _lora("held.safetensors", strength=0, strength_two=0),
+    ],
+)
+def test_a_lora_the_node_would_not_load_is_not_a_dependency(entry: Any) -> None:
+    """An entry switched off, or left at zero strength, keeps its filename so the
+    author can turn it back on. The node never opens it, so counting it blocked
+    the whole import over an asset no run would read."""
+
+    analysis = _analysed(entry)
+
+    assert analysis.asset_references == ()
+    assert not any(issue.code == "missing_asset" for issue in analysis.issues)
+
+
+def test_a_zero_model_strength_with_a_clip_strength_is_still_a_dependency() -> None:
+    """The node applies either one, so only both being zero means it loads
+    nothing."""
+
+    analysis = _analysed(_lora("wanted.safetensors", strength=0, strength_two=0.4))
+
+    assert [asset.filename for asset in analysis.asset_references] == ["wanted.safetensors"]
+
+
+def test_a_mixed_loader_reports_only_what_it_would_load() -> None:
+    analysis = _analysed(
+        _lora("live.safetensors"),
+        _lora("held.safetensors", on=False),
+        _lora("muted.safetensors", strength=0),
+    )
+
+    assert [asset.filename for asset in analysis.asset_references] == ["live.safetensors"]
+
+
+def test_a_loader_this_build_cannot_read_still_reports_every_filename() -> None:
+    """Over-reporting a dependency is a worse answer than under-reporting one,
+    and a revision nobody audited is not evidence that an entry is dormant."""
+
+    unread = node(
+        1,
+        "Power Lora Loader (rgthree)",
+        package="rgthree-comfy",
+        version="1.0.9999999999",
+        widgets=[
+            {},
+            {"type": "PowerLoraLoaderHeaderWidget"},
+            _lora("held.safetensors", on=False),
+            {},
+            "",
+        ],
+    )
+    analysis = analyze_comfyui_workflow_package(
+        workflow(nodes=[unread, node(2, "KSampler")]),
+        available_node_types={"KSampler", "Power Lora Loader (rgthree)"},
+    )
+
+    assert [asset.filename for asset in analysis.asset_references] == ["held.safetensors"]

@@ -9,6 +9,7 @@ from local_lm.comfy_workflow_compiler import (
     WorkflowCompilationError,
     compile_comfyui_ui_graph,
 )
+from local_lm.comfy_workflow_packages import WorkflowPackageError
 
 
 def _object_info() -> dict[str, Any]:
@@ -78,6 +79,22 @@ def _with_supported_frontend(workflow: dict[str, Any]) -> dict[str, Any]:
 def _assert_error(code: str, workflow: dict[str, Any], object_info: dict[str, Any]) -> None:
     with pytest.raises(WorkflowCompilationError) as raised:
         compile_comfyui_ui_graph(workflow, object_info)
+    assert raised.value.code == code
+
+
+def _assert_refused_before_compiling(
+    code: str, workflow: dict[str, Any], object_info: dict[str, Any]
+) -> None:
+    """Refused by the graph analysis the compiler runs first, not by compilation.
+
+    Kept distinct from `_assert_error` so that a check moving between the two
+    layers shows up as a failing test rather than passing silently in the wrong
+    place.
+    """
+
+    with pytest.raises(WorkflowPackageError) as raised:
+        compile_comfyui_ui_graph(workflow, object_info)
+    assert not isinstance(raised.value, WorkflowCompilationError)
     assert raised.value.code == code
 
 
@@ -1159,7 +1176,14 @@ def test_widgets_saved_as_neither_shape_are_refused(widgets_values: Any) -> None
     _assert_error("invalid_widget_values", workflow, _object_info())
 
 
-def _video_combine(extras: dict[str, Any], package: str = "comfyui-videohelpersuite") -> Any:
+_VHS_AUDITED = "8343122234b61a0f8eb3d1f3f98382b0f7aff2b9"
+
+
+def _video_combine(
+    extras: dict[str, Any],
+    package: str = "comfyui-videohelpersuite",
+    revision: str = _VHS_AUDITED,
+) -> Any:
     workflow = _workflow()
     workflow["nodes"][0]["outputs"][0]["links"] = [7, 9]
     workflow["nodes"].append(
@@ -1167,7 +1191,7 @@ def _video_combine(extras: dict[str, Any], package: str = "comfyui-videohelpersu
             "id": 4,
             "type": "VHS_VideoCombine",
             "mode": 0,
-            "properties": {"cnr_id": package, "ver": "8343122234b6"},
+            "properties": {"cnr_id": package, "ver": revision},
             "inputs": [{"name": "images", "type": "IMAGE", "link": 9}],
             "outputs": [],
             "widgets_values": {"frame_rate": 16, "format": "video/h264-mp4", **extras},
@@ -1225,3 +1249,200 @@ def test_extra_names_are_only_read_for_the_package_that_declares_them() -> None:
     workflow, object_info = _video_combine({"crf": 17}, package="someone-else")
 
     _assert_error("unknown_widget_value", workflow, object_info)
+
+
+@pytest.mark.parametrize(
+    ("properties", "code"),
+    [
+        ({"cnr_id": "rgthree-comfy", "ver": "1.0.9999999999"}, "package_widget_revision"),
+        ({"cnr_id": "rgthree-comfy"}, "package_widget_revision"),
+        ({"cnr_id": "rgthree-comfy", "ver": ""}, "invalid_node_properties"),
+        ({"cnr_id": "rgthree-comfy", "ver": 1}, "invalid_node_properties"),
+    ],
+)
+def test_a_layout_is_only_read_for_a_revision_it_was_read_at(
+    properties: dict[str, Any], code: str
+) -> None:
+    """A complete layout proves the shape, not the meaning. Two revisions can
+    serialize identically and read the values differently, so matching the shape
+    is not permission to skip which code drew it - and the nearest revision that
+    was audited is a guess, not a fallback."""
+
+    workflow = _power_loras(
+        {"on": True, "lora": "one.safetensors", "strength": 1}, properties=properties
+    )
+
+    if code == "invalid_node_properties":
+        _assert_refused_before_compiling(code, workflow, _drawn_object_info())
+        return
+    _assert_error(code, workflow, _drawn_object_info())
+
+
+def test_the_other_audited_revision_of_the_same_layout_is_read() -> None:
+    """Both audited revisions ship the file that defines this layout byte for
+    byte identically, which is what makes them one layout rather than two
+    assumed to match."""
+
+    workflow = _power_loras(
+        {"on": True, "lora": "one.safetensors", "strength": 1},
+        properties={"cnr_id": "rgthree-comfy", "ver": "1.0.2605082257"},
+    )
+
+    compiled = compile_comfyui_ui_graph(workflow, _drawn_object_info())
+
+    assert compiled.api_graph["3"]["inputs"]["lora_1"]["lora"] == "one.safetensors"
+
+
+@pytest.mark.parametrize("divider", [{}, None])
+def test_both_recorded_furniture_variants_are_read(divider: Any) -> None:
+    """Real exports write a divider as an empty object or as null depending on
+    how they were saved. Each is named; neither loosens the check into
+    accepting whatever happens to be there."""
+
+    workflow = _package_drawn_widgets(
+        _RGTHREE,
+        node_type="Power Lora Loader (rgthree)",
+        widgets_values=[
+            divider,
+            {"type": "PowerLoraLoaderHeaderWidget"},
+            {"on": True, "lora": "one.safetensors", "strength": 1},
+            divider,
+            "",
+        ],
+    )
+
+    compiled = compile_comfyui_ui_graph(workflow, _drawn_object_info())
+
+    assert compiled.api_graph["3"]["inputs"]["lora_1"]["lora"] == "one.safetensors"
+
+
+@pytest.mark.parametrize("strength", [float("nan"), float("inf"), float("-inf")])
+def test_a_strength_that_is_not_a_finite_number_is_refused(strength: float) -> None:
+    """They survive a JSON round trip in some encoders and mean nothing as a
+    scaling factor. Bounded parsing already refuses them for the whole graph,
+    which is a stronger guarantee than the transcription can make on its own -
+    so the transcription keeps its own check and this proves the earlier one."""
+
+    _assert_refused_before_compiling(
+        "non_finite_number",
+        _power_loras({"on": True, "lora": "one.safetensors", "strength": strength}),
+        _drawn_object_info(),
+    )
+
+
+def test_a_node_claiming_two_packages_that_disagree_is_refused() -> None:
+    """Choosing one would decide which package's layout to read by, on no
+    evidence at all."""
+
+    workflow = _power_loras(
+        {"on": True, "lora": "one.safetensors", "strength": 1},
+        properties={
+            "cnr_id": "rgthree-comfy",
+            "aux_id": "someone/else",
+            "ver": "1.0.2605082257",
+        },
+    )
+
+    _assert_error("conflicting_package_claim", workflow, _drawn_object_info())
+
+
+@pytest.mark.parametrize(
+    "revision",
+    ["8343122234b61a0f8eb3d1f3f98382b0f7aff2b8", "1.0.0"],
+)
+def test_video_options_are_only_read_for_the_audited_revision(revision: str) -> None:
+    """One character away from the audited revision is still a revision nobody
+    read, and there is no nearest-match fallback."""
+
+    workflow, object_info = _video_combine({"crf": 17}, revision=revision)
+
+    _assert_error("package_widget_revision", workflow, object_info)
+
+
+@pytest.mark.parametrize(
+    "extras",
+    [
+        {"crf": 17, "reserved": "x"},
+        {"crf": 17, "prompt": "leaked"},
+        {"crf": 17, "unique_id": 1},
+        {"pix_fmt": "yuv444p"},
+        {"crf": 101},
+        {"crf": -1},
+        {"crf": 17.5},
+        {"crf": True},
+        {"save_metadata": "yes"},
+        {"trim_to_audio": 1},
+    ],
+)
+def test_a_video_option_outside_what_the_format_declares_is_refused(extras: dict[str, Any]) -> None:
+    """The node ends in `**kwargs`, so a name it does not expect reaches it
+    unchecked. Being a scalar is not evidence of being an option."""
+
+    workflow, object_info = _video_combine(extras)
+
+    _assert_error("package_widget_layout", workflow, object_info)
+
+
+def test_a_video_format_this_build_has_not_read_is_refused() -> None:
+    """Its options are declared by its own format file, so reading them under
+    another format's set would accept names this one never had."""
+
+    workflow, object_info = _video_combine({"crf": 17})
+    workflow["nodes"][2]["widgets_values"]["format"] = "image/gif"
+    object_info["VHS_VideoCombine"]["input"]["required"]["format"] = [
+        ["video/h264-mp4", "image/gif"]
+    ]
+
+    _assert_error("package_widget_layout", workflow, object_info)
+
+
+def test_the_players_own_state_is_recognised_and_dropped() -> None:
+    """The node never reads it and the runtime has no input by that name, so it
+    is neither sent nor treated as an unknown input."""
+
+    workflow, object_info = _video_combine(
+        {
+            "crf": 17,
+            "videopreview": {"hidden": False, "paused": False, "params": {"filename": "x.mp4"}},
+        }
+    )
+
+    compiled = compile_comfyui_ui_graph(workflow, object_info)
+
+    assert "videopreview" not in compiled.api_graph["4"]["inputs"]
+    assert compiled.api_graph["4"]["inputs"]["crf"] == 17
+
+
+@pytest.mark.parametrize(
+    "preview",
+    ["not an object", {"hidden": False, "invented": 1}, ["hidden"]],
+)
+def test_player_state_this_build_does_not_know_is_refused(preview: Any) -> None:
+    """It is dropped either way, so this is not about what gets sent. It is
+    about not calling something known furniture while it carries something never
+    seen - which is how a changed layout passes unnoticed."""
+
+    workflow, object_info = _video_combine({"crf": 17, "videopreview": preview})
+
+    _assert_error("package_widget_layout", workflow, object_info)
+
+
+@pytest.mark.parametrize("control", ["", "sometimes", "RANDOMISE"])
+def test_a_named_control_value_that_is_not_a_control_is_refused(control: str) -> None:
+    """The positional path only consumes a real control value; consuming any
+    string here would swallow whatever the graph actually meant."""
+
+    workflow = _named_widgets()
+    workflow["nodes"][0]["widgets_values"]["control_after_generate"] = control
+
+    _assert_error("unknown_widget_value", workflow, _object_info())
+
+
+@pytest.mark.parametrize("control", ["randomize", "Fixed", "INCREMENT", "decrement"])
+def test_a_named_control_value_is_consumed_however_it_is_cased(control: str) -> None:
+    workflow = _named_widgets()
+    workflow["nodes"][0]["widgets_values"]["control_after_generate"] = control
+
+    compiled = compile_comfyui_ui_graph(workflow, _object_info())
+
+    assert compiled.api_graph["1"]["inputs"] == {"label": "camera", "seed": 42}

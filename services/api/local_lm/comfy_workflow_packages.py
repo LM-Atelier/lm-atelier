@@ -683,6 +683,29 @@ def _missing_node_requirements(
     )
 
 
+def _asset_bearing_widgets(record: _NodeRecord) -> object:
+    """The part of a node's saved widgets that names files it would load.
+
+    Normally all of them: a filename in a widget is a file the node opens. A
+    loader that holds several entries and switches them on and off is the
+    exception - an entry left switched off, or at zero strength, keeps its
+    filename so the author can turn it back on, and the node never opens it.
+
+    Counting those made a missing file for a disabled entry block the whole
+    import, over an asset no run would ever read.
+    """
+
+    from .comfy_package_widgets import executable_lora_entries
+
+    entries = executable_lora_entries(
+        record.node_type,
+        record.package_id,
+        record.package_version,
+        record.widgets,
+    )
+    return record.widgets if entries is None else entries
+
+
 def _asset_references(
     records: Sequence[_NodeRecord],
     available_asset_filenames: Collection[str],
@@ -698,7 +721,7 @@ def _asset_references(
     for record in records:
         if record.node_type in {"MarkdownNote", "Note"}:
             continue
-        for value in _strings(record.widgets):
+        for value in _strings(_asset_bearing_widgets(record)):
             candidate = value.strip()
             if not candidate:
                 continue

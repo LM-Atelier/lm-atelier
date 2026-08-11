@@ -5,6 +5,7 @@ from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 
 from .comfy_package_widgets import (
+    PackageClaim,
     PackageWidgetError,
     package_named_widget_inputs,
     package_widget_inputs,
@@ -253,22 +254,37 @@ def _parse_link(value: object) -> _Link:
     )
 
 
-def _drawn_by_package(node: Mapping[str, object]) -> str | None:
-    """The package a node says defines it.
+def _drawn_by_package(node: Mapping[str, object]) -> PackageClaim | None:
+    """The package and revision a node says drew it.
 
     Taken from what the graph records rather than from anything installed. The
     question a layout answers is whose editor code has to be reproduced, and the
     saved graph is what states that; an installed package of the same name is a
     different claim and could disagree.
+
+    Both ids are read because a graph may record either, but a node claiming two
+    that disagree is refused rather than resolved - picking one would decide
+    which package's layout to read by, on no evidence.
+
+    The revision travels with the id and never separately. A layout is a
+    transcription of specific code, so which code drew this node is half the
+    question, and a package name on its own cannot answer it.
     """
 
     properties = node.get("properties")
     if not isinstance(properties, Mapping):
         return None
-    package = properties.get("cnr_id") or properties.get("aux_id")
-    if not isinstance(package, str) or not package:
+    registry = properties.get("cnr_id")
+    repository = properties.get("aux_id")
+    revision = properties.get("ver")
+    claim = PackageClaim(
+        registry if isinstance(registry, str) and registry else None,
+        repository if isinstance(repository, str) and repository else None,
+        revision if isinstance(revision, str) else "",
+    )
+    if claim.registry_id is None and claim.repository_id is None:
         return None
-    return package
+    return claim
 
 
 def _drawn_by(node: Mapping[str, object]) -> str:
@@ -278,14 +294,12 @@ def _drawn_by(node: Mapping[str, object]) -> str:
     than naming none.
     """
 
-    package = _drawn_by_package(node)
-    if package is None:
+    claim = _drawn_by_package(node)
+    if claim is None:
         return " its package"
-    properties = node.get("properties")
-    revision = properties.get("ver") if isinstance(properties, Mapping) else None
-    if isinstance(revision, str) and revision:
-        return f" {package} at {revision}"
-    return f" {package}"
+    if claim.revision:
+        return f" {claim.package_id} at {claim.revision}"
+    return f" {claim.package_id}"
 
 
 def _named_wire_label(node_id: str, node: Mapping[str, object]) -> str:
@@ -792,7 +806,14 @@ def _compile_node_inputs(
         # The control that follows a seed is drawn by the editor and applied
         # before a graph is ever saved, so it is consumed rather than sent.
         if named is not None:
-            if isinstance(named.get(_CONTROL_WIDGET), str):
+            # The same rule the positional path applies. Consuming any string
+            # would swallow a value that is not a control at all and quietly
+            # drop whatever the graph meant by it.
+            control_value = named.get(_CONTROL_WIDGET)
+            if (
+                isinstance(control_value, str)
+                and control_value.casefold() in _CONTROL_AFTER_GENERATE
+            ):
                 taken.add(_CONTROL_WIDGET)
             continue
         if cursor >= len(values):
@@ -805,7 +826,7 @@ def _compile_node_inputs(
         if unread:
             try:
                 extras = package_named_widget_inputs(
-                    str(node["type"]), _drawn_by_package(node), unread
+                    str(node["type"]), _drawn_by_package(node), result, unread
                 )
             except PackageWidgetError as exc:
                 raise WorkflowCompilationError(exc.code, f"node {node_id}: {exc}") from exc
