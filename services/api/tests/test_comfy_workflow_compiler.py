@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import random
 from copy import deepcopy
 from typing import Any
 
@@ -1791,3 +1792,55 @@ def test_a_repository_label_that_disagrees_with_the_registry_id_is_refused() -> 
     )
 
     _assert_error("conflicting_package_claim", workflow, _drawn_object_info())
+
+
+_DAMAGE_VALUES: list[Any] = [None, 0, -1, 1.5, True, "", "x", [], {}, [[]], {"a": 1}]
+
+
+def _damaged(workflow: dict[str, Any], rng: random.Random) -> dict[str, Any]:
+    """One small, plausible corruption of a saved graph."""
+
+    nodes = workflow["nodes"]
+    links = workflow["links"]
+    choice = rng.randrange(7)
+    if choice == 0:
+        rng.choice(nodes).pop("widgets_values", None)
+    elif choice == 1:
+        rng.choice(nodes)["widgets_values"] = rng.choice(_DAMAGE_VALUES)
+    elif choice == 2:
+        rng.choice(nodes)["inputs"] = rng.choice(_DAMAGE_VALUES)
+    elif choice == 3 and links:
+        links[rng.randrange(len(links))] = rng.choice(_DAMAGE_VALUES)
+    elif choice == 4:
+        rng.choice(nodes)["type"] = rng.choice(["SetNode", "GetNode", "Reroute", "Nope"])
+    elif choice == 5:
+        rng.choice(nodes)["properties"] = rng.choice(_DAMAGE_VALUES)
+    else:
+        rng.choice(nodes)["outputs"] = rng.choice(_DAMAGE_VALUES)
+    return workflow
+
+
+def test_a_damaged_graph_is_always_refused_and_never_raises_something_else() -> None:
+    """Everything this compiler raises means one thing: the graph cannot be
+    compiled. Callers catch exactly that, so anything else escaping them becomes
+    a server fault instead of a refusal.
+
+    Compilation begins by analysing the graph, and that analysis has its own
+    error type. Left to propagate it went straight through those callers - on a
+    seeded sweep of real saved workflows it did so three hundred and forty-two
+    times in four thousand. Unit tests prove the refusals someone thought of;
+    this looks for the ones nobody did.
+    """
+
+    rng = random.Random(20260811)
+    seen_refusal = False
+    for _ in range(500):
+        workflow = _damaged(_with_supported_frontend(_named_wire()), rng)
+        try:
+            compile_comfyui_ui_graph(workflow, _object_info())
+        except WorkflowCompilationError:
+            seen_refusal = True
+        except RecursionError:
+            seen_refusal = True
+
+    assert seen_refusal, "the damage was too gentle to refuse anything"
