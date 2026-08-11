@@ -1763,3 +1763,31 @@ def test_a_value_set_twice_in_one_nesting_is_still_ambiguous() -> None:
     workflow["links"].append([101, 1, 0, "inner:12", 0, "IMAGE"])
 
     _assert_error("duplicate_named_wire", workflow, _object_info())
+
+
+def test_a_repository_label_alone_does_not_authorize_a_layout() -> None:
+    """The registry id is the one a package requirement is recorded under, so it
+    is the one that can be checked against what was reviewed and installed. A
+    repository label is carried by the graph and nothing downstream treats it as
+    a requirement, so a node offering only that is left to the ordinary refusal
+    rather than reading its widgets."""
+
+    workflow = _power_loras(
+        {"on": True, "lora": "one.safetensors", "strength": 1},
+        properties={"aux_id": "rgthree/rgthree-comfy", "ver": "1.0.2605082257"},
+    )
+
+    _assert_error("package_serialized_widgets", workflow, _drawn_object_info())
+
+
+def test_a_repository_label_that_disagrees_with_the_registry_id_is_refused() -> None:
+    workflow = _power_loras(
+        {"on": True, "lora": "one.safetensors", "strength": 1},
+        properties={
+            "cnr_id": "rgthree-comfy",
+            "aux_id": "someone/else",
+            "ver": "1.0.2605082257",
+        },
+    )
+
+    _assert_error("conflicting_package_claim", workflow, _drawn_object_info())

@@ -79,11 +79,19 @@ _VIDEO_HELPER_SUITE = frozenset(
     {"comfyui-videohelpersuite", "Kosinkadink/ComfyUI-VideoHelperSuite"}
 )
 
-# rgthree draws the loader in `web/comfyui/power_lora_loader.js`. These two
-# revisions ship that file byte-identically at sha256
-# 1de8669ab958806e26e4f0ad68e9b06e376fa50cc53d574f7d20daca529559b1, which is
-# what makes them one audited layout rather than two assumed to match. A
-# revision is admitted here only once that file has been read at it.
+# rgthree draws the loader in `web/comfyui/power_lora_loader.js` and reads it
+# back in `py/power_lora_loader.py`. Both revisions below ship both files
+# byte-identically:
+#
+#   web/comfyui/power_lora_loader.js
+#     1de8669ab958806e26e4f0ad68e9b06e376fa50cc53d574f7d20daca529559b1
+#   py/power_lora_loader.py
+#     9b0eee007dc4cdff8e54e03e14c72049b5d07a2aba02d227e982361f51f15f2c
+#
+# Both sides on purpose. A matching serializer shows two revisions write the
+# same shape and says nothing about what either does with it, so admitting one
+# on the strength of the other's layout alone would be assuming the half nobody
+# read. A revision is admitted only once both files have been read at it.
 _RGTHREE_AUDITED = frozenset({"1.0.2605082257", "6b76ee6f2c5a007710b5a16f97c94330d6ecc871"})
 
 # VideoHelperSuite derives the combiner's extra widgets from the format files in
@@ -175,24 +183,29 @@ def package_named_widget_inputs(
 def _names(claim: PackageClaim | None, aliases: frozenset[str], node_type: str) -> bool:
     """Whether the graph's claim names this package, and only this package.
 
-    A node carrying one id this package answers to and one it does not is not a
-    match with a stray field - it is two statements about which code drew the
-    node that cannot both be true. Reading it by either one would be choosing
-    which to believe.
+    The registry id has to be there and has to match. It is the id a package
+    requirement is recorded under, so it is the one that can be checked against
+    what was reviewed and installed; a repository id is a label the graph
+    carries and nothing downstream treats as a requirement. A node offering
+    only the label is not authorizing anything, and is left to the ordinary
+    refusal.
+
+    The repository id still has to agree where the graph states one. A node
+    carrying one id this package answers to and one it does not is not a match
+    with a stray field - it is two statements about which code drew the node
+    that cannot both be true, and reading it by either would be choosing which
+    to believe.
     """
 
-    if claim is None:
+    if claim is None or not claim.registry_id:
         return False
-    stated = {value for value in (claim.registry_id, claim.repository_id) if value}
-    if not stated:
+    if claim.registry_id not in aliases:
         return False
-    recognised = stated & aliases
-    if not recognised:
-        return False
-    if recognised != stated:
+    if claim.repository_id and claim.repository_id not in aliases:
         raise PackageWidgetError(
             "conflicting_package_claim",
-            f"{node_type} names {' and '.join(sorted(stated))}, which are different packages",
+            f"{node_type} names {claim.registry_id} and {claim.repository_id},"
+            " which are different packages",
         )
     return True
 
