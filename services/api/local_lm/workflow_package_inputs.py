@@ -22,8 +22,9 @@ here rather than trusted to the shape of an ordinary graph:
   to stop carrying it.  Any other node advertising an upload input is therefore
   counted as a second source.
 * A subgraph the author bypassed still expands, and expansion does not carry the
-  container's mode inward.  Disabled scopes are dropped before selection so a
-  disabled LoadImage is never chosen.
+  container's mode inward, at any nesting depth.  Disabled scopes are therefore
+  computed from the graph as saved and excluded from *selection* - never from
+  the graph itself, whose links still name those nodes.
 """
 
 from __future__ import annotations
@@ -46,6 +47,13 @@ _SOURCE_IMAGE_SLOT = 0
 # Expansion names an inner node "<container>:<inner>"; it must match the
 # compiler's separator or a bypassed container's contents look top-level.
 _SCOPE_SEPARATOR = ":"
+# Matches the expander's own nesting limit, so walking definitions cannot run
+# further than the graph it is describing.
+_MAX_SCOPE_DEPTH = 8
+# ComfyUI marks a widget whose value is a file the author supplied with an
+# "<kind>_upload" option: image_upload, video_upload, audio_upload, and whatever
+# a package invents next.
+_UPLOAD_CONTROL_SUFFIX = "_upload"
 _WIDGET_TYPES = frozenset({"BOOLEAN", "COMBO", "FLOAT", "INT", "STRING"})
 
 
@@ -145,11 +153,17 @@ def prepare_workflow_package_compilation(
     # A node's own mode survives expansion; the mode of the container it came
     # from does not.  Without this, a LoadImage inside a subgraph the author
     # bypassed reads as live and can be chosen as the source.
+    #
+    # This narrows what the *selection* looks at and deliberately leaves the
+    # graph alone.  Removing the nodes instead would strand every link that
+    # named them and turn an ordinary wired-but-bypassed subgraph into a
+    # dangling_link compile failure, which is a worse fault than the one being
+    # fixed: the author's file would be called malformed when it is not.
     disabled_scopes = _disabled_scope_prefixes(ui_graph)
-    nodes = [node for node in nodes if not _is_in_disabled_scope(node, disabled_scopes)]
+    live_nodes = [node for node in nodes if not _is_in_disabled_scope(node, disabled_scopes)]
     sources = [
         node
-        for node in nodes
+        for node in live_nodes
         if isinstance(node, Mapping)
         and node.get("type") == _SOURCE_NODE_TYPE
         and node.get("mode", 0) == 0
@@ -172,9 +186,9 @@ def prepare_workflow_package_compilation(
         )
     source = sources[0]
     _require_core_load_image(source)
-    _require_no_second_uploaded_source(nodes, object_info, source)
+    _require_no_second_uploaded_source(live_nodes, object_info, source)
     source_id = _node_identifier(source)
-    output_node_ids = _executable_output_node_ids(nodes, object_info)
+    output_node_ids = _executable_output_node_ids(live_nodes, object_info)
     link_input_names = _link_input_names_by_node_type(object_info)
     load_image_info = object_info.get(_SOURCE_NODE_TYPE)
     if not isinstance(load_image_info, Mapping):
@@ -325,21 +339,52 @@ def _node_identifier(node: Mapping[str, object]) -> str:
 
 
 def _disabled_scope_prefixes(ui_graph: Mapping[str, Any]) -> tuple[str, ...]:
-    """Identity prefixes of containers the author bypassed or muted.
+    """Identity prefixes of every scope the author bypassed or muted.
 
     Read from the graph as saved, before expansion, because expansion inlines a
     subgraph's contents without carrying the instance's mode inward.
+
+    Nesting is the part that is easy to get wrong.  Expansion namespaces each
+    level separately, so a disabled instance two levels down owns the prefix
+    "<outer instance>:<inner instance>:" - built from the path taken to reach
+    it, not from its own id.  One definition can also be instantiated several
+    times under different ids, so only a path can name the disabled copy without
+    also naming its live siblings.
     """
-    nodes = ui_graph.get("nodes")
-    if not isinstance(nodes, Sequence) or isinstance(nodes, str | bytes):
-        return ()
+    definitions = ui_graph.get("definitions")
+    subgraphs: dict[str, Mapping[str, Any]] = {}
+    if isinstance(definitions, Mapping):
+        declared = definitions.get("subgraphs")
+        if isinstance(declared, Sequence) and not isinstance(declared, str | bytes):
+            for definition in declared:
+                if isinstance(definition, Mapping) and definition.get("id") is not None:
+                    subgraphs[str(definition["id"])] = definition
+
     prefixes: list[str] = []
-    for node in nodes:
-        if not isinstance(node, Mapping) or node.get("mode", 0) == 0:
-            continue
-        value = node.get("id")
-        if not isinstance(value, bool) and isinstance(value, int | str):
-            prefixes.append(f"{value}{_SCOPE_SEPARATOR}")
+
+    def walk(nodes: object, prefix: str, seen: tuple[str, ...]) -> None:
+        if len(seen) > _MAX_SCOPE_DEPTH:
+            return
+        if not isinstance(nodes, Sequence) or isinstance(nodes, str | bytes):
+            return
+        for node in nodes:
+            if not isinstance(node, Mapping):
+                continue
+            value = node.get("id")
+            if isinstance(value, bool) or not isinstance(value, int | str):
+                continue
+            scope = f"{prefix}{value}{_SCOPE_SEPARATOR}"
+            if node.get("mode", 0) != 0:
+                # Everything beneath a disabled node is disabled with it, so
+                # there is nothing further to learn by descending.  For a plain
+                # node the prefix simply matches nothing, which is harmless.
+                prefixes.append(scope)
+                continue
+            definition = subgraphs.get(str(node.get("type")))
+            if definition is not None and str(node.get("type")) not in seen:
+                walk(definition.get("nodes"), scope, (*seen, str(node.get("type"))))
+
+    walk(ui_graph.get("nodes"), "", ())
     return tuple(prefixes)
 
 
@@ -405,9 +450,16 @@ def _declares_upload_input(node_info: Mapping[str, object]) -> bool:
                 and not isinstance(spec, str | bytes)
                 and len(spec) > 1
                 and isinstance(spec[1], Mapping)
+                # Any "<kind>_upload" control, rather than a list of the kinds
+                # that happen to exist today.  A package is free to advertise
+                # its own, and a hardcoded list would silently let exactly the
+                # unfamiliar loader through - which is the case most likely to
+                # be carrying a path from someone else's machine.
                 and any(
-                    spec[1].get(control) is True
-                    for control in ("image_upload", "video_upload", "audio_upload")
+                    isinstance(control, str)
+                    and control.endswith(_UPLOAD_CONTROL_SUFFIX)
+                    and value is True
+                    for control, value in spec[1].items()
                 )
             ):
                 return True

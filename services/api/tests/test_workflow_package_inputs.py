@@ -635,7 +635,7 @@ def test_a_second_uploaded_file_of_another_class_is_ambiguous() -> None:
     object_info = _object_info()
     object_info["LoadImageOutput"] = {
         "python_module": "nodes",
-        "input": {"required": {"image": [["a.png"], {"image_upload": True}]}},
+        "input": {"required": {"image": [["a.png", "author-extra.png"], {"image_upload": True}]}},
         "input_order": {"required": ["image"]},
         "output": ["IMAGE", "MASK"],
     }
@@ -783,3 +783,355 @@ def test_the_modern_combo_options_upload_contract_binds() -> None:
 
     assert compiled.api_graph["1"]["inputs"]["image"] == "author.png"
     assert bound["1"]["inputs"]["image"] == "${input_image}"
+
+
+def _subgraph_graph(*, inner_mode: int, nested: bool) -> dict[str, Any]:
+    """A graph whose only LoadImage sits inside a subgraph, optionally nested.
+
+    `inner_mode` is the mode of the instance holding it, so one builder covers
+    both the disabled case and its live control.
+    """
+    inner = {
+        "id": "inner",
+        "name": "Source",
+        "nodes": [
+            {
+                "id": 1,
+                "type": "LoadImage",
+                "mode": 0,
+                "inputs": [],
+                "outputs": [{"name": "IMAGE", "type": "IMAGE", "links": []}],
+                "widgets_values": ["author.png", "image"],
+            }
+        ],
+        "links": [],
+        "inputs": [],
+        "outputs": [],
+    }
+    outer = {
+        "id": "outer",
+        "name": "Wrapper",
+        "nodes": [{"id": 7, "type": "inner", "mode": inner_mode, "inputs": [], "outputs": []}],
+        "links": [],
+        "inputs": [],
+        "outputs": [],
+    }
+    top_type = "outer" if nested else "inner"
+    top_mode = 0 if nested else inner_mode
+    return {
+        "version": 0.4,
+        "definitions": {"subgraphs": [inner, outer] if nested else [inner]},
+        "nodes": [
+            {"id": 4, "type": top_type, "mode": top_mode, "inputs": [], "outputs": []},
+            {
+                "id": 2,
+                "type": "SaveImage",
+                "mode": 0,
+                "inputs": [{"name": "images", "type": "IMAGE", "link": None}],
+                "outputs": [],
+                "widgets_values": [],
+            },
+        ],
+        "links": [],
+    }
+
+
+def test_a_bypassed_subgraph_nested_inside_another_is_still_not_a_source() -> None:
+    """Depth is the whole difficulty, so the test has to have some.
+
+    Expansion namespaces each level separately, so a disabled instance two
+    levels down is named "<outer>:<inner>:<node>" and a scope computed from
+    top-level ids alone never matches it.  A test at depth one passes against
+    an implementation that only reads the top level, which is why it cannot be
+    the only test.
+    """
+    graph = _subgraph_graph(inner_mode=4, nested=True)
+
+    with pytest.raises(WorkflowPackageInputError) as raised:
+        prepare_workflow_package_compilation(graph, _object_info(), Operation.IMAGE_TO_IMAGE)
+
+    assert raised.value.code == "workflow_source_input_missing"
+
+
+def test_a_live_subgraph_nested_inside_another_still_supplies_the_source() -> None:
+    """The control for the test above, differing only in the instance's mode.
+
+    Without it, refusing every nested subgraph would pass just as well.
+    """
+    graph = _subgraph_graph(inner_mode=0, nested=True)
+
+    prepared = prepare_workflow_package_compilation(
+        graph,
+        _object_info(),
+        Operation.IMAGE_TO_IMAGE,
+    )
+
+    assert prepared.source_node_id == "4:7:1"
+    assert prepared.source_value == "author.png"
+
+
+def test_a_wired_bypassed_subgraph_still_compiles() -> None:
+    """Excluding a scope from selection must not excise it from the graph.
+
+    Dropping the nodes leaves every link that named them pointing at nothing,
+    and the compiler rightly calls that a dangling link - so a graph that merely
+    contains a bypassed-but-wired subgraph would be reported as malformed when
+    the author's file is fine.
+
+    The bypassed branch also ends in an output node, which must not become a
+    destination the source is required to reach: the author turned it off.
+    """
+    graph = _graph()
+    graph["definitions"] = {
+        "subgraphs": [
+            {
+                "id": "side",
+                "name": "Side branch",
+                "nodes": [
+                    {
+                        "id": 5,
+                        "type": "EmptyImage",
+                        "mode": 0,
+                        "inputs": [],
+                        "outputs": [{"name": "IMAGE", "type": "IMAGE", "links": [21]}],
+                        "widgets_values": [64, 64],
+                    },
+                    {
+                        "id": 6,
+                        "type": "PreviewImage",
+                        "mode": 0,
+                        "inputs": [{"name": "images", "type": "IMAGE", "link": 21}],
+                        "outputs": [],
+                        "widgets_values": [],
+                    },
+                ],
+                "links": [[21, 5, 0, 6, 0, "IMAGE"]],
+                "inputs": [],
+                "outputs": [],
+            }
+        ]
+    }
+    graph["nodes"].append({"id": 9, "type": "side", "mode": 4, "inputs": [], "outputs": []})
+    object_info = _object_info()
+    object_info["EmptyImage"] = {
+        "input": {"required": {"width": ["INT", {}], "height": ["INT", {}]}},
+        "input_order": {"required": ["width", "height"]},
+        "output": ["IMAGE"],
+    }
+    object_info["PreviewImage"] = {
+        "input": {"required": {"images": ["IMAGE"]}},
+        "input_order": {"required": ["images"]},
+        "output": [],
+        "output_node": True,
+    }
+
+    prepared = prepare_workflow_package_compilation(
+        graph,
+        object_info,
+        Operation.IMAGE_TO_IMAGE,
+    )
+    compiled = compile_comfyui_ui_graph(prepared.ui_graph, prepared.object_info)
+
+    # The bypassed branch survives into the compiled graph, and is not a
+    # required destination for the source.
+    assert "9:5" in compiled.api_graph
+    assert prepared.output_node_ids == ("2",)
+    assert prepared.bind(compiled.api_graph)["1"]["inputs"]["image"] == "${input_image}"
+
+
+def test_a_downstream_non_zero_output_slot_is_still_followed() -> None:
+    """The slot restriction belongs to the source alone.
+
+    Applying it everywhere would refuse the ordinary case of a mid-graph node
+    whose second output carries the picture onward, so the restriction has to be
+    pinned as source-only rather than merely present.
+    """
+    graph = {
+        "version": 0.4,
+        "nodes": [
+            {
+                "id": 1,
+                "type": "LoadImage",
+                "mode": 0,
+                "inputs": [],
+                "outputs": [
+                    {"name": "IMAGE", "type": "IMAGE", "links": [7]},
+                    {"name": "MASK", "type": "MASK", "links": []},
+                ],
+                "widgets_values": ["author.png", "image"],
+            },
+            {
+                "id": 3,
+                "type": "Splitter",
+                "mode": 0,
+                "inputs": [{"name": "image", "type": "IMAGE", "link": 7}],
+                "outputs": [
+                    {"name": "discard", "type": "IMAGE", "links": []},
+                    {"name": "keep", "type": "IMAGE", "links": [8]},
+                ],
+                "widgets_values": [],
+            },
+            {
+                "id": 2,
+                "type": "SaveImage",
+                "mode": 0,
+                "inputs": [{"name": "images", "type": "IMAGE", "link": 8}],
+                "outputs": [],
+                "widgets_values": [],
+            },
+        ],
+        "links": [[7, 1, 0, 3, 0, "IMAGE"], [8, 3, 1, 2, 0, "IMAGE"]],
+    }
+    object_info = _object_info()
+    object_info["Splitter"] = {
+        "input": {"required": {"image": ["IMAGE"]}},
+        "input_order": {"required": ["image"]},
+        "output": ["IMAGE", "IMAGE"],
+    }
+
+    prepared = prepare_workflow_package_compilation(
+        graph,
+        object_info,
+        Operation.IMAGE_TO_IMAGE,
+    )
+    compiled = compile_comfyui_ui_graph(prepared.ui_graph, prepared.object_info)
+
+    assert prepared.bind(compiled.api_graph)["1"]["inputs"]["image"] == "${input_image}"
+
+
+@pytest.mark.parametrize(
+    "control",
+    ["image_upload", "video_upload", "audio_upload", "file_upload", "document_upload"],
+)
+def test_any_upload_control_marks_a_second_supplied_file(control: str) -> None:
+    """A package may name its own upload control.
+
+    Listing the kinds that exist today would let exactly the unfamiliar loader
+    through, and an unfamiliar loader is the one most likely to be carrying a
+    path from the author's machine.
+    """
+    graph = _graph()
+    graph["nodes"].append(
+        {
+            "id": 3,
+            "type": "PackageLoader",
+            "mode": 0,
+            "inputs": [],
+            "outputs": [{"name": "IMAGE", "type": "IMAGE", "links": []}],
+            "widgets_values": ["author-reference.png", "file"],
+        }
+    )
+    object_info = _object_info()
+    object_info["PackageLoader"] = {
+        "input": {"required": {"path": [["author-reference.png"], {control: True}]}},
+        "input_order": {"required": ["path"]},
+        "output": ["IMAGE"],
+    }
+
+    with pytest.raises(WorkflowPackageInputError) as raised:
+        prepare_workflow_package_compilation(graph, object_info, Operation.IMAGE_TO_IMAGE)
+
+    assert raised.value.code == "workflow_source_input_ambiguous"
+
+
+def test_an_optional_upload_input_counts_as_a_second_supplied_file() -> None:
+    """Optional is where a second loader is most likely to be declared."""
+    graph = _graph()
+    graph["nodes"].append(
+        {
+            "id": 3,
+            "type": "OptionalLoader",
+            "mode": 0,
+            "inputs": [],
+            "outputs": [{"name": "IMAGE", "type": "IMAGE", "links": []}],
+            "widgets_values": ["author-extra.png", "image"],
+        }
+    )
+    object_info = _object_info()
+    object_info["OptionalLoader"] = {
+        "input": {"optional": {"image": [["author-extra.png"], {"image_upload": True}]}},
+        "input_order": {"optional": ["image"]},
+        "output": ["IMAGE"],
+    }
+
+    with pytest.raises(WorkflowPackageInputError) as raised:
+        prepare_workflow_package_compilation(graph, object_info, Operation.IMAGE_TO_IMAGE)
+
+    assert raised.value.code == "workflow_source_input_ambiguous"
+
+
+def test_an_upload_control_that_is_not_enabled_is_not_a_second_source() -> None:
+    """The flag has to be true, not merely present."""
+    graph = _graph()
+    graph["nodes"].append(
+        {
+            "id": 3,
+            "type": "QuietLoader",
+            "mode": 0,
+            "inputs": [],
+            "outputs": [{"name": "IMAGE", "type": "IMAGE", "links": []}],
+            "widgets_values": ["preset.png"],
+        }
+    )
+    object_info = _object_info()
+    object_info["QuietLoader"] = {
+        "input": {"required": {"image": [["preset.png"], {"image_upload": False}]}},
+        "input_order": {"required": ["image"]},
+        "output": ["IMAGE"],
+    }
+
+    prepared = prepare_workflow_package_compilation(
+        graph,
+        object_info,
+        Operation.IMAGE_TO_IMAGE,
+    )
+    compiled = compile_comfyui_ui_graph(prepared.ui_graph, prepared.object_info)
+
+    assert prepared.bind(compiled.api_graph)["1"]["inputs"]["image"] == "${input_image}"
+
+
+def test_a_second_uploader_inside_a_bypassed_scope_is_not_counted() -> None:
+    """Selection and the second-source rule must agree on what is live.
+
+    A disabled uploader is not a second supplied file, and refusing on one would
+    reject a graph whose author had already turned it off.
+    """
+    graph = _graph()
+    graph["definitions"] = {
+        "subgraphs": [
+            {
+                "id": "extra",
+                "name": "Disabled extra",
+                "nodes": [
+                    {
+                        "id": 5,
+                        "type": "LoadImageOutput",
+                        "mode": 0,
+                        "inputs": [],
+                        "outputs": [{"name": "IMAGE", "type": "IMAGE", "links": []}],
+                        "widgets_values": ["author-extra.png", "image"],
+                    }
+                ],
+                "links": [],
+                "inputs": [],
+                "outputs": [],
+            }
+        ]
+    }
+    graph["nodes"].append({"id": 9, "type": "extra", "mode": 4, "inputs": [], "outputs": []})
+    object_info = _object_info()
+    object_info["LoadImageOutput"] = {
+        "python_module": "nodes",
+        "input": {"required": {"image": [["a.png", "author-extra.png"], {"image_upload": True}]}},
+        "input_order": {"required": ["image"]},
+        "output": ["IMAGE", "MASK"],
+    }
+
+    prepared = prepare_workflow_package_compilation(
+        graph,
+        object_info,
+        Operation.IMAGE_TO_IMAGE,
+    )
+    compiled = compile_comfyui_ui_graph(prepared.ui_graph, prepared.object_info)
+
+    assert prepared.bind(compiled.api_graph)["1"]["inputs"]["image"] == "${input_image}"
