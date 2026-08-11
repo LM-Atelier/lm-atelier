@@ -247,6 +247,27 @@ def _parse_link(value: object) -> _Link:
     )
 
 
+def _drawn_by(node: Mapping[str, object]) -> str:
+    """The package a node says defines it, for a refusal that can be acted on.
+
+    Taken from what the graph records rather than from anything installed: the
+    question is which package's editor code would have to be reproduced, and the
+    saved graph is what states that. Empty when the graph does not say, because
+    naming the wrong package is worse than naming none.
+    """
+
+    properties = node.get("properties")
+    if not isinstance(properties, Mapping):
+        return " its package"
+    package = properties.get("cnr_id") or properties.get("aux_id")
+    if not isinstance(package, str) or not package:
+        return " its package"
+    revision = properties.get("ver")
+    if isinstance(revision, str) and revision:
+        return f" {package} at {revision}"
+    return f" {package}"
+
+
 def _named_wire_label(node_id: str, node: Mapping[str, object]) -> str:
     """The label a named wire is written or read under.
 
@@ -736,6 +757,19 @@ def _compile_node_inputs(
         ):
             cursor += 1
     if cursor != len(values):
+        # A leftover scalar is a mapping this compiler got wrong. A leftover
+        # object is something else entirely: a widget the node's own package
+        # draws and serializes, whose layout lives in that package's editor code
+        # and is described nowhere the runtime can be asked. Both must refuse,
+        # but only one of them is about this compiler, and saying "cannot be
+        # mapped safely" for the other sends someone looking for a defect here.
+        drawn = next((value for value in values[cursor:] if isinstance(value, Mapping)), None)
+        if drawn is not None:
+            raise WorkflowCompilationError(
+                "package_serialized_widgets",
+                f"node {node_id} keeps its {node['type']} settings in a layout"
+                f"{_drawn_by(node)} defines, which only that package can read",
+            )
         raise WorkflowCompilationError(
             "unsupported_widget_values",
             f"node {node_id} has widget values that cannot be mapped safely",
