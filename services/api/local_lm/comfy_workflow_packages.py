@@ -44,13 +44,20 @@ KNOWN_MODEL_SUFFIXES = SUPPORTED_MODEL_SUFFIXES | BLOCKED_MODEL_SUFFIXES | froze
 # package is usually a node whose package we failed to identify, and treating
 # that whole class as frontend furniture would silently drop real
 # dependencies.
+# Deliberately not here: `Node Collector (rgthree)`. It also registers nothing,
+# but it gathers several connections into one output, so it carries a wire the
+# way `Reroute` does. Listing it would drop the edges it stands for, which is a
+# different graph rather than a smaller one.
 FRONTEND_SYSTEM_NODE_TYPES = frozenset(
     {
         "MarkdownNote",
         "Note",
         "PrimitiveNode",
         "Reroute",
+        "Bookmark (rgthree)",
+        "Fast Actions Button (rgthree)",
         "Fast Groups Bypasser (rgthree)",
+        "Fast Groups Muter (rgthree)",
         "GetNode",
         "Label (rgthree)",
         "Mute / Bypass Relay (rgthree)",

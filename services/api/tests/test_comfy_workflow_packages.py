@@ -687,3 +687,40 @@ def test_a_loader_this_build_cannot_read_still_reports_every_filename() -> None:
     )
 
     assert [asset.filename for asset in analysis.asset_references] == ["held.safetensors"]
+
+
+@pytest.mark.parametrize(
+    "node_type",
+    [
+        "Fast Groups Muter (rgthree)",
+        "Fast Actions Button (rgthree)",
+        "Bookmark (rgthree)",
+    ],
+)
+def test_an_editor_control_is_not_a_node_the_runtime_must_provide(node_type: str) -> None:
+    """These set other nodes' modes, or move the view, while a graph is being
+    edited. The runtime registers none of them, so counting one as missing sends
+    someone to install a package that is already installed and could not have
+    helped - the muter especially, which sits beside a bypasser that was already
+    named here.
+    """
+
+    analysis = analyze_comfyui_workflow_package(
+        workflow(
+            nodes=[
+                node(1, node_type, package="rgthree-comfy", version="1.0.2605082257"),
+                node(2, "KSampler"),
+            ]
+        ),
+        available_node_types={"KSampler"},
+    )
+
+    assert analysis.missing_node_types == ()
+    assert node_type in analysis.frontend_node_types
+
+
+def test_a_collector_carries_a_wire_and_stays_a_runtime_dependency() -> None:
+    """It registers nothing either, but it gathers several connections into one
+    output. Calling it furniture would drop the edges it stands for."""
+
+    assert "Node Collector (rgthree)" not in FRONTEND_SYSTEM_NODE_TYPES
