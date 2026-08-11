@@ -31,6 +31,15 @@ KNOWN_MODEL_SUFFIXES = SUPPORTED_MODEL_SUFFIXES | BLOCKED_MODEL_SUFFIXES | froze
 # muted or bypassed carries that mode itself - so discarding the controls
 # cannot disturb what they applied.
 #
+# The KJNodes pair are named wires. `SetNode` labels the link feeding it and
+# `GetNode` re-emits that link elsewhere in the graph, which is how a large
+# share of published workflows avoid drawing a wire across the canvas. Both are
+# implemented entirely in that package's JavaScript, so no runtime can ever
+# report them - counting them as runtime requirements made every graph that uses
+# the idiom unimportable, and made the package that ships their JavaScript look
+# like the thing that failed to load. Unlike the entries above they carry
+# connectivity, so the compiler resolves them rather than discarding them.
+#
 # Named individually rather than by a rule like "no cnr_id". A node without a
 # package is usually a node whose package we failed to identify, and treating
 # that whole class as frontend furniture would silently drop real
@@ -42,9 +51,11 @@ FRONTEND_SYSTEM_NODE_TYPES = frozenset(
         "PrimitiveNode",
         "Reroute",
         "Fast Groups Bypasser (rgthree)",
+        "GetNode",
         "Label (rgthree)",
         "Mute / Bypass Relay (rgthree)",
         "Mute / Bypass Repeater (rgthree)",
+        "SetNode",
     }
 )
 

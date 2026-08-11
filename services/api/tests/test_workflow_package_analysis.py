@@ -329,7 +329,7 @@ async def test_a_verified_registry_package_can_resolve_before_its_nodes_are_load
                 archive_sha256="c" * 64,
                 manifest_sha256="d" * 64,
                 installed_path="lm-atelier-registry_kjnodes",
-                node_types_json=["GetNode"],
+                node_types_json=["ImageResizeKJ"],
                 pip_dependencies_json=[],
                 review_json={"review_required": True},
                 trusted=True,
@@ -342,7 +342,7 @@ async def test_a_verified_registry_package_can_resolve_before_its_nodes_are_load
         return {"KSampler": {}}
 
     async def launchable_packages() -> dict[tuple[str, str], frozenset[str]]:
-        return {("comfyui-kjnodes", "1.2.3"): frozenset({"GetNode"})}
+        return {("comfyui-kjnodes", "1.2.3"): frozenset({"ImageResizeKJ"})}
 
     monkeypatch.setattr(
         app.state.services.engines.media,
@@ -359,7 +359,9 @@ async def test_a_verified_registry_package_can_resolve_before_its_nodes_are_load
     response = await client.post(
         "/api/workflows/packages/analyze",
         json={
-            "ui_graph": _workflow([_node(1, "GetNode", package="comfyui-kjnodes", version="1.2.3")])
+            "ui_graph": _workflow(
+                [_node(1, "ImageResizeKJ", package="comfyui-kjnodes", version="1.2.3")]
+            )
         },
     )
 
@@ -381,8 +383,8 @@ async def test_launchable_nodes_cannot_be_laundered_between_registry_packages(
 
     async def launchable_packages() -> dict[tuple[str, str], frozenset[str]]:
         return {
-            ("comfyui-kjnodes", "1.2.3"): frozenset({"SetNode"}),
-            ("another-package", "1.2.3"): frozenset({"GetNode"}),
+            ("comfyui-kjnodes", "1.2.3"): frozenset({"ColorMatch"}),
+            ("another-package", "1.2.3"): frozenset({"ImageResizeKJ"}),
         }
 
     monkeypatch.setattr(
@@ -405,13 +407,15 @@ async def test_launchable_nodes_cannot_be_laundered_between_registry_packages(
     response = await client.post(
         "/api/workflows/packages/analyze",
         json={
-            "ui_graph": _workflow([_node(1, "GetNode", package="comfyui-kjnodes", version="1.2.3")])
+            "ui_graph": _workflow(
+                [_node(1, "ImageResizeKJ", package="comfyui-kjnodes", version="1.2.3")]
+            )
         },
     )
 
     assert response.status_code == 200
     payload = response.json()
-    assert payload["missing_node_types"] == ["GetNode"]
+    assert payload["missing_node_types"] == ["ImageResizeKJ"]
     assert payload["custom_packages"][0]["locally_resolved"] is False
     assert payload["ready"] is False
 
@@ -436,7 +440,7 @@ async def test_a_reviewed_manual_package_can_resolve_before_its_nodes_are_loaded
                 tree_hash="b" * 40,
                 trusted=True,
                 active=True,
-                security_json={"node_types": ["GetNode"]},
+                security_json={"node_types": ["ImageResizeKJ"]},
             )
         )
         session.commit()
@@ -448,7 +452,7 @@ async def test_a_reviewed_manual_package_can_resolve_before_its_nodes_are_loaded
         return {}
 
     async def manual_packages() -> dict[tuple[str, str], frozenset[str]]:
-        return {("comfyui-kjnodes", revision): frozenset({"GetNode"})}
+        return {("comfyui-kjnodes", revision): frozenset({"ImageResizeKJ"})}
 
     monkeypatch.setattr(
         app.state.services.engines.media,
@@ -471,7 +475,7 @@ async def test_a_reviewed_manual_package_can_resolve_before_its_nodes_are_loaded
         "/api/workflows/packages/analyze",
         json={
             "ui_graph": _workflow(
-                [_node(1, "GetNode", package="comfyui-kjnodes", version=revision)]
+                [_node(1, "ImageResizeKJ", package="comfyui-kjnodes", version=revision)]
             )
         },
     )
@@ -491,15 +495,15 @@ async def test_reviewed_manual_nodes_cannot_be_laundered_between_packages(
     revision = "c" * 40
 
     async def object_info() -> dict[str, Any]:
-        return {"GetNode": {}}
+        return {"ImageResizeKJ": {}}
 
     async def no_registry_packages() -> dict[tuple[str, str], frozenset[str]]:
         return {}
 
     async def manual_packages() -> dict[tuple[str, str], frozenset[str]]:
         return {
-            ("comfyui-kjnodes", revision): frozenset({"SetNode"}),
-            ("another-package", revision): frozenset({"GetNode"}),
+            ("comfyui-kjnodes", revision): frozenset({"ColorMatch"}),
+            ("another-package", revision): frozenset({"ImageResizeKJ"}),
         }
 
     monkeypatch.setattr(
@@ -528,7 +532,7 @@ async def test_reviewed_manual_nodes_cannot_be_laundered_between_packages(
         "/api/workflows/packages/analyze",
         json={
             "ui_graph": _workflow(
-                [_node(1, "GetNode", package="comfyui-kjnodes", version=revision)]
+                [_node(1, "ImageResizeKJ", package="comfyui-kjnodes", version=revision)]
             )
         },
     )
