@@ -117,7 +117,9 @@ def test_a_subgraph_that_contains_itself_is_refused() -> None:
 @pytest.mark.parametrize(
     ("mutate", "code"),
     [
-        # Nothing feeds the instance, so the inside has no source.
+        # Nothing feeds the instance, and the inside points at an input its own
+        # node does not have. Once the unfed link is gone nothing downstream can
+        # notice that, so it is caught here.
         (lambda w: w["links"].remove([10, 1, 0, 2, 0, "IMAGE"]), "unconnected_subgraph_input"),
         # Two links claim the same output boundary slot.
         (
@@ -299,3 +301,70 @@ def test_a_graph_without_subgraphs_is_returned_unchanged() -> None:
 
     assert [str(node["id"]) for node in expanded["nodes"]] == ["1", "2"]
     assert len(expanded["links"]) == 1
+
+
+def _promoted_widget() -> dict[str, Any]:
+    """A subgraph whose inner widget was promoted to its edge and left unwired.
+
+    The common shape in published templates: the definition offers `text` at its
+    boundary so an instance can override it, the instance does not, and the
+    inner node still carries the value it was saved with.
+    """
+
+    return {
+        "nodes": [
+            _node(1, "Encode", mode=0),
+            _node(2, "SaveImage", inputs=[{"name": "images", "type": "IMAGE"}]),
+        ],
+        "links": [[11, 1, 0, 2, 0, "IMAGE"]],
+        "definitions": {
+            "subgraphs": [
+                {
+                    "id": "Encode",
+                    "nodes": [
+                        _node(
+                            7,
+                            "CLIPTextEncode",
+                            inputs=[{"name": "text", "type": "STRING", "widget": {"name": "text"}}],
+                            widgets_values=["a saved prompt"],
+                        )
+                    ],
+                    "links": [
+                        [70, "-10", 0, 7, 0, "STRING"],
+                        [71, 7, 0, "-20", 0, "IMAGE"],
+                    ],
+                }
+            ]
+        },
+    }
+
+
+def test_an_edge_nobody_wired_leaves_the_inside_holding_its_own_value() -> None:
+    """Promoting an inner widget to a subgraph's edge does not take the widget
+    away. An instance can override it by wiring that edge, and when it does not,
+    the inner node keeps what it was saved with - so an unwired edge is an
+    ordinary default rather than a hole, and refusing it rejected published
+    templates that work."""
+
+    expanded = expand_workflow(_promoted_widget())
+
+    inner = next(node for node in expanded["nodes"] if node["type"] == "CLIPTextEncode")
+    assert inner["widgets_values"] == ["a saved prompt"]
+    assert not [link for link in expanded["links"] if str(link[3]) == str(inner["id"])]
+
+
+def test_whether_an_unwired_input_matters_is_left_to_the_declaration() -> None:
+    """Expansion cannot tell a promoted widget from an optional input from a
+    required one - the runtime's declaration can, and the compiler checks it
+    there. Reading a UI slot and guessing would be deciding it in the one place
+    that has no evidence."""
+
+    workflow = _promoted_widget()
+    workflow["definitions"]["subgraphs"][0]["nodes"][0]["inputs"] = [
+        {"name": "conditioning", "type": "CONDITIONING"}
+    ]
+
+    expanded = expand_workflow(workflow)
+
+    inner = next(node for node in expanded["nodes"] if node["type"] == "CLIPTextEncode")
+    assert not [link for link in expanded["links"] if str(link[3]) == str(inner["id"])]
