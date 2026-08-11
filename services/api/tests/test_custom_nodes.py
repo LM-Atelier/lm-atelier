@@ -355,3 +355,53 @@ def test_a_registry_package_dependency_resolves_against_registry_installs() -> N
         # A revision that declares neither key costs nothing, which is every
         # revision stored before this existed.
         assert node_dependency_errors(session, {}) == []
+
+
+def test_a_package_that_ships_requirements_names_the_file(settings) -> None:  # type: ignore[no-untyped-def]
+    """Cloning a pinned repository does not install what it imports, so the
+    package loads into nothing and its nodes never register. Explaining that
+    without naming the file leaves somebody knowing they are stuck and not what
+    to run, which is the complaint this answers."""
+
+    manager = CustomNodeManager(settings)
+    directory = "lm-atelier-" + new_id("node")
+    destination = settings.custom_node_dir / directory
+    destination.mkdir(parents=True, exist_ok=True)
+    install = CustomNodeInstall(
+        id=new_id("node"),
+        name="comfyui-videohelpersuite",
+        source_url="https://github.com/example/vhs.git",
+        revision="a" * 40,
+        installed_path=directory,
+        tree_hash="b" * 40,
+        trusted=True,
+        active=True,
+        security_json={},
+    )
+
+    assert manager.python_requirements_path(install) is None
+
+    (destination / "requirements.txt").write_text("opencv-python", encoding="utf-8")
+    found = manager.python_requirements_path(install)
+    assert found is not None
+    assert found.name == "requirements.txt"
+    assert found.parent == destination.resolve()
+
+
+def test_a_missing_package_directory_is_answered_rather_than_raised(settings) -> None:  # type: ignore[no-untyped-def]
+    """Advice that can fail must not be able to break the refusal it advises on."""
+
+    manager = CustomNodeManager(settings)
+    install = CustomNodeInstall(
+        id=new_id("node"),
+        name="gone",
+        source_url="https://github.com/example/gone.git",
+        revision="a" * 40,
+        installed_path="lm-atelier-node_missing",
+        tree_hash="b" * 40,
+        trusted=True,
+        active=True,
+        security_json={},
+    )
+
+    assert manager.python_requirements_path(install) is None

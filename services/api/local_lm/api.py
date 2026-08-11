@@ -8045,6 +8045,69 @@ async def _verified_launchable_packages(
     return combined
 
 
+async def _packages_awaiting_review(services: Services) -> frozenset[tuple[str, str]]:
+    """Trusted installs whose reviewed node inventory was never recorded.
+
+    Absent evidence and an absent package resolve identically and need opposite
+    actions, so the analysis is told which is which. Failing closed here means
+    reporting the package as simply unresolved, which is the older, less helpful
+    answer rather than a wrong one.
+    """
+
+    resolver = getattr(
+        services.processes, "trusted_comfy_custom_node_packages_awaiting_review", None
+    )
+    if not callable(resolver):
+        return frozenset()
+    try:
+        packages = await resolver()
+    except Exception:  # noqa: BLE001 - analysis must not fail outright over advice
+        logger.warning("Installed custom-node packages could not be checked for review state.")
+        return frozenset()
+    # Rebuilt rather than returned, so an untyped resolver cannot widen what
+    # this promises - the same shape the launchable-package reader uses.
+    return frozenset((str(name), str(revision)) for name, revision in packages)
+
+
+def _packages_that_did_not_load(
+    services: Services, available_node_types: set[str]
+) -> list[tuple[str, Path | None]]:
+    """Trusted packages whose reviewed nodes are absent from a live runtime.
+
+    The runtime is the authority on what loaded. A package can be installed,
+    pinned, trusted and still fail to import - most often because it declares
+    Python requirements that cloning a repository does not install - and the
+    only symptom is that its node types never appear. Reported as "a node is
+    missing", that sends somebody to install what is already on disk.
+
+    Returns each package name with the requirements file it ships, if any, so
+    the refusal can say which of the two situations this is and name the exact
+    file somebody has to install from.
+    """
+
+    from .custom_nodes import CustomNodeManager, reviewed_custom_node_types
+    from .db import SessionLocal
+    from .models import CustomNodeInstall
+
+    failed: list[tuple[str, Path | None]] = []
+    with SessionLocal() as session:
+        installs = list(
+            session.scalars(
+                select(CustomNodeInstall).where(
+                    CustomNodeInstall.active.is_(True),
+                    CustomNodeInstall.trusted.is_(True),
+                )
+            ).all()
+        )
+        manager = CustomNodeManager(services.settings)
+        for install in installs:
+            reviewed = set(reviewed_custom_node_types(install.security_json))
+            if not reviewed or reviewed <= available_node_types:
+                continue
+            failed.append((install.name, manager.python_requirements_path(install)))
+    return failed
+
+
 def _launchable_package_node_types(
     analysis: ComfyWorkflowPackageAnalysis,
     packages: Mapping[tuple[str, str], frozenset[str]],
@@ -9111,6 +9174,7 @@ async def import_workflow_package(
                 available_node_types=available_node_types | launchable_node_types,
                 available_asset_filenames=asset_filenames,
                 installed_package_versions=verified_package_versions,
+                packages_awaiting_review=await _packages_awaiting_review(services),
             )
         except WorkflowPackageError as exc:
             raise api_error(422, exc.code, str(exc)) from exc
@@ -9145,6 +9209,46 @@ async def import_workflow_package(
         except WorkflowPackageError as exc:
             raise api_error(422, exc.code, str(exc)) from exc
         if not analysis.ready:
+            # Name the package rather than the symptom. "A node is missing" is
+            # true and useless: the node is missing because something that owns
+            # it did not load, and that has a different fix from installing
+            # anything at all.
+            unloaded = _packages_that_did_not_load(services, available_node_types)
+            if unloaded:
+                needing = [(name, path) for name, path in unloaded if path is not None]
+                detail = ", ".join(name for name, _ in unloaded)
+                if needing:
+                    # Say what to run, not only what went wrong. Whoever hits
+                    # this has no reason to know that a ComfyUI runtime has its
+                    # own interpreter, let alone where it lives.
+                    interpreter = services.settings.comfy_executable
+                    steps = "; ".join(
+                        f'"{interpreter}" -m pip install -r "{path}"' for _, path in needing
+                    )
+                    # Named last and framed as reference rather than as the
+                    # instruction. Running it does install what is missing, and
+                    # it also invalidates the prepared runtime contract, so the
+                    # next start refuses until the package is prepared anyway.
+                    raise api_error(
+                        422,
+                        "custom-node-package-requirements-missing",
+                        f"{detail} is installed and trusted but did not load, because it "
+                        "declares Python requirements and installing a pinned repository "
+                        "does not install what it imports. Prepare the package from the "
+                        "workflow package review: preparation installs those requirements "
+                        "into the media runtime and records the runtime's package baseline, "
+                        "which the runtime checks before it starts. Installing them by hand "
+                        "leaves that baseline stale and the media runtime refusing to start "
+                        f"until it is prepared again. For reference, the requirements are: "
+                        f"{steps}",
+                    )
+                raise api_error(
+                    422,
+                    "custom-node-package-did-not-load",
+                    f"{detail} is installed and trusted but did not load, so the nodes it "
+                    "provides are unavailable. The media worker log records why the import "
+                    "failed.",
+                )
             raise api_error(
                 422,
                 "package-not-resolved",
@@ -9256,6 +9360,7 @@ async def analyze_workflow_package(
                 available_node_types=available_node_types | launchable_node_types,
                 available_asset_filenames=asset_filenames,
                 installed_package_versions=verified_package_versions,
+                packages_awaiting_review=await _packages_awaiting_review(services),
             )
         except WorkflowPackageError as exc:
             raise api_error(422, exc.code, str(exc)) from exc
