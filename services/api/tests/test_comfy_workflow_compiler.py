@@ -477,6 +477,87 @@ def test_rejects_widget_values_that_do_not_map_exactly() -> None:
     _assert_error("unsupported_widget_values", workflow, _object_info())
 
 
+def _package_drawn_widgets(properties: dict[str, Any] | None) -> dict[str, Any]:
+    """A node whose settings live in objects only its own package understands.
+
+    Shaped after rgthree's Power Lora Loader: the runtime declares the links and
+    nothing else, because the node takes any number of further inputs, and the
+    saved graph carries them as objects interleaved with the package's own
+    canvas furniture.
+    """
+
+    workflow = _workflow()
+    node: dict[str, Any] = {
+        "id": 3,
+        "type": "Power Lora Loader (rgthree)",
+        "mode": 0,
+        "inputs": [],
+        "outputs": [],
+        "widgets_values": [
+            {},
+            {"type": "PowerLoraLoaderHeaderWidget"},
+            {"on": True, "lora": "one.safetensors", "strength": 1, "strengthTwo": None},
+            {},
+            "",
+        ],
+    }
+    if properties is not None:
+        node["properties"] = properties
+    workflow["nodes"].append(node)
+    return workflow
+
+
+def _drawn_object_info() -> dict[str, Any]:
+    object_info = _object_info()
+    object_info["Power Lora Loader (rgthree)"] = {
+        "input": {"optional": {"model": ["MODEL"], "clip": ["CLIP"]}},
+        "input_order": {"optional": ["model", "clip"]},
+        "output": ["MODEL", "CLIP"],
+    }
+    return object_info
+
+
+def test_widgets_only_a_package_can_read_are_refused_as_that_and_not_as_a_mapping_fault() -> None:
+    """A leftover scalar is a mapping this compiler got wrong. A leftover object
+    is a widget the node's own package draws, whose layout is described nowhere
+    the runtime can be asked. Reporting the second as the first sends someone
+    looking for a defect in the compiler."""
+
+    workflow = _package_drawn_widgets(
+        {"cnr_id": "rgthree-comfy", "ver": "6b76ee6f2c5a007710b5a16f97c94330d6ecc871"}
+    )
+
+    with pytest.raises(WorkflowCompilationError) as raised:
+        compile_comfyui_ui_graph(workflow, _drawn_object_info())
+
+    assert raised.value.code == "package_serialized_widgets"
+    message = str(raised.value)
+    assert "Power Lora Loader (rgthree)" in message
+    assert "rgthree-comfy at 6b76ee6f2c5a007710b5a16f97c94330d6ecc871" in message
+
+
+@pytest.mark.parametrize(
+    ("properties", "expected"),
+    [
+        ({"cnr_id": "rgthree-comfy"}, "rgthree-comfy"),
+        ({"aux_id": "rgthree/rgthree-comfy"}, "rgthree/rgthree-comfy"),
+        ({}, "its package"),
+        (None, "its package"),
+    ],
+)
+def test_a_package_drawn_widget_names_only_the_package_the_graph_records(
+    properties: dict[str, Any] | None, expected: str
+) -> None:
+    """Taken from the saved graph rather than from anything installed, because
+    the question is whose editor code would have to be reproduced. Naming the
+    wrong package would be worse than naming none."""
+
+    with pytest.raises(WorkflowCompilationError) as raised:
+        compile_comfyui_ui_graph(_package_drawn_widgets(properties), _drawn_object_info())
+
+    assert expected in str(raised.value)
+
+
 def test_rejects_invalid_combo_choices() -> None:
     workflow = _workflow()
     workflow["nodes"] = [
