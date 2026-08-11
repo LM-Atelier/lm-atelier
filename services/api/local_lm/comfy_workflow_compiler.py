@@ -20,7 +20,20 @@ _IGNORED_FRONTEND_NODE_TYPES = frozenset(
 # Nodes that carry a wire and nothing else. They are resolved away before
 # compilation rather than ignored: ignoring one drops the edge it was
 # carrying, which is a different graph, not a smaller one.
-_PASS_THROUGH_TYPES = frozenset({"Reroute"})
+#
+# `Reroute` carries its wire to whatever it touches. The KJNodes pair carries one
+# by name instead: `SetNode` labels the link feeding it, and any `GetNode`
+# holding the same label re-emits that link from anywhere in the graph. The
+# difference is only in how the far end is found, so both resolve here.
+_NAMED_WIRE_SOURCE_TYPE = "SetNode"
+_NAMED_WIRE_SINK_TYPE = "GetNode"
+_PASS_THROUGH_TYPES = frozenset({"Reroute", _NAMED_WIRE_SOURCE_TYPE, _NAMED_WIRE_SINK_TYPE})
+# Deliberately without the named-wire pair. This gate asks whether the ComfyUI
+# frontend version is one whose `PrimitiveNode` and `Reroute` semantics we have
+# certified. Named wires are not that frontend's construct - they come from a
+# third-party package, and each node records the exact package revision that
+# defined it - so asking the core frontend version about them would be asking
+# the wrong thing and answering confidently.
 _FRONTEND_SEMANTIC_NODE_TYPES = frozenset({"PrimitiveNode", "Reroute"})
 
 
@@ -234,6 +247,41 @@ def _parse_link(value: object) -> _Link:
     )
 
 
+def _named_wire_label(node_id: str, node: Mapping[str, object]) -> str:
+    """The label a named wire is written or read under.
+
+    Held in the node's first widget, which is also where the frontend keeps it.
+    A named wire with no readable label cannot be matched to its other end, and
+    guessing which end it meant would connect two things the author did not.
+    """
+
+    values = node.get("widgets_values")
+    if isinstance(values, Sequence) and not isinstance(values, str | bytes):
+        label = values[0] if values else None
+        if isinstance(label, str) and label:
+            return label
+    raise WorkflowCompilationError(
+        "invalid_named_wire", f"node {node_id} is a named wire with no name"
+    )
+
+
+def _named_wire_writers(nodes: Mapping[str, Mapping[str, object]]) -> dict[str, list[str]]:
+    """Which nodes write each label.
+
+    Every writer is kept rather than the first, because a label written twice is
+    only ambiguous where something reads it. An unread duplicate is a stray node
+    the author left behind, and the frontend runs that graph, so refusing it here
+    would reject a workflow that works.
+    """
+
+    writers: dict[str, list[str]] = {}
+    for node_id, node in nodes.items():
+        if str(node.get("type")) != _NAMED_WIRE_SOURCE_TYPE:
+            continue
+        writers.setdefault(_named_wire_label(node_id, node), []).append(node_id)
+    return writers
+
+
 def _elide_pass_through_nodes(
     nodes: Mapping[str, Mapping[str, object]],
     links: Sequence[_Link],
@@ -247,9 +295,18 @@ def _elide_pass_through_nodes(
     every consumer reconnects to whatever fed the reroute, through however many
     reroutes stand between them.
 
-    The refusal that matters is a reroute with consumers and nothing feeding it.
+    A named wire is the same problem with the far end named rather than touched.
+    A `SetNode` labels the link feeding it; every `GetNode` carrying that label
+    stands in for that link, wherever in the graph it sits. Resolving one is
+    therefore a lookup by label rather than a step along an edge, but what
+    happens next is identical, so both walk the same chain and a wire may cross
+    reroutes and labels in any order.
+
+    The refusal that matters is a carrier with consumers and nothing feeding it.
     Dropping that silently would leave a required input unfilled, so it is named
-    instead.
+    instead - as is a label no `SetNode` defines, and a label two of them claim.
+    A label whose two definitions disagree has no correct reading, and picking
+    either would compile a graph the author never drew.
     """
 
     pass_through = {
@@ -259,6 +316,36 @@ def _elide_pass_through_nodes(
         return dict(nodes), tuple(links)
 
     incoming = {link.target: link for link in links if link.target in pass_through}
+    writers = _named_wire_writers(nodes)
+    for node_id, node in nodes.items():
+        if str(node.get("type")) != _NAMED_WIRE_SINK_TYPE:
+            continue
+        label = _named_wire_label(node_id, node)
+        defined = writers.get(label, [])
+        if not defined:
+            raise WorkflowCompilationError(
+                "undefined_named_wire",
+                f"node {node_id} reads workflow value {label}, which nothing sets",
+            )
+        if len(defined) > 1:
+            raise WorkflowCompilationError(
+                "duplicate_named_wire",
+                f"node {node_id} reads workflow value {label}, which more than one node sets",
+            )
+        source = defined[0]
+        # Stands in for the edge a reader does not draw. Only its origin is read,
+        # and the walk continues from the writer - so a writer that carries
+        # nothing is reported as the writer it is, not as the reader that found
+        # it.
+        incoming[node_id] = _Link(f"named-wire:{label}", source, 0, node_id, 0)
+
+    def describe(node_id: str) -> str:
+        node_type = str(nodes[node_id].get("type"))
+        if node_type == _NAMED_WIRE_SOURCE_TYPE:
+            return f"workflow value {_named_wire_label(node_id, nodes[node_id])}"
+        if node_type == _NAMED_WIRE_SINK_TYPE:
+            return f"the read of workflow value {_named_wire_label(node_id, nodes[node_id])}"
+        return f"reroute node {node_id}"
 
     def resolve(link: _Link) -> _Link:
         origin, origin_slot = link.origin, link.origin_slot
@@ -267,14 +354,14 @@ def _elide_pass_through_nodes(
             if origin in seen:
                 raise WorkflowCompilationError(
                     "pass_through_cycle",
-                    f"reroute node {origin} feeds itself",
+                    f"{describe(origin)} feeds itself",
                 )
             seen.add(origin)
             feeding = incoming.get(origin)
             if feeding is None:
                 raise WorkflowCompilationError(
                     "unconnected_pass_through",
-                    f"reroute node {origin} carries a connection but nothing feeds it",
+                    f"{describe(origin)} carries a connection but nothing feeds it",
                 )
             origin, origin_slot = feeding.origin, feeding.origin_slot
         if origin == link.origin and origin_slot == link.origin_slot:

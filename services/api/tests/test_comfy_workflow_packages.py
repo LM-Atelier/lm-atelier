@@ -276,6 +276,33 @@ def test_a_canvas_label_never_becomes_a_runtime_dependency() -> None:
     assert "Label (rgthree)" in analysis.frontend_node_types
 
 
+def test_a_named_wire_never_makes_the_package_that_draws_it_a_dependency() -> None:
+    """`SetNode` and `GetNode` are KJNodes JavaScript with no Python class.
+
+    They carry a package id, so counting them as runtime nodes attributed them
+    to that package and then reported it as the package that failed to load -
+    while the package was installed, trusted, and loading correctly. Nothing can
+    satisfy them, so a graph using the idiom could never be imported no matter
+    what was installed.
+    """
+
+    analysis = analyze_comfyui_workflow_package(
+        workflow(
+            nodes=[
+                node(1, "SetNode", package="comfyui-kjnodes", version="1.2.3"),
+                node(2, "GetNode", package="comfyui-kjnodes", version="1.2.3"),
+                node(3, "KSampler"),
+            ]
+        ),
+        available_node_types={"KSampler"},
+    )
+
+    assert analysis.runtime_nodes_available
+    assert analysis.missing_node_types == ()
+    assert set(analysis.frontend_node_types) == {"GetNode", "SetNode"}
+    assert [package.package_id for package in analysis.custom_packages] == []
+
+
 @pytest.mark.parametrize("node_type", sorted(FRONTEND_SYSTEM_NODE_TYPES))
 def test_frontend_system_nodes_are_not_runtime_dependencies(node_type: str) -> None:
     analysis = analyze_comfyui_workflow_package(
