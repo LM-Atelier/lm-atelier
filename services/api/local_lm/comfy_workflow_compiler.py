@@ -89,10 +89,21 @@ def compile_comfyui_ui_graph(
         workflow = expand_workflow(workflow)
     except SubgraphExpansionError as exc:
         raise WorkflowCompilationError(exc.code, str(exc)) from exc
-    analysis = analyze_comfyui_workflow_package(
-        workflow,
-        available_node_types=object_info.keys(),
-    )
+    # Converted rather than left to propagate. Everything this function raises is
+    # "this graph cannot be compiled", and a caller that catches that should not
+    # also have to catch the type the analysis happens to use - one call site
+    # compiles a graph handed back by the visual editor with no analysis in
+    # front of it, so a malformed graph escaped as an unhandled error rather
+    # than as the refusal it is. The code is kept, so nothing loses detail.
+    try:
+        analysis = analyze_comfyui_workflow_package(
+            workflow,
+            available_node_types=object_info.keys(),
+        )
+    except WorkflowCompilationError:
+        raise
+    except WorkflowPackageError as exc:
+        raise WorkflowCompilationError(exc.code, str(exc)) from exc
     if analysis.subgraph_count:
         raise WorkflowCompilationError(
             "unsupported_subgraphs",

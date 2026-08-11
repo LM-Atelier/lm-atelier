@@ -87,14 +87,14 @@ def _assert_refused_before_compiling(
 ) -> None:
     """Refused by the graph analysis the compiler runs first, not by compilation.
 
-    Kept distinct from `_assert_error` so that a check moving between the two
-    layers shows up as a failing test rather than passing silently in the wrong
-    place.
+    Still reported as a compilation refusal, because that is what a caller asked
+    for and everything this function raises means the same thing to them. The
+    code carries which check it was.
     """
 
     with pytest.raises(WorkflowPackageError) as raised:
         compile_comfyui_ui_graph(workflow, object_info)
-    assert not isinstance(raised.value, WorkflowCompilationError)
+    assert isinstance(raised.value, WorkflowCompilationError)
     assert raised.value.code == code
 
 
