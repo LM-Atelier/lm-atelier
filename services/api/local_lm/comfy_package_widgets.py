@@ -121,16 +121,42 @@ _LORA_OPTIONAL = frozenset({"strengthTwo"})
 _VIDEO_PREVIEW = "videopreview"
 _VIDEO_PREVIEW_KEYS = frozenset({"hidden", "paused", "params", "muted"})
 
+
+@dataclass(frozen=True)
+class _Choices:
+    """An option that must be one of a listed set."""
+
+    values: tuple[object, ...]
+
+
+@dataclass(frozen=True)
+class _Whole:
+    """An option that must be a whole number within a range."""
+
+    low: int
+    high: int
+
+
+@dataclass(frozen=True)
+class _Flag:
+    """An option that must be true or false."""
+
+
 # Transcribed from `video_formats/h264-mp4.json`. Every list in a format file
 # becomes one widget named by its first element, so this is that file's widget
 # set and nothing else. A format with no entry here refuses rather than being
 # read under another format's set.
+#
+# Each option says what it is rather than being recognised by the shape of its
+# declaration. A set of numbers and a range are both a pair of numbers, and
+# telling them apart by looking would be the mistake this module exists to
+# avoid.
 _VIDEO_FORMAT_WIDGETS: dict[str, dict[str, object]] = {
     "video/h264-mp4": {
-        "pix_fmt": ("yuv420p", "yuv420p10le"),
-        "crf": (0, 100),
-        "save_metadata": bool,
-        "trim_to_audio": bool,
+        "pix_fmt": _Choices(("yuv420p", "yuv420p10le")),
+        "crf": _Whole(0, 100),
+        "save_metadata": _Flag(),
+        "trim_to_audio": _Flag(),
     }
 }
 
@@ -430,25 +456,26 @@ def _video_combine_extras(
 def _video_combine_option(name: str, value: object, expected: object) -> object:
     """One option, checked against what its format declares it to be."""
 
-    if expected is bool:
+    if isinstance(expected, _Flag):
         if not isinstance(value, bool):
             raise PackageWidgetError(
                 "package_widget_layout", f"{VIDEO_COMBINE} option {name} is not a true or false"
             )
         return value
-    if isinstance(expected, tuple) and expected and isinstance(expected[0], str):
-        if value not in expected:
+    if isinstance(expected, _Choices):
+        if value not in expected.values:
             raise PackageWidgetError(
                 "package_widget_layout", f"{VIDEO_COMBINE} option {name} is not one of its choices"
             )
         return value
-    if isinstance(expected, tuple) and len(expected) == 2:
-        low, high = expected
+    if isinstance(expected, _Whole):
+        # `bool` is an `int` in Python, so True would pass as 1 and be recorded
+        # as a number the author never chose.
         if isinstance(value, bool) or not isinstance(value, int):
             raise PackageWidgetError(
                 "package_widget_layout", f"{VIDEO_COMBINE} option {name} is not a whole number"
             )
-        if not isinstance(low, int) or not isinstance(high, int) or not low <= value <= high:
+        if not expected.low <= value <= expected.high:
             raise PackageWidgetError(
                 "package_widget_layout", f"{VIDEO_COMBINE} option {name} is outside its range"
             )
