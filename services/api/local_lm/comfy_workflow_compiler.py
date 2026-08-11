@@ -20,6 +20,10 @@ from .comfy_workflow_packages import (
 _SUPPORTED_WIDGET_TYPES = frozenset({"BOOLEAN", "COMBO", "FLOAT", "INT", "STRING"})
 _CONTROL_AFTER_GENERATE = frozenset({"decrement", "fixed", "increment", "randomize"})
 _CONTROL_WIDGET = "control_after_generate"
+# Subgraph expansion prefixes an inner node id with the instance it came from,
+# separated by this. It is the only record of nesting left once the definitions
+# are rewritten away.
+_SCOPE_SEPARATOR = ":"
 # Nodes that draw something and carry nothing. Dropping one loses a caption.
 _IGNORED_FRONTEND_NODE_TYPES = frozenset(
     {"MarkdownNote", "Note", "PrimitiveNode", "Label (rgthree)"}
@@ -331,20 +335,50 @@ def _named_wire_label(node_id: str, node: Mapping[str, object]) -> str:
     )
 
 
-def _named_wire_writers(nodes: Mapping[str, Mapping[str, object]]) -> dict[str, list[str]]:
-    """Which nodes write each label.
+def _scope_of(node_id: str) -> str:
+    """Which nesting a node sits in, as subgraph expansion recorded it.
 
-    Every writer is kept rather than the first, because a label written twice is
-    only ambiguous where something reads it. An unread duplicate is a stray node
-    the author left behind, and the frontend runs that graph, so refusing it here
-    would reject a workflow that works.
+    Expansion flattens instances by prefixing every inner node's id with the
+    instance it came from, so an id carries its own nesting and is the only
+    record of it left once the definitions are gone. A graph that never had a
+    subgraph has no prefix and one scope, which is the whole graph.
     """
 
-    writers: dict[str, list[str]] = {}
+    return node_id.rpartition(_SCOPE_SEPARATOR)[0]
+
+
+def _enclosing_scopes(scope: str) -> tuple[str, ...]:
+    """A scope and the ones around it, innermost first."""
+
+    scopes = [scope]
+    while scope:
+        scope = scope.rpartition(_SCOPE_SEPARATOR)[0]
+        scopes.append(scope)
+    return tuple(scopes)
+
+
+def _named_wire_writers(
+    nodes: Mapping[str, Mapping[str, object]],
+) -> dict[tuple[str, str], list[str]]:
+    """Which nodes write each label, in which nesting.
+
+    Labelled by scope as well as name because the package that draws these
+    resolves a reader against its own graph and then the graphs around it, never
+    a sibling. Two copies of one subgraph therefore each carry their own copy of
+    a label, and reading them as one would make every reuse of a subgraph
+    ambiguous - which is a graph the editor runs perfectly well.
+
+    Every writer of a scoped name is kept rather than the first, because a label
+    written twice is only ambiguous where something reads it. An unread duplicate
+    is a stray node the author left behind, and the editor runs that graph too.
+    """
+
+    writers: dict[tuple[str, str], list[str]] = {}
     for node_id, node in nodes.items():
         if str(node.get("type")) != _NAMED_WIRE_SOURCE_TYPE:
             continue
-        writers.setdefault(_named_wire_label(node_id, node), []).append(node_id)
+        key = (_scope_of(node_id), _named_wire_label(node_id, node))
+        writers.setdefault(key, []).append(node_id)
     return writers
 
 
@@ -387,7 +421,15 @@ def _elide_pass_through_nodes(
         if str(node.get("type")) != _NAMED_WIRE_SINK_TYPE:
             continue
         label = _named_wire_label(node_id, node)
-        defined = writers.get(label, [])
+        # Its own nesting first, then outwards, which is how the package that
+        # draws these resolves them. A label set nearer the reader is the one it
+        # means, and one set in a nesting the reader is not inside is not a
+        # candidate at all.
+        defined: list[str] = []
+        for scope in _enclosing_scopes(_scope_of(node_id)):
+            defined = writers.get((scope, label), [])
+            if defined:
+                break
         if not defined:
             raise WorkflowCompilationError(
                 "undefined_named_wire",

@@ -1598,3 +1598,168 @@ def test_a_captured_video_combine_compiles_to_its_captured_prompt() -> None:
         "save_metadata": True,
         "trim_to_audio": False,
     }
+
+
+def _scoped_named_wires(writer_scope: str, reader_scope: str, label: str = "pipe") -> Any:
+    """A graph shaped the way subgraph expansion leaves one.
+
+    Expansion flattens an instance by prefixing its inner node ids with the
+    instance they came from, so nesting survives only in the ids. These are
+    written directly rather than expanded from definitions, because what is
+    under test is how a nesting is read, not how one is flattened.
+    """
+
+    workflow = _workflow()
+    workflow["nodes"][0]["outputs"][0]["links"] = [100]
+    workflow["nodes"].append(
+        {
+            "id": f"{writer_scope}10",
+            "type": "SetNode",
+            "mode": 0,
+            "inputs": [{"name": "IMAGE", "type": "IMAGE", "link": 100}],
+            "outputs": [{"name": "IMAGE", "type": "IMAGE", "links": None}],
+            "widgets_values": [label],
+        }
+    )
+    workflow["nodes"].append(
+        {
+            "id": f"{reader_scope}11",
+            "type": "GetNode",
+            "mode": 0,
+            "inputs": [],
+            "outputs": [{"name": "IMAGE", "type": "IMAGE", "links": [7]}],
+            "widgets_values": [label],
+        }
+    )
+    workflow["links"] = [
+        [100, 1, 0, f"{writer_scope}10", 0, "IMAGE"],
+        [7, f"{reader_scope}11", 0, 2, 0, "IMAGE"],
+    ]
+    return workflow
+
+
+@pytest.mark.parametrize(
+    ("writer_scope", "reader_scope"),
+    [
+        ("", ""),
+        ("inner:", "inner:"),
+        ("", "inner:"),
+        ("", "outer:inner:"),
+        ("outer:", "outer:inner:"),
+    ],
+)
+def test_a_reader_takes_the_value_from_its_own_nesting_or_one_around_it(
+    writer_scope: str, reader_scope: str
+) -> None:
+    """The package that draws these resolves a reader against its own graph and
+    then the graphs enclosing it, so a value set outside reaches inward."""
+
+    compiled = compile_comfyui_ui_graph(
+        _scoped_named_wires(writer_scope, reader_scope), _object_info()
+    )
+
+    assert compiled.api_graph["2"]["inputs"]["images"] == ["1", 0]
+
+
+@pytest.mark.parametrize(
+    ("writer_scope", "reader_scope"),
+    [("inner:", ""), ("one:", "two:"), ("outer:inner:", "outer:")],
+)
+def test_a_value_set_where_the_reader_cannot_see_it_is_not_found(
+    writer_scope: str, reader_scope: str
+) -> None:
+    """That lookup never reaches a sibling nesting, or inward from one. Treating
+    those as candidates would connect two things the editor keeps apart."""
+
+    _assert_error(
+        "undefined_named_wire", _scoped_named_wires(writer_scope, reader_scope), _object_info()
+    )
+
+
+def test_two_copies_of_one_nesting_each_keep_their_own_value() -> None:
+    """The shape two instances of the same subgraph leave behind. Read as one
+    graph they look like a label set twice, and every reuse of a subgraph that
+    names a wire would be ambiguous - a graph the editor runs perfectly well."""
+
+    workflow = _workflow()
+    workflow["nodes"][0]["outputs"][0]["links"] = [100]
+    workflow["nodes"].append(
+        {
+            "id": 5,
+            "type": "Source",
+            "mode": 0,
+            "inputs": [],
+            "outputs": [{"name": "IMAGE", "type": "IMAGE", "links": [200]}],
+            "widgets_values": ["camera", 42, "randomize"],
+        }
+    )
+    workflow["nodes"].append(
+        {
+            "id": 6,
+            "type": "Save",
+            "mode": 0,
+            "inputs": [
+                {"name": "images", "type": "IMAGE", "link": 8},
+                {
+                    "name": "filename_prefix",
+                    "type": "STRING",
+                    "widget": {"name": "filename_prefix"},
+                },
+            ],
+            "outputs": [],
+            "widgets_values": ["second"],
+        }
+    )
+    for scope, feed, emit in (("a:", 100, 7), ("b:", 200, 8)):
+        workflow["nodes"].append(
+            {
+                "id": f"{scope}10",
+                "type": "SetNode",
+                "mode": 0,
+                "inputs": [{"name": "IMAGE", "type": "IMAGE", "link": feed}],
+                "outputs": [{"name": "IMAGE", "type": "IMAGE", "links": None}],
+                "widgets_values": ["pipe"],
+            }
+        )
+        workflow["nodes"].append(
+            {
+                "id": f"{scope}11",
+                "type": "GetNode",
+                "mode": 0,
+                "inputs": [],
+                "outputs": [{"name": "IMAGE", "type": "IMAGE", "links": [emit]}],
+                "widgets_values": ["pipe"],
+            }
+        )
+    workflow["links"] = [
+        [100, 1, 0, "a:10", 0, "IMAGE"],
+        [7, "a:11", 0, 2, 0, "IMAGE"],
+        [200, 5, 0, "b:10", 0, "IMAGE"],
+        [8, "b:11", 0, 6, 0, "IMAGE"],
+    ]
+
+    compiled = compile_comfyui_ui_graph(workflow, _object_info())
+
+    assert compiled.api_graph["2"]["inputs"]["images"] == ["1", 0]
+    assert compiled.api_graph["6"]["inputs"]["images"] == ["5", 0]
+
+
+def test_a_value_set_twice_in_one_nesting_is_still_ambiguous() -> None:
+    """Scoping decides which copies are separate, not whether a real collision
+    inside one nesting can be resolved."""
+
+    workflow = _scoped_named_wires("inner:", "inner:")
+    workflow["nodes"][0]["outputs"][0]["links"] = [100, 101]
+    workflow["nodes"].append(
+        {
+            "id": "inner:12",
+            "type": "SetNode",
+            "mode": 0,
+            "inputs": [{"name": "IMAGE", "type": "IMAGE", "link": 101}],
+            "outputs": [{"name": "IMAGE", "type": "IMAGE", "links": None}],
+            "widgets_values": ["pipe"],
+        }
+    )
+    workflow["links"].append([101, 1, 0, "inner:12", 0, "IMAGE"])
+
+    _assert_error("duplicate_named_wire", workflow, _object_info())
