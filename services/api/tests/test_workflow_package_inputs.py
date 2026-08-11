@@ -530,3 +530,256 @@ def test_a_sequence_valued_widget_cannot_forge_a_source_edge() -> None:
         prepared.bind(compiled.api_graph)
 
     assert raised.value.code == "workflow_source_input_not_used"
+
+
+def test_a_source_reaching_outputs_only_through_its_mask_is_refused() -> None:
+    """The upload must become the picture, never the stencil cut out of it.
+
+    A LoadImage whose IMAGE output goes nowhere and whose MASK output feeds the
+    graph still "reaches" the outputs if reachability forgets which slot an edge
+    left by.  Binding there hands the run's upload to a mask input and leaves the
+    run with no source image, which is exactly the quiet wrong choice this module
+    promises not to make.
+    """
+    graph = {
+        "version": 0.4,
+        "nodes": [
+            {
+                "id": 1,
+                "type": "LoadImage",
+                "mode": 0,
+                "inputs": [],
+                "outputs": [
+                    {"name": "IMAGE", "type": "IMAGE", "links": []},
+                    {"name": "MASK", "type": "MASK", "links": [11]},
+                ],
+                "widgets_values": ["author.png", "image"],
+            },
+            {
+                "id": 3,
+                "type": "EmptyImage",
+                "mode": 0,
+                "inputs": [],
+                "outputs": [{"name": "IMAGE", "type": "IMAGE", "links": [12]}],
+                "widgets_values": [64, 64],
+            },
+            {
+                "id": 4,
+                "type": "Composite",
+                "mode": 0,
+                "inputs": [
+                    {"name": "image", "type": "IMAGE", "link": 12},
+                    {"name": "mask", "type": "MASK", "link": 11},
+                ],
+                "outputs": [{"name": "IMAGE", "type": "IMAGE", "links": [13]}],
+                "widgets_values": [],
+            },
+            {
+                "id": 2,
+                "type": "SaveImage",
+                "mode": 0,
+                "inputs": [{"name": "images", "type": "IMAGE", "link": 13}],
+                "outputs": [],
+                "widgets_values": [],
+            },
+        ],
+        "links": [
+            [11, 1, 1, 4, 1, "MASK"],
+            [12, 3, 0, 4, 0, "IMAGE"],
+            [13, 4, 0, 2, 0, "IMAGE"],
+        ],
+    }
+    object_info = _object_info()
+    object_info["EmptyImage"] = {
+        "input": {"required": {"width": ["INT", {}], "height": ["INT", {}]}},
+        "input_order": {"required": ["width", "height"]},
+        "output": ["IMAGE"],
+    }
+    object_info["Composite"] = {
+        "input": {"required": {"image": ["IMAGE"], "mask": ["MASK"]}},
+        "input_order": {"required": ["image", "mask"]},
+        "output": ["IMAGE"],
+    }
+
+    prepared = prepare_workflow_package_compilation(
+        graph,
+        object_info,
+        Operation.IMAGE_TO_IMAGE,
+    )
+    compiled = compile_comfyui_ui_graph(prepared.ui_graph, prepared.object_info)
+
+    with pytest.raises(WorkflowPackageInputError) as raised:
+        prepared.bind(compiled.api_graph)
+
+    assert raised.value.code == "workflow_source_input_not_used"
+
+
+def test_a_second_uploaded_file_of_another_class_is_ambiguous() -> None:
+    """Exactly-one cannot be decided by class name.
+
+    A second loader of a different class keeps the author's local filename in the
+    compiled package - the precise non-portability this binding exists to remove -
+    while the "one LoadImage" count still passes.
+    """
+    graph = _graph()
+    graph["nodes"].append(
+        {
+            "id": 3,
+            "type": "LoadImageOutput",
+            "mode": 0,
+            "inputs": [],
+            "outputs": [{"name": "IMAGE", "type": "IMAGE", "links": []}],
+            "widgets_values": ["author-mask.png", "image"],
+        }
+    )
+    object_info = _object_info()
+    object_info["LoadImageOutput"] = {
+        "python_module": "nodes",
+        "input": {"required": {"image": [["a.png"], {"image_upload": True}]}},
+        "input_order": {"required": ["image"]},
+        "output": ["IMAGE", "MASK"],
+    }
+
+    with pytest.raises(WorkflowPackageInputError) as raised:
+        prepare_workflow_package_compilation(graph, object_info, Operation.IMAGE_TO_IMAGE)
+
+    assert raised.value.code == "workflow_source_input_ambiguous"
+    assert "LoadImageOutput" in str(raised.value)
+
+
+def test_an_image_producer_without_an_upload_is_not_a_second_source() -> None:
+    """The counterpart to the rule above: only supplied files count.
+
+    A node that makes an image rather than loading one carries no author
+    filename, so refusing on it would reject ordinary graphs.
+    """
+    graph = _graph()
+    graph["nodes"].append(
+        {
+            "id": 3,
+            "type": "EmptyImage",
+            "mode": 0,
+            "inputs": [],
+            "outputs": [{"name": "IMAGE", "type": "IMAGE", "links": []}],
+            "widgets_values": [64, 64],
+        }
+    )
+    object_info = _object_info()
+    object_info["EmptyImage"] = {
+        "input": {"required": {"width": ["INT", {}], "height": ["INT", {}]}},
+        "input_order": {"required": ["width", "height"]},
+        "output": ["IMAGE"],
+    }
+
+    prepared = prepare_workflow_package_compilation(
+        graph,
+        object_info,
+        Operation.IMAGE_TO_IMAGE,
+    )
+    compiled = compile_comfyui_ui_graph(prepared.ui_graph, prepared.object_info)
+
+    assert prepared.bind(compiled.api_graph)["1"]["inputs"]["image"] == "${input_image}"
+
+
+def test_a_load_image_inside_a_bypassed_subgraph_is_not_a_source() -> None:
+    """Expansion inlines a container's contents without its mode.
+
+    So the only place a bypassed subgraph is still visible as bypassed is the
+    graph as the author saved it, which is where this has to be read.
+    """
+    graph = {
+        "version": 0.4,
+        "definitions": {
+            "subgraphs": [
+                {
+                    "id": "sub",
+                    "name": "Disabled source",
+                    "nodes": [
+                        {
+                            "id": 1,
+                            "type": "LoadImage",
+                            "mode": 0,
+                            "inputs": [],
+                            "outputs": [{"name": "IMAGE", "type": "IMAGE", "links": []}],
+                            "widgets_values": ["author.png", "image"],
+                        }
+                    ],
+                    "links": [],
+                    "inputs": [],
+                    "outputs": [],
+                }
+            ]
+        },
+        "nodes": [
+            {
+                "id": 4,
+                "type": "sub",
+                "mode": 4,
+                "inputs": [],
+                "outputs": [{"name": "IMAGE", "type": "IMAGE", "links": []}],
+                "widgets_values": [],
+            },
+            {
+                "id": 2,
+                "type": "SaveImage",
+                "mode": 0,
+                "inputs": [{"name": "images", "type": "IMAGE", "link": None}],
+                "outputs": [],
+                "widgets_values": [],
+            },
+        ],
+        "links": [],
+    }
+
+    with pytest.raises(WorkflowPackageInputError) as raised:
+        prepare_workflow_package_compilation(graph, _object_info(), Operation.IMAGE_TO_IMAGE)
+
+    assert raised.value.code == "workflow_source_input_missing"
+
+
+def test_a_graph_with_no_executable_output_says_so() -> None:
+    """A graph that produces nothing is not a graph that ignores its source.
+
+    Reporting the reachability failure here is vacuously true and points the
+    reader at the source instead of at the missing output.
+    """
+    graph = _graph()
+    object_info = _object_info()
+    del object_info["SaveImage"]["output_node"]
+
+    prepared = prepare_workflow_package_compilation(
+        graph,
+        object_info,
+        Operation.IMAGE_TO_IMAGE,
+    )
+    compiled = compile_comfyui_ui_graph(prepared.ui_graph, prepared.object_info)
+
+    with pytest.raises(WorkflowPackageInputError) as raised:
+        prepared.bind(compiled.api_graph)
+
+    assert raised.value.code == "workflow_source_output_missing"
+
+
+def test_the_modern_combo_options_upload_contract_binds() -> None:
+    """The runtime may advertise choices under options rather than inline.
+
+    Supported since this module was written and exercised by nothing, so a later
+    edit to that branch would have gone unnoticed until an import failed.
+    """
+    graph = _graph()
+    object_info = _object_info()
+    object_info["LoadImage"]["input"]["required"]["image"] = [
+        "COMBO",
+        {"options": ["available.png"], "image_upload": True},
+    ]
+
+    prepared = prepare_workflow_package_compilation(
+        graph,
+        object_info,
+        Operation.IMAGE_TO_IMAGE,
+    )
+    compiled = compile_comfyui_ui_graph(prepared.ui_graph, prepared.object_info)
+    bound = prepared.bind(compiled.api_graph)
+
+    assert compiled.api_graph["1"]["inputs"]["image"] == "author.png"
+    assert bound["1"]["inputs"]["image"] == "${input_image}"

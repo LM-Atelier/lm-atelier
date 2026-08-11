@@ -8,6 +8,22 @@ each run and must substitute that exact runtime name.
 Only the core LoadImage contract is handled here.  A graph with no source, more
 than one possible source, or a different package's node refuses rather than
 quietly choosing the wrong image.
+
+"The wrong image" has three shapes that are easy to miss, and each is refused
+here rather than trusted to the shape of an ordinary graph:
+
+* A LoadImage can reach the outputs through its MASK output while its IMAGE
+  output goes nowhere.  Substituting there would feed the run's upload in as a
+  mask and leave the run with no source image at all, so reachability follows
+  the source's IMAGE slot specifically rather than any edge that happens to
+  leave the node.
+* A second author-supplied file can sit in the graph under a different class,
+  which keeps the author's local filename in a workflow whose entire purpose is
+  to stop carrying it.  Any other node advertising an upload input is therefore
+  counted as a second source.
+* A subgraph the author bypassed still expands, and expansion does not carry the
+  container's mode inward.  Disabled scopes are dropped before selection so a
+  disabled LoadImage is never chosen.
 """
 
 from __future__ import annotations
@@ -24,6 +40,12 @@ _SOURCE_IMAGE_OPERATIONS = frozenset({Operation.IMAGE_TO_IMAGE, Operation.IMAGE_
 _SOURCE_NODE_TYPE = "LoadImage"
 _SOURCE_INPUT_NAME = "image"
 _SOURCE_PLACEHOLDER = "${input_image}"
+# The audited core contract returns ("IMAGE", "MASK"), checked before this is
+# used, so the image a run supplies is slot 0 and the mask is slot 1.
+_SOURCE_IMAGE_SLOT = 0
+# Expansion names an inner node "<container>:<inner>"; it must match the
+# compiler's separator or a bypassed container's contents look top-level.
+_SCOPE_SEPARATOR = ":"
 _WIDGET_TYPES = frozenset({"BOOLEAN", "COMBO", "FLOAT", "INT", "STRING"})
 
 
@@ -120,6 +142,11 @@ def prepare_workflow_package_compilation(
             "workflow_source_input_missing",
             "The source workflow has no readable node list.",
         )
+    # A node's own mode survives expansion; the mode of the container it came
+    # from does not.  Without this, a LoadImage inside a subgraph the author
+    # bypassed reads as live and can be chosen as the source.
+    disabled_scopes = _disabled_scope_prefixes(ui_graph)
+    nodes = [node for node in nodes if not _is_in_disabled_scope(node, disabled_scopes)]
     sources = [
         node
         for node in nodes
@@ -145,6 +172,7 @@ def prepare_workflow_package_compilation(
         )
     source = sources[0]
     _require_core_load_image(source)
+    _require_no_second_uploaded_source(nodes, object_info, source)
     source_id = _node_identifier(source)
     output_node_ids = _executable_output_node_ids(nodes, object_info)
     link_input_names = _link_input_names_by_node_type(object_info)
@@ -296,6 +324,96 @@ def _node_identifier(node: Mapping[str, object]) -> str:
     return str(value)
 
 
+def _disabled_scope_prefixes(ui_graph: Mapping[str, Any]) -> tuple[str, ...]:
+    """Identity prefixes of containers the author bypassed or muted.
+
+    Read from the graph as saved, before expansion, because expansion inlines a
+    subgraph's contents without carrying the instance's mode inward.
+    """
+    nodes = ui_graph.get("nodes")
+    if not isinstance(nodes, Sequence) or isinstance(nodes, str | bytes):
+        return ()
+    prefixes: list[str] = []
+    for node in nodes:
+        if not isinstance(node, Mapping) or node.get("mode", 0) == 0:
+            continue
+        value = node.get("id")
+        if not isinstance(value, bool) and isinstance(value, int | str):
+            prefixes.append(f"{value}{_SCOPE_SEPARATOR}")
+    return tuple(prefixes)
+
+
+def _is_in_disabled_scope(node: object, prefixes: Sequence[str]) -> bool:
+    if not prefixes or not isinstance(node, Mapping):
+        return False
+    value = node.get("id")
+    if isinstance(value, bool) or not isinstance(value, int | str):
+        return False
+    node_id = str(value)
+    return any(node_id.startswith(prefix) for prefix in prefixes)
+
+
+def _require_no_second_uploaded_source(
+    nodes: Sequence[object],
+    object_info: Mapping[str, Any],
+    source: Mapping[str, object],
+) -> None:
+    """Refuse a graph carrying a second author-supplied file.
+
+    The "exactly one source" rule cannot be enforced by class name alone: a
+    second loader of any other class - `LoadImageOutput`, a mask loader, a
+    package's own uploader - keeps the author's local filename in the compiled
+    package, which is the exact non-portability this module exists to remove.
+
+    An upload input is the evidence, because that is what marks a widget whose
+    value is a file the author put in their own input directory.  A node that
+    merely produces an image without one - `EmptyImage`, a generator - is not a
+    second source and is left alone.
+    """
+    offenders: set[str] = set()
+    for node in nodes:
+        if not isinstance(node, Mapping) or node is source or node.get("mode", 0) != 0:
+            continue
+        node_type = node.get("type")
+        if not isinstance(node_type, str):
+            continue
+        node_info = object_info.get(node_type)
+        if isinstance(node_info, Mapping) and _declares_upload_input(node_info):
+            offenders.add(node_type)
+    if offenders:
+        listed = ", ".join(sorted(offenders))
+        raise WorkflowPackageInputError(
+            "workflow_source_input_ambiguous",
+            (
+                "This workflow loads more than one supplied file, so which one the "
+                f"run should replace is ambiguous: {listed}."
+            ),
+        )
+
+
+def _declares_upload_input(node_info: Mapping[str, object]) -> bool:
+    sections = node_info.get("input")
+    if not isinstance(sections, Mapping):
+        return False
+    for section_name in ("required", "optional"):
+        definitions = sections.get(section_name)
+        if not isinstance(definitions, Mapping):
+            continue
+        for spec in definitions.values():
+            if (
+                isinstance(spec, Sequence)
+                and not isinstance(spec, str | bytes)
+                and len(spec) > 1
+                and isinstance(spec[1], Mapping)
+                and any(
+                    spec[1].get(control) is True
+                    for control in ("image_upload", "video_upload", "audio_upload")
+                )
+            ):
+                return True
+    return False
+
+
 def _executable_output_node_ids(
     nodes: Sequence[object],
     object_info: Mapping[str, Any],
@@ -318,7 +436,9 @@ def _require_compiled_source_reaches_outputs(
     link_input_names: Mapping[str, frozenset[str]],
 ) -> None:
     node_ids = frozenset(graph)
-    adjacency: dict[str, set[str]] = {node_id: set() for node_id in node_ids}
+    # Edges carry the origin's output slot, because leaving the source through
+    # its MASK output is not the source image reaching anything.
+    adjacency: dict[str, set[tuple[str, int]]] = {node_id: set() for node_id in node_ids}
     for target_id, node in graph.items():
         inputs = node.get("inputs")
         node_type = node.get("class_type")
@@ -332,10 +452,22 @@ def _require_compiled_source_reaches_outputs(
                 and len(value) == 2
                 and isinstance(value[0], int | str)
                 and not isinstance(value[0], bool)
+                and isinstance(value[1], int)
+                and not isinstance(value[1], bool)
             ):
                 origin_id = str(value[0])
                 if origin_id in node_ids:
-                    adjacency[origin_id].add(target_id)
+                    adjacency[origin_id].add((target_id, value[1]))
+    required_outputs = frozenset(output_node_ids)
+    if not required_outputs:
+        # Distinct from the reachability failure below: nothing is wrong with
+        # the source, the graph simply produces nothing.  Saying "the source
+        # does not feed every output" here sends the reader after the wrong
+        # thing, because it is vacuously true of a graph with no outputs.
+        raise WorkflowPackageInputError(
+            "workflow_source_output_missing",
+            "This workflow has no executable output node.",
+        )
     reachable: set[str] = set()
     pending = [source_id]
     while pending:
@@ -343,9 +475,13 @@ def _require_compiled_source_reaches_outputs(
         if current in reachable:
             continue
         reachable.add(current)
-        pending.extend(adjacency.get(current, ()))
-    required_outputs = frozenset(output_node_ids)
-    if not required_outputs or not required_outputs.issubset(reachable):
+        for target_id, slot in adjacency.get(current, ()):
+            # Only the image leaving the source counts; downstream of it every
+            # slot is ordinary dataflow.
+            if current == source_id and slot != _SOURCE_IMAGE_SLOT:
+                continue
+            pending.append(target_id)
+    if not required_outputs.issubset(reachable):
         raise WorkflowPackageInputError(
             "workflow_source_input_not_used",
             "The source image does not feed every executable workflow output.",
