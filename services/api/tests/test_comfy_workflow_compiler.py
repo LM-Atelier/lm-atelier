@@ -1844,3 +1844,82 @@ def test_a_damaged_graph_is_always_refused_and_never_raises_something_else() -> 
             seen_refusal = True
 
     assert seen_refusal, "the damage was too gentle to refuse anything"
+
+
+def _uploader(
+    saved: list[Any], option: str = "image_upload"
+) -> tuple[dict[str, Any], dict[str, Any]]:
+    """A loader whose widget offers an upload button, as the editor saves it."""
+
+    workflow = _workflow()
+    workflow["nodes"][0]["outputs"][0]["links"] = []
+    workflow["nodes"] = [
+        {
+            "id": 1,
+            "type": "LoadImage",
+            "mode": 0,
+            "inputs": [],
+            "outputs": [{"name": "IMAGE", "type": "IMAGE", "links": []}],
+            "widgets_values": saved,
+        }
+    ]
+    workflow["links"] = []
+    object_info = {
+        "LoadImage": {
+            "input": {"required": {"image": [["seed.jpg", "other.png"], {option: True}]}},
+            "input_order": {"required": ["image"]},
+            "output": ["IMAGE"],
+            "output_node": True,
+        }
+    }
+    return workflow, object_info
+
+
+def test_the_value_an_upload_button_saves_is_consumed_rather_than_sent() -> None:
+    """A node offering an upload button declares it as an option on the widget
+    it fills, and the editor writes the upload kind as one more saved value. The
+    runtime declares no input for it, so every graph exported with one of these
+    nodes carried a value nothing could map."""
+
+    workflow, object_info = _uploader(["seed.jpg", "image"])
+
+    compiled = compile_comfyui_ui_graph(workflow, object_info)
+
+    assert compiled.api_graph["1"]["inputs"] == {"image": "seed.jpg"}
+
+
+@pytest.mark.parametrize(
+    ("option", "saved"),
+    [
+        ("audio_upload", "audio"),
+        ("video_upload", "video"),
+        ("file_upload", "file"),
+    ],
+)
+def test_the_upload_kind_is_read_off_what_the_runtime_declared(option: str, saved: str) -> None:
+    """Read from the option the node itself declares rather than a list of node
+    types kept in the compiler, which would go stale the moment a package added
+    one."""
+
+    workflow, object_info = _uploader(["seed.jpg", saved], option=option)
+
+    compiled = compile_comfyui_ui_graph(workflow, object_info)
+
+    assert compiled.api_graph["1"]["inputs"] == {"image": "seed.jpg"}
+
+
+def test_a_value_that_is_not_the_upload_kind_is_left_alone() -> None:
+    """The most this can swallow is the word the node said it writes. Anything
+    else is a value the graph meant, and dropping it silently would send a
+    different instruction than the one recorded."""
+
+    workflow, object_info = _uploader(["seed.jpg", "something else"])
+
+    _assert_error("unsupported_widget_values", workflow, object_info)
+
+
+def test_a_widget_with_no_upload_button_consumes_nothing_extra() -> None:
+    workflow, object_info = _uploader(["seed.jpg", "image"])
+    object_info["LoadImage"]["input"]["required"]["image"] = [["seed.jpg", "other.png"], {}]
+
+    _assert_error("unsupported_widget_values", workflow, object_info)

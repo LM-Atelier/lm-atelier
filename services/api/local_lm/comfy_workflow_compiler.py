@@ -269,6 +269,26 @@ def _parse_link(value: object) -> _Link:
     )
 
 
+def _upload_control_kind(options: Mapping[str, object]) -> str | None:
+    """What a widget's upload control writes, if the node offers one.
+
+    Read off the option the runtime itself declared - `image_upload` names an
+    image, `audio_upload` an audio file - rather than from a list of node types
+    kept here, which would go stale the moment a package added one.
+
+    Returning the expected value rather than a flag is the point: the caller
+    consumes a saved value only when it is exactly this, so the most this can
+    ever swallow is the word that node said it writes. Anything else is left
+    alone and refuses, which is the safe direction for a guess about a value
+    nobody declared an input for.
+    """
+
+    for name, enabled in options.items():
+        if enabled and isinstance(name, str) and name.endswith("_upload"):
+            return name[: -len("_upload")]
+    return None
+
+
 def _drawn_by_package(node: Mapping[str, object]) -> PackageClaim | None:
     """The package and revision a node says drew it.
 
@@ -854,6 +874,16 @@ def _compile_node_inputs(
                 f"node {node_id} is missing required input {definition.name}",
             )
         options = _widget_options(definition.spec)
+        # A node that offers an upload button declares it as an option on the
+        # widget it fills, and the editor writes the upload kind as one more
+        # saved value after that widget's own. The runtime declares no input
+        # for it, so it is consumed rather than sent - the same shape as the
+        # control that follows a seed.
+        uploads = _upload_control_kind(options)
+        if uploads is not None and named is None and cursor < len(values):
+            saved = values[cursor]
+            if isinstance(saved, str) and saved == uploads:
+                cursor += 1
         if not options.get("control_after_generate"):
             continue
         # The control that follows a seed is drawn by the editor and applied
