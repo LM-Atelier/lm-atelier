@@ -8045,6 +8045,89 @@ async def _verified_launchable_packages(
     return combined
 
 
+async def _packages_awaiting_review(services: Services) -> frozenset[tuple[str, str]]:
+    """Trusted installs whose reviewed node inventory was never recorded.
+
+    Absent evidence and an absent package resolve identically and need opposite
+    actions, so the analysis is told which is which. Failing closed here means
+    reporting the package as simply unresolved, which is the older, less helpful
+    answer rather than a wrong one.
+    """
+
+    resolver = getattr(
+        services.processes, "trusted_comfy_custom_node_packages_awaiting_review", None
+    )
+    if not callable(resolver):
+        return frozenset()
+    try:
+        packages = await resolver()
+    except Exception:  # noqa: BLE001 - analysis must not fail outright over advice
+        logger.warning("Installed custom-node packages could not be checked for review state.")
+        return frozenset()
+    # Rebuilt rather than returned, so an untyped resolver cannot widen what
+    # this promises - the same shape the launchable-package reader uses.
+    return frozenset((str(name), str(revision)) for name, revision in packages)
+
+
+def _packages_that_did_not_load(
+    services: Services,
+    analysis: ComfyWorkflowPackageAnalysis,
+    available_node_types: set[str],
+) -> list[tuple[str, Path | None]]:
+    """Packages *this workflow requires* whose nodes are absent after a restart.
+
+    Scoped to the analysis on purpose. The media runtime launches with only the
+    packages a particular activation needs, so most installed packages are
+    legitimately absent from any given inventory. Reporting every trusted
+    install whose nodes are missing would name whichever unrelated package
+    happened to be out of scope, and name it as the thing that broke an import
+    it has nothing to do with.
+
+    So a package is only a candidate when the workflow declares it, at the
+    revision the workflow declares, and the nodes still missing are nodes this
+    workflow actually asked that package for.
+
+    Returns each package name with the requirements file it ships, if any, so
+    the refusal can distinguish a package that cannot import from one that
+    failed for a reason only the runtime log knows.
+    """
+
+    from .custom_nodes import CustomNodeManager, reviewed_custom_node_types
+    from .db import SessionLocal
+    from .models import CustomNodeInstall
+
+    required: dict[tuple[str, str], set[str]] = {}
+    for requirement in analysis.custom_packages:
+        for version in requirement.versions:
+            required[(requirement.package_id, version)] = set(requirement.node_types)
+    if not required:
+        return []
+
+    failed: list[tuple[str, Path | None]] = []
+    with SessionLocal() as session:
+        installs = list(
+            session.scalars(
+                select(CustomNodeInstall).where(
+                    CustomNodeInstall.active.is_(True),
+                    CustomNodeInstall.trusted.is_(True),
+                )
+            ).all()
+        )
+        manager = CustomNodeManager(services.settings)
+        for install in installs:
+            wanted = required.get((install.name, install.revision))
+            if wanted is None:
+                continue
+            reviewed = set(reviewed_custom_node_types(install.security_json))
+            # Only the nodes this workflow asked this package for. A package can
+            # own nodes nobody here needs, and their absence proves nothing.
+            owed = reviewed & wanted
+            if not owed or owed <= available_node_types:
+                continue
+            failed.append((install.name, manager.python_requirements_path(install)))
+    return failed
+
+
 def _launchable_package_node_types(
     analysis: ComfyWorkflowPackageAnalysis,
     packages: Mapping[tuple[str, str], frozenset[str]],
@@ -9111,6 +9194,7 @@ async def import_workflow_package(
                 available_node_types=available_node_types | launchable_node_types,
                 available_asset_filenames=asset_filenames,
                 installed_package_versions=verified_package_versions,
+                packages_awaiting_review=await _packages_awaiting_review(services),
             )
         except WorkflowPackageError as exc:
             raise api_error(422, exc.code, str(exc)) from exc
@@ -9145,6 +9229,55 @@ async def import_workflow_package(
         except WorkflowPackageError as exc:
             raise api_error(422, exc.code, str(exc)) from exc
         if not analysis.ready:
+            # Name the package rather than the symptom. "A node is missing" is
+            # true and useless: the node is missing because something that owns
+            # it did not load, and that has a different fix from installing
+            # anything at all.
+            unloaded = _packages_that_did_not_load(services, analysis, available_node_types)
+            if unloaded:
+                # Partitioned rather than summarised. A set where one package
+                # ships requirements and another does not has two causes, and
+                # asserting either for both would be a confident wrong answer.
+                needing = sorted(name for name, path in unloaded if path is not None)
+                other = sorted(name for name, path in unloaded if path is None)
+                # No pip command. Installing requirements by hand invalidates the
+                # prepared runtime baseline, which the worker compares for
+                # equality before it starts - so the command would fix the import
+                # and stop the runtime, which is worse than saying nothing.
+                remedy = (
+                    " Prepare the package from the workflow package review:"
+                    " preparation installs a package's dependency closure and records"
+                    " the runtime's package baseline, which installing by hand cannot do."
+                )
+                if needing and not other:
+                    listed = ", ".join(needing)
+                    raise api_error(
+                        422,
+                        "custom-node-package-requirements-missing",
+                        f"{listed} is installed and trusted but did not load. It declares"
+                        " Python requirements, and installing a pinned repository does not"
+                        " install what it imports, so its nodes never register with the"
+                        f" runtime.{remedy}",
+                    )
+                if needing:
+                    listed = ", ".join(needing)
+                    others = ", ".join(other)
+                    raise api_error(
+                        422,
+                        "custom-node-package-did-not-load",
+                        f"{listed} and {others} are installed and trusted but did not load."
+                        f" {listed} declares Python requirements that installing a pinned"
+                        f" repository does not install. Why {others} failed is recorded in"
+                        f" the media worker log.{remedy}",
+                    )
+                listed = ", ".join(other)
+                raise api_error(
+                    422,
+                    "custom-node-package-did-not-load",
+                    f"{listed} is installed and trusted but did not load, so the nodes it"
+                    " provides are unavailable. The media worker log records why the import"
+                    f" failed.{remedy}",
+                )
             raise api_error(
                 422,
                 "package-not-resolved",
@@ -9256,6 +9389,7 @@ async def analyze_workflow_package(
                 available_node_types=available_node_types | launchable_node_types,
                 available_asset_filenames=asset_filenames,
                 installed_package_versions=verified_package_versions,
+                packages_awaiting_review=await _packages_awaiting_review(services),
             )
         except WorkflowPackageError as exc:
             raise api_error(422, exc.code, str(exc)) from exc

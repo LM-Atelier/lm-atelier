@@ -31,20 +31,38 @@ KNOWN_MODEL_SUFFIXES = SUPPORTED_MODEL_SUFFIXES | BLOCKED_MODEL_SUFFIXES | froze
 # muted or bypassed carries that mode itself - so discarding the controls
 # cannot disturb what they applied.
 #
+# The KJNodes pair are named wires. `SetNode` labels the link feeding it and
+# `GetNode` re-emits that link elsewhere in the graph, which is how a large
+# share of published workflows avoid drawing a wire across the canvas. Both are
+# implemented entirely in that package's JavaScript, so no runtime can ever
+# report them - counting them as runtime requirements made every graph that uses
+# the idiom unimportable, and made the package that ships their JavaScript look
+# like the thing that failed to load. Unlike the entries above they carry
+# connectivity, so the compiler resolves them rather than discarding them.
+#
 # Named individually rather than by a rule like "no cnr_id". A node without a
 # package is usually a node whose package we failed to identify, and treating
 # that whole class as frontend furniture would silently drop real
 # dependencies.
+# Deliberately not here: `Node Collector (rgthree)`. It also registers nothing,
+# but it gathers several connections into one output, so it carries a wire the
+# way `Reroute` does. Listing it would drop the edges it stands for, which is a
+# different graph rather than a smaller one.
 FRONTEND_SYSTEM_NODE_TYPES = frozenset(
     {
         "MarkdownNote",
         "Note",
         "PrimitiveNode",
         "Reroute",
+        "Bookmark (rgthree)",
+        "Fast Actions Button (rgthree)",
         "Fast Groups Bypasser (rgthree)",
+        "Fast Groups Muter (rgthree)",
+        "GetNode",
         "Label (rgthree)",
         "Mute / Bypass Relay (rgthree)",
         "Mute / Bypass Repeater (rgthree)",
+        "SetNode",
     }
 )
 
@@ -158,6 +176,7 @@ class ComfyWorkflowPackageAnalysis:
             "unidentified_custom_node_package",
             "unresolved_custom_node_package",
             "unversioned_custom_node_package",
+            "custom_node_package_awaiting_review",
         }
         return self.runtime_nodes_available and not any(
             issue.code in blocking for issue in self.issues
@@ -190,6 +209,7 @@ def analyze_comfyui_workflow_package(
     available_node_types: Collection[str] = (),
     available_asset_filenames: Collection[str] = (),
     installed_package_versions: Mapping[str, Collection[str]] | None = None,
+    packages_awaiting_review: Collection[tuple[str, str]] = (),
 ) -> ComfyWorkflowPackageAnalysis:
     """Inspect a ComfyUI v0.4 UI workflow without executing or persisting it."""
     _validate_bounded_json(workflow)
@@ -229,6 +249,7 @@ def analyze_comfyui_workflow_package(
         available_asset_filenames,
         installed_package_versions,
         structural_issues,
+        packages_awaiting_review,
     )
 
 
@@ -242,6 +263,7 @@ def _analysis(
     available_asset_filenames: Collection[str],
     installed_package_versions: Mapping[str, Collection[str]] | None,
     structural_issues: tuple[WorkflowPackageIssue, ...],
+    packages_awaiting_review: Collection[tuple[str, str]] = (),
 ) -> ComfyWorkflowPackageAnalysis:
     all_types = {record.node_type for record in records}
     frontend = all_types & (FRONTEND_SYSTEM_NODE_TYPES | subgraph_ids)
@@ -254,6 +276,7 @@ def _analysis(
         missing,
         available,
         installed_package_versions or {},
+        packages_awaiting_review,
     )
     assets, asset_issues = _asset_references(records, available_asset_filenames)
     return ComfyWorkflowPackageAnalysis(
@@ -539,6 +562,7 @@ def _package_requirements(
     missing_types: set[str],
     available_types: set[str],
     installed_package_versions: Mapping[str, Collection[str]],
+    packages_awaiting_review: Collection[tuple[str, str]] = (),
 ) -> tuple[tuple[WorkflowPackageRequirement, ...], tuple[WorkflowPackageIssue, ...]]:
     packages: dict[str, dict[str, set[str]]] = defaultdict(lambda: defaultdict(set))
     unidentified: set[str] = set()
@@ -606,14 +630,38 @@ def _package_requirements(
             )
         )
     unresolved = [requirement for requirement in requirements if not requirement.locally_resolved]
-    if unresolved:
-        node_types = {
-            node_type for requirement in unresolved for node_type in requirement.node_types
-        }
+    # Installed and trusted, but nobody recorded which nodes were reviewed. It
+    # resolves exactly as poorly as an absent package and needs the opposite
+    # action, so it is reported as its own thing rather than folded in: one is
+    # fixed by fetching something, the other by reading what is already here.
+    awaiting = [
+        requirement
+        for requirement in unresolved
+        if requirement.versions
+        and all(
+            (requirement.package_id, version) in packages_awaiting_review
+            for version in requirement.versions
+        )
+    ]
+    awaiting_ids = {requirement.package_id for requirement in awaiting}
+    absent = [
+        requirement for requirement in unresolved if requirement.package_id not in awaiting_ids
+    ]
+    if absent:
+        node_types = {node_type for requirement in absent for node_type in requirement.node_types}
         issues.append(
             WorkflowPackageIssue(
                 "unresolved_custom_node_package",
-                len(unresolved),
+                len(absent),
+                tuple(sorted(node_types, key=str.casefold)),
+            )
+        )
+    if awaiting:
+        node_types = {node_type for requirement in awaiting for node_type in requirement.node_types}
+        issues.append(
+            WorkflowPackageIssue(
+                "custom_node_package_awaiting_review",
+                len(awaiting),
                 tuple(sorted(node_types, key=str.casefold)),
             )
         )
@@ -642,6 +690,29 @@ def _missing_node_requirements(
     )
 
 
+def _asset_bearing_widgets(record: _NodeRecord) -> object:
+    """The part of a node's saved widgets that names files it would load.
+
+    Normally all of them: a filename in a widget is a file the node opens. A
+    loader that holds several entries and switches them on and off is the
+    exception - an entry left switched off, or at zero strength, keeps its
+    filename so the author can turn it back on, and the node never opens it.
+
+    Counting those made a missing file for a disabled entry block the whole
+    import, over an asset no run would ever read.
+    """
+
+    from .comfy_package_widgets import executable_lora_entries
+
+    entries = executable_lora_entries(
+        record.node_type,
+        record.package_id,
+        record.package_version,
+        record.widgets,
+    )
+    return record.widgets if entries is None else entries
+
+
 def _asset_references(
     records: Sequence[_NodeRecord],
     available_asset_filenames: Collection[str],
@@ -657,7 +728,7 @@ def _asset_references(
     for record in records:
         if record.node_type in {"MarkdownNote", "Note"}:
             continue
-        for value in _strings(record.widgets):
+        for value in _strings(_asset_bearing_widgets(record)):
             candidate = value.strip()
             if not candidate:
                 continue

@@ -782,6 +782,47 @@ class ProcessSupervisor:
             result[key] = frozenset(node_types)
         return result
 
+    async def trusted_comfy_custom_node_packages_awaiting_review(
+        self,
+    ) -> frozenset[tuple[str, str]]:
+        """Trusted installs whose reviewed node inventory was never recorded.
+
+        These are indistinguishable from a package nobody installed, as far as
+        resolution is concerned: the inventory is the evidence, and without it
+        nothing can say this package owns the nodes a workflow attributes to it.
+        They are not the same thing to the person looking at them, though. One
+        needs installing and the other needs reading, and an installation that
+        reports the first when it means the second sends somebody to fetch what
+        they already have.
+
+        This exists because the inventory began being recorded after people had
+        already trusted packages. Upgrading does not retroactively review
+        anything - trust says somebody read that exact revision, and nothing here
+        can assert that on their behalf - so the honest answer is to name the
+        state and let them re-read it.
+        """
+
+        from sqlalchemy import select
+
+        from .custom_nodes import reviewed_custom_node_types
+        from .db import SessionLocal
+        from .models import CustomNodeInstall
+
+        with SessionLocal() as session:
+            installs = list(
+                session.scalars(
+                    select(CustomNodeInstall).where(
+                        CustomNodeInstall.active.is_(True),
+                        CustomNodeInstall.trusted.is_(True),
+                    )
+                ).all()
+            )
+            return frozenset(
+                (install.name, install.revision)
+                for install in installs
+                if not reviewed_custom_node_types(install.security_json)
+            )
+
     async def comfy_node_inventory(self) -> frozenset[str]:
         """Every node type the running worker loaded.
 

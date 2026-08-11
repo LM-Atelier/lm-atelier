@@ -183,7 +183,7 @@ async def test_import_restarts_unscoped_for_a_verified_registry_package(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     package_id = "comfyui-kjnodes"
-    node_type = "GetNode"
+    node_type = "ImageResizeKJ"
     _record_registry_install(package_id, node_type)
     reads = 0
     starts = 0
@@ -242,7 +242,7 @@ async def test_import_restarts_unscoped_for_a_reviewed_manual_package(
 ) -> None:
     package_id = "comfyui-kjnodes"
     revision = "e" * 40
-    node_type = "GetNode"
+    node_type = "ImageResizeKJ"
     _record_manual_install(package_id, revision, node_type)
     reads = 0
     starts = 0
@@ -682,3 +682,82 @@ async def test_a_subgraph_package_imports_now_that_it_can_be_expanded(
     )
 
     assert response.status_code == 201, response.json()
+
+
+async def test_an_unrelated_out_of_scope_package_is_not_blamed(
+    client: AsyncClient,
+    app: FastAPI,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The runtime launches activation-scoped, so most installed packages are
+    legitimately absent from any given inventory. Reporting every trusted
+    install whose nodes are missing names whichever unrelated package happened
+    to be out of scope - and names it as the cause of an import it has nothing
+    to do with.
+
+    One required package that genuinely will not load, one unrelated package
+    that is simply not in scope. Only the first may be named.
+    """
+
+    package_id = "comfyui-kjnodes"
+    revision = "e" * 40
+    node_type = "ImageResizeKJ"
+    _record_manual_install(package_id, revision, node_type)
+    # Installed, trusted, and nothing to do with this workflow.
+    _record_manual_install("comfyui-unrelated", "d" * 40, "UnrelatedNode")
+
+    async def object_info() -> dict[str, Any]:
+        # Neither custom package ever loads, before or after the restart.
+        return _object_info()
+
+    async def no_registry_packages() -> dict[tuple[str, str], frozenset[str]]:
+        return {}
+
+    async def manual_packages() -> dict[tuple[str, str], frozenset[str]]:
+        return {
+            (package_id, revision): frozenset({node_type}),
+            ("comfyui-unrelated", "d" * 40): frozenset({"UnrelatedNode"}),
+        }
+
+    async def start_media() -> None:
+        return None
+
+    services = app.state.services
+    monkeypatch.setattr(services.engines.media, "object_info", object_info, raising=False)
+    monkeypatch.setattr(
+        services.processes,
+        "trusted_comfy_registry_package_node_types",
+        no_registry_packages,
+        raising=False,
+    )
+    monkeypatch.setattr(
+        services.processes,
+        "trusted_comfy_custom_node_package_node_types",
+        manual_packages,
+        raising=False,
+    )
+    monkeypatch.setattr(services.processes, "start_media", start_media, raising=False)
+
+    graph = _manual_graph(package_id, revision, node_type)
+    draft_response = await client.post(
+        "/api/workflows/packages/drafts",
+        json={"ui_graph": graph, "name": "Scoped blame", "operation": "text_to_image"},
+    )
+    draft = draft_response.json()
+    response = await client.post(
+        "/api/workflows/packages/import",
+        json={
+            "ui_graph": graph,
+            "name": "scoped blame",
+            "operation": "text_to_image",
+            "draft_workflow_id": draft["id"],
+            "draft_revision_id": draft["current_revision_id"],
+        },
+    )
+
+    assert response.status_code == 422
+    detail = response.json()["detail"]
+    assert package_id in detail
+    # The unrelated package is out of scope, not broken. Naming it would send
+    # somebody to repair something that is working.
+    assert "comfyui-unrelated" not in detail

@@ -4,6 +4,12 @@ from collections import deque
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 
+from .comfy_package_widgets import (
+    PackageClaim,
+    PackageWidgetError,
+    package_named_widget_inputs,
+    package_widget_inputs,
+)
 from .comfy_subgraphs import SubgraphExpansionError, expand_workflow
 from .comfy_version_support import COMFY_VERSION_SUPPORT
 from .comfy_workflow_packages import (
@@ -13,6 +19,11 @@ from .comfy_workflow_packages import (
 
 _SUPPORTED_WIDGET_TYPES = frozenset({"BOOLEAN", "COMBO", "FLOAT", "INT", "STRING"})
 _CONTROL_AFTER_GENERATE = frozenset({"decrement", "fixed", "increment", "randomize"})
+_CONTROL_WIDGET = "control_after_generate"
+# Subgraph expansion prefixes an inner node id with the instance it came from,
+# separated by this. It is the only record of nesting left once the definitions
+# are rewritten away.
+_SCOPE_SEPARATOR = ":"
 # Nodes that draw something and carry nothing. Dropping one loses a caption.
 _IGNORED_FRONTEND_NODE_TYPES = frozenset(
     {"MarkdownNote", "Note", "PrimitiveNode", "Label (rgthree)"}
@@ -20,7 +31,20 @@ _IGNORED_FRONTEND_NODE_TYPES = frozenset(
 # Nodes that carry a wire and nothing else. They are resolved away before
 # compilation rather than ignored: ignoring one drops the edge it was
 # carrying, which is a different graph, not a smaller one.
-_PASS_THROUGH_TYPES = frozenset({"Reroute"})
+#
+# `Reroute` carries its wire to whatever it touches. The KJNodes pair carries one
+# by name instead: `SetNode` labels the link feeding it, and any `GetNode`
+# holding the same label re-emits that link from anywhere in the graph. The
+# difference is only in how the far end is found, so both resolve here.
+_NAMED_WIRE_SOURCE_TYPE = "SetNode"
+_NAMED_WIRE_SINK_TYPE = "GetNode"
+_PASS_THROUGH_TYPES = frozenset({"Reroute", _NAMED_WIRE_SOURCE_TYPE, _NAMED_WIRE_SINK_TYPE})
+# Deliberately without the named-wire pair. This gate asks whether the ComfyUI
+# frontend version is one whose `PrimitiveNode` and `Reroute` semantics we have
+# certified. Named wires are not that frontend's construct - they come from a
+# third-party package, and each node records the exact package revision that
+# defined it - so asking the core frontend version about them would be asking
+# the wrong thing and answering confidently.
 _FRONTEND_SEMANTIC_NODE_TYPES = frozenset({"PrimitiveNode", "Reroute"})
 
 
@@ -69,10 +93,21 @@ def compile_comfyui_ui_graph(
         workflow = expand_workflow(workflow)
     except SubgraphExpansionError as exc:
         raise WorkflowCompilationError(exc.code, str(exc)) from exc
-    analysis = analyze_comfyui_workflow_package(
-        workflow,
-        available_node_types=object_info.keys(),
-    )
+    # Converted rather than left to propagate. Everything this function raises is
+    # "this graph cannot be compiled", and a caller that catches that should not
+    # also have to catch the type the analysis happens to use - one call site
+    # compiles a graph handed back by the visual editor with no analysis in
+    # front of it, so a malformed graph escaped as an unhandled error rather
+    # than as the refusal it is. The code is kept, so nothing loses detail.
+    try:
+        analysis = analyze_comfyui_workflow_package(
+            workflow,
+            available_node_types=object_info.keys(),
+        )
+    except WorkflowCompilationError:
+        raise
+    except WorkflowPackageError as exc:
+        raise WorkflowCompilationError(exc.code, str(exc)) from exc
     if analysis.subgraph_count:
         raise WorkflowCompilationError(
             "unsupported_subgraphs",
@@ -234,6 +269,119 @@ def _parse_link(value: object) -> _Link:
     )
 
 
+def _drawn_by_package(node: Mapping[str, object]) -> PackageClaim | None:
+    """The package and revision a node says drew it.
+
+    Taken from what the graph records rather than from anything installed. The
+    question a layout answers is whose editor code has to be reproduced, and the
+    saved graph is what states that; an installed package of the same name is a
+    different claim and could disagree.
+
+    Both ids are read because a graph may record either, but a node claiming two
+    that disagree is refused rather than resolved - picking one would decide
+    which package's layout to read by, on no evidence.
+
+    The revision travels with the id and never separately. A layout is a
+    transcription of specific code, so which code drew this node is half the
+    question, and a package name on its own cannot answer it.
+    """
+
+    properties = node.get("properties")
+    if not isinstance(properties, Mapping):
+        return None
+    registry = properties.get("cnr_id")
+    repository = properties.get("aux_id")
+    revision = properties.get("ver")
+    claim = PackageClaim(
+        registry if isinstance(registry, str) and registry else None,
+        repository if isinstance(repository, str) and repository else None,
+        revision if isinstance(revision, str) else "",
+    )
+    if claim.registry_id is None and claim.repository_id is None:
+        return None
+    return claim
+
+
+def _drawn_by(node: Mapping[str, object]) -> str:
+    """The same, phrased for a refusal that can be acted on.
+
+    Empty when the graph does not say, because naming the wrong package is worse
+    than naming none.
+    """
+
+    claim = _drawn_by_package(node)
+    if claim is None:
+        return " its package"
+    if claim.revision:
+        return f" {claim.package_id} at {claim.revision}"
+    return f" {claim.package_id}"
+
+
+def _named_wire_label(node_id: str, node: Mapping[str, object]) -> str:
+    """The label a named wire is written or read under.
+
+    Held in the node's first widget, which is also where the frontend keeps it.
+    A named wire with no readable label cannot be matched to its other end, and
+    guessing which end it meant would connect two things the author did not.
+    """
+
+    values = node.get("widgets_values")
+    if isinstance(values, Sequence) and not isinstance(values, str | bytes):
+        label = values[0] if values else None
+        if isinstance(label, str) and label:
+            return label
+    raise WorkflowCompilationError(
+        "invalid_named_wire", f"node {node_id} is a named wire with no name"
+    )
+
+
+def _scope_of(node_id: str) -> str:
+    """Which nesting a node sits in, as subgraph expansion recorded it.
+
+    Expansion flattens instances by prefixing every inner node's id with the
+    instance it came from, so an id carries its own nesting and is the only
+    record of it left once the definitions are gone. A graph that never had a
+    subgraph has no prefix and one scope, which is the whole graph.
+    """
+
+    return node_id.rpartition(_SCOPE_SEPARATOR)[0]
+
+
+def _enclosing_scopes(scope: str) -> tuple[str, ...]:
+    """A scope and the ones around it, innermost first."""
+
+    scopes = [scope]
+    while scope:
+        scope = scope.rpartition(_SCOPE_SEPARATOR)[0]
+        scopes.append(scope)
+    return tuple(scopes)
+
+
+def _named_wire_writers(
+    nodes: Mapping[str, Mapping[str, object]],
+) -> dict[tuple[str, str], list[str]]:
+    """Which nodes write each label, in which nesting.
+
+    Labelled by scope as well as name because the package that draws these
+    resolves a reader against its own graph and then the graphs around it, never
+    a sibling. Two copies of one subgraph therefore each carry their own copy of
+    a label, and reading them as one would make every reuse of a subgraph
+    ambiguous - which is a graph the editor runs perfectly well.
+
+    Every writer of a scoped name is kept rather than the first, because a label
+    written twice is only ambiguous where something reads it. An unread duplicate
+    is a stray node the author left behind, and the editor runs that graph too.
+    """
+
+    writers: dict[tuple[str, str], list[str]] = {}
+    for node_id, node in nodes.items():
+        if str(node.get("type")) != _NAMED_WIRE_SOURCE_TYPE:
+            continue
+        key = (_scope_of(node_id), _named_wire_label(node_id, node))
+        writers.setdefault(key, []).append(node_id)
+    return writers
+
+
 def _elide_pass_through_nodes(
     nodes: Mapping[str, Mapping[str, object]],
     links: Sequence[_Link],
@@ -247,9 +395,18 @@ def _elide_pass_through_nodes(
     every consumer reconnects to whatever fed the reroute, through however many
     reroutes stand between them.
 
-    The refusal that matters is a reroute with consumers and nothing feeding it.
+    A named wire is the same problem with the far end named rather than touched.
+    A `SetNode` labels the link feeding it; every `GetNode` carrying that label
+    stands in for that link, wherever in the graph it sits. Resolving one is
+    therefore a lookup by label rather than a step along an edge, but what
+    happens next is identical, so both walk the same chain and a wire may cross
+    reroutes and labels in any order.
+
+    The refusal that matters is a carrier with consumers and nothing feeding it.
     Dropping that silently would leave a required input unfilled, so it is named
-    instead.
+    instead - as is a label no `SetNode` defines, and a label two of them claim.
+    A label whose two definitions disagree has no correct reading, and picking
+    either would compile a graph the author never drew.
     """
 
     pass_through = {
@@ -259,6 +416,44 @@ def _elide_pass_through_nodes(
         return dict(nodes), tuple(links)
 
     incoming = {link.target: link for link in links if link.target in pass_through}
+    writers = _named_wire_writers(nodes)
+    for node_id, node in nodes.items():
+        if str(node.get("type")) != _NAMED_WIRE_SINK_TYPE:
+            continue
+        label = _named_wire_label(node_id, node)
+        # Its own nesting first, then outwards, which is how the package that
+        # draws these resolves them. A label set nearer the reader is the one it
+        # means, and one set in a nesting the reader is not inside is not a
+        # candidate at all.
+        defined: list[str] = []
+        for scope in _enclosing_scopes(_scope_of(node_id)):
+            defined = writers.get((scope, label), [])
+            if defined:
+                break
+        if not defined:
+            raise WorkflowCompilationError(
+                "undefined_named_wire",
+                f"node {node_id} reads workflow value {label}, which nothing sets",
+            )
+        if len(defined) > 1:
+            raise WorkflowCompilationError(
+                "duplicate_named_wire",
+                f"node {node_id} reads workflow value {label}, which more than one node sets",
+            )
+        source = defined[0]
+        # Stands in for the edge a reader does not draw. Only its origin is read,
+        # and the walk continues from the writer - so a writer that carries
+        # nothing is reported as the writer it is, not as the reader that found
+        # it.
+        incoming[node_id] = _Link(f"named-wire:{label}", source, 0, node_id, 0)
+
+    def describe(node_id: str) -> str:
+        node_type = str(nodes[node_id].get("type"))
+        if node_type == _NAMED_WIRE_SOURCE_TYPE:
+            return f"workflow value {_named_wire_label(node_id, nodes[node_id])}"
+        if node_type == _NAMED_WIRE_SINK_TYPE:
+            return f"the read of workflow value {_named_wire_label(node_id, nodes[node_id])}"
+        return f"reroute node {node_id}"
 
     def resolve(link: _Link) -> _Link:
         origin, origin_slot = link.origin, link.origin_slot
@@ -267,14 +462,14 @@ def _elide_pass_through_nodes(
             if origin in seen:
                 raise WorkflowCompilationError(
                     "pass_through_cycle",
-                    f"reroute node {origin} feeds itself",
+                    f"{describe(origin)} feeds itself",
                 )
             seen.add(origin)
             feeding = incoming.get(origin)
             if feeding is None:
                 raise WorkflowCompilationError(
                     "unconnected_pass_through",
-                    f"reroute node {origin} carries a connection but nothing feeds it",
+                    f"{describe(origin)} carries a connection but nothing feeds it",
                 )
             origin, origin_slot = feeding.origin, feeding.origin_slot
         if origin == link.origin and origin_slot == link.origin_slot:
@@ -600,12 +795,24 @@ def _compile_node_inputs(
             "unknown_input_slot", f"node {node_id} uses unknown input {name}"
         )
     raw_values = node.get("widgets_values", [])
-    if not isinstance(raw_values, Sequence) or isinstance(raw_values, str | bytes):
+    # A graph may save widgets in either of two shapes: positionally, in the
+    # order the node draws them, or keyed by the input each belongs to. The
+    # second says outright what the first only implies, so it is read by name
+    # and never counted - a node that gained or lost a widget shifts every
+    # position after it, and that is exactly what naming them avoids.
+    named: dict[str, object] | None = None
+    values: list[object] = []
+    if isinstance(raw_values, Mapping):
+        named = {str(key): value for key, value in raw_values.items()}
+    elif isinstance(raw_values, Sequence) and not isinstance(raw_values, str | bytes):
+        values = list(raw_values)
+    else:
         raise WorkflowCompilationError(
-            "invalid_widget_values", f"node {node_id} widget values must be an array"
+            "invalid_widget_values",
+            f"node {node_id} widget values must be an array or an object",
         )
-    values = list(raw_values)
     cursor = 0
+    taken: set[str] = set()
     result: dict[str, object] = {}
     for definition in definitions:
         key = (node_id, definition.name)
@@ -625,11 +832,17 @@ def _compile_node_inputs(
             continue
 
         selected: object | None = None
-        has_value = cursor < len(values)
-        if has_value:
-            selected = values[cursor]
-            cursor += 1
+        if named is not None:
+            has_value = definition.name in named
+            if has_value:
+                selected = named[definition.name]
+                taken.add(definition.name)
         else:
+            has_value = cursor < len(values)
+            if has_value:
+                selected = values[cursor]
+                cursor += 1
+        if not has_value:
             selected, has_value = _widget_default(definition.spec)
         if has_value:
             result[definition.name] = _serialize_widget_value(
@@ -641,18 +854,90 @@ def _compile_node_inputs(
                 f"node {node_id} is missing required input {definition.name}",
             )
         options = _widget_options(definition.spec)
-        if (
-            options.get("control_after_generate")
-            and cursor < len(values)
-            and isinstance(values[cursor], str)
-            and values[cursor].casefold() in _CONTROL_AFTER_GENERATE
-        ):
+        if not options.get("control_after_generate"):
+            continue
+        # The control that follows a seed is drawn by the editor and applied
+        # before a graph is ever saved, so it is consumed rather than sent.
+        if named is not None:
+            # The same rule the positional path applies. Consuming any string
+            # would swallow a value that is not a control at all and quietly
+            # drop whatever the graph meant by it.
+            control_value = named.get(_CONTROL_WIDGET)
+            if (
+                isinstance(control_value, str)
+                and control_value.casefold() in _CONTROL_AFTER_GENERATE
+            ):
+                taken.add(_CONTROL_WIDGET)
+            continue
+        if cursor >= len(values):
+            continue
+        control = values[cursor]
+        if isinstance(control, str) and control.casefold() in _CONTROL_AFTER_GENERATE:
             cursor += 1
+    if named is not None:
+        unread = {name: named[name] for name in sorted(set(named) - taken, key=str.casefold)}
+        if unread:
+            try:
+                extras = package_named_widget_inputs(
+                    str(node["type"]), _drawn_by_package(node), result, unread
+                )
+            except PackageWidgetError as exc:
+                raise WorkflowCompilationError(exc.code, f"node {node_id}: {exc}") from exc
+            if extras is None:
+                raise WorkflowCompilationError(
+                    "unknown_widget_value",
+                    f"node {node_id} saves a value for {next(iter(unread))},"
+                    " which it has no input for",
+                )
+            result.update(extras)
+        return _with_connected_inputs(node_id, result, by_name, connections, primitive_values)
     if cursor != len(values):
+        try:
+            drawn_inputs = package_widget_inputs(
+                str(node["type"]), _drawn_by_package(node), values[cursor:]
+            )
+        except PackageWidgetError as exc:
+            # The layout is transcribed and this graph does not match it. Saying
+            # so beats compiling it under a layout it no longer uses, which
+            # would run and mean something else.
+            raise WorkflowCompilationError(exc.code, f"node {node_id}: {exc}") from exc
+        if drawn_inputs is not None:
+            result.update(drawn_inputs)
+            cursor = len(values)
+    if cursor != len(values):
+        # A leftover scalar is a mapping this compiler got wrong. A leftover
+        # object is something else entirely: a widget the node's own package
+        # draws and serializes, whose layout lives in that package's editor code
+        # and is described nowhere the runtime can be asked. Both must refuse,
+        # but only one of them is about this compiler, and saying "cannot be
+        # mapped safely" for the other sends someone looking for a defect here.
+        drawn = next((value for value in values[cursor:] if isinstance(value, Mapping)), None)
+        if drawn is not None:
+            raise WorkflowCompilationError(
+                "package_serialized_widgets",
+                f"node {node_id} keeps its {node['type']} settings in a layout"
+                f"{_drawn_by(node)} defines, which only that package can read",
+            )
         raise WorkflowCompilationError(
             "unsupported_widget_values",
             f"node {node_id} has widget values that cannot be mapped safely",
         )
+    return _with_connected_inputs(node_id, result, by_name, connections, primitive_values)
+
+
+def _with_connected_inputs(
+    node_id: str,
+    result: dict[str, object],
+    by_name: Mapping[str, _InputDefinition],
+    connections: Mapping[tuple[str, str], list[object]],
+    primitive_values: Mapping[tuple[str, str], object],
+) -> dict[str, object]:
+    """A link replaces whatever a widget saved for the same input.
+
+    Shared by both saved shapes rather than written twice, because an input that
+    is wired takes its value from the wire in either of them.
+    """
+
     for (target, name), connection in connections.items():
         if target == node_id:
             if name not in by_name:

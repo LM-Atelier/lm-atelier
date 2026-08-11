@@ -156,10 +156,34 @@ def _expand(
             seen=(*seen, definition_id),
         )
         plain.extend(inner_nodes)
-        links = _splice(instance, identifier, links, inner_links)
+        links = _splice(
+            instance,
+            identifier,
+            links,
+            inner_links,
+            {str(node["id"]): node for node in inner_nodes},
+        )
 
     _refuse_duplicate_ids(plain)
     return plain, links
+
+
+def _names_a_real_slot(inner_nodes: Mapping[str, Mapping[str, Any]], link: _Link) -> bool:
+    """Whether the input a link points at exists on the node it points at.
+
+    Asked only about structure. Whether that input is required, and whether the
+    node can do without it, is decided against the runtime's declaration later -
+    but a link naming a slot no node has describes nothing, and there is no
+    later check that will notice once the link is gone.
+    """
+
+    node = inner_nodes.get(str(link.target_id))
+    if node is None:
+        return False
+    slots = node.get("inputs")
+    if not isinstance(slots, Sequence) or isinstance(slots, str | bytes):
+        return False
+    return 0 <= link.target_slot < len(slots)
 
 
 def _splice(
@@ -167,6 +191,7 @@ def _splice(
     identifier: str,
     outer: list[_Link],
     inner: list[_Link],
+    inner_nodes: Mapping[str, Mapping[str, Any]],
 ) -> list[_Link]:
     """Join a subgraph's insides to the graph the instance sat in.
 
@@ -199,9 +224,23 @@ def _splice(
             continue
         source = feeding.get(link.origin_slot)
         if source is None:
+            # Nothing wired this edge, so there is no connection to carry
+            # inward and the link goes. What that leaves behind is decided
+            # where it can be decided properly: an input the node draws a
+            # widget for keeps the value it was saved with, an optional input
+            # was never needed, and a required one that is now unfed is
+            # refused by name against the runtime's own declaration of what
+            # this node requires. Deciding it here would mean reading a UI slot
+            # and guessing which of the three it was.
+            #
+            # The one thing that must be caught before the link goes is a link
+            # naming an input its own node does not have. Nothing downstream
+            # can notice that once there is no link left to check.
+            if _names_a_real_slot(inner_nodes, link):
+                continue
             raise SubgraphExpansionError(
                 "unconnected_subgraph_input",
-                "a subgraph input has nothing feeding it, so the graph is incomplete",
+                "a subgraph input feeds an input its node does not have",
             )
         spliced.append(
             _Link(

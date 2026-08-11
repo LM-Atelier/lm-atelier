@@ -276,6 +276,33 @@ def test_a_canvas_label_never_becomes_a_runtime_dependency() -> None:
     assert "Label (rgthree)" in analysis.frontend_node_types
 
 
+def test_a_named_wire_never_makes_the_package_that_draws_it_a_dependency() -> None:
+    """`SetNode` and `GetNode` are KJNodes JavaScript with no Python class.
+
+    They carry a package id, so counting them as runtime nodes attributed them
+    to that package and then reported it as the package that failed to load -
+    while the package was installed, trusted, and loading correctly. Nothing can
+    satisfy them, so a graph using the idiom could never be imported no matter
+    what was installed.
+    """
+
+    analysis = analyze_comfyui_workflow_package(
+        workflow(
+            nodes=[
+                node(1, "SetNode", package="comfyui-kjnodes", version="1.2.3"),
+                node(2, "GetNode", package="comfyui-kjnodes", version="1.2.3"),
+                node(3, "KSampler"),
+            ]
+        ),
+        available_node_types={"KSampler"},
+    )
+
+    assert analysis.runtime_nodes_available
+    assert analysis.missing_node_types == ()
+    assert set(analysis.frontend_node_types) == {"GetNode", "SetNode"}
+    assert [package.package_id for package in analysis.custom_packages] == []
+
+
 @pytest.mark.parametrize("node_type", sorted(FRONTEND_SYSTEM_NODE_TYPES))
 def test_frontend_system_nodes_are_not_runtime_dependencies(node_type: str) -> None:
     analysis = analyze_comfyui_workflow_package(
@@ -485,3 +512,215 @@ def test_provenance_reports_and_decides_nothing() -> None:
     # ...while still telling them apart.
     assert first.node_provenance[0].unattributed
     assert second.node_provenance[0].core_claimed
+
+
+def test_a_package_trusted_before_its_inventory_was_recorded_says_so() -> None:
+    """Absent evidence resolves exactly as poorly as an absent package and needs
+    the opposite action: one is fixed by fetching something, the other by
+    reading what is already installed.
+
+    This is reachable by upgrading rather than by doing anything wrong. The
+    reviewed inventory began being recorded after people had already trusted
+    packages, so every such install reports as unresolved until somebody reads
+    that exact revision again - and until this distinction existed, the
+    application sent them to install what they already had.
+    """
+
+    value = workflow(
+        nodes=[
+            node(1, "KSampler", package="comfy-core", version="0.28.0"),
+            node(2, "CustomNode", package="example-pack", version="a" * 40),
+        ]
+    )
+
+    analysis = analyze_comfyui_workflow_package(
+        value,
+        available_node_types={"KSampler", "CustomNode"},
+        packages_awaiting_review={("example-pack", "a" * 40)},
+    )
+
+    codes = {issue.code for issue in analysis.issues}
+    assert "custom_node_package_awaiting_review" in codes
+    assert "unresolved_custom_node_package" not in codes
+    # Still blocking: the workflow genuinely cannot run. Only the remedy differs.
+    assert not analysis.dependencies_resolved
+    assert not analysis.ready
+
+
+def test_an_absent_package_is_still_reported_as_absent() -> None:
+    """The new state must not swallow the old one, or a package nobody
+    installed would be reported as merely needing a read."""
+
+    value = workflow(
+        nodes=[
+            node(1, "KSampler", package="comfy-core", version="0.28.0"),
+            node(2, "CustomNode", package="example-pack", version="a" * 40),
+        ]
+    )
+
+    analysis = analyze_comfyui_workflow_package(
+        value,
+        available_node_types={"KSampler", "CustomNode"},
+        packages_awaiting_review=set(),
+    )
+
+    codes = {issue.code for issue in analysis.issues}
+    assert "unresolved_custom_node_package" in codes
+    assert "custom_node_package_awaiting_review" not in codes
+
+
+def test_a_reviewed_package_is_neither() -> None:
+    """Recording the inventory is what makes the package resolve, so a package
+    that has it must report no issue at all."""
+
+    value = workflow(
+        nodes=[
+            node(1, "KSampler", package="comfy-core", version="0.28.0"),
+            node(2, "CustomNode", package="example-pack", version="a" * 40),
+        ]
+    )
+
+    analysis = analyze_comfyui_workflow_package(
+        value,
+        available_node_types={"KSampler", "CustomNode"},
+        installed_package_versions={"example-pack": {"a" * 40}},
+        packages_awaiting_review={("example-pack", "a" * 40)},
+    )
+
+    assert analysis.issues == ()
+    assert analysis.ready
+
+
+_RGTHREE_AUDITED_REVISION = "1.0.2605082257"
+
+
+def _lora(name: str, *, on: bool = True, strength: float = 1, strength_two: object = ...) -> Any:
+    entry: dict[str, Any] = {"on": on, "lora": name, "strength": strength}
+    if strength_two is not ...:
+        entry["strengthTwo"] = strength_two
+    return entry
+
+
+def _loader(*entries: Any) -> dict[str, Any]:
+    return node(
+        1,
+        "Power Lora Loader (rgthree)",
+        package="rgthree-comfy",
+        version=_RGTHREE_AUDITED_REVISION,
+        widgets=[{}, {"type": "PowerLoraLoaderHeaderWidget"}, *entries, {}, ""],
+    )
+
+
+def _analysed(*entries: Any, available: tuple[str, ...] = ()) -> Any:
+    return analyze_comfyui_workflow_package(
+        workflow(nodes=[_loader(*entries), node(2, "KSampler")]),
+        available_node_types={"KSampler", "Power Lora Loader (rgthree)"},
+        available_asset_filenames=available,
+    )
+
+
+def test_a_lora_the_node_would_load_is_a_dependency() -> None:
+    analysis = _analysed(_lora("wanted.safetensors"))
+
+    assert [asset.filename for asset in analysis.asset_references] == ["wanted.safetensors"]
+    assert any(issue.code == "missing_asset" for issue in analysis.issues)
+
+
+@pytest.mark.parametrize(
+    "entry",
+    [
+        _lora("held.safetensors", on=False),
+        _lora("held.safetensors", strength=0),
+        _lora("held.safetensors", strength=0, strength_two=0),
+    ],
+)
+def test_a_lora_the_node_would_not_load_is_not_a_dependency(entry: Any) -> None:
+    """An entry switched off, or left at zero strength, keeps its filename so the
+    author can turn it back on. The node never opens it, so counting it blocked
+    the whole import over an asset no run would read."""
+
+    analysis = _analysed(entry)
+
+    assert analysis.asset_references == ()
+    assert not any(issue.code == "missing_asset" for issue in analysis.issues)
+
+
+def test_a_zero_model_strength_with_a_clip_strength_is_still_a_dependency() -> None:
+    """The node applies either one, so only both being zero means it loads
+    nothing."""
+
+    analysis = _analysed(_lora("wanted.safetensors", strength=0, strength_two=0.4))
+
+    assert [asset.filename for asset in analysis.asset_references] == ["wanted.safetensors"]
+
+
+def test_a_mixed_loader_reports_only_what_it_would_load() -> None:
+    analysis = _analysed(
+        _lora("live.safetensors"),
+        _lora("held.safetensors", on=False),
+        _lora("muted.safetensors", strength=0),
+    )
+
+    assert [asset.filename for asset in analysis.asset_references] == ["live.safetensors"]
+
+
+def test_a_loader_this_build_cannot_read_still_reports_every_filename() -> None:
+    """Over-reporting a dependency is a worse answer than under-reporting one,
+    and a revision nobody audited is not evidence that an entry is dormant."""
+
+    unread = node(
+        1,
+        "Power Lora Loader (rgthree)",
+        package="rgthree-comfy",
+        version="1.0.9999999999",
+        widgets=[
+            {},
+            {"type": "PowerLoraLoaderHeaderWidget"},
+            _lora("held.safetensors", on=False),
+            {},
+            "",
+        ],
+    )
+    analysis = analyze_comfyui_workflow_package(
+        workflow(nodes=[unread, node(2, "KSampler")]),
+        available_node_types={"KSampler", "Power Lora Loader (rgthree)"},
+    )
+
+    assert [asset.filename for asset in analysis.asset_references] == ["held.safetensors"]
+
+
+@pytest.mark.parametrize(
+    "node_type",
+    [
+        "Fast Groups Muter (rgthree)",
+        "Fast Actions Button (rgthree)",
+        "Bookmark (rgthree)",
+    ],
+)
+def test_an_editor_control_is_not_a_node_the_runtime_must_provide(node_type: str) -> None:
+    """These set other nodes' modes, or move the view, while a graph is being
+    edited. The runtime registers none of them, so counting one as missing sends
+    someone to install a package that is already installed and could not have
+    helped - the muter especially, which sits beside a bypasser that was already
+    named here.
+    """
+
+    analysis = analyze_comfyui_workflow_package(
+        workflow(
+            nodes=[
+                node(1, node_type, package="rgthree-comfy", version="1.0.2605082257"),
+                node(2, "KSampler"),
+            ]
+        ),
+        available_node_types={"KSampler"},
+    )
+
+    assert analysis.missing_node_types == ()
+    assert node_type in analysis.frontend_node_types
+
+
+def test_a_collector_carries_a_wire_and_stays_a_runtime_dependency() -> None:
+    """It registers nothing either, but it gathers several connections into one
+    output. Calling it furniture would drop the edges it stands for."""
+
+    assert "Node Collector (rgthree)" not in FRONTEND_SYSTEM_NODE_TYPES
