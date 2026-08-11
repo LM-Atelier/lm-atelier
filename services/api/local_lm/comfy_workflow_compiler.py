@@ -4,7 +4,11 @@ from collections import deque
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 
-from .comfy_package_widgets import PackageWidgetError, package_widget_inputs
+from .comfy_package_widgets import (
+    PackageWidgetError,
+    package_named_widget_inputs,
+    package_widget_inputs,
+)
 from .comfy_subgraphs import SubgraphExpansionError, expand_workflow
 from .comfy_version_support import COMFY_VERSION_SUPPORT
 from .comfy_workflow_packages import (
@@ -14,6 +18,7 @@ from .comfy_workflow_packages import (
 
 _SUPPORTED_WIDGET_TYPES = frozenset({"BOOLEAN", "COMBO", "FLOAT", "INT", "STRING"})
 _CONTROL_AFTER_GENERATE = frozenset({"decrement", "fixed", "increment", "randomize"})
+_CONTROL_WIDGET = "control_after_generate"
 # Nodes that draw something and carry nothing. Dropping one loses a caption.
 _IGNORED_FRONTEND_NODE_TYPES = frozenset(
     {"MarkdownNote", "Note", "PrimitiveNode", "Label (rgthree)"}
@@ -723,12 +728,24 @@ def _compile_node_inputs(
             "unknown_input_slot", f"node {node_id} uses unknown input {name}"
         )
     raw_values = node.get("widgets_values", [])
-    if not isinstance(raw_values, Sequence) or isinstance(raw_values, str | bytes):
+    # A graph may save widgets in either of two shapes: positionally, in the
+    # order the node draws them, or keyed by the input each belongs to. The
+    # second says outright what the first only implies, so it is read by name
+    # and never counted - a node that gained or lost a widget shifts every
+    # position after it, and that is exactly what naming them avoids.
+    named: dict[str, object] | None = None
+    values: list[object] = []
+    if isinstance(raw_values, Mapping):
+        named = {str(key): value for key, value in raw_values.items()}
+    elif isinstance(raw_values, Sequence) and not isinstance(raw_values, str | bytes):
+        values = list(raw_values)
+    else:
         raise WorkflowCompilationError(
-            "invalid_widget_values", f"node {node_id} widget values must be an array"
+            "invalid_widget_values",
+            f"node {node_id} widget values must be an array or an object",
         )
-    values = list(raw_values)
     cursor = 0
+    taken: set[str] = set()
     result: dict[str, object] = {}
     for definition in definitions:
         key = (node_id, definition.name)
@@ -748,11 +765,17 @@ def _compile_node_inputs(
             continue
 
         selected: object | None = None
-        has_value = cursor < len(values)
-        if has_value:
-            selected = values[cursor]
-            cursor += 1
+        if named is not None:
+            has_value = definition.name in named
+            if has_value:
+                selected = named[definition.name]
+                taken.add(definition.name)
         else:
+            has_value = cursor < len(values)
+            if has_value:
+                selected = values[cursor]
+                cursor += 1
+        if not has_value:
             selected, has_value = _widget_default(definition.spec)
         if has_value:
             result[definition.name] = _serialize_widget_value(
@@ -764,13 +787,36 @@ def _compile_node_inputs(
                 f"node {node_id} is missing required input {definition.name}",
             )
         options = _widget_options(definition.spec)
-        if (
-            options.get("control_after_generate")
-            and cursor < len(values)
-            and isinstance(values[cursor], str)
-            and values[cursor].casefold() in _CONTROL_AFTER_GENERATE
-        ):
+        if not options.get("control_after_generate"):
+            continue
+        # The control that follows a seed is drawn by the editor and applied
+        # before a graph is ever saved, so it is consumed rather than sent.
+        if named is not None:
+            if isinstance(named.get(_CONTROL_WIDGET), str):
+                taken.add(_CONTROL_WIDGET)
+            continue
+        if cursor >= len(values):
+            continue
+        control = values[cursor]
+        if isinstance(control, str) and control.casefold() in _CONTROL_AFTER_GENERATE:
             cursor += 1
+    if named is not None:
+        unread = {name: named[name] for name in sorted(set(named) - taken, key=str.casefold)}
+        if unread:
+            try:
+                extras = package_named_widget_inputs(
+                    str(node["type"]), _drawn_by_package(node), unread
+                )
+            except PackageWidgetError as exc:
+                raise WorkflowCompilationError(exc.code, f"node {node_id}: {exc}") from exc
+            if extras is None:
+                raise WorkflowCompilationError(
+                    "unknown_widget_value",
+                    f"node {node_id} saves a value for {next(iter(unread))},"
+                    " which it has no input for",
+                )
+            result.update(extras)
+        return _with_connected_inputs(node_id, result, by_name, connections, primitive_values)
     if cursor != len(values):
         try:
             drawn_inputs = package_widget_inputs(
@@ -802,6 +848,22 @@ def _compile_node_inputs(
             "unsupported_widget_values",
             f"node {node_id} has widget values that cannot be mapped safely",
         )
+    return _with_connected_inputs(node_id, result, by_name, connections, primitive_values)
+
+
+def _with_connected_inputs(
+    node_id: str,
+    result: dict[str, object],
+    by_name: Mapping[str, _InputDefinition],
+    connections: Mapping[tuple[str, str], list[object]],
+    primitive_values: Mapping[tuple[str, str], object],
+) -> dict[str, object]:
+    """A link replaces whatever a widget saved for the same input.
+
+    Shared by both saved shapes rather than written twice, because an input that
+    is wired takes its value from the wire in either of them.
+    """
+
     for (target, name), connection in connections.items():
         if target == node_id:
             if name not in by_name:

@@ -23,10 +23,14 @@ from __future__ import annotations
 from collections.abc import Mapping, Sequence
 
 POWER_LORA_LOADER = "Power Lora Loader (rgthree)"
+VIDEO_COMBINE = "VHS_VideoCombine"
 
-# rgthree publishes under a registry id and a repository id; a saved graph may
+# Packages publish under a registry id and a repository id; a saved graph may
 # record either, and both name the same package.
 _RGTHREE = frozenset({"rgthree-comfy", "rgthree/rgthree-comfy"})
+_VIDEO_HELPER_SUITE = frozenset(
+    {"comfyui-videohelpersuite", "Kosinkadink/ComfyUI-VideoHelperSuite"}
+)
 
 # What the node's own `addNonLoraWidgets` puts around the loras: a divider, the
 # header, then a spacer and the add button after them. Transcribed from
@@ -65,6 +69,60 @@ def package_widget_inputs(
     if node_type == POWER_LORA_LOADER and package in _RGTHREE:
         return _power_lora_loader_inputs(values)
     return None
+
+
+def package_named_widget_inputs(
+    node_type: str,
+    package: str | None,
+    unread: Mapping[str, object],
+) -> dict[str, object] | None:
+    """The API inputs a node's extra named widgets stand for.
+
+    Some nodes declare a fixed set of inputs to the runtime and then add more in
+    the editor depending on what one of them is set to. Those extra widgets are
+    named for the inputs they become, so a graph that saved them by name has
+    already said what they are - what a transcription adds is knowing that this
+    node takes them at all.
+
+    `None` when this node is not one of those, which is the common case and is
+    not an error: an unrecognised name means the graph saved a value for an
+    input the node does not have, and the caller says so.
+    """
+
+    if node_type == VIDEO_COMBINE and package in _VIDEO_HELPER_SUITE:
+        return _video_combine_extras(unread)
+    return None
+
+
+def _video_combine_extras(unread: Mapping[str, object]) -> dict[str, object]:
+    """The options the chosen video format adds, carried through as saved.
+
+    `combine_video` ends in `**kwargs`, and the widgets that land there are
+    declared by the format file the `format` input selects - `pix_fmt` and `crf`
+    for h264, `save_metadata` and `trim_to_audio` alongside them, others for
+    other formats. Their names and defaults live in that package's
+    `video_formats/*.json`, so the set is not fixed and cannot be listed here.
+
+    What is fixed is their shape: each is one editor widget, so each is one
+    scalar. Anything else is not a format option, and passing it on would send
+    the node something its own editor would never have produced.
+
+    Deliberately not checked against the selected format. Doing that means
+    reading the package's format files, and a stale option from a format the
+    author switched away from is ignored by the node rather than misapplied -
+    so the check would refuse graphs that work.
+    """
+
+    extras: dict[str, object] = {}
+    for name in sorted(unread):
+        value = unread[name]
+        if value is not None and not isinstance(value, str | bool | int | float):
+            raise PackageWidgetError(
+                "package_widget_layout",
+                f"{VIDEO_COMBINE} option {name} is not a value one of its widgets holds",
+            )
+        extras[name] = value
+    return extras
 
 
 def _power_lora_loader_inputs(values: Sequence[object]) -> dict[str, object]:

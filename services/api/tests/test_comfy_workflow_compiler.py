@@ -1083,3 +1083,145 @@ def test_the_same_node_type_from_another_package_is_not_read() -> None:
     )
 
     _assert_error("package_serialized_widgets", workflow, _drawn_object_info())
+
+
+def _named_widgets() -> dict[str, Any]:
+    """The same workflow, with each widget saved under the input it belongs to."""
+
+    workflow = _workflow()
+    workflow["nodes"][0]["widgets_values"] = {
+        "label": "camera",
+        "seed": 42,
+        "control_after_generate": "randomize",
+    }
+    workflow["nodes"][1]["widgets_values"] = {"filename_prefix": "result"}
+    return workflow
+
+
+def test_widgets_saved_by_name_compile_to_the_same_graph_as_widgets_saved_in_order() -> None:
+    """The named shape says outright what the positional one only implies, so it
+    is read by name and never counted - a node that gained or lost a widget
+    shifts every position after it, which is what naming them avoids."""
+
+    positional = compile_comfyui_ui_graph(_workflow(), _object_info())
+    named = compile_comfyui_ui_graph(_named_widgets(), _object_info())
+
+    assert named.api_graph == positional.api_graph
+    assert named.execution_order == positional.execution_order
+
+
+def test_a_name_the_graph_did_not_save_falls_back_to_the_declared_default() -> None:
+    workflow = _named_widgets()
+    del workflow["nodes"][0]["widgets_values"]["label"]
+
+    compiled = compile_comfyui_ui_graph(workflow, _object_info())
+
+    assert compiled.api_graph["1"]["inputs"]["label"] == "default"
+
+
+def test_a_link_still_overrides_a_widget_saved_by_name() -> None:
+    workflow = _named_widgets()
+    workflow["nodes"][1]["widgets_values"] = {"images": "unused", "filename_prefix": "result"}
+    object_info = _object_info()
+    object_info["Save"]["input"]["required"]["images"] = ["STRING"]
+
+    compiled = compile_comfyui_ui_graph(workflow, object_info)
+
+    assert compiled.api_graph["2"]["inputs"] == {
+        "images": ["1", 0],
+        "filename_prefix": "result",
+    }
+
+
+def test_the_control_that_follows_a_seed_is_consumed_rather_than_sent() -> None:
+    """The editor draws it and applies it before a graph is ever saved."""
+
+    compiled = compile_comfyui_ui_graph(_named_widgets(), _object_info())
+
+    assert compiled.api_graph["1"]["inputs"] == {"label": "camera", "seed": 42}
+
+
+def test_a_name_the_node_has_no_input_for_is_refused() -> None:
+    """Silently dropping it would send the node a different instruction than the
+    graph recorded."""
+
+    workflow = _named_widgets()
+    workflow["nodes"][0]["widgets_values"]["invented"] = 1
+
+    _assert_error("unknown_widget_value", workflow, _object_info())
+
+
+@pytest.mark.parametrize("widgets_values", ["text", 7, None])
+def test_widgets_saved_as_neither_shape_are_refused(widgets_values: Any) -> None:
+    workflow = _workflow()
+    workflow["nodes"][0]["widgets_values"] = widgets_values
+
+    _assert_error("invalid_widget_values", workflow, _object_info())
+
+
+def _video_combine(extras: dict[str, Any], package: str = "comfyui-videohelpersuite") -> Any:
+    workflow = _workflow()
+    workflow["nodes"][0]["outputs"][0]["links"] = [7, 9]
+    workflow["nodes"].append(
+        {
+            "id": 4,
+            "type": "VHS_VideoCombine",
+            "mode": 0,
+            "properties": {"cnr_id": package, "ver": "8343122234b6"},
+            "inputs": [{"name": "images", "type": "IMAGE", "link": 9}],
+            "outputs": [],
+            "widgets_values": {"frame_rate": 16, "format": "video/h264-mp4", **extras},
+        }
+    )
+    workflow["links"].append([9, 1, 0, 4, 0, "IMAGE"])
+    object_info = _object_info()
+    object_info["VHS_VideoCombine"] = {
+        "input": {
+            "required": {
+                "images": ["IMAGE"],
+                "frame_rate": ["INT", {"default": 8}],
+                "format": [["video/h264-mp4", "image/gif"]],
+            }
+        },
+        "input_order": {"required": ["images", "frame_rate", "format"]},
+        "output": [],
+    }
+    return workflow, object_info
+
+
+def test_the_options_a_video_format_adds_are_carried_through_as_saved() -> None:
+    """`combine_video` ends in `**kwargs`, and the widgets that land there are
+    declared by the format file the `format` input selects - so their names are
+    not in the runtime's declaration and the graph is what states them."""
+
+    workflow, object_info = _video_combine(
+        {"crf": 17, "pix_fmt": "yuv420p", "save_metadata": True, "trim_to_audio": False}
+    )
+
+    compiled = compile_comfyui_ui_graph(workflow, object_info)
+
+    assert compiled.api_graph["4"]["inputs"] == {
+        "images": ["1", 0],
+        "frame_rate": 16,
+        "format": "video/h264-mp4",
+        "crf": 17,
+        "pix_fmt": "yuv420p",
+        "save_metadata": True,
+        "trim_to_audio": False,
+    }
+
+
+@pytest.mark.parametrize("value", [{"nested": 1}, [1, 2]])
+def test_a_format_option_that_is_not_one_widget_is_refused(value: Any) -> None:
+    """Each is one editor widget, so each is one value. Anything else is not a
+    format option and its own editor would never have produced it."""
+
+    workflow, object_info = _video_combine({"crf": value})
+
+    _assert_error("package_widget_layout", workflow, object_info)
+
+
+def test_extra_names_are_only_read_for_the_package_that_declares_them() -> None:
+    workflow, object_info = _video_combine({"crf": 17}, package="someone-else")
+
+    _assert_error("unknown_widget_value", workflow, object_info)
