@@ -303,6 +303,183 @@ def test_a_graph_without_subgraphs_is_returned_unchanged() -> None:
     assert len(expanded["links"]) == 1
 
 
+def test_a_bypassed_subgraph_does_not_admit_its_inner_nodes() -> None:
+    """Mode 4 on the instance erases the container; its interior must not run.
+
+    Expanding first and resolving mode later drops the container mode while
+    leaving mode-0 inner nodes in the prompt - the defect this suite pins.
+    """
+    workflow = {
+        "nodes": [
+            _node(1, "LoadImage"),
+            _node(2, "SaveImage"),
+            _node(9, "Side", mode=4),
+        ],
+        "links": [[10, 1, 0, 2, 0, "IMAGE"]],
+        "definitions": {
+            "subgraphs": [
+                {
+                    "id": "Side",
+                    "nodes": [
+                        _node(5, "EmptyImage", mode=0, outputs=_slots("IMAGE")),
+                        _node(6, "PreviewImage", mode=0, inputs=_slots("IMAGE")),
+                    ],
+                    "links": [[21, 5, 0, 6, 0, "IMAGE"]],
+                }
+            ]
+        },
+    }
+
+    expanded = expand_workflow(workflow)
+
+    ids = {str(node["id"]) for node in expanded["nodes"]}
+    types = {str(node["type"]) for node in expanded["nodes"]}
+    assert ids == {"1", "2"}
+    assert "9:5" not in ids and "9:6" not in ids
+    assert "EmptyImage" not in types and "PreviewImage" not in types
+
+
+def test_a_bypassed_pass_through_subgraph_becomes_a_direct_outer_link() -> None:
+    workflow = {
+        "nodes": [
+            _node(1, "LoadImage", outputs=_slots("IMAGE")),
+            _node(2, "Pass", mode=4, inputs=_slots("IMAGE"), outputs=_slots("IMAGE")),
+            _node(3, "SaveImage", inputs=_slots("IMAGE")),
+        ],
+        "links": [
+            [10, 1, 0, 2, 0, "IMAGE"],
+            [11, 2, 0, 3, 0, "IMAGE"],
+        ],
+        "definitions": {
+            "subgraphs": [
+                {
+                    "id": "Pass",
+                    "nodes": [],
+                    "links": [[70, "-10", 0, "-20", 0, "IMAGE"]],
+                }
+            ]
+        },
+    }
+
+    expanded = expand_workflow(workflow)
+
+    assert [str(node["id"]) for node in expanded["nodes"]] == ["1", "3"]
+    assert {(str(link[1]), str(link[3])) for link in expanded["links"]} == {("1", "3")}
+    assert not any(
+        str(link[1]).startswith("-") or str(link[3]).startswith("-") for link in expanded["links"]
+    )
+
+
+def test_nested_pass_through_leaves_no_negative_boundary_ids() -> None:
+    workflow = {
+        "nodes": [
+            _node(1, "LoadImage", outputs=_slots("IMAGE")),
+            _node(2, "Outer", mode=0, inputs=_slots("IMAGE"), outputs=_slots("IMAGE")),
+            _node(3, "SaveImage", inputs=_slots("IMAGE")),
+        ],
+        "links": [
+            [10, 1, 0, 2, 0, "IMAGE"],
+            [11, 2, 0, 3, 0, "IMAGE"],
+        ],
+        "definitions": {
+            "subgraphs": [
+                {
+                    "id": "Outer",
+                    "nodes": [
+                        _node(7, "Inner", mode=0, inputs=_slots("IMAGE"), outputs=_slots("IMAGE"))
+                    ],
+                    "links": [
+                        [70, "-10", 0, 7, 0, "IMAGE"],
+                        [71, 7, 0, "-20", 0, "IMAGE"],
+                    ],
+                },
+                {
+                    "id": "Inner",
+                    "nodes": [],
+                    "links": [[90, "-10", 0, "-20", 0, "IMAGE"]],
+                },
+            ]
+        },
+    }
+
+    expanded = expand_workflow(workflow)
+
+    assert [str(node["id"]) for node in expanded["nodes"]] == ["1", "3"]
+    assert {(str(link[1]), str(link[3])) for link in expanded["links"]} == {("1", "3")}
+    assert not any(
+        str(part).startswith("-") for link in expanded["links"] for part in (link[1], link[3])
+    )
+    assert not any(str(node["id"]).startswith("-") for node in expanded["nodes"])
+
+
+def test_a_muted_subgraph_instance_is_refused() -> None:
+    workflow = _photo_like()
+    workflow["nodes"][1]["mode"] = 2
+
+    with pytest.raises(SubgraphExpansionError) as caught:
+        expand_workflow(workflow)
+    assert caught.value.code == "unsupported_node_mode"
+
+
+@pytest.mark.parametrize("mode", [True, False, "4", 1.5, 99])
+def test_an_invalid_subgraph_instance_mode_is_refused(mode: Any) -> None:
+    workflow = _photo_like()
+    workflow["nodes"][1]["mode"] = mode
+
+    with pytest.raises(SubgraphExpansionError) as caught:
+        expand_workflow(workflow)
+    assert caught.value.code == "invalid_node_mode"
+
+
+def test_live_and_bypassed_siblings_of_one_definition_stay_independent() -> None:
+    workflow = {
+        "nodes": [
+            _node(1, "LoadImage", outputs=_slots("IMAGE")),
+            _node(2, "Sharpen", mode=0, inputs=_slots("IMAGE"), outputs=_slots("IMAGE")),
+            _node(3, "SaveImage", inputs=_slots("IMAGE")),
+            _node(4, "Sharpen", mode=4, inputs=_slots("IMAGE"), outputs=_slots("IMAGE")),
+            _node(5, "AlsoSave", inputs=_slots("IMAGE")),
+        ],
+        "links": [
+            [10, 1, 0, 2, 0, "IMAGE"],
+            [11, 2, 0, 3, 0, "IMAGE"],
+            [12, 1, 0, 4, 0, "IMAGE"],
+            [13, 4, 0, 5, 0, "IMAGE"],
+        ],
+        "definitions": {
+            "subgraphs": [
+                {
+                    "id": "Sharpen",
+                    "nodes": [
+                        _node(7, "ImageSharpen", inputs=_slots("IMAGE"), outputs=_slots("IMAGE"))
+                    ],
+                    "links": [
+                        [70, "-10", 0, 7, 0, "IMAGE"],
+                        [71, 7, 0, "-20", 0, "IMAGE"],
+                    ],
+                }
+            ]
+        },
+    }
+
+    expanded = expand_workflow(workflow)
+
+    types_by_id = {str(node["id"]): str(node["type"]) for node in expanded["nodes"]}
+    assert types_by_id == {
+        "1": "LoadImage",
+        "2:7": "ImageSharpen",
+        "3": "SaveImage",
+        "5": "AlsoSave",
+    }
+    assert "4:7" not in types_by_id
+    links = {(str(link[1]), str(link[3])) for link in expanded["links"]}
+    assert ("1", "2:7") in links and ("2:7", "3") in links
+    # Bypassed sibling is not a pass-through of its interior work, so its
+    # consumer is left without a composed route through disabled nodes.
+    assert ("1", "5") not in links
+    assert not any(origin == "4" or target == "4" for origin, target in links)
+
+
 def _promoted_widget() -> dict[str, Any]:
     """A subgraph whose inner widget was promoted to its edge and left unwired.
 

@@ -871,15 +871,10 @@ def test_a_live_subgraph_nested_inside_another_still_supplies_the_source() -> No
 
 
 def test_a_wired_bypassed_subgraph_still_compiles() -> None:
-    """Excluding a scope from selection must not excise it from the graph.
+    """A disabled side branch must compile without executing its interior.
 
-    Dropping the nodes leaves every link that named them pointing at nothing,
-    and the compiler rightly calls that a dangling link - so a graph that merely
-    contains a bypassed-but-wired subgraph would be reported as malformed when
-    the author's file is fine.
-
-    The bypassed branch also ends in an output node, which must not become a
-    destination the source is required to reach: the author turned it off.
+    The author turned the branch off. Its EmptyImage and PreviewImage must not
+    reach the runtime prompt, and the live source path must still bind.
     """
     graph = _graph()
     graph["definitions"] = {
@@ -932,9 +927,8 @@ def test_a_wired_bypassed_subgraph_still_compiles() -> None:
     )
     compiled = compile_comfyui_ui_graph(prepared.ui_graph, prepared.object_info)
 
-    # The bypassed branch survives into the compiled graph, and is not a
-    # required destination for the source.
-    assert "9:5" in compiled.api_graph
+    assert "9:5" not in compiled.api_graph
+    assert "9:6" not in compiled.api_graph
     assert prepared.output_node_ids == ("2",)
     assert prepared.bind(compiled.api_graph)["1"]["inputs"]["image"] == "${input_image}"
 
