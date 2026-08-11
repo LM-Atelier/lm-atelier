@@ -107,7 +107,7 @@ async def test_trusted_registry_node_types_preserve_package_version_ownership(
         archive_sha256="a" * 64,
         manifest_sha256="b" * 64,
         installed_path="lm-atelier-registry_kjnodes",
-        node_types_json=["GetNode", "SetNode"],
+        node_types_json=["ImageResizeKJ", "ColorMatch"],
         pip_dependencies_json=[],
         review_json={"review_required": True},
         trusted=True,
@@ -128,11 +128,11 @@ async def test_trusted_registry_node_types_preserve_package_version_ownership(
     request.addfinalizer(cleanup_install)
 
     supervisor = ProcessSupervisor(settings)
-    packages = {("comfyui-kjnodes", "1.2.3"): frozenset({"GetNode", "SetNode"})}
+    packages = {("comfyui-kjnodes", "1.2.3"): frozenset({"ImageResizeKJ", "ColorMatch"})}
     monkeypatch.setattr(
         "local_lm.comfy_registry_installs.trusted_comfy_registry_launch_contract",
         lambda *_args, **_kwargs: ComfyRegistryLaunchContract(
-            ("lm-atelier-registry_kjnodes",), (), ("GetNode", "SetNode")
+            ("lm-atelier-registry_kjnodes",), (), ("ImageResizeKJ", "ColorMatch")
         ),
     )
 
@@ -162,7 +162,7 @@ async def test_trusted_manual_node_types_preserve_reviewed_package_ownership(
         tree_hash="b" * 40,
         trusted=True,
         active=True,
-        security_json={"node_types": ["SetNode", "GetNode"]},
+        security_json={"node_types": ["ColorMatch", "ImageResizeKJ"]},
     )
     with SessionLocal() as session:
         session.add(install)
@@ -185,7 +185,7 @@ async def test_trusted_manual_node_types_preserve_reviewed_package_ownership(
     supervisor = ProcessSupervisor(settings)
 
     assert await supervisor.trusted_comfy_custom_node_package_node_types() == {
-        ("comfyui-kjnodes", "a" * 40): frozenset({"GetNode", "SetNode"})
+        ("comfyui-kjnodes", "a" * 40): frozenset({"ImageResizeKJ", "ColorMatch"})
     }
     assert verified == [install.id]
 

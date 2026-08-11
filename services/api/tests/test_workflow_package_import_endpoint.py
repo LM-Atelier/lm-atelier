@@ -183,7 +183,7 @@ async def test_import_restarts_unscoped_for_a_verified_registry_package(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     package_id = "comfyui-kjnodes"
-    node_type = "GetNode"
+    node_type = "ImageResizeKJ"
     _record_registry_install(package_id, node_type)
     reads = 0
     starts = 0
@@ -242,7 +242,7 @@ async def test_import_restarts_unscoped_for_a_reviewed_manual_package(
 ) -> None:
     package_id = "comfyui-kjnodes"
     revision = "e" * 40
-    node_type = "GetNode"
+    node_type = "ImageResizeKJ"
     _record_manual_install(package_id, revision, node_type)
     reads = 0
     starts = 0
@@ -701,7 +701,7 @@ async def test_an_unrelated_out_of_scope_package_is_not_blamed(
 
     package_id = "comfyui-kjnodes"
     revision = "e" * 40
-    node_type = "GetNode"
+    node_type = "ImageResizeKJ"
     _record_manual_install(package_id, revision, node_type)
     # Installed, trusted, and nothing to do with this workflow.
     _record_manual_install("comfyui-unrelated", "d" * 40, "UnrelatedNode")

@@ -639,3 +639,215 @@ def test_a_reroute_attached_to_nothing_is_simply_dropped() -> None:
     compiled = compile_comfyui_ui_graph(workflow, _object_info())
 
     assert compiled.api_graph == compile_comfyui_ui_graph(_workflow(), _object_info()).api_graph
+
+
+def _named_wire(label: str = "image") -> dict[str, Any]:
+    """The same workflow, with the one wire written and read by name."""
+
+    workflow = _workflow()
+    workflow["nodes"][0]["outputs"][0]["links"] = [100]
+    workflow["nodes"].append(
+        {
+            "id": 10,
+            "type": "SetNode",
+            "mode": 0,
+            "inputs": [{"name": "IMAGE", "type": "IMAGE", "link": 100}],
+            "outputs": [{"name": "IMAGE", "type": "IMAGE", "links": None}],
+            "widgets_values": [label],
+        }
+    )
+    workflow["nodes"].append(
+        {
+            "id": 11,
+            "type": "GetNode",
+            "mode": 0,
+            "inputs": [],
+            "outputs": [{"name": "IMAGE", "type": "IMAGE", "links": [7]}],
+            "widgets_values": [label],
+        }
+    )
+    workflow["links"] = [
+        [100, 1, 0, 10, 0, "IMAGE"],
+        [7, 11, 0, 2, 0, "IMAGE"],
+    ]
+    return workflow
+
+
+def test_a_named_wire_compiles_to_the_same_graph_as_the_wire() -> None:
+    """A `SetNode` labels the link feeding it and a `GetNode` re-emits it. The
+    pair is frontend JavaScript that no runtime can report, so counting them as
+    runtime nodes made every graph using the idiom unimportable - and resolving
+    them has to produce the graph the author would have drawn with one wire.
+
+    Compiled without a declared frontend version on purpose: these are a
+    package's construct rather than the editor's, so the certified-frontend gate
+    does not apply to them.
+    """
+
+    direct = compile_comfyui_ui_graph(_workflow(), _object_info())
+    named = compile_comfyui_ui_graph(_named_wire(), _object_info())
+
+    assert named.api_graph == direct.api_graph
+    assert named.execution_order == direct.execution_order
+
+
+def test_one_written_value_feeds_every_reader_of_it() -> None:
+    workflow = _named_wire()
+    workflow["nodes"].append(
+        {
+            "id": 3,
+            "type": "Save",
+            "mode": 0,
+            "inputs": [
+                {"name": "images", "type": "IMAGE", "link": 8},
+                {
+                    "name": "filename_prefix",
+                    "type": "STRING",
+                    "widget": {"name": "filename_prefix"},
+                },
+            ],
+            "outputs": [],
+            "widgets_values": ["second"],
+        }
+    )
+    workflow["nodes"].append(
+        {
+            "id": 12,
+            "type": "GetNode",
+            "mode": 0,
+            "inputs": [],
+            "outputs": [{"name": "IMAGE", "type": "IMAGE", "links": [8]}],
+            "widgets_values": ["image"],
+        }
+    )
+    workflow["links"].append([8, 12, 0, 3, 0, "IMAGE"])
+
+    compiled = compile_comfyui_ui_graph(workflow, _object_info())
+
+    assert compiled.api_graph["2"]["inputs"]["images"] == ["1", 0]
+    assert compiled.api_graph["3"]["inputs"]["images"] == ["1", 0]
+    assert "11" not in compiled.api_graph
+    assert "12" not in compiled.api_graph
+
+
+def test_a_value_written_through_a_reroute_resolves_through_both() -> None:
+    """Carriers are resolved by one walk, so a wire may cross a reroute and a
+    label in either order and still arrive at its real producer."""
+
+    workflow = _with_supported_frontend(_named_wire())
+    workflow["nodes"][0]["outputs"][0]["links"] = [200]
+    workflow["nodes"].append(
+        {
+            "id": 20,
+            "type": "Reroute",
+            "mode": 0,
+            "inputs": [{"name": "", "type": "*", "link": 200}],
+            "outputs": [{"name": "", "type": "IMAGE", "links": [100]}],
+        }
+    )
+    workflow["links"] = [
+        [200, 1, 0, 20, 0, "IMAGE"],
+        [100, 20, 0, 10, 0, "IMAGE"],
+        [7, 11, 0, 2, 0, "IMAGE"],
+    ]
+
+    compiled = compile_comfyui_ui_graph(workflow, _object_info())
+
+    assert compiled.api_graph["2"]["inputs"]["images"] == ["1", 0]
+    assert set(compiled.api_graph) == {"1", "2"}
+
+
+def test_reading_a_value_nothing_writes_is_refused() -> None:
+    """Dropping it silently would leave a required input unfilled."""
+
+    workflow = _named_wire()
+    workflow["nodes"] = [node for node in workflow["nodes"] if node["id"] != 10]
+    workflow["links"] = [link for link in workflow["links"] if link[0] != 100]
+    workflow["nodes"][0]["outputs"][0]["links"] = []
+
+    _assert_error("undefined_named_wire", workflow, _object_info())
+
+
+def test_reading_a_value_two_nodes_write_is_refused() -> None:
+    """Two writers of one label have no correct reading, and choosing either
+    would compile a graph the author never drew."""
+
+    workflow = _named_wire()
+    workflow["nodes"][0]["outputs"][0]["links"] = [100, 101]
+    workflow["nodes"].append(
+        {
+            "id": 13,
+            "type": "SetNode",
+            "mode": 0,
+            "inputs": [{"name": "IMAGE", "type": "IMAGE", "link": 101}],
+            "outputs": [{"name": "IMAGE", "type": "IMAGE", "links": None}],
+            "widgets_values": ["image"],
+        }
+    )
+    workflow["links"].append([101, 1, 0, 13, 0, "IMAGE"])
+
+    _assert_error("duplicate_named_wire", workflow, _object_info())
+
+
+def test_a_value_written_twice_but_never_read_still_compiles() -> None:
+    """Ambiguity only exists where something reads it. The editor runs this
+    graph, so refusing it would reject a workflow that works."""
+
+    workflow = _named_wire()
+    workflow["nodes"][0]["outputs"][0]["links"] = [100, 101]
+    workflow["nodes"].append(
+        {
+            "id": 13,
+            "type": "SetNode",
+            "mode": 0,
+            "inputs": [{"name": "IMAGE", "type": "IMAGE", "link": 101}],
+            "outputs": [{"name": "IMAGE", "type": "IMAGE", "links": None}],
+            "widgets_values": ["unread"],
+        }
+    )
+    workflow["links"].append([101, 1, 0, 13, 0, "IMAGE"])
+
+    compiled = compile_comfyui_ui_graph(workflow, _object_info())
+
+    assert compiled.api_graph["2"]["inputs"]["images"] == ["1", 0]
+    assert set(compiled.api_graph) == {"1", "2"}
+
+
+def test_reading_a_value_whose_writer_carries_nothing_names_the_writer() -> None:
+    """The reader found its writer; the writer is what is empty. Reporting the
+    reader would send someone to the end of the wire that is intact."""
+
+    workflow = _named_wire()
+    workflow["links"] = [link for link in workflow["links"] if link[0] != 100]
+    workflow["nodes"][0]["outputs"][0]["links"] = []
+    workflow["nodes"][2]["inputs"][0]["link"] = None
+
+    with pytest.raises(WorkflowCompilationError) as raised:
+        compile_comfyui_ui_graph(workflow, _object_info())
+
+    assert raised.value.code == "unconnected_pass_through"
+    assert "workflow value image" in str(raised.value)
+    assert "the read of" not in str(raised.value)
+
+
+@pytest.mark.parametrize("values", [[], [""], [None], "image", None])
+def test_a_named_wire_without_a_readable_name_is_refused(values: Any) -> None:
+    """It cannot be matched to its other end, and guessing which end it meant
+    would connect two things the author did not."""
+
+    workflow = _named_wire()
+    workflow["nodes"][3]["widgets_values"] = values
+
+    _assert_error("invalid_named_wire", workflow, _object_info())
+
+
+def test_a_value_that_reads_itself_is_refused() -> None:
+    workflow = _named_wire()
+    workflow["nodes"][0]["outputs"][0]["links"] = []
+    workflow["nodes"][3]["outputs"][0]["links"] = [7, 100]
+    workflow["links"] = [
+        [100, 11, 0, 10, 0, "IMAGE"],
+        [7, 11, 0, 2, 0, "IMAGE"],
+    ]
+
+    _assert_error("pass_through_cycle", workflow, _object_info())
