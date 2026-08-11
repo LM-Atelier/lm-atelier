@@ -9175,11 +9175,6 @@ async def import_workflow_package(
                 available_asset_filenames=asset_filenames,
                 installed_package_versions=verified_package_versions,
                 packages_awaiting_review=await _packages_awaiting_review(services),
-                # What actually loaded, kept apart from what evidence claims.
-                # A package the runtime did not load is not resolved, whatever
-                # its review recorded - and saying otherwise hides the one
-                # action that repairs it.
-                runtime_node_types=available_node_types,
             )
         except WorkflowPackageError as exc:
             raise api_error(422, exc.code, str(exc)) from exc
@@ -9366,11 +9361,6 @@ async def analyze_workflow_package(
                 available_asset_filenames=asset_filenames,
                 installed_package_versions=verified_package_versions,
                 packages_awaiting_review=await _packages_awaiting_review(services),
-                # What actually loaded, kept apart from what evidence claims.
-                # A package the runtime did not load is not resolved, whatever
-                # its review recorded - and saying otherwise hides the one
-                # action that repairs it.
-                runtime_node_types=(available_node_types if node_inventory_available else None),
             )
         except WorkflowPackageError as exc:
             raise api_error(422, exc.code, str(exc)) from exc
