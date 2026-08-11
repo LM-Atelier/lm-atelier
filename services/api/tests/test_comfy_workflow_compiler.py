@@ -1446,3 +1446,155 @@ def test_a_named_control_value_is_consumed_however_it_is_cased(control: str) -> 
     compiled = compile_comfyui_ui_graph(workflow, _object_info())
 
     assert compiled.api_graph["1"]["inputs"] == {"label": "camera", "seed": 42}
+
+
+# Captured from a real exported ComfyUI workflow rather than written here, with
+# only the lora filename replaced. Hand-built fixtures agreed with the layout
+# and still missed what a real export carries: further properties beside the
+# package id, both a registry and a repository id on the same node, and slot
+# fields the compiler never reads. A fixture that is tidier than reality proves
+# less than it looks.
+_GOLDEN_POWER_LORA_LOADER: dict[str, Any] = {
+    "id": 326,
+    "type": "Power Lora Loader (rgthree)",
+    "mode": 0,
+    "order": 12,
+    "flags": {},
+    "title": "High Noise LoRAs",
+    "properties": {
+        "cnr_id": "rgthree-comfy",
+        "ver": "6b76ee6f2c5a007710b5a16f97c94330d6ecc871",
+        "Show Strengths": "Single Strength",
+        "Match": "",
+    },
+    "inputs": [
+        {"dir": 3, "name": "model", "type": "MODEL", "link": 9},
+        {"dir": 3, "name": "clip", "type": "CLIP", "link": None},
+    ],
+    "outputs": [],
+    "widgets_values": [
+        {},
+        {"type": "PowerLoraLoaderHeaderWidget"},
+        {"on": True, "lora": "captured.safetensors", "strength": 1, "strengthTwo": None},
+        {},
+        "",
+    ],
+}
+
+_GOLDEN_VIDEO_COMBINE: dict[str, Any] = {
+    "id": 80,
+    "type": "VHS_VideoCombine",
+    "mode": 0,
+    "order": 20,
+    "flags": {},
+    "title": "Initial 16FPS Video",
+    "properties": {
+        "cnr_id": "comfyui-videohelpersuite",
+        "ver": "8343122234b61a0f8eb3d1f3f98382b0f7aff2b9",
+        "Node name for S&R": "VHS_VideoCombine",
+        "aux_id": "Kosinkadink/ComfyUI-VideoHelperSuite",
+        "widget_ue_connectable": {},
+    },
+    "inputs": [
+        {"name": "images", "type": "IMAGE", "link": 9},
+        {"name": "audio", "shape": 7, "type": "AUDIO", "link": None},
+    ],
+    "outputs": [],
+    "widgets_values": {
+        "frame_rate": 16,
+        "loop_count": 0,
+        "filename_prefix": "wan22/raw",
+        "format": "video/h264-mp4",
+        "pix_fmt": "yuv420p",
+        "crf": 17,
+        "save_metadata": True,
+        "trim_to_audio": False,
+        "pingpong": False,
+        "save_output": True,
+    },
+}
+
+
+def _golden(node: dict[str, Any], definition: dict[str, Any]) -> Any:
+    workflow = _workflow()
+    workflow["nodes"][0]["outputs"][0]["links"] = [7, 9]
+    workflow["nodes"].append(deepcopy(node))
+    workflow["links"].append([9, 1, 0, node["id"], 0, "IMAGE"])
+    object_info = _object_info()
+    object_info[node["type"]] = definition
+    return workflow, object_info
+
+
+def test_a_captured_power_lora_loader_compiles_to_its_captured_prompt() -> None:
+    workflow, object_info = _golden(
+        _GOLDEN_POWER_LORA_LOADER,
+        {
+            "input": {"optional": {"model": ["MODEL"], "clip": ["CLIP"]}},
+            "input_order": {"optional": ["model", "clip"]},
+            "output": ["MODEL", "CLIP"],
+        },
+    )
+
+    compiled = compile_comfyui_ui_graph(workflow, object_info)
+
+    assert compiled.api_graph["326"]["inputs"] == {
+        "lora_1": {
+            "on": True,
+            "lora": "captured.safetensors",
+            "strength": 1,
+            "strengthTwo": None,
+        },
+        "model": ["1", 0],
+    }
+
+
+def test_a_captured_video_combine_compiles_to_its_captured_prompt() -> None:
+    """It states a registry id and a repository id at once, which is the case
+    that made difference-is-not-disagreement necessary."""
+
+    workflow, object_info = _golden(
+        _GOLDEN_VIDEO_COMBINE,
+        {
+            "input": {
+                "required": {
+                    "images": ["IMAGE"],
+                    "frame_rate": ["INT", {"default": 8}],
+                    "loop_count": ["INT", {"default": 0}],
+                    "filename_prefix": ["STRING", {"default": "AnimateDiff"}],
+                    "format": [["video/h264-mp4", "image/gif"]],
+                    "pingpong": ["BOOLEAN", {"default": False}],
+                    "save_output": ["BOOLEAN", {"default": True}],
+                },
+                "optional": {"audio": ["AUDIO"], "meta_batch": ["VHS_BatchManager"]},
+            },
+            "input_order": {
+                "required": [
+                    "images",
+                    "frame_rate",
+                    "loop_count",
+                    "filename_prefix",
+                    "format",
+                    "pingpong",
+                    "save_output",
+                ],
+                "optional": ["audio", "meta_batch"],
+            },
+            "output": [],
+        },
+    )
+
+    compiled = compile_comfyui_ui_graph(workflow, object_info)
+
+    assert compiled.api_graph["80"]["inputs"] == {
+        "images": ["1", 0],
+        "frame_rate": 16,
+        "loop_count": 0,
+        "filename_prefix": "wan22/raw",
+        "format": "video/h264-mp4",
+        "pingpong": False,
+        "save_output": True,
+        "crf": 17,
+        "pix_fmt": "yuv420p",
+        "save_metadata": True,
+        "trim_to_audio": False,
+    }
