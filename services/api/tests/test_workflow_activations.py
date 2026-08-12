@@ -492,7 +492,7 @@ def _registry(
     closure = hashlib.sha256(f"closure-{suffix}".encode()).hexdigest()
     folder = custom_root / f"lm-atelier-registry_{suffix}"
     folder.mkdir(parents=True)
-    environment_name = f"registry-wheels-{closure}"
+    environment_name = f"registry-wheels-v3-{closure}"
     (environment_root / environment_name / "site-packages").mkdir(parents=True)
     install = ComfyRegistryInstall(
         id=f"registry_{suffix}",

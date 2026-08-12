@@ -44,6 +44,7 @@ from .comfy_registry_wheel_downloads import (
     WheelDownloadProgress,
 )
 from .comfy_registry_wheel_environments import (
+    REGISTRY_WHEEL_ENVIRONMENT_PREFIX,
     ComfyRegistryWheelEnvironmentError,
     ComfyRegistryWheelEnvironmentReport,
     assemble_comfy_registry_wheel_environment,
@@ -203,8 +204,12 @@ async def prepare_comfy_registry_install(
     staging_root = _managed_child(managed_state, "registry-wheel-staging")
     installed_path = _installed_path(package_id, package_version, record_id)
     node_destination = node_root / installed_path
-    environment_destination = environment_root / f"registry-wheels-{closure.closure_sha256}"
-    wheel_destination = staging_root / f"registry-wheels-{closure.closure_sha256}"
+    environment_destination = environment_root / (
+        f"{REGISTRY_WHEEL_ENVIRONMENT_PREFIX}{closure.closure_sha256}"
+    )
+    wheel_destination = staging_root / (
+        f"{REGISTRY_WHEEL_ENVIRONMENT_PREFIX}{closure.closure_sha256}"
+    )
     environment_preexisting = (
         environment_destination.exists() or environment_destination.is_symlink()
     )
@@ -362,8 +367,12 @@ async def renew_comfy_registry_install_environment(
             "Registry package has no prepared dependency environment",
         )
     old_environment = _existing_managed_child(environment_root, old_environment_name, "environment")
-    environment_destination = environment_root / f"registry-wheels-{closure.closure_sha256}"
-    wheel_destination = staging_root / f"registry-wheels-{closure.closure_sha256}"
+    environment_destination = environment_root / (
+        f"{REGISTRY_WHEEL_ENVIRONMENT_PREFIX}{closure.closure_sha256}"
+    )
+    wheel_destination = staging_root / (
+        f"{REGISTRY_WHEEL_ENVIRONMENT_PREFIX}{closure.closure_sha256}"
+    )
     environment_preexisting = (
         environment_destination.exists() or environment_destination.is_symlink()
     )
