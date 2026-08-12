@@ -430,6 +430,11 @@ from .workflow_package_drafts import (
     is_workflow_package_draft,
     workflow_package_draft_dependencies,
 )
+from .workflow_package_inputs import (
+    WorkflowPackageInputError,
+    prepare_workflow_package_compilation,
+    prepare_workflow_revision_compilation,
+)
 from .workflow_package_preparation import (
     PreparationContext,
     WorkflowPackagePreparationError,
@@ -7290,7 +7295,7 @@ async def start_workflow_editor_session(
     response: Response,
     session: SessionDep,
 ) -> WorkflowEditorSessionOut:
-    _definition, revision = _workflow_and_revision(session, workflow_id)
+    definition, revision = _workflow_and_revision(session, workflow_id)
     if revision.engine != "comfyui":
         raise api_error(
             422,
@@ -7343,11 +7348,25 @@ async def start_workflow_editor_session(
             "The media runtime returned an invalid workflow node inventory.",
         )
     try:
-        compilation = compile_comfyui_ui_graph(revision.ui_graph_json, object_info)
-        compiled_api_graph = {key: dict(value) for key, value in compilation.api_graph.items()}
+        prepared = prepare_workflow_revision_compilation(
+            revision.ui_graph_json,
+            object_info,
+            definition.operation,
+            revision.api_graph_json,
+            revision.input_schema_json,
+        )
+        compilation = compile_comfyui_ui_graph(
+            prepared.ui_graph,
+            prepared.object_info,
+        )
+        compiled_api_graph = prepared.bind(compilation.api_graph)
         compiled_sha256 = workflow_api_graph_sha256(compiled_api_graph)
         stored_sha256 = workflow_api_graph_sha256(revision.api_graph_json)
-    except WorkflowCompilationError as exc:
+    except (
+        WorkflowCompilationError,
+        WorkflowPackageError,
+        WorkflowPackageInputError,
+    ) as exc:
         raise api_error(
             422,
             "workflow-editor-graph-cannot-compile",
@@ -7520,10 +7539,25 @@ async def consume_workflow_editor_session(
             "The media runtime returned an invalid workflow node inventory.",
         )
     try:
-        compilation = compile_comfyui_ui_graph(payload.ui_graph, object_info)
-        compiled_api_graph = {key: dict(value) for key, value in compilation.api_graph.items()}
-        compiled_prompt_sha256 = workflow_api_graph_sha256(compiled_api_graph)
-    except WorkflowCompilationError as exc:
+        prepared = prepare_workflow_revision_compilation(
+            payload.ui_graph,
+            object_info,
+            definition.operation,
+            base_revision.api_graph_json,
+            base_revision.input_schema_json,
+        )
+        compilation = compile_comfyui_ui_graph(
+            prepared.ui_graph,
+            prepared.object_info,
+        )
+        raw_compiled_api_graph = {key: dict(value) for key, value in compilation.api_graph.items()}
+        raw_compiled_prompt_sha256 = workflow_api_graph_sha256(raw_compiled_api_graph)
+        compiled_api_graph = prepared.bind(raw_compiled_api_graph)
+    except (
+        WorkflowCompilationError,
+        WorkflowPackageError,
+        WorkflowPackageInputError,
+    ) as exc:
         raise api_error(
             422,
             "workflow-editor-return-cannot-compile",
@@ -7537,7 +7571,7 @@ async def consume_workflow_editor_session(
             "The workflow editor returned an invalid graph or prompt.",
             reason_code=exc.code,
         ) from exc
-    if compiled_prompt_sha256 != returned_prompt_sha256:
+    if raw_compiled_prompt_sha256 != returned_prompt_sha256:
         raise api_error(
             422,
             "workflow-editor-return-prompt-mismatch",
@@ -9284,10 +9318,20 @@ async def import_workflow_package(
                 "The refreshed media runtime did not load every required workflow node.",
             )
     try:
-        compilation = compile_comfyui_ui_graph(payload.ui_graph, object_info)
-    except WorkflowCompilationError as exc:
+        prepared = prepare_workflow_package_compilation(
+            payload.ui_graph,
+            object_info,
+            payload.operation,
+        )
+        compilation = compile_comfyui_ui_graph(prepared.ui_graph, prepared.object_info)
+        compiled_api_graph = prepared.bind(compilation.api_graph)
+    except (
+        WorkflowCompilationError,
+        WorkflowPackageError,
+        WorkflowPackageInputError,
+    ) as exc:
         raise api_error(422, exc.code, str(exc)) from exc
-    compiled_api_graph = {key: dict(value) for key, value in compilation.api_graph.items()}
+    input_schema = prepared.input_schema
     if draft:
         definition, initial_revision = draft
         current_revision = session.get(WorkflowRevision, definition.current_revision_id)
@@ -9303,6 +9347,7 @@ async def import_workflow_package(
                 or _canonical_graph(current_revision.ui_graph_json)
                 != _canonical_graph(payload.ui_graph)
                 or current_revision.api_graph_json != compiled_api_graph
+                or current_revision.input_schema_json != input_schema
             ):
                 raise api_error(
                     409,
@@ -9328,6 +9373,7 @@ async def import_workflow_package(
             WorkflowRevisionCreate(
                 ui_graph=payload.ui_graph,
                 api_graph=compiled_api_graph,
+                input_schema=input_schema,
                 trusted=False,
             ),
             session,
@@ -9341,6 +9387,7 @@ async def import_workflow_package(
             engine="comfyui",
             ui_graph=payload.ui_graph,
             api_graph=compiled_api_graph,
+            input_schema=input_schema,
             trusted=False,
         ),
         session,

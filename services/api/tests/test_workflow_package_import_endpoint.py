@@ -9,12 +9,25 @@ from fastapi import FastAPI
 from httpx2 import AsyncClient
 
 from local_lm import api as api_module
+from local_lm.db import SessionLocal
+from local_lm.models import WorkflowRevision
 
 pytestmark = pytest.mark.asyncio
 
 
 def _object_info() -> dict[str, Any]:
     return {
+        "LoadImage": {
+            "display_name": "Load image",
+            "python_module": "nodes",
+            "input": {
+                "required": {
+                    "image": [["available.png"], {"image_upload": True}],
+                }
+            },
+            "input_order": {"required": ["image"]},
+            "output": ["IMAGE", "MASK"],
+        },
         "Source": {
             "display_name": "Source image",
             "input": {
@@ -72,9 +85,31 @@ def _ui_graph() -> dict[str, Any]:
     }
 
 
-def _wire_runtime(app: FastAPI, monkeypatch: pytest.MonkeyPatch) -> None:
+def _source_ui_graph() -> dict[str, Any]:
+    graph = _ui_graph()
+    graph["nodes"][0] = {
+        "id": 1,
+        "type": "LoadImage",
+        "mode": 0,
+        "inputs": [],
+        "outputs": [{"name": "IMAGE", "type": "IMAGE", "links": [7]}],
+        # Deliberately absent from object_info: this is the author's scratch
+        # file, not a portable dependency or a runtime input on this machine.
+        "widgets_values": ["author-source.png", "image"],
+    }
+    return graph
+
+
+def _wire_runtime(
+    app: FastAPI,
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    runtime_object_info: dict[str, Any] | None = None,
+) -> None:
+    inventory = runtime_object_info or _object_info()
+
     async def object_info() -> dict[str, Any]:
-        return _object_info()
+        return inventory
 
     monkeypatch.setattr(app.state.services.engines.media, "object_info", object_info, raising=False)
 
@@ -416,10 +451,10 @@ async def test_a_ready_draft_finalizes_in_place_and_retry_is_idempotent(
     client: AsyncClient, app: FastAPI, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     _wire_runtime(app, monkeypatch)
-    graph = _ui_graph()
+    graph = _source_ui_graph()
     draft_response = await client.post(
         "/api/workflows/packages/drafts",
-        json={"ui_graph": graph, "name": "Draft", "operation": "text_to_image"},
+        json={"ui_graph": graph, "name": "Draft", "operation": "image_to_image"},
     )
     draft = draft_response.json()
     import_payload = {
@@ -444,7 +479,16 @@ async def test_a_ready_draft_finalizes_in_place_and_retry_is_idempotent(
         if revision["id"] == finalized["current_revision_id"]
     )
     assert current["trusted"] is False
-    assert current["api_graph_json"]["1"]["class_type"] == "Source"
+    assert current["api_graph_json"]["1"]["class_type"] == "LoadImage"
+    assert current["api_graph_json"]["1"]["inputs"]["image"] == "${input_image}"
+    assert current["input_schema_json"] == {
+        "type": "object",
+        "properties": {"input_image": {"type": "string"}},
+    }
+    assert current["ui_graph_json"]["nodes"][0]["widgets_values"] == [
+        "author-source.png",
+        "image",
+    ]
     listed = (await client.get("/api/workflows")).json()
     assert any(workflow["id"] == draft["id"] for workflow in listed)
     finalized_families = (
@@ -470,6 +514,23 @@ async def test_a_ready_draft_finalizes_in_place_and_retry_is_idempotent(
     assert retry_response.status_code == 201
     assert retry_response.json()["id"] == draft["id"]
     assert len(retry_response.json()["revisions"]) == 2
+
+    with SessionLocal() as session:
+        stored = session.get(WorkflowRevision, finalized["current_revision_id"])
+        assert stored is not None
+        stored.input_schema_json = {}
+        session.commit()
+
+    drifted_retry = await client.post(
+        "/api/workflows/packages/import",
+        json={
+            **import_payload,
+            "draft_revision_id": finalized["current_revision_id"],
+        },
+    )
+
+    assert drifted_retry.status_code == 409
+    assert drifted_retry.json()["code"] == "workflow-package-draft-already-finalized"
 
 
 async def test_a_draft_cannot_authorize_a_different_graph(
@@ -511,7 +572,7 @@ async def test_a_ready_package_imports_as_an_untrusted_workflow(
         json={
             "ui_graph": _ui_graph(),
             "name": "Camera save",
-            "operation": "image_to_image",
+            "operation": "text_to_image",
             "description": "From a shared export",
         },
     )
@@ -519,7 +580,7 @@ async def test_a_ready_package_imports_as_an_untrusted_workflow(
     assert response.status_code == 201
     workflow = response.json()
     assert workflow["name"] == "Camera save"
-    assert workflow["operation"] == "image_to_image"
+    assert workflow["operation"] == "text_to_image"
     (revision,) = workflow["revisions"]
     # Imported code is never trusted by arriving; review grants that later.
     assert revision["trusted"] is False
@@ -527,6 +588,110 @@ async def test_a_ready_package_imports_as_an_untrusted_workflow(
     compiled = revision["api_graph_json"]
     assert compiled["1"]["class_type"] == "Source"
     assert compiled["2"]["inputs"]["images"] == ["1", 0]
+
+
+async def test_a_source_operation_binds_the_chat_image_not_the_authors_file(
+    client: AsyncClient, app: FastAPI, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _wire_runtime(app, monkeypatch)
+
+    response = await client.post(
+        "/api/workflows/packages/import",
+        json={
+            "ui_graph": _source_ui_graph(),
+            "name": "Portable image to video",
+            "operation": "image_to_video",
+        },
+    )
+
+    assert response.status_code == 201, response.json()
+    (revision,) = response.json()["revisions"]
+    assert revision["ui_graph_json"]["nodes"][0]["widgets_values"] == [
+        "author-source.png",
+        "image",
+    ]
+    assert revision["api_graph_json"]["1"]["inputs"]["image"] == "${input_image}"
+    assert revision["input_schema_json"] == {
+        "type": "object",
+        "properties": {"input_image": {"type": "string"}},
+    }
+
+
+async def test_a_graph_core_claim_cannot_authorize_a_custom_runtime_load_image(
+    client: AsyncClient,
+    app: FastAPI,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    object_info = _object_info()
+    object_info["LoadImage"]["python_module"] = "custom_nodes.shadow_loader"
+    _wire_runtime(app, monkeypatch, runtime_object_info=object_info)
+    graph = _source_ui_graph()
+    graph["nodes"][0]["properties"] = {"cnr_id": "comfy-core"}
+
+    response = await client.post(
+        "/api/workflows/packages/import",
+        json={
+            "ui_graph": graph,
+            "name": "Shadowed source",
+            "operation": "image_to_video",
+        },
+    )
+
+    assert response.status_code == 422
+    assert response.json()["code"] == "workflow_source_input_unsupported"
+
+
+async def test_a_source_operation_refuses_no_source_or_several_sources(
+    client: AsyncClient, app: FastAPI, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _wire_runtime(app, monkeypatch)
+    missing = await client.post(
+        "/api/workflows/packages/import",
+        json={
+            "ui_graph": _ui_graph(),
+            "name": "No source",
+            "operation": "image_to_video",
+        },
+    )
+    ambiguous_graph = _source_ui_graph()
+    ambiguous_graph["nodes"].append(
+        {
+            **ambiguous_graph["nodes"][0],
+            "id": 3,
+            "outputs": [],
+        }
+    )
+    ambiguous = await client.post(
+        "/api/workflows/packages/import",
+        json={
+            "ui_graph": ambiguous_graph,
+            "name": "Several sources",
+            "operation": "image_to_video",
+        },
+    )
+
+    assert missing.status_code == 422
+    assert missing.json()["code"] == "workflow_source_input_missing"
+    assert ambiguous.status_code == 422
+    assert ambiguous.json()["code"] == "workflow_source_input_ambiguous"
+
+
+async def test_a_non_source_operation_keeps_transient_file_choice_validation(
+    client: AsyncClient, app: FastAPI, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _wire_runtime(app, monkeypatch)
+
+    response = await client.post(
+        "/api/workflows/packages/import",
+        json={
+            "ui_graph": _source_ui_graph(),
+            "name": "Fixed authored image",
+            "operation": "text_to_video",
+        },
+    )
+
+    assert response.status_code == 422
+    assert response.json()["code"] == "invalid_widget_choice"
 
 
 async def test_plain_package_import_ignores_an_unsupported_frontend_version(

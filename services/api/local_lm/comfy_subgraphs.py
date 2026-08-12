@@ -118,11 +118,29 @@ def _expand(
     for instance in instances:
         identifier = str(instance.get("id"))
         definition_id = str(instance.get("type"))
+        mode = _subgraph_instance_mode(instance)
         if definition_id in seen:
             raise SubgraphExpansionError(
                 "recursive_subgraph", "workflow contains a subgraph that contains itself"
             )
         definition = subgraphs[definition_id]
+
+        # A disabled instance never contributes its interior. Resolve nested
+        # structure only far enough to compose pure boundary pass-through, then
+        # drop every real node so a muted or bypassed side branch cannot run.
+        if mode == BYPASS_MODE:
+            sandbox_nodes = [dict(node) for node in _nodes_of(definition, "subgraph")]
+            sandbox_links = _links_of(definition, "subgraph")
+            sandbox_nodes, sandbox_links = _expand(
+                sandbox_nodes,
+                sandbox_links,
+                subgraphs,
+                depth=depth + 1,
+                seen=(*seen, definition_id),
+            )
+            links = _compose_bypassed_instance(instance, identifier, links, sandbox_links)
+            continue
+
         scope = f"{identifier}:"
 
         inner_nodes = [dict(node) for node in _nodes_of(definition, "subgraph")]
@@ -166,6 +184,151 @@ def _expand(
 
     _refuse_duplicate_ids(plain)
     return plain, links
+
+
+def _subgraph_instance_mode(instance: Mapping[str, Any]) -> int:
+    """Mode of a subgraph instance, validated before any expansion of it.
+
+    Only an absent mode key, or an exact built-in ``int`` 0, expands as live.
+    Exact built-in ``int`` 4 bypasses without admitting interior nodes.
+    Built-in 1/2/3 are not bypass and cannot be rewritten safely. Present
+    ``None``, bools, IntEnum members, non-integers, and other numbers are not
+    known frontend modes and are refused rather than guessed.
+    """
+    if "mode" not in instance:
+        return 0
+    mode = instance.get("mode")
+    # type(mode) is int rejects bool and IntEnum; isinstance would not.
+    if type(mode) is not int:
+        raise SubgraphExpansionError(
+            "invalid_node_mode",
+            "a subgraph instance mode is not a built-in whole number",
+        )
+    if mode == 0 or mode == BYPASS_MODE:
+        return mode
+    if mode in (1, 2, 3):
+        raise SubgraphExpansionError(
+            "unsupported_node_mode",
+            "a subgraph instance uses a mode that cannot be expanded",
+        )
+    raise SubgraphExpansionError(
+        "invalid_node_mode",
+        "a subgraph instance mode is not a known built-in value",
+    )
+
+
+def _feeders_for_slot(outer: Sequence[_Link], identifier: str, slot: int) -> list[_Link]:
+    return [link for link in outer if link.target_id == identifier and link.target_slot == slot]
+
+
+def _unique_feeder(outer: Sequence[_Link], identifier: str, slot: int) -> _Link:
+    """The single outer link feeding an instance input, or a fixed typed error."""
+    feeders = _feeders_for_slot(outer, identifier, slot)
+    if len(feeders) > 1:
+        raise SubgraphExpansionError(
+            "ambiguous_subgraph_input",
+            "a subgraph input is fed by more than one link, so its source is not decidable",
+        )
+    if not feeders:
+        raise SubgraphExpansionError(
+            "unconnected_subgraph_input",
+            "a subgraph pass-through output is used but nothing feeds its input",
+        )
+    return feeders[0]
+
+
+def _declared_slot_count(node: Mapping[str, Any], key: str) -> int | None:
+    if key not in node:
+        return None
+    slots = node.get(key)
+    if not isinstance(slots, Sequence) or isinstance(slots, str | bytes):
+        raise SubgraphExpansionError(
+            "inconsistent_subgraph_boundary",
+            "a subgraph instance declares slots that are not an array",
+        )
+    return len(slots)
+
+
+def _require_declared_slot(node: Mapping[str, Any], key: str, slot: int) -> None:
+    """Refuse a boundary slot that falls outside the instance's declaration."""
+    count = _declared_slot_count(node, key)
+    if count is None:
+        return
+    if not 0 <= slot < count:
+        raise SubgraphExpansionError(
+            "inconsistent_subgraph_boundary",
+            "a subgraph boundary slot is outside the instance's declared slots",
+        )
+
+
+def _require_matching_kinds(*kinds: str | None) -> None:
+    named = [kind for kind in kinds if kind is not None]
+    if len(named) >= 2 and any(kind != named[0] for kind in named[1:]):
+        raise SubgraphExpansionError(
+            "mistyped_subgraph_boundary",
+            "a subgraph boundary pass-through joins links of different kinds",
+        )
+
+
+def _compose_bypassed_instance(
+    instance: Mapping[str, Any],
+    identifier: str,
+    outer: list[_Link],
+    inner: list[_Link],
+) -> list[_Link]:
+    """Wire around a mode-4 subgraph without admitting any of its nodes.
+
+    Only a structurally exact boundary pass-through
+    (INPUT_BOUNDARY -> OUTPUT_BOUNDARY, including after nested expansion)
+    becomes a direct outer link. Outputs produced by real interior nodes have
+    no runtime producer once those nodes are dropped, so consumer routes end
+    rather than inventing a path through disabled work. Missing, ambiguous,
+    mistyped, or inconsistent boundary evidence fails closed.
+    """
+    consuming = [link for link in outer if link.origin_id == identifier]
+
+    produced: dict[int, _Link] = {}
+    for link in inner:
+        if link.target_id != OUTPUT_BOUNDARY:
+            continue
+        if link.target_slot in produced:
+            raise SubgraphExpansionError(
+                "ambiguous_subgraph_output",
+                "a subgraph output is fed by more than one link, so its source is not decidable",
+            )
+        produced[link.target_slot] = link
+
+    spliced = [
+        link for link in outer if link.target_id != identifier and link.origin_id != identifier
+    ]
+    for link in consuming:
+        _require_declared_slot(instance, "outputs", link.origin_slot)
+        inside = produced.get(link.origin_slot)
+        if inside is None:
+            raise SubgraphExpansionError(
+                "unconnected_subgraph_output",
+                "a subgraph output is used but nothing inside produces it",
+            )
+        if inside.origin_id != INPUT_BOUNDARY:
+            # Interior work is disabled; there is no value to carry onward.
+            continue
+        _require_declared_slot(instance, "inputs", inside.origin_slot)
+        source = _unique_feeder(outer, identifier, inside.origin_slot)
+        _require_matching_kinds(source.kind, inside.kind, link.kind)
+        # The feeder may still be an enclosing boundary during nested
+        # expansion; the outer splice composes that next. Refusing here would
+        # break multi-level pass-through.
+        spliced.append(
+            _Link(
+                link_id=link.link_id,
+                origin_id=source.origin_id,
+                origin_slot=source.origin_slot,
+                target_id=link.target_id,
+                target_slot=link.target_slot,
+                kind=link.kind or source.kind or inside.kind,
+            )
+        )
+    return spliced
 
 
 def _names_a_real_slot(inner_nodes: Mapping[str, Mapping[str, Any]], link: _Link) -> bool:
@@ -253,20 +416,41 @@ def _splice(
             )
         )
     for link in consuming:
+        _require_declared_slot(instance, "outputs", link.origin_slot)
         inside = produced.get(link.origin_slot)
         if inside is None:
             raise SubgraphExpansionError(
                 "unconnected_subgraph_output",
                 "a subgraph output is used but nothing inside produces it",
             )
+        origin_id = inside.origin_id
+        origin_slot = inside.origin_slot
+        kind = link.kind or inside.kind
+        # A pure boundary pass-through has no runtime node. Compose through the
+        # instance's feeding link. The feeder may still be an enclosing
+        # INPUT_BOUNDARY during nested expansion; each outer splice peels one
+        # level so no negative id remains in the final host graph. Missing,
+        # ambiguous, mistyped, or out-of-range boundary evidence fails closed.
+        if origin_id == INPUT_BOUNDARY:
+            _require_declared_slot(instance, "inputs", origin_slot)
+            source = _unique_feeder(outer, identifier, origin_slot)
+            _require_matching_kinds(source.kind, inside.kind, link.kind)
+            origin_id = source.origin_id
+            origin_slot = source.origin_slot
+            kind = link.kind or source.kind or inside.kind
+        if origin_id == OUTPUT_BOUNDARY:
+            raise SubgraphExpansionError(
+                "unconnected_subgraph_output",
+                "a subgraph output resolves to a boundary that is not a runtime producer",
+            )
         spliced.append(
             _Link(
                 link_id=link.link_id,
-                origin_id=inside.origin_id,
-                origin_slot=inside.origin_slot,
+                origin_id=origin_id,
+                origin_slot=origin_slot,
                 target_id=link.target_id,
                 target_slot=link.target_slot,
-                kind=link.kind or inside.kind,
+                kind=kind,
             )
         )
     return spliced
