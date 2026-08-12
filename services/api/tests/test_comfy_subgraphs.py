@@ -2,11 +2,17 @@
 
 from __future__ import annotations
 
+from enum import IntEnum
 from typing import Any
 
 import pytest
 
 from local_lm.comfy_subgraphs import SubgraphExpansionError, expand_workflow
+
+
+class _FrontendMode(IntEnum):
+    LIVE = 0
+    BYPASS = 4
 
 
 def _node(node_id: Any, node_type: str, **extra: Any) -> dict[str, Any]:
@@ -421,14 +427,86 @@ def test_a_muted_subgraph_instance_is_refused() -> None:
     assert caught.value.code == "unsupported_node_mode"
 
 
-@pytest.mark.parametrize("mode", [True, False, "4", 1.5, 99])
+@pytest.mark.parametrize(
+    "mode",
+    [None, True, False, "4", 1.5, 99, _FrontendMode.LIVE, _FrontendMode.BYPASS],
+)
 def test_an_invalid_subgraph_instance_mode_is_refused(mode: Any) -> None:
+    """Present None and IntEnum are not absent mode or exact built-in int."""
     workflow = _photo_like()
     workflow["nodes"][1]["mode"] = mode
 
     with pytest.raises(SubgraphExpansionError) as caught:
         expand_workflow(workflow)
     assert caught.value.code == "invalid_node_mode"
+
+
+def _pass_through_workflow(*, mode: int = 4) -> dict[str, Any]:
+    return {
+        "nodes": [
+            _node(1, "LoadImage", outputs=_slots("IMAGE")),
+            _node(2, "Pass", mode=mode, inputs=_slots("IMAGE"), outputs=_slots("IMAGE")),
+            _node(3, "SaveImage", inputs=_slots("IMAGE")),
+        ],
+        "links": [
+            [10, 1, 0, 2, 0, "IMAGE"],
+            [11, 2, 0, 3, 0, "IMAGE"],
+        ],
+        "definitions": {
+            "subgraphs": [
+                {
+                    "id": "Pass",
+                    "nodes": [],
+                    "links": [[70, "-10", 0, "-20", 0, "IMAGE"]],
+                }
+            ]
+        },
+    }
+
+
+def test_two_outer_feeders_for_a_consumed_bypass_input_are_ambiguous() -> None:
+    workflow = _pass_through_workflow()
+    workflow["nodes"].append(_node(4, "AlsoImage", outputs=_slots("IMAGE")))
+    workflow["links"].append([12, 4, 0, 2, 0, "IMAGE"])
+
+    with pytest.raises(SubgraphExpansionError) as caught:
+        expand_workflow(workflow)
+    assert caught.value.code == "ambiguous_subgraph_input"
+
+
+def test_a_consumed_pass_through_with_no_outer_feeder_is_missing() -> None:
+    workflow = _pass_through_workflow()
+    workflow["links"] = [[11, 2, 0, 3, 0, "IMAGE"]]
+
+    with pytest.raises(SubgraphExpansionError) as caught:
+        expand_workflow(workflow)
+    assert caught.value.code == "unconnected_subgraph_input"
+
+
+def test_mismatched_pass_through_kinds_are_mistyped() -> None:
+    workflow = _pass_through_workflow()
+    workflow["links"] = [
+        [10, 1, 0, 2, 0, "MODEL"],
+        [11, 2, 0, 3, 0, "IMAGE"],
+    ]
+    workflow["nodes"][0]["outputs"] = _slots("MODEL")
+    workflow["nodes"][1]["inputs"] = _slots("MODEL")
+
+    with pytest.raises(SubgraphExpansionError) as caught:
+        expand_workflow(workflow)
+    assert caught.value.code == "mistyped_subgraph_boundary"
+
+
+def test_a_boundary_slot_outside_declared_instance_slots_is_inconsistent() -> None:
+    workflow = _pass_through_workflow()
+    # Instance declares no inputs, but the pass-through and outer feeder use
+    # slot 0 - that is outside the empty declaration.
+    workflow["nodes"][1]["inputs"] = []
+    workflow["nodes"][1]["outputs"] = _slots("IMAGE")
+
+    with pytest.raises(SubgraphExpansionError) as caught:
+        expand_workflow(workflow)
+    assert caught.value.code == "inconsistent_subgraph_boundary"
 
 
 def test_live_and_bypassed_siblings_of_one_definition_stay_independent() -> None:
