@@ -19,6 +19,17 @@ from local_lm.workflow_editor_sessions import (
 
 def _object_info() -> dict[str, Any]:
     return {
+        "LoadImage": {
+            "display_name": "Load image",
+            "python_module": "nodes",
+            "input": {
+                "required": {
+                    "image": [["available.png"], {"image_upload": True}],
+                }
+            },
+            "input_order": {"required": ["image"]},
+            "output": ["IMAGE", "MASK"],
+        },
         "Source": {
             "display_name": "Source image",
             "input": {
@@ -103,6 +114,39 @@ def _edited_api_graph() -> dict[str, Any]:
     return graph
 
 
+def _source_ui_graph(*, filename_prefix: str = "result") -> dict[str, Any]:
+    graph = _ui_graph()
+    graph["nodes"][0] = {
+        "id": 1,
+        "type": "LoadImage",
+        "mode": 0,
+        "inputs": [],
+        "outputs": [{"name": "IMAGE", "type": "IMAGE", "links": [7]}],
+        "widgets_values": ["author-source.png", "image"],
+    }
+    graph["nodes"][1]["widgets_values"] = [filename_prefix]
+    return graph
+
+
+def _source_api_graph(
+    *,
+    source: str = "${input_image}",
+    filename_prefix: str = "result",
+) -> dict[str, Any]:
+    return {
+        "1": {
+            "inputs": {"image": source},
+            "class_type": "LoadImage",
+            "_meta": {"title": "Load image"},
+        },
+        "2": {
+            "inputs": {"images": ["1", 0], "filename_prefix": filename_prefix},
+            "class_type": "Save",
+            "_meta": {"title": "Save"},
+        },
+    }
+
+
 async def _create_workflow(
     client: AsyncClient,
     *,
@@ -111,12 +155,13 @@ async def _create_workflow(
     api_graph: dict[str, Any] | None = None,
     input_schema: dict[str, Any] | None = None,
     dependencies: dict[str, Any] | None = None,
+    operation: str = "text_to_image",
 ) -> dict[str, Any]:
     response = await client.post(
         "/api/workflows",
         json={
             "name": "Editable workflow",
-            "operation": "text_to_image",
+            "operation": operation,
             "engine": engine,
             "ui_graph": _ui_graph() if ui_graph is None else ui_graph,
             "api_graph": _api_graph() if api_graph is None else api_graph,
@@ -346,6 +391,23 @@ async def test_start_reports_uncertified_frontend_semantics(
     assert response.json()["reason_code"] == "unsupported_frontend_version"
 
 
+async def test_start_maps_package_analysis_refusal_instead_of_returning_500(
+    app: FastAPI,
+    client: AsyncClient,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _ready_editor(app, monkeypatch)
+    ui_graph = _ui_graph()
+    ui_graph["version"] = 0.5
+    workflow = await _create_workflow(client, ui_graph=ui_graph)
+
+    response = await client.post(f"/api/workflows/{workflow['id']}/editor-sessions")
+
+    assert response.status_code == 422
+    assert response.json()["code"] == "workflow-editor-graph-cannot-compile"
+    assert response.json()["reason_code"] == "unsupported_format"
+
+
 async def test_start_maps_session_capacity_without_eviction(
     app: FastAPI,
     client: AsyncClient,
@@ -445,6 +507,138 @@ async def test_consume_validates_prompt_without_mutating_and_remains_retryable(
         item for item in (await client.get("/api/workflows")).json() if item["id"] == workflow["id"]
     )
     assert after == before
+
+
+async def test_source_workflow_editor_attests_raw_prompt_and_persists_runtime_binding(
+    app: FastAPI,
+    client: AsyncClient,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _ready_editor(app, monkeypatch)
+    input_schema = {
+        "type": "object",
+        "properties": {"input_image": {"type": "string"}},
+    }
+    workflow = await _create_workflow(
+        client,
+        operation="image_to_video",
+        ui_graph=_source_ui_graph(),
+        api_graph=_source_api_graph(),
+        input_schema=input_schema,
+    )
+    started_response = await client.post(f"/api/workflows/{workflow['id']}/editor-sessions")
+    assert started_response.status_code == 201, started_response.json()
+    started = started_response.json()
+    path = f"/api/workflows/{workflow['id']}/editor-sessions/{started['id']}/consume"
+    edited_ui = _source_ui_graph(filename_prefix="edited")
+
+    mismatched = await client.post(
+        path,
+        json={
+            "nonce": started["nonce"],
+            "base_revision_id": started["base_revision_id"],
+            "ui_graph": edited_ui,
+            "api_prompt": _source_api_graph(
+                source="different-source.png",
+                filename_prefix="edited",
+            ),
+        },
+    )
+    assert mismatched.status_code == 422
+    assert mismatched.json()["code"] == "workflow-editor-return-prompt-mismatch"
+    assert app.state.services.workflow_editor_sessions.active_count == 1
+
+    consumed = await client.post(
+        path,
+        json={
+            "nonce": started["nonce"],
+            "base_revision_id": started["base_revision_id"],
+            "ui_graph": edited_ui,
+            "api_prompt": _source_api_graph(
+                source="author-source.png",
+                filename_prefix="edited",
+            ),
+        },
+    )
+    assert consumed.status_code == 200, consumed.json()
+    receipt = consumed.json()["validated_return_id"]
+    assert consumed.json()["returned_prompt_sha256"] == workflow_api_graph_sha256(
+        _source_api_graph(filename_prefix="edited")
+    )
+
+    created = await client.post(
+        f"/api/workflows/{workflow['id']}/editor-drafts",
+        json={"validated_return_id": receipt},
+    )
+    assert created.status_code == 200, created.json()
+    listed = next(
+        item for item in (await client.get("/api/workflows")).json() if item["id"] == workflow["id"]
+    )
+    draft = next(
+        revision
+        for revision in listed["revisions"]
+        if revision["id"] == created.json()["draft_revision_id"]
+    )
+    assert draft["ui_graph_json"] == edited_ui
+    assert draft["api_graph_json"] == _source_api_graph(filename_prefix="edited")
+    assert draft["input_schema_json"] == input_schema
+
+
+async def test_legacy_image_operation_without_a_source_binding_keeps_raw_editor_contract(
+    app: FastAPI,
+    client: AsyncClient,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _ready_editor(app, monkeypatch)
+    workflow = await _create_workflow(client, operation="image_to_image")
+
+    started = await client.post(f"/api/workflows/{workflow['id']}/editor-sessions")
+
+    assert started.status_code == 201, started.json()
+    payload = started.json()
+    consumed = await client.post(
+        f"/api/workflows/{workflow['id']}/editor-sessions/{payload['id']}/consume",
+        json={
+            "nonce": payload["nonce"],
+            "base_revision_id": payload["base_revision_id"],
+            "ui_graph": _ui_graph(),
+            "api_prompt": _api_graph(),
+        },
+    )
+    assert consumed.status_code == 200, consumed.json()
+
+
+async def test_bound_image_editor_reports_a_missing_returned_source_as_typed_refusal(
+    app: FastAPI,
+    client: AsyncClient,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _ready_editor(app, monkeypatch)
+    workflow = await _create_workflow(
+        client,
+        operation="image_to_video",
+        ui_graph=_source_ui_graph(),
+        api_graph=_source_api_graph(),
+        input_schema={
+            "type": "object",
+            "properties": {"input_image": {"type": "string"}},
+        },
+    )
+    started = (await client.post(f"/api/workflows/{workflow['id']}/editor-sessions")).json()
+
+    response = await client.post(
+        f"/api/workflows/{workflow['id']}/editor-sessions/{started['id']}/consume",
+        json={
+            "nonce": started["nonce"],
+            "base_revision_id": started["base_revision_id"],
+            "ui_graph": _ui_graph(),
+            "api_prompt": _api_graph(),
+        },
+    )
+
+    assert response.status_code == 422
+    assert response.json()["code"] == "workflow-editor-return-cannot-compile"
+    assert response.json()["reason_code"] == "workflow_source_input_missing"
 
 
 async def test_consume_authenticates_before_workflow_mismatch(
