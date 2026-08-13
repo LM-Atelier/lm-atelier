@@ -122,9 +122,9 @@ def test_artifact_library_entry_migration_backfills_once_and_seals_membership(
             ON CONFLICT(artifact_id) DO NOTHING
             """
         )
-        assert connection.execute(
-            "SELECT count(*) FROM artifact_library_entries"
-        ).fetchone() == (2,)
+        assert connection.execute("SELECT count(*) FROM artifact_library_entries").fetchone() == (
+            2,
+        )
         with pytest.raises(sqlite3.IntegrityError, match="version is stale"):
             connection.execute(
                 "UPDATE artifact_library_entries SET display_name = 'changed' "

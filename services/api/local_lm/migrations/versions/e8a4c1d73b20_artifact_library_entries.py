@@ -87,8 +87,14 @@ def upgrade() -> None:
             name="ck_library_entry_recovery_consistent",
         ),
     )
-    op.create_index("ix_library_entry_state_created", "artifact_library_entries", ["state", "created_at", "id"])
-    op.create_index("ix_library_entry_favorite_created", "artifact_library_entries", ["favorite", "created_at", "id"])
+    op.create_index(
+        "ix_library_entry_state_created", "artifact_library_entries", ["state", "created_at", "id"]
+    )
+    op.create_index(
+        "ix_library_entry_favorite_created",
+        "artifact_library_entries",
+        ["favorite", "created_at", "id"],
+    )
     op.execute("""
         INSERT INTO artifact_library_entries
           (id, artifact_id, display_name, favorite, state, deleted_at, recovery_id,
