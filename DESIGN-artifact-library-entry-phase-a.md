@@ -52,21 +52,22 @@ Out of scope (later phases):
 - setup verification inputs
 - **visible library entry artifact ids**
 - message_references JSON
-- run provenance, work step bindings, studio chat origin
+- run provenance/settings (including masks), work step bindings/settings, studio chat origin
 - job payload/result nested artifact ids (bounded, fail-closed)
 
 Corrupt JSON aborts retention with fixed text: `Stored artifact reference data is invalid.`
 
-Visible membership pins bytes even without favorites or message parts.
+Visible or recoverable/trashed membership pins bytes even without favorites or message parts.
+Destructive paths take a SQLite writer reservation before reference proof and row deletion.
 
 ## Delete authority
 
 | Caller | Behavior |
 | --- | --- |
 | User `DELETE /api/artifacts/{id}` | 409 `artifact-in-use` if membership exists (Phase A) |
-| `delete_library_artifact(..., release_membership=True)` | drops entry then hard-deletes when no other refs |
-| chat-generated media cleanup | uses `release_membership=True` |
-| setup verification cleanup | uses `release_membership=True`; never published |
+| internal artifact deletion | refuses whenever membership exists; no release boolean exists |
+| chat-generated media cleanup | preserves published entries and bytes |
+| setup verification cleanup | setup output is never published; clears exact DB refs before deleting unpublished bytes |
 
 Trash/soft-delete and recovery_id transitions are schema-ready (`visible` / `trashed`) but not user-exposed yet.
 
@@ -79,9 +80,10 @@ Trash/soft-delete and recovery_id transitions are schema-ready (`visible` / `tra
 5. Identity and version triggers refuse illegal updates.
 6. Visible membership prevents retention GC and low-level `_delete_artifact`.
 7. User DELETE of a published item returns 409 with fixed membership text.
-8. Authorized `release_membership=True` cleanup removes entry and bytes when no other refs.
+8. Entry deletion never deletes bytes; no generic membership-release authority exists.
 9. Corrupt job reference JSON fails closed with fixed error text.
-10. No list/pagination API cutover in this phase.
+10. Run and ordered-step mask references are retained under the same write fence.
+11. No list/pagination API cutover in this phase.
 
 ## Holds
 

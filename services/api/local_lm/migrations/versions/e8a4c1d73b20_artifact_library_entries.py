@@ -10,6 +10,8 @@ from collections.abc import Sequence
 import sqlalchemy as sa
 from alembic import op
 
+from local_lm.artifact_library_schema import CREATE_TRIGGER_SQL, DROP_TRIGGER_SQL
+
 revision: str = "e8a4c1d73b20"
 down_revision: str | None = "c7e1d4a83b56"
 branch_labels: str | Sequence[str] | None = None
@@ -17,45 +19,8 @@ depends_on: str | Sequence[str] | None = None
 
 
 def _triggers() -> None:
-    op.execute("""
-        CREATE TRIGGER artifact_library_entry_insert_guard
-        BEFORE INSERT ON artifact_library_entries
-        BEGIN
-          SELECT CASE WHEN NEW.id != 'libentry:sha256:' || (
-            SELECT sha256 FROM artifacts WHERE id = NEW.artifact_id
-          )
-            THEN RAISE(ABORT, 'artifact library entry identity is invalid') END;
-          SELECT CASE WHEN NOT EXISTS (
-            SELECT 1 FROM artifacts
-            WHERE id = NEW.artifact_id AND kind IN ('image', 'video')
-          ) THEN RAISE(ABORT, 'artifact library entry requires media') END;
-        END
-    """)
-    op.execute("""
-        CREATE TRIGGER artifact_library_entry_update_guard
-        BEFORE UPDATE ON artifact_library_entries
-        BEGIN
-          SELECT CASE WHEN NEW.id != OLD.id OR NEW.artifact_id != OLD.artifact_id
-                              OR NEW.created_at != OLD.created_at
-            THEN RAISE(ABORT, 'artifact library entry identity is immutable') END;
-          SELECT CASE WHEN NEW.version != OLD.version + 1
-            THEN RAISE(ABORT, 'artifact library entry version is stale') END;
-          SELECT CASE WHEN NOT EXISTS (
-            SELECT 1 FROM artifacts
-            WHERE id = NEW.artifact_id AND kind IN ('image', 'video')
-          ) THEN RAISE(ABORT, 'artifact library entry requires media') END;
-        END
-    """)
-    op.execute("""
-        CREATE TRIGGER artifact_library_artifact_update_guard
-        BEFORE UPDATE OF id, sha256, kind ON artifacts
-        WHEN EXISTS (SELECT 1 FROM artifact_library_entries WHERE artifact_id = OLD.id)
-        BEGIN
-          SELECT CASE WHEN NEW.id != OLD.id OR NEW.sha256 != OLD.sha256
-                              OR NEW.kind != OLD.kind
-            THEN RAISE(ABORT, 'library artifact identity is immutable') END;
-        END
-    """)
+    for statement in CREATE_TRIGGER_SQL:
+        op.execute(statement)
 
 
 def upgrade() -> None:
@@ -95,6 +60,13 @@ def upgrade() -> None:
         "artifact_library_entries",
         ["favorite", "created_at", "id"],
     )
+    op.create_index(
+        "ux_library_entry_recovery_id",
+        "artifact_library_entries",
+        ["recovery_id"],
+        unique=True,
+        sqlite_where=sa.text("recovery_id IS NOT NULL"),
+    )
     op.execute("""
         INSERT INTO artifact_library_entries
           (id, artifact_id, display_name, favorite, state, deleted_at, recovery_id,
@@ -109,9 +81,9 @@ def upgrade() -> None:
 
 
 def downgrade() -> None:
-    op.execute("DROP TRIGGER artifact_library_artifact_update_guard")
-    op.execute("DROP TRIGGER artifact_library_entry_update_guard")
-    op.execute("DROP TRIGGER artifact_library_entry_insert_guard")
+    for statement in DROP_TRIGGER_SQL:
+        op.execute(statement)
+    op.drop_index("ux_library_entry_recovery_id", table_name="artifact_library_entries")
     op.drop_index("ix_library_entry_favorite_created", table_name="artifact_library_entries")
     op.drop_index("ix_library_entry_state_created", table_name="artifact_library_entries")
     op.drop_table("artifact_library_entries")

@@ -17,12 +17,13 @@ from typing import IO
 from sqlalchemy import event, func, select
 from sqlalchemy.orm import Session
 
-from .artifact_library import referenced_artifact_ids
+from .artifact_library import begin_artifact_write_fence, referenced_artifact_ids
 from .config import Settings
 from .domain import ArtifactKind, MessageRole, PartType
 from .filesystem_links import is_link_or_reparse
 from .models import (
     Artifact,
+    ArtifactLibraryEntry,
     Message,
     MessagePart,
     ResponseRevision,
@@ -410,6 +411,7 @@ class ArtifactStore:
     ) -> RetentionCleanupSummary:
         current = now or datetime.now(UTC)
         if not dry_run:
+            begin_artifact_write_fence(session)
             self._recover_staged_deletions(session)
         referenced = self.referenced_artifact_ids(session)
         marked_count = 0
@@ -464,21 +466,16 @@ class ArtifactStore:
         self,
         session: Session,
         artifact: Artifact,
-        *,
-        release_membership: bool = False,
     ) -> tuple[int, int, int]:
+        begin_artifact_write_fence(session)
         if artifact.kind not in {ArtifactKind.IMAGE.value, ArtifactKind.VIDEO.value}:
             raise ValueError("only image and video library artifacts can be deleted directly")
-        from .artifact_library import release_library_entry
-        from .models import ArtifactLibraryEntry
 
         entry_id = session.scalar(
             select(ArtifactLibraryEntry.id).where(ArtifactLibraryEntry.artifact_id == artifact.id)
         )
-        if entry_id and not release_membership:
+        if entry_id:
             raise ValueError("This media item is retained by its Media Library membership.")
-        if entry_id and release_membership:
-            release_library_entry(session, artifact)
 
         linked_ids = {
             linked_id
@@ -561,6 +558,12 @@ class ArtifactStore:
             external_run_artifact_ids.update(self._provenance_input_ids(provenance))
         removed = 0
         for artifact in artifacts:
+            if session.scalar(
+                select(ArtifactLibraryEntry.id).where(
+                    ArtifactLibraryEntry.artifact_id == artifact.id
+                )
+            ):
+                continue
             message_references_elsewhere = session.scalar(
                 select(func.count(MessagePart.id))
                 .join(Message, Message.id == MessagePart.message_id)
@@ -588,12 +591,13 @@ class ArtifactStore:
             ):
                 continue
             _references, removed_count, _reclaimed_bytes = self.delete_library_artifact(
-                session, artifact, release_membership=True
+                session, artifact
             )
             removed += removed_count
         return removed
 
     def _delete_artifact(self, session: Session, artifact: Artifact) -> None:
+        begin_artifact_write_fence(session)
         if artifact.id in self.referenced_artifact_ids(session):
             raise ValueError("This artifact is still retained.")
         try:

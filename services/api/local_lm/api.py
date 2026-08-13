@@ -25,7 +25,7 @@ from starlette.responses import FileResponse, HTMLResponse
 from . import __version__
 from .adapter_grammar_review import review_adapter_grammar
 from .api_errors import api_error
-from .artifact_library import ensure_library_entry, set_library_favorite
+from .artifact_library import ArtifactLibraryConflict, ensure_library_entry, set_library_favorite
 from .auxiliary_assets import AUXILIARY_ASSET_KINDS, validate_lora_workflow_contract
 from .capability_evidence import current_capability_evidence, evidence_input_modalities
 from .capability_probe import probe_structured_tools
@@ -363,6 +363,7 @@ from .setup_verification import (
     ACTIVE_VERIFICATION_STATES,
     SETUP_VERIFICATION_SCOPE,
     current_setup_verification,
+    delete_setup_artifacts,
     ingest_synthetic_setup_image,
     setup_verification_prompt,
     setup_verification_settings,
@@ -995,16 +996,13 @@ async def start_setup_verification(
             current.state = "failed"
             current.failure_code = "generation_not_started"
             current.completed_at = utcnow()
-            if current.input_artifact_id and (
-                failed_artifact := session.get(Artifact, current.input_artifact_id)
-            ):
-                services.artifacts.delete_library_artifact(
-                    session, failed_artifact, release_membership=True
-                )
+            artifact_ids = {current.input_artifact_id} if current.input_artifact_id else set()
             if current.chat_id and (failed_chat := session.get(Chat, current.chat_id)):
                 session.delete(failed_chat)
             current.chat_id = None
             current.input_artifact_id = None
+            session.flush()
+            delete_setup_artifacts(session, services.artifacts, artifact_ids)
             session.commit()
         raise
 
@@ -2900,7 +2898,15 @@ async def update_artifact(
     artifact = session.get(Artifact, artifact_id)
     if not artifact:
         raise api_error(404, "artifact-not-found", "This media item no longer exists")
-    set_library_favorite(session, artifact, payload.favorite)
+    try:
+        set_library_favorite(session, artifact, payload.favorite)
+    except ArtifactLibraryConflict as exc:
+        session.rollback()
+        raise api_error(
+            409,
+            "artifact-library-conflict",
+            "The Media Library item changed. Refresh and try again.",
+        ) from exc
     session.commit()
     session.refresh(artifact)
     result = ArtifactOut.model_validate(artifact)

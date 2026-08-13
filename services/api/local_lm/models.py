@@ -4,6 +4,7 @@ from datetime import datetime
 from typing import Any
 
 from sqlalchemy import (
+    DDL,
     JSON,
     Boolean,
     CheckConstraint,
@@ -16,10 +17,12 @@ from sqlalchemy import (
     String,
     Text,
     UniqueConstraint,
+    event,
     text,
 )
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
+from .artifact_library_schema import CREATE_TRIGGER_SQL, DROP_TRIGGER_SQL
 from .db import Base
 from .domain import (
     ArtifactKind,
@@ -458,6 +461,12 @@ class ArtifactLibraryEntry(TimestampMixin, Base):
         ),
         Index("ix_library_entry_state_created", "state", "created_at", "id"),
         Index("ix_library_entry_favorite_created", "favorite", "created_at", "id"),
+        Index(
+            "ux_library_entry_recovery_id",
+            "recovery_id",
+            unique=True,
+            sqlite_where=text("recovery_id IS NOT NULL"),
+        ),
     )
 
     id: Mapped[str] = mapped_column(String(80), primary_key=True)
@@ -468,6 +477,20 @@ class ArtifactLibraryEntry(TimestampMixin, Base):
     deleted_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     recovery_id: Mapped[str | None] = mapped_column(String(80), nullable=True)
     version: Mapped[int] = mapped_column(Integer, default=1)
+
+
+for _statement in CREATE_TRIGGER_SQL:
+    event.listen(
+        ArtifactLibraryEntry.__table__,
+        "after_create",
+        DDL(_statement).execute_if(dialect="sqlite"),  # type: ignore[no-untyped-call]
+    )
+for _statement in DROP_TRIGGER_SQL:
+    event.listen(
+        ArtifactLibraryEntry.__table__,
+        "before_drop",
+        DDL(_statement).execute_if(dialect="sqlite"),  # type: ignore[no-untyped-call]
+    )
 
 
 class ModelSource(TimestampMixin, Base):

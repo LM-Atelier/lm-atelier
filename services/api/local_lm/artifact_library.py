@@ -3,13 +3,14 @@
 from __future__ import annotations
 
 from collections.abc import Mapping
-from typing import NoReturn
+from typing import Any, NoReturn, cast
 
-from sqlalchemy import func, select
+from sqlalchemy import func, select, update
 from sqlalchemy.dialects.sqlite import insert
+from sqlalchemy.engine import CursorResult
 from sqlalchemy.orm import Session
 
-from .domain import ArtifactKind
+from .domain import ArtifactKind, utcnow
 from .models import (
     Artifact,
     ArtifactLibraryEntry,
@@ -34,6 +35,21 @@ REFERENCE_CORRUPT = "Stored artifact reference data is invalid."
 
 class ArtifactReferenceDataError(RuntimeError):
     pass
+
+
+class ArtifactLibraryConflict(ValueError):
+    pass
+
+
+def begin_artifact_write_fence(session: Session) -> None:
+    """Take SQLite's writer reservation before proving deletion authority."""
+
+    connection = session.connection()
+    if connection.dialect.name != "sqlite":
+        return
+    driver = connection.connection.driver_connection
+    if not bool(getattr(driver, "in_transaction", False)):
+        connection.exec_driver_sql("BEGIN IMMEDIATE")
 
 
 def library_entry_id(artifact: Artifact) -> str:
@@ -77,28 +93,28 @@ def set_library_favorite(
     entry = ensure_library_entry(session, artifact)
     if entry is None:
         raise ValueError("only image and video artifacts can enter the Media Library")
-    entry.favorite = favorite
-    entry.version += 1
-    artifact.favorite = favorite
-    session.flush()
-    return entry
-
-
-def release_library_entry(session: Session, artifact: Artifact) -> bool:
-    """Drop durable membership so an authorized cleanup may delete bytes.
-
-    User-facing DELETE must not call this while Phase A has no Trash path;
-    system cleanups that intentionally retire synthetic or chat-scoped media may.
-    """
-
-    entry = session.scalar(
-        select(ArtifactLibraryEntry).where(ArtifactLibraryEntry.artifact_id == artifact.id)
+    desired = bool(favorite)
+    observed_version = entry.version
+    changed = cast(
+        CursorResult[Any],
+        session.execute(
+            update(ArtifactLibraryEntry)
+            .where(
+                ArtifactLibraryEntry.id == entry.id,
+                ArtifactLibraryEntry.version == observed_version,
+                ArtifactLibraryEntry.favorite != desired,
+            )
+            .values(favorite=desired, version=observed_version + 1, updated_at=utcnow())
+        ),
     )
-    if entry is None:
-        return False
-    session.delete(entry)
-    session.flush()
-    return True
+    session.expire(entry)
+    session.refresh(entry)
+    if changed.rowcount != 1 and entry.favorite != desired:
+        raise ArtifactLibraryConflict("Media Library entry changed; refresh and try again.")
+    session.execute(update(Artifact).where(Artifact.id == artifact.id).values(favorite=desired))
+    session.expire(artifact)
+    session.refresh(artifact)
+    return entry
 
 
 def _fail() -> NoReturn:
@@ -156,6 +172,17 @@ def _work_step_ids(value: object) -> set[str]:
         if "artifact_id" in item:
             found.update(_optional_id(item["artifact_id"]))
     return found
+
+
+def _settings_ids(value: object) -> set[str]:
+    row = _mapping(value)
+    mask = row.get("mask")
+    if mask is None:
+        return set()
+    mask_row = _mapping(mask)
+    if "artifact_id" not in mask_row:
+        _fail()
+    return _optional_id(mask_row["artifact_id"])
 
 
 _SCALAR_ARTIFACT_KEYS = {
@@ -241,8 +268,12 @@ def referenced_artifact_ids(session: Session) -> set[str]:
         retain(_ids(value))
     for value in session.scalars(select(Run.provenance_json)):
         retain(_run_ids(value))
+    for value in session.scalars(select(Run.settings_json)):
+        retain(_settings_ids(value))
     for value in session.scalars(select(WorkStep.input_bindings_json)):
         retain(_work_step_ids(value))
+    for value in session.scalars(select(WorkStep.settings_json)):
+        retain(_settings_ids(value))
     for scope, value in session.execute(select(Chat.scope, Chat.origin_json)):
         if scope == "studio":
             row = _mapping(value)

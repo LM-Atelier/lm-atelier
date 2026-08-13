@@ -144,6 +144,31 @@ async def test_the_flag_toggles_filters_and_library_membership_blocks_legacy_del
     assert remaining[0]["favorite"] is True
 
 
+async def test_favorite_conflict_is_fixed_and_private(
+    client: AsyncClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from local_lm import api
+    from local_lm.artifact_library import ArtifactLibraryConflict
+
+    created = await client.post(
+        "/api/artifacts?kind=image",
+        files={"file": ("race.png", b"race", "image/png")},
+    )
+    marker = "private stale writer marker"
+
+    def refuse(*_args: object, **_kwargs: object) -> None:
+        raise ArtifactLibraryConflict(marker)
+
+    monkeypatch.setattr(api, "set_library_favorite", refuse)
+    response = await client.patch(f"/api/artifacts/{created.json()['id']}", json={"favorite": True})
+    assert response.status_code == 409
+    assert response.json() == {
+        "detail": "The Media Library item changed. Refresh and try again.",
+        "code": "artifact-library-conflict",
+    }
+    assert marker not in response.text
+
+
 async def test_a_missing_artifact_refuses_with_a_stable_code(client: AsyncClient) -> None:
     response = await client.patch("/api/artifacts/absent", json={"favorite": True})
     assert response.status_code == 404

@@ -139,6 +139,21 @@ def test_artifact_library_entry_migration_backfills_once_and_seals_membership(
             connection.execute("DELETE FROM artifacts WHERE id = 'legacy-image'")
         with pytest.raises(sqlite3.IntegrityError, match="library artifact identity"):
             connection.execute("UPDATE artifacts SET kind = 'other' WHERE id = 'legacy-image'")
+        connection.execute(
+            "UPDATE artifact_library_entries SET state = 'trashed', deleted_at = ?, "
+            "recovery_id = 'recover-image', version = 2 WHERE artifact_id = 'legacy-image'",
+            (stamp,),
+        )
+        connection.execute(
+            "UPDATE artifact_library_entries SET state = 'trashed', deleted_at = ?, "
+            "recovery_id = 'recover-video', version = 2 WHERE artifact_id = 'legacy-video'",
+            (stamp,),
+        )
+        with pytest.raises(sqlite3.IntegrityError, match="UNIQUE constraint failed"):
+            connection.execute(
+                "UPDATE artifact_library_entries SET recovery_id = 'recover-image', version = 3 "
+                "WHERE artifact_id = 'legacy-video'"
+            )
         assert connection.execute(
             "SELECT kind, original_name, favorite FROM artifacts ORDER BY id"
         ).fetchall() == [

@@ -4336,7 +4336,8 @@ class ConversationOrchestrator:
                         "settings": run.settings_json,
                     },
                 )
-                ensure_library_entry(session, artifact)
+                if setup_verification_for_chat(session, run.chat_id) is None:
+                    ensure_library_entry(session, artifact)
                 # Derived-video helpers can spend minutes in ffmpeg. Persist the
                 # content-addressed source before awaiting them so SQLite never
                 # carries a write transaction across external process work.
