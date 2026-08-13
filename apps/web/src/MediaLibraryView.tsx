@@ -14,6 +14,11 @@ import { formatBytes } from "./format";
 
 const PAGE_LIMIT = 20;
 const LIBRARY_UNAVAILABLE = "The Media Library could not be loaded safely. Refresh and try again.";
+const MAX_QUERY_CODE_POINTS = 200;
+
+function boundedQuery(value: string): string {
+  return Array.from(value).slice(0, MAX_QUERY_CODE_POINTS).join("");
+}
 
 export function MediaLibraryView({
   onEditImage,
@@ -86,8 +91,10 @@ export function MediaLibraryView({
             aria-label="Search media"
             placeholder="Search display names"
             value={filters.query}
-            maxLength={200}
-            onChange={(event) => replaceFilters({ ...filters, query: event.target.value })}
+            onChange={(event) => replaceFilters({
+              ...filters,
+              query: boundedQuery(event.target.value),
+            })}
           />
         </div>
         <select

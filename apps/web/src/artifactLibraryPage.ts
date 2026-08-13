@@ -82,10 +82,12 @@ function exactKeys(value: Record<string, unknown>, expected: readonly string[]):
 }
 
 function boundedString(value: unknown, minimum: number, maximum: number): string {
-  if (typeof value !== "string" || value.length < minimum || value.length > maximum) invalid();
-  for (const character of value) {
-    const code = character.charCodeAt(0);
-    if (code < 32 || code === 127) invalid();
+  if (typeof value !== "string" || value.length < minimum || value.length > maximum * 2) invalid();
+  const characters = Array.from(value);
+  if (characters.length < minimum || characters.length > maximum) invalid();
+  for (const character of characters) {
+    const code = character.codePointAt(0);
+    if (code === undefined || code < 32 || code === 127 || (character.length === 1 && code >= 0xd800 && code <= 0xdfff)) invalid();
   }
   return value;
 }

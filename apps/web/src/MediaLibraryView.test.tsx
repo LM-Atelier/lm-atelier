@@ -74,6 +74,16 @@ describe("EntryV1 Media Library feed", () => {
     expect(await screen.findByText("No media matches these filters")).toBeVisible();
   });
 
+  it("bounds search by backend Unicode code points instead of UTF-16 units", async () => {
+    vi.mocked(api.artifactLibrary).mockResolvedValue(parsedPage([]));
+    renderLibrary();
+    await screen.findByText("No media matches these filters");
+
+    const input = screen.getByRole("textbox", { name: "Search media" });
+    fireEvent.change(input, { target: { value: "😀".repeat(201) } });
+    expect(input).toHaveValue("😀".repeat(200));
+  });
+
   it("loads a cursor page, states truncation, and preserves exact cursor order", async () => {
     const first = parsedPage(
       Array.from({ length: 20 }, (_, index) => rawItem(String.fromCharCode(122 - index))),

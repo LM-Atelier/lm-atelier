@@ -84,6 +84,15 @@ describe("Media Library EntryV1 response boundary", () => {
     rejects(page([item()], `${"a".repeat(1600)}.${"b".repeat(44)}`), 1);
   });
 
+  it("counts display-name bounds by Unicode code point like the backend", () => {
+    const maximum = "😀".repeat(500);
+    expect(parseArtifactLibraryPage(
+      page([{ ...item(), display_name: maximum }]),
+      20,
+    ).items[0].display_name).toBe(maximum);
+    rejects(page([{ ...item(), display_name: "😀".repeat(501) }]));
+  });
+
   it("is total for hostile non-JSON objects", () => {
     const accessor = Object.create(Object.prototype, {
       items: { get: () => { throw new Error("private marker"); }, enumerable: true },
