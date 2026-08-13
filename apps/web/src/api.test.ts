@@ -64,6 +64,7 @@ it("rejects a malformed Media Library response atomically", async () => {
 });
 
 it("rejects a Media Library cursor self-loop", async () => {
+  const cursor = `cGF5bG9hZA.${"a".repeat(43)}`;
   const items = Array.from({ length: 20 }, (_, index) => {
     const sha = index.toString(16).padStart(64, "0");
     return {
@@ -84,14 +85,14 @@ it("rejects a Media Library cursor self-loop", async () => {
     .mockResolvedValueOnce(new Response(JSON.stringify({ csrf_token: "csrf" }), { status: 200 }))
     .mockResolvedValueOnce(new Response(JSON.stringify({
       items,
-      next_cursor: "same_cursor",
+      next_cursor: cursor,
     }), { status: 200 }));
   vi.stubGlobal("fetch", fetchMock);
 
   const { api } = await import("./api");
   await expect(api.artifactLibrary(
     { kind: "", query: "", favorite: false },
-    "same_cursor",
+    cursor,
     20,
   )).rejects.toThrow("The Media Library response was invalid.");
 });

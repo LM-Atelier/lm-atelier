@@ -12,6 +12,7 @@ vi.mock("./api", () => ({
 const digest = (character: string) => /^[a-f]$/.test(character)
   ? character.repeat(64)
   : character.charCodeAt(0).toString(16).padStart(64, "0");
+const cursor = `cGF5bG9hZA.${"a".repeat(43)}`;
 
 function rawItem(character: string, options: {
   createdAt?: string;
@@ -76,7 +77,7 @@ describe("EntryV1 Media Library feed", () => {
   it("loads a cursor page, states truncation, and preserves exact cursor order", async () => {
     const first = parsedPage(
       Array.from({ length: 20 }, (_, index) => rawItem(String.fromCharCode(122 - index))),
-      "cursor_one",
+      cursor,
     );
     const second = parsedPage([rawItem("a", { createdAt: "2026-08-12T11:59:00Z", kind: "video" })]);
     vi.mocked(api.artifactLibrary)
@@ -88,7 +89,7 @@ describe("EntryV1 Media Library feed", () => {
     fireEvent.click(screen.getByRole("button", { name: "Load more" }));
     await waitFor(() => expect(api.artifactLibrary).toHaveBeenLastCalledWith(
       { kind: "", query: "", favorite: false },
-      "cursor_one",
+      cursor,
       20,
       expect.any(AbortSignal),
     ));
@@ -99,7 +100,7 @@ describe("EntryV1 Media Library feed", () => {
   it("fails the whole chain on a duplicate page instead of partially appending", async () => {
     const firstItems = Array.from({ length: 20 }, (_, index) => rawItem(String.fromCharCode(122 - index)));
     vi.mocked(api.artifactLibrary)
-      .mockResolvedValueOnce(parsedPage(firstItems, "cursor_one"))
+      .mockResolvedValueOnce(parsedPage(firstItems, cursor))
       .mockResolvedValueOnce(parsedPage([firstItems[19]]));
     renderLibrary();
 

@@ -6,6 +6,7 @@ import {
 } from "./artifactLibraryPage";
 
 const digest = (character: string) => character.repeat(64);
+const cursor = `cGF5bG9hZA.${"a".repeat(43)}`;
 
 function item(character = "a", createdAt = "2026-08-12T12:00:00Z") {
   const sha = digest(character);
@@ -89,7 +90,7 @@ describe("Media Library EntryV1 response boundary", () => {
 describe("cursor-chain validation", () => {
   it("accepts strict descending time and id order", () => {
     const first = parseArtifactLibraryPage(
-      page([item("b"), item("a")], "cursor_one"),
+      page([item("b"), item("a")], cursor),
       2,
     );
     const second = parseArtifactLibraryPage(
@@ -104,7 +105,7 @@ describe("cursor-chain validation", () => {
     const later = parseArtifactLibraryPage(page([item("b", "2026-08-12T12:01:00Z")]), 2);
     expect(() => flattenArtifactLibraryPages([terminal, later])).toThrow(ARTIFACT_LIBRARY_PAGE_ERROR);
 
-    const first = parseArtifactLibraryPage(page([item("b"), item("a")], "cursor_one"), 2);
+    const first = parseArtifactLibraryPage(page([item("b"), item("a")], cursor), 2);
     const duplicate = parseArtifactLibraryPage(page([item("a")]), 2);
     expect(() => flattenArtifactLibraryPages([first, duplicate])).toThrow(ARTIFACT_LIBRARY_PAGE_ERROR);
 
@@ -114,12 +115,12 @@ describe("cursor-chain validation", () => {
 
   it("preserves microsecond ordering that Date.parse alone would collapse", () => {
     const first = parseArtifactLibraryPage(
-      page([item("b", "2026-08-12T12:00:00.000002Z"), item("a", "2026-08-12T12:00:00.000001Z")], "cursor_one"),
+      page([item("b", "2026-08-12T12:00:00.000002Z"), item("a", "2026-08-12T12:00:00.000001Z")], cursor),
       2,
     );
     expect(flattenArtifactLibraryPages([first])).toHaveLength(2);
     const reversed = parseArtifactLibraryPage(
-      page([item("a", "2026-08-12T12:00:00.000001Z"), item("b", "2026-08-12T12:00:00.000002Z")], "cursor_one"),
+      page([item("a", "2026-08-12T12:00:00.000001Z"), item("b", "2026-08-12T12:00:00.000002Z")], cursor),
       2,
     );
     expect(() => flattenArtifactLibraryPages([reversed])).toThrow(ARTIFACT_LIBRARY_PAGE_ERROR);

@@ -14,7 +14,7 @@ const ITEM_KEYS = [
 ] as const;
 
 const DIGEST = /^[0-9a-f]{64}$/;
-const CURSOR = /^[A-Za-z0-9_-]{1,1600}$/;
+const CURSOR = /^[A-Za-z0-9_-]{1,1600}\.[A-Za-z0-9_-]{43}$/;
 const TIMESTAMP = /^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2}):(\d{2})(?:\.(\d{1,6}))?(Z|[+-]\d{2}:\d{2})?$/;
 
 export const ARTIFACT_LIBRARY_PAGE_ERROR = "The Media Library response was invalid.";
