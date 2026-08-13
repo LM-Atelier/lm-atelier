@@ -39,6 +39,10 @@ from .domain import (
     new_id,
     utcnow,
 )
+from .media_organization_schema import (
+    CREATE_MEDIA_ORGANIZATION_TRIGGER_SQL,
+    DROP_MEDIA_ORGANIZATION_TRIGGER_SQL,
+)
 
 
 def _lowercase_sha256_check(column: str) -> str:
@@ -479,6 +483,102 @@ class ArtifactLibraryEntry(TimestampMixin, Base):
     version: Mapped[int] = mapped_column(Integer, default=1)
 
 
+class MediaCollection(TimestampMixin, Base):
+    """A durable manual Media Library collection; smart queries are separate."""
+
+    __tablename__ = "media_collections"
+    __table_args__ = (
+        CheckConstraint("kind = 'manual'", name="ck_media_collection_kind"),
+        CheckConstraint(
+            "length(name) BETWEEN 1 AND 200 AND name = trim(name) AND instr(name, char(0)) = 0",
+            name="ck_media_collection_name",
+        ),
+        CheckConstraint(
+            "length(description) <= 2000 AND instr(description, char(0)) = 0",
+            name="ck_media_collection_description",
+        ),
+        CheckConstraint("version > 0", name="ck_media_collection_version_positive"),
+    )
+
+    id: Mapped[str] = mapped_column(String(43), primary_key=True)
+    kind: Mapped[str] = mapped_column(String(16), default="manual")
+    name: Mapped[str] = mapped_column(String(200))
+    description: Mapped[str] = mapped_column(Text, default="")
+    version: Mapped[int] = mapped_column(Integer, default=1)
+
+
+class MediaCollectionMembership(Base):
+    """One ordered strong reference from a manual collection to a library entry."""
+
+    __tablename__ = "media_collection_memberships"
+    __table_args__ = (
+        UniqueConstraint(
+            "collection_id", "position", name="uq_media_collection_membership_position"
+        ),
+        CheckConstraint("position >= 0", name="ck_media_collection_membership_position"),
+        CheckConstraint(
+            "note IS NULL OR (length(note) BETWEEN 1 AND 1000 AND instr(note, char(0)) = 0)",
+            name="ck_media_collection_membership_note",
+        ),
+    )
+
+    collection_id: Mapped[str] = mapped_column(
+        ForeignKey("media_collections.id", ondelete="CASCADE"), primary_key=True
+    )
+    entry_id: Mapped[str] = mapped_column(
+        ForeignKey("artifact_library_entries.id", ondelete="RESTRICT"), primary_key=True
+    )
+    position: Mapped[int] = mapped_column(Integer)
+    note: Mapped[str | None] = mapped_column(String(1000), nullable=True)
+    added_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+
+
+class MediaTag(TimestampMixin, Base):
+    """A normalized explicit Media Library tag."""
+
+    __tablename__ = "media_tags"
+    __table_args__ = (
+        UniqueConstraint("normalized_name", name="uq_media_tag_normalized_name"),
+        CheckConstraint(
+            "length(normalized_name) BETWEEN 1 AND 80 "
+            "AND normalized_name NOT GLOB '*[^a-z0-9-]*' "
+            "AND normalized_name NOT LIKE '-%' AND normalized_name NOT LIKE '%-' "
+            "AND normalized_name NOT LIKE '%--%'",
+            name="ck_media_tag_normalized_name",
+        ),
+        CheckConstraint(
+            "length(label) BETWEEN 1 AND 200 AND label = trim(label) AND instr(label, char(0)) = 0",
+            name="ck_media_tag_label",
+        ),
+        CheckConstraint(
+            "color IS NULL OR (length(color) = 7 AND substr(color, 1, 1) = '#' "
+            "AND substr(color, 2) NOT GLOB '*[^0-9a-f]*')",
+            name="ck_media_tag_color",
+        ),
+        CheckConstraint("version > 0", name="ck_media_tag_version_positive"),
+    )
+
+    id: Mapped[str] = mapped_column(String(41), primary_key=True)
+    normalized_name: Mapped[str] = mapped_column(String(80))
+    label: Mapped[str] = mapped_column(String(200))
+    color: Mapped[str | None] = mapped_column(String(7), nullable=True)
+    version: Mapped[int] = mapped_column(Integer, default=1)
+
+
+class MediaTagAssignment(Base):
+    """One explicit strong tag reference to a Media Library entry."""
+
+    __tablename__ = "media_tag_assignments"
+
+    tag_id: Mapped[str] = mapped_column(
+        ForeignKey("media_tags.id", ondelete="CASCADE"), primary_key=True
+    )
+    entry_id: Mapped[str] = mapped_column(
+        ForeignKey("artifact_library_entries.id", ondelete="RESTRICT"), primary_key=True
+    )
+    added_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+
+
 for _statement in CREATE_TRIGGER_SQL:
     event.listen(
         Base.metadata,
@@ -486,6 +586,18 @@ for _statement in CREATE_TRIGGER_SQL:
         DDL(_statement).execute_if(dialect="sqlite"),  # type: ignore[no-untyped-call]
     )
 for _statement in DROP_TRIGGER_SQL:
+    event.listen(
+        Base.metadata,
+        "before_drop",
+        DDL(_statement).execute_if(dialect="sqlite"),  # type: ignore[no-untyped-call]
+    )
+for _statement in CREATE_MEDIA_ORGANIZATION_TRIGGER_SQL:
+    event.listen(
+        Base.metadata,
+        "after_create",
+        DDL(_statement).execute_if(dialect="sqlite"),  # type: ignore[no-untyped-call]
+    )
+for _statement in DROP_MEDIA_ORGANIZATION_TRIGGER_SQL:
     event.listen(
         Base.metadata,
         "before_drop",
