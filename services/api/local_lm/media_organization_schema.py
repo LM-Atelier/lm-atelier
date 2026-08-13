@@ -2,17 +2,6 @@
 
 from __future__ import annotations
 
-_CONTROL_CODES = (*range(32), 127)
-
-
-def _control_invalid(expression: str) -> str:
-    return " OR ".join(f"instr({expression}, char({code})) != 0" for code in _CONTROL_CODES)
-
-
-def _guard_end(condition: str, message: str) -> str:
-    return f"  SELECT CASE WHEN {condition}\n    THEN RAISE(ABORT, '{message}') END;\nEND\n"
-
-
 COLLECTION_INSERT_TRIGGER = """
 CREATE TRIGGER media_collection_insert_guard
 BEFORE INSERT ON media_collections
@@ -21,32 +10,23 @@ BEGIN
                     OR substr(NEW.id, 1, 11) != 'collection_'
                     OR substr(NEW.id, 12) GLOB '*[^0-9a-f]*'
     THEN RAISE(ABORT, 'media collection identity is invalid') END;
+  SELECT CASE WHEN NEW.version != 1
+    THEN RAISE(ABORT, 'media collection initial version is invalid') END;
 END
-""".replace(
-    "END\n",
-    _guard_end(
-        f"{_control_invalid('NEW.name')} OR {_control_invalid('NEW.description')}",
-        "media collection text is invalid",
-    ),
-)
+"""
 
 COLLECTION_UPDATE_TRIGGER = """
 CREATE TRIGGER media_collection_update_guard
 BEFORE UPDATE ON media_collections
 BEGIN
-  SELECT CASE WHEN NEW.id != OLD.id OR NEW.kind != OLD.kind
+  SELECT CASE WHEN NEW.id != OLD.id OR NEW.kind != OLD.kind OR NEW.name != OLD.name
+                      OR NEW.description != OLD.description
                       OR NEW.created_at != OLD.created_at
     THEN RAISE(ABORT, 'media collection identity is immutable') END;
   SELECT CASE WHEN NEW.version != OLD.version + 1
     THEN RAISE(ABORT, 'media collection version is stale') END;
 END
-""".replace(
-    "END\n",
-    _guard_end(
-        f"{_control_invalid('NEW.name')} OR {_control_invalid('NEW.description')}",
-        "media collection text is invalid",
-    ),
-)
+"""
 
 MEMBERSHIP_INSERT_TRIGGER = """
 CREATE TRIGGER media_collection_membership_insert_guard
@@ -57,7 +37,7 @@ BEGIN
     WHERE id = NEW.collection_id AND kind = 'manual'
   ) THEN RAISE(ABORT, 'manual media collection is required') END;
   SELECT CASE WHEN NOT EXISTS (
-    SELECT 1 FROM artifact_library_entries WHERE id = NEW.entry_id
+    SELECT 1 FROM artifact_library_entries WHERE id = NEW.entry_id AND state = 'visible'
   ) THEN RAISE(ABORT, 'media library entry is required') END;
 END
 """
@@ -98,20 +78,23 @@ BEGIN
                     OR substr(NEW.id, 1, 9) != 'mediatag_'
                     OR substr(NEW.id, 10) GLOB '*[^0-9a-f]*'
     THEN RAISE(ABORT, 'media tag identity is invalid') END;
+  SELECT CASE WHEN NEW.version != 1
+    THEN RAISE(ABORT, 'media tag initial version is invalid') END;
 END
-""".replace("END\n", _guard_end(_control_invalid("NEW.label"), "media tag text is invalid"))
+"""
 
 TAG_UPDATE_TRIGGER = """
 CREATE TRIGGER media_tag_update_guard
 BEFORE UPDATE ON media_tags
 BEGIN
-  SELECT CASE WHEN NEW.id != OLD.id OR NEW.normalized_name != OLD.normalized_name
+  SELECT CASE WHEN NEW.id != OLD.id OR NEW.slug != OLD.slug
+                      OR NEW.label != OLD.label OR NEW.color IS NOT OLD.color
                       OR NEW.created_at != OLD.created_at
     THEN RAISE(ABORT, 'media tag identity is immutable') END;
   SELECT CASE WHEN NEW.version != OLD.version + 1
     THEN RAISE(ABORT, 'media tag version is stale') END;
 END
-""".replace("END\n", _guard_end(_control_invalid("NEW.label"), "media tag text is invalid"))
+"""
 
 TAG_ASSIGNMENT_INSERT_TRIGGER = """
 CREATE TRIGGER media_tag_assignment_insert_guard
@@ -121,7 +104,7 @@ BEGIN
     SELECT 1 FROM media_tags WHERE id = NEW.tag_id
   ) THEN RAISE(ABORT, 'media tag is required') END;
   SELECT CASE WHEN NOT EXISTS (
-    SELECT 1 FROM artifact_library_entries WHERE id = NEW.entry_id
+    SELECT 1 FROM artifact_library_entries WHERE id = NEW.entry_id AND state = 'visible'
   ) THEN RAISE(ABORT, 'media library entry is required') END;
 END
 """

@@ -490,11 +490,11 @@ class MediaCollection(TimestampMixin, Base):
     __table_args__ = (
         CheckConstraint("kind = 'manual'", name="ck_media_collection_kind"),
         CheckConstraint(
-            "length(name) BETWEEN 1 AND 200 AND name = trim(name) AND instr(name, char(0)) = 0",
+            "length(name) BETWEEN 1 AND 200 AND name = trim(name) AND name NOT GLOB '*[^ -~]*'",
             name="ck_media_collection_name",
         ),
         CheckConstraint(
-            "length(description) <= 2000 AND instr(description, char(0)) = 0",
+            "length(description) <= 2000 AND description NOT GLOB '*[^ -~]*'",
             name="ck_media_collection_description",
         ),
         CheckConstraint("version > 0", name="ck_media_collection_version_positive"),
@@ -517,7 +517,7 @@ class MediaCollectionMembership(Base):
         ),
         CheckConstraint("position >= 0", name="ck_media_collection_membership_position"),
         CheckConstraint(
-            "note IS NULL OR (length(note) BETWEEN 1 AND 1000 AND instr(note, char(0)) = 0)",
+            "note IS NULL OR (length(note) BETWEEN 1 AND 1000 AND note NOT GLOB '*[^ -~]*')",
             name="ck_media_collection_membership_note",
         ),
     )
@@ -538,16 +538,14 @@ class MediaTag(TimestampMixin, Base):
 
     __tablename__ = "media_tags"
     __table_args__ = (
-        UniqueConstraint("normalized_name", name="uq_media_tag_normalized_name"),
+        UniqueConstraint("slug", name="uq_media_tag_slug"),
         CheckConstraint(
-            "length(normalized_name) BETWEEN 1 AND 80 "
-            "AND normalized_name NOT GLOB '*[^a-z0-9-]*' "
-            "AND normalized_name NOT LIKE '-%' AND normalized_name NOT LIKE '%-' "
-            "AND normalized_name NOT LIKE '%--%'",
-            name="ck_media_tag_normalized_name",
+            "length(slug) BETWEEN 1 AND 80 AND slug NOT GLOB '*[^a-z0-9-]*' "
+            "AND slug NOT LIKE '-%' AND slug NOT LIKE '%-' AND slug NOT LIKE '%--%'",
+            name="ck_media_tag_slug",
         ),
         CheckConstraint(
-            "length(label) BETWEEN 1 AND 200 AND label = trim(label) AND instr(label, char(0)) = 0",
+            "length(label) BETWEEN 1 AND 200 AND label = trim(label) AND label NOT GLOB '*[^ -~]*'",
             name="ck_media_tag_label",
         ),
         CheckConstraint(
@@ -559,7 +557,7 @@ class MediaTag(TimestampMixin, Base):
     )
 
     id: Mapped[str] = mapped_column(String(41), primary_key=True)
-    normalized_name: Mapped[str] = mapped_column(String(80))
+    slug: Mapped[str] = mapped_column(String(80))
     label: Mapped[str] = mapped_column(String(200))
     color: Mapped[str | None] = mapped_column(String(7), nullable=True)
     version: Mapped[int] = mapped_column(Integer, default=1)

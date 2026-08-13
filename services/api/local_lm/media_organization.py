@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import re
-import unicodedata
 from typing import NoReturn
 
 from sqlalchemy import func, select
@@ -40,17 +39,16 @@ def _invalid() -> NoReturn:
 def _text(value: object, *, maximum: int, empty: bool = False) -> str:
     if type(value) is not str:
         _invalid()
-    normalized = unicodedata.normalize("NFC", value)
-    if normalized != value or len(value) > maximum or (not empty and not value):
+    if len(value) > maximum or (not empty and not value):
         _invalid()
-    if any(unicodedata.category(character).startswith("C") for character in value):
+    if any(ord(character) < 32 or ord(character) > 126 for character in value):
         _invalid()
     if not empty and value != value.strip():
         _invalid()
     return value
 
 
-def normalized_tag_name(value: object) -> str:
+def media_tag_slug(value: object) -> str:
     label = _text(value, maximum=200)
     normalized = "-".join(label.casefold().split())
     if len(normalized) > 80 or _TAG_NAME.fullmatch(normalized) is None:
@@ -85,7 +83,7 @@ def create_media_tag(session: Session, *, label: object, color: object = None) -
     exact_label = _text(label, maximum=200)
     tag = MediaTag(
         id=new_id("mediatag"),
-        normalized_name=normalized_tag_name(exact_label),
+        slug=media_tag_slug(exact_label),
         label=exact_label,
         color=_color(color),
         version=1,

@@ -46,11 +46,11 @@ def upgrade() -> None:
         sa.PrimaryKeyConstraint("id"),
         sa.CheckConstraint("kind = 'manual'", name="ck_media_collection_kind"),
         sa.CheckConstraint(
-            "length(name) BETWEEN 1 AND 200 AND name = trim(name) AND instr(name, char(0)) = 0",
+            "length(name) BETWEEN 1 AND 200 AND name = trim(name) AND name NOT GLOB '*[^ -~]*'",
             name="ck_media_collection_name",
         ),
         sa.CheckConstraint(
-            "length(description) <= 2000 AND instr(description, char(0)) = 0",
+            "length(description) <= 2000 AND description NOT GLOB '*[^ -~]*'",
             name="ck_media_collection_description",
         ),
         sa.CheckConstraint("version > 0", name="ck_media_collection_version_positive"),
@@ -58,23 +58,21 @@ def upgrade() -> None:
     op.create_table(
         "media_tags",
         sa.Column("id", sa.String(length=41), nullable=False),
-        sa.Column("normalized_name", sa.String(length=80), nullable=False),
+        sa.Column("slug", sa.String(length=80), nullable=False),
         sa.Column("label", sa.String(length=200), nullable=False),
         sa.Column("color", sa.String(length=7), nullable=True),
         sa.Column("version", sa.Integer(), nullable=False),
         sa.Column("created_at", sa.DateTime(timezone=True), nullable=False),
         sa.Column("updated_at", sa.DateTime(timezone=True), nullable=False),
         sa.PrimaryKeyConstraint("id"),
-        sa.UniqueConstraint("normalized_name", name="uq_media_tag_normalized_name"),
+        sa.UniqueConstraint("slug", name="uq_media_tag_slug"),
         sa.CheckConstraint(
-            "length(normalized_name) BETWEEN 1 AND 80 "
-            "AND normalized_name NOT GLOB '*[^a-z0-9-]*' "
-            "AND normalized_name NOT LIKE '-%' AND normalized_name NOT LIKE '%-' "
-            "AND normalized_name NOT LIKE '%--%'",
-            name="ck_media_tag_normalized_name",
+            "length(slug) BETWEEN 1 AND 80 AND slug NOT GLOB '*[^a-z0-9-]*' "
+            "AND slug NOT LIKE '-%' AND slug NOT LIKE '%-' AND slug NOT LIKE '%--%'",
+            name="ck_media_tag_slug",
         ),
         sa.CheckConstraint(
-            "length(label) BETWEEN 1 AND 200 AND label = trim(label) AND instr(label, char(0)) = 0",
+            "length(label) BETWEEN 1 AND 200 AND label = trim(label) AND label NOT GLOB '*[^ -~]*'",
             name="ck_media_tag_label",
         ),
         sa.CheckConstraint(
@@ -99,7 +97,7 @@ def upgrade() -> None:
         ),
         sa.CheckConstraint("position >= 0", name="ck_media_collection_membership_position"),
         sa.CheckConstraint(
-            "note IS NULL OR (length(note) BETWEEN 1 AND 1000 AND instr(note, char(0)) = 0)",
+            "note IS NULL OR (length(note) BETWEEN 1 AND 1000 AND note NOT GLOB '*[^ -~]*')",
             name="ck_media_collection_membership_note",
         ),
     )
