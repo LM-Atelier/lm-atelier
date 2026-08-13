@@ -13,11 +13,13 @@ import httpx
 import pytest
 
 import local_lm.runtime_provisioning as runtime_provisioning
+from local_lm.config import Settings
 from local_lm.runtime_config import runtime_config_path
 from local_lm.runtime_provisioning import (
     RuntimeProvisioner,
     RuntimeProvisioningError,
     RuntimeVerificationCancelled,
+    default_engine_manifest_path,
 )
 
 
@@ -1254,26 +1256,41 @@ def test_comfy_manifest_fails_closed_when_audit_contract_is_omitted(
         RuntimeProvisioner._read_manifest(manifest)
 
 
-def test_pinned_comfy_review_accounts_for_every_distribution_and_license() -> None:
-    repository_root = Path(__file__).resolve().parents[3]
-    manifest_path = repository_root / "packaging" / "engines.json"
-    manifest = RuntimeProvisioner._read_manifest(manifest_path)
-    definition = manifest["engines"]["comfyui"]
+async def test_pinned_comfy_review_accounts_for_every_distribution_and_license(
+    settings: Settings,
+) -> None:
+    manifest_path = default_engine_manifest_path()
+    provisioner = RuntimeProvisioner(
+        settings,
+        manifest_path=manifest_path,
+        platform_key="windows-x86_64-nvidia-cu13",
+    )
+    definition = provisioner._definition("comfyui")
     assets = definition["runtime_assets"]
-    review_path = repository_root / "packaging" / "runtime-reviews" / "comfyui-v0.28.0.json"
+    selected_asset = provisioner._asset("comfyui", definition)
+    assert selected_asset is not None
+    selected_review = selected_asset["dependency_review"]
+    review_path = manifest_path.parent / selected_review["file"]
     review_bytes = review_path.read_bytes()
     review = json.loads(review_bytes)
 
-    assert hashlib.sha256(review_bytes).hexdigest() == (
-        "138a1432a49fafe465ea74c1b38c8211dc3b0e0a9fc1ae1d237067e3c92861a5"
-    )
+    assert definition["pinned_release"] == review["release"] == "v0.30.0"
+    assert selected_review["file"] == "runtime-reviews/comfyui-v0.30.0.json"
+    assert selected_review["asset_key"] == "windows-x86_64-nvidia-cu13"
+    assert hashlib.sha256(review_bytes).hexdigest() == selected_review["sha256"]
+    reviewed_selected_asset = review["assets"][selected_review["asset_key"]]
+    assert reviewed_selected_asset["source_asset_url"] == selected_asset["url"]
+    assert reviewed_selected_asset["source_asset_sha256"] == selected_asset["sha256"]
+    assert reviewed_selected_asset["source_asset_size_bytes"] == selected_asset["size_bytes"]
     assert review["vulnerability_audit"] == {
         "tool": "pip-audit 2.10.1",
         "service": "OSV",
         "dependency_count": 89,
         "known_vulnerabilities": 0,
+        # Both archives were downloaded and hashed for this release, so the
+        # inventory comes from the payloads rather than from their indexes.
         "requirements_source": (
-            "Exact dist-info identities from both portable archive indexes; "
+            "Exact dist-info identities from both downloaded portable archives; "
             "CUDA local version suffixes were normalized only for advisory lookup."
         ),
         "advisory_sources": [
@@ -1286,10 +1303,10 @@ def test_pinned_comfy_review_accounts_for_every_distribution_and_license() -> No
     expected_review_hash = hashlib.sha256(review_bytes).hexdigest()
     expected_inventory = {
         "windows-x86_64-nvidia-cu13": (
-            "f12087e3dfc278fc1f6521b6c61f8df03bdc9b0322df9c6464fb78a6dd08b69c"
+            "e71912637473513109c05d7cb0dee99d6f1864f13ce26ff2b468e7ad89025438"
         ),
         "windows-x86_64-nvidia-cu126": (
-            "2917012ad55e024468a0e0ca2cf128db1cdac17d1d055008759f9842839e71c2"
+            "09d226f9097d598a256fef80b60b82b59933c5b3ee49197fd1ac5d6473e59cac"
         ),
     }
     for asset_key, inventory_hash in expected_inventory.items():
@@ -1318,7 +1335,7 @@ def test_pinned_comfy_review_accounts_for_every_distribution_and_license() -> No
         for item in review["assets"]["windows-x86_64-nvidia-cu13"]["distributions"]
     }
     assert cu13_identities["torch-2.13.0+cu130.dist-info"]["license"].startswith("Apache-2.0")
-    assert cu13_identities["comfy_aimdo-0.4.10.dist-info"]["license"] == ("GPL-3.0-only")
+    assert cu13_identities["comfy_aimdo-0.4.11.dist-info"]["license"] == ("GPL-3.0-only")
     assert cu13["runtime_probe"]["python"] == "3.13.14"
     assert cu13["runtime_probe"]["packages"]["torch"] == "2.13.0+cu130"
     overlay = cu13["security_overlays"][0]
@@ -1330,3 +1347,40 @@ def test_pinned_comfy_review_accounts_for_every_distribution_and_license() -> No
     assert overlay["license"] == "Python-2.0"
     assert len(overlay["expected_files"]) == 34
     assert assets["windows-x86_64-nvidia-cu126"]["security_status"] == "blocked"
+    await provisioner.close()
+
+
+async def test_comfy_v028_marker_is_invalid_after_production_pin_moves_to_v030(
+    settings: Settings,
+) -> None:
+    provisioner = RuntimeProvisioner(
+        settings,
+        manifest_path=default_engine_manifest_path(),
+        platform_key="windows-x86_64-nvidia-cu13",
+    )
+    definition = provisioner._definition("comfyui")
+    asset = provisioner._asset("comfyui", definition)
+    assert asset is not None
+    install_root = provisioner._installation_path("comfyui", definition)
+    install_root.mkdir(parents=True)
+    (install_root / ".managed-runtime.json").write_text(
+        json.dumps(
+            {
+                "schema_version": 3,
+                "engine": "comfyui",
+                "release": "v0.28.0",
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    assert definition["pinned_release"] == "v0.30.0"
+    assert install_root.name == "v0.30.0"
+    assert not provisioner._managed_marker_owned(install_root, "comfyui", definition)
+    assert not provisioner._managed_marker_matches(
+        install_root,
+        "comfyui",
+        definition,
+        asset,
+    )
+    await provisioner.close()
