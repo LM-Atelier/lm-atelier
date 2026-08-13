@@ -4630,7 +4630,10 @@ async def attach_reference_asset(
         artifact = session.get(Artifact, artifact_id)
         if artifact is None:
             raise KeyError(artifact_id)
-        return services.artifacts.verified_path(artifact).read_bytes()
+        return services.artifacts.read_verified_bytes(
+            artifact,
+            maximum_bytes=services.settings.max_upload_bytes,
+        )
 
     try:
         attached = attach_asset(
