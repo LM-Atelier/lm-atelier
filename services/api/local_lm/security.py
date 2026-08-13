@@ -250,6 +250,7 @@ class SessionSecurity:
     def __init__(self, settings: Settings) -> None:
         self.settings = settings
         self._session_token = secrets.token_urlsafe(48)
+        self._state_signing_secret = secrets.token_bytes(32)
         self.csrf_token = hmac.new(
             self._session_token.encode(), b"local-lm-csrf-v1", hashlib.sha256
         ).hexdigest()
@@ -264,6 +265,17 @@ class SessionSecurity:
             path="/",
         )
         return self.csrf_token
+
+    def local_state_signing_key(self, purpose: bytes) -> bytes:
+        """Derive a run-local key for opaque server-issued state tokens."""
+
+        if not purpose or len(purpose) > 100:
+            raise ValueError("local state signing purpose is invalid")
+        return hmac.new(
+            self._state_signing_secret,
+            b"local-lm-state-v1\0" + purpose,
+            hashlib.sha256,
+        ).digest()
 
     def _valid_cookie(self, cookie: str | None) -> bool:
         return bool(cookie and hmac.compare_digest(cookie, self._session_token))

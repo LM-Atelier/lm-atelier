@@ -2,10 +2,17 @@
 
 from __future__ import annotations
 
+import base64
+import hashlib
+import hmac
+import json
+import re
 from collections.abc import Mapping
+from dataclasses import dataclass
+from datetime import datetime
 from typing import Any, NoReturn, cast
 
-from sqlalchemy import func, select, update
+from sqlalchemy import and_, func, or_, select, update
 from sqlalchemy.dialects.sqlite import insert
 from sqlalchemy.engine import CursorResult
 from sqlalchemy.orm import Session
@@ -31,6 +38,11 @@ MAX_REFERENCE_LIST = 4_096
 MAX_REFERENCE_VALUES = 100_000
 MAX_REFERENCE_DEPTH = 16
 REFERENCE_CORRUPT = "Stored artifact reference data is invalid."
+LIBRARY_CURSOR_INVALID = "The Media Library cursor is invalid."
+LIBRARY_DATA_INVALID = "Stored Media Library data is invalid."
+_CURSOR_CONTEXT = b"artifact-library-page-v1"
+_ENTRY_ID = re.compile(r"^libentry:sha256:[0-9a-f]{64}$")
+_SHA256 = re.compile(r"^[0-9a-f]{64}$")
 
 
 class ArtifactReferenceDataError(RuntimeError):
@@ -39,6 +51,294 @@ class ArtifactReferenceDataError(RuntimeError):
 
 class ArtifactLibraryConflict(ValueError):
     pass
+
+
+class ArtifactLibraryCursorError(ValueError):
+    pass
+
+
+class ArtifactLibraryDataError(ValueError):
+    pass
+
+
+@dataclass(frozen=True)
+class ArtifactLibraryPageRow:
+    entry: ArtifactLibraryEntry
+    artifact: Artifact
+
+
+@dataclass(frozen=True)
+class _LibraryCursor:
+    anchor_created_at: datetime
+    anchor_id: str
+    after_created_at: datetime
+    after_id: str
+
+
+def _cursor_fail() -> NoReturn:
+    raise ArtifactLibraryCursorError(LIBRARY_CURSOR_INVALID)
+
+
+def _b64encode(value: bytes) -> str:
+    return base64.urlsafe_b64encode(value).rstrip(b"=").decode("ascii")
+
+
+def _b64decode(value: str) -> bytes:
+    if not value or len(value) > 1_600 or not re.fullmatch(r"[A-Za-z0-9_-]+", value):
+        _cursor_fail()
+    try:
+        decoded = base64.urlsafe_b64decode(value + "=" * (-len(value) % 4))
+    except Exception as exc:
+        raise ArtifactLibraryCursorError(LIBRARY_CURSOR_INVALID) from exc
+    if not hmac.compare_digest(_b64encode(decoded), value):
+        _cursor_fail()
+    return decoded
+
+
+def _cursor_filters(
+    *, kind: str | None, state: str, favorite: bool | None, query: str, limit: int
+) -> dict[str, object]:
+    return {
+        "favorite": favorite,
+        "kind": kind,
+        "limit": limit,
+        "query": query,
+        "state": state,
+    }
+
+
+def _encode_cursor(
+    cursor: _LibraryCursor,
+    *,
+    signing_key: bytes,
+    filters: dict[str, object],
+) -> str:
+    payload = json.dumps(
+        {
+            "after": [cursor.after_created_at.isoformat(timespec="microseconds"), cursor.after_id],
+            "anchor": [
+                cursor.anchor_created_at.isoformat(timespec="microseconds"),
+                cursor.anchor_id,
+            ],
+            "filters": filters,
+            "version": 1,
+        },
+        ensure_ascii=True,
+        separators=(",", ":"),
+        sort_keys=True,
+    ).encode("ascii")
+    signature = hmac.new(signing_key, _CURSOR_CONTEXT + payload, hashlib.sha256).digest()
+    return f"{_b64encode(payload)}.{_b64encode(signature)}"
+
+
+def _unique_object(pairs: list[tuple[str, object]]) -> dict[str, object]:
+    result: dict[str, object] = {}
+    for key, value in pairs:
+        if key in result:
+            _cursor_fail()
+        result[key] = value
+    return result
+
+
+def _decode_position(value: object) -> tuple[datetime, str]:
+    if not isinstance(value, list) or len(value) != 2:
+        _cursor_fail()
+    timestamp, entry_id = value
+    if not isinstance(timestamp, str) or len(timestamp) > 40:
+        _cursor_fail()
+    if not isinstance(entry_id, str) or not _ENTRY_ID.fullmatch(entry_id):
+        _cursor_fail()
+    try:
+        parsed = datetime.fromisoformat(timestamp)
+    except ValueError as exc:
+        raise ArtifactLibraryCursorError(LIBRARY_CURSOR_INVALID) from exc
+    if parsed.isoformat(timespec="microseconds") != timestamp:
+        _cursor_fail()
+    return parsed, entry_id
+
+
+def _decode_cursor(
+    token: str,
+    *,
+    signing_key: bytes,
+    filters: dict[str, object],
+) -> _LibraryCursor:
+    if not token or len(token) > 2_048 or token.count(".") != 1:
+        _cursor_fail()
+    if type(signing_key) is not bytes or len(signing_key) != hashlib.sha256().digest_size:
+        _cursor_fail()
+    encoded, encoded_signature = token.split(".", 1)
+    payload = _b64decode(encoded)
+    if len(payload) > 1_200:
+        _cursor_fail()
+    signature = _b64decode(encoded_signature)
+    expected = hmac.new(signing_key, _CURSOR_CONTEXT + payload, hashlib.sha256).digest()
+    if len(signature) != len(expected) or not hmac.compare_digest(signature, expected):
+        _cursor_fail()
+    try:
+        raw = json.loads(payload, object_pairs_hook=_unique_object)
+    except (ArtifactLibraryCursorError, RecursionError, UnicodeError, ValueError) as exc:
+        raise ArtifactLibraryCursorError(LIBRARY_CURSOR_INVALID) from exc
+    if not isinstance(raw, dict) or set(raw) != {"after", "anchor", "filters", "version"}:
+        _cursor_fail()
+    raw_filters = raw["filters"]
+    if (
+        type(raw["version"]) is not int
+        or raw["version"] != 1
+        or not isinstance(raw_filters, dict)
+        or set(raw_filters) != {"favorite", "kind", "limit", "query", "state"}
+        or type(raw_filters["limit"]) is not int
+        or type(raw_filters["favorite"]) not in {bool, type(None)}
+        or not isinstance(raw_filters["query"], str)
+        or not isinstance(raw_filters["state"], str)
+        or (raw_filters["kind"] is not None and not isinstance(raw_filters["kind"], str))
+        or raw_filters != filters
+    ):
+        _cursor_fail()
+    anchor_created_at, anchor_id = _decode_position(raw["anchor"])
+    after_created_at, after_id = _decode_position(raw["after"])
+    if (after_created_at, after_id) > (anchor_created_at, anchor_id):
+        _cursor_fail()
+    return _LibraryCursor(anchor_created_at, anchor_id, after_created_at, after_id)
+
+
+def _begin_library_read_snapshot(session: Session) -> None:
+    connection = session.connection()
+    if connection.dialect.name != "sqlite":
+        return
+    driver = connection.connection.driver_connection
+    if not bool(getattr(driver, "in_transaction", False)):
+        connection.exec_driver_sql("BEGIN")
+
+
+def _validate_library_row(entry: ArtifactLibraryEntry, artifact: Artifact) -> None:
+    valid_recovery = (
+        entry.state == "visible" and entry.deleted_at is None and entry.recovery_id is None
+    ) or (
+        entry.state == "trashed"
+        and entry.deleted_at is not None
+        and isinstance(entry.recovery_id, str)
+        and 1 <= len(entry.recovery_id) <= 80
+    )
+    if (
+        not isinstance(entry.id, str)
+        or not _ENTRY_ID.fullmatch(entry.id)
+        or not isinstance(entry.artifact_id, str)
+        or not (1 <= len(entry.artifact_id) <= 80)
+        or entry.artifact_id != artifact.id
+        or not isinstance(artifact.sha256, str)
+        or not _SHA256.fullmatch(artifact.sha256)
+        or entry.id != f"libentry:sha256:{artifact.sha256}"
+        or not isinstance(entry.display_name, str)
+        or not (1 <= len(entry.display_name) <= 500)
+        or "\0" in entry.display_name
+        or type(entry.favorite) is not bool
+        or type(entry.version) is not int
+        or entry.version < 1
+        or not valid_recovery
+        or artifact.kind not in {"image", "video"}
+        or not isinstance(artifact.media_type, str)
+        or artifact.media_type != artifact.media_type.strip()
+        or not (1 <= len(artifact.media_type) <= 120)
+        or any(ord(character) < 32 for character in artifact.media_type)
+        or type(artifact.size_bytes) is not int
+        or artifact.size_bytes < 1
+        or not isinstance(entry.created_at, datetime)
+        or not isinstance(entry.updated_at, datetime)
+    ):
+        raise ArtifactLibraryDataError(LIBRARY_DATA_INVALID)
+
+
+def list_library_entries(
+    session: Session,
+    *,
+    signing_key: bytes,
+    limit: int,
+    cursor: str | None,
+    kind: str | None,
+    state: str,
+    favorite: bool | None,
+    query: str,
+) -> tuple[list[ArtifactLibraryPageRow], str | None]:
+    """Read one stable, Entry-backed page without loading files or reference graphs."""
+
+    if not 1 <= limit <= 100 or kind not in {None, "image", "video"}:
+        _cursor_fail()
+    if state not in {"visible", "trashed"} or type(favorite) not in {bool, type(None)}:
+        _cursor_fail()
+    normalized_query = query.strip().lower()
+    if len(normalized_query) > 200:
+        _cursor_fail()
+    filters = _cursor_filters(
+        kind=kind, state=state, favorite=favorite, query=normalized_query, limit=limit
+    )
+    decoded = _decode_cursor(cursor, signing_key=signing_key, filters=filters) if cursor else None
+    _begin_library_read_snapshot(session)
+    conditions = [ArtifactLibraryEntry.state == state]
+    if kind is not None:
+        conditions.append(Artifact.kind == kind)
+    if favorite is not None:
+        conditions.append(ArtifactLibraryEntry.favorite.is_(favorite))
+    if normalized_query:
+        conditions.append(
+            func.lower(ArtifactLibraryEntry.display_name).contains(
+                normalized_query, autoescape=True
+            )
+        )
+    statement = select(ArtifactLibraryEntry, Artifact).join(
+        Artifact, Artifact.id == ArtifactLibraryEntry.artifact_id
+    )
+    statement = statement.where(*conditions)
+    if decoded is not None:
+        anchor_row = session.execute(
+            select(ArtifactLibraryEntry, Artifact)
+            .join(Artifact, Artifact.id == ArtifactLibraryEntry.artifact_id)
+            .where(
+                *conditions,
+                ArtifactLibraryEntry.id == decoded.anchor_id,
+                ArtifactLibraryEntry.created_at == decoded.anchor_created_at,
+            )
+        ).one_or_none()
+        if anchor_row is None:
+            _cursor_fail()
+        _validate_library_row(*anchor_row)
+        statement = statement.where(
+            or_(
+                ArtifactLibraryEntry.created_at < decoded.anchor_created_at,
+                and_(
+                    ArtifactLibraryEntry.created_at == decoded.anchor_created_at,
+                    ArtifactLibraryEntry.id <= decoded.anchor_id,
+                ),
+            ),
+            or_(
+                ArtifactLibraryEntry.created_at < decoded.after_created_at,
+                and_(
+                    ArtifactLibraryEntry.created_at == decoded.after_created_at,
+                    ArtifactLibraryEntry.id < decoded.after_id,
+                ),
+            ),
+        )
+    rows = session.execute(
+        statement.order_by(
+            ArtifactLibraryEntry.created_at.desc(), ArtifactLibraryEntry.id.desc()
+        ).limit(limit + 1)
+    ).all()
+    for entry, artifact in rows:
+        _validate_library_row(entry, artifact)
+    page_rows = [ArtifactLibraryPageRow(entry, artifact) for entry, artifact in rows[:limit]]
+    if len(rows) <= limit or not page_rows:
+        return page_rows, None
+    anchor_created_at = (
+        decoded.anchor_created_at if decoded is not None else page_rows[0].entry.created_at
+    )
+    anchor_id = decoded.anchor_id if decoded is not None else page_rows[0].entry.id
+    last = page_rows[-1].entry
+    next_cursor = _encode_cursor(
+        _LibraryCursor(anchor_created_at, anchor_id, last.created_at, last.id),
+        signing_key=signing_key,
+        filters=filters,
+    )
+    return page_rows, next_cursor
 
 
 def begin_artifact_write_fence(session: Session) -> None:

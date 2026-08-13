@@ -25,7 +25,14 @@ from starlette.responses import FileResponse, HTMLResponse
 from . import __version__
 from .adapter_grammar_review import review_adapter_grammar
 from .api_errors import api_error
-from .artifact_library import ArtifactLibraryConflict, ensure_library_entry, set_library_favorite
+from .artifact_library import (
+    ArtifactLibraryConflict,
+    ArtifactLibraryCursorError,
+    ArtifactLibraryDataError,
+    ensure_library_entry,
+    list_library_entries,
+    set_library_favorite,
+)
 from .auxiliary_assets import AUXILIARY_ASSET_KINDS, validate_lora_workflow_contract
 from .capability_evidence import current_capability_evidence, evidence_input_modalities
 from .capability_probe import probe_structured_tools
@@ -204,7 +211,9 @@ from .schemas import (
     ArtifactCleanupRequest,
     ArtifactCleanupResult,
     ArtifactDeleteResult,
+    ArtifactLibraryEntrySummary,
     ArtifactLibraryItem,
+    ArtifactLibraryPage,
     ArtifactOut,
     ArtifactStorageInfo,
     ArtifactUpdate,
@@ -2819,6 +2828,64 @@ def _artifact_generation_identity(
     run_id = artifact.metadata_json.get("run_id")
     run = session.get(Run, run_id) if isinstance(run_id, str) else None
     return _generation_identity(run.provenance_json) if run is not None else None
+
+
+@router.get("/artifact-library", response_model=ArtifactLibraryPage)
+async def list_artifact_library(
+    request: Request,
+    session: ConversationSessionDep,
+    limit: int = Query(default=20, ge=1, le=100),
+    cursor: str | None = Query(default=None, min_length=1, max_length=2_048),
+    kind: Literal["image", "video"] | None = None,
+    state: Literal["visible", "trashed"] = "visible",
+    favorite: Literal["true", "false"] | None = None,
+    query: str = Query(default="", max_length=200),
+) -> ArtifactLibraryPage:
+    """Return one bounded page of durable Media Library memberships."""
+
+    favorite_value = None if favorite is None else favorite == "true"
+    try:
+        rows, next_cursor = list_library_entries(
+            session,
+            signing_key=_services(request).security.local_state_signing_key(b"artifact-library"),
+            limit=limit,
+            cursor=cursor,
+            kind=kind,
+            state=state,
+            favorite=favorite_value,
+            query=query,
+        )
+    except ArtifactLibraryCursorError as exc:
+        raise api_error(
+            422,
+            "artifact-library-cursor-invalid",
+            "The Media Library page request is invalid. Start again from the first page.",
+        ) from exc
+    except ArtifactLibraryDataError as exc:
+        raise api_error(
+            409,
+            "artifact-library-conflict",
+            "The Media Library could not be read safely. Refresh and try again.",
+        ) from exc
+    return ArtifactLibraryPage(
+        items=[
+            ArtifactLibraryEntrySummary(
+                id=row.entry.id,
+                artifact_id=row.artifact.id,
+                version=row.entry.version,
+                state=cast(Literal["visible", "trashed"], row.entry.state),
+                display_name=row.entry.display_name,
+                favorite=row.entry.favorite,
+                kind=cast(Literal["image", "video"], row.artifact.kind),
+                media_type=row.artifact.media_type,
+                size_bytes=row.artifact.size_bytes,
+                created_at=row.entry.created_at,
+                updated_at=row.entry.updated_at,
+            )
+            for row in rows
+        ],
+        next_cursor=next_cursor,
+    )
 
 
 @router.get("/artifacts", response_model=list[ArtifactLibraryItem])
