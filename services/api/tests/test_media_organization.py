@@ -214,6 +214,7 @@ def test_raw_sql_cannot_forge_identities_versions_or_dangling_references(
 ) -> None:
     store, session = organization_session
     entry = _entry(store, session, b"raw-guards")
+    note_entry = _entry(store, session, b"raw-note-guards")
     trashed = _entry(store, session, b"raw-trashed")
     collection = create_manual_collection(session, name="Album")
     tag = create_media_tag(session, label="Safe Tag")
@@ -269,6 +270,18 @@ def test_raw_sql_cannot_forge_identities_versions_or_dangling_references(
             "(collection_id,entry_id,position,note,added_at) "
             "VALUES (:collection,:entry,4,NULL,CURRENT_TIMESTAMP)",
             {"collection": collection.id, "entry": trashed.id},
+        ),
+        (
+            "INSERT INTO media_collection_memberships "
+            "(collection_id,entry_id,position,note,added_at) "
+            "VALUES (:collection,:entry,5,:note,CURRENT_TIMESTAMP)",
+            {"collection": collection.id, "entry": note_entry.id, "note": " leading"},
+        ),
+        (
+            "INSERT INTO media_collection_memberships "
+            "(collection_id,entry_id,position,note,added_at) "
+            "VALUES (:collection,:entry,6,:note,CURRENT_TIMESTAMP)",
+            {"collection": collection.id, "entry": note_entry.id, "note": "trailing "},
         ),
         (
             "UPDATE media_tags SET slug='changed',version=version+1 WHERE id=:id",

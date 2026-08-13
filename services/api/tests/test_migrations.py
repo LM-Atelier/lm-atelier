@@ -345,6 +345,12 @@ def test_artifact_library_migration_fence_blocks_concurrent_dangling_writer(
         assert connection.execute("SELECT version_num FROM alembic_version").fetchone() == (
             "f9b7a1c42d60",
         )
+        membership_schema = connection.execute(
+            "SELECT sql FROM sqlite_master "
+            "WHERE type = 'table' AND name = 'media_collection_memberships'"
+        ).fetchone()
+        assert membership_schema is not None
+        assert "note = trim(note)" in membership_schema[0]
 
 
 def test_unrelated_alembic_command_error_is_not_reclassified(

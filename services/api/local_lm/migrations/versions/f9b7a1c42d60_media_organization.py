@@ -97,7 +97,8 @@ def upgrade() -> None:
         ),
         sa.CheckConstraint("position >= 0", name="ck_media_collection_membership_position"),
         sa.CheckConstraint(
-            "note IS NULL OR (length(note) BETWEEN 1 AND 1000 AND note NOT GLOB '*[^ -~]*')",
+            "note IS NULL OR (length(note) BETWEEN 1 AND 1000 AND note = trim(note) "
+            "AND note NOT GLOB '*[^ -~]*')",
             name="ck_media_collection_membership_note",
         ),
     )
