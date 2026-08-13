@@ -1888,6 +1888,46 @@ class ReferenceAssetOut(ApiModel):
     view_label: str | None
     sort_order: int
     validation_state: str
+    validation_reasons_json: list[str]
+    width: int | None
+    height: int | None
+    review_version: int
+
+
+ReferenceReviewReason = Annotated[
+    str,
+    StringConstraints(strip_whitespace=True, min_length=1, max_length=500),
+]
+
+
+class ReferenceAssetReviewRequest(ApiModel):
+    expected_state: Literal["unchecked"]
+    expected_version: int = Field(ge=1)
+    decision: Literal["usable", "weak", "rejected"]
+    reasons: list[ReferenceReviewReason] = Field(default_factory=list, max_length=16)
+
+
+class ReferenceAssetReviewEventOut(ApiModel):
+    id: str
+    reference_asset_id: str
+    artifact_id: str
+    artifact_sha256: str
+    reviewer_kind: Literal["local-human"]
+    expected_state: Literal["unchecked"]
+    expected_version: int
+    result_version: int
+    decision: Literal["usable", "weak", "rejected"]
+    reasons_json: list[str]
+    width: int
+    height: int
+    decision_sha256: str
+    reviewed_at: datetime
+
+
+class ReferenceAssetReviewed(ApiModel):
+    asset: ReferenceAssetOut
+    review: ReferenceAssetReviewEventOut
+    idempotent: bool
 
 
 class ReferenceSimilarAsset(ApiModel):

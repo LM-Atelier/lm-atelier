@@ -210,6 +210,12 @@ from .reference_library import (
     set_details,
     set_favorite,
 )
+from .reference_review import (
+    ReferenceReviewConflict,
+    ReferenceReviewInvalid,
+    ReferenceReviewNotFound,
+    review_reference_asset,
+)
 from .references import ReferenceError, ReferenceNotFoundError
 from .routing import RouteConfirmationRequired
 from .runtime_config import persist_runtime_values
@@ -287,6 +293,9 @@ from .schemas import (
     ReferenceAssetAttach,
     ReferenceAssetAttached,
     ReferenceAssetOut,
+    ReferenceAssetReviewed,
+    ReferenceAssetReviewEventOut,
+    ReferenceAssetReviewRequest,
     ReferenceCoverIn,
     ReferenceDeletionImpact,
     ReferenceRecipe,
@@ -4666,6 +4675,53 @@ async def attach_reference_asset(
 async def list_reference_assets(subject_id: str, session: SessionDep) -> list[ReferenceAsset]:
     subject = _subject_or_404(session, subject_id)
     return list(subject.assets)
+
+
+@router.post(
+    "/references/{subject_id}/assets/{asset_id}/review",
+    response_model=ReferenceAssetReviewed,
+)
+async def review_reference_image(
+    subject_id: str,
+    asset_id: str,
+    payload: ReferenceAssetReviewRequest,
+    request: Request,
+    session: SessionDep,
+) -> ReferenceAssetReviewed:
+    """Settle one exact unchecked image review, with exact retries idempotent."""
+
+    services = _services(request)
+    try:
+        result = review_reference_asset(
+            session,
+            services.artifacts,
+            subject_id=subject_id,
+            asset_id=asset_id,
+            expected_state=payload.expected_state,
+            expected_version=payload.expected_version,
+            decision=payload.decision,
+            reasons=list(payload.reasons),
+            maximum_bytes=services.settings.max_upload_bytes,
+            maximum_pixels=services.settings.vision_max_pixels,
+        )
+    except ReferenceReviewNotFound as exc:
+        raise api_error(404, "reference-asset-not-attached", str(exc)) from exc
+    except ReferenceReviewConflict as exc:
+        raise api_error(
+            409,
+            "reference-asset-review-conflict",
+            str(exc),
+            current_state=exc.state,
+            current_version=exc.version,
+        ) from exc
+    except ReferenceReviewInvalid as exc:
+        raise api_error(422, "reference-asset-review-invalid", str(exc)) from exc
+    session.commit()
+    return ReferenceAssetReviewed(
+        asset=ReferenceAssetOut.model_validate(result.asset, from_attributes=True),
+        review=ReferenceAssetReviewEventOut.model_validate(result.review, from_attributes=True),
+        idempotent=result.idempotent,
+    )
 
 
 @router.delete("/references/{subject_id}/assets/{asset_id}", status_code=204)
