@@ -61,6 +61,9 @@ Visible or recoverable/trashed membership pins bytes even without favorites or m
 Destructive paths take a SQLite writer reservation before reference proof and row deletion.
 Every ORM JSON-reference writer takes the same reservation and rechecks each referenced
 Artifact before flush, so a delete and a reference publication cannot both commit.
+Shared create-all/Alembic triggers provide the bulk/raw-SQL backstop: guarded JSON
+inserts/updates must reference existing Artifact rows, and JSON-retained Artifacts
+cannot be deleted even when the ORM is bypassed.
 
 ## Delete authority
 

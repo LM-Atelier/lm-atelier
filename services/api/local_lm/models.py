@@ -20,7 +20,7 @@ from sqlalchemy import (
     event,
     text,
 )
-from sqlalchemy.orm import Mapped, mapped_column, relationship
+from sqlalchemy.orm import Mapped, Session, mapped_column, relationship
 
 from .artifact_library_schema import CREATE_TRIGGER_SQL, DROP_TRIGGER_SQL
 from .db import Base
@@ -481,13 +481,13 @@ class ArtifactLibraryEntry(TimestampMixin, Base):
 
 for _statement in CREATE_TRIGGER_SQL:
     event.listen(
-        ArtifactLibraryEntry.__table__,
+        Base.metadata,
         "after_create",
         DDL(_statement).execute_if(dialect="sqlite"),  # type: ignore[no-untyped-call]
     )
 for _statement in DROP_TRIGGER_SQL:
     event.listen(
-        ArtifactLibraryEntry.__table__,
+        Base.metadata,
         "before_drop",
         DDL(_statement).execute_if(dialect="sqlite"),  # type: ignore[no-untyped-call]
     )
@@ -1683,3 +1683,16 @@ class AppSetting(TimestampMixin, Base):
 
     key: Mapped[str] = mapped_column(String(200), primary_key=True)
     value_json: Mapped[Any] = mapped_column(JSON)
+
+
+@event.listens_for(Session, "before_flush")
+def _guard_artifact_reference_flush(
+    session: Session,
+    flush_context: object,
+    instances: object,
+) -> None:
+    """Register JSON Artifact authority with every production model import."""
+
+    from .artifact_library import guard_artifact_reference_flush
+
+    guard_artifact_reference_flush(session, flush_context, instances)

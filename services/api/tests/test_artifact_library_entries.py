@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+import os
+import subprocess
+import sys
 from collections.abc import Iterator
 from concurrent.futures import ThreadPoolExecutor
 from datetime import UTC, datetime, timedelta
@@ -7,7 +10,7 @@ from pathlib import Path
 from threading import Barrier, Event
 
 import pytest
-from sqlalchemy import create_engine, select
+from sqlalchemy import create_engine, insert, select, update
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
@@ -499,7 +502,7 @@ def test_delete_write_fence_prevents_a_concurrent_reference_commit(
 
 @pytest.mark.parametrize(
     "reference_kind",
-    ["job", "run", "work_step", "message_reference", "chat_origin"],
+    ["job", "run", "work_step", "message_reference", "chat_origin", "artifact_metadata"],
 )
 def test_delete_write_fence_rejects_late_json_reference_writers(
     tmp_path: Path,
@@ -589,11 +592,23 @@ def test_delete_write_fence_rejects_late_json_reference_writers(
                         artifact_ids_json=[artifact_id],
                     )
                 )
-            else:
+            elif reference_kind == "chat_origin":
                 chat = session.get(Chat, chat_id)
                 assert chat is not None
                 chat.scope = "studio"
                 chat.origin_json = {"source_artifact_id": artifact_id}
+            else:
+                session.add(
+                    Artifact(
+                        id="sha256:" + "a" * 64,
+                        sha256="a" * 64,
+                        kind=ArtifactKind.VIDEO.value,
+                        media_type="video/mp4",
+                        size_bytes=1,
+                        relative_path=f"aa/aa/{'a' * 64}",
+                        metadata_json={"poster_artifact_id": artifact_id},
+                    )
+                )
             writer_started.set()
             try:
                 session.commit()
@@ -621,3 +636,137 @@ def test_delete_write_fence_rejects_late_json_reference_writers(
         assert stored_chat.scope == "standard"
         assert stored_chat.origin_json == {}
     engine.dispose()
+
+
+def test_committed_json_writer_wins_and_low_level_delete_refuses(
+    library_session: tuple[ArtifactStore, Session],
+) -> None:
+    store, session = library_session
+    artifact = store.ingest_bytes(
+        session, b"writer-wins", kind=ArtifactKind.OTHER, media_type="application/octet-stream"
+    )
+    session.add(Job(result_json={"artifact_id": artifact.id}))
+    session.commit()
+    path = store.resolve(artifact)
+
+    with pytest.raises(ValueError, match="still retained"):
+        store._delete_artifact(session, artifact)
+    session.rollback()
+    assert session.get(Artifact, artifact.id) is not None
+    assert path.is_file()
+
+
+def test_model_import_alone_registers_the_json_reference_guard(tmp_path: Path) -> None:
+    data_dir = repr(str(tmp_path / "fresh-data"))
+    database_url = repr(f"sqlite:///{tmp_path / 'fresh.sqlite3'}")
+    script = f"""
+from sqlalchemy.orm import Session
+from local_lm.db import Base, create_database_engine
+from local_lm.config import Settings
+from local_lm.models import Job
+settings = Settings(data_dir={data_dir}, database_url={database_url})
+settings.prepare()
+engine = create_database_engine(settings)
+Base.metadata.create_all(engine)
+with Session(engine) as session:
+    session.add(Job(payload_json={{'artifact_id': 'sha256:' + 'f' * 64}}))
+    try:
+        session.commit()
+    except Exception:
+        print('refused')
+    else:
+        raise SystemExit('dangling reference committed')
+"""
+    environment = dict(os.environ)
+    environment["PYTHONPATH"] = str(Path(__file__).parents[1])
+    result = subprocess.run(
+        [sys.executable, "-c", script],
+        capture_output=True,
+        check=False,
+        text=True,
+        timeout=20,
+        env=environment,
+    )
+    assert result.returncode == 0, result.stderr
+    assert result.stdout.strip() == "refused"
+
+
+def test_bulk_and_raw_json_writers_are_refused_by_database_authority(
+    library_session: tuple[ArtifactStore, Session],
+) -> None:
+    _store, session = library_session
+    missing = "sha256:" + "e" * 64
+    with pytest.raises(IntegrityError, match="artifact JSON reference is invalid"):
+        session.execute(insert(Job).values(payload_json={"artifact_id": missing}))
+    session.rollback()
+    job = Job(payload_json={})
+    session.add(job)
+    session.commit()
+    with pytest.raises(IntegrityError, match="artifact JSON reference is invalid"):
+        session.execute(
+            update(Job).where(Job.id == job.id).values(payload_json={"artifact_id": missing})
+        )
+    session.rollback()
+    with pytest.raises(IntegrityError, match="artifact JSON reference is invalid"):
+        session.connection().exec_driver_sql(
+            "INSERT INTO jobs (id, kind, status, progress, phase, payload_json, result_json, "
+            "progress_json, queue_priority, attempt, cancellable, created_at, updated_at) "
+            "VALUES (?, 'chat', 'queued', 0, 'queued', ?, '{}', '{}', 0, 0, 1, ?, ?)",
+            (
+                "job_raw_missing",
+                '{"artifact_id":"' + missing + '"}',
+                datetime.now(UTC),
+                datetime.now(UTC),
+            ),
+        )
+    session.rollback()
+    with pytest.raises(IntegrityError, match="artifact JSON reference is invalid"):
+        session.connection().exec_driver_sql(
+            "UPDATE jobs SET result_json = ? WHERE id = ?",
+            ('{"artifact_id":"' + missing + '"}', job.id),
+        )
+    session.rollback()
+
+
+def test_raw_artifact_delete_is_refused_by_committed_json_reference(
+    library_session: tuple[ArtifactStore, Session],
+) -> None:
+    store, session = library_session
+    artifact = store.ingest_bytes(
+        session, b"raw-delete", kind=ArtifactKind.OTHER, media_type="application/octet-stream"
+    )
+    session.add(Job(payload_json={"artifact_id": artifact.id}))
+    session.commit()
+
+    with pytest.raises(IntegrityError, match="retained by JSON reference"):
+        session.connection().exec_driver_sql("DELETE FROM artifacts WHERE id = ?", (artifact.id,))
+    session.rollback()
+    assert session.get(Artifact, artifact.id) is not None
+    assert store.resolve(artifact).is_file()
+
+
+def test_existing_or_same_flush_json_reference_refuses_direct_artifact_delete(
+    library_session: tuple[ArtifactStore, Session],
+) -> None:
+    store, session = library_session
+    existing = store.ingest_bytes(
+        session, b"existing-ref", kind=ArtifactKind.OTHER, media_type="application/octet-stream"
+    )
+    session.add(Job(payload_json={"artifact_id": existing.id}))
+    session.commit()
+    session.delete(existing)
+    with pytest.raises(ArtifactReferenceDataError, match=f"^{REFERENCE_CORRUPT}$"):
+        session.flush()
+    session.rollback()
+    assert session.get(Artifact, existing.id) is not None
+
+    simultaneous = store.ingest_bytes(
+        session, b"same-flush-ref", kind=ArtifactKind.OTHER, media_type="application/octet-stream"
+    )
+    session.commit()
+    session.add(Job(payload_json={"artifact_id": simultaneous.id}))
+    session.delete(simultaneous)
+    with pytest.raises(ArtifactReferenceDataError, match=f"^{REFERENCE_CORRUPT}$"):
+        session.flush()
+    session.rollback()
+    assert session.get(Artifact, simultaneous.id) is not None

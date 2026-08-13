@@ -5,7 +5,7 @@ from __future__ import annotations
 from collections.abc import Mapping
 from typing import Any, NoReturn, cast
 
-from sqlalchemy import event, func, select, update
+from sqlalchemy import func, select, update
 from sqlalchemy.dialects.sqlite import insert
 from sqlalchemy.engine import CursorResult
 from sqlalchemy.orm import Session
@@ -257,8 +257,7 @@ def _pending_json_reference_ids(session: Session) -> set[str]:
     return found
 
 
-@event.listens_for(Session, "before_flush")
-def _guard_json_reference_writes(
+def guard_artifact_reference_flush(
     session: Session,
     _flush_context: object,
     _instances: object,
@@ -266,16 +265,19 @@ def _guard_json_reference_writes(
     """Serialize JSON reference publication with deletion and refuse dangling ids."""
 
     referenced = _pending_json_reference_ids(session)
-    if not referenced:
+    deleted = {value.id for value in session.deleted if isinstance(value, Artifact)}
+    if not referenced and not deleted:
         return
     begin_artifact_write_fence(session)
-    deleted = {value.id for value in session.deleted if isinstance(value, Artifact)}
+    if deleted & referenced_artifact_ids(session):
+        raise ArtifactReferenceDataError(REFERENCE_CORRUPT)
     available = {
         value.id for value in session.new if isinstance(value, Artifact) and value.id not in deleted
     }
     available.update(
         session.scalars(select(Artifact.id).where(Artifact.id.in_(sorted(referenced)))).all()
     )
+    available.difference_update(deleted)
     if referenced - available:
         raise ArtifactReferenceDataError(REFERENCE_CORRUPT)
 

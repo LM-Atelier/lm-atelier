@@ -14,6 +14,7 @@ from alembic.util.exc import CommandError
 from sqlalchemy import UniqueConstraint, create_engine
 
 from local_lm import db, models  # noqa: F401 - importing registers every table to compare
+from local_lm.artifact_library_schema import CREATE_TRIGGER_SQL
 from local_lm.backups import BackupManager
 from local_lm.config import Settings
 from local_lm.database_migrations import (
@@ -125,6 +126,14 @@ def test_artifact_library_entry_migration_backfills_once_and_seals_membership(
         assert connection.execute("SELECT count(*) FROM artifact_library_entries").fetchone() == (
             2,
         )
+        expected_triggers = {statement.split()[2] for statement in CREATE_TRIGGER_SQL}
+        migrated_triggers = {
+            row[0]
+            for row in connection.execute(
+                "SELECT name FROM sqlite_master WHERE type = 'trigger'"
+            ).fetchall()
+        }
+        assert expected_triggers <= migrated_triggers
         with pytest.raises(sqlite3.IntegrityError, match="version is stale"):
             connection.execute(
                 "UPDATE artifact_library_entries SET display_name = 'changed' "
