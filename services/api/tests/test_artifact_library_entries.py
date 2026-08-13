@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from collections.abc import Iterator
 from concurrent.futures import ThreadPoolExecutor
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -14,6 +15,7 @@ from local_lm.artifact_library import (
     REFERENCE_CORRUPT,
     ArtifactReferenceDataError,
     ensure_library_entry,
+    library_entry_id,
     referenced_artifact_ids,
     set_library_favorite,
 )
@@ -21,11 +23,11 @@ from local_lm.artifacts import ArtifactStore
 from local_lm.config import Settings
 from local_lm.db import Base
 from local_lm.domain import ArtifactKind
-from local_lm.models import ArtifactLibraryEntry, Job
+from local_lm.models import Artifact, ArtifactLibraryEntry, Job
 
 
 @pytest.fixture
-def library_session(tmp_path: Path) -> tuple[ArtifactStore, Session]:
+def library_session(tmp_path: Path) -> Iterator[tuple[ArtifactStore, Session]]:
     settings = Settings(data_dir=tmp_path / "data")
     settings.prepare()
     engine = create_engine(f"sqlite:///{tmp_path / 'library.sqlite3'}")
@@ -86,6 +88,55 @@ def test_publication_is_idempotent_and_non_media_never_gets_membership(
     assert len(session.scalars(select(ArtifactLibraryEntry)).all()) == 1
 
 
+def test_conflict_loser_publication_reuses_canonical_entry(
+    library_session: tuple[ArtifactStore, Session],
+) -> None:
+    store, session = library_session
+    artifact = store.ingest_bytes(
+        session, b"conflict", kind=ArtifactKind.IMAGE, media_type="image/png"
+    )
+    session.commit()
+    first = ensure_library_entry(session, artifact)
+    session.commit()
+    assert first is not None
+
+    with Session(session.get_bind(), expire_on_commit=False) as other:
+        same_artifact = other.get(Artifact, artifact.id)
+        assert same_artifact is not None
+        loser = ensure_library_entry(other, same_artifact)
+        other.commit()
+        assert loser is not None
+        assert loser.id == first.id
+    assert len(session.scalars(select(ArtifactLibraryEntry)).all()) == 1
+
+
+def test_concurrent_publications_converge(
+    library_session: tuple[ArtifactStore, Session],
+) -> None:
+    store, session = library_session
+    artifact = store.ingest_bytes(
+        session, b"concurrent", kind=ArtifactKind.IMAGE, media_type="image/png"
+    )
+    session.commit()
+    barrier = Barrier(2)
+
+    def publish() -> str:
+        with Session(session.get_bind(), expire_on_commit=False) as worker:
+            owned = worker.get(Artifact, artifact.id)
+            assert owned is not None
+            barrier.wait()
+            entry = ensure_library_entry(worker, owned)
+            assert entry is not None
+            worker.commit()
+            return entry.id
+
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        ids = list(pool.map(lambda _index: publish(), range(2)))
+    assert ids == [library_entry_id(artifact), library_entry_id(artifact)]
+    session.expire_all()
+    assert len(session.scalars(select(ArtifactLibraryEntry)).all()) == 1
+
+
 def test_favorite_is_entry_canonical_and_dual_written(
     library_session: tuple[ArtifactStore, Session],
 ) -> None:
@@ -132,9 +183,7 @@ def test_trashed_membership_pins_bounded_poster_closure(
     poster = store.ingest_bytes(
         session, b"poster", kind=ArtifactKind.THUMBNAIL, media_type="image/png"
     )
-    video = store.ingest_bytes(
-        session, b"video", kind=ArtifactKind.VIDEO, media_type="video/mp4"
-    )
+    video = store.ingest_bytes(session, b"video", kind=ArtifactKind.VIDEO, media_type="video/mp4")
     video.metadata_json = {"poster_artifact_id": poster.id}
     entry = ensure_library_entry(session, video)
     assert entry is not None
