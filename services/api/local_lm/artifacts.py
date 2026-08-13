@@ -17,6 +17,7 @@ from typing import IO
 from sqlalchemy import event, func, select
 from sqlalchemy.orm import Session
 
+from .artifact_library import referenced_artifact_ids
 from .config import Settings
 from .domain import ArtifactKind, MessageRole, PartType
 from .filesystem_links import is_link_or_reparse
@@ -396,37 +397,7 @@ class ArtifactStore:
 
     @staticmethod
     def referenced_artifact_ids(session: Session) -> set[str]:
-        referenced = {
-            artifact_id
-            for artifact_id in session.scalars(
-                select(MessagePart.artifact_id).where(MessagePart.artifact_id.is_not(None))
-            )
-            if artifact_id
-        }
-        referenced.update(
-            artifact_id
-            for artifact_id in session.scalars(
-                select(ResponseRevisionPart.artifact_id).where(
-                    ResponseRevisionPart.artifact_id.is_not(None)
-                )
-            )
-            if artifact_id
-        )
-        # Runs created before input references became message parts stored their
-        # attachments only in provenance. Keep those artifacts live until the
-        # legacy run is deleted or migrated through a project round trip.
-        for provenance in session.scalars(select(Run.provenance_json)):
-            referenced.update(ArtifactStore._provenance_input_ids(provenance))
-        if not referenced:
-            return referenced
-        posters = session.scalars(select(Artifact).where(Artifact.id.in_(referenced))).all()
-        referenced.update(
-            linked_id
-            for artifact in posters
-            for key in ("poster_artifact_id", "browser_proxy_artifact_id")
-            if isinstance((linked_id := artifact.metadata_json.get(key)), str)
-        )
-        return referenced
+        return referenced_artifact_ids(session)
 
     def cleanup_retention(
         self,
@@ -493,9 +464,21 @@ class ArtifactStore:
         self,
         session: Session,
         artifact: Artifact,
+        *,
+        release_membership: bool = False,
     ) -> tuple[int, int, int]:
         if artifact.kind not in {ArtifactKind.IMAGE.value, ArtifactKind.VIDEO.value}:
             raise ValueError("only image and video library artifacts can be deleted directly")
+        from .artifact_library import release_library_entry
+        from .models import ArtifactLibraryEntry
+
+        entry_id = session.scalar(
+            select(ArtifactLibraryEntry.id).where(ArtifactLibraryEntry.artifact_id == artifact.id)
+        )
+        if entry_id and not release_membership:
+            raise ValueError("This media item is retained by its Media Library membership.")
+        if entry_id and release_membership:
+            release_library_entry(session, artifact)
 
         linked_ids = {
             linked_id
@@ -605,12 +588,14 @@ class ArtifactStore:
             ):
                 continue
             _references, removed_count, _reclaimed_bytes = self.delete_library_artifact(
-                session, artifact
+                session, artifact, release_membership=True
             )
             removed += removed_count
         return removed
 
     def _delete_artifact(self, session: Session, artifact: Artifact) -> None:
+        if artifact.id in self.referenced_artifact_ids(session):
+            raise ValueError("This artifact is still retained.")
         try:
             path = self.resolve(artifact)
         except ValueError:

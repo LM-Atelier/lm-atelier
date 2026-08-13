@@ -50,6 +50,104 @@ def test_unknown_database_revision_has_actionable_error(tmp_path: Path) -> None:
         )
 
 
+def test_artifact_library_entry_migration_backfills_once_and_seals_membership(
+    tmp_path: Path,
+) -> None:
+    settings = Settings(data_dir=tmp_path / "library-entry-migration")
+    settings.prepare()
+    config = alembic_config(settings)
+    command.upgrade(config, "c7e1d4a83b56")
+    database = settings.state_dir / "local-lm.sqlite3"
+    stamp = "2026-08-12 12:00:00"
+    rows = [
+        ("legacy-image", "1" * 64, "image", "image/png", "portrait.png", 1),
+        ("legacy-video", "2" * 64, "video", "video/mp4", None, 0),
+        ("legacy-input", "3" * 64, "input", "image/png", "upload.png", 1),
+    ]
+    with sqlite3.connect(database) as connection:
+        connection.executemany(
+            """
+            INSERT INTO artifacts
+              (id, sha256, kind, media_type, size_bytes, relative_path,
+               original_name, metadata_json, favorite, created_at, updated_at)
+            VALUES (?, ?, ?, ?, 7, ?, ?, '{}', ?, ?, ?)
+            """,
+            [
+                (artifact_id, digest, kind, media_type, digest, name, favorite, stamp, stamp)
+                for artifact_id, digest, kind, media_type, name, favorite in rows
+            ],
+        )
+    command.upgrade(config, "head")
+
+    with sqlite3.connect(database) as connection:
+        connection.execute("PRAGMA foreign_keys=ON")
+        entries = connection.execute(
+            """
+            SELECT id, artifact_id, display_name, favorite, state, version,
+                   created_at, updated_at
+            FROM artifact_library_entries ORDER BY artifact_id
+            """
+        ).fetchall()
+        assert entries == [
+            (
+                "libentry:sha256:" + "1" * 64,
+                "legacy-image",
+                "portrait.png",
+                1,
+                "visible",
+                1,
+                stamp,
+                stamp,
+            ),
+            (
+                "libentry:sha256:" + "2" * 64,
+                "legacy-video",
+                "2" * 64,
+                0,
+                "visible",
+                1,
+                stamp,
+                stamp,
+            ),
+        ]
+        connection.execute(
+            """
+            INSERT INTO artifact_library_entries
+              (id, artifact_id, display_name, favorite, state, deleted_at, recovery_id,
+               version, created_at, updated_at)
+            SELECT 'libentry:sha256:' || sha256, id,
+                   COALESCE(NULLIF(trim(original_name), ''), sha256), favorite,
+                   'visible', NULL, NULL, 1, created_at, updated_at
+            FROM artifacts WHERE kind IN ('image', 'video')
+            ON CONFLICT(artifact_id) DO NOTHING
+            """
+        )
+        assert connection.execute(
+            "SELECT count(*) FROM artifact_library_entries"
+        ).fetchone() == (2,)
+        with pytest.raises(sqlite3.IntegrityError, match="version is stale"):
+            connection.execute(
+                "UPDATE artifact_library_entries SET display_name = 'changed' "
+                "WHERE artifact_id = 'legacy-image'"
+            )
+        with pytest.raises(sqlite3.IntegrityError, match="identity is immutable"):
+            connection.execute(
+                "UPDATE artifact_library_entries SET artifact_id = 'legacy-video', "
+                "version = 2 WHERE artifact_id = 'legacy-image'"
+            )
+        with pytest.raises(sqlite3.IntegrityError):
+            connection.execute("DELETE FROM artifacts WHERE id = 'legacy-image'")
+        with pytest.raises(sqlite3.IntegrityError, match="library artifact identity"):
+            connection.execute("UPDATE artifacts SET kind = 'other' WHERE id = 'legacy-image'")
+        assert connection.execute(
+            "SELECT kind, original_name, favorite FROM artifacts ORDER BY id"
+        ).fetchall() == [
+            ("image", "portrait.png", 1),
+            ("input", "upload.png", 1),
+            ("video", None, 0),
+        ]
+
+
 def test_unrelated_alembic_command_error_is_not_reclassified(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

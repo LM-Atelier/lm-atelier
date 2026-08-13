@@ -438,6 +438,38 @@ class Artifact(TimestampMixin, Base):
     favorite: Mapped[bool] = mapped_column(Boolean, default=False, index=True)
 
 
+class ArtifactLibraryEntry(TimestampMixin, Base):
+    """Durable user-visible membership, separate from content-addressed bytes."""
+
+    __tablename__ = "artifact_library_entries"
+    __table_args__ = (
+        UniqueConstraint("artifact_id", name="uq_artifact_library_entry_artifact"),
+        CheckConstraint(
+            "length(display_name) BETWEEN 1 AND 500 AND instr(display_name, char(0)) = 0",
+            name="ck_library_entry_display_name",
+        ),
+        CheckConstraint("favorite IN (0, 1)", name="ck_library_entry_favorite_boolean"),
+        CheckConstraint("state IN ('visible', 'trashed')", name="ck_library_entry_state"),
+        CheckConstraint("version > 0", name="ck_library_entry_version_positive"),
+        CheckConstraint(
+            "(state = 'visible' AND deleted_at IS NULL AND recovery_id IS NULL) OR "
+            "(state = 'trashed' AND deleted_at IS NOT NULL AND recovery_id IS NOT NULL)",
+            name="ck_library_entry_recovery_consistent",
+        ),
+        Index("ix_library_entry_state_created", "state", "created_at", "id"),
+        Index("ix_library_entry_favorite_created", "favorite", "created_at", "id"),
+    )
+
+    id: Mapped[str] = mapped_column(String(80), primary_key=True)
+    artifact_id: Mapped[str] = mapped_column(ForeignKey("artifacts.id", ondelete="RESTRICT"))
+    display_name: Mapped[str] = mapped_column(String(500))
+    favorite: Mapped[bool] = mapped_column(Boolean, default=False)
+    state: Mapped[str] = mapped_column(String(16), default="visible")
+    deleted_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    recovery_id: Mapped[str | None] = mapped_column(String(80), nullable=True)
+    version: Mapped[int] = mapped_column(Integer, default=1)
+
+
 class ModelSource(TimestampMixin, Base):
     __tablename__ = "model_sources"
     __table_args__ = (

@@ -7,7 +7,7 @@ from pathlib import Path
 
 import pytest
 from httpx2 import AsyncClient
-from sqlalchemy import create_engine
+from sqlalchemy import create_engine, select
 from sqlalchemy.orm import Session
 
 from local_lm.artifacts import ArtifactStore
@@ -92,10 +92,12 @@ def test_favoriting_clears_an_existing_retention_mark(
     assert "unreferenced_at" not in artifact.metadata_json
 
 
-async def test_the_flag_toggles_filters_and_never_blocks_deletion(client: AsyncClient) -> None:
+async def test_the_flag_toggles_filters_and_library_membership_blocks_legacy_deletion(
+    client: AsyncClient,
+) -> None:
     from local_lm.db import SessionLocal
     from local_lm.domain import ArtifactKind as Kind
-    from local_lm.models import Artifact
+    from local_lm.models import Artifact, ArtifactLibraryEntry
 
     with SessionLocal() as session:
         session.add(
@@ -114,6 +116,11 @@ async def test_the_flag_toggles_filters_and_never_blocks_deletion(client: AsyncC
     flagged = await client.patch("/api/artifacts/art_favorite_flow", json={"favorite": True})
     assert flagged.status_code == 200
     assert flagged.json()["favorite"] is True
+    with SessionLocal() as session:
+        entry = session.get(ArtifactLibraryEntry, "libentry:sha256:" + "f" * 64)
+        assert entry is not None
+        assert entry.favorite is True
+        assert entry.version == 2
 
     only_favorites = await client.get("/api/artifacts", params={"favorites": "true"})
     assert [item["id"] for item in only_favorites.json()] == ["art_favorite_flow"]
@@ -124,14 +131,40 @@ async def test_the_flag_toggles_filters_and_never_blocks_deletion(client: AsyncC
     assert cleared.json()["favorite"] is False
     assert (await client.get("/api/artifacts", params={"favorites": "true"})).json() == []
 
-    # Explicit deletion wins over the flag; a favorite is not undeletable.
+    # Phase A has no Trash yet: legacy hard deletion cannot bypass membership.
     await client.patch("/api/artifacts/art_favorite_flow", json={"favorite": True})
     deleted = await client.delete("/api/artifacts/art_favorite_flow")
-    assert deleted.status_code == 200
-    assert (await client.get("/api/artifacts")).json() == []
+    assert deleted.status_code == 409
+    assert deleted.json() == {
+        "detail": "This media item is retained by its Media Library membership.",
+        "code": "artifact-in-use",
+    }
+    remaining = (await client.get("/api/artifacts")).json()
+    assert [item["id"] for item in remaining] == ["art_favorite_flow"]
+    assert remaining[0]["favorite"] is True
 
 
 async def test_a_missing_artifact_refuses_with_a_stable_code(client: AsyncClient) -> None:
     response = await client.patch("/api/artifacts/absent", json={"favorite": True})
     assert response.status_code == 404
     assert response.json()["code"] == "artifact-not-found"
+
+
+async def test_only_explicit_media_upload_is_published_to_library(
+    client: AsyncClient,
+) -> None:
+    from local_lm.db import SessionLocal
+    from local_lm.models import ArtifactLibraryEntry
+
+    image = await client.post(
+        "/api/artifacts?kind=image",
+        files={"file": ("published.png", b"published", "image/png")},
+    )
+    raw_input = await client.post(
+        "/api/artifacts",
+        files={"file": ("input.png", b"input", "image/png")},
+    )
+    assert image.status_code == raw_input.status_code == 201
+    with SessionLocal() as session:
+        entries = session.scalars(select(ArtifactLibraryEntry)).all()
+        assert [entry.artifact_id for entry in entries] == [image.json()["id"]]

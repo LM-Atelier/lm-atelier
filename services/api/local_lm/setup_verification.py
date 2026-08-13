@@ -187,7 +187,7 @@ def finalize_setup_verification(
     input_artifact_id = verification.input_artifact_id
     artifacts.delete_chat_generated_media(session, chat_id)
     if input_artifact_id and (artifact := session.get(Artifact, input_artifact_id)):
-        artifacts.delete_library_artifact(session, artifact)
+        artifacts.delete_library_artifact(session, artifact, release_membership=True)
 
     if chat := session.get(Chat, chat_id):
         session.delete(chat)
@@ -242,7 +242,7 @@ def recover_terminal_setup_verifications(
             if verification.input_artifact_id and (
                 artifact := session.get(Artifact, verification.input_artifact_id)
             ):
-                artifacts.delete_library_artifact(session, artifact)
+                artifacts.delete_library_artifact(session, artifact, release_membership=True)
             if chat := session.get(Chat, verification.chat_id):
                 session.delete(chat)
             verification.chat_id = None

@@ -25,6 +25,7 @@ from starlette.responses import FileResponse, HTMLResponse
 from . import __version__
 from .adapter_grammar_review import review_adapter_grammar
 from .api_errors import api_error
+from .artifact_library import ensure_library_entry, set_library_favorite
 from .auxiliary_assets import AUXILIARY_ASSET_KINDS, validate_lora_workflow_contract
 from .capability_evidence import current_capability_evidence, evidence_input_modalities
 from .capability_probe import probe_structured_tools
@@ -997,7 +998,9 @@ async def start_setup_verification(
             if current.input_artifact_id and (
                 failed_artifact := session.get(Artifact, current.input_artifact_id)
             ):
-                services.artifacts.delete_library_artifact(session, failed_artifact)
+                services.artifacts.delete_library_artifact(
+                    session, failed_artifact, release_membership=True
+                )
             if current.chat_id and (failed_chat := session.get(Chat, current.chat_id)):
                 session.delete(failed_chat)
             current.chat_id = None
@@ -2760,6 +2763,7 @@ async def upload_artifact(
         original_name=file.filename,
         metadata={"uploaded": True},
     )
+    ensure_library_entry(session, artifact)
     session.commit()
     result = ArtifactOut.model_validate(artifact)
     result.url = f"/api/artifacts/{artifact.id}/content"
@@ -2896,7 +2900,7 @@ async def update_artifact(
     artifact = session.get(Artifact, artifact_id)
     if not artifact:
         raise api_error(404, "artifact-not-found", "This media item no longer exists")
-    artifact.favorite = payload.favorite
+    set_library_favorite(session, artifact, payload.favorite)
     session.commit()
     session.refresh(artifact)
     result = ArtifactOut.model_validate(artifact)
