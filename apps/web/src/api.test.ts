@@ -8,6 +8,94 @@ afterEach(() => {
   localStorage.clear();
 });
 
+it("parses the bounded visible Media Library page before returning it", async () => {
+  const sha = "a".repeat(64);
+  const response = {
+    items: [{
+      id: `libentry:sha256:${sha}`,
+      artifact_id: `sha256:${sha}`,
+      version: 1,
+      state: "visible",
+      display_name: "Published image",
+      favorite: false,
+      kind: "image",
+      media_type: "image/png",
+      size_bytes: 10,
+      created_at: "2026-08-12T12:00:00Z",
+      updated_at: "2026-08-12T12:00:00Z",
+    }],
+    next_cursor: null,
+  };
+  const fetchMock = vi.fn()
+    .mockResolvedValueOnce(new Response(JSON.stringify({ csrf_token: "csrf" }), { status: 200 }))
+    .mockResolvedValueOnce(new Response(JSON.stringify(response), { status: 200 }));
+  vi.stubGlobal("fetch", fetchMock);
+
+  const { api } = await import("./api");
+  const controller = new AbortController();
+  await expect(api.artifactLibrary(
+    { kind: "image", query: " portrait ", favorite: true },
+    "opaque_cursor",
+    20,
+    controller.signal,
+  )).resolves.toMatchObject({ items: [{ artifact_id: `sha256:${sha}` }] });
+  expect(fetchMock.mock.calls[1][0]).toBe(
+    "/api/artifact-library?limit=20&query=+portrait+&state=visible&kind=image&favorite=true&cursor=opaque_cursor",
+  );
+  expect(fetchMock.mock.calls[1][1]?.signal).toBe(controller.signal);
+  expect(fetchMock.mock.calls[1][1]?.method).toBeUndefined();
+});
+
+it("rejects a malformed Media Library response atomically", async () => {
+  const fetchMock = vi.fn()
+    .mockResolvedValueOnce(new Response(JSON.stringify({ csrf_token: "csrf" }), { status: 200 }))
+    .mockResolvedValueOnce(new Response(JSON.stringify({
+      items: [{ artifact_id: "private/path" }],
+      next_cursor: null,
+    }), { status: 200 }));
+  vi.stubGlobal("fetch", fetchMock);
+
+  const { api } = await import("./api");
+  await expect(api.artifactLibrary(
+    { kind: "", query: "", favorite: false },
+    null,
+    20,
+  )).rejects.toThrow("The Media Library response was invalid.");
+});
+
+it("rejects a Media Library cursor self-loop", async () => {
+  const items = Array.from({ length: 20 }, (_, index) => {
+    const sha = index.toString(16).padStart(64, "0");
+    return {
+      id: `libentry:sha256:${sha}`,
+      artifact_id: `sha256:${sha}`,
+      version: 1,
+      state: "visible",
+      display_name: `Item ${index}`,
+      favorite: false,
+      kind: "image",
+      media_type: "image/png",
+      size_bytes: 1,
+      created_at: "2026-08-12T12:00:00Z",
+      updated_at: "2026-08-12T12:00:00Z",
+    };
+  });
+  const fetchMock = vi.fn()
+    .mockResolvedValueOnce(new Response(JSON.stringify({ csrf_token: "csrf" }), { status: 200 }))
+    .mockResolvedValueOnce(new Response(JSON.stringify({
+      items,
+      next_cursor: "same_cursor",
+    }), { status: 200 }));
+  vi.stubGlobal("fetch", fetchMock);
+
+  const { api } = await import("./api");
+  await expect(api.artifactLibrary(
+    { kind: "", query: "", favorite: false },
+    "same_cursor",
+    20,
+  )).rejects.toThrow("The Media Library response was invalid.");
+});
+
 it("requests the read-only setup readiness contract", async () => {
   const report = { version: 2, state: "ready", roles: [] };
   const fetchMock = vi.fn()
