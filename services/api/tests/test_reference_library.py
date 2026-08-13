@@ -293,6 +293,46 @@ def test_similarity_is_advice_and_cannot_block_the_attachment(session: Session) 
     assert attach_asset(session, subject, artifact_id="art_third", read_bytes=explode).asset.id
 
 
+@pytest.mark.parametrize("failure", [OSError, KeyError, ValueError])
+@pytest.mark.parametrize("unavailable", ["incoming", "existing"])
+def test_unavailable_similarity_evidence_never_blocks_or_reviews_an_attachment(
+    session: Session,
+    failure: type[Exception],
+    unavailable: str,
+) -> None:
+    private_detail = "private retained-artifact authority detail"
+    subject = create_subject(session, name="Ada", kind="person")
+    _named_artifact(session, "existing")
+    _named_artifact(session, "incoming")
+    existing = attach_asset(session, subject, artifact_id="art_existing").asset
+    images = {"art_existing": _png(120), "art_incoming": _png(120)}
+
+    def read(artifact_id: str) -> bytes:
+        if artifact_id == f"art_{unavailable}":
+            raise failure(private_detail)
+        return images[artifact_id]
+
+    result = attach_asset(
+        session,
+        subject,
+        artifact_id="art_incoming",
+        read_bytes=read,
+    )
+    rows = list(
+        session.query(ReferenceAsset)
+        .filter(ReferenceAsset.reference_subject_id == subject.id)
+        .order_by(ReferenceAsset.sort_order)
+    )
+
+    assert result.similar == ()
+    assert [row.artifact_id for row in rows] == ["art_existing", "art_incoming"]
+    assert result.asset is rows[1]
+    assert existing is rows[0]
+    assert all(row.validation_state == "unchecked" for row in rows)
+    assert all(row.validation_reasons_json == [] for row in rows)
+    assert private_detail not in repr(result)
+
+
 def test_without_a_reader_the_scan_is_skipped_not_faked(session: Session) -> None:
     subject = create_subject(session, name="Ada", kind="person")
     _named_artifact(session, "a1")
