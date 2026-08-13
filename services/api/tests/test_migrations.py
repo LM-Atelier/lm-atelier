@@ -12,6 +12,7 @@ from alembic.migration import MigrationContext
 from alembic.script import ScriptDirectory
 from alembic.util.exc import CommandError
 from sqlalchemy import UniqueConstraint, create_engine
+from sqlalchemy.exc import IntegrityError as SAIntegrityError
 
 from local_lm import db, models  # noqa: F401 - importing registers every table to compare
 from local_lm.artifact_library_schema import CREATE_TRIGGER_SQL
@@ -174,6 +175,50 @@ def test_artifact_library_entry_migration_backfills_once_and_seals_membership(
             ("input", "upload.png", 1),
             ("video", None, 0),
         ]
+
+
+def test_artifact_library_migration_refuses_preexisting_corrupt_reference_json(
+    tmp_path: Path,
+) -> None:
+    settings = Settings(data_dir=tmp_path / "library-entry-corrupt-reference")
+    settings.prepare()
+    config = alembic_config(settings)
+    command.upgrade(config, "c7e1d4a83b56")
+    database = settings.state_dir / "local-lm.sqlite3"
+    stamp = "2026-08-12 12:00:00"
+    with sqlite3.connect(database) as connection:
+        connection.execute(
+            """
+            INSERT INTO jobs
+              (id, kind, status, progress, phase, payload_json, result_json,
+               progress_json, queue_priority, attempt, cancellable, created_at, updated_at)
+            VALUES ('corrupt-before-library', 'chat', 'queued', 0, 'queued',
+                    '{"artifact_ids":"not-a-list"}', '{}', '{}', 0, 0, 1, ?, ?)
+            """,
+            (stamp, stamp),
+        )
+
+    with pytest.raises(SAIntegrityError, match="artifact JSON reference is invalid"):
+        command.upgrade(config, "head")
+
+    with sqlite3.connect(database) as connection:
+        assert connection.execute("SELECT version_num FROM alembic_version").fetchone() == (
+            "c7e1d4a83b56",
+        )
+        assert (
+            connection.execute(
+                "SELECT name FROM sqlite_master WHERE type = 'table' "
+                "AND name = 'artifact_library_entries'"
+            ).fetchone()
+            is None
+        )
+        assert connection.execute(
+            "SELECT count(*) FROM sqlite_master WHERE type = 'trigger' "
+            "AND name LIKE '%artifact_reference%_guard'"
+        ).fetchone() == (0,)
+        assert connection.execute(
+            "SELECT payload_json FROM jobs WHERE id = 'corrupt-before-library'"
+        ).fetchone() == ('{"artifact_ids":"not-a-list"}',)
 
 
 def test_unrelated_alembic_command_error_is_not_reclassified(

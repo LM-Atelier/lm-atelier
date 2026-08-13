@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import os
 import subprocess
 import sys
@@ -743,6 +744,178 @@ def test_raw_artifact_delete_is_refused_by_committed_json_reference(
     session.rollback()
     assert session.get(Artifact, artifact.id) is not None
     assert store.resolve(artifact).is_file()
+
+
+@pytest.mark.parametrize(
+    "payload",
+    [
+        '{"artifact_id":1}',
+        '{"artifact_id":{}}',
+        '{"artifact_ids":"sha256:bad"}',
+        '{"artifact_ids":[1]}',
+        '{"artifact_ids":[""]}',
+        '{"artifact_ids":["' + "a" * 81 + '"]}',
+        '{"unterminated":',
+    ],
+)
+def test_raw_job_reference_shapes_fail_closed(
+    library_session: tuple[ArtifactStore, Session], payload: str
+) -> None:
+    _store, session = library_session
+    with pytest.raises(IntegrityError, match="artifact JSON reference is invalid"):
+        session.connection().exec_driver_sql(
+            "INSERT INTO jobs (id, kind, status, progress, phase, payload_json, result_json, "
+            "progress_json, queue_priority, attempt, cancellable, created_at, updated_at) "
+            "VALUES (?, 'chat', 'queued', 0, 'queued', ?, '{}', '{}', 0, 0, 1, ?, ?)",
+            ("job_bad_shape", payload, datetime.now(UTC), datetime.now(UTC)),
+        )
+
+
+def test_raw_reference_json_bounds_fail_closed(
+    library_session: tuple[ArtifactStore, Session],
+) -> None:
+    _store, session = library_session
+    variants = (
+        {"artifact_ids": ["sha256:" + "1" * 64] * 4_097},
+        {"nested": [[[[[[[[[[[[[[[[[None]]]]]]]]]]]]]]]]]},
+        {"padding": "x" * 1_048_576},
+        {f"group_{index}": [None] * 4_000 for index in range(26)},
+    )
+    for index, payload in enumerate(variants):
+        with pytest.raises(IntegrityError, match="artifact JSON reference is invalid"):
+            session.connection().exec_driver_sql(
+                "INSERT INTO jobs (id, kind, status, progress, phase, payload_json, result_json, "
+                "progress_json, queue_priority, attempt, cancellable, created_at, updated_at) "
+                "VALUES (?, 'chat', 'queued', 0, 'queued', ?, '{}', '{}', 0, 0, 1, ?, ?)",
+                (
+                    f"job_over_bound_{index}",
+                    json.dumps(payload),
+                    datetime.now(UTC),
+                    datetime.now(UTC),
+                ),
+            )
+        session.rollback()
+
+
+def test_raw_reference_json_exact_list_and_depth_boundaries_are_accepted(
+    library_session: tuple[ArtifactStore, Session],
+) -> None:
+    store, session = library_session
+    artifact = store.ingest_bytes(
+        session,
+        b"boundary-reference",
+        kind=ArtifactKind.OTHER,
+        media_type="application/octet-stream",
+    )
+    nested: object = None
+    for _ in range(15):
+        nested = [nested]
+    session.commit()
+    payloads = (
+        {"artifact_ids": [artifact.id] * 4_096},
+        {"nested": nested},
+        {"a.key[with].punctuation": artifact.id},
+    )
+    for index, payload in enumerate(payloads):
+        session.connection().exec_driver_sql(
+            "INSERT INTO jobs (id, kind, status, progress, phase, payload_json, result_json, "
+            "progress_json, queue_priority, attempt, cancellable, created_at, updated_at) "
+            "VALUES (?, 'chat', 'queued', 0, 'queued', ?, '{}', '{}', 0, 0, 1, ?, ?)",
+            (
+                f"job_at_bound_{index}",
+                json.dumps(payload),
+                datetime.now(UTC),
+                datetime.now(UTC),
+            ),
+        )
+    session.commit()
+
+
+def test_raw_table_specific_reference_shapes_fail_closed(
+    library_session: tuple[ArtifactStore, Session],
+) -> None:
+    store, session = library_session
+    artifact = store.ingest_bytes(
+        session, b"shape-target", kind=ArtifactKind.OTHER, media_type="application/octet-stream"
+    )
+    chat = Chat(title="Shape")
+    session.add(chat)
+    session.flush()
+    message = Message(chat_id=chat.id, role="user")
+    session.add(message)
+    session.flush()
+    session.add(
+        Run(
+            id="shape_run",
+            chat_id=chat.id,
+            user_message_id="shape_user",
+            assistant_message_id="shape_assistant",
+        )
+    )
+    session.add(WorkStep(id="shape_step", plan_id="shape_plan", ordinal=0, operation="image"))
+    session.add(
+        MessageReference(
+            id="shape_message_reference",
+            message_id=message.id,
+            position=0,
+            reference_subject_id="shape-subject",
+            mention_slug="shape-subject",
+            subject_name="Shape Subject",
+            subject_kind="person",
+        )
+    )
+    session.commit()
+    mutations = (
+        ("UPDATE runs SET settings_json = ? WHERE id = 'shape_run'", '{"mask":"bad"}'),
+        ("UPDATE runs SET settings_json = ? WHERE id = 'shape_run'", '{"mask":{}}'),
+        ("UPDATE work_steps SET input_bindings_json = ? WHERE id = 'shape_step'", "{}"),
+        ("UPDATE work_steps SET input_bindings_json = ? WHERE id = 'shape_step'", "[1]"),
+        (
+            "UPDATE message_references SET artifact_ids_json = ? "
+            "WHERE id = 'shape_message_reference'",
+            "[1]",
+        ),
+        (
+            "UPDATE chats SET scope = 'studio', origin_json = ? WHERE id = ?",
+            '{"source_artifact_id":1}',
+            chat.id,
+        ),
+        (
+            "UPDATE artifacts SET metadata_json = ? WHERE id = ?",
+            '{"poster_artifact_id":1}',
+            artifact.id,
+        ),
+    )
+    for mutation in mutations:
+        sql, *parameters = mutation
+        with pytest.raises(IntegrityError, match="artifact JSON reference is invalid"):
+            session.connection().exec_driver_sql(sql, tuple(parameters))
+        session.rollback()
+
+
+def test_corrupt_legacy_json_blocks_every_artifact_delete(
+    library_session: tuple[ArtifactStore, Session],
+) -> None:
+    store, session = library_session
+    target = store.ingest_bytes(
+        session, b"unrelated-delete", kind=ArtifactKind.OTHER, media_type="application/octet-stream"
+    )
+    session.commit()
+    session.connection().exec_driver_sql("DROP TRIGGER jobs_artifact_reference_insert_guard")
+    session.connection().exec_driver_sql(
+        "INSERT INTO jobs (id, kind, status, progress, phase, payload_json, result_json, "
+        "progress_json, queue_priority, attempt, cancellable, created_at, updated_at) "
+        "VALUES ('legacy_corrupt_job', 'chat', 'queued', 0, 'queued', ?, '{}', '{}', "
+        "0, 0, 1, ?, ?)",
+        ('{"artifact_ids":"' + target.id + '"}', datetime.now(UTC), datetime.now(UTC)),
+    )
+    session.commit()
+
+    with pytest.raises(IntegrityError, match="artifact JSON reference is invalid"):
+        session.connection().exec_driver_sql("DELETE FROM artifacts WHERE id = ?", (target.id,))
+    session.rollback()
+    assert session.get(Artifact, target.id) is not None
+    assert store.resolve(target).is_file()
 
 
 def test_existing_or_same_flush_json_reference_refuses_direct_artifact_delete(

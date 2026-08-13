@@ -10,7 +10,12 @@ from collections.abc import Sequence
 import sqlalchemy as sa
 from alembic import op
 
-from local_lm.artifact_library_schema import CREATE_TRIGGER_SQL, DROP_TRIGGER_SQL
+from local_lm.artifact_library_schema import (
+    AUDIT_TRIGGER_SQL,
+    CREATE_TRIGGER_SQL,
+    DROP_TRIGGER_SQL,
+    PREMIGRATION_INVALID_SQL,
+)
 
 revision: str = "e8a4c1d73b20"
 down_revision: str | None = "c7e1d4a83b56"
@@ -21,9 +26,21 @@ depends_on: str | Sequence[str] | None = None
 def _triggers() -> None:
     for statement in CREATE_TRIGGER_SQL:
         op.execute(statement)
+    for statement in AUDIT_TRIGGER_SQL:
+        op.execute(statement)
+
+
+def _audit_existing_references() -> None:
+    if op.get_bind().exec_driver_sql(PREMIGRATION_INVALID_SQL).scalar_one():
+        raise sa.exc.IntegrityError(
+            "artifact JSON reference is invalid",
+            None,
+            ValueError("artifact JSON reference is invalid"),
+        )
 
 
 def upgrade() -> None:
+    _audit_existing_references()
     op.create_table(
         "artifact_library_entries",
         sa.Column("id", sa.String(length=80), nullable=False),
