@@ -2,8 +2,10 @@ from __future__ import annotations
 
 import json
 import sqlite3
+from concurrent.futures import ThreadPoolExecutor
 from contextlib import closing
 from pathlib import Path
+from threading import Event
 
 import pytest
 from alembic import command
@@ -11,7 +13,8 @@ from alembic.autogenerate import compare_metadata
 from alembic.migration import MigrationContext
 from alembic.script import ScriptDirectory
 from alembic.util.exc import CommandError
-from sqlalchemy import UniqueConstraint, create_engine
+from sqlalchemy import UniqueConstraint, create_engine, event
+from sqlalchemy.engine import Engine
 from sqlalchemy.exc import IntegrityError as SAIntegrityError
 
 from local_lm import db, models  # noqa: F401 - importing registers every table to compare
@@ -177,8 +180,17 @@ def test_artifact_library_entry_migration_backfills_once_and_seals_membership(
         ]
 
 
+@pytest.mark.parametrize(
+    "payload",
+    (
+        '{"artifact_ids":"not-a-list"}',
+        '{"unterminated":',
+        '{"artifact_id":"sha256:' + "f" * 64 + '"}',
+    ),
+)
 def test_artifact_library_migration_refuses_preexisting_corrupt_reference_json(
     tmp_path: Path,
+    payload: str,
 ) -> None:
     settings = Settings(data_dir=tmp_path / "library-entry-corrupt-reference")
     settings.prepare()
@@ -193,9 +205,9 @@ def test_artifact_library_migration_refuses_preexisting_corrupt_reference_json(
               (id, kind, status, progress, phase, payload_json, result_json,
                progress_json, queue_priority, attempt, cancellable, created_at, updated_at)
             VALUES ('corrupt-before-library', 'chat', 'queued', 0, 'queued',
-                    '{"artifact_ids":"not-a-list"}', '{}', '{}', 0, 0, 1, ?, ?)
+                    ?, '{}', '{}', 0, 0, 1, ?, ?)
             """,
-            (stamp, stamp),
+            (payload, stamp, stamp),
         )
 
     with pytest.raises(SAIntegrityError, match="artifact JSON reference is invalid"):
@@ -218,7 +230,121 @@ def test_artifact_library_migration_refuses_preexisting_corrupt_reference_json(
         ).fetchone() == (0,)
         assert connection.execute(
             "SELECT payload_json FROM jobs WHERE id = 'corrupt-before-library'"
-        ).fetchone() == ('{"artifact_ids":"not-a-list"}',)
+        ).fetchone() == (payload,)
+
+
+@pytest.mark.parametrize("original_name", ("x" * 501, "bad\0name"))
+def test_artifact_library_migration_refuses_legacy_names_before_ddl(
+    tmp_path: Path,
+    original_name: str,
+) -> None:
+    settings = Settings(data_dir=tmp_path / "library-entry-invalid-name")
+    settings.prepare()
+    config = alembic_config(settings)
+    command.upgrade(config, "c7e1d4a83b56")
+    database = settings.state_dir / "local-lm.sqlite3"
+    stamp = "2026-08-12 12:00:00"
+    digest = "a" * 64
+    with sqlite3.connect(database) as connection:
+        connection.execute(
+            """
+            INSERT INTO artifacts
+              (id, sha256, kind, media_type, size_bytes, relative_path,
+               original_name, metadata_json, favorite, created_at, updated_at)
+            VALUES ('legacy-invalid-name', ?, 'image', 'image/png', 7, ?, ?, '{}', 0, ?, ?)
+            """,
+            (digest, digest, original_name, stamp, stamp),
+        )
+
+    with pytest.raises(SAIntegrityError, match="artifact JSON reference is invalid"):
+        command.upgrade(config, "head")
+
+    with sqlite3.connect(database) as connection:
+        assert connection.execute("SELECT version_num FROM alembic_version").fetchone() == (
+            "c7e1d4a83b56",
+        )
+        assert (
+            connection.execute(
+                "SELECT name FROM sqlite_master WHERE type = 'table' "
+                "AND name = 'artifact_library_entries'"
+            ).fetchone()
+            is None
+        )
+
+
+def test_artifact_library_migration_fence_blocks_concurrent_dangling_writer(
+    tmp_path: Path,
+) -> None:
+    settings = Settings(data_dir=tmp_path / "library-entry-migration-race")
+    settings.prepare()
+    config = alembic_config(settings)
+    command.upgrade(config, "c7e1d4a83b56")
+    database = settings.state_dir / "local-lm.sqlite3"
+    with sqlite3.connect(database) as connection:
+        connection.execute("PRAGMA journal_mode=WAL")
+
+    audit_started = Event()
+    writer_started = Event()
+    writer_done = Event()
+    writer_was_blocked: list[bool] = []
+
+    def trace(statement: str) -> None:
+        if "SELECT CASE" not in statement or audit_started.is_set():
+            return
+        audit_started.set()
+        if writer_started.wait(5):
+            writer_was_blocked.append(not writer_done.wait(0.2))
+
+    def register_trace(dbapi_connection: object, _record: object) -> None:
+        dbapi_connection.set_trace_callback(trace)  # type: ignore[attr-defined]
+
+    def upgrade() -> None:
+        command.upgrade(config, "head")
+
+    def write_dangling_reference() -> str:
+        assert audit_started.wait(5)
+        writer_started.set()
+        try:
+            with sqlite3.connect(database, timeout=5) as connection:
+                connection.execute(
+                    """
+                    INSERT INTO jobs
+                      (id, kind, status, progress, phase, payload_json, result_json,
+                       progress_json, queue_priority, attempt, cancellable, created_at, updated_at)
+                    VALUES ('migration-race-writer', 'chat', 'queued', 0, 'queued',
+                            ?, '{}', '{}', 0, 0, 1, ?, ?)
+                    """,
+                    (
+                        '{"artifact_id":"sha256:' + "f" * 64 + '"}',
+                        "2026-08-12 12:00:00",
+                        "2026-08-12 12:00:00",
+                    ),
+                )
+        except sqlite3.IntegrityError as error:
+            return str(error)
+        finally:
+            writer_done.set()
+        return "dangling reference committed"
+
+    event.listen(Engine, "connect", register_trace)
+    try:
+        with ThreadPoolExecutor(max_workers=2) as executor:
+            upgrade_result = executor.submit(upgrade)
+            writer_result = executor.submit(write_dangling_reference)
+            upgrade_result.result(timeout=15)
+            outcome = writer_result.result(timeout=15)
+    finally:
+        event.remove(Engine, "connect", register_trace)
+
+    assert writer_was_blocked == [True]
+    assert outcome == "artifact JSON reference is invalid"
+    with sqlite3.connect(database) as connection:
+        assert connection.execute(
+            "SELECT count(*) FROM jobs WHERE id = 'migration-race-writer'"
+        ).fetchone() == (0,)
+        assert connection.execute("SELECT version_num FROM alembic_version").fetchone() == (
+            "e8a4c1d73b20",
+        )
 
 
 def test_unrelated_alembic_command_error_is_not_reclassified(

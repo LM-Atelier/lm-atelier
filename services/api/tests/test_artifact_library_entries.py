@@ -729,6 +729,41 @@ def test_bulk_and_raw_json_writers_are_refused_by_database_authority(
     session.rollback()
 
 
+def test_chat_scope_transition_cannot_activate_unchecked_origin_json(
+    library_session: tuple[ArtifactStore, Session],
+) -> None:
+    _store, session = library_session
+    missing = "sha256:" + "e" * 64
+    bulk_chat = Chat(title="Bulk scope", origin_json={"source_artifact_id": missing})
+    raw_chat = Chat(title="Raw scope")
+    simultaneous_chat = Chat(title="Simultaneous scope")
+    session.add_all((bulk_chat, raw_chat, simultaneous_chat))
+    session.commit()
+    session.connection().exec_driver_sql(
+        "UPDATE chats SET origin_json = ? WHERE id = ?",
+        ('{"source_artifact_id":1}', raw_chat.id),
+    )
+    session.commit()
+
+    with pytest.raises(IntegrityError, match="artifact JSON reference is invalid"):
+        session.execute(update(Chat).where(Chat.id == bulk_chat.id).values(scope="studio"))
+    session.rollback()
+    with pytest.raises(IntegrityError, match="artifact JSON reference is invalid"):
+        session.connection().exec_driver_sql(
+            "UPDATE chats SET scope = 'studio' WHERE id = ?", (raw_chat.id,)
+        )
+    session.rollback()
+    with pytest.raises(IntegrityError, match="artifact JSON reference is invalid"):
+        session.connection().exec_driver_sql(
+            "UPDATE chats SET scope = 'studio', origin_json = ? WHERE id = ?",
+            ('{"source_artifact_id":"' + missing + '"}', simultaneous_chat.id),
+        )
+    session.rollback()
+    assert session.scalars(
+        select(Chat.scope).where(Chat.id.in_((bulk_chat.id, raw_chat.id, simultaneous_chat.id)))
+    ).all() == ["standard", "standard", "standard"]
+
+
 def test_raw_artifact_delete_is_refused_by_committed_json_reference(
     library_session: tuple[ArtifactStore, Session],
 ) -> None:
@@ -893,8 +928,13 @@ def test_raw_table_specific_reference_shapes_fail_closed(
         session.rollback()
 
 
+@pytest.mark.parametrize(
+    "payload",
+    ('{"artifact_ids":"{target}"}', '{"unterminated":'),
+)
 def test_corrupt_legacy_json_blocks_every_artifact_delete(
     library_session: tuple[ArtifactStore, Session],
+    payload: str,
 ) -> None:
     store, session = library_session
     target = store.ingest_bytes(
@@ -907,7 +947,7 @@ def test_corrupt_legacy_json_blocks_every_artifact_delete(
         "progress_json, queue_priority, attempt, cancellable, created_at, updated_at) "
         "VALUES ('legacy_corrupt_job', 'chat', 'queued', 0, 'queued', ?, '{}', '{}', "
         "0, 0, 1, ?, ?)",
-        ('{"artifact_ids":"' + target.id + '"}', datetime.now(UTC), datetime.now(UTC)),
+        (payload.replace("{target}", target.id), datetime.now(UTC), datetime.now(UTC)),
     )
     session.commit()
 

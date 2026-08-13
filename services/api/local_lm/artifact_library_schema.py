@@ -119,13 +119,14 @@ def _optional_id_invalid(expression: str, path: str) -> str:
 
 
 def _list_invalid(expression: str, path: str) -> str:
-    return f"""(
-      json_type({expression}, '{path}') IS NOT NULL AND
-      (json_type({expression}, '{path}') != 'array' OR EXISTS (
+    return f"""CASE
+      WHEN json_type({expression}, '{path}') IS NULL THEN 0
+      WHEN json_type({expression}, '{path}') != 'array' THEN 1
+      WHEN EXISTS (
         SELECT 1 FROM json_each({expression}, '{path}') AS item
         WHERE item.type != 'text' OR length(item.value) NOT BETWEEN 1 AND 80
-      ))
-    )"""
+      ) THEN 1
+      ELSE 0 END"""
 
 
 def _job_invalid(expression: str) -> str:
@@ -169,14 +170,15 @@ def _run_invalid(settings: str, provenance: str) -> str:
             _mask_invalid(settings),
             _list_invalid(provenance, "$.input_artifact_ids"),
             _list_invalid(provenance, "$.resolved_dependency_artifact_ids"),
-            f"""(
-              json_type({provenance}, '$.outputs') IS NOT NULL AND
-              (json_type({provenance}, '$.outputs') != 'array' OR
-               {_array_items_not_objects(provenance, "$.outputs")} OR EXISTS (
+            f"""CASE
+              WHEN json_type({provenance}, '$.outputs') IS NULL THEN 0
+              WHEN json_type({provenance}, '$.outputs') != 'array' THEN 1
+              WHEN {_array_items_not_objects(provenance, "$.outputs")} THEN 1
+              WHEN EXISTS (
                  SELECT 1 FROM json_each({provenance}, '$.outputs') AS output
                  WHERE {output_ids}
-               )))
-            """,
+               ) THEN 1
+              ELSE 0 END""",
         )
     )
 
@@ -282,16 +284,21 @@ def _json_write_triggers(
     *,
     when: str | None = None,
 ) -> tuple[str, str]:
-    invalid = [
-        *(_common_invalid(f"NEW.{column}", root_type) for column, root_type in columns),
-        *_table_invalid(table, "NEW"),
+    structural_invalid = [
+        _common_invalid(f"NEW.{column}", root_type) for column, root_type in columns
     ]
+    semantic_invalid = list(_table_invalid(table, "NEW"))
+    invalid = (
+        f"CASE WHEN {' OR '.join(structural_invalid)} THEN 1 "
+        f"WHEN {' OR '.join(semantic_invalid)} THEN 1 ELSE 0 END"
+    )
     references = _reference_values(table, "NEW")
     column_names = tuple(column for column, _ in columns)
+    watched_columns = (*column_names, "scope") if table == "chats" else column_names
     when_sql = f"WHEN {when}\n" if when else ""
     body = (
         f"{when_sql}BEGIN\n"
-        f"  SELECT CASE WHEN {' OR '.join(invalid)}\n"
+        f"  SELECT CASE WHEN {invalid}\n"
         "    THEN RAISE(ABORT, 'artifact JSON reference is invalid') END;\n"
         "  SELECT CASE WHEN EXISTS (\n"
         f"    SELECT 1 FROM ({references}) AS reference\n"
@@ -302,7 +309,7 @@ def _json_write_triggers(
     return (
         f"CREATE TRIGGER {table}_artifact_reference_insert_guard\nBEFORE INSERT ON {table}\n{body}",
         f"CREATE TRIGGER {table}_artifact_reference_update_guard\n"
-        f"BEFORE UPDATE OF {', '.join(column_names)} ON {table}\n{body}",
+        f"BEFORE UPDATE OF {', '.join(watched_columns)} ON {table}\n{body}",
     )
 
 
@@ -322,12 +329,16 @@ JSON_WRITE_TRIGGER_SQL = (
 def _stored_json_invalid() -> str:
     checks = []
     for table, columns in _TABLE_COLUMNS.items():
-        invalid = [
-            *(_common_invalid(f"{table}.{column}", root_type) for column, root_type in columns),
-            *_table_invalid(table, table),
+        structural_invalid = [
+            _common_invalid(f"{table}.{column}", root_type) for column, root_type in columns
         ]
+        semantic_invalid = list(_table_invalid(table, table))
+        invalid = (
+            f"CASE WHEN {' OR '.join(structural_invalid)} THEN 1 "
+            f"WHEN {' OR '.join(semantic_invalid)} THEN 1 ELSE 0 END"
+        )
         scope = "scope = 'studio' AND " if table == "chats" else ""
-        checks.append(f"EXISTS (SELECT 1 FROM {table} WHERE {scope}({' OR '.join(invalid)}))")
+        checks.append(f"EXISTS (SELECT 1 FROM {table} WHERE {scope}({invalid}))")
     return " OR\n    ".join(checks)
 
 
@@ -344,10 +355,15 @@ def _stored_reference_missing() -> str:
     return " OR\n    ".join(checks)
 
 
-PREMIGRATION_INVALID_SQL = f"""SELECT CASE WHEN
-  {_stored_json_invalid()} OR
-  {_stored_reference_missing()}
-  THEN 1 ELSE 0 END
+PREMIGRATION_INVALID_SQL = f"""SELECT CASE
+  WHEN {_stored_json_invalid()} THEN 1
+  WHEN {_stored_reference_missing()} THEN 1
+  WHEN EXISTS (
+    SELECT 1 FROM artifacts
+    WHERE kind IN ('image', 'video') AND original_name IS NOT NULL
+      AND (length(trim(original_name)) > 500 OR instr(original_name, char(0)) != 0)
+  ) THEN 1
+  ELSE 0 END
 """
 
 

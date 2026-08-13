@@ -39,7 +39,19 @@ def _audit_existing_references() -> None:
         )
 
 
+def _begin_write_fence() -> None:
+    connection = op.get_bind()
+    if connection.dialect.name != "sqlite":
+        return
+    driver = connection.connection.driver_connection
+    if not bool(getattr(driver, "in_transaction", False)):
+        connection.exec_driver_sql("BEGIN IMMEDIATE")
+    else:
+        connection.exec_driver_sql("UPDATE alembic_version SET version_num = version_num")
+
+
 def upgrade() -> None:
+    _begin_write_fence()
     _audit_existing_references()
     op.create_table(
         "artifact_library_entries",
