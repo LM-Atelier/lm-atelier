@@ -76,6 +76,14 @@ describe("Media Library EntryV1 response boundary", () => {
     rejects(page([item(), item("b")]), 1);
   });
 
+  it("accepts the backend cursor maximum and refuses segment overflow", () => {
+    const maximumCursor = `${"a".repeat(1600)}.${"b".repeat(43)}`;
+    expect(parseArtifactLibraryPage(page([item()], maximumCursor), 1).next_cursor)
+      .toBe(maximumCursor);
+    rejects(page([item()], `${"a".repeat(1601)}.${"b".repeat(43)}`), 1);
+    rejects(page([item()], `${"a".repeat(1600)}.${"b".repeat(44)}`), 1);
+  });
+
   it("is total for hostile non-JSON objects", () => {
     const accessor = Object.create(Object.prototype, {
       items: { get: () => { throw new Error("private marker"); }, enumerable: true },

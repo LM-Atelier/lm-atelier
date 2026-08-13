@@ -15,6 +15,7 @@ const ITEM_KEYS = [
 
 const DIGEST = /^[0-9a-f]{64}$/;
 const CURSOR = /^[A-Za-z0-9_-]{1,1600}\.[A-Za-z0-9_-]{43}$/;
+const CURSOR_MAX_LENGTH = 1600 + 1 + 43;
 const TIMESTAMP = /^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2}):(\d{2})(?:\.(\d{1,6}))?(Z|[+-]\d{2}:\d{2})?$/;
 
 export const ARTIFACT_LIBRARY_PAGE_ERROR = "The Media Library response was invalid.";
@@ -163,7 +164,7 @@ export function parseArtifactLibraryPage(value: unknown, requestedLimit: number)
   if (ids.size !== items.length) invalid();
   const nextCursor = record.next_cursor === null
     ? null
-    : boundedString(record.next_cursor, 1, 1600);
+    : boundedString(record.next_cursor, 1, CURSOR_MAX_LENGTH);
   if (nextCursor !== null && (!CURSOR.test(nextCursor) || items.length !== requestedLimit)) invalid();
   return Object.freeze({ items: Object.freeze(items) as ArtifactLibraryEntry[], next_cursor: nextCursor });
 }
