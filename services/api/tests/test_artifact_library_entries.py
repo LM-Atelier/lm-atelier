@@ -32,7 +32,9 @@ from local_lm.models import (
     Job,
     Message,
     MessagePart,
+    MessageReference,
     Run,
+    WorkPlan,
     WorkStep,
 )
 
@@ -256,10 +258,8 @@ def test_corrupt_reference_json_aborts_retention_with_fixed_text(
 ) -> None:
     _store, session = library_session
     session.add(Job(payload_json={"artifact_ids": "not-a-list"}, result_json={}))
-    session.flush()
-
     with pytest.raises(ArtifactReferenceDataError, match=f"^{REFERENCE_CORRUPT}$"):
-        referenced_artifact_ids(session)
+        session.flush()
 
 
 def test_reference_row_cap_fails_before_parsing(
@@ -282,23 +282,33 @@ def test_reference_row_cap_fails_before_parsing(
 def test_job_reference_parser_is_bounded_and_keeps_exact_fields(
     library_session: tuple[ArtifactStore, Session],
 ) -> None:
-    _store, session = library_session
+    store, session = library_session
+    first = store.ingest_bytes(
+        session, b"job-input", kind=ArtifactKind.OTHER, media_type="application/octet-stream"
+    )
+    second = store.ingest_bytes(
+        session, b"job-source", kind=ArtifactKind.OTHER, media_type="application/octet-stream"
+    )
     session.add(
         Job(
-            payload_json={"input_artifact_ids": ["sha256:" + "1" * 64]},
-            result_json={"nested": {"source_artifact_id": "sha256:" + "2" * 64}},
+            payload_json={"input_artifact_ids": [first.id]},
+            result_json={"nested": {"source_artifact_id": second.id}},
         )
     )
     session.flush()
-    assert {"sha256:" + "1" * 64, "sha256:" + "2" * 64} <= referenced_artifact_ids(session)
+    assert {first.id, second.id} <= referenced_artifact_ids(session)
 
 
 def test_run_and_ordered_step_masks_are_strong_references(
     library_session: tuple[ArtifactStore, Session],
 ) -> None:
-    _store, session = library_session
-    run_mask = "sha256:" + "3" * 64
-    step_mask = "sha256:" + "4" * 64
+    store, session = library_session
+    run_mask = store.ingest_bytes(
+        session, b"run-mask", kind=ArtifactKind.INPUT, media_type="image/png"
+    ).id
+    step_mask = store.ingest_bytes(
+        session, b"step-mask", kind=ArtifactKind.INPUT, media_type="image/png"
+    ).id
     session.add(
         Run(
             id="run_mask_reference",
@@ -335,10 +345,8 @@ def test_corrupt_mask_reference_fails_closed(
             settings_json={"mask": "not-an-object"},
         )
     )
-    session.flush()
-
     with pytest.raises(ArtifactReferenceDataError, match=f"^{REFERENCE_CORRUPT}$"):
-        referenced_artifact_ids(session)
+        session.flush()
 
 
 def test_low_level_delete_rechecks_membership_authority(
@@ -357,7 +365,7 @@ def test_low_level_delete_rechecks_membership_authority(
     assert session.get(type(artifact), artifact.id) is artifact
 
 
-def test_entry_deletion_never_deletes_artifact_bytes(
+def test_entry_deletion_is_refused_and_never_releases_artifact_bytes(
     library_session: tuple[ArtifactStore, Session],
 ) -> None:
     store, session = library_session
@@ -372,9 +380,19 @@ def test_entry_deletion_never_deletes_artifact_bytes(
         store.delete_library_artifact(session, artifact)
 
     session.delete(entry)
-    session.commit()
-    assert session.scalars(select(ArtifactLibraryEntry)).all() == []
+    with pytest.raises(IntegrityError, match="deletion is not authorized"):
+        session.commit()
+    session.rollback()
+    assert session.scalars(select(ArtifactLibraryEntry)).all() == [entry]
     assert session.get(type(artifact), artifact.id) is artifact
+    assert store.resolve(artifact).exists()
+
+    with pytest.raises(IntegrityError, match="deletion is not authorized"):
+        session.connection().exec_driver_sql(
+            "DELETE FROM artifact_library_entries WHERE id = ?", (entry.id,)
+        )
+    session.rollback()
+    assert session.get(ArtifactLibraryEntry, entry.id) is not None
     assert store.resolve(artifact).exists()
 
 
@@ -476,4 +494,130 @@ def test_delete_write_fence_prevents_a_concurrent_reference_commit(
     with Session(engine) as session:
         assert session.get(Artifact, artifact_id) is None
         assert session.scalars(select(MessagePart)).all() == []
+    engine.dispose()
+
+
+@pytest.mark.parametrize(
+    "reference_kind",
+    ["job", "run", "work_step", "message_reference", "chat_origin"],
+)
+def test_delete_write_fence_rejects_late_json_reference_writers(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    reference_kind: str,
+) -> None:
+    settings = Settings(
+        data_dir=tmp_path / reference_kind,
+        database_url=f"sqlite:///{tmp_path / reference_kind}.sqlite3",
+    )
+    settings.prepare()
+    engine = create_database_engine(settings)
+    Base.metadata.create_all(engine)
+    store = ArtifactStore(settings)
+    with Session(engine, expire_on_commit=False) as seed:
+        artifact = store.ingest_bytes(
+            seed, b"json-fenced", kind=ArtifactKind.OTHER, media_type="application/octet-stream"
+        )
+        chat = Chat(title="Fence")
+        seed.add(chat)
+        seed.flush()
+        user = Message(chat_id=chat.id, role="user")
+        assistant = Message(chat_id=chat.id, role="assistant")
+        seed.add_all((user, assistant))
+        seed.flush()
+        plan = WorkPlan(chat_id=chat.id, transcript_sequence=1)
+        seed.add(plan)
+        seed.commit()
+        artifact_id = artifact.id
+        chat_id = chat.id
+        user_id = user.id
+        assistant_id = assistant.id
+        plan_id = plan.id
+
+    scanned = Event()
+    writer_started = Event()
+    release_delete = Event()
+    original = store.referenced_artifact_ids
+
+    def paused_references(session: Session) -> set[str]:
+        found = original(session)
+        scanned.set()
+        assert release_delete.wait(5)
+        return found
+
+    monkeypatch.setattr(store, "referenced_artifact_ids", paused_references)
+
+    def delete() -> None:
+        with Session(engine) as session:
+            owned = session.get(Artifact, artifact_id)
+            assert owned is not None
+            store._delete_artifact(session, owned)
+            session.commit()
+
+    def reference() -> str:
+        assert scanned.wait(5)
+        with Session(engine) as session:
+            if reference_kind == "job":
+                session.add(Job(payload_json={"artifact_id": artifact_id}))
+            elif reference_kind == "run":
+                session.add(
+                    Run(
+                        chat_id=chat_id,
+                        user_message_id=user_id,
+                        assistant_message_id=assistant_id,
+                        settings_json={"mask": {"artifact_id": artifact_id}},
+                    )
+                )
+            elif reference_kind == "work_step":
+                session.add(
+                    WorkStep(
+                        plan_id=plan_id,
+                        ordinal=0,
+                        operation="image_edit",
+                        input_bindings_json=[{"artifact_id": artifact_id}],
+                    )
+                )
+            elif reference_kind == "message_reference":
+                session.add(
+                    MessageReference(
+                        message_id=user_id,
+                        position=0,
+                        reference_subject_id="historical-subject",
+                        mention_slug="historical-subject",
+                        subject_name="Historical Subject",
+                        subject_kind="person",
+                        artifact_ids_json=[artifact_id],
+                    )
+                )
+            else:
+                chat = session.get(Chat, chat_id)
+                assert chat is not None
+                chat.scope = "studio"
+                chat.origin_json = {"source_artifact_id": artifact_id}
+            writer_started.set()
+            try:
+                session.commit()
+            except ArtifactReferenceDataError:
+                session.rollback()
+                return "refused"
+        return "committed"
+
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        deleting = pool.submit(delete)
+        referencing = pool.submit(reference)
+        assert writer_started.wait(5)
+        release_delete.set()
+        deleting.result(timeout=10)
+        assert referencing.result(timeout=10) == "refused"
+
+    with Session(engine) as session:
+        assert session.get(Artifact, artifact_id) is None
+        assert session.scalars(select(Job)).all() == []
+        assert session.scalars(select(Run)).all() == []
+        assert session.scalars(select(WorkStep)).all() == []
+        assert session.scalars(select(MessageReference)).all() == []
+        stored_chat = session.get(Chat, chat_id)
+        assert stored_chat is not None
+        assert stored_chat.scope == "standard"
+        assert stored_chat.origin_json == {}
     engine.dispose()

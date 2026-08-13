@@ -5,7 +5,7 @@ from __future__ import annotations
 from collections.abc import Mapping
 from typing import Any, NoReturn, cast
 
-from sqlalchemy import func, select, update
+from sqlalchemy import event, func, select, update
 from sqlalchemy.dialects.sqlite import insert
 from sqlalchemy.engine import CursorResult
 from sqlalchemy.orm import Session
@@ -223,6 +223,61 @@ def _job_ids(value: object, *, depth: int = 0, budget: list[int] | None = None) 
     elif value is not None and not isinstance(value, str | int | float | bool):
         _fail()
     return found
+
+
+def _pending_json_reference_ids(session: Session) -> set[str]:
+    """Parse every new or changed JSON reference producer before it is written."""
+
+    found: set[str] = set()
+
+    def retain(values: set[str]) -> None:
+        found.update(values)
+        if len(found) > MAX_REFERENCE_VALUES:
+            _fail()
+
+    for value in session.new.union(session.dirty):
+        if isinstance(value, MessageReference):
+            retain(_ids(value.artifact_ids_json or []))
+        elif isinstance(value, Run):
+            retain(_run_ids(value.provenance_json or {}))
+            retain(_settings_ids(value.settings_json or {}))
+        elif isinstance(value, WorkStep):
+            retain(_work_step_ids(value.input_bindings_json or []))
+            retain(_settings_ids(value.settings_json or {}))
+        elif isinstance(value, Chat) and value.scope == "studio":
+            retain(_optional_id(_mapping(value.origin_json).get("source_artifact_id")))
+        elif isinstance(value, Job):
+            retain(_job_ids(value.payload_json or {}))
+            retain(_job_ids(value.result_json or {}))
+        elif isinstance(value, Artifact):
+            metadata = _mapping(value.metadata_json or {})
+            for key in ("poster_artifact_id", "browser_proxy_artifact_id"):
+                if key in metadata:
+                    retain(_optional_id(metadata[key]))
+    return found
+
+
+@event.listens_for(Session, "before_flush")
+def _guard_json_reference_writes(
+    session: Session,
+    _flush_context: object,
+    _instances: object,
+) -> None:
+    """Serialize JSON reference publication with deletion and refuse dangling ids."""
+
+    referenced = _pending_json_reference_ids(session)
+    if not referenced:
+        return
+    begin_artifact_write_fence(session)
+    deleted = {value.id for value in session.deleted if isinstance(value, Artifact)}
+    available = {
+        value.id for value in session.new if isinstance(value, Artifact) and value.id not in deleted
+    }
+    available.update(
+        session.scalars(select(Artifact.id).where(Artifact.id.in_(sorted(referenced)))).all()
+    )
+    if referenced - available:
+        raise ArtifactReferenceDataError(REFERENCE_CORRUPT)
 
 
 def referenced_artifact_ids(session: Session) -> set[str]:

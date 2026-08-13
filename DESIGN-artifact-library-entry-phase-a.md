@@ -59,13 +59,15 @@ Corrupt JSON aborts retention with fixed text: `Stored artifact reference data i
 
 Visible or recoverable/trashed membership pins bytes even without favorites or message parts.
 Destructive paths take a SQLite writer reservation before reference proof and row deletion.
+Every ORM JSON-reference writer takes the same reservation and rechecks each referenced
+Artifact before flush, so a delete and a reference publication cannot both commit.
 
 ## Delete authority
 
 | Caller | Behavior |
 | --- | --- |
 | User `DELETE /api/artifacts/{id}` | 409 `artifact-in-use` if membership exists (Phase A) |
-| internal artifact deletion | refuses whenever membership exists; no release boolean exists |
+| internal artifact deletion | refuses whenever membership exists; entry DELETE is DB-sealed |
 | chat-generated media cleanup | preserves published entries and bytes |
 | setup verification cleanup | setup output is never published; clears exact DB refs before deleting unpublished bytes |
 

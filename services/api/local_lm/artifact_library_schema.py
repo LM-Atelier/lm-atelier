@@ -44,13 +44,23 @@ BEGIN
 END
 """
 
+ENTRY_DELETE_TRIGGER = """
+CREATE TRIGGER artifact_library_entry_delete_guard
+BEFORE DELETE ON artifact_library_entries
+BEGIN
+  SELECT RAISE(ABORT, 'artifact library entry deletion is not authorized');
+END
+"""
+
 CREATE_TRIGGER_SQL = (
     ENTRY_INSERT_TRIGGER,
     ENTRY_UPDATE_TRIGGER,
     ARTIFACT_UPDATE_TRIGGER,
+    ENTRY_DELETE_TRIGGER,
 )
 
 DROP_TRIGGER_SQL = (
+    "DROP TRIGGER IF EXISTS artifact_library_entry_delete_guard",
     "DROP TRIGGER IF EXISTS artifact_library_artifact_update_guard",
     "DROP TRIGGER IF EXISTS artifact_library_entry_update_guard",
     "DROP TRIGGER IF EXISTS artifact_library_entry_insert_guard",
