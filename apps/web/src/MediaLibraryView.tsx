@@ -16,8 +16,19 @@ const PAGE_LIMIT = 20;
 const LIBRARY_UNAVAILABLE = "The Media Library could not be loaded safely. Refresh and try again.";
 const MAX_QUERY_CODE_POINTS = 200;
 
-function boundedQuery(value: string): string {
-  return Array.from(value).slice(0, MAX_QUERY_CODE_POINTS).join("");
+function boundedQuery(value: string): string | null {
+  let result = "";
+  let count = 0;
+  for (const character of value) {
+    const code = character.codePointAt(0);
+    if (code === undefined || (character.length === 1 && code >= 0xd800 && code <= 0xdfff)) {
+      return null;
+    }
+    if (count === MAX_QUERY_CODE_POINTS) break;
+    result += character;
+    count += 1;
+  }
+  return result;
 }
 
 export function MediaLibraryView({
@@ -91,10 +102,13 @@ export function MediaLibraryView({
             aria-label="Search media"
             placeholder="Search display names"
             value={filters.query}
-            onChange={(event) => replaceFilters({
-              ...filters,
-              query: boundedQuery(event.target.value),
-            })}
+            maxLength={MAX_QUERY_CODE_POINTS * 2}
+            onChange={(event) => {
+              const query = boundedQuery(event.currentTarget.value);
+              event.currentTarget.value = query ?? filters.query;
+              if (query === null || query === filters.query) return;
+              replaceFilters({ ...filters, query });
+            }}
           />
         </div>
         <select

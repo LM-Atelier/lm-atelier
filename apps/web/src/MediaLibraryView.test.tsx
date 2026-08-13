@@ -80,8 +80,18 @@ describe("EntryV1 Media Library feed", () => {
     await screen.findByText("No media matches these filters");
 
     const input = screen.getByRole("textbox", { name: "Search media" });
-    fireEvent.change(input, { target: { value: "😀".repeat(201) } });
-    expect(input).toHaveValue("😀".repeat(200));
+    const maximum = "\u{1F600}".repeat(200);
+    fireEvent.change(input, { target: { value: maximum } });
+    expect(input).toHaveValue(maximum);
+    await waitFor(() => expect(api.artifactLibrary).toHaveBeenCalledTimes(2));
+
+    fireEvent.change(input, { target: { value: maximum + "x".repeat(1_000_000) } });
+    expect(input).toHaveValue(maximum);
+    expect(api.artifactLibrary).toHaveBeenCalledTimes(2);
+
+    fireEvent.change(input, { target: { value: "\ud800private" } });
+    expect(input).toHaveValue(maximum);
+    expect(api.artifactLibrary).toHaveBeenCalledTimes(2);
   });
 
   it("loads a cursor page, states truncation, and preserves exact cursor order", async () => {
