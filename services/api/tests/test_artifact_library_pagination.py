@@ -231,6 +231,69 @@ async def test_corrupt_selected_lookahead_or_anchor_fails_without_partial_items(
     assert "private" not in corrupt_anchor.text
 
 
+async def test_noncanonical_artifact_id_and_alias_path_fail_closed(
+    client: AsyncClient,
+) -> None:
+    now = datetime(2026, 8, 12, 14, 45, tzinfo=UTC)
+    digest = "a" * 64
+    with db.SessionLocal() as session:
+        session.add(
+            Artifact(
+                id="not-content-addressed",
+                sha256=digest,
+                kind=ArtifactKind.IMAGE.value,
+                media_type="image/png",
+                size_bytes=10,
+                relative_path=f"aa/aa/{digest}",
+                original_name="private-noncanonical-name.png",
+                metadata_json={"private": "noncanonical-marker"},
+                created_at=now,
+                updated_at=now,
+            )
+        )
+        session.flush()
+        session.add(
+            ArtifactLibraryEntry(
+                id=f"libentry:sha256:{digest}",
+                artifact_id="not-content-addressed",
+                display_name="Noncanonical item",
+                favorite=False,
+                state="visible",
+                version=1,
+                created_at=now,
+                updated_at=now,
+            )
+        )
+        session.commit()
+
+    invalid_id = await client.get("/api/artifact-library")
+    assert invalid_id.status_code == 409
+    assert invalid_id.json()["code"] == "artifact-library-conflict"
+    assert "not-content-addressed" not in invalid_id.text
+    assert "noncanonical-marker" not in invalid_id.text
+
+    with db.SessionLocal() as session:
+        session.execute(text("DROP TRIGGER artifact_library_entry_delete_guard"))
+        entry = session.get(ArtifactLibraryEntry, f"libentry:sha256:{digest}")
+        assert entry is not None
+        session.delete(entry)
+        artifact = session.get(Artifact, "not-content-addressed")
+        assert artifact is not None
+        session.delete(artifact)
+        session.commit()
+    valid_entry, valid_artifact = _add_entry(27, now)
+    with db.SessionLocal() as session:
+        artifact = session.get(Artifact, valid_artifact)
+        assert artifact is not None
+        artifact.relative_path = f"alias/{artifact.sha256}"
+        session.commit()
+    invalid_path = await client.get("/api/artifact-library")
+    assert invalid_path.status_code == 409
+    assert invalid_path.json()["code"] == "artifact-library-conflict"
+    assert valid_entry not in invalid_path.text
+    assert "alias" not in invalid_path.text
+
+
 async def test_cursor_page_uses_one_snapshot_and_performs_no_writes_or_file_reads(
     client: AsyncClient,
     monkeypatch: pytest.MonkeyPatch,

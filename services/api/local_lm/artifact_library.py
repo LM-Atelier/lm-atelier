@@ -228,6 +228,9 @@ def _validate_library_row(entry: ArtifactLibraryEntry, artifact: Artifact) -> No
         or entry.artifact_id != artifact.id
         or not isinstance(artifact.sha256, str)
         or not _SHA256.fullmatch(artifact.sha256)
+        or artifact.id != f"sha256:{artifact.sha256}"
+        or artifact.relative_path
+        != f"{artifact.sha256[:2]}/{artifact.sha256[2:4]}/{artifact.sha256}"
         or entry.id != f"libentry:sha256:{artifact.sha256}"
         or not isinstance(entry.display_name, str)
         or not (1 <= len(entry.display_name) <= 500)
