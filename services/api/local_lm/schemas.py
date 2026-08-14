@@ -1247,6 +1247,14 @@ class RegistryInstallOut(ApiModel):
     manifest_sha256: str
     wheel_closure_sha256: str | None
     wheel_environment_sha256: str | None
+    disk_status: Literal[
+        "ready",
+        "node_files_missing",
+        "wheel_environment_missing",
+        "files_missing",
+    ]
+    node_files_present: bool
+    wheel_environment_present: bool
     trusted: bool
     active: bool
     reviewed_at: str | None
