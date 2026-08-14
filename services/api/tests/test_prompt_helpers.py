@@ -8,7 +8,7 @@ from sqlalchemy import select
 
 from local_lm.adapters.base import ChatRequest
 from local_lm.db import SessionLocal
-from local_lm.models import Artifact, Chat, Job, Run, WorkPlan
+from local_lm.models import Artifact, ArtifactLibraryEntry, Chat, Job, Run, WorkPlan
 from local_lm.prompt_helpers import (
     PROMPT_HELPER_SCOPE,
     STANDARD_CHAT_SCOPE,
@@ -197,8 +197,10 @@ async def test_prompt_helper_preview_uses_media_queue_and_cleanup(client: AsyncC
         assert job is not None
         assert job.queue_resource == "media_compute"
         assert session.scalars(select(Artifact)).all()
+        assert session.scalars(select(ArtifactLibraryEntry)).all() == []
 
     assert (await client.delete(f"/api/prompt-helpers/{helper['id']}")).status_code == 204
     with SessionLocal() as session:
         assert session.get(Chat, helper["id"]) is None
         assert session.scalars(select(Artifact)).all() == []
+        assert session.scalars(select(Job)).all() == []

@@ -16,6 +16,7 @@ from local_lm.hardware import hardware_capability_class
 from local_lm.model_planner import ACTIVATION_PROBE_VERSION, LAUNCH_CONTRACT_VERSION
 from local_lm.models import (
     Artifact,
+    ArtifactLibraryEntry,
     Chat,
     Job,
     Message,
@@ -212,6 +213,7 @@ async def test_setup_verification_uses_isolated_queue_and_cleans_everything(
             session.scalars(select(Chat).where(Chat.scope == SETUP_VERIFICATION_SCOPE)).all() == []
         )
         assert session.scalars(select(Artifact)).all() == []
+        assert session.scalars(select(ArtifactLibraryEntry)).all() == []
         assert session.scalars(select(Job)).all() == []
 
 

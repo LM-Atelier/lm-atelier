@@ -1,13 +1,17 @@
 from __future__ import annotations
 
 import asyncio
+import base64
+import csv
 import hashlib
 import hmac
+import io
 import json
 import os
 import shutil
 import stat
 import tempfile
+import unicodedata
 import zipfile
 from collections.abc import Mapping, Sequence
 from contextlib import suppress
@@ -40,6 +44,7 @@ MAX_REGISTRY_WHEEL_ENVIRONMENT_BYTES = 32 * 1024 * 1024 * 1024
 MAX_REGISTRY_WHEEL_METADATA_FILE_BYTES = 1024 * 1024
 MAX_REGISTRY_WHEEL_ENVIRONMENT_MANIFEST_BYTES = 16 * 1024 * 1024
 MAX_REGISTRY_WHEEL_ARCHIVE_PATH_CHARACTERS = 1_000
+MAX_REGISTRY_WHEEL_ARCHIVE_COMPONENT_CHARACTERS = 255
 MAX_REGISTRY_WHEEL_EXPANSION_RATIO = 200
 # The ratio only means anything once an entry is big enough to matter. A
 # decompression bomb is dangerous because of what it expands *to*, not because
@@ -56,6 +61,17 @@ MAX_REGISTRY_WHEEL_UNCHECKED_ENTRY_BYTES = 64 * 1024 * 1024
 WHEEL_HASH_CHUNK_BYTES = 1024 * 1024
 WHEEL_INSTALL_TIMEOUT_SECONDS = 600
 _DIGEST_CHARACTERS = frozenset("0123456789abcdefABCDEF")
+WHEEL_OWNERSHIP_ATTESTATION = "wheel-source-record-v1"
+REGISTRY_WHEEL_ENVIRONMENT_PREFIX = "registry-wheels-v3-"
+_GENERATED_DISTRIBUTION_FILES = ("INSTALLER", "REQUESTED", "direct_url.json")
+_RESERVED_WINDOWS_NAMES = {
+    "CON",
+    "PRN",
+    "AUX",
+    "NUL",
+    *(f"COM{index}" for index in range(1, 10)),
+    *(f"LPT{index}" for index in range(1, 10)),
+}
 
 
 class ComfyRegistryWheelEnvironmentError(ValueError):
@@ -80,6 +96,25 @@ class ComfyRegistryWheelEnvironmentReport:
     total_bytes: int
     distributions: tuple[ComfyRegistryWheelEnvironmentDistribution, ...]
     runtime_distributions: tuple[ComfyRegistryRuntimeDistribution, ...] = ()
+
+
+@dataclass(frozen=True, slots=True)
+class _PlannedInstalledFile:
+    path: str
+    source_path: str
+    size_bytes: int
+    sha256: str
+
+
+@dataclass(frozen=True, slots=True)
+class _WheelOwnership:
+    record_path: str
+    files: tuple[_PlannedInstalledFile, ...]
+
+
+@dataclass(frozen=True, slots=True)
+class _WheelOwnershipPlan:
+    wheels: tuple[_WheelOwnership, ...]
 
 
 async def assemble_comfy_registry_wheel_environment(
@@ -119,7 +154,9 @@ async def assemble_comfy_registry_wheel_environment(
         site_packages = staging / "site-packages"
         site_packages.mkdir()
         wheel_staging = staging / "wheels"
-        staged_wheels = await asyncio.to_thread(_stage_wheels, wheels, wheel_staging)
+        staged_wheels, ownership_plan = await asyncio.to_thread(
+            _stage_wheels, wheels, wheel_staging
+        )
         if staged_wheels:
             await _run_pip(executable, staged_wheels, site_packages)
         await asyncio.to_thread(_remove_staged_wheels, wheel_staging)
@@ -128,6 +165,7 @@ async def assemble_comfy_registry_wheel_environment(
             closure,
             artifacts,
             site_packages,
+            ownership_plan,
         )
         _write_new(staging / "environment-manifest.json", encoded)
         if destination.exists() or destination.is_symlink():
@@ -154,7 +192,13 @@ def verify_comfy_registry_wheel_environment(
     """Revalidate a published inert overlay without importing from it."""
     closure_sha256 = _digest(expected_closure_sha256, "closure")
     environment_sha256 = _digest(expected_environment_sha256, "environment")
-    expected_name = f"registry-wheels-{closure_sha256}"
+    legacy_name = f"registry-wheels-{closure_sha256}"
+    expected_name = f"{REGISTRY_WHEEL_ENVIRONMENT_PREFIX}{closure_sha256}"
+    if isinstance(destination, Path) and destination.name == legacy_name:
+        raise ComfyRegistryWheelEnvironmentError(
+            "legacy_environment_manifest",
+            "Legacy wheel environments must be renewed before use",
+        )
     if (
         not isinstance(destination, Path)
         or destination.name != expected_name
@@ -191,45 +235,45 @@ def verify_comfy_registry_wheel_environment(
         raise ComfyRegistryWheelEnvironmentError(
             "invalid_environment_manifest", "Wheel environment manifest is invalid"
         ) from exc
-    if not isinstance(payload, dict) or frozenset(payload) not in {
-        frozenset(
-            {
-                "version",
-                "closure_sha256",
-                "artifact_count",
-                "file_count",
-                "total_bytes",
-                "distributions",
-                "inventory",
-            }
-        ),
-        frozenset(
-            {
-                "version",
-                "closure_sha256",
-                "artifact_count",
-                "file_count",
-                "total_bytes",
-                "distributions",
-                "runtime_distributions",
-                "inventory",
-            }
-        ),
-    }:
+    if (
+        isinstance(payload, dict)
+        and type(payload.get("version")) is int
+        and payload["version"]
+        in {
+            1,
+            2,
+        }
+    ):
+        raise ComfyRegistryWheelEnvironmentError(
+            "legacy_environment_manifest",
+            "Legacy wheel environments must be renewed before use",
+        )
+    required_fields = {
+        "version",
+        "ownership_attestation",
+        "closure_sha256",
+        "artifact_count",
+        "file_count",
+        "total_bytes",
+        "distributions",
+        "runtime_distributions",
+        "inventory",
+    }
+    if not isinstance(payload, dict) or set(payload) != required_fields:
         raise ComfyRegistryWheelEnvironmentError(
             "invalid_environment_manifest", "Wheel environment manifest shape is invalid"
         )
     artifact_count = _count(payload["artifact_count"], "artifact")
-    version = payload["version"]
     if (
-        version not in {1, 2}
-        or (version == 1) != ("runtime_distributions" not in payload)
+        type(payload["version"]) is not int
+        or payload["version"] != 3
+        or payload["ownership_attestation"] != WHEEL_OWNERSHIP_ATTESTATION
         or payload["closure_sha256"] != closure_sha256
     ):
         raise ComfyRegistryWheelEnvironmentError(
             "invalid_environment_manifest", "Wheel environment manifest identity is invalid"
         )
-    runtime_value = payload.get("runtime_distributions", [])
+    runtime_value = payload["runtime_distributions"]
     if not isinstance(runtime_value, list):
         raise ComfyRegistryWheelEnvironmentError(
             "invalid_environment_manifest",
@@ -360,10 +404,12 @@ def _wheel_inputs(
 def _stage_wheels(
     wheels: Sequence[tuple[ComfyRegistryWheelArtifact, Path]],
     directory: Path,
-) -> tuple[Path, ...]:
+) -> tuple[tuple[Path, ...], _WheelOwnershipPlan]:
     directory.mkdir()
     staged: list[Path] = []
+    ownership: list[_WheelOwnership] = []
     installed_paths: set[str] = set()
+    installed_parent_paths: set[str] = set()
     expanded_files = 0
     expanded_bytes = 0
     for artifact, source in wheels:
@@ -387,7 +433,13 @@ def _stage_wheels(
                 "wheel_changed_during_staging",
                 f"Wheel file {artifact.filename} changed while it was staged",
             )
-        archive_files, archive_bytes = _inspect_wheel_archive(destination, installed_paths)
+        archive_files, archive_bytes, wheel_ownership = _inspect_wheel_archive(
+            destination,
+            installed_paths,
+            installed_parent_paths=installed_parent_paths,
+            remaining_files=MAX_REGISTRY_WHEEL_ENVIRONMENT_FILES - expanded_files,
+            remaining_bytes=MAX_REGISTRY_WHEEL_ENVIRONMENT_BYTES - expanded_bytes,
+        )
         expanded_files += archive_files
         expanded_bytes += archive_bytes
         if (
@@ -398,31 +450,76 @@ def _stage_wheels(
                 "wheel_archive_too_large", "Closed wheel archives exceed extraction limits"
             )
         staged.append(destination)
-    return tuple(staged)
+        ownership.append(wheel_ownership)
+    return tuple(staged), _WheelOwnershipPlan(tuple(ownership))
 
 
-def _inspect_wheel_archive(path: Path, installed_paths: set[str]) -> tuple[int, int]:
+def _inspect_wheel_archive(
+    path: Path,
+    installed_paths: set[str],
+    *,
+    installed_parent_paths: set[str] | None = None,
+    remaining_files: int = MAX_REGISTRY_WHEEL_ENVIRONMENT_FILES,
+    remaining_bytes: int = MAX_REGISTRY_WHEEL_ENVIRONMENT_BYTES,
+) -> tuple[int, int, _WheelOwnership]:
     file_count = 0
     expanded_bytes = 0
+    if installed_parent_paths is None:
+        installed_parent_paths = {
+            parent for existing in installed_paths for parent in _parent_path_keys(existing)
+        }
     try:
         with zipfile.ZipFile(path) as archive:
+            entries: dict[str, zipfile.ZipInfo] = {}
+            archive_keys: set[str] = set()
+            archive_files: set[str] = set()
+            archive_directories: set[str] = set()
             for entry in archive.infolist():
                 relative = _archive_path(entry.filename)
+                archive_key = _wheel_path_key(relative)
+                parents = _parent_path_keys(archive_key)
                 mode = (entry.external_attr >> 16) & 0xFFFF
                 if entry.flag_bits & 1 or stat.S_ISLNK(mode):
                     raise ComfyRegistryWheelEnvironmentError(
                         "unsafe_wheel_archive", "Wheel archive contains an unsafe entry"
                     )
-                if entry.is_dir():
-                    continue
-                if relative in installed_paths:
+                if archive_key in archive_keys:
                     raise ComfyRegistryWheelEnvironmentError(
-                        "overlapping_wheel_archives",
-                        "Closed wheel archives contain overlapping files",
+                        "invalid_wheel_record",
+                        "Wheel archive contains aliased or duplicate file paths",
                     )
-                installed_paths.add(relative)
+                archive_keys.add(archive_key)
+                if any(parent in archive_files for parent in parents) or (
+                    not entry.is_dir() and archive_key in archive_directories
+                ):
+                    raise ComfyRegistryWheelEnvironmentError(
+                        "invalid_wheel_record",
+                        "Wheel archive contains a file-directory path collision",
+                    )
+                archive_directories.update(parents)
+                if entry.is_dir():
+                    if entry.file_size or entry.compress_size or entry.CRC:
+                        raise ComfyRegistryWheelEnvironmentError(
+                            "unsafe_wheel_archive",
+                            "Wheel archive directory entries must contain no payload",
+                        )
+                    archive_directories.add(archive_key)
+                    continue
+                archive_files.add(archive_key)
+                entries[relative] = entry
+                installed = _installed_wheel_path(relative)
+                _claim_installed_path(
+                    installed,
+                    installed_paths,
+                    installed_parent_paths,
+                )
                 file_count += 1
                 expanded_bytes += entry.file_size
+                if file_count > remaining_files or expanded_bytes > remaining_bytes:
+                    raise ComfyRegistryWheelEnvironmentError(
+                        "wheel_archive_too_large",
+                        "Closed wheel archives exceed extraction limits",
+                    )
                 compressed = max(entry.compress_size, 1)
                 if (
                     entry.file_size > MAX_REGISTRY_WHEEL_UNCHECKED_ENTRY_BYTES
@@ -433,24 +530,257 @@ def _inspect_wheel_archive(path: Path, installed_paths: set[str]) -> tuple[int, 
                         f"{path.name} expands {entry.filename} from "
                         f"{compressed} bytes to {entry.file_size}, which is an unsafe ratio",
                     )
+            record_paths = [
+                relative
+                for relative in entries
+                if len(PurePosixPath(relative).parts) == 2
+                and PurePosixPath(relative).parts[0].endswith(".dist-info")
+                and PurePosixPath(relative).name == "RECORD"
+            ]
+            if len(record_paths) != 1:
+                raise ComfyRegistryWheelEnvironmentError(
+                    "invalid_wheel_record",
+                    "Wheel archive must contain exactly one distribution RECORD",
+                )
+            record_path = record_paths[0]
+            record_entry = entries[record_path]
+            if record_entry.file_size > MAX_REGISTRY_WHEEL_METADATA_FILE_BYTES:
+                raise ComfyRegistryWheelEnvironmentError(
+                    "invalid_wheel_record", "Wheel distribution RECORD is too large"
+                )
+            record_bytes = _read_wheel_entry(archive, record_entry)
+            recorded = _parse_source_record(record_bytes)
+            if set(recorded) != set(entries):
+                raise ComfyRegistryWheelEnvironmentError(
+                    "invalid_wheel_record",
+                    "Wheel distribution RECORD does not cover the archive exactly",
+                )
+            planned: list[_PlannedInstalledFile] = []
+            for relative, entry in entries.items():
+                size, digest = _wheel_entry_identity(archive, entry)
+                recorded_hash, recorded_size = recorded[relative]
+                if relative == record_path:
+                    if recorded_hash or recorded_size:
+                        raise ComfyRegistryWheelEnvironmentError(
+                            "invalid_wheel_record",
+                            "Wheel distribution RECORD must leave its own identity blank",
+                        )
+                elif recorded_hash != digest or recorded_size != size:
+                    raise ComfyRegistryWheelEnvironmentError(
+                        "invalid_wheel_record",
+                        "Wheel distribution RECORD identity does not match the archive",
+                    )
+                planned.append(
+                    _PlannedInstalledFile(
+                        _installed_wheel_path(relative),
+                        relative,
+                        size,
+                        digest,
+                    )
+                )
+            dist_info = PurePosixPath(record_path).parent.as_posix()
+            for name in _GENERATED_DISTRIBUTION_FILES:
+                try:
+                    _claim_installed_path(
+                        f"{dist_info}/{name}",
+                        installed_paths,
+                        installed_parent_paths,
+                    )
+                except ComfyRegistryWheelEnvironmentError as exc:
+                    raise ComfyRegistryWheelEnvironmentError(
+                        "invalid_wheel_record",
+                        "Wheel archive contains pip-generated distribution metadata",
+                    ) from exc
     except (OSError, zipfile.BadZipFile, zipfile.LargeZipFile) as exc:
         raise ComfyRegistryWheelEnvironmentError(
             "invalid_wheel_archive", f"Wheel file {path.name} is not a valid archive"
         ) from exc
-    return file_count, expanded_bytes
+    return (
+        file_count,
+        expanded_bytes,
+        _WheelOwnership(
+            _installed_wheel_path(record_path),
+            tuple(sorted(planned, key=lambda item: item.path)),
+        ),
+    )
+
+
+def _installed_wheel_path(relative: str) -> str:
+    parts = PurePosixPath(relative).parts
+    if not parts[0].endswith(".data"):
+        return relative
+    if len(parts) < 3 or parts[1] not in {"purelib", "platlib"}:
+        raise ComfyRegistryWheelEnvironmentError(
+            "unsupported_wheel_scheme",
+            "Wheel archive uses a target scheme whose installed path is not stable",
+        )
+    return PurePosixPath(*parts[2:]).as_posix()
+
+
+def _read_wheel_entry(archive: zipfile.ZipFile, entry: zipfile.ZipInfo) -> bytes:
+    try:
+        with archive.open(entry) as reader:
+            value = reader.read(MAX_REGISTRY_WHEEL_METADATA_FILE_BYTES + 1)
+    except (OSError, RuntimeError, zipfile.BadZipFile) as exc:
+        raise ComfyRegistryWheelEnvironmentError(
+            "invalid_wheel_record", "Wheel distribution RECORD is unreadable"
+        ) from exc
+    if len(value) > MAX_REGISTRY_WHEEL_METADATA_FILE_BYTES:
+        raise ComfyRegistryWheelEnvironmentError(
+            "invalid_wheel_record", "Wheel distribution RECORD is too large"
+        )
+    return value
+
+
+def _parse_source_record(value: bytes) -> dict[str, tuple[str, int | str]]:
+    try:
+        text = value.decode("utf-8")
+        rows = csv.reader(io.StringIO(text, newline=""))
+        result: dict[str, tuple[str, int | str]] = {}
+        for row in rows:
+            if len(result) >= MAX_REGISTRY_WHEEL_ENVIRONMENT_FILES:
+                raise ValueError("too many RECORD rows")
+            if len(row) != 3:
+                raise ValueError("invalid RECORD row")
+            relative = _archive_path(row[0])
+            if relative in result:
+                raise ValueError("duplicate RECORD row")
+            if not row[1] and not row[2]:
+                identity: tuple[str, int | str] = ("", "")
+            else:
+                if not row[2].isascii() or not row[2].isdigit():
+                    raise ValueError("invalid RECORD size")
+                size = int(row[2])
+                if size < 0:
+                    raise ValueError("invalid RECORD size")
+                identity = (_record_sha256(row[1]), size)
+            result[relative] = identity
+    except (UnicodeDecodeError, csv.Error, ValueError) as exc:
+        raise ComfyRegistryWheelEnvironmentError(
+            "invalid_wheel_record", "Wheel distribution RECORD is invalid"
+        ) from exc
+    return result
+
+
+def _record_sha256(value: str) -> str:
+    prefix = "sha256="
+    encoded = value[len(prefix) :] if value.startswith(prefix) else ""
+    if (
+        not encoded
+        or "=" in encoded
+        or any(
+            character not in "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_"
+            for character in encoded
+        )
+    ):
+        raise ValueError("invalid RECORD digest")
+    try:
+        decoded = base64.urlsafe_b64decode(encoded + "=" * (-len(encoded) % 4))
+    except (ValueError, TypeError) as exc:
+        raise ValueError("invalid RECORD digest") from exc
+    if len(decoded) != hashlib.sha256().digest_size:
+        raise ValueError("invalid RECORD digest")
+    canonical = base64.urlsafe_b64encode(decoded).rstrip(b"=").decode("ascii")
+    if not hmac.compare_digest(canonical, encoded):
+        raise ValueError("invalid RECORD digest")
+    return decoded.hex()
+
+
+def _wheel_entry_identity(
+    archive: zipfile.ZipFile,
+    entry: zipfile.ZipInfo,
+) -> tuple[int, str]:
+    digest = hashlib.sha256()
+    size = 0
+    try:
+        with archive.open(entry) as reader:
+            while chunk := reader.read(WHEEL_HASH_CHUNK_BYTES):
+                size += len(chunk)
+                digest.update(chunk)
+                if size > entry.file_size:
+                    raise ComfyRegistryWheelEnvironmentError(
+                        "invalid_wheel_record",
+                        "Wheel archive entry exceeds its declared size",
+                    )
+    except (OSError, RuntimeError, zipfile.BadZipFile) as exc:
+        raise ComfyRegistryWheelEnvironmentError(
+            "invalid_wheel_record", "Wheel archive entry is unreadable"
+        ) from exc
+    if size != entry.file_size:
+        raise ComfyRegistryWheelEnvironmentError(
+            "invalid_wheel_record", "Wheel archive entry size is inconsistent"
+        )
+    return size, digest.hexdigest()
 
 
 def _archive_path(value: str) -> str:
-    if not value or len(value) > MAX_REGISTRY_WHEEL_ARCHIVE_PATH_CHARACTERS or chr(92) in value:
+    if (
+        not value
+        or len(value) > MAX_REGISTRY_WHEEL_ARCHIVE_PATH_CHARACTERS
+        or chr(92) in value
+        or value.startswith("/")
+    ):
         raise ComfyRegistryWheelEnvironmentError(
             "unsafe_wheel_archive", "Wheel archive contains an unsafe path"
         )
-    path = PurePosixPath(value)
-    if path.is_absolute() or any(part in {"", ".", ".."} or ":" in part for part in path.parts):
+    normalized = value[:-1] if value.endswith("/") else value
+    parts = normalized.split("/")
+    if not normalized or any(part in {"", ".", ".."} for part in parts):
         raise ComfyRegistryWheelEnvironmentError(
             "unsafe_wheel_archive", "Wheel archive contains an unsafe path"
         )
+    for part in parts:
+        if (
+            len(part) > MAX_REGISTRY_WHEEL_ARCHIVE_COMPONENT_CHARACTERS
+            or part.rstrip(" .") != part
+            or ":" in part
+            or any(ord(character) < 32 or ord(character) == 127 for character in part)
+            or part.split(".", 1)[0].upper() in _RESERVED_WINDOWS_NAMES
+        ):
+            raise ComfyRegistryWheelEnvironmentError(
+                "unsafe_wheel_archive", "Wheel archive contains an unsafe path"
+            )
+    path = PurePosixPath(*parts)
     return path.as_posix()
+
+
+def _wheel_path_key(value: str) -> str:
+    return "/".join(
+        unicodedata.normalize("NFC", part).casefold() for part in PurePosixPath(value).parts
+    )
+
+
+def _wheel_path_sort_key(value: str) -> tuple[tuple[str, ...], tuple[str, ...]]:
+    parts = PurePosixPath(value).parts
+    return (
+        tuple(unicodedata.normalize("NFC", part).casefold() for part in parts),
+        parts,
+    )
+
+
+def _parent_path_keys(value: str) -> tuple[str, ...]:
+    parts = PurePosixPath(value).parts
+    return tuple(PurePosixPath(*parts[:index]).as_posix() for index in range(1, len(parts)))
+
+
+def _claim_installed_path(
+    value: str,
+    installed_paths: set[str],
+    installed_parent_paths: set[str],
+) -> None:
+    key = _wheel_path_key(value)
+    parents = _parent_path_keys(key)
+    if (
+        key in installed_paths
+        or key in installed_parent_paths
+        or any(parent in installed_paths for parent in parents)
+    ):
+        raise ComfyRegistryWheelEnvironmentError(
+            "overlapping_wheel_archives",
+            "Closed wheel archives contain overlapping installed paths",
+        )
+    installed_paths.add(key)
+    installed_parent_paths.update(parents)
 
 
 def _remove_staged_wheels(directory: Path) -> None:
@@ -470,7 +800,7 @@ def _destination(
         raise ComfyRegistryWheelEnvironmentError(
             "invalid_environment_destination", "Wheel environment destination is invalid"
         )
-    expected_name = f"registry-wheels-{closure.closure_sha256}"
+    expected_name = f"{REGISTRY_WHEEL_ENVIRONMENT_PREFIX}{closure.closure_sha256}"
     if destination.name != expected_name or destination.exists() or destination.is_symlink():
         raise ComfyRegistryWheelEnvironmentError(
             "invalid_environment_destination",
@@ -566,6 +896,7 @@ def _audit_environment(
     closure: ComfyRegistryWheelClosure,
     artifacts: Sequence[ComfyRegistryWheelArtifact],
     site_packages: Path,
+    ownership_plan: _WheelOwnershipPlan,
 ) -> tuple[ComfyRegistryWheelEnvironmentReport, bytes]:
     expected = {(artifact.name, artifact.version) for artifact in artifacts}
     inventory, file_count, total_bytes, resolved = _scan_environment(site_packages)
@@ -575,6 +906,7 @@ def _audit_environment(
             "distribution_set_mismatch",
             "Wheel environment distributions do not match the closed artifacts",
         )
+    _verify_installed_ownership(site_packages, ownership_plan, inventory)
     payload = _environment_payload(
         closure.closure_sha256,
         len(artifacts),
@@ -600,6 +932,102 @@ def _audit_environment(
     )
 
 
+def _verify_installed_ownership(
+    site_packages: Path,
+    plan: _WheelOwnershipPlan,
+    inventory: Sequence[dict[str, object]],
+) -> None:
+    final_files: dict[str, tuple[int, str]] = {}
+    for item in inventory:
+        if item.get("kind") != "file":
+            continue
+        path = item.get("path")
+        size = item.get("size_bytes")
+        digest = item.get("sha256")
+        if (
+            type(path) is not str
+            or type(size) is not int
+            or type(digest) is not str
+            or path in final_files
+        ):
+            raise ComfyRegistryWheelEnvironmentError(
+                "wheel_ownership_mismatch",
+                "Installed wheel ownership evidence is invalid",
+            )
+        final_files[path] = (size, digest)
+
+    expected_global: set[str] = set()
+    for wheel in plan.wheels:
+        source = {item.path: item for item in wheel.files}
+        if len(source) != len(wheel.files) or wheel.record_path not in source:
+            raise ComfyRegistryWheelEnvironmentError(
+                "wheel_ownership_mismatch",
+                "Wheel ownership plan is inconsistent",
+            )
+        dist_info = PurePosixPath(wheel.record_path).parent.as_posix()
+        generated = {f"{dist_info}/{name}" for name in _GENERATED_DISTRIBUTION_FILES}
+        expected = set(source) | generated
+        if expected_global & expected:
+            raise ComfyRegistryWheelEnvironmentError(
+                "wheel_ownership_mismatch",
+                "Installed wheel ownership overlaps another distribution",
+            )
+        expected_global.update(expected)
+
+        record_file = site_packages.joinpath(*PurePosixPath(wheel.record_path).parts)
+        try:
+            if (
+                _is_link_or_reparse(record_file)
+                or not record_file.is_file()
+                or record_file.stat().st_size > MAX_REGISTRY_WHEEL_METADATA_FILE_BYTES
+            ):
+                raise OSError("invalid RECORD")
+            recorded = _parse_source_record(record_file.read_bytes())
+        except (OSError, ComfyRegistryWheelEnvironmentError) as exc:
+            raise ComfyRegistryWheelEnvironmentError(
+                "wheel_ownership_mismatch",
+                "Installed wheel RECORD is invalid",
+            ) from exc
+        if set(recorded) != expected:
+            raise ComfyRegistryWheelEnvironmentError(
+                "wheel_ownership_mismatch",
+                "Installed wheel RECORD does not cover its owned files exactly",
+            )
+        for relative in expected:
+            identity = final_files.get(relative)
+            if identity is None:
+                raise ComfyRegistryWheelEnvironmentError(
+                    "wheel_ownership_mismatch",
+                    "Installed wheel file is missing",
+                )
+            recorded_hash, recorded_size = recorded[relative]
+            if relative == wheel.record_path:
+                if recorded_hash or recorded_size:
+                    raise ComfyRegistryWheelEnvironmentError(
+                        "wheel_ownership_mismatch",
+                        "Installed wheel RECORD must leave its own identity blank",
+                    )
+                continue
+            if (recorded_size, recorded_hash) != identity:
+                raise ComfyRegistryWheelEnvironmentError(
+                    "wheel_ownership_mismatch",
+                    "Installed wheel RECORD identity does not match its file",
+                )
+            planned = source.get(relative)
+            if planned is not None and (
+                planned.size_bytes != identity[0] or planned.sha256 != identity[1]
+            ):
+                raise ComfyRegistryWheelEnvironmentError(
+                    "wheel_ownership_mismatch",
+                    "Pip changed a source-owned wheel file",
+                )
+    if set(final_files) != expected_global:
+        raise ComfyRegistryWheelEnvironmentError(
+            "wheel_ownership_mismatch",
+            "Installed wheel file set differs from the source ownership plan",
+        )
+
+
 def _scan_environment(
     site_packages: Path,
 ) -> tuple[
@@ -612,7 +1040,9 @@ def _scan_environment(
     inventory: list[dict[str, object]] = []
     file_count = 0
     total_bytes = 0
-    for path in sorted(site_packages.rglob("*")):
+    paths = list(site_packages.rglob("*"))
+    paths.sort(key=lambda item: _wheel_path_sort_key(item.relative_to(site_packages).as_posix()))
+    for path in paths:
         if _is_link_or_reparse(path):
             raise ComfyRegistryWheelEnvironmentError(
                 "unsafe_environment_link", "Wheel environment contains a link"
@@ -642,7 +1072,9 @@ def _scan_environment(
             raise ComfyRegistryWheelEnvironmentError(
                 "environment_too_large", "Wheel environment exceeds its audited limits"
             )
-    for directory in sorted(site_packages.glob("*.dist-info")):
+    directories = list(site_packages.glob("*.dist-info"))
+    directories.sort(key=lambda item: _wheel_path_sort_key(item.name))
+    for directory in directories:
         if not directory.is_dir() or _is_link_or_reparse(directory):
             raise ComfyRegistryWheelEnvironmentError(
                 "invalid_distribution_metadata", "Wheel distribution metadata is invalid"
@@ -701,7 +1133,8 @@ def _environment_payload(
 ) -> dict[str, object]:
     runtime = canonical_comfy_registry_runtime_distributions(runtime_distributions)
     payload: dict[str, object] = {
-        "version": 2 if runtime else 1,
+        "version": 3,
+        "ownership_attestation": WHEEL_OWNERSHIP_ATTESTATION,
         "closure_sha256": closure_sha256,
         "artifact_count": artifact_count,
         "file_count": file_count,
@@ -710,10 +1143,9 @@ def _environment_payload(
             {"name": item.name, "version": item.version, "dist_info": item.dist_info}
             for item in distributions
         ],
+        "runtime_distributions": comfy_registry_runtime_distribution_payload(runtime),
         "inventory": list(inventory),
     }
-    if runtime:
-        payload["runtime_distributions"] = comfy_registry_runtime_distribution_payload(runtime)
     return payload
 
 

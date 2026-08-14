@@ -50,7 +50,7 @@ def _install(session: Session, *, trusted: bool = False, active: bool = False) -
         review_json={"review_required": True, "file_count": 0, "expanded_bytes": 0},
         wheel_closure_sha256="c" * 64,
         wheel_environment_sha256="d" * 64,
-        wheel_environment_path=f"registry-wheels-{'c' * 64}",
+        wheel_environment_path=f"registry-wheels-v3-{'c' * 64}",
         trusted=trusted,
         active=active,
     )

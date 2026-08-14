@@ -652,7 +652,7 @@ def _registry_install() -> ComfyRegistryInstall:
         review_json={},
         wheel_closure_sha256=closure,
         wheel_environment_sha256="d" * 64,
-        wheel_environment_path=f"registry-wheels-{closure}",
+        wheel_environment_path=f"registry-wheels-v3-{closure}",
         trusted=True,
         active=True,
     )
@@ -671,6 +671,11 @@ def test_registry_identity_accepts_semver_and_requires_the_managed_environment()
     with pytest.raises(WorkflowBindingError) as raised:
         materialize_registry_package(install)
     assert raised.value.code == "dependency_unavailable"
+
+    install.wheel_environment_path = f"registry-wheels-{'c' * 64}"
+    with pytest.raises(WorkflowBindingError) as legacy:
+        materialize_registry_package(install)
+    assert legacy.value.code == "legacy_environment_manifest"
 
 
 @pytest.mark.parametrize("node_types", [[], ["ExampleNode", "ExampleNode"]])

@@ -184,18 +184,16 @@ def finalize_setup_verification(
         )
     verification.completed_at = utcnow()
 
-    input_artifact_id = verification.input_artifact_id
-    artifacts.delete_chat_generated_media(session, chat_id)
-    if input_artifact_id and (artifact := session.get(Artifact, input_artifact_id)):
-        artifacts.delete_library_artifact(session, artifact)
-
-    if chat := session.get(Chat, chat_id):
-        session.delete(chat)
-    session.delete(job)
+    artifact_ids = _setup_artifact_ids(result, verification.input_artifact_id)
     verification.chat_id = None
     verification.run_id = None
     verification.job_id = None
     verification.input_artifact_id = None
+    if chat := session.get(Chat, chat_id):
+        session.delete(chat)
+    session.delete(job)
+    session.flush()
+    delete_setup_artifacts(session, artifacts, artifact_ids)
     return True
 
 
@@ -239,14 +237,35 @@ def recover_terminal_setup_verifications(
             verification.state = "failed"
             verification.failure_code = "application_restarted"
             verification.completed_at = utcnow()
-            if verification.input_artifact_id and (
-                artifact := session.get(Artifact, verification.input_artifact_id)
-            ):
-                artifacts.delete_library_artifact(session, artifact)
+            artifact_ids = _setup_artifact_ids({}, verification.input_artifact_id)
             if chat := session.get(Chat, verification.chat_id):
                 session.delete(chat)
             verification.chat_id = None
             verification.input_artifact_id = None
+            session.flush()
+            delete_setup_artifacts(session, artifacts, artifact_ids)
+
+
+def _setup_artifact_ids(result: object, input_artifact_id: str | None) -> set[str]:
+    found = {input_artifact_id} if input_artifact_id else set()
+    if isinstance(result, dict):
+        values = result.get("artifact_ids")
+        if isinstance(values, list):
+            found.update(value for value in values if isinstance(value, str))
+    return found
+
+
+def delete_setup_artifacts(
+    session: Session,
+    artifacts: ArtifactStore,
+    artifact_ids: set[str],
+) -> None:
+    """Delete only unpublished setup bytes after every setup reference is gone."""
+
+    for artifact_id in sorted(artifact_ids):
+        artifact = session.get(Artifact, artifact_id)
+        if artifact is not None:
+            artifacts.delete_library_artifact(session, artifact)
 
 
 def synthetic_setup_image(verification_id: str) -> bytes:

@@ -25,6 +25,14 @@ from starlette.responses import FileResponse, HTMLResponse
 from . import __version__
 from .adapter_grammar_review import review_adapter_grammar
 from .api_errors import api_error
+from .artifact_library import (
+    ArtifactLibraryConflict,
+    ArtifactLibraryCursorError,
+    ArtifactLibraryDataError,
+    ensure_library_entry,
+    list_library_entries,
+    set_library_favorite,
+)
 from .auxiliary_assets import AUXILIARY_ASSET_KINDS, validate_lora_workflow_contract
 from .capability_evidence import current_capability_evidence, evidence_input_modalities
 from .capability_probe import probe_structured_tools
@@ -203,7 +211,9 @@ from .schemas import (
     ArtifactCleanupRequest,
     ArtifactCleanupResult,
     ArtifactDeleteResult,
+    ArtifactLibraryEntrySummary,
     ArtifactLibraryItem,
+    ArtifactLibraryPage,
     ArtifactOut,
     ArtifactStorageInfo,
     ArtifactUpdate,
@@ -362,6 +372,7 @@ from .setup_verification import (
     ACTIVE_VERIFICATION_STATES,
     SETUP_VERIFICATION_SCOPE,
     current_setup_verification,
+    delete_setup_artifacts,
     ingest_synthetic_setup_image,
     setup_verification_prompt,
     setup_verification_settings,
@@ -994,14 +1005,13 @@ async def start_setup_verification(
             current.state = "failed"
             current.failure_code = "generation_not_started"
             current.completed_at = utcnow()
-            if current.input_artifact_id and (
-                failed_artifact := session.get(Artifact, current.input_artifact_id)
-            ):
-                services.artifacts.delete_library_artifact(session, failed_artifact)
+            artifact_ids = {current.input_artifact_id} if current.input_artifact_id else set()
             if current.chat_id and (failed_chat := session.get(Chat, current.chat_id)):
                 session.delete(failed_chat)
             current.chat_id = None
             current.input_artifact_id = None
+            session.flush()
+            delete_setup_artifacts(session, services.artifacts, artifact_ids)
             session.commit()
         raise
 
@@ -1855,8 +1865,15 @@ async def delete_prompt_helper(
         helper = session.get(Chat, helper_id)
         if not helper or helper.scope != PROMPT_HELPER_SCOPE:
             raise api_error(404, "prompt-helper-not-found", "prompt helper not found")
-        services.artifacts.delete_chat_generated_media(session, helper_id)
+        artifact_ids = services.artifacts.generated_media_artifact_ids_for_chat(session, helper_id)
+        helper_jobs = session.scalars(
+            select(Job).join(Run, Job.run_id == Run.id).where(Run.chat_id == helper_id)
+        ).all()
+        for job in helper_jobs:
+            session.delete(job)
         session.delete(helper)
+        session.flush()
+        services.artifacts.delete_generated_media_artifacts(session, artifact_ids)
         session.commit()
     return Response(status_code=204)
 
@@ -1951,9 +1968,14 @@ async def delete_chat(
         chat = session.get(Chat, chat_id)
         if not chat or chat.scope != STANDARD_CHAT_SCOPE:
             raise api_error(404, "chat-not-found", "chat not found")
-        if delete_generated_media:
-            services.artifacts.delete_chat_generated_media(session, chat_id)
+        artifact_ids = (
+            services.artifacts.generated_media_artifact_ids_for_chat(session, chat_id)
+            if delete_generated_media
+            else ()
+        )
         session.delete(chat)
+        session.flush()
+        services.artifacts.delete_generated_media_artifacts(session, artifact_ids)
         session.commit()
     return Response(status_code=204)
 
@@ -2760,6 +2782,7 @@ async def upload_artifact(
         original_name=file.filename,
         metadata={"uploaded": True},
     )
+    ensure_library_entry(session, artifact)
     session.commit()
     result = ArtifactOut.model_validate(artifact)
     result.url = f"/api/artifacts/{artifact.id}/content"
@@ -2817,6 +2840,64 @@ def _artifact_generation_identity(
     run_id = artifact.metadata_json.get("run_id")
     run = session.get(Run, run_id) if isinstance(run_id, str) else None
     return _generation_identity(run.provenance_json) if run is not None else None
+
+
+@router.get("/artifact-library", response_model=ArtifactLibraryPage)
+async def list_artifact_library(
+    request: Request,
+    session: ConversationSessionDep,
+    limit: int = Query(default=20, ge=1, le=100),
+    cursor: str | None = Query(default=None, min_length=1, max_length=2_048),
+    kind: Literal["image", "video"] | None = None,
+    state: Literal["visible", "trashed"] = "visible",
+    favorite: Literal["true", "false"] | None = None,
+    query: str = Query(default="", max_length=200),
+) -> ArtifactLibraryPage:
+    """Return one bounded page of durable Media Library memberships."""
+
+    favorite_value = None if favorite is None else favorite == "true"
+    try:
+        rows, next_cursor = list_library_entries(
+            session,
+            signing_key=_services(request).security.local_state_signing_key(b"artifact-library"),
+            limit=limit,
+            cursor=cursor,
+            kind=kind,
+            state=state,
+            favorite=favorite_value,
+            query=query,
+        )
+    except ArtifactLibraryCursorError as exc:
+        raise api_error(
+            422,
+            "artifact-library-cursor-invalid",
+            "The Media Library page request is invalid. Start again from the first page.",
+        ) from exc
+    except ArtifactLibraryDataError as exc:
+        raise api_error(
+            409,
+            "artifact-library-conflict",
+            "The Media Library could not be read safely. Refresh and try again.",
+        ) from exc
+    return ArtifactLibraryPage(
+        items=[
+            ArtifactLibraryEntrySummary(
+                id=row.entry.id,
+                artifact_id=row.artifact.id,
+                version=row.entry.version,
+                state=cast(Literal["visible", "trashed"], row.entry.state),
+                display_name=row.entry.display_name,
+                favorite=row.entry.favorite,
+                kind=cast(Literal["image", "video"], row.artifact.kind),
+                media_type=row.artifact.media_type,
+                size_bytes=row.artifact.size_bytes,
+                created_at=row.entry.created_at,
+                updated_at=row.entry.updated_at,
+            )
+            for row in rows
+        ],
+        next_cursor=next_cursor,
+    )
 
 
 @router.get("/artifacts", response_model=list[ArtifactLibraryItem])
@@ -2896,7 +2977,15 @@ async def update_artifact(
     artifact = session.get(Artifact, artifact_id)
     if not artifact:
         raise api_error(404, "artifact-not-found", "This media item no longer exists")
-    artifact.favorite = payload.favorite
+    try:
+        set_library_favorite(session, artifact, payload.favorite)
+    except ArtifactLibraryConflict as exc:
+        session.rollback()
+        raise api_error(
+            409,
+            "artifact-library-conflict",
+            "The Media Library item changed. Refresh and try again.",
+        ) from exc
     session.commit()
     session.refresh(artifact)
     result = ArtifactOut.model_validate(artifact)

@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import base64
+import csv
 import hashlib
 import io
 import sys
@@ -181,18 +183,22 @@ class _PopulatedWheelDownloader:
 
 
 def _wheel_content() -> bytes:
+    files = {
+        "alpha/__init__.py": b"VALUE = 1",
+        "alpha-1.0.dist-info/METADATA": (b"Metadata-Version: 2.4\nName: alpha\nVersion: 1.0\n\n"),
+        "alpha-1.0.dist-info/WHEEL": b"Wheel-Version: 1.0\nTag: py3-none-any\n\n",
+    }
+    record = io.StringIO(newline="")
+    writer = csv.writer(record, lineterminator="\n")
+    for relative, value in files.items():
+        digest = base64.urlsafe_b64encode(hashlib.sha256(value).digest()).rstrip(b"=").decode()
+        writer.writerow((relative, f"sha256={digest}", len(value)))
+    writer.writerow(("alpha-1.0.dist-info/RECORD", "", ""))
     output = io.BytesIO()
     with zipfile.ZipFile(output, "w", compression=zipfile.ZIP_DEFLATED) as archive:
-        archive.writestr("alpha/__init__.py", "VALUE = 1")
-        archive.writestr(
-            "alpha-1.0.dist-info/METADATA",
-            "Metadata-Version: 2.4\nName: alpha\nVersion: 1.0\n\n",
-        )
-        archive.writestr(
-            "alpha-1.0.dist-info/WHEEL",
-            "Wheel-Version: 1.0\nTag: py3-none-any\n\n",
-        )
-        archive.writestr("alpha-1.0.dist-info/RECORD", "")
+        for relative, value in files.items():
+            archive.writestr(relative, value)
+        archive.writestr("alpha-1.0.dist-info/RECORD", record.getvalue())
     return output.getvalue()
 
 
@@ -459,15 +465,29 @@ async def test_staged_wheel_flows_through_offline_environment_and_is_removed(
         target: Path,
     ) -> None:
         assert staged[0].read_bytes() == content
-        package = target / "alpha"
-        package.mkdir()
-        (package / "__init__.py").write_text("VALUE = 1\n", encoding="utf-8")
+        with zipfile.ZipFile(io.BytesIO(content)) as wheel:
+            for entry in wheel.infolist():
+                if entry.filename.endswith("/RECORD"):
+                    continue
+                destination = target.joinpath(*Path(entry.filename).parts)
+                destination.parent.mkdir(parents=True, exist_ok=True)
+                destination.write_bytes(wheel.read(entry))
         dist_info = target / "alpha-1.0.dist-info"
-        dist_info.mkdir()
-        (dist_info / "METADATA").write_text(
-            "Metadata-Version: 2.4\nName: alpha\nVersion: 1.0\n\n",
-            encoding="utf-8",
-        )
+        (dist_info / "INSTALLER").write_text("pip\n", encoding="utf-8")
+        (dist_info / "REQUESTED").write_bytes(b"")
+        (dist_info / "direct_url.json").write_text("{}\n", encoding="utf-8")
+        installed = {
+            path.relative_to(target).as_posix(): path.read_bytes()
+            for path in target.rglob("*")
+            if path.is_file()
+        }
+        record = io.StringIO(newline="")
+        writer = csv.writer(record, lineterminator="\n")
+        for relative, value in installed.items():
+            digest = base64.urlsafe_b64encode(hashlib.sha256(value).digest()).rstrip(b"=").decode()
+            writer.writerow((relative, f"sha256={digest}", len(value)))
+        writer.writerow(("alpha-1.0.dist-info/RECORD", "", ""))
+        (dist_info / "RECORD").write_text(record.getvalue(), encoding="utf-8")
 
     monkeypatch.setattr(environment_module, "_run_pip", fake_run_pip)
 
@@ -574,7 +594,7 @@ async def test_unbound_existing_environment_is_preserved_and_refused(
     custom_nodes, state = _roots(tmp_path)
     environments = state / "registry-wheel-environments"
     environments.mkdir()
-    existing = environments / f"registry-wheels-{closure.closure_sha256}"
+    existing = environments / f"registry-wheels-v3-{closure.closure_sha256}"
     existing.mkdir()
     marker = existing / "unbound.txt"
     marker.write_text("preserve\n", encoding="utf-8")
@@ -821,6 +841,91 @@ async def test_renewal_rebinds_dependencies_without_changing_reviewed_node_code(
     assert (custom_nodes / result.installed_path / "__init__.py").read_bytes() == node_bytes
 
 
+async def test_renewal_moves_a_same_closure_legacy_binding_to_v3(
+    session: Session,
+    tmp_path: Path,
+) -> None:
+    result, _, _, custom_nodes, state = await _prepare(session, tmp_path)
+    install = session.get(ComfyRegistryInstall, result.install_id)
+    assert install is not None
+    environments = state / "registry-wheel-environments"
+    current = environments / result.wheel_environment_path
+    legacy_name = f"registry-wheels-{result.wheel_closure_sha256}"
+    legacy = environments / legacy_name
+    current.rename(legacy)
+    install.wheel_environment_path = legacy_name
+    session.commit()
+
+    renewed = await renew_comfy_registry_install_environment(
+        session,
+        install_id=result.install_id,
+        resolution=_resolution(),
+        closure=_closure(_resolution()),
+        wheel_downloader=_WheelDownloader(),
+        python_executable=Path(sys.executable),
+        custom_node_root=custom_nodes,
+        state_root=state,
+        media_worker_stopped=True,
+    )
+
+    assert renewed.wheel_closure_sha256 == result.wheel_closure_sha256
+    assert renewed.wheel_environment_path == (f"registry-wheels-v3-{result.wheel_closure_sha256}")
+    assert (environments / renewed.wheel_environment_path).is_dir()
+    assert legacy.exists() is False
+
+
+async def test_renewal_preserves_a_legacy_environment_still_bound_to_a_peer(
+    session: Session,
+    tmp_path: Path,
+) -> None:
+    result, _, _, custom_nodes, state = await _prepare(session, tmp_path)
+    install = session.get(ComfyRegistryInstall, result.install_id)
+    assert install is not None
+    environments = state / "registry-wheel-environments"
+    current = environments / result.wheel_environment_path
+    legacy_name = f"registry-wheels-{result.wheel_closure_sha256}"
+    legacy = environments / legacy_name
+    current.rename(legacy)
+    install.wheel_environment_path = legacy_name
+    peer = ComfyRegistryInstall(
+        package_id="shared-environment-peer",
+        package_version="1.0.0",
+        registry_record_id="shared-environment-peer-record",
+        repository_url="https://github.com/example/shared-environment-peer.git",
+        download_url="https://cdn.comfy.org/shared-environment-peer/1.0.0.zip",
+        archive_sha256="a" * 64,
+        manifest_sha256="b" * 64,
+        installed_path="shared-environment-peer@1.0.0",
+        node_types_json=["SharedEnvironmentPeer"],
+        pip_dependencies_json=list(install.pip_dependencies_json),
+        review_json={},
+        wheel_closure_sha256=install.wheel_closure_sha256,
+        wheel_environment_sha256=install.wheel_environment_sha256,
+        wheel_environment_path=legacy_name,
+        trusted=False,
+        active=False,
+    )
+    session.add(peer)
+    session.commit()
+
+    renewed = await renew_comfy_registry_install_environment(
+        session,
+        install_id=result.install_id,
+        resolution=_resolution(),
+        closure=_closure(_resolution()),
+        wheel_downloader=_WheelDownloader(),
+        python_executable=Path(sys.executable),
+        custom_node_root=custom_nodes,
+        state_root=state,
+        media_worker_stopped=True,
+    )
+
+    assert renewed.wheel_environment_path == (f"registry-wheels-v3-{result.wheel_closure_sha256}")
+    assert legacy.is_dir()
+    session.refresh(peer)
+    assert peer.wheel_environment_path == legacy_name
+
+
 async def test_renewal_accepts_exact_recorded_runtime_files(
     session: Session,
     tmp_path: Path,
@@ -942,5 +1047,7 @@ async def test_failed_renewal_keeps_the_prior_binding_and_environment(
     assert current.wheel_environment_path == result.wheel_environment_path
     assert old_environment.is_dir()
     assert not (
-        state / "registry-wheel-environments" / f"registry-wheels-{renewed_closure.closure_sha256}"
+        state
+        / "registry-wheel-environments"
+        / f"registry-wheels-v3-{renewed_closure.closure_sha256}"
     ).exists()

@@ -147,6 +147,25 @@ class ArtifactLibraryItem(ArtifactOut):
     project_ids: list[str] = Field(default_factory=list)
 
 
+class ArtifactLibraryEntrySummary(ApiModel):
+    id: str = Field(min_length=1, max_length=80)
+    artifact_id: str = Field(min_length=1, max_length=80)
+    version: int = Field(ge=1)
+    state: Literal["visible", "trashed"]
+    display_name: str = Field(min_length=1, max_length=500)
+    favorite: bool
+    kind: Literal["image", "video"]
+    media_type: str = Field(min_length=1, max_length=120)
+    size_bytes: int = Field(ge=1)
+    created_at: datetime
+    updated_at: datetime
+
+
+class ArtifactLibraryPage(ApiModel):
+    items: list[ArtifactLibraryEntrySummary]
+    next_cursor: str | None = Field(default=None, min_length=1, max_length=2_048)
+
+
 class ArtifactStorageInfo(ApiModel):
     total_bytes: int
     total_count: int

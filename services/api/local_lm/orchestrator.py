@@ -20,6 +20,7 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session, object_session, selectinload
 
 from .adapters.base import ChatRequest, MediaEvent, MediaRequest
+from .artifact_library import ensure_library_entry
 from .artifacts import ArtifactStore
 from .auxiliary_assets import (
     LORA_GRAPH_TRANSFORM_VERSION,
@@ -4335,6 +4336,13 @@ class ConversationOrchestrator:
                         "settings": run.settings_json,
                     },
                 )
+                output_chat = session.get(Chat, run.chat_id)
+                if (
+                    setup_verification_for_chat(session, run.chat_id) is None
+                    and output_chat
+                    and output_chat.scope != PROMPT_HELPER_SCOPE
+                ):
+                    ensure_library_entry(session, artifact)
                 # Derived-video helpers can spend minutes in ffmpeg. Persist the
                 # content-addressed source before awaiting them so SQLite never
                 # carries a write transaction across external process work.

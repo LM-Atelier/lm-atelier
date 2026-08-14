@@ -48,7 +48,8 @@ _STABLE_TEXT = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.:/+-]{0,199}$")
 _PACKAGE_ID = re.compile(r"^[a-z0-9][a-z0-9._-]{0,99}$")
 _LOWERCASE_COMMIT = re.compile(r"^[0-9a-f]{40}$")
 _SEMANTIC_VERSION = re.compile(r"^[0-9]+[.][0-9]+[.][0-9]+(?:[-+][0-9A-Za-z.-]+)?$")
-_REGISTRY_ENVIRONMENT_PATH = re.compile(r"^registry-wheels-([0-9a-f]{64})$")
+_REGISTRY_ENVIRONMENT_PATH = re.compile(r"^registry-wheels-v3-([0-9a-f]{64})$")
+_LEGACY_REGISTRY_ENVIRONMENT_PATH = re.compile(r"^registry-wheels-([0-9a-f]{64})$")
 
 
 class WorkflowBindingError(ValueError):
@@ -525,6 +526,13 @@ def materialize_registry_package(
         "wheel_closure_sha256": install.wheel_closure_sha256,
         "wheel_environment_sha256": install.wheel_environment_sha256,
     }
+    if isinstance(
+        install.wheel_environment_path, str
+    ) and _LEGACY_REGISTRY_ENVIRONMENT_PATH.fullmatch(install.wheel_environment_path):
+        raise WorkflowBindingError(
+            "legacy_environment_manifest",
+            "Registry package dependency environment must be renewed",
+        )
     environment_match = (
         _REGISTRY_ENVIRONMENT_PATH.fullmatch(install.wheel_environment_path)
         if isinstance(install.wheel_environment_path, str)
