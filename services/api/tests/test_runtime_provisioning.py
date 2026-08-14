@@ -557,6 +557,115 @@ async def test_comfy_upgrade_carries_only_managed_registry_nodes(
     assert (managed / "node.py").read_bytes() == b"managed node"
 
 
+async def test_startup_restore_carries_registry_nodes_into_a_preinstalled_release(
+    settings,
+    tmp_path: Path,
+    monkeypatch,
+) -> None:  # type: ignore[no-untyped-def]
+    llama_content = _zip_bytes({"llama-server.exe": b"llama"})
+    comfy_content = _zip_bytes(
+        {
+            "python/python.exe": b"python",
+            "python/Lib/site-packages/example-1.0.dist-info/METADATA": (
+                b"Name: example\nVersion: 1.0\n"
+            ),
+            "ComfyUI/main.py": b"print('comfy')",
+        }
+    )
+    manifest = tmp_path / "engines.json"
+    settings.prepare()
+    probe = {"python": "3.13.14", "comfyui": "0.28.0", "packages": {"example": "1.0"}}
+    monkeypatch.setattr(
+        runtime_provisioning.subprocess,
+        "run",
+        lambda *args, **kwargs: runtime_provisioning.subprocess.CompletedProcess(  # noqa: ARG005
+            args[0],
+            0,
+            stdout=f"{runtime_provisioning._RUNTIME_PROBE_SENTINEL}{json.dumps(probe)}\n",
+            stderr="",
+        ),
+    )
+
+    async with httpx.AsyncClient(
+        transport=httpx.MockTransport(lambda _request: httpx.Response(200, content=comfy_content))
+    ) as client:
+        _write_manifest(
+            manifest,
+            llama_content=llama_content,
+            comfy_content=comfy_content,
+            comfy_release="v-old",
+            comfy_version="0.28.0",
+        )
+        old = RuntimeProvisioner(
+            settings,
+            manifest_path=manifest,
+            client=client,
+            environment={},
+            platform_key="test-platform",
+            allowed_download_hosts={"runtime.test"},
+        )
+        assert (await old.ensure("comfyui")).state == "ready"
+        await old.close()
+        assert settings.comfy_directory is not None
+        assert settings.comfy_executable is not None
+        old_directory = settings.comfy_directory
+        old_executable = settings.comfy_executable
+
+        _write_manifest(
+            manifest,
+            llama_content=llama_content,
+            comfy_content=comfy_content,
+            comfy_release="v-new",
+            comfy_version="0.30.0",
+        )
+        probe["comfyui"] = "0.30.0"
+        preinstall = RuntimeProvisioner(
+            settings,
+            manifest_path=manifest,
+            client=client,
+            environment={},
+            platform_key="test-platform",
+            allowed_download_hosts={"runtime.test"},
+        )
+        assert (await preinstall.ensure("comfyui")).state == "ready"
+        await preinstall.close()
+        assert settings.comfy_directory is not None
+        new_directory = settings.comfy_directory
+
+        managed = old_directory / "custom_nodes" / "lm-atelier-registry_late-renewal"
+        unmanaged = old_directory / "custom_nodes" / "manual-node"
+        managed.mkdir(parents=True)
+        unmanaged.mkdir()
+        (managed / "node.py").write_bytes(b"renewed after preinstall")
+        (unmanaged / "node.py").write_bytes(b"unmanaged")
+        assert not (new_directory / "custom_nodes" / managed.name).exists()
+
+        # Recreate the real restart boundary: the old release is still the
+        # configured launch authority while the new managed tree already exists.
+        settings.comfy_directory = old_directory
+        settings.comfy_executable = old_executable
+        environment: dict[str, str] = {}
+        restored = RuntimeProvisioner(
+            settings,
+            manifest_path=manifest,
+            client=client,
+            environment=environment,
+            platform_key="test-platform",
+            allowed_download_hosts={"runtime.test"},
+        )
+        task = restored.start_restore()
+        assert task is not None
+        await task
+        assert restored.status("comfyui").state == "ready"
+        await restored.close()
+
+    assert settings.comfy_directory == new_directory
+    copied = new_directory / "custom_nodes" / managed.name
+    assert (copied / "node.py").read_bytes() == b"renewed after preinstall"
+    assert not (new_directory / "custom_nodes" / unmanaged.name).exists()
+    assert environment["LOCAL_LM_COMFY_DIRECTORY"] == str(new_directory)
+
+
 def test_managed_registry_copy_budget_is_shared_across_folders(tmp_path: Path) -> None:
     first = tmp_path / "first"
     second = tmp_path / "second"

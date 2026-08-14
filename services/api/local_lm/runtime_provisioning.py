@@ -618,6 +618,8 @@ class RuntimeProvisioner:
         for source in self._managed_registry_node_sources(directory, final):
             if not source.exists():
                 continue
+            if source.resolve() == target.resolve():
+                continue
             if is_link_or_reparse(source, missing="assume_link", unreadable="assume_link"):
                 raise RuntimeProvisioningError(
                     "A managed Registry node source is not an ordinary directory."
@@ -636,12 +638,21 @@ class RuntimeProvisioner:
                     raise RuntimeProvisioningError(
                         "The replacement runtime already contains a managed Registry node."
                     )
-                added_entries, added_bytes = self._copy_managed_registry_tree(
-                    candidate,
-                    destination,
-                    max_entries=_MAX_RUNTIME_FILES - copied_entries,
-                    max_bytes=_MAX_RUNTIME_BYTES - copied_bytes,
-                )
+                restoring = target / f".lm-atelier-restoring-{uuid4().hex}"
+                try:
+                    added_entries, added_bytes = self._copy_managed_registry_tree(
+                        candidate,
+                        restoring,
+                        max_entries=_MAX_RUNTIME_FILES - copied_entries,
+                        max_bytes=_MAX_RUNTIME_BYTES - copied_bytes,
+                    )
+                    if destination.exists():
+                        raise RuntimeProvisioningError(
+                            "The replacement runtime already contains a managed Registry node."
+                        )
+                    os.replace(restoring, destination)
+                finally:
+                    shutil.rmtree(restoring, ignore_errors=True)
                 copied_entries += added_entries
                 copied_bytes += added_bytes
                 restored.add(candidate.name)
@@ -1005,6 +1016,13 @@ class RuntimeProvisioner:
                         engine,
                     )
                     continue
+                if engine == "comfyui":
+                    # A newer managed release can already be present before a
+                    # Registry package is renewed in the currently configured
+                    # release. Carry those application-owned node bytes before
+                    # switching the persisted runtime paths; afterwards the old
+                    # configured release is no longer discoverable authority.
+                    self._restore_managed_registry_nodes(final, asset, final)
                 installed = self._resolve_installed_paths(final, asset)
                 self._apply_configuration(engine, installed, persist=True)
                 self._states[engine] = self._status(
