@@ -12,6 +12,7 @@ from local_lm.db import Base
 from local_lm.models import Artifact, ReferenceAsset, ReferenceSubject
 from local_lm.reference_library import (
     MAX_PAGE,
+    MAX_SIMILARITY_CANDIDATES,
     attach_asset,
     clear_cover,
     create_subject,
@@ -24,7 +25,7 @@ from local_lm.reference_library import (
     set_details,
     set_favorite,
 )
-from local_lm.references import ReferenceError, ReferenceKind
+from local_lm.references import MAX_SLUG, ReferenceError, ReferenceKind, valid_mention_slug
 
 
 @pytest.fixture
@@ -80,6 +81,22 @@ def test_two_people_may_share_a_name_but_not_a_mention(session: Session) -> None
     assert (first.mention_slug, second.mention_slug) == ("ada-lovelace", "ada-lovelace-2")
 
 
+def test_a_maximum_length_derived_mention_reserves_room_for_each_suffix(
+    session: Session,
+) -> None:
+    name = "a" * MAX_SLUG
+    subjects = [create_subject(session, name=name, kind="person") for _ in range(11)]
+    slugs = [subject.mention_slug for subject in subjects]
+
+    assert slugs[:2] == [name, "a" * (MAX_SLUG - 2) + "-2"]
+    assert slugs[8:11] == [
+        "a" * (MAX_SLUG - 2) + "-9",
+        "a" * (MAX_SLUG - 3) + "-10",
+        "a" * (MAX_SLUG - 3) + "-11",
+    ]
+    assert all(len(slug) <= MAX_SLUG and valid_mention_slug(slug) for slug in slugs)
+
+
 def test_a_mention_the_user_chose_is_refused_rather_than_renumbered(session: Session) -> None:
     """Silently handing back a different mention than the one asked for would
     mean the user's chats reference something that does not exist."""
@@ -87,13 +104,56 @@ def test_a_mention_the_user_chose_is_refused_rather_than_renumbered(session: Ses
     create_subject(session, name="Ada", kind="person", mention_slug="ada")
     with pytest.raises(ReferenceError) as caught:
         create_subject(session, name="Someone else", kind="person", mention_slug="ada")
-    assert "already answers to @ada" in str(caught.value)
+    assert str(caught.value) == "that mention is already in use"
+
+
+def test_an_explicit_mention_honors_the_exact_length_boundary(session: Session) -> None:
+    boundary = "a" * MAX_SLUG
+    subject = create_subject(session, name="Ada", kind="person", mention_slug=boundary)
+    assert subject.mention_slug == boundary
+
+    private_value = "z" * (MAX_SLUG + 1)
+    with pytest.raises(ReferenceError) as caught:
+        create_subject(session, name="Grace", kind="person", mention_slug=private_value)
+    assert str(caught.value) == "a mention must use lowercase letters, digits and hyphens"
+    assert private_value not in str(caught.value)
+    assert session.query(ReferenceSubject).count() == 1
 
 
 @pytest.mark.parametrize("bad", ["Ada Lovelace", "ada_lovelace", "-ada", "", "a" * 80])
 def test_an_unusable_mention_is_refused(session: Session, bad: str) -> None:
     with pytest.raises(ReferenceError):
         create_subject(session, name="Ada", kind="person", mention_slug=bad)
+
+
+def test_collision_exhaustion_is_bounded_and_leaves_no_partial_subject(
+    session: Session, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr("local_lm.reference_library.MAX_SLUG_COLLISION_SUFFIX", 3)
+    for _ in range(3):
+        create_subject(session, name="Ada", kind="person")
+
+    with pytest.raises(ReferenceError) as caught:
+        create_subject(session, name="Ada", kind="person")
+
+    assert str(caught.value) == "a unique mention could not be assigned"
+    assert session.query(ReferenceSubject).count() == 3
+
+
+def test_collision_exhaustion_does_not_partially_rename_a_subject(
+    session: Session, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr("local_lm.reference_library.MAX_SLUG_COLLISION_SUFFIX", 3)
+    for _ in range(3):
+        create_subject(session, name="Grace", kind="person")
+    subject = create_subject(session, name="Ada", kind="person")
+
+    with pytest.raises(ReferenceError) as caught:
+        rename_subject(session, subject, name="Grace", follow_mention=True)
+
+    assert str(caught.value) == "a unique mention could not be assigned"
+    assert subject.name == "Ada"
+    assert subject.mention_slug == "ada"
 
 
 def test_renaming_does_not_move_the_mention_by_default(session: Session) -> None:
@@ -339,6 +399,104 @@ def test_without_a_reader_the_scan_is_skipped_not_faked(session: Session) -> Non
     _named_artifact(session, "a2")
     attach_asset(session, subject, artifact_id="art_a1")
     assert attach_asset(session, subject, artifact_id="art_a2").similar == ()
+
+
+def _fill_similarity_candidates(
+    session: Session,
+    subject: ReferenceSubject,
+    count: int,
+) -> list[ReferenceAsset]:
+    rows: list[ReferenceAsset] = []
+    for index in range(count):
+        artifact = _named_artifact(session, f"candidate_{index:03d}")
+        rows.append(
+            ReferenceAsset(
+                reference_subject_id=subject.id,
+                artifact_id=artifact.id,
+                sort_order=index,
+            )
+        )
+    session.add_all(rows)
+    session.flush()
+    return rows
+
+
+def test_similarity_scan_accepts_the_exact_candidate_boundary(session: Session) -> None:
+    subject = create_subject(session, name="Ada", kind="person")
+    _fill_similarity_candidates(session, subject, MAX_SIMILARITY_CANDIDATES)
+    incoming = _named_artifact(session, "boundary_incoming")
+    image = _png(120)
+    calls: list[str] = []
+
+    def read(artifact_id: str) -> bytes:
+        calls.append(artifact_id)
+        return image
+
+    result = attach_asset(session, subject, artifact_id=incoming.id, read_bytes=read)
+
+    assert len(result.similar) == MAX_SIMILARITY_CANDIDATES
+    assert calls[0] == incoming.id
+    assert calls[1:] == [f"art_candidate_{index:03d}" for index in range(64)]
+    assert result.asset.sort_order == MAX_SIMILARITY_CANDIDATES
+
+
+def test_similarity_scan_plus_one_skips_advice_and_still_attaches(session: Session) -> None:
+    subject = create_subject(session, name="Ada", kind="person")
+    existing = _fill_similarity_candidates(session, subject, MAX_SIMILARITY_CANDIDATES + 1)
+    incoming = _named_artifact(session, "oversize_incoming")
+    calls: list[str] = []
+
+    def read(artifact_id: str) -> bytes:
+        calls.append(artifact_id)
+        return _png(120)
+
+    result = attach_asset(session, subject, artifact_id=incoming.id, read_bytes=read)
+
+    assert result.similar == ()
+    assert calls == []
+    rows = session.query(ReferenceAsset).order_by(ReferenceAsset.sort_order).all()
+    assert [row.id for row in rows[:-1]] == [row.id for row in existing]
+    assert rows[-1].id == result.asset.id
+    assert rows[-1].artifact_id == incoming.id
+    assert rows[-1].sort_order == MAX_SIMILARITY_CANDIDATES + 1
+
+
+def test_exact_duplicate_outside_similarity_window_is_still_authoritative(
+    session: Session,
+) -> None:
+    subject = create_subject(session, name="Ada", kind="person")
+    existing = _fill_similarity_candidates(session, subject, MAX_SIMILARITY_CANDIDATES + 1)
+    duplicate = existing[-1]
+    calls: list[str] = []
+
+    def read(artifact_id: str) -> bytes:
+        calls.append(artifact_id)
+        return _png(120)
+
+    with pytest.raises(ReferenceError, match="already holds that exact image"):
+        attach_asset(
+            session,
+            subject,
+            artifact_id=duplicate.artifact_id,
+            read_bytes=read,
+        )
+
+    assert calls == []
+    assert session.query(ReferenceAsset).count() == MAX_SIMILARITY_CANDIDATES + 1
+
+
+def test_skipping_similarity_uses_full_subject_for_next_order(session: Session) -> None:
+    subject = create_subject(session, name="Ada", kind="person")
+    existing = _fill_similarity_candidates(session, subject, MAX_SIMILARITY_CANDIDATES + 1)
+    existing[-1].sort_order = 500
+    incoming = _named_artifact(session, "unscanned_incoming")
+    session.flush()
+
+    result = attach_asset(session, subject, artifact_id=incoming.id)
+
+    assert result.similar == ()
+    assert result.asset.sort_order == 501
+    assert session.query(ReferenceAsset).count() == MAX_SIMILARITY_CANDIDATES + 2
 
 
 def test_an_image_outside_the_store_cannot_be_attached(session: Session) -> None:
