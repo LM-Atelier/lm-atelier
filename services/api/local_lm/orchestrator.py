@@ -1033,7 +1033,12 @@ class ConversationOrchestrator:
                 Operation.IMAGE_TO_IMAGE: Operation.TEXT_TO_IMAGE,
                 Operation.IMAGE_TO_VIDEO: Operation.TEXT_TO_VIDEO,
             }.get(plan.operation)
-            if semantic_fallback and not resolved_input_ids and prior_prompt:
+            if (
+                semantic_fallback
+                and not request.input_artifact_ids
+                and not reference_artifact_ids
+                and prior_prompt
+            ):
                 plan.operation = semantic_fallback
                 plan.input_artifact_ids = []
                 resolved_input_ids = []
