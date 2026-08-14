@@ -7,6 +7,7 @@ from sqlalchemy import create_engine, event
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
+from local_lm.artifact_library import ArtifactReferenceDataError
 from local_lm.db import Base
 from local_lm.models import Artifact, ReferenceAsset, ReferenceSubject
 from local_lm.references import ReferenceKind, ValidationState, slugify_mention
@@ -123,7 +124,7 @@ def test_an_image_in_use_cannot_be_deleted_out_from_under_a_subject(session: Ses
     session.commit()
 
     session.delete(artifact)
-    with pytest.raises(IntegrityError):
+    with pytest.raises(ArtifactReferenceDataError):
         session.commit()
     session.rollback()
 

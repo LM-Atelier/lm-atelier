@@ -28,7 +28,6 @@ from .models import (
     MessagePart,
     ResponseRevision,
     ResponseRevisionPart,
-    Run,
 )
 from .subprocess_env import subprocess_environment
 
@@ -511,7 +510,11 @@ class ArtifactStore:
         # count with implementation details.
         return len(parts), removed_count, reclaimed_bytes
 
-    def delete_chat_generated_media(self, session: Session, chat_id: str) -> int:
+    def generated_media_artifact_ids_for_chat(
+        self,
+        session: Session,
+        chat_id: str,
+    ) -> tuple[str, ...]:
         artifacts_by_id = {
             artifact.id: artifact
             for artifact in session.scalars(
@@ -549,46 +552,39 @@ class ArtifactStore:
         ).unique()
         for artifact in revision_artifacts:
             artifacts_by_id[artifact.id] = artifact
-        artifacts = sorted(artifacts_by_id.values(), key=lambda item: item.created_at)
+        return tuple(
+            artifact.id
+            for artifact in sorted(artifacts_by_id.values(), key=lambda item: item.created_at)
+        )
 
-        external_run_artifact_ids: set[str] = set()
-        for provenance in session.scalars(
-            select(Run.provenance_json).where(Run.chat_id != chat_id)
-        ):
-            external_run_artifact_ids.update(self._provenance_input_ids(provenance))
+    def delete_generated_media_artifacts(
+        self,
+        session: Session,
+        artifact_ids: tuple[str, ...],
+    ) -> int:
+        """Delete a removed chat's now-unreferenced generated media.
+
+        Callers snapshot the ids before deleting the chat, then flush the chat
+        deletion before entering here. The canonical reference graph therefore
+        protects every surviving consumer without treating the deleted chat's
+        own Run and Job rows as external retention.
+        """
+
         removed = 0
-        for artifact in artifacts:
+        for artifact_id in artifact_ids:
+            artifact = session.get(Artifact, artifact_id)
+            if not artifact or artifact.kind not in {
+                ArtifactKind.IMAGE.value,
+                ArtifactKind.VIDEO.value,
+            }:
+                continue
             if session.scalar(
                 select(ArtifactLibraryEntry.id).where(
                     ArtifactLibraryEntry.artifact_id == artifact.id
                 )
             ):
                 continue
-            message_references_elsewhere = session.scalar(
-                select(func.count(MessagePart.id))
-                .join(Message, Message.id == MessagePart.message_id)
-                .where(
-                    MessagePart.artifact_id == artifact.id,
-                    Message.chat_id != chat_id,
-                )
-            )
-            revision_references_elsewhere = session.scalar(
-                select(func.count(ResponseRevisionPart.id))
-                .join(
-                    ResponseRevision,
-                    ResponseRevision.id == ResponseRevisionPart.response_revision_id,
-                )
-                .join(Message, Message.id == ResponseRevision.message_id)
-                .where(
-                    ResponseRevisionPart.artifact_id == artifact.id,
-                    Message.chat_id != chat_id,
-                )
-            )
-            if (
-                message_references_elsewhere
-                or revision_references_elsewhere
-                or artifact.id in external_run_artifact_ids
-            ):
+            if artifact.id in self.referenced_artifact_ids(session):
                 continue
             _references, removed_count, _reclaimed_bytes = self.delete_library_artifact(
                 session, artifact

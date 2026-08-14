@@ -1865,8 +1865,15 @@ async def delete_prompt_helper(
         helper = session.get(Chat, helper_id)
         if not helper or helper.scope != PROMPT_HELPER_SCOPE:
             raise api_error(404, "prompt-helper-not-found", "prompt helper not found")
-        services.artifacts.delete_chat_generated_media(session, helper_id)
+        artifact_ids = services.artifacts.generated_media_artifact_ids_for_chat(session, helper_id)
+        helper_jobs = session.scalars(
+            select(Job).join(Run, Job.run_id == Run.id).where(Run.chat_id == helper_id)
+        ).all()
+        for job in helper_jobs:
+            session.delete(job)
         session.delete(helper)
+        session.flush()
+        services.artifacts.delete_generated_media_artifacts(session, artifact_ids)
         session.commit()
     return Response(status_code=204)
 
@@ -1961,9 +1968,14 @@ async def delete_chat(
         chat = session.get(Chat, chat_id)
         if not chat or chat.scope != STANDARD_CHAT_SCOPE:
             raise api_error(404, "chat-not-found", "chat not found")
-        if delete_generated_media:
-            services.artifacts.delete_chat_generated_media(session, chat_id)
+        artifact_ids = (
+            services.artifacts.generated_media_artifact_ids_for_chat(session, chat_id)
+            if delete_generated_media
+            else ()
+        )
         session.delete(chat)
+        session.flush()
+        services.artifacts.delete_generated_media_artifacts(session, artifact_ids)
         session.commit()
     return Response(status_code=204)
 

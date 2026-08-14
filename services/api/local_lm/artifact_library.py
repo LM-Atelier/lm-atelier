@@ -613,10 +613,11 @@ def referenced_artifact_ids(session: Session) -> set[str]:
         if len(found) > MAX_REFERENCE_VALUES:
             _fail()
 
+    # A subject cover is a replaceable selector, not a retention edge. Its
+    # foreign key is deliberately SET NULL when those bytes are removed.
     direct_columns = (
         MessagePart.artifact_id,
         ResponseRevisionPart.artifact_id,
-        ReferenceSubject.cover_artifact_id,
         ReferenceAsset.artifact_id,
         SetupVerification.input_artifact_id,
         ArtifactLibraryEntry.artifact_id,

@@ -4336,7 +4336,12 @@ class ConversationOrchestrator:
                         "settings": run.settings_json,
                     },
                 )
-                if setup_verification_for_chat(session, run.chat_id) is None:
+                output_chat = session.get(Chat, run.chat_id)
+                if (
+                    setup_verification_for_chat(session, run.chat_id) is None
+                    and output_chat
+                    and output_chat.scope != PROMPT_HELPER_SCOPE
+                ):
                     ensure_library_entry(session, artifact)
                 # Derived-video helpers can spend minutes in ffmpeg. Persist the
                 # content-addressed source before awaiting them so SQLite never
