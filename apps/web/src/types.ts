@@ -1311,6 +1311,21 @@ export interface ReferenceAsset {
   view_label: string | null;
   sort_order: number;
   validation_state: string;
+  validation_reasons_json: string[];
+  width: number | null;
+  height: number | null;
+  review_version: number;
+}
+
+export interface ReferenceAssetReviewed {
+  asset: ReferenceAsset;
+  review: {
+    id: string;
+    result_version: number;
+    decision: "usable" | "weak" | "rejected";
+    decision_sha256: string;
+  };
+  idempotent: boolean;
 }
 
 /** An image already held that closely resembles one just added. */

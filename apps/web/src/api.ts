@@ -15,6 +15,7 @@ import type {
   BackupInfo,
   ReferenceAsset,
   ReferenceAssetAttached,
+  ReferenceAssetReviewed,
   ReferenceDeletionImpact,
   ReferenceSubject,
   ReferenceSubjectPage,
@@ -597,6 +598,20 @@ export const api = {
       method: "POST",
       body: JSON.stringify(body),
     }),
+  reviewReferenceAsset: (
+    id: string,
+    assetId: string,
+    body: {
+      expected_state: "unchecked";
+      expected_version: number;
+      decision: "usable" | "weak" | "rejected";
+      reasons: string[];
+    },
+  ) =>
+    request<ReferenceAssetReviewed>(
+      `/api/references/${encodeURIComponent(id)}/assets/${encodeURIComponent(assetId)}/review`,
+      { method: "POST", body: JSON.stringify(body) },
+    ),
   detachReferenceAsset: (id: string, assetId: string) =>
     request<void>(
       `/api/references/${encodeURIComponent(id)}/assets/${encodeURIComponent(assetId)}`,
