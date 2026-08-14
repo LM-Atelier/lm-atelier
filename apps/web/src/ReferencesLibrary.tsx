@@ -24,6 +24,8 @@ const KINDS = [
   "other",
 ] as const;
 
+const REFERENCE_PAGE_SIZE = 50;
+
 export function ReferencesLibrary() {
   const client = useQueryClient();
   const [search, setSearch] = useState("");
@@ -36,10 +38,11 @@ export function ReferencesLibrary() {
   // the impact is held here rather than re-fetched at the moment of deleting.
   const [pendingDelete, setPendingDelete] = useState<ReferenceDeletionImpact | null>(null);
   const [opened, setOpened] = useState<ReferenceSubject | null>(null);
+  const [offset, setOffset] = useState(0);
 
   const references = useQuery({
-    queryKey: ["references", search, includeArchived],
-    queryFn: () => api.references(search, includeArchived),
+    queryKey: ["references", search, includeArchived, offset],
+    queryFn: () => api.references(search, includeArchived, REFERENCE_PAGE_SIZE, offset),
   });
 
   const refresh = () => client.invalidateQueries({ queryKey: ["references"] });
@@ -52,6 +55,7 @@ export function ReferencesLibrary() {
       setCreating(false);
       setName("");
       setError(null);
+      setOffset(0);
       void refresh();
     },
     onError: fail,
@@ -69,6 +73,9 @@ export function ReferencesLibrary() {
       api.deleteReference(impact.reference_subject_id, impact.asset_count),
     onSuccess: () => {
       setPendingDelete(null);
+      if (items.length === 1 && offset > 0) {
+        setOffset(Math.max(0, offset - REFERENCE_PAGE_SIZE));
+      }
       void refresh();
     },
     onError: fail,
@@ -83,6 +90,11 @@ export function ReferencesLibrary() {
   };
 
   const items = references.data?.items ?? [];
+  const total = references.data?.total ?? 0;
+  const shownFrom = total === 0 ? 0 : Math.min(offset + 1, total);
+  const shownThrough = Math.min(offset + items.length, total);
+  const hasPrevious = offset > 0;
+  const hasNext = offset + items.length < total;
 
   // The detail view replaces the list rather than nesting inside it, so the
   // back control is the only way out and cannot be confused with the nav.
@@ -104,13 +116,19 @@ export function ReferencesLibrary() {
             value={search}
             aria-label="Search references"
             placeholder="Search by name"
-            onChange={(event) => setSearch(event.target.value)}
+            onChange={(event) => {
+              setSearch(event.target.value);
+              setOffset(0);
+            }}
           />
           <label className="toggle-row">
             <input
               type="checkbox"
               checked={includeArchived}
-              onChange={(event) => setIncludeArchived(event.target.checked)}
+              onChange={(event) => {
+                setIncludeArchived(event.target.checked);
+                setOffset(0);
+              }}
             />
             Show archived
           </label>
@@ -130,7 +148,7 @@ export function ReferencesLibrary() {
 
       {references.isLoading ? <p>Loading references…</p> : null}
 
-      {!references.isLoading && items.length === 0 ? (
+      {!references.isLoading && total === 0 ? (
         <EmptyState
           icon={<Plus />}
           title="No references yet"
@@ -189,6 +207,28 @@ export function ReferencesLibrary() {
           </li>
         ))}
       </ul>
+
+      {total > 0 ? (
+        <nav className="row-actions" aria-label="Reference pages">
+          <p className="muted" aria-live="polite">
+            Showing {shownFrom}-{shownThrough} of {total}
+          </p>
+          <button
+            className="secondary compact-button"
+            disabled={!hasPrevious || references.isFetching}
+            onClick={() => setOffset(Math.max(0, offset - REFERENCE_PAGE_SIZE))}
+          >
+            Previous
+          </button>
+          <button
+            className="secondary compact-button"
+            disabled={!hasNext || references.isFetching}
+            onClick={() => setOffset(offset + REFERENCE_PAGE_SIZE)}
+          >
+            Next
+          </button>
+        </nav>
+      ) : null}
 
       {creating ? (
         <AccessibleDialog
