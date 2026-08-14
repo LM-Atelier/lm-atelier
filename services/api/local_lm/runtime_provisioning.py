@@ -118,6 +118,7 @@ class RuntimeProvisioner:
         ] = {}
         self.runtime_root.mkdir(parents=True, exist_ok=True)
         self.archive_root.mkdir(parents=True, exist_ok=True)
+        self._managed_node_source_releases = self._configured_managed_comfy_releases()
         self._restore_candidates = self._managed_restoration_candidates()
         for engine in self._restore_candidates:
             definition = self._definition(engine)
@@ -679,15 +680,7 @@ class RuntimeProvisioner:
         directory: PurePosixPath,
         final: Path,
     ) -> tuple[Path, ...]:
-        engine_root = self.runtime_root / "comfyui"
-        releases: list[Path] = []
-        configured = self.settings.comfy_directory
-        if configured is not None:
-            configured_path = Path(configured).expanduser()
-            for parent in (configured_path, *configured_path.parents):
-                if parent.parent == engine_root:
-                    releases.append(parent)
-                    break
+        releases = list(self._managed_node_source_releases)
         if final.exists():
             releases.append(final)
 
@@ -699,6 +692,19 @@ class RuntimeProvisioner:
             seen.add(release)
             sources.append(release.joinpath(*directory.parts, "custom_nodes"))
         return tuple(sources)
+
+    def _configured_managed_comfy_releases(self) -> tuple[Path, ...]:
+        """Snapshot the configured managed release before background restore."""
+
+        configured = self.settings.comfy_directory
+        if configured is None:
+            return ()
+        engine_root = self.runtime_root / "comfyui"
+        configured_path = Path(configured).expanduser()
+        for parent in (configured_path, *configured_path.parents):
+            if parent.parent == engine_root:
+                return (parent,)
+        return ()
 
     def _managed_comfy_release_owned(self, release: Path) -> bool:
         try:

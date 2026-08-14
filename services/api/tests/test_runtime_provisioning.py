@@ -648,8 +648,10 @@ async def test_startup_restore_carries_registry_nodes_into_a_preinstalled_releas
         (unmanaged / "node.py").write_bytes(b"unmanaged")
         assert not (new_directory / "custom_nodes" / managed.name).exists()
 
-        # Recreate the real restart boundary: the old release is still the
-        # configured launch authority while the new managed tree already exists.
+        # Recreate the real restart boundary: startup constructs the
+        # provisioner while the worker still uses the old release, then another
+        # startup path advances the mutable settings object before background
+        # verification reaches ComfyUI.
         settings.comfy_directory = old_directory
         settings.comfy_executable = old_executable
         environment: dict[str, str] = {}
@@ -661,6 +663,7 @@ async def test_startup_restore_carries_registry_nodes_into_a_preinstalled_releas
             platform_key="test-platform",
             allowed_download_hosts={"runtime.test"},
         )
+        settings.comfy_directory = new_directory
         task = restored.start_restore()
         assert task is not None
         await task
@@ -686,6 +689,7 @@ async def test_startup_restore_carries_registry_nodes_into_a_preinstalled_releas
         platform_key="test-platform",
         allowed_download_hosts={"runtime.test"},
     )
+    settings.comfy_directory = new_directory
     task = repeat.start_restore()
     assert task is not None
     await task
@@ -705,6 +709,7 @@ async def test_startup_restore_carries_registry_nodes_into_a_preinstalled_releas
         platform_key="test-platform",
         allowed_download_hosts={"runtime.test"},
     )
+    settings.comfy_directory = new_directory
     task = conflict.start_restore()
     assert task is not None
     await task
