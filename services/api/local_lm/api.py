@@ -6571,6 +6571,7 @@ def _workflow_family_variant_out(
     family: WorkflowFamily,
     definition: WorkflowDefinition,
     compatibility: WorkflowProfileCompatibility | None,
+    ready_offers: Mapping[str, tuple[WorkflowInstallOffer, ...]],
 ) -> WorkflowFamilyVariantOut:
     readiness: WorkflowVariantReadiness
     reason: str | None
@@ -6632,6 +6633,20 @@ def _workflow_family_variant_out(
         readiness, reason = "unavailable", "family_archived"
     elif not family.enabled:
         readiness, reason = "unavailable", "family_disabled"
+    setup_resolution: Literal["reviewed_download_available", "attention_required"] | None = None
+    install_offer_id: str | None = None
+    if readiness == "setup_required":
+        setup_resolution = "attention_required"
+        if revision is not None:
+            matching_offers = [
+                offer
+                for offer in ready_offers.get(revision.id, ())
+                if offer.workflow_artifact_sha256 == revision.artifact_sha256
+                and offer.dependency_contract_sha256 == revision.dependency_contract_sha256
+            ]
+            if len(matching_offers) == 1:
+                setup_resolution = "reviewed_download_available"
+                install_offer_id = matching_offers[0].id
     return WorkflowFamilyVariantOut(
         id=definition.id,
         variant_key=definition.variant_key or "",
@@ -6644,13 +6659,59 @@ def _workflow_family_variant_out(
         trusted=revision.trusted if revision else compatibility is not None,
         readiness=readiness,
         readiness_reason=reason,
+        setup_resolution=setup_resolution,
+        install_offer_id=install_offer_id,
     )
+
+
+def _ready_workflow_install_offers(
+    session: Session,
+    *,
+    family_id: str | None = None,
+    selector_capability: WorkflowSelectorCapability | None = None,
+    include_archived: bool = True,
+) -> dict[str, tuple[WorkflowInstallOffer, ...]]:
+    query = (
+        select(WorkflowInstallOffer)
+        .join(
+            WorkflowRevision,
+            WorkflowRevision.id == WorkflowInstallOffer.workflow_revision_id,
+        )
+        .join(
+            WorkflowDefinition,
+            and_(
+                WorkflowDefinition.id == WorkflowRevision.workflow_id,
+                WorkflowDefinition.current_revision_id == WorkflowRevision.id,
+            ),
+        )
+        .join(WorkflowFamily, WorkflowFamily.id == WorkflowDefinition.family_id)
+        .where(
+            WorkflowInstallOffer.status == "ready",
+            WorkflowInstallOffer.invalidated_at.is_(None),
+        )
+    )
+    if family_id is not None:
+        query = query.where(WorkflowFamily.id == family_id)
+    else:
+        if not include_archived:
+            query = query.where(WorkflowFamily.archived.is_(False))
+        if selector_capability is not None:
+            query = query.join(WorkflowPreference).where(
+                WorkflowPreference.selector_capability == selector_capability
+            )
+    grouped: dict[str, list[WorkflowInstallOffer]] = {}
+    for offer in session.scalars(
+        query.order_by(WorkflowInstallOffer.workflow_revision_id, WorkflowInstallOffer.id)
+    ).unique():
+        grouped.setdefault(offer.workflow_revision_id, []).append(offer)
+    return {revision_id: tuple(offers) for revision_id, offers in grouped.items()}
 
 
 def _workflow_family_out(
     session: Session,
     services: Services,
     family: WorkflowFamily,
+    ready_offers: Mapping[str, tuple[WorkflowInstallOffer, ...]],
 ) -> WorkflowFamilyOut:
     compatibility = session.scalar(
         select(WorkflowProfileCompatibility).where(
@@ -6673,6 +6734,7 @@ def _workflow_family_out(
                 family,
                 definition,
                 compatibility,
+                ready_offers,
             )
             for definition in sorted(
                 family.definitions,
@@ -6776,7 +6838,12 @@ async def list_workflow_families(
         session.scalars(query.order_by(WorkflowFamily.name, WorkflowFamily.id)).unique()
     )
     services = _services(request)
-    return [_workflow_family_out(session, services, family) for family in families]
+    ready_offers = _ready_workflow_install_offers(
+        session,
+        selector_capability=selector_capability,
+        include_archived=include_archived,
+    )
+    return [_workflow_family_out(session, services, family, ready_offers) for family in families]
 
 
 @router.get("/workflow-families/{family_id}", response_model=WorkflowFamilyOut)
@@ -6786,7 +6853,8 @@ async def get_workflow_family(
     session: SessionDep,
 ) -> WorkflowFamilyOut:
     family = _workflow_family_row(session, family_id)
-    return _workflow_family_out(session, _services(request), family)
+    ready_offers = _ready_workflow_install_offers(session, family_id=family_id)
+    return _workflow_family_out(session, _services(request), family, ready_offers)
 
 
 @router.patch("/workflow-families/{family_id}", response_model=WorkflowFamilyOut)
@@ -6849,7 +6917,8 @@ async def update_workflow_family(
         ensure_legacy_profile_workflow(session, compatibility_profile)
     session.commit()
     family = _workflow_family_row(session, family.id)
-    return _workflow_family_out(session, _services(request), family)
+    ready_offers = _ready_workflow_install_offers(session, family_id=family.id)
+    return _workflow_family_out(session, _services(request), family, ready_offers)
 
 
 def _normalized_workflow_family_tags(tags: list[str]) -> list[str]:

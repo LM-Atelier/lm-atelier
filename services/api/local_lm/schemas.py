@@ -953,6 +953,10 @@ WorkflowVariantReadiness = Literal[
     "review_required",
     "unavailable",
 ]
+WorkflowSetupResolution = Literal[
+    "reviewed_download_available",
+    "attention_required",
+]
 WorkflowSelectionResponseMode = Literal[
     "default",
     "inherit",
@@ -975,6 +979,8 @@ class WorkflowFamilyVariantOut(ApiModel):
     trusted: bool
     readiness: WorkflowVariantReadiness
     readiness_reason: str | None = None
+    setup_resolution: WorkflowSetupResolution | None = None
+    install_offer_id: str | None = Field(default=None, max_length=40)
 
 
 class WorkflowFamilyPreferenceOut(ApiModel):

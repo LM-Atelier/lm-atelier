@@ -1115,6 +1115,10 @@ export type WorkflowVariantReadiness =
   | "review_required"
   | "unavailable";
 
+export type WorkflowSetupResolution =
+  | "reviewed_download_available"
+  | "attention_required";
+
 export type WorkflowSelectionMode =
   | "default"
   | "inherit"
@@ -1135,6 +1139,10 @@ export interface WorkflowFamilyVariant {
   trusted: boolean;
   readiness: WorkflowVariantReadiness;
   readiness_reason: string | null;
+  // Optional for rolling compatibility with a backend that predates the
+  // additive setup-resolution projection.
+  setup_resolution?: WorkflowSetupResolution | null;
+  install_offer_id?: string | null;
 }
 
 export interface WorkflowFamilyPreference {
