@@ -97,7 +97,11 @@ export function ReferencesLibrary() {
     if (!references.data || offset === 0 || items.length > 0) return;
     const lastOffset =
       total === 0 ? 0 : Math.floor((total - 1) / REFERENCE_PAGE_SIZE) * REFERENCE_PAGE_SIZE;
-    if (lastOffset < offset) setOffset(lastOffset);
+    if (lastOffset >= offset) return;
+    const timeout = window.setTimeout(() => {
+      setOffset((current) => (current === offset ? lastOffset : current));
+    }, 0);
+    return () => window.clearTimeout(timeout);
   }, [items.length, offset, references.data, total]);
 
   // The detail view replaces the list rather than nesting inside it, so the
