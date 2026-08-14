@@ -750,6 +750,14 @@ def _wheel_path_key(value: str) -> str:
     )
 
 
+def _wheel_path_sort_key(value: str) -> tuple[tuple[str, ...], tuple[str, ...]]:
+    parts = PurePosixPath(value).parts
+    return (
+        tuple(unicodedata.normalize("NFC", part).casefold() for part in parts),
+        parts,
+    )
+
+
 def _parent_path_keys(value: str) -> tuple[str, ...]:
     parts = PurePosixPath(value).parts
     return tuple(PurePosixPath(*parts[:index]).as_posix() for index in range(1, len(parts)))
@@ -1032,7 +1040,9 @@ def _scan_environment(
     inventory: list[dict[str, object]] = []
     file_count = 0
     total_bytes = 0
-    for path in sorted(site_packages.rglob("*")):
+    paths = list(site_packages.rglob("*"))
+    paths.sort(key=lambda item: _wheel_path_sort_key(item.relative_to(site_packages).as_posix()))
+    for path in paths:
         if _is_link_or_reparse(path):
             raise ComfyRegistryWheelEnvironmentError(
                 "unsafe_environment_link", "Wheel environment contains a link"
@@ -1062,7 +1072,9 @@ def _scan_environment(
             raise ComfyRegistryWheelEnvironmentError(
                 "environment_too_large", "Wheel environment exceeds its audited limits"
             )
-    for directory in sorted(site_packages.glob("*.dist-info")):
+    directories = list(site_packages.glob("*.dist-info"))
+    directories.sort(key=lambda item: _wheel_path_sort_key(item.name))
+    for directory in directories:
         if not directory.is_dir() or _is_link_or_reparse(directory):
             raise ComfyRegistryWheelEnvironmentError(
                 "invalid_distribution_metadata", "Wheel distribution metadata is invalid"
