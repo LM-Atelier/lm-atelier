@@ -116,6 +116,7 @@ from .gguf import (
 from .hardware import collect_system_info
 from .image_edit_strength import STRENGTH_MODE_PARAMETER
 from .model_manifests import (
+    COMFY_MODEL_FOLDERS,
     MAX_METADATA_BYTES,
     MAX_WEIGHT_HEADER_BYTES,
     ModelManifestError,
@@ -5113,6 +5114,7 @@ async def check_model_updates(request: Request, session: SessionDep) -> list[Mod
 @router.post("/models/import", response_model=ModelInstallOut, status_code=201)
 async def import_model(payload: ModelImport, session: SessionDep) -> ModelInstall:
     path = Path(payload.local_path).expanduser().resolve(strict=True)
+    comfy_paths = _comfy_import_paths(path) if payload.engine == "comfyui" else {}
     blocked = {".bin", ".pt", ".pth", ".ckpt", ".pkl", ".pickle"}
     files = [child for child in path.rglob("*") if child.is_file()] if path.is_dir() else [path]
     unsafe = [child for child in files if child.suffix.lower() in blocked]
@@ -5134,6 +5136,7 @@ async def import_model(payload: ModelImport, session: SessionDep) -> ModelInstal
             "path_type": "directory" if path.is_dir() else "file",
             "file_count": len(files),
             "pickle_compatible_weights": False,
+            **({"comfy_paths": comfy_paths} if comfy_paths else {}),
         },
     )
     session.add(install)
@@ -5142,6 +5145,26 @@ async def import_model(payload: ModelImport, session: SessionDep) -> ModelInstal
     session.commit()
     session.refresh(install)
     return install
+
+
+def _comfy_import_paths(path: Path) -> dict[str, str]:
+    """Expose exact, ordinary ComfyUI model folders under an imported root."""
+
+    if not path.is_dir():
+        return {}
+    result: dict[str, str] = {}
+    for child in sorted(path.iterdir(), key=lambda item: item.name):
+        if child.name not in COMFY_MODEL_FOLDERS:
+            continue
+        if is_link_or_reparse(child, missing="assume_link", unreadable="assume_link"):
+            raise api_error(
+                422,
+                "model-path-unsafe",
+                "ComfyUI model folders cannot use filesystem links",
+            )
+        if child.is_dir():
+            result[child.name] = child.name
+    return result
 
 
 @router.post("/models/{model_id}/activate", response_model=JobOut, status_code=202)

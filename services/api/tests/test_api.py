@@ -55,6 +55,7 @@ from local_lm.models import (
     WorkStepDependency,
 )
 from local_lm.orchestrator import ConversationOrchestrator
+from local_lm.processes import ProcessSupervisor
 from local_lm.runtime_provisioning import RuntimeProvisioner
 from local_lm.scheduler import ResourceScheduler
 from local_lm.schemas import (
@@ -6182,6 +6183,48 @@ async def test_model_storage_cleanup_and_shared_path_deletion(
         },
     )
     assert blocked.status_code == 422
+
+
+async def test_comfy_directory_import_publishes_only_canonical_model_folders(
+    client: AsyncClient,
+    settings: Settings,
+    tmp_path: Path,
+) -> None:
+    model_root = tmp_path / "comfy-models"
+    for folder in ("diffusion_models", "text_encoders", "vae", "unknown_models"):
+        target = model_root / folder
+        target.mkdir(parents=True)
+        (target / f"{folder}.safetensors").write_bytes(b"safe")
+
+    imported = await client.post(
+        "/api/models/import",
+        json={
+            "name": "Comfy model directory",
+            "role": "video",
+            "engine": "comfyui",
+            "local_path": str(model_root),
+        },
+    )
+
+    assert imported.status_code == 201
+    assert imported.json()["manifest_json"]["comfy_paths"] == {
+        "diffusion_models": "diffusion_models",
+        "text_encoders": "text_encoders",
+        "vae": "vae",
+    }
+    assert imported.json()["manifest_json"]["file_count"] == 4
+    published = json.loads(
+        ProcessSupervisor(settings)._write_comfy_model_paths().read_text(encoding="utf-8")
+    )
+    imported_entry = next(
+        entry for entry in published.values() if entry["base_path"] == str(model_root.resolve())
+    )
+    assert imported_entry == {
+        "base_path": str(model_root.resolve()),
+        "diffusion_models": "diffusion_models",
+        "text_encoders": "text_encoders",
+        "vae": "vae",
+    }
 
 
 async def test_model_delete_commit_failure_restores_files_and_database_state(
