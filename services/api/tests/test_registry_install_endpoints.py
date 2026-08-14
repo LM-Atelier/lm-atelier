@@ -8,6 +8,7 @@ import pytest
 from fastapi import FastAPI
 from httpx2 import AsyncClient
 
+from local_lm.comfy_registry_paths import registry_wheel_environment_root
 from local_lm.config import Settings
 
 pytestmark = pytest.mark.asyncio
@@ -48,6 +49,24 @@ def _configure_runtime(settings: Settings, monkeypatch: pytest.MonkeyPatch, tmp_
     monkeypatch.setattr(settings, "comfy_directory", tmp_path / "ComfyUI")
 
 
+def _write_install_paths(
+    settings: Settings,
+    *,
+    node: bool = True,
+    environment: bool = True,
+) -> None:
+    if node:
+        assert settings.comfy_directory is not None
+        (settings.comfy_directory / "custom_nodes" / "lm-atelier-registry_example").mkdir(
+            parents=True
+        )
+    if environment:
+        (
+            registry_wheel_environment_root(settings.registry_dir)
+            / f"registry-wheels-v3-{'c' * 64}"
+        ).mkdir(parents=True)
+
+
 async def test_the_install_list_reports_both_pending_decisions(client: AsyncClient) -> None:
     install_id = _seed_install()
 
@@ -62,6 +81,9 @@ async def test_the_install_list_reports_both_pending_decisions(client: AsyncClie
     assert install["archive_sha256"] == "a" * 64
     assert install["trusted"] is False
     assert install["active"] is False
+    assert install["disk_status"] == "files_missing"
+    assert install["node_files_present"] is False
+    assert install["wheel_environment_present"] is False
     assert install["reviewed_at"] is None
     assert install["activated_at"] is None
 
@@ -193,6 +215,7 @@ async def test_dependency_renewal_queues_the_exact_inactive_install(
     tmp_path,
 ) -> None:
     _configure_runtime(settings, monkeypatch, tmp_path)
+    _write_install_paths(settings, environment=False)
     install_id = _seed_install(trusted=True)
     services = app.state.services
     monkeypatch.setattr(
@@ -235,6 +258,84 @@ async def test_dependency_renewal_queues_the_exact_inactive_install(
     )
 
 
+async def test_a_stale_install_is_visible_and_removable(
+    client: AsyncClient,
+    settings: Settings,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path,
+) -> None:
+    _configure_runtime(settings, monkeypatch, tmp_path)
+    _write_install_paths(settings, node=False)
+    install_id = _seed_install()
+
+    listed = await client.get("/api/workflows/packages/installs")
+
+    assert listed.status_code == 200
+    (install,) = listed.json()
+    assert install["id"] == install_id
+    assert install["disk_status"] == "node_files_missing"
+    assert install["node_files_present"] is False
+    assert install["wheel_environment_present"] is True
+
+    removed = await client.delete(f"/api/workflows/packages/installs/{install_id}")
+
+    assert removed.status_code == 204
+    from local_lm.db import SessionLocal
+    from local_lm.models import ComfyRegistryInstall
+
+    with SessionLocal() as session:
+        assert session.get(ComfyRegistryInstall, install_id) is None
+    environment = (
+        registry_wheel_environment_root(settings.registry_dir) / f"registry-wheels-v3-{'c' * 64}"
+    )
+    assert not environment.exists()
+
+
+async def test_removal_refuses_an_active_install_without_mutation(
+    client: AsyncClient,
+    settings: Settings,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path,
+) -> None:
+    _configure_runtime(settings, monkeypatch, tmp_path)
+    _write_install_paths(settings)
+    install_id = _seed_install(trusted=True, active=True)
+
+    response = await client.delete(f"/api/workflows/packages/installs/{install_id}")
+
+    assert response.status_code == 409
+    assert response.json()["code"] == "registry_install_active"
+    from local_lm.db import SessionLocal
+    from local_lm.models import ComfyRegistryInstall
+
+    with SessionLocal() as session:
+        assert session.get(ComfyRegistryInstall, install_id) is not None
+    assert settings.comfy_directory is not None
+    assert (settings.comfy_directory / "custom_nodes" / "lm-atelier-registry_example").is_dir()
+
+
+async def test_renewal_refuses_when_the_package_files_are_missing(
+    client: AsyncClient,
+    app: FastAPI,
+    settings: Settings,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path,
+) -> None:
+    _configure_runtime(settings, monkeypatch, tmp_path)
+    _write_install_paths(settings, node=False)
+    install_id = _seed_install()
+    monkeypatch.setattr(
+        app.state.services.processes,
+        "statuses",
+        lambda: [SimpleNamespace(name="media", running=False, state="stopped")],
+    )
+
+    response = await client.post(f"/api/workflows/packages/installs/{install_id}/renew")
+
+    assert response.status_code == 409
+    assert response.json()["code"] == "registry-install-files-missing"
+
+
 async def test_dependency_renewal_refuses_active_or_running_packages(
     client: AsyncClient,
     app: FastAPI,
@@ -243,6 +344,7 @@ async def test_dependency_renewal_refuses_active_or_running_packages(
     tmp_path,
 ) -> None:
     _configure_runtime(settings, monkeypatch, tmp_path)
+    _write_install_paths(settings)
     active_id = _seed_install(active=True)
 
     active = await client.post(f"/api/workflows/packages/installs/{active_id}/renew")

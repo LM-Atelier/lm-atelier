@@ -41,6 +41,7 @@ _RUNTIME_PROBE_SENTINEL = "LM_ATELIER_RUNTIME_PROBE:"
 _SHA256 = re.compile(r"^[0-9a-f]{64}$")
 _MAX_RUNTIME_FILES = 250_000
 _MAX_RUNTIME_BYTES = 32 * 1024**3
+_REGISTRY_NODE_PREFIX = "lm-atelier-registry_"
 _MUTABLE_RUNTIME_DIRECTORIES = {
     "__pycache__",
     "custom_nodes",
@@ -541,6 +542,8 @@ class RuntimeProvisioner:
             )
             for overlay, overlay_archive in overlays:
                 self._apply_security_overlay(staging, overlay, overlay_archive)
+            if engine == "comfyui":
+                self._restore_managed_registry_nodes(staging, asset, final)
             self._set_install_progress(
                 engine,
                 definition,
@@ -592,6 +595,147 @@ class RuntimeProvisioner:
             return self._resolve_installed_paths(final, asset)
         finally:
             self._discard_staging(staging, engine)
+
+    def _restore_managed_registry_nodes(
+        self,
+        staging: Path,
+        asset: Mapping[str, Any],
+        final: Path,
+    ) -> None:
+        """Carry application-owned Registry nodes into a replacement runtime."""
+
+        raw_directory = asset.get("directory")
+        if not isinstance(raw_directory, str):
+            raise RuntimeProvisioningError("The ComfyUI runtime directory is invalid.")
+        directory = self._safe_archive_path(raw_directory)
+        target = staging.joinpath(*directory.parts, "custom_nodes")
+        self._ensure_inside(staging, target.resolve())
+        target.mkdir(parents=True, exist_ok=True)
+
+        restored: set[str] = set()
+        copied_entries = 0
+        copied_bytes = 0
+        for source in self._managed_registry_node_sources(directory, final):
+            if not source.exists():
+                continue
+            if is_link_or_reparse(source, missing="assume_link", unreadable="assume_link"):
+                raise RuntimeProvisioningError(
+                    "A managed Registry node source is not an ordinary directory."
+                )
+            if not source.is_dir():
+                raise RuntimeProvisioningError(
+                    "A managed Registry node source is not an ordinary directory."
+                )
+            for candidate in sorted(source.iterdir(), key=lambda item: item.name.casefold()):
+                if not candidate.name.startswith(_REGISTRY_NODE_PREFIX):
+                    continue
+                if candidate.name in restored:
+                    continue
+                destination = target / candidate.name
+                if destination.exists():
+                    raise RuntimeProvisioningError(
+                        "The replacement runtime already contains a managed Registry node."
+                    )
+                added_entries, added_bytes = self._copy_managed_registry_tree(
+                    candidate,
+                    destination,
+                    max_entries=_MAX_RUNTIME_FILES - copied_entries,
+                    max_bytes=_MAX_RUNTIME_BYTES - copied_bytes,
+                )
+                copied_entries += added_entries
+                copied_bytes += added_bytes
+                restored.add(candidate.name)
+
+    def _managed_registry_node_sources(
+        self,
+        directory: PurePosixPath,
+        final: Path,
+    ) -> tuple[Path, ...]:
+        engine_root = self.runtime_root / "comfyui"
+        releases: list[Path] = []
+        configured = self.settings.comfy_directory
+        if configured is not None:
+            configured_path = Path(configured).expanduser()
+            for parent in (configured_path, *configured_path.parents):
+                if parent.parent == engine_root:
+                    releases.append(parent)
+                    break
+        if final.exists():
+            releases.append(final)
+
+        sources: list[Path] = []
+        seen: set[Path] = set()
+        for release in releases:
+            if release in seen or not self._managed_comfy_release_owned(release):
+                continue
+            seen.add(release)
+            sources.append(release.joinpath(*directory.parts, "custom_nodes"))
+        return tuple(sources)
+
+    def _managed_comfy_release_owned(self, release: Path) -> bool:
+        try:
+            engine_root = (self.runtime_root / "comfyui").resolve(strict=True)
+            if is_link_or_reparse(release, missing="assume_link", unreadable="assume_link"):
+                return False
+            owned = release.resolve(strict=True)
+            if owned.parent != engine_root:
+                return False
+            marker = json.loads((owned / _MANAGED_MARKER).read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            return False
+        return bool(
+            isinstance(marker, dict)
+            and marker.get("schema_version") in {1, 2, 3}
+            and marker.get("engine") == "comfyui"
+            and isinstance(marker.get("release"), str)
+            and owned.name == self._safe_component(str(marker["release"]))
+        )
+
+    @staticmethod
+    def _copy_managed_registry_tree(
+        source: Path,
+        destination: Path,
+        *,
+        max_entries: int,
+        max_bytes: int,
+    ) -> tuple[int, int]:
+        if is_link_or_reparse(source, missing="assume_link", unreadable="assume_link"):
+            raise RuntimeProvisioningError(
+                "A managed Registry node source contains an unsupported link."
+            )
+        if not source.is_dir():
+            raise RuntimeProvisioningError(
+                "A managed Registry node source is not an ordinary directory."
+            )
+        destination.mkdir()
+        entries = 0
+        total_size = 0
+        stack = [(source, destination)]
+        while stack:
+            source_directory, destination_directory = stack.pop()
+            with os.scandir(source_directory) as children:
+                for child in children:
+                    entries += 1
+                    if entries > max_entries or RuntimeProvisioner._is_reparse_point(child):
+                        raise RuntimeProvisioningError(
+                            "A managed Registry node source has an unsupported shape."
+                        )
+                    output = destination_directory / child.name
+                    if child.is_dir(follow_symlinks=False):
+                        output.mkdir()
+                        stack.append((Path(child.path), output))
+                        continue
+                    if not child.is_file(follow_symlinks=False):
+                        raise RuntimeProvisioningError(
+                            "A managed Registry node source has an unsupported file type."
+                        )
+                    total_size += child.stat(follow_symlinks=False).st_size
+                    if total_size > max_bytes:
+                        raise RuntimeProvisioningError(
+                            "A managed Registry node source exceeds its allowed size."
+                        )
+                    shutil.copy2(child.path, output, follow_symlinks=False)
+        return entries, total_size
 
     def _prune_stale_staging(self, parent: Path, engine: RuntimeName) -> None:
         """Reclaim staging trees abandoned by an interrupted or failed attempt.

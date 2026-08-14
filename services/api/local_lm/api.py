@@ -58,6 +58,14 @@ from .comfy_registry_downloads import ComfyRegistryArchiveDownloader
 from .comfy_registry_installs import installed_comfy_registry_versions
 from .comfy_registry_interpreter import probe_comfy_registry_runtime_target
 from .comfy_registry_paths import registry_wheel_environment_root
+from .comfy_registry_reconciliation import (
+    ComfyRegistryReconciliationError,
+    RegistryInstallDiskState,
+    inspect_registry_install_disk_state,
+)
+from .comfy_registry_reconciliation import (
+    remove_registry_install as remove_comfy_registry_install,
+)
 from .comfy_registry_wheel_downloads import ComfyRegistryWheelDownloader
 from .comfy_registry_wheel_projects import ComfyRegistryWheelProjectClient
 from .comfy_templates import (
@@ -8795,7 +8803,10 @@ def _registry_activation_failure(exc: ComfyRegistryActivationError) -> Exception
     return api_error(_REGISTRY_ACTIVATION_STATUS.get(exc.code, 500), exc.code, str(exc))
 
 
-def _registry_install_out(install: ComfyRegistryInstall) -> RegistryInstallOut:
+def _registry_install_out(
+    install: ComfyRegistryInstall,
+    disk_state: RegistryInstallDiskState,
+) -> RegistryInstallOut:
     review = install.review_json if isinstance(install.review_json, dict) else {}
     reviewed_at = review.get("reviewed_at")
     activated_at = review.get("activated_at")
@@ -8808,6 +8819,9 @@ def _registry_install_out(install: ComfyRegistryInstall) -> RegistryInstallOut:
         manifest_sha256=install.manifest_sha256,
         wheel_closure_sha256=install.wheel_closure_sha256,
         wheel_environment_sha256=install.wheel_environment_sha256,
+        disk_status=disk_state.status,
+        node_files_present=disk_state.node_files_present,
+        wheel_environment_present=disk_state.wheel_environment_present,
         trusted=install.trusted,
         active=install.active,
         reviewed_at=reviewed_at if isinstance(reviewed_at, str) else None,
@@ -8874,16 +8888,36 @@ def _registry_activation_context(services: Services) -> PreparationContext:
         raise api_error(422, exc.code, str(exc)) from exc
 
 
+def _registry_install_disk_state(
+    services: Services,
+    install: ComfyRegistryInstall,
+) -> RegistryInstallDiskState:
+    custom_node_root = (
+        services.settings.comfy_directory / "custom_nodes"
+        if services.settings.comfy_directory is not None
+        else None
+    )
+    return inspect_registry_install_disk_state(
+        install,
+        custom_node_root=custom_node_root,
+        environment_root=registry_wheel_environment_root(services.settings.registry_dir),
+    )
+
+
 @router.get("/workflows/packages/installs", response_model=list[RegistryInstallOut])
-async def list_registry_installs(session: SessionDep) -> list[RegistryInstallOut]:
+async def list_registry_installs(request: Request, session: SessionDep) -> list[RegistryInstallOut]:
     """List every prepared package with its trust and activation state."""
 
+    services = _services(request)
     installs = session.scalars(
         select(ComfyRegistryInstall).order_by(
             ComfyRegistryInstall.package_id, ComfyRegistryInstall.package_version
         )
     ).all()
-    return [_registry_install_out(install) for install in installs]
+    return [
+        _registry_install_out(install, _registry_install_disk_state(services, install))
+        for install in installs
+    ]
 
 
 @router.post(
@@ -8895,12 +8929,28 @@ async def renew_registry_install(install_id: str, request: Request, session: Ses
     """Rebuild an inactive package's dependencies for the current media runtime."""
 
     services = _services(request)
+    async with services.scheduler.lease("primary"):
+        return _queue_registry_install_renewal(session, services, install_id)
+
+
+def _queue_registry_install_renewal(
+    session: Session,
+    services: Services,
+    install_id: str,
+) -> Job:
     install = _loaded_registry_install(session, install_id)
     if install.active:
         raise api_error(
             409,
             "registry-install-active",
             "Deactivate the Registry package before refreshing its dependencies",
+        )
+    disk_state = _registry_install_disk_state(services, install)
+    if not disk_state.node_files_present:
+        raise api_error(
+            409,
+            "registry-install-files-missing",
+            "Remove this incomplete Registry package and prepare it again",
         )
     if not _media_worker_truly_stopped(services):
         raise api_error(
@@ -8949,7 +8999,8 @@ async def review_registry_install(
             )
         except ComfyRegistryActivationError as exc:
             raise _registry_activation_failure(exc) from exc
-    return _registry_install_out(_loaded_registry_install(session, install_id))
+    install = _loaded_registry_install(session, install_id)
+    return _registry_install_out(install, _registry_install_disk_state(services, install))
 
 
 @router.post(
@@ -8978,7 +9029,8 @@ async def activate_registry_install(
             )
         except ComfyRegistryActivationError as exc:
             raise _registry_activation_failure(exc) from exc
-    return _registry_install_out(_loaded_registry_install(session, install_id))
+    install = _loaded_registry_install(session, install_id)
+    return _registry_install_out(install, _registry_install_disk_state(services, install))
 
 
 @router.post(
@@ -9001,7 +9053,50 @@ async def deactivate_registry_install(
             )
         except ComfyRegistryActivationError as exc:
             raise _registry_activation_failure(exc) from exc
-    return _registry_install_out(_loaded_registry_install(session, install_id))
+    install = _loaded_registry_install(session, install_id)
+    return _registry_install_out(install, _registry_install_disk_state(services, install))
+
+
+_REGISTRY_REMOVAL_STATUS: dict[str, int] = {
+    "registry_install_not_found": 404,
+    "registry_install_active": 409,
+    "registry_install_in_use": 409,
+    "registry_install_busy": 409,
+    "registry_install_path_invalid": 409,
+    "registry_install_remove_failed": 500,
+    "registry_install_restore_failed": 500,
+}
+
+
+@router.delete("/workflows/packages/installs/{install_id}", status_code=204)
+async def delete_registry_install(
+    install_id: str,
+    request: Request,
+    session: SessionDep,
+) -> Response:
+    """Remove one inactive prepared package and its exclusively owned files."""
+
+    services = _services(request)
+    custom_node_root = (
+        services.settings.comfy_directory / "custom_nodes"
+        if services.settings.comfy_directory is not None
+        else None
+    )
+    async with services.scheduler.lease("primary"):
+        try:
+            remove_comfy_registry_install(
+                session,
+                install_id=install_id,
+                custom_node_root=custom_node_root,
+                environment_root=registry_wheel_environment_root(services.settings.registry_dir),
+            )
+        except ComfyRegistryReconciliationError as exc:
+            raise api_error(
+                _REGISTRY_REMOVAL_STATUS.get(exc.code, 500),
+                exc.code,
+                str(exc),
+            ) from exc
+    return Response(status_code=204)
 
 
 def _rebuild_asset_binding(

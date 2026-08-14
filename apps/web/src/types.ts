@@ -1090,6 +1090,9 @@ export interface RegistryInstall {
   manifest_sha256: string;
   wheel_closure_sha256: string | null;
   wheel_environment_sha256: string | null;
+  disk_status: "ready" | "node_files_missing" | "wheel_environment_missing" | "files_missing";
+  node_files_present: boolean;
+  wheel_environment_present: boolean;
   trusted: boolean;
   active: boolean;
   reviewed_at: string | null;
