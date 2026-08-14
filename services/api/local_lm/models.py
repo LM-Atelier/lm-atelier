@@ -645,7 +645,7 @@ for _statement in CREATE_REFERENCE_REVIEW_TRIGGER_SQL:
     event.listen(
         Base.metadata,
         "after_create",
-        DDL(_statement).execute_if(dialect="sqlite"),  # type: ignore[no-untyped-call]
+        _install_sqlite_trigger(_statement),
     )
 for _statement in DROP_REFERENCE_REVIEW_TRIGGER_SQL:
     event.listen(
