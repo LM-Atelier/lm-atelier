@@ -2,8 +2,10 @@ from __future__ import annotations
 
 import json
 import sqlite3
+from concurrent.futures import ThreadPoolExecutor
 from contextlib import closing
 from pathlib import Path
+from threading import Event
 
 import pytest
 from alembic import command
@@ -11,9 +13,12 @@ from alembic.autogenerate import compare_metadata
 from alembic.migration import MigrationContext
 from alembic.script import ScriptDirectory
 from alembic.util.exc import CommandError
-from sqlalchemy import UniqueConstraint, create_engine
+from sqlalchemy import UniqueConstraint, create_engine, event
+from sqlalchemy.engine import Engine
+from sqlalchemy.exc import IntegrityError as SAIntegrityError
 
 from local_lm import db, models  # noqa: F401 - importing registers every table to compare
+from local_lm.artifact_library_schema import CREATE_TRIGGER_SQL
 from local_lm.backups import BackupManager
 from local_lm.config import Settings
 from local_lm.database_migrations import (
@@ -48,6 +53,304 @@ def test_unknown_database_revision_has_actionable_error(tmp_path: Path) -> None:
         assert connection.execute("SELECT version_num FROM alembic_version").fetchone() == (
             unknown_revision,
         )
+
+
+def test_artifact_library_entry_migration_backfills_once_and_seals_membership(
+    tmp_path: Path,
+) -> None:
+    settings = Settings(data_dir=tmp_path / "library-entry-migration")
+    settings.prepare()
+    config = alembic_config(settings)
+    command.upgrade(config, "c7e1d4a83b56")
+    database = settings.state_dir / "local-lm.sqlite3"
+    stamp = "2026-08-12 12:00:00"
+    rows = [
+        ("legacy-image", "1" * 64, "image", "image/png", "portrait.png", 1),
+        ("legacy-video", "2" * 64, "video", "video/mp4", None, 0),
+        ("legacy-input", "3" * 64, "input", "image/png", "upload.png", 1),
+    ]
+    with sqlite3.connect(database) as connection:
+        connection.executemany(
+            """
+            INSERT INTO artifacts
+              (id, sha256, kind, media_type, size_bytes, relative_path,
+               original_name, metadata_json, favorite, created_at, updated_at)
+            VALUES (?, ?, ?, ?, 7, ?, ?, '{}', ?, ?, ?)
+            """,
+            [
+                (artifact_id, digest, kind, media_type, digest, name, favorite, stamp, stamp)
+                for artifact_id, digest, kind, media_type, name, favorite in rows
+            ],
+        )
+    command.upgrade(config, "head")
+
+    with sqlite3.connect(database) as connection:
+        connection.execute("PRAGMA foreign_keys=ON")
+        entries = connection.execute(
+            """
+            SELECT id, artifact_id, display_name, favorite, state, version,
+                   created_at, updated_at
+            FROM artifact_library_entries ORDER BY artifact_id
+            """
+        ).fetchall()
+        assert entries == [
+            (
+                "libentry:sha256:" + "1" * 64,
+                "legacy-image",
+                "portrait.png",
+                1,
+                "visible",
+                1,
+                stamp,
+                stamp,
+            ),
+            (
+                "libentry:sha256:" + "2" * 64,
+                "legacy-video",
+                "2" * 64,
+                0,
+                "visible",
+                1,
+                stamp,
+                stamp,
+            ),
+        ]
+        connection.execute(
+            """
+            INSERT INTO artifact_library_entries
+              (id, artifact_id, display_name, favorite, state, deleted_at, recovery_id,
+               version, created_at, updated_at)
+            SELECT 'libentry:sha256:' || sha256, id,
+                   COALESCE(NULLIF(trim(original_name), ''), sha256), favorite,
+                   'visible', NULL, NULL, 1, created_at, updated_at
+            FROM artifacts WHERE kind IN ('image', 'video')
+            ON CONFLICT(artifact_id) DO NOTHING
+            """
+        )
+        assert connection.execute("SELECT count(*) FROM artifact_library_entries").fetchone() == (
+            2,
+        )
+        expected_triggers = {statement.split()[2] for statement in CREATE_TRIGGER_SQL}
+        migrated_triggers = {
+            row[0]
+            for row in connection.execute(
+                "SELECT name FROM sqlite_master WHERE type = 'trigger'"
+            ).fetchall()
+        }
+        assert expected_triggers <= migrated_triggers
+        with pytest.raises(sqlite3.IntegrityError, match="version is stale"):
+            connection.execute(
+                "UPDATE artifact_library_entries SET display_name = 'changed' "
+                "WHERE artifact_id = 'legacy-image'"
+            )
+        with pytest.raises(sqlite3.IntegrityError, match="identity is immutable"):
+            connection.execute(
+                "UPDATE artifact_library_entries SET artifact_id = 'legacy-video', "
+                "version = 2 WHERE artifact_id = 'legacy-image'"
+            )
+        with pytest.raises(sqlite3.IntegrityError):
+            connection.execute("DELETE FROM artifacts WHERE id = 'legacy-image'")
+        with pytest.raises(sqlite3.IntegrityError, match="library artifact identity"):
+            connection.execute("UPDATE artifacts SET kind = 'other' WHERE id = 'legacy-image'")
+        with pytest.raises(sqlite3.IntegrityError, match="deletion is not authorized"):
+            connection.execute(
+                "DELETE FROM artifact_library_entries WHERE artifact_id = 'legacy-image'"
+            )
+        connection.execute(
+            "UPDATE artifact_library_entries SET state = 'trashed', deleted_at = ?, "
+            "recovery_id = 'recover-image', version = 2 WHERE artifact_id = 'legacy-image'",
+            (stamp,),
+        )
+        connection.execute(
+            "UPDATE artifact_library_entries SET state = 'trashed', deleted_at = ?, "
+            "recovery_id = 'recover-video', version = 2 WHERE artifact_id = 'legacy-video'",
+            (stamp,),
+        )
+        with pytest.raises(sqlite3.IntegrityError, match="UNIQUE constraint failed"):
+            connection.execute(
+                "UPDATE artifact_library_entries SET recovery_id = 'recover-image', version = 3 "
+                "WHERE artifact_id = 'legacy-video'"
+            )
+        assert connection.execute(
+            "SELECT kind, original_name, favorite FROM artifacts ORDER BY id"
+        ).fetchall() == [
+            ("image", "portrait.png", 1),
+            ("input", "upload.png", 1),
+            ("video", None, 0),
+        ]
+
+
+@pytest.mark.parametrize(
+    "payload",
+    (
+        '{"artifact_ids":"not-a-list"}',
+        '{"unterminated":',
+        '{"artifact_id":"sha256:' + "f" * 64 + '"}',
+    ),
+)
+def test_artifact_library_migration_refuses_preexisting_corrupt_reference_json(
+    tmp_path: Path,
+    payload: str,
+) -> None:
+    settings = Settings(data_dir=tmp_path / "library-entry-corrupt-reference")
+    settings.prepare()
+    config = alembic_config(settings)
+    command.upgrade(config, "c7e1d4a83b56")
+    database = settings.state_dir / "local-lm.sqlite3"
+    stamp = "2026-08-12 12:00:00"
+    with sqlite3.connect(database) as connection:
+        connection.execute(
+            """
+            INSERT INTO jobs
+              (id, kind, status, progress, phase, payload_json, result_json,
+               progress_json, queue_priority, attempt, cancellable, created_at, updated_at)
+            VALUES ('corrupt-before-library', 'chat', 'queued', 0, 'queued',
+                    ?, '{}', '{}', 0, 0, 1, ?, ?)
+            """,
+            (payload, stamp, stamp),
+        )
+
+    with pytest.raises(SAIntegrityError, match="artifact JSON reference is invalid"):
+        command.upgrade(config, "head")
+
+    with sqlite3.connect(database) as connection:
+        assert connection.execute("SELECT version_num FROM alembic_version").fetchone() == (
+            "c7e1d4a83b56",
+        )
+        assert (
+            connection.execute(
+                "SELECT name FROM sqlite_master WHERE type = 'table' "
+                "AND name = 'artifact_library_entries'"
+            ).fetchone()
+            is None
+        )
+        assert connection.execute(
+            "SELECT count(*) FROM sqlite_master WHERE type = 'trigger' "
+            "AND name LIKE '%artifact_reference%_guard'"
+        ).fetchone() == (0,)
+        assert connection.execute(
+            "SELECT payload_json FROM jobs WHERE id = 'corrupt-before-library'"
+        ).fetchone() == (payload,)
+
+
+@pytest.mark.parametrize("original_name", ("x" * 501, "bad\0name"))
+def test_artifact_library_migration_refuses_legacy_names_before_ddl(
+    tmp_path: Path,
+    original_name: str,
+) -> None:
+    settings = Settings(data_dir=tmp_path / "library-entry-invalid-name")
+    settings.prepare()
+    config = alembic_config(settings)
+    command.upgrade(config, "c7e1d4a83b56")
+    database = settings.state_dir / "local-lm.sqlite3"
+    stamp = "2026-08-12 12:00:00"
+    digest = "a" * 64
+    with sqlite3.connect(database) as connection:
+        connection.execute(
+            """
+            INSERT INTO artifacts
+              (id, sha256, kind, media_type, size_bytes, relative_path,
+               original_name, metadata_json, favorite, created_at, updated_at)
+            VALUES ('legacy-invalid-name', ?, 'image', 'image/png', 7, ?, ?, '{}', 0, ?, ?)
+            """,
+            (digest, digest, original_name, stamp, stamp),
+        )
+
+    with pytest.raises(SAIntegrityError, match="artifact JSON reference is invalid"):
+        command.upgrade(config, "head")
+
+    with sqlite3.connect(database) as connection:
+        assert connection.execute("SELECT version_num FROM alembic_version").fetchone() == (
+            "c7e1d4a83b56",
+        )
+        assert (
+            connection.execute(
+                "SELECT name FROM sqlite_master WHERE type = 'table' "
+                "AND name = 'artifact_library_entries'"
+            ).fetchone()
+            is None
+        )
+
+
+def test_artifact_library_migration_fence_blocks_concurrent_dangling_writer(
+    tmp_path: Path,
+) -> None:
+    settings = Settings(data_dir=tmp_path / "library-entry-migration-race")
+    settings.prepare()
+    config = alembic_config(settings)
+    command.upgrade(config, "c7e1d4a83b56")
+    database = settings.state_dir / "local-lm.sqlite3"
+    with sqlite3.connect(database) as connection:
+        connection.execute("PRAGMA journal_mode=WAL")
+
+    audit_started = Event()
+    writer_started = Event()
+    writer_done = Event()
+    writer_was_blocked: list[bool] = []
+
+    def trace(statement: str) -> None:
+        if "SELECT CASE" not in statement or audit_started.is_set():
+            return
+        audit_started.set()
+        if writer_started.wait(5):
+            writer_was_blocked.append(not writer_done.wait(0.2))
+
+    def register_trace(dbapi_connection: object, _record: object) -> None:
+        dbapi_connection.set_trace_callback(trace)  # type: ignore[attr-defined]
+
+    def upgrade() -> None:
+        command.upgrade(config, "head")
+
+    def write_dangling_reference() -> str:
+        assert audit_started.wait(5)
+        writer_started.set()
+        try:
+            with sqlite3.connect(database, timeout=5) as connection:
+                connection.execute(
+                    """
+                    INSERT INTO jobs
+                      (id, kind, status, progress, phase, payload_json, result_json,
+                       progress_json, queue_priority, attempt, cancellable, created_at, updated_at)
+                    VALUES ('migration-race-writer', 'chat', 'queued', 0, 'queued',
+                            ?, '{}', '{}', 0, 0, 1, ?, ?)
+                    """,
+                    (
+                        '{"artifact_id":"sha256:' + "f" * 64 + '"}',
+                        "2026-08-12 12:00:00",
+                        "2026-08-12 12:00:00",
+                    ),
+                )
+        except sqlite3.IntegrityError as error:
+            return str(error)
+        finally:
+            writer_done.set()
+        return "dangling reference committed"
+
+    event.listen(Engine, "connect", register_trace)
+    try:
+        with ThreadPoolExecutor(max_workers=2) as executor:
+            upgrade_result = executor.submit(upgrade)
+            writer_result = executor.submit(write_dangling_reference)
+            upgrade_result.result(timeout=15)
+            outcome = writer_result.result(timeout=15)
+    finally:
+        event.remove(Engine, "connect", register_trace)
+
+    assert writer_was_blocked == [True]
+    assert outcome == "artifact JSON reference is invalid"
+    with sqlite3.connect(database) as connection:
+        assert connection.execute(
+            "SELECT count(*) FROM jobs WHERE id = 'migration-race-writer'"
+        ).fetchone() == (0,)
+        assert connection.execute("SELECT version_num FROM alembic_version").fetchone() == (
+            "f9b7a1c42d60",
+        )
+        membership_schema = connection.execute(
+            "SELECT sql FROM sqlite_master "
+            "WHERE type = 'table' AND name = 'media_collection_memberships'"
+        ).fetchone()
+        assert membership_schema is not None
+        assert "note = trim(note)" in membership_schema[0]
 
 
 def test_unrelated_alembic_command_error_is_not_reclassified(
@@ -1220,6 +1523,93 @@ def test_a_brand_new_database_is_not_snapshotted(
 def _recorded_revisions_for(settings: Settings) -> set[str]:
     with closing(sqlite3.connect(settings.state_dir / "local-lm.sqlite3")) as connection:
         return {row[0] for row in connection.execute("SELECT version_num FROM alembic_version")}
+
+
+def _trigger_definitions(database: Path) -> dict[str, str]:
+    with sqlite3.connect(database) as connection:
+        return dict(
+            connection.execute(
+                "SELECT name, sql FROM sqlite_master WHERE type = 'trigger' ORDER BY name"
+            ).fetchall()
+        )
+
+
+def test_metadata_bootstrap_preserves_migrated_triggers(tmp_path: Path) -> None:
+    """Startup after Alembic preserves the exact guards and their behavior."""
+
+    settings = Settings(data_dir=tmp_path / "migrated-trigger-bootstrap", dev=True)
+    settings.prepare()
+    upgrade_database(settings)
+    database = settings.state_dir / "local-lm.sqlite3"
+    before = _trigger_definitions(database)
+
+    engine = create_engine(f"sqlite:///{database}")
+    try:
+        Base.metadata.create_all(engine)
+        Base.metadata.create_all(engine)
+    finally:
+        engine.dispose()
+
+    with sqlite3.connect(database) as connection:
+        assert _trigger_definitions(database) == before
+        with pytest.raises(sqlite3.IntegrityError, match="requires media"):
+            connection.execute(
+                """
+                INSERT INTO artifact_library_entries (
+                  id, artifact_id, display_name, favorite, state, version,
+                  created_at, updated_at
+                ) VALUES (
+                  'libentry:sha256:missing', 'missing', 'Missing', 0,
+                  'visible', 1, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP
+                )
+                """
+            )
+
+
+def test_metadata_bootstrap_trigger_definitions_match_fresh_and_migrated_schema(
+    tmp_path: Path,
+) -> None:
+    settings = Settings(data_dir=tmp_path / "migrated-trigger-parity", dev=True)
+    settings.prepare()
+    upgrade_database(settings)
+    migrated = settings.state_dir / "local-lm.sqlite3"
+
+    fresh = tmp_path / "fresh.sqlite3"
+    engine = create_engine(f"sqlite:///{fresh}")
+    try:
+        Base.metadata.create_all(engine)
+    finally:
+        engine.dispose()
+
+    assert _trigger_definitions(fresh) == _trigger_definitions(migrated)
+
+
+def test_metadata_bootstrap_refuses_a_same_name_trigger_with_the_wrong_body(
+    tmp_path: Path,
+) -> None:
+    settings = Settings(data_dir=tmp_path / "tampered-trigger", dev=True)
+    settings.prepare()
+    upgrade_database(settings)
+    database = settings.state_dir / "local-lm.sqlite3"
+    trigger_name = "artifact_library_entry_insert_guard"
+    with sqlite3.connect(database) as connection:
+        connection.execute(f"DROP TRIGGER {trigger_name}")
+        connection.execute(
+            f"""
+            CREATE TRIGGER {trigger_name}
+            BEFORE INSERT ON artifact_library_entries
+            BEGIN
+              SELECT 1;
+            END
+            """
+        )
+
+    engine = create_engine(f"sqlite:///{database}")
+    try:
+        with pytest.raises(RuntimeError, match=trigger_name):
+            Base.metadata.create_all(engine)
+    finally:
+        engine.dispose()
 
 
 def test_the_migrated_schema_matches_the_models(tmp_path: Path) -> None:

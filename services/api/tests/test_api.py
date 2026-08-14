@@ -4066,7 +4066,10 @@ async def test_retention_keeps_artifacts_referenced_only_by_response_revisions(
     assert (await client.get(f"/api/artifacts/{artifact_id}")).status_code == 200
 
 
-async def test_media_library_can_delete_a_referenced_artifact(client: AsyncClient) -> None:
+async def test_media_library_membership_refuses_legacy_artifact_delete(
+    client: AsyncClient,
+    app: FastAPI,
+) -> None:
     chat = (await client.post("/api/chats", json={"title": "Delete media"})).json()
     await client.post(
         f"/api/chats/{chat['id']}/turns",
@@ -4075,20 +4078,26 @@ async def test_media_library_can_delete_a_referenced_artifact(client: AsyncClien
     message = await wait_for_assistant(client, chat["id"], "image")
     image = next(part for part in message["parts"] if part["type"] == "image")
     artifact_id = image["artifact_id"]
+    with SessionLocal() as session:
+        stored = session.get(Artifact, artifact_id)
+        assert stored is not None
+        stored_path = app.state.services.artifacts.resolve(stored)
+        assert stored_path.is_file()
 
     deleted = await client.delete(f"/api/artifacts/{artifact_id}")
-    assert deleted.status_code == 200
-    assert deleted.json()["artifact_id"] == artifact_id
-    assert deleted.json()["reference_count"] == 1
-    assert deleted.json()["removed_count"] == 1
-    assert deleted.json()["reclaimed_bytes"] > 0
-    assert (await client.get(f"/api/artifacts/{artifact_id}")).status_code == 404
+    assert deleted.status_code == 409
+    assert deleted.json() == {
+        "detail": "This media item is retained by its Media Library membership.",
+        "code": "artifact-in-use",
+    }
+    assert (await client.get(f"/api/artifacts/{artifact_id}")).status_code == 200
+    assert stored_path.is_file()
 
     detail = (await client.get(f"/api/chats/{chat['id']}")).json()
     deleted_part = next(
         part for item in detail["messages"] for part in item["parts"] if part["id"] == image["id"]
     )
-    assert deleted_part["artifact_id"] is None
+    assert deleted_part["artifact_id"] == artifact_id
 
 
 async def test_chat_delete_can_remove_exclusive_generated_media(client: AsyncClient) -> None:
@@ -4120,7 +4129,7 @@ async def test_chat_delete_can_remove_exclusive_generated_media(client: AsyncCli
         params={"delete_generated_media": True},
     )
     assert deleted.status_code == 204
-    assert (await client.get(f"/api/artifacts/{delete_artifact_id}")).status_code == 404
+    assert (await client.get(f"/api/artifacts/{delete_artifact_id}")).status_code == 200
 
 
 async def test_chat_delete_keeps_generated_media_referenced_by_another_chat(

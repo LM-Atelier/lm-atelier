@@ -107,6 +107,7 @@ vi.mock("./api", () => ({
     exportProject: vi.fn(),
     importProject: vi.fn(),
     artifacts: vi.fn().mockResolvedValue([]),
+    artifactLibrary: vi.fn().mockResolvedValue({ items: [], next_cursor: null }),
     artifactStorage: vi.fn().mockResolvedValue({ total_bytes: 0, total_count: 0, referenced_bytes: 0, referenced_count: 0, unreferenced_bytes: 0, unreferenced_count: 0, temporary_bytes: 0, temporary_count: 0, eligible_bytes: 0, eligible_count: 0, disk_free_bytes: 1024, warning: false, retention_days: 30, temporary_retention_hours: 24 }),
     cleanupArtifacts: vi.fn(),
     deleteArtifact: vi.fn(),
@@ -338,6 +339,7 @@ describe("App", () => {
     vi.mocked(api.models).mockResolvedValue([]);
     vi.mocked(api.modelAssets).mockResolvedValue([]);
     vi.mocked(api.catalog).mockResolvedValue({ items: [], next_cursor: null });
+    vi.mocked(api.artifactLibrary).mockResolvedValue({ items: [], next_cursor: null });
     vi.mocked(api.workflowCatalogModels).mockResolvedValue([]);
     vi.mocked(api.workflows).mockResolvedValue([]);
     vi.mocked(api.workflowFamilies).mockImplementation(async () => familiesForWorkflows(await api.workflows()));
@@ -3709,8 +3711,26 @@ describe("App", () => {
     expect(screen.queryByRole("dialog", { name: "Review workflow package" })).not.toBeInTheDocument();
   });
 
-  it("browses generated media and exposes retention-safe cleanup", async () => {
+  it("browses durable EntryV1 media without delete or cleanup authority", async () => {
     const stamp = "2026-07-22T00:00:00Z";
+    const entrySha = "a".repeat(64);
+    vi.mocked(api.artifactLibrary).mockResolvedValue({
+      items: [{
+        id: `libentry:sha256:${entrySha}`,
+        artifact_id: `sha256:${entrySha}`,
+        version: 1,
+        state: "visible",
+        display_name: "observatory.png",
+        favorite: false,
+        kind: "image",
+        media_type: "image/png",
+        size_bytes: 2048,
+        created_at: stamp,
+        updated_at: stamp,
+        created_at_epoch_micros: Date.parse(stamp) * 1000,
+      }],
+      next_cursor: null,
+    });
     vi.mocked(api.artifacts).mockResolvedValue([{
       id: "sha256:image",
       sha256: "0123456789abcdef",
@@ -3751,28 +3771,32 @@ describe("App", () => {
     );
     fireEvent.click(await screen.findByText("Media library"));
     expect(await screen.findByText("observatory.png")).toBeInTheDocument();
-    expect(screen.getByText(/2\.0 KB · 1 reference/)).toBeInTheDocument();
-    expect(screen.getByText("Run cleanup")).toBeDisabled();
-    vi.mocked(api.deleteArtifact).mockImplementation(async () => {
-      vi.mocked(api.artifacts).mockResolvedValue([]);
-      return {
-        artifact_id: "sha256:image",
-        reference_count: 1,
-        removed_count: 1,
-        reclaimed_bytes: 2048,
-      };
-    });
-    fireEvent.click(screen.getByRole("button", { name: "Delete observatory.png" }));
-    // The count of chat appearances is part of what is being lost, so the
-    // question states it rather than the user discovering it afterwards.
-    expect(screen.getByText(/removes 1 appearance from your chats/)).toBeInTheDocument();
-    fireEvent.click(screen.getByRole("button", { name: "Delete permanently" }));
-    await waitFor(() => expect(vi.mocked(api.deleteArtifact).mock.calls[0]?.[0]).toBe("sha256:image"));
-    await waitFor(() => expect(screen.queryByText("observatory.png")).not.toBeInTheDocument());
+    expect(screen.getByText(/2\.0 KB/)).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: /cleanup/i })).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: /delete/i })).not.toBeInTheDocument();
+    expect(api.artifacts).not.toHaveBeenCalled();
   });
 
   it("edits a library image straight into the Image Studio", async () => {
     const stamp = "2026-07-22T00:00:00Z";
+    const entrySha = "b".repeat(64);
+    vi.mocked(api.artifactLibrary).mockResolvedValue({
+      items: [{
+        id: `libentry:sha256:${entrySha}`,
+        artifact_id: `sha256:${entrySha}`,
+        version: 1,
+        state: "visible",
+        display_name: "observatory.png",
+        favorite: false,
+        kind: "image",
+        media_type: "image/png",
+        size_bytes: 2048,
+        created_at: stamp,
+        updated_at: stamp,
+        created_at_epoch_micros: Date.parse(stamp) * 1000,
+      }],
+      next_cursor: null,
+    });
     const chat: Chat = {
       id: "chat-library-edit",
       project_id: null,
@@ -3823,10 +3847,10 @@ describe("App", () => {
     expect(await screen.findByRole("heading", { name: "Image Studio" })).toBeVisible();
     await waitFor(() => expect(api.studioCapabilities).toHaveBeenCalledTimes(1));
     await waitFor(() =>
-      expect(api.openStudioSession).toHaveBeenCalledWith("sha256:library-image", null));
+      expect(api.openStudioSession).toHaveBeenCalledWith(`sha256:${entrySha}`, null));
   });
 
-  it("edits a library selection together through the studio", async () => {
+  it("does not fabricate multi-image composer authority from EntryV1 summaries", async () => {
     const stamp = "2026-07-22T00:00:00Z";
     const chat: Chat = {
       id: "chat-batch-edit",
@@ -3864,6 +3888,25 @@ describe("App", () => {
       libraryImage("sha256:one", "one.png"),
       libraryImage("sha256:two", "two.png"),
     ]);
+    const one = "1".repeat(64);
+    const two = "2".repeat(64);
+    vi.mocked(api.artifactLibrary).mockResolvedValue({
+      items: [two, one].map((sha, index) => ({
+        id: `libentry:sha256:${sha}`,
+        artifact_id: `sha256:${sha}`,
+        version: 1,
+        state: "visible" as const,
+        display_name: index === 0 ? "two.png" : "one.png",
+        favorite: false,
+        kind: "image" as const,
+        media_type: "image/png",
+        size_bytes: 2048,
+        created_at: stamp,
+        updated_at: stamp,
+        created_at_epoch_micros: Date.parse(stamp) * 1000,
+      })),
+      next_cursor: null,
+    });
     const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
     render(
       <QueryClientProvider client={client}>
@@ -3872,16 +3915,11 @@ describe("App", () => {
     );
 
     fireEvent.click(await screen.findByText("Media library"));
-    fireEvent.click(await screen.findByRole("checkbox", { name: "Select one.png" }));
-    fireEvent.click(screen.getByRole("checkbox", { name: "Select two.png" }));
-    expect(screen.getByText("2 images selected")).toBeInTheDocument();
-    fireEvent.click(screen.getByRole("button", { name: "Edit together in the studio" }));
-
-    // Both land in the composer, and the studio offers the per-image batch.
-    expect(await screen.findByRole("dialog", { name: "Editing studio" })).toBeVisible();
-    expect(screen.getByRole("link", { name: "Preview one.png" })).toBeVisible();
-    expect(screen.getByRole("link", { name: "Preview two.png" })).toBeVisible();
-    expect(screen.getByRole("button", { name: "Apply to each of 2 images" })).toBeInTheDocument();
+    expect(await screen.findByText("one.png")).toBeVisible();
+    expect(screen.getByText("two.png")).toBeVisible();
+    expect(screen.queryByRole("checkbox", { name: /Select/ })).not.toBeInTheDocument();
+    expect(screen.queryByText(/images selected/)).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: /Edit together/ })).not.toBeInTheDocument();
   });
 
   it("records a preference verdict and clears it on the second click", async () => {
@@ -3955,26 +3993,28 @@ describe("App", () => {
 
   it("favorites a library item and filters down to favorites", async () => {
     const stamp = "2026-07-22T00:00:00Z";
-    const item = (favorite: boolean) => ({
-      id: "sha256:starred",
-      sha256: "0123456789abcdef",
-      kind: "image",
-      media_type: "image/png",
-      size_bytes: 2048,
-      original_name: "keeper.png",
-      metadata_json: {},
-      favorite,
-      created_at: stamp,
-      url: "/api/artifacts/sha256:starred/content",
-      reference_count: 0,
-      chat_ids: [],
-      project_ids: [],
+    const entrySha = "c".repeat(64);
+    const entryPage = (favorite: boolean) => ({
+      items: [{
+        id: `libentry:sha256:${entrySha}`,
+        artifact_id: `sha256:${entrySha}`,
+        version: favorite ? 2 : 1,
+        state: "visible" as const,
+        display_name: "keeper.png",
+        favorite,
+        kind: "image" as const,
+        media_type: "image/png",
+        size_bytes: 2048,
+        created_at: stamp,
+        updated_at: stamp,
+        created_at_epoch_micros: Date.parse(stamp) * 1000,
+      }],
+      next_cursor: null,
     });
-    vi.mocked(api.artifacts).mockResolvedValue([item(false)]);
-    vi.mocked(api.favoriteArtifact).mockImplementation(async () => {
-      vi.mocked(api.artifacts).mockResolvedValue([item(true)]);
-      return item(true);
-    });
+    vi.mocked(api.artifactLibrary)
+      .mockResolvedValueOnce(entryPage(false))
+      .mockResolvedValue(entryPage(true));
+    vi.mocked(api.favoriteArtifact).mockResolvedValue({} as never);
     const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
     render(
       <QueryClientProvider client={client}>
@@ -3985,7 +4025,7 @@ describe("App", () => {
     fireEvent.click(await screen.findByText("Media library"));
     fireEvent.click(await screen.findByRole("button", { name: "Favorite keeper.png" }));
     await waitFor(() =>
-      expect(api.favoriteArtifact).toHaveBeenCalledWith("sha256:starred", true));
+      expect(api.favoriteArtifact).toHaveBeenCalledWith(`sha256:${entrySha}`, true));
     // The toggle reflects the new state once the list refetches.
     expect(await screen.findByRole("button", { name: "Unfavorite keeper.png" })).toBeVisible();
 
@@ -3993,10 +4033,15 @@ describe("App", () => {
       target: { value: "favorites" },
     });
     await waitFor(() =>
-      expect(api.artifacts).toHaveBeenLastCalledWith("", "", true));
+      expect(api.artifactLibrary).toHaveBeenLastCalledWith(
+        { kind: "", query: "", favorite: true },
+        null,
+        20,
+        expect.any(AbortSignal),
+      ));
   });
 
-  it("explains when cleanup only finds media still in the recovery window", async () => {
+  it("keeps cleanup and recovery controls outside durable membership browsing", async () => {
     vi.mocked(api.artifactStorage).mockResolvedValue({
       total_bytes: 2048,
       total_count: 1,
@@ -4028,8 +4073,10 @@ describe("App", () => {
       </QueryClientProvider>,
     );
     fireEvent.click(await screen.findByText("Media library"));
-    fireEvent.click(await screen.findByRole("button", { name: "Run cleanup" }));
-    expect(await screen.findByText("1 artifact remains in the recovery window; none are eligible yet.")).toBeInTheDocument();
+    expect(await screen.findByText("No media matches these filters")).toBeVisible();
+    expect(screen.queryByRole("button", { name: /cleanup/i })).not.toBeInTheDocument();
+    expect(api.artifactStorage).not.toHaveBeenCalled();
+    expect(api.cleanupArtifacts).not.toHaveBeenCalled();
   });
 
   it("isolates role-aware settings in profile and preset editors", async () => {

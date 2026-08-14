@@ -1,9 +1,11 @@
 from __future__ import annotations
 
+from collections.abc import Callable
 from datetime import datetime
 from typing import Any
 
 from sqlalchemy import (
+    DDL,
     JSON,
     Boolean,
     CheckConstraint,
@@ -16,10 +18,13 @@ from sqlalchemy import (
     String,
     Text,
     UniqueConstraint,
+    event,
     text,
 )
-from sqlalchemy.orm import Mapped, mapped_column, relationship
+from sqlalchemy.engine import Connection
+from sqlalchemy.orm import Mapped, Session, mapped_column, relationship
 
+from .artifact_library_schema import CREATE_TRIGGER_SQL, DROP_TRIGGER_SQL
 from .db import Base
 from .domain import (
     ArtifactKind,
@@ -36,6 +41,10 @@ from .domain import (
     new_id,
     utcnow,
 )
+from .media_organization_schema import (
+    CREATE_MEDIA_ORGANIZATION_TRIGGER_SQL,
+    DROP_MEDIA_ORGANIZATION_TRIGGER_SQL,
+)
 
 
 def _lowercase_sha256_check(column: str) -> str:
@@ -43,6 +52,39 @@ def _lowercase_sha256_check(column: str) -> str:
     for character in "0123456789abcdef":
         remainder = f"replace({remainder}, '{character}', '')"
     return f"length({column}) = 64 AND lower({column}) = {column} AND {remainder} = ''"
+
+
+def _install_sqlite_trigger(statement: str) -> Callable[..., None]:
+    """Create a missing canonical trigger and refuse an existing divergent one.
+
+    Alembic owns upgrades and deliberately uses strict trigger statements.
+    ``create_all`` is also called during application startup, where metadata
+    ``after_create`` events run even when no table is created. An existing
+    name is insufficient authority: a stale or weakened body must fail closed.
+    """
+
+    parts = statement.split(None, 3)
+    if len(parts) < 4 or parts[:2] != ["CREATE", "TRIGGER"]:
+        raise ValueError("SQLite trigger statement has no CREATE TRIGGER clause")
+    trigger_name = parts[2]
+    canonical = statement.strip()
+
+    def install(_target: object, connection: Connection, **_kwargs: object) -> None:
+        if connection.dialect.name != "sqlite":
+            return
+        installed = connection.exec_driver_sql(
+            "SELECT sql FROM sqlite_master WHERE type = 'trigger' AND name = ?",
+            (trigger_name,),
+        ).scalar_one_or_none()
+        if installed is None:
+            connection.exec_driver_sql(canonical)
+            return
+        if not isinstance(installed, str) or installed.strip() != canonical:
+            raise RuntimeError(
+                f"SQLite trigger {trigger_name} does not match the application schema"
+            )
+
+    return install
 
 
 class TimestampMixin:
@@ -436,6 +478,165 @@ class Artifact(TimestampMixin, Base):
     metadata_json: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
     # Pins against automatic cleanup only; explicit deletion always wins.
     favorite: Mapped[bool] = mapped_column(Boolean, default=False, index=True)
+
+
+class ArtifactLibraryEntry(TimestampMixin, Base):
+    """Durable user-visible membership, separate from content-addressed bytes."""
+
+    __tablename__ = "artifact_library_entries"
+    __table_args__ = (
+        UniqueConstraint("artifact_id", name="uq_artifact_library_entry_artifact"),
+        CheckConstraint(
+            "length(display_name) BETWEEN 1 AND 500 AND instr(display_name, char(0)) = 0",
+            name="ck_library_entry_display_name",
+        ),
+        CheckConstraint("favorite IN (0, 1)", name="ck_library_entry_favorite_boolean"),
+        CheckConstraint("state IN ('visible', 'trashed')", name="ck_library_entry_state"),
+        CheckConstraint("version > 0", name="ck_library_entry_version_positive"),
+        CheckConstraint(
+            "(state = 'visible' AND deleted_at IS NULL AND recovery_id IS NULL) OR "
+            "(state = 'trashed' AND deleted_at IS NOT NULL AND recovery_id IS NOT NULL)",
+            name="ck_library_entry_recovery_consistent",
+        ),
+        Index("ix_library_entry_state_created", "state", "created_at", "id"),
+        Index("ix_library_entry_favorite_created", "favorite", "created_at", "id"),
+        Index(
+            "ux_library_entry_recovery_id",
+            "recovery_id",
+            unique=True,
+            sqlite_where=text("recovery_id IS NOT NULL"),
+        ),
+    )
+
+    id: Mapped[str] = mapped_column(String(80), primary_key=True)
+    artifact_id: Mapped[str] = mapped_column(ForeignKey("artifacts.id", ondelete="RESTRICT"))
+    display_name: Mapped[str] = mapped_column(String(500))
+    favorite: Mapped[bool] = mapped_column(Boolean, default=False)
+    state: Mapped[str] = mapped_column(String(16), default="visible")
+    deleted_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    recovery_id: Mapped[str | None] = mapped_column(String(80), nullable=True)
+    version: Mapped[int] = mapped_column(Integer, default=1)
+
+
+class MediaCollection(TimestampMixin, Base):
+    """A durable manual Media Library collection; smart queries are separate."""
+
+    __tablename__ = "media_collections"
+    __table_args__ = (
+        CheckConstraint("kind = 'manual'", name="ck_media_collection_kind"),
+        CheckConstraint(
+            "length(name) BETWEEN 1 AND 200 AND name = trim(name) AND name NOT GLOB '*[^ -~]*'",
+            name="ck_media_collection_name",
+        ),
+        CheckConstraint(
+            "length(description) <= 2000 AND description NOT GLOB '*[^ -~]*'",
+            name="ck_media_collection_description",
+        ),
+        CheckConstraint("version > 0", name="ck_media_collection_version_positive"),
+    )
+
+    id: Mapped[str] = mapped_column(String(43), primary_key=True)
+    kind: Mapped[str] = mapped_column(String(16), default="manual")
+    name: Mapped[str] = mapped_column(String(200))
+    description: Mapped[str] = mapped_column(Text, default="")
+    version: Mapped[int] = mapped_column(Integer, default=1)
+
+
+class MediaCollectionMembership(Base):
+    """One ordered strong reference from a manual collection to a library entry."""
+
+    __tablename__ = "media_collection_memberships"
+    __table_args__ = (
+        UniqueConstraint(
+            "collection_id", "position", name="uq_media_collection_membership_position"
+        ),
+        CheckConstraint("position >= 0", name="ck_media_collection_membership_position"),
+        CheckConstraint(
+            "note IS NULL OR (length(note) BETWEEN 1 AND 1000 AND note = trim(note) "
+            "AND note NOT GLOB '*[^ -~]*')",
+            name="ck_media_collection_membership_note",
+        ),
+    )
+
+    collection_id: Mapped[str] = mapped_column(
+        ForeignKey("media_collections.id", ondelete="CASCADE"), primary_key=True
+    )
+    entry_id: Mapped[str] = mapped_column(
+        ForeignKey("artifact_library_entries.id", ondelete="RESTRICT"), primary_key=True
+    )
+    position: Mapped[int] = mapped_column(Integer)
+    note: Mapped[str | None] = mapped_column(String(1000), nullable=True)
+    added_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+
+
+class MediaTag(TimestampMixin, Base):
+    """A normalized explicit Media Library tag."""
+
+    __tablename__ = "media_tags"
+    __table_args__ = (
+        UniqueConstraint("slug", name="uq_media_tag_slug"),
+        CheckConstraint(
+            "length(slug) BETWEEN 1 AND 80 AND slug NOT GLOB '*[^a-z0-9-]*' "
+            "AND slug NOT LIKE '-%' AND slug NOT LIKE '%-' AND slug NOT LIKE '%--%'",
+            name="ck_media_tag_slug",
+        ),
+        CheckConstraint(
+            "length(label) BETWEEN 1 AND 200 AND label = trim(label) AND label NOT GLOB '*[^ -~]*'",
+            name="ck_media_tag_label",
+        ),
+        CheckConstraint(
+            "color IS NULL OR (length(color) = 7 AND substr(color, 1, 1) = '#' "
+            "AND substr(color, 2) NOT GLOB '*[^0-9a-f]*')",
+            name="ck_media_tag_color",
+        ),
+        CheckConstraint("version > 0", name="ck_media_tag_version_positive"),
+    )
+
+    id: Mapped[str] = mapped_column(String(41), primary_key=True)
+    slug: Mapped[str] = mapped_column(String(80))
+    label: Mapped[str] = mapped_column(String(200))
+    color: Mapped[str | None] = mapped_column(String(7), nullable=True)
+    version: Mapped[int] = mapped_column(Integer, default=1)
+
+
+class MediaTagAssignment(Base):
+    """One explicit strong tag reference to a Media Library entry."""
+
+    __tablename__ = "media_tag_assignments"
+
+    tag_id: Mapped[str] = mapped_column(
+        ForeignKey("media_tags.id", ondelete="CASCADE"), primary_key=True
+    )
+    entry_id: Mapped[str] = mapped_column(
+        ForeignKey("artifact_library_entries.id", ondelete="RESTRICT"), primary_key=True
+    )
+    added_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+
+
+for _statement in CREATE_TRIGGER_SQL:
+    event.listen(
+        Base.metadata,
+        "after_create",
+        _install_sqlite_trigger(_statement),
+    )
+for _statement in DROP_TRIGGER_SQL:
+    event.listen(
+        Base.metadata,
+        "before_drop",
+        DDL(_statement).execute_if(dialect="sqlite"),  # type: ignore[no-untyped-call]
+    )
+for _statement in CREATE_MEDIA_ORGANIZATION_TRIGGER_SQL:
+    event.listen(
+        Base.metadata,
+        "after_create",
+        _install_sqlite_trigger(_statement),
+    )
+for _statement in DROP_MEDIA_ORGANIZATION_TRIGGER_SQL:
+    event.listen(
+        Base.metadata,
+        "before_drop",
+        DDL(_statement).execute_if(dialect="sqlite"),  # type: ignore[no-untyped-call]
+    )
 
 
 class ModelSource(TimestampMixin, Base):
@@ -1628,3 +1829,16 @@ class AppSetting(TimestampMixin, Base):
 
     key: Mapped[str] = mapped_column(String(200), primary_key=True)
     value_json: Mapped[Any] = mapped_column(JSON)
+
+
+@event.listens_for(Session, "before_flush")
+def _guard_artifact_reference_flush(
+    session: Session,
+    flush_context: object,
+    instances: object,
+) -> None:
+    """Register JSON Artifact authority with every production model import."""
+
+    from .artifact_library import guard_artifact_reference_flush
+
+    guard_artifact_reference_flush(session, flush_context, instances)

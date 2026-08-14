@@ -14,6 +14,7 @@ from pydantic import ValidationError
 from sqlalchemy import event, select
 from sqlalchemy.orm import Session, selectinload
 
+from .artifact_library import ensure_library_entry
 from .artifacts import ArtifactStore
 from .auxiliary_assets import AUXILIARY_ASSET_KINDS
 from .config import Settings
@@ -1764,6 +1765,7 @@ class ProjectExporter:
                     raise ValueError("project artifact identity does not match its checksum")
                 if not destination.is_file() or destination.stat().st_size != expected_size:
                     raise ValueError("project content store has a conflicting artifact")
+                ensure_library_entry(session, artifact)
                 if existed_before:
                     stored_checksum = hashlib.sha256()
                     with destination.open("rb") as stored:

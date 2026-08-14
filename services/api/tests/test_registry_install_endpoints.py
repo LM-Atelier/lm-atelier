@@ -32,7 +32,7 @@ def _seed_install(*, trusted: bool = False, active: bool = False) -> str:
             review_json={"review_required": True},
             wheel_closure_sha256="c" * 64,
             wheel_environment_sha256="d" * 64,
-            wheel_environment_path=f"registry-wheels-{'c' * 64}",
+            wheel_environment_path=f"registry-wheels-v3-{'c' * 64}",
             trusted=trusted,
             active=active,
         )

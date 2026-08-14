@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import ast
 import asyncio
+import hashlib
+import hmac
 from pathlib import Path
 from typing import Annotated
 
@@ -435,3 +437,23 @@ def test_the_session_cookie_is_not_a_durable_on_disk_secret(tmp_path: Path) -> N
     assert not first._valid_cookie(second._session_token)
     assert first._session_token in cookie
     assert first.csrf_token not in cookie
+
+
+def test_server_issued_state_uses_a_private_purpose_separated_key(tmp_path: Path) -> None:
+    settings = Settings(data_dir=tmp_path / "signed-state")
+    settings.prepare()
+    first = SessionSecurity(settings)
+    second = SessionSecurity(settings)
+
+    cursor_key = first.local_state_signing_key(b"artifact-library")
+    assert cursor_key == first.local_state_signing_key(b"artifact-library")
+    assert cursor_key != first.local_state_signing_key(b"another-purpose")
+    assert cursor_key != second.local_state_signing_key(b"artifact-library")
+    browser_derivable = hmac.new(
+        first._session_token.encode("utf-8"),
+        b"local-lm-state-v1\0artifact-library",
+        hashlib.sha256,
+    ).digest()
+    assert cursor_key != browser_derivable
+    with pytest.raises(ValueError, match="purpose"):
+        first.local_state_signing_key(b"")

@@ -68,7 +68,7 @@ import {
 import { useLiveEvents } from "./useLiveEvents";
 import { ErrorCallout } from "./ErrorCallout";
 import { FirstFailure } from "./FirstFailure";
-import { openLibraryEditTargets, type VisualTarget } from "./libraryEditTargets";
+import type { VisualTarget } from "./libraryEditTargets";
 import { EmptyState } from "./EmptyState";
 import { AtelierMark } from "./AtelierMark";
 import { EditingStudio } from "./EditingStudio";
@@ -124,7 +124,6 @@ import {
   resolveWorkflowSettings,
 } from "./settings";
 import type {
-  ArtifactLibraryItem,
   CatalogModel,
   CatalogPreflight,
   Chat,
@@ -2118,7 +2117,6 @@ export default function App() {
   const client = useQueryClient();
   const [view, setView] = useState<View>("chat");
   const { appearance, sidebar } = useWorkspaceChrome();
-  const [libraryEdit, setLibraryEdit] = useState<VisualTarget | null>(null);
   const [studioSource, setStudioSource] = useState<{ artifactId: string; chatId: string | null } | null>(null);
   const [modelLibraryRole, setModelLibraryRole] = useState<EngineRole>("chat");
   const [setupOpen, setSetupOpen] = useState<boolean | null>(null);
@@ -2359,19 +2357,11 @@ export default function App() {
     },
   });
 
-  const openLibraryEdit = useCallback((artifacts: ArtifactLibraryItem[]) => {
-    openLibraryEditTargets(artifacts, {
-      openStudio: (artifactId) => {
-        setStudioSource({ artifactId, chatId: null });
-        setView("studio");
-      },
-      openComposer: (target) => {
-        setLibraryEdit(target);
-        if (!activeChatId) createChat.mutate(null);
-        setView("chat");
-      },
-    });
-  }, [activeChatId, createChat]);
+  const openLibraryImage = useCallback((artifactId: string) => {
+    setStudioSource({ artifactId, chatId: null });
+    setView("studio");
+    focusMainContent();
+  }, []);
 
   const allChats = useMemo(() => chats.data ?? [], [chats.data]);
   const allProjects = useMemo(() => projects.data ?? [], [projects.data]);
@@ -2389,7 +2379,7 @@ export default function App() {
           onClose={() => setStudioSource(null)}/>
       );
     }
-    if (view === "media") return <MediaLibraryView onEditImages={openLibraryEdit} />;
+    if (view === "media") return <MediaLibraryView onEditImage={openLibraryImage} />;
     if (view === "models") return <ModelsView key={modelLibraryRole} initialRole={modelLibraryRole} />;
     if (view === "references") return <ReferencesLibrary />;
     if (view === "workflows") return <WorkflowsView />;
@@ -2411,7 +2401,7 @@ export default function App() {
       ));
       updateChat.mutate({ id: displayedChat.id, values });
     };
-    return <ChatView key={displayedChat?.id ?? "empty-chat"} onOpenStudio={(artifactId) => { setStudioSource({ artifactId, chatId: displayedChat?.id ?? null }); setView("studio"); focusMainContent(); }} libraryEdit={libraryEdit} chat={displayedChat} engines={engines.data ?? []} profiles={profiles.data ?? []} presets={presets.data ?? []} workflows={workflows.data ?? []} project={allProjects.find((item) => item.id === displayedChat?.project_id)} liveText={liveText} pendingTurns={displayedChat ? pendingTurns[displayedChat.id] ?? [] : []} workPlans={workPlans.data ?? []} settings={scopedSettings} presetId={presetId} onSettings={(settings) => {
+    return <ChatView key={displayedChat?.id ?? "empty-chat"} onOpenStudio={(artifactId) => { setStudioSource({ artifactId, chatId: displayedChat?.id ?? null }); setView("studio"); focusMainContent(); }} chat={displayedChat} engines={engines.data ?? []} profiles={profiles.data ?? []} presets={presets.data ?? []} workflows={workflows.data ?? []} project={allProjects.find((item) => item.id === displayedChat?.project_id)} liveText={liveText} pendingTurns={displayedChat ? pendingTurns[displayedChat.id] ?? [] : []} workPlans={workPlans.data ?? []} settings={scopedSettings} presetId={presetId} onSettings={(settings) => {
       if (!displayedChat) return;
       const role = roleForMode(displayedChat.routing_mode);
       persistActiveChat({
@@ -2464,7 +2454,7 @@ export default function App() {
         send.mutate({ chatId: displayedChat.id, id: crypto.randomUUID(), text, mode, artifacts, settings, references });
       }
     }} />;
-  }, [studioSource, view, modelLibraryRole, engines.data, profiles.data, presets.data, workflows.data, allProjects, chat.data, chatDrafts, liveText, pendingTurns, workPlans.data, send, regenerate, selectResponseRevision, branch, stop, cancelWorkPlan, cancelWorkStep, retryWorkStep, updateChat, deleteExchange, forkThread, client, libraryEdit, openLibraryEdit]);
+  }, [studioSource, view, modelLibraryRole, engines.data, profiles.data, presets.data, workflows.data, allProjects, chat.data, chatDrafts, liveText, pendingTurns, workPlans.data, send, regenerate, selectResponseRevision, branch, stop, cancelWorkPlan, cancelWorkStep, retryWorkStep, updateChat, deleteExchange, forkThread, client, openLibraryImage]);
 
   if (firstRunSetup && setupReadiness.data) {
     return <FirstRunSetup report={setupReadiness.data} onExit={exitFirstRunSetup} onOpenModels={(role) => { exitFirstRunSetup(); setModelLibraryRole(role); setView("models"); }} onOpenWorkflows={() => { exitFirstRunSetup(); setView("workflows"); }} />;

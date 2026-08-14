@@ -176,6 +176,12 @@ async def test_a_masked_edit_is_accepted_by_the_real_turn_route(client) -> None:
             files={"file": ("studio-source.png", b"source-image", "image/png")},
         )
     ).json()
+    mask = (
+        await client.post(
+            "/api/artifacts",
+            files={"file": ("studio-mask.png", b"mask-image", "image/png")},
+        )
+    ).json()
     chat = (await client.post("/api/chats", json={"title": "Masked edit"})).json()
     response = await client.post(
         f"/api/chats/{chat['id']}/turns",
@@ -183,7 +189,7 @@ async def test_a_masked_edit_is_accepted_by_the_real_turn_route(client) -> None:
             "text": "Repaint the selected area",
             "mode": "image",
             "input_artifact_ids": [source["id"]],
-            "settings": {"mask": {"artifact_id": ARTIFACT, "feather_px": 4, "invert": False}},
+            "settings": {"mask": {"artifact_id": mask["id"], "feather_px": 4, "invert": False}},
         },
     )
 

@@ -17,16 +17,17 @@ from typing import IO
 from sqlalchemy import event, func, select
 from sqlalchemy.orm import Session
 
+from .artifact_library import begin_artifact_write_fence, referenced_artifact_ids
 from .config import Settings
 from .domain import ArtifactKind, MessageRole, PartType
 from .filesystem_links import is_link_or_reparse
 from .models import (
     Artifact,
+    ArtifactLibraryEntry,
     Message,
     MessagePart,
     ResponseRevision,
     ResponseRevisionPart,
-    Run,
 )
 from .subprocess_env import subprocess_environment
 
@@ -396,37 +397,7 @@ class ArtifactStore:
 
     @staticmethod
     def referenced_artifact_ids(session: Session) -> set[str]:
-        referenced = {
-            artifact_id
-            for artifact_id in session.scalars(
-                select(MessagePart.artifact_id).where(MessagePart.artifact_id.is_not(None))
-            )
-            if artifact_id
-        }
-        referenced.update(
-            artifact_id
-            for artifact_id in session.scalars(
-                select(ResponseRevisionPart.artifact_id).where(
-                    ResponseRevisionPart.artifact_id.is_not(None)
-                )
-            )
-            if artifact_id
-        )
-        # Runs created before input references became message parts stored their
-        # attachments only in provenance. Keep those artifacts live until the
-        # legacy run is deleted or migrated through a project round trip.
-        for provenance in session.scalars(select(Run.provenance_json)):
-            referenced.update(ArtifactStore._provenance_input_ids(provenance))
-        if not referenced:
-            return referenced
-        posters = session.scalars(select(Artifact).where(Artifact.id.in_(referenced))).all()
-        referenced.update(
-            linked_id
-            for artifact in posters
-            for key in ("poster_artifact_id", "browser_proxy_artifact_id")
-            if isinstance((linked_id := artifact.metadata_json.get(key)), str)
-        )
-        return referenced
+        return referenced_artifact_ids(session)
 
     def cleanup_retention(
         self,
@@ -439,6 +410,7 @@ class ArtifactStore:
     ) -> RetentionCleanupSummary:
         current = now or datetime.now(UTC)
         if not dry_run:
+            begin_artifact_write_fence(session)
             self._recover_staged_deletions(session)
         referenced = self.referenced_artifact_ids(session)
         marked_count = 0
@@ -494,8 +466,15 @@ class ArtifactStore:
         session: Session,
         artifact: Artifact,
     ) -> tuple[int, int, int]:
+        begin_artifact_write_fence(session)
         if artifact.kind not in {ArtifactKind.IMAGE.value, ArtifactKind.VIDEO.value}:
             raise ValueError("only image and video library artifacts can be deleted directly")
+
+        entry_id = session.scalar(
+            select(ArtifactLibraryEntry.id).where(ArtifactLibraryEntry.artifact_id == artifact.id)
+        )
+        if entry_id:
+            raise ValueError("This media item is retained by its Media Library membership.")
 
         linked_ids = {
             linked_id
@@ -531,7 +510,11 @@ class ArtifactStore:
         # count with implementation details.
         return len(parts), removed_count, reclaimed_bytes
 
-    def delete_chat_generated_media(self, session: Session, chat_id: str) -> int:
+    def generated_media_artifact_ids_for_chat(
+        self,
+        session: Session,
+        chat_id: str,
+    ) -> tuple[str, ...]:
         artifacts_by_id = {
             artifact.id: artifact
             for artifact in session.scalars(
@@ -569,40 +552,39 @@ class ArtifactStore:
         ).unique()
         for artifact in revision_artifacts:
             artifacts_by_id[artifact.id] = artifact
-        artifacts = sorted(artifacts_by_id.values(), key=lambda item: item.created_at)
+        return tuple(
+            artifact.id
+            for artifact in sorted(artifacts_by_id.values(), key=lambda item: item.created_at)
+        )
 
-        external_run_artifact_ids: set[str] = set()
-        for provenance in session.scalars(
-            select(Run.provenance_json).where(Run.chat_id != chat_id)
-        ):
-            external_run_artifact_ids.update(self._provenance_input_ids(provenance))
+    def delete_generated_media_artifacts(
+        self,
+        session: Session,
+        artifact_ids: tuple[str, ...],
+    ) -> int:
+        """Delete a removed chat's now-unreferenced generated media.
+
+        Callers snapshot the ids before deleting the chat, then flush the chat
+        deletion before entering here. The canonical reference graph therefore
+        protects every surviving consumer without treating the deleted chat's
+        own Run and Job rows as external retention.
+        """
+
         removed = 0
-        for artifact in artifacts:
-            message_references_elsewhere = session.scalar(
-                select(func.count(MessagePart.id))
-                .join(Message, Message.id == MessagePart.message_id)
-                .where(
-                    MessagePart.artifact_id == artifact.id,
-                    Message.chat_id != chat_id,
+        for artifact_id in artifact_ids:
+            artifact = session.get(Artifact, artifact_id)
+            if not artifact or artifact.kind not in {
+                ArtifactKind.IMAGE.value,
+                ArtifactKind.VIDEO.value,
+            }:
+                continue
+            if session.scalar(
+                select(ArtifactLibraryEntry.id).where(
+                    ArtifactLibraryEntry.artifact_id == artifact.id
                 )
-            )
-            revision_references_elsewhere = session.scalar(
-                select(func.count(ResponseRevisionPart.id))
-                .join(
-                    ResponseRevision,
-                    ResponseRevision.id == ResponseRevisionPart.response_revision_id,
-                )
-                .join(Message, Message.id == ResponseRevision.message_id)
-                .where(
-                    ResponseRevisionPart.artifact_id == artifact.id,
-                    Message.chat_id != chat_id,
-                )
-            )
-            if (
-                message_references_elsewhere
-                or revision_references_elsewhere
-                or artifact.id in external_run_artifact_ids
             ):
+                continue
+            if artifact.id in self.referenced_artifact_ids(session):
                 continue
             _references, removed_count, _reclaimed_bytes = self.delete_library_artifact(
                 session, artifact
@@ -611,6 +593,9 @@ class ArtifactStore:
         return removed
 
     def _delete_artifact(self, session: Session, artifact: Artifact) -> None:
+        begin_artifact_write_fence(session)
+        if artifact.id in self.referenced_artifact_ids(session):
+            raise ValueError("This artifact is still retained.")
         try:
             path = self.resolve(artifact)
         except ValueError:

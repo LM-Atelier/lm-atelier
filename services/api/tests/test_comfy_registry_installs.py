@@ -219,7 +219,7 @@ def test_exact_wheel_environment_is_bound_before_trust(
     )
     root = tmp_path / "environments"
     root.mkdir()
-    destination = root / f"registry-wheels-{closure_sha256}"
+    destination = root / f"registry-wheels-v3-{closure_sha256}"
     destination.mkdir()
     monkeypatch.setattr(
         install_module,
@@ -276,7 +276,7 @@ def test_trusted_launch_contract_revalidates_node_code_and_overlay(
     environment_sha256 = "d" * 64
     environment_root = tmp_path / "environments"
     environment_root.mkdir()
-    environment = environment_root / f"registry-wheels-{closure_sha256}"
+    environment = environment_root / f"registry-wheels-v3-{closure_sha256}"
     site_packages = environment / "site-packages"
     site_packages.mkdir(parents=True)
     install.wheel_closure_sha256 = closure_sha256
@@ -323,6 +323,16 @@ def test_trusted_launch_contract_revalidates_node_code_and_overlay(
     assert contract.site_packages == (site_packages,)
     assert contract.node_types == ("ExampleLoader", "ExampleSampler")
 
+    install.wheel_environment_path = f"registry-wheels-{closure_sha256}"
+    with pytest.raises(install_module.ComfyRegistryInstallError) as legacy:
+        trusted_comfy_registry_launch_contract(
+            session,
+            custom_node_root=node_root,
+            environment_root=environment_root,
+        )
+    assert legacy.value.code == "legacy_environment_manifest"
+    install.wheel_environment_path = environment.name
+
     unselected = persist_comfy_registry_install(
         session,
         resolution=_resolution(
@@ -336,7 +346,7 @@ def test_trusted_launch_contract_revalidates_node_code_and_overlay(
     )
     unselected.wheel_closure_sha256 = "1" * 64
     unselected.wheel_environment_sha256 = "2" * 64
-    unselected.wheel_environment_path = f"registry-wheels-{'1' * 64}"
+    unselected.wheel_environment_path = f"registry-wheels-v3-{'1' * 64}"
     unselected.trusted = True
     unselected.active = True
     session.flush()

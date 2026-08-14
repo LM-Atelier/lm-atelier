@@ -1,4 +1,8 @@
 import type { TurnReference } from "./mentionDraft";
+import {
+  parseArtifactLibraryPage,
+  type ArtifactLibraryFilters,
+} from "./artifactLibraryPage";
 import type {
   StudioCapabilityReport,
   ApplicationInfo,
@@ -614,6 +618,27 @@ export const api = {
     if (kind) parameters.set("kind", kind);
     if (favorites) parameters.set("favorites", "true");
     return request<ArtifactLibraryItem[]>(`/api/artifacts?${parameters}`);
+  },
+  artifactLibrary: async (
+    filters: ArtifactLibraryFilters,
+    cursor: string | null,
+    limit: number,
+    signal?: AbortSignal,
+  ) => {
+    const parameters = new URLSearchParams({
+      limit: String(limit),
+      query: filters.query,
+      state: "visible",
+    });
+    if (filters.kind) parameters.set("kind", filters.kind);
+    if (filters.favorite) parameters.set("favorite", "true");
+    if (cursor !== null) parameters.set("cursor", cursor);
+    const payload = await request<unknown>(`/api/artifact-library?${parameters}`, { signal });
+    const page = parseArtifactLibraryPage(payload, limit);
+    if (cursor !== null && page.next_cursor === cursor) {
+      throw new Error("The Media Library response was invalid.");
+    }
+    return page;
   },
   artifact: (artifactId: string) =>
     request<Artifact>(`/api/artifacts/${encodeURIComponent(artifactId)}`),

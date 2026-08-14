@@ -41,11 +41,14 @@ if TYPE_CHECKING:
 _PACKAGE_ID = re.compile(r"^[a-z0-9][a-z0-9._-]{0,99}$")
 _DIGEST = re.compile(r"^[0-9a-fA-F]{64}$")
 _INSTALL_PATH = re.compile(r"^lm-atelier-registry_[A-Za-z0-9._-]{1,200}$")
-_ENVIRONMENT_PATH = re.compile(r"^registry-wheels-([0-9a-f]{64})$")
+_ENVIRONMENT_PATH = re.compile(r"^registry-wheels-v3-([0-9a-f]{64})$")
+_LEGACY_ENVIRONMENT_PATH = re.compile(r"^registry-wheels-([0-9a-f]{64})$")
 
 
 class ComfyRegistryInstallError(ValueError):
-    pass
+    def __init__(self, message: str, *, code: str = "registry_install_invalid") -> None:
+        super().__init__(message)
+        self.code = code
 
 
 @dataclass(frozen=True)
@@ -183,7 +186,9 @@ def bind_comfy_registry_wheel_environment(
             expected_environment_sha256=report.environment_sha256,
         )
     except ComfyRegistryWheelEnvironmentError as exc:
-        raise ComfyRegistryInstallError("Registry wheel environment is invalid") from exc
+        raise ComfyRegistryInstallError(
+            "Registry wheel environment is invalid", code=exc.code
+        ) from exc
     if (
         verified != report
         or report.closure_sha256 != closure.closure_sha256
@@ -306,7 +311,7 @@ def _verified_comfy_registry_launch_contract(
             )
         except ComfyRegistryWheelEnvironmentError as exc:
             raise ComfyRegistryInstallError(
-                "Registry wheel environment failed verification"
+                "Registry wheel environment failed verification", code=exc.code
             ) from exc
         if report.runtime_distributions:
             runtime_baselines.add(report.runtime_distributions)
@@ -483,6 +488,11 @@ def _managed_root(value: Path) -> Path:
 
 
 def _managed_environment_path(root: Path, value: Path) -> Path:
+    if isinstance(value, Path) and _LEGACY_ENVIRONMENT_PATH.fullmatch(value.name):
+        raise ComfyRegistryInstallError(
+            "Legacy Registry wheel environment must be renewed",
+            code="legacy_environment_manifest",
+        )
     if not isinstance(value, Path) or not _ENVIRONMENT_PATH.fullmatch(value.name):
         raise ComfyRegistryInstallError("managed Registry wheel environment path is invalid")
     try:
