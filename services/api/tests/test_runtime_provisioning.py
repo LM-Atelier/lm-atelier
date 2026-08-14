@@ -509,10 +509,13 @@ async def test_comfy_upgrade_carries_only_managed_registry_nodes(
         assert settings.comfy_directory is not None
         old_directory = settings.comfy_directory
         managed = old_directory / "custom_nodes" / "lm-atelier-registry_example"
+        managed_manual = old_directory / "custom_nodes" / "lm-atelier-node_example"
         unmanaged = old_directory / "custom_nodes" / "manually-installed-node"
         managed.mkdir(parents=True)
+        managed_manual.mkdir()
         unmanaged.mkdir()
         (managed / "node.py").write_bytes(b"managed node")
+        (managed_manual / "node.py").write_bytes(b"managed manual node")
         (unmanaged / "node.py").write_bytes(b"manual node")
         unrelated_release = settings.data_dir / "runtimes" / "comfyui" / "v-unrelated"
         unrelated = unrelated_release / "ComfyUI" / "custom_nodes" / "lm-atelier-registry_unrelated"
@@ -552,6 +555,8 @@ async def test_comfy_upgrade_carries_only_managed_registry_nodes(
     assert settings.comfy_directory != old_directory
     restored = settings.comfy_directory / "custom_nodes" / managed.name
     assert (restored / "node.py").read_bytes() == b"managed node"
+    restored_manual = settings.comfy_directory / "custom_nodes" / managed_manual.name
+    assert (restored_manual / "node.py").read_bytes() == b"managed manual node"
     assert not (settings.comfy_directory / "custom_nodes" / unmanaged.name).exists()
     assert not (settings.comfy_directory / "custom_nodes" / unrelated.name).exists()
     assert (managed / "node.py").read_bytes() == b"managed node"
@@ -633,10 +638,13 @@ async def test_startup_restore_carries_registry_nodes_into_a_preinstalled_releas
         new_directory = settings.comfy_directory
 
         managed = old_directory / "custom_nodes" / "lm-atelier-registry_late-renewal"
+        managed_manual = old_directory / "custom_nodes" / "lm-atelier-node_late-review"
         unmanaged = old_directory / "custom_nodes" / "manual-node"
         managed.mkdir(parents=True)
+        managed_manual.mkdir()
         unmanaged.mkdir()
         (managed / "node.py").write_bytes(b"renewed after preinstall")
+        (managed_manual / "node.py").write_bytes(b"reviewed after preinstall")
         (unmanaged / "node.py").write_bytes(b"unmanaged")
         assert not (new_directory / "custom_nodes" / managed.name).exists()
 
@@ -662,8 +670,47 @@ async def test_startup_restore_carries_registry_nodes_into_a_preinstalled_releas
     assert settings.comfy_directory == new_directory
     copied = new_directory / "custom_nodes" / managed.name
     assert (copied / "node.py").read_bytes() == b"renewed after preinstall"
+    copied_manual = new_directory / "custom_nodes" / managed_manual.name
+    assert (copied_manual / "node.py").read_bytes() == b"reviewed after preinstall"
     assert not (new_directory / "custom_nodes" / unmanaged.name).exists()
     assert environment["LOCAL_LM_COMFY_DIRECTORY"] == str(new_directory)
+
+    # A repeated recovery with the same exact bytes is a no-op rather than a
+    # false conflict; changed bytes still compare by the bounded tree digest.
+    settings.comfy_directory = old_directory
+    settings.comfy_executable = old_executable
+    repeat = RuntimeProvisioner(
+        settings,
+        manifest_path=manifest,
+        environment={},
+        platform_key="test-platform",
+        allowed_download_hosts={"runtime.test"},
+    )
+    task = repeat.start_restore()
+    assert task is not None
+    await task
+    assert repeat.status("comfyui").state == "ready"
+    await repeat.close()
+
+    original = (copied / "node.py").read_bytes()
+    changed = b"x" * len(original)
+    assert changed != original
+    (copied / "node.py").write_bytes(changed)
+    settings.comfy_directory = old_directory
+    settings.comfy_executable = old_executable
+    conflict = RuntimeProvisioner(
+        settings,
+        manifest_path=manifest,
+        environment={},
+        platform_key="test-platform",
+        allowed_download_hosts={"runtime.test"},
+    )
+    task = conflict.start_restore()
+    assert task is not None
+    await task
+    assert conflict.status("comfyui").state == "missing"
+    assert (copied / "node.py").read_bytes() == changed
+    await conflict.close()
 
 
 def test_managed_registry_copy_budget_is_shared_across_folders(tmp_path: Path) -> None:

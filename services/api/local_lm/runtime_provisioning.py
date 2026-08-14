@@ -42,6 +42,7 @@ _SHA256 = re.compile(r"^[0-9a-f]{64}$")
 _MAX_RUNTIME_FILES = 250_000
 _MAX_RUNTIME_BYTES = 32 * 1024**3
 _REGISTRY_NODE_PREFIX = "lm-atelier-registry_"
+_MANAGED_NODE_PREFIXES = ("lm-atelier-node_", _REGISTRY_NODE_PREFIX)
 _MUTABLE_RUNTIME_DIRECTORIES = {
     "__pycache__",
     "custom_nodes",
@@ -629,30 +630,46 @@ class RuntimeProvisioner:
                     "A managed Registry node source is not an ordinary directory."
                 )
             for candidate in sorted(source.iterdir(), key=lambda item: item.name.casefold()):
-                if not candidate.name.startswith(_REGISTRY_NODE_PREFIX):
+                if not candidate.name.startswith(_MANAGED_NODE_PREFIXES):
                     continue
                 if candidate.name in restored:
                     continue
                 destination = target / candidate.name
                 if destination.exists():
-                    raise RuntimeProvisioningError(
-                        "The replacement runtime already contains a managed Registry node."
-                    )
-                restoring = target / f".lm-atelier-restoring-{uuid4().hex}"
-                try:
-                    added_entries, added_bytes = self._copy_managed_registry_tree(
+                    added_entries, added_bytes, source_sha256 = self._managed_node_tree_identity(
                         candidate,
-                        restoring,
                         max_entries=_MAX_RUNTIME_FILES - copied_entries,
                         max_bytes=_MAX_RUNTIME_BYTES - copied_bytes,
                     )
-                    if destination.exists():
+                    destination_identity = self._managed_node_tree_identity(
+                        destination,
+                        max_entries=added_entries,
+                        max_bytes=added_bytes,
+                    )
+                    if destination_identity != (
+                        added_entries,
+                        added_bytes,
+                        source_sha256,
+                    ):
                         raise RuntimeProvisioningError(
-                            "The replacement runtime already contains a managed Registry node."
+                            "A managed custom node differs between runtime releases."
                         )
-                    os.replace(restoring, destination)
-                finally:
-                    shutil.rmtree(restoring, ignore_errors=True)
+                else:
+                    restoring = target / f".lm-atelier-restoring-{uuid4().hex}"
+                    try:
+                        added_entries, added_bytes = self._copy_managed_registry_tree(
+                            candidate,
+                            restoring,
+                            max_entries=_MAX_RUNTIME_FILES - copied_entries,
+                            max_bytes=_MAX_RUNTIME_BYTES - copied_bytes,
+                        )
+                        if destination.exists():
+                            raise RuntimeProvisioningError(
+                                "The replacement runtime already contains a managed custom node."
+                            )
+                        os.replace(restoring, destination)
+                    finally:
+                        shutil.rmtree(restoring, ignore_errors=True)
                 copied_entries += added_entries
                 copied_bytes += added_bytes
                 restored.add(candidate.name)
@@ -747,6 +764,57 @@ class RuntimeProvisioner:
                         )
                     shutil.copy2(child.path, output, follow_symlinks=False)
         return entries, total_size
+
+    @classmethod
+    def _managed_node_tree_identity(
+        cls,
+        root: Path,
+        *,
+        max_entries: int,
+        max_bytes: int,
+    ) -> tuple[int, int, str]:
+        """Hash one bounded ordinary tree for idempotent runtime restoration."""
+
+        if is_link_or_reparse(root, missing="assume_link", unreadable="assume_link"):
+            raise RuntimeProvisioningError("A managed custom node contains an unsupported link.")
+        if not root.is_dir():
+            raise RuntimeProvisioningError("A managed custom node is not an ordinary directory.")
+        digest = hashlib.sha256(b"lm-atelier-managed-custom-node-v1\0")
+        entries = 0
+        total_size = 0
+        stack: list[tuple[Path, PurePosixPath]] = [(root, PurePosixPath())]
+        while stack:
+            source_directory, relative_directory = stack.pop()
+            with os.scandir(source_directory) as scanned:
+                children = sorted(scanned, key=lambda child: child.name)
+            for child in children:
+                entries += 1
+                if entries > max_entries or cls._is_reparse_point(child):
+                    raise RuntimeProvisioningError(
+                        "A managed custom node has an unsupported shape."
+                    )
+                relative = relative_directory / child.name
+                encoded = relative.as_posix().encode("utf-8")
+                digest.update(len(encoded).to_bytes(4, "big"))
+                digest.update(encoded)
+                if child.is_dir(follow_symlinks=False):
+                    digest.update(b"D")
+                    stack.append((Path(child.path), relative))
+                    continue
+                if not child.is_file(follow_symlinks=False):
+                    raise RuntimeProvisioningError(
+                        "A managed custom node has an unsupported file type."
+                    )
+                size = child.stat(follow_symlinks=False).st_size
+                total_size += size
+                if total_size > max_bytes:
+                    raise RuntimeProvisioningError(
+                        "A managed custom node exceeds its allowed size."
+                    )
+                digest.update(b"F")
+                digest.update(size.to_bytes(8, "big"))
+                digest.update(bytes.fromhex(cls._sha256_file(Path(child.path))))
+        return entries, total_size, digest.hexdigest()
 
     def _prune_stale_staging(self, parent: Path, engine: RuntimeName) -> None:
         """Reclaim staging trees abandoned by an interrupted or failed attempt.
