@@ -4,6 +4,7 @@ import asyncio
 import io
 import json
 from collections.abc import AsyncIterator
+from typing import Any, cast
 
 import pytest
 from fastapi import FastAPI
@@ -14,8 +15,9 @@ from sqlalchemy import select
 from local_lm.adapters.base import ChatEvent, ChatRequest, GeneratedAsset, MediaEvent, MediaRequest
 from local_lm.adapters.mock import MockChatAdapter, MockMediaAdapter
 from local_lm.db import SessionLocal
-from local_lm.domain import JobKind, JobStatus
+from local_lm.domain import ArtifactKind, JobKind, JobStatus
 from local_lm.models import (
+    Artifact,
     Chat,
     Job,
     Message,
@@ -65,7 +67,7 @@ _RETRY_ASSESSMENT = json.dumps(
 )
 
 
-async def _wait_for_run(client: AsyncClient, run_id: str) -> dict:  # type: ignore[type-arg]
+async def _wait_for_run(client: AsyncClient, run_id: str) -> dict[str, Any]:
     deadline = asyncio.get_running_loop().time() + 5
     while asyncio.get_running_loop().time() < deadline:
         run = (await client.get(f"/api/runs/{run_id}")).json()
@@ -76,7 +78,7 @@ async def _wait_for_run(client: AsyncClient, run_id: str) -> dict:  # type: igno
             JobStatus.INTERRUPTED.value,
         }:
             assert run["status"] == JobStatus.COMPLETE.value
-            return run
+            return cast(dict[str, Any], run)
         await asyncio.sleep(0.03)
     raise AssertionError(f"run {run_id} did not finish")
 
@@ -376,7 +378,23 @@ async def test_restart_requeues_waiting_verification_and_interrupts_active_one(
             queue_group="primary",
             payload_json=base_payload,
         )
-        session.add_all([chat, plan])
+        source_artifact = Artifact(
+            id="source_missing",
+            sha256="a" * 64,
+            kind=ArtifactKind.IMAGE.value,
+            media_type="image/png",
+            size_bytes=1,
+            relative_path="verification/source-missing.png",
+        )
+        result_artifact = Artifact(
+            id="result_missing",
+            sha256="b" * 64,
+            kind=ArtifactKind.IMAGE.value,
+            media_type="image/png",
+            size_bytes=1,
+            relative_path="verification/result-missing.png",
+        )
+        session.add_all([chat, plan, source_artifact, result_artifact])
         session.flush()
         session.add_all([queued_step, running_step, queued, running])
         session.commit()
@@ -443,7 +461,23 @@ async def test_cancelled_verification_retains_output_and_cannot_be_retried(
             queue_group="primary",
             payload_json=payload,
         )
-        session.add_all([chat, plan])
+        source_artifact = Artifact(
+            id=payload["source_artifact_id"],
+            sha256="c" * 64,
+            kind=ArtifactKind.IMAGE.value,
+            media_type="image/png",
+            size_bytes=1,
+            relative_path="verification/cancel-source.png",
+        )
+        result_artifact = Artifact(
+            id=payload["result_artifact_id"],
+            sha256="d" * 64,
+            kind=ArtifactKind.IMAGE.value,
+            media_type="image/png",
+            size_bytes=1,
+            relative_path="verification/cancel-result.png",
+        )
+        session.add_all([chat, plan, source_artifact, result_artifact])
         session.flush()
         session.add_all([step, job])
         session.commit()
@@ -465,10 +499,10 @@ async def test_cancelled_verification_retains_output_and_cannot_be_retried(
     retry = await client.post(f"/api/jobs/{job_id}/retry")
     assert retry.status_code == 422
     with SessionLocal() as session:
-        job = session.get(Job, job_id)
-        step = session.get(WorkStep, step_id)
-        assert job and step
-        assert job.status == JobStatus.CANCELLED.value
-        assert step.status == JobStatus.CANCELLED.value
-        assert job.result_json["reason"] == "cancelled"
-        assert job.result_json["automatic_retry_executed"] is False
+        stored_job = session.get(Job, job_id)
+        stored_step = session.get(WorkStep, step_id)
+        assert stored_job and stored_step
+        assert stored_job.status == JobStatus.CANCELLED.value
+        assert stored_step.status == JobStatus.CANCELLED.value
+        assert stored_job.result_json["reason"] == "cancelled"
+        assert stored_job.result_json["automatic_retry_executed"] is False

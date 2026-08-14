@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from collections.abc import Callable
 from datetime import datetime
 from typing import Any
 
@@ -20,6 +21,7 @@ from sqlalchemy import (
     event,
     text,
 )
+from sqlalchemy.engine import Connection
 from sqlalchemy.orm import Mapped, Session, mapped_column, relationship
 
 from .artifact_library_schema import CREATE_TRIGGER_SQL, DROP_TRIGGER_SQL
@@ -50,6 +52,39 @@ def _lowercase_sha256_check(column: str) -> str:
     for character in "0123456789abcdef":
         remainder = f"replace({remainder}, '{character}', '')"
     return f"length({column}) = 64 AND lower({column}) = {column} AND {remainder} = ''"
+
+
+def _install_sqlite_trigger(statement: str) -> Callable[..., None]:
+    """Create a missing canonical trigger and refuse an existing divergent one.
+
+    Alembic owns upgrades and deliberately uses strict trigger statements.
+    ``create_all`` is also called during application startup, where metadata
+    ``after_create`` events run even when no table is created. An existing
+    name is insufficient authority: a stale or weakened body must fail closed.
+    """
+
+    parts = statement.split(None, 3)
+    if len(parts) < 4 or parts[:2] != ["CREATE", "TRIGGER"]:
+        raise ValueError("SQLite trigger statement has no CREATE TRIGGER clause")
+    trigger_name = parts[2]
+    canonical = statement.strip()
+
+    def install(_target: object, connection: Connection, **_kwargs: object) -> None:
+        if connection.dialect.name != "sqlite":
+            return
+        installed = connection.exec_driver_sql(
+            "SELECT sql FROM sqlite_master WHERE type = 'trigger' AND name = ?",
+            (trigger_name,),
+        ).scalar_one_or_none()
+        if installed is None:
+            connection.exec_driver_sql(canonical)
+            return
+        if not isinstance(installed, str) or installed.strip() != canonical:
+            raise RuntimeError(
+                f"SQLite trigger {trigger_name} does not match the application schema"
+            )
+
+    return install
 
 
 class TimestampMixin:
@@ -582,7 +617,7 @@ for _statement in CREATE_TRIGGER_SQL:
     event.listen(
         Base.metadata,
         "after_create",
-        DDL(_statement).execute_if(dialect="sqlite"),  # type: ignore[no-untyped-call]
+        _install_sqlite_trigger(_statement),
     )
 for _statement in DROP_TRIGGER_SQL:
     event.listen(
@@ -594,7 +629,7 @@ for _statement in CREATE_MEDIA_ORGANIZATION_TRIGGER_SQL:
     event.listen(
         Base.metadata,
         "after_create",
-        DDL(_statement).execute_if(dialect="sqlite"),  # type: ignore[no-untyped-call]
+        _install_sqlite_trigger(_statement),
     )
 for _statement in DROP_MEDIA_ORGANIZATION_TRIGGER_SQL:
     event.listen(

@@ -1525,6 +1525,93 @@ def _recorded_revisions_for(settings: Settings) -> set[str]:
         return {row[0] for row in connection.execute("SELECT version_num FROM alembic_version")}
 
 
+def _trigger_definitions(database: Path) -> dict[str, str]:
+    with sqlite3.connect(database) as connection:
+        return dict(
+            connection.execute(
+                "SELECT name, sql FROM sqlite_master WHERE type = 'trigger' ORDER BY name"
+            ).fetchall()
+        )
+
+
+def test_metadata_bootstrap_preserves_migrated_triggers(tmp_path: Path) -> None:
+    """Startup after Alembic preserves the exact guards and their behavior."""
+
+    settings = Settings(data_dir=tmp_path / "migrated-trigger-bootstrap", dev=True)
+    settings.prepare()
+    upgrade_database(settings)
+    database = settings.state_dir / "local-lm.sqlite3"
+    before = _trigger_definitions(database)
+
+    engine = create_engine(f"sqlite:///{database}")
+    try:
+        Base.metadata.create_all(engine)
+        Base.metadata.create_all(engine)
+    finally:
+        engine.dispose()
+
+    with sqlite3.connect(database) as connection:
+        assert _trigger_definitions(database) == before
+        with pytest.raises(sqlite3.IntegrityError, match="requires media"):
+            connection.execute(
+                """
+                INSERT INTO artifact_library_entries (
+                  id, artifact_id, display_name, favorite, state, version,
+                  created_at, updated_at
+                ) VALUES (
+                  'libentry:sha256:missing', 'missing', 'Missing', 0,
+                  'visible', 1, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP
+                )
+                """
+            )
+
+
+def test_metadata_bootstrap_trigger_definitions_match_fresh_and_migrated_schema(
+    tmp_path: Path,
+) -> None:
+    settings = Settings(data_dir=tmp_path / "migrated-trigger-parity", dev=True)
+    settings.prepare()
+    upgrade_database(settings)
+    migrated = settings.state_dir / "local-lm.sqlite3"
+
+    fresh = tmp_path / "fresh.sqlite3"
+    engine = create_engine(f"sqlite:///{fresh}")
+    try:
+        Base.metadata.create_all(engine)
+    finally:
+        engine.dispose()
+
+    assert _trigger_definitions(fresh) == _trigger_definitions(migrated)
+
+
+def test_metadata_bootstrap_refuses_a_same_name_trigger_with_the_wrong_body(
+    tmp_path: Path,
+) -> None:
+    settings = Settings(data_dir=tmp_path / "tampered-trigger", dev=True)
+    settings.prepare()
+    upgrade_database(settings)
+    database = settings.state_dir / "local-lm.sqlite3"
+    trigger_name = "artifact_library_entry_insert_guard"
+    with sqlite3.connect(database) as connection:
+        connection.execute(f"DROP TRIGGER {trigger_name}")
+        connection.execute(
+            f"""
+            CREATE TRIGGER {trigger_name}
+            BEFORE INSERT ON artifact_library_entries
+            BEGIN
+              SELECT 1;
+            END
+            """
+        )
+
+    engine = create_engine(f"sqlite:///{database}")
+    try:
+        with pytest.raises(RuntimeError, match=trigger_name):
+            Base.metadata.create_all(engine)
+    finally:
+        engine.dispose()
+
+
 def test_the_migrated_schema_matches_the_models(tmp_path: Path) -> None:
     """The two ways this schema gets built have to produce the same thing.
 
