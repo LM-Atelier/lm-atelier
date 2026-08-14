@@ -2089,6 +2089,7 @@ class ApplicationInfo(ApiModel):
     version: str
     data_directory: str
     log_directory: str
+    max_media_outputs_per_plan: int = Field(ge=1, le=16)
     # The installation-wide gate. When this is false no chat can open its
     # own, and the UI says so rather than offering a switch that does
     # nothing.

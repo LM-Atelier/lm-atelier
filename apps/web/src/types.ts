@@ -888,6 +888,7 @@ export interface ApplicationInfo {
   version: string;
   data_directory: string;
   log_directory: string;
+  max_media_outputs_per_plan: number;
   // The installation-wide gate. False means no chat can open its own, and
   // the UI says so rather than offering a switch that does nothing.
   web_access_enabled: boolean;

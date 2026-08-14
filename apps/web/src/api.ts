@@ -279,7 +279,14 @@ export const api = {
     // text: the server refuses to recover references by reading a prompt,
     // because that binds whoever the words most resemble.
     references: TurnReference[] = [],
+    outputCount?: number,
   ) => {
+    // The count belongs to the mode the person explicitly chose. Auto may
+    // later confirm a media route, but that must not resurrect a hidden media
+    // control from an earlier mode.
+    const requestedOutputCount = mode === "image" || mode === "video"
+      ? outputCount
+      : undefined;
     const submit = (selectedMode: RoutingMode, confirmed = false) => request<TurnAccepted>(`/api/chats/${chatId}/${endpoint}`, {
       method: "POST",
       body: JSON.stringify({
@@ -289,6 +296,7 @@ export const api = {
         references,
         settings,
         workflow_revision_id: workflowRevisionId,
+        output_count: requestedOutputCount,
         confirm_media: confirmed,
         idempotency_key: idempotencyKey,
       }),
@@ -353,6 +361,7 @@ export const api = {
     settings: Record<string, unknown>,
     idempotencyKey: string = crypto.randomUUID(),
     references: TurnReference[] = [],
+    outputCount?: number,
   ) => api.sendTurn(
     chatId,
     text,
@@ -363,6 +372,7 @@ export const api = {
     "stop-and-send",
     undefined,
     references,
+    outputCount,
   ),
   regenerateMessage: (messageId: string, settings: Record<string, unknown>) =>
     request<TurnAccepted>(`/api/messages/${messageId}/regenerate`, {
