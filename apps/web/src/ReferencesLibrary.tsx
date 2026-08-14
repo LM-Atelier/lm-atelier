@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { Plus, Star, Archive, Trash2 } from "lucide-react";
 import { api } from "./api";
@@ -73,9 +73,6 @@ export function ReferencesLibrary() {
       api.deleteReference(impact.reference_subject_id, impact.asset_count),
     onSuccess: () => {
       setPendingDelete(null);
-      if (items.length === 1 && offset > 0) {
-        setOffset(Math.max(0, offset - REFERENCE_PAGE_SIZE));
-      }
       void refresh();
     },
     onError: fail,
@@ -95,6 +92,13 @@ export function ReferencesLibrary() {
   const shownThrough = Math.min(offset + items.length, total);
   const hasPrevious = offset > 0;
   const hasNext = offset + items.length < total;
+
+  useEffect(() => {
+    if (!references.data || offset === 0 || items.length > 0) return;
+    const lastOffset =
+      total === 0 ? 0 : Math.floor((total - 1) / REFERENCE_PAGE_SIZE) * REFERENCE_PAGE_SIZE;
+    if (lastOffset < offset) setOffset(lastOffset);
+  }, [items.length, offset, references.data, total]);
 
   // The detail view replaces the list rather than nesting inside it, so the
   // back control is the only way out and cannot be confused with the nav.

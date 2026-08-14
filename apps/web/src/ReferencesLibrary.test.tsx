@@ -209,9 +209,13 @@ describe("references library", () => {
   });
 
   it("returns to the previous page after deleting its only item", async () => {
+    let deleted = false;
     mocked.references.mockImplementation(async (_search, _archived, limit, offset) => ({
-      items: [subject({ id: (offset ?? 0) === 0 ? "ref-1" : "ref-51" })],
-      total: 51,
+      items:
+        deleted && (offset ?? 0) > 0
+          ? []
+          : [subject({ id: (offset ?? 0) === 0 ? "ref-1" : "ref-51" })],
+      total: deleted ? 50 : 51,
       limit: limit ?? 50,
       offset: offset ?? 0,
     }));
@@ -221,7 +225,9 @@ describe("references library", () => {
       asset_count: 0,
       exclusive_artifact_ids: [],
     });
-    mocked.deleteReference.mockResolvedValue(undefined);
+    mocked.deleteReference.mockImplementation(async () => {
+      deleted = true;
+    });
     renderLibrary();
 
     fireEvent.click(await screen.findByRole("button", { name: "Next" }));
@@ -231,5 +237,30 @@ describe("references library", () => {
     fireEvent.click(await screen.findByText("Delete permanently", { selector: "button.danger" }));
 
     await waitFor(() => expect(mocked.references).toHaveBeenLastCalledWith("", false, 50, 0));
+  });
+
+  it("returns to the previous page when archiving removes its only visible item", async () => {
+    let archived = false;
+    mocked.references.mockImplementation(async (_search, includeArchived, limit, offset) => ({
+      items:
+        archived && !includeArchived && (offset ?? 0) > 0
+          ? []
+          : [subject({ id: (offset ?? 0) === 0 ? "ref-1" : "ref-51" })],
+      total: archived && !includeArchived ? 50 : 51,
+      limit: limit ?? 50,
+      offset: offset ?? 0,
+    }));
+    mocked.updateReference.mockImplementation(async () => {
+      archived = true;
+      return subject({ id: "ref-51", archived: true });
+    });
+    renderLibrary();
+
+    fireEvent.click(await screen.findByRole("button", { name: "Next" }));
+    await screen.findByText("Showing 51-51 of 51");
+    fireEvent.click(screen.getByRole("button", { name: "Archive" }));
+
+    await waitFor(() => expect(mocked.references).toHaveBeenLastCalledWith("", false, 50, 0));
+    expect(screen.queryByText("Showing 50-50 of 50")).toBeNull();
   });
 });
