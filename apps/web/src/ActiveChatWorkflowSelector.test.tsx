@@ -198,7 +198,7 @@ describe("ActiveChatWorkflowSelector", () => {
     const imageVariant = {
       ...family().variants[0],
       readiness: "setup_required" as const,
-      readiness_reason: "activation_not_ready",
+      readiness_reason: "future_server_reason",
     };
     const videoVariant = {
       ...family().variants[0],
@@ -228,7 +228,10 @@ describe("ActiveChatWorkflowSelector", () => {
     });
 
     render(<ActiveChatWorkflowSelector chatId="chat-1" routingMode="image" />);
-    expect(screen.getByRole("status")).toHaveTextContent("Its files are not prepared yet.");
+    expect(screen.getByRole("status")).toHaveTextContent(
+      "Needs files or nodes installed before it can run.",
+    );
+    expect(screen.getByRole("status")).not.toHaveTextContent("future_server_reason");
   });
 
   it("reports a family with no variant for the active capability", () => {
