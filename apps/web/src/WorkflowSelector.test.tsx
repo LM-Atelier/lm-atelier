@@ -199,7 +199,7 @@ describe("WorkflowSelector", () => {
   it("warns when the chosen family cannot run at all", async () => {
     const blocked = family({
       variants: [
-        variant({ readiness: "setup_required", readiness_reason: "Two model files are missing." }),
+        variant({ readiness: "setup_required", readiness_reason: "model_unavailable" }),
       ],
     });
     vi.mocked(api.workflowFamilies).mockResolvedValue([blocked]);
@@ -216,7 +216,7 @@ describe("WorkflowSelector", () => {
 
     // Letting someone pick a workflow and only telling them at generation
     // time moves the failure rather than preventing it.
-    expect(await screen.findByText("Two model files are missing.")).toBeInTheDocument();
+    expect(await screen.findByText("The model it needs is not installed.")).toBeInTheDocument();
   });
 
   it("stays quiet when only some variants are blocked", () => {
