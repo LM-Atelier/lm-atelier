@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import ast
 from collections.abc import Callable, Generator, Mapping
+from pathlib import Path
 from typing import cast
 
 import pytest
@@ -19,6 +21,7 @@ from local_lm.models import (
     ModelProfile,
 )
 from local_lm.workflow_bindings import (
+    WORKFLOW_DEPENDENCY_MATERIALIZER_ISSUE_CODES,
     MaterializedWorkflowDependency,
     WorkflowBindingError,
     WorkflowBindingSelection,
@@ -37,6 +40,8 @@ from local_lm.workflow_dependencies import (
     WorkflowDependencyResourceKind,
     parse_workflow_dependency_contract,
 )
+
+WORKFLOW_BINDINGS_MODULE = Path(binding_module.__file__).resolve()
 
 
 def _contract() -> WorkflowDependencyContract:
@@ -118,6 +123,31 @@ def _required_materializations() -> dict[str, MaterializedWorkflowDependency]:
         "local-clip": _runtime("encoder", "clip"),
         "local-t5": _runtime("encoder", "t5"),
     }
+
+
+def _literal_materializer_issue_codes() -> frozenset[str]:
+    tree = ast.parse(WORKFLOW_BINDINGS_MODULE.read_text(encoding="utf-8"))
+    materializer_start = next(
+        node.lineno
+        for node in tree.body
+        if isinstance(node, ast.FunctionDef) and node.name == "materialize_model_install"
+    )
+    materializer_end = next(
+        node.lineno
+        for node in tree.body
+        if isinstance(node, ast.FunctionDef) and node.name == "_local_locator"
+    )
+    return frozenset(
+        call.args[0].value
+        for call in ast.walk(tree)
+        if isinstance(call, ast.Call)
+        and materializer_start <= call.lineno < materializer_end
+        and isinstance(call.func, ast.Name)
+        and call.func.id == "WorkflowBindingError"
+        and call.args
+        and isinstance(call.args[0], ast.Constant)
+        and isinstance(call.args[0].value, str)
+    )
 
 
 def test_complete_activation_materializes_all_required_groups() -> None:
@@ -268,6 +298,41 @@ def test_materializer_unavailability_is_a_repairable_activation_issue() -> None:
 
     assert result.complete is False
     assert "dependency_unavailable" in {item.code for item in result.issues}
+    assert result.binding_sha256 is None
+
+
+def test_materializer_issue_vocabulary_covers_every_literal_producer() -> None:
+    assert _literal_materializer_issue_codes() == (WORKFLOW_DEPENDENCY_MATERIALIZER_ISSUE_CODES)
+
+
+def test_all_materializer_refusals_accumulate_across_dependency_slots() -> None:
+    codes_by_local_id = {
+        "local-quality": "dependency_unavailable",
+        "local-clip": "legacy_environment_manifest",
+        "local-t5": "invalid_dependency_identity",
+    }
+
+    def refuse(
+        requirement: WorkflowDependencyRequirement,
+        selection: WorkflowBindingSelection,
+    ) -> MaterializedWorkflowDependency:
+        del requirement
+        raise WorkflowBindingError(codes_by_local_id[selection.local_id], "not ready")
+
+    result = resolve_workflow_activation(_contract(), _required_selections(), refuse)
+
+    assert [
+        (issue.code, issue.slot_name, issue.requirement_key)
+        for issue in result.issues
+        if issue.requirement_key is not None
+    ] == [
+        ("legacy_environment_manifest", "encoders", "clip"),
+        ("invalid_dependency_identity", "encoders", "t5"),
+        ("dependency_unavailable", "primary", "quality"),
+    ]
+    assert result.bindings == ()
+    assert result.missing_required_slots == ("encoders", "primary")
+    assert result.complete is False
     assert result.binding_sha256 is None
 
 
