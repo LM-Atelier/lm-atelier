@@ -30,7 +30,8 @@ export const ACTIVATION_ERROR_DESCRIPTIONS: Record<string, string> = {
   registry_install_not_found: "This prepared package no longer exists",
   registry_install_untrusted: "Trust the package before activating it",
   registry_install_verification_failed: "The package's files or dependencies failed verification",
-  activation_start_failed: "The package broke media startup; the prior runtime was restored",
+  activation_start_failed:
+    "The package prevented media startup. It was deactivated and the previous runtime was restored. Leave it inactive. Refresh its dependencies or remove it and prepare a compatible revision before trying again.",
   activation_restore_failed: "Activation failed and the prior runtime did not restart; check the logs",
   activation_cancelled: "Activation was cancelled before the runtime came up",
   deactivation_restart_failed: "The package is inactive but the runtime did not restart; check the logs",
