@@ -172,6 +172,64 @@ def test_empty_workflow_schema_preserves_legacy_role_settings() -> None:
     assert workflow_settings(VIDEO_SETTINGS, {}) == VIDEO_SETTINGS
 
 
+def test_a_declared_schema_without_length_says_the_graph_fixes_it() -> None:
+    """The measured case: a package exposing only its source image.
+
+    The turn carried `frames: 49, fps: 24` and neither reached the run - the
+    graph's own literals won, and the output was 16fps. The control kept
+    collecting a number that was discarded, and offered up to 1024 of them.
+    """
+
+    fields = workflow_settings(
+        VIDEO_SETTINGS,
+        {"type": "object", "properties": {"input_image": {"type": "string"}}},
+    )
+    by_key = {field.key: field for field in fields}
+
+    assert by_key["frames"].available is False
+    assert (
+        by_key["frames"].unavailable_reason == "This workflow's length is fixed by its own graph."
+    )
+    assert by_key["fps"].available is False
+    # And the refusal is enforced rather than only displayed, so a client that
+    # ignores the flag is told rather than silently obeyed.
+    with pytest.raises(ValueError, match="fixed by its own graph"):
+        validate_settings({"frames": 49}, fields)
+
+
+def test_a_schema_that_binds_length_leaves_the_control_alone() -> None:
+    fields = workflow_settings(
+        VIDEO_SETTINGS,
+        {
+            "type": "object",
+            "properties": {
+                "frames": {"type": "integer", "default": 81},
+                "fps": {"type": "number", "default": 16},
+            },
+        },
+    )
+    by_key = {field.key: field for field in fields}
+
+    assert by_key["frames"].available is True
+    assert by_key["frames"].unavailable_reason is None
+    assert defaults(fields)["frames"] == 81
+
+
+def test_a_workflow_that_declared_nothing_is_left_alone() -> None:
+    """No schema is not the same claim as a schema that omits length.
+
+    A workflow that has told us nothing about its bindable surface gets the
+    benefit of the doubt, because older schemas legitimately declare only the
+    controls they customise. Failing closed here would disable the control for
+    every one of them.
+    """
+
+    for schema in (None, {}, {"type": "object"}):
+        by_key = {field.key: field for field in workflow_settings(VIDEO_SETTINGS, schema)}
+        assert by_key["frames"].available is True, schema
+        assert by_key["frames"].unavailable_reason is None, schema
+
+
 def test_workflow_read_only_controls_drop_obsolete_overrides() -> None:
     fields = workflow_settings(
         IMAGE_SETTINGS,
