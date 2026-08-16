@@ -6,6 +6,7 @@ the live queue.
 
 from __future__ import annotations
 
+import unicodedata
 from dataclasses import dataclass, field
 from typing import Final, Literal, NoReturn
 
@@ -43,9 +44,17 @@ def _require_id(value: object) -> str:
         _invalid()
     if not value or len(value) > MAX_ID:
         _invalid()
+    if any(0xD800 <= ord(ch) <= 0xDFFF for ch in value):
+        _invalid()
+    for ch in value:
+        category = unicodedata.category(ch)
+        if category == "Cc" or category == "Cf":
+            _invalid()
     if value.strip() != value or any(ch.isspace() for ch in value):
         _invalid()
-    if any(ord(ch) < 32 or ord(ch) == 127 or 0xD800 <= ord(ch) <= 0xDFFF for ch in value):
+    if "/" in value or "\\" in value:
+        _invalid()
+    if value in {".", ".."}:
         _invalid()
     return value
 

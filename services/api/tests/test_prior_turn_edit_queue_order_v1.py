@@ -41,3 +41,20 @@ def test_public_constructor_cannot_authorize_reorder() -> None:
             chat_id="c1",
             reorder_queue_authorized=True,
         )
+
+
+def test_refuses_slash_dot_segments_and_controls() -> None:
+    with pytest.raises(PriorTurnEditQueueOrderError, match=INVALID_QUEUE_ORDER):
+        declare_prior_turn_edit_queue_order(chat_id="m1/extra")
+    with pytest.raises(PriorTurnEditQueueOrderError, match=INVALID_QUEUE_ORDER):
+        declare_prior_turn_edit_queue_order(chat_id="m1\\x")
+    with pytest.raises(PriorTurnEditQueueOrderError, match=INVALID_QUEUE_ORDER):
+        declare_prior_turn_edit_queue_order(chat_id=".")
+    with pytest.raises(PriorTurnEditQueueOrderError, match=INVALID_QUEUE_ORDER):
+        declare_prior_turn_edit_queue_order(chat_id="..")
+    with pytest.raises(PriorTurnEditQueueOrderError, match=INVALID_QUEUE_ORDER):
+        declare_prior_turn_edit_queue_order(chat_id="m1\x00x")
+    with pytest.raises(PriorTurnEditQueueOrderError, match=INVALID_QUEUE_ORDER):
+        declare_prior_turn_edit_queue_order(chat_id="m1\x7f")
+    with pytest.raises(PriorTurnEditQueueOrderError, match=INVALID_QUEUE_ORDER):
+        declare_prior_turn_edit_queue_order(chat_id="m1\u202e")
