@@ -13,6 +13,7 @@ from local_lm.prompt_model_values import (
     PromptModelItemValues,
     PromptModelSlotContract,
     PromptModelSlotSpec,
+    PromptModelValues,
     PromptModelValuesError,
     parse_prompt_model_values,
     parse_prompt_model_values_json,
@@ -498,6 +499,47 @@ def test_hand_built_contracts_and_receipts_fail_closed() -> None:
     object.__setattr__(template, "slots", (object(),))
     with pytest.raises(PromptModelValuesError):
         prompt_model_slot_contract(template, item_count=1)
+
+
+def test_payload_revalidates_frozen_receipts_before_hashing() -> None:
+    contract = _contract()
+    values = parse_prompt_model_values(_payload(), contract=contract)
+    object.__setattr__(values.items[0], "ordinal", 2)
+
+    with pytest.raises(PromptModelValuesError) as caught:
+        prompt_model_values_sha256(values, contract=contract)
+    assert str(caught.value) == PROMPT_MODEL_VALUES_INVALID
+
+
+def test_payload_requires_the_exact_root_receipt_type() -> None:
+    class ValuesSubclass(PromptModelValues):
+        __slots__ = ()
+
+    contract = _contract()
+    values = parse_prompt_model_values(_payload(), contract=contract)
+    hostile = ValuesSubclass(
+        version=values.version,
+        batch_values=values.batch_values,
+        items=values.items,
+    )
+
+    with pytest.raises(PromptModelValuesError) as caught:
+        prompt_model_values_payload(hostile, contract=contract)
+    assert str(caught.value) == PROMPT_MODEL_VALUES_INVALID
+
+
+def test_payload_refuses_duplicate_names_in_frozen_pairs() -> None:
+    contract = _contract()
+    values = parse_prompt_model_values(_payload(), contract=contract)
+    object.__setattr__(
+        values,
+        "batch_values",
+        (("style", "oil paint"), ("style", "watercolor")),
+    )
+
+    with pytest.raises(PromptModelValuesError) as caught:
+        prompt_model_values_sha256(values, contract=contract)
+    assert str(caught.value) == PROMPT_MODEL_VALUES_INVALID
 
 
 def test_scope_swaps_in_a_hand_built_contract_refuse() -> None:
