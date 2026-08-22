@@ -84,27 +84,42 @@ def declare_search_index_status(
     detail_code: object,
 ) -> SearchIndexStatusV1:
     """Classify index readiness from already-measured generation facts."""
-    if type(state) is not str or state not in STATES:
+    if type(state) is not str:
+        _invalid()
+    # Equality against short literals rather than frozenset membership: an
+    # equality check refuses an attacker-sized string without hashing it first
+    # (codex/R984), and each branch proves the Literal to mypy instead of
+    # asserting it past a membership test it cannot narrow (claude/R1177). The
+    # else arm keeps an unknown state fail-closed on its own, so losing any one
+    # branch refuses that state rather than minting it.
+    narrowed: IndexState
+    if state == "ready":
+        narrowed = "ready"
+    elif state == "building":
+        narrowed = "building"
+    elif state == "degraded":
+        narrowed = "degraded"
+    else:
         _invalid()
     if type(generation) is not int or generation < 0 or generation > MAX_GENERATION:
         _invalid()
     if type(indexed_through) is not int or indexed_through < 0 or indexed_through > MAX_SEQUENCE:
         _invalid()
-    if (
-        type(detail_code) is not str
-        or detail_code not in DETAIL_CODES
-        or len(detail_code) > MAX_DETAIL_CHARS
-    ):
+    # Length before membership: DETAIL_CODES is a frozenset, and hashing is the
+    # one operation here whose cost scales with attacker-sized input.
+    if type(detail_code) is not str or len(detail_code) > MAX_DETAIL_CHARS:
         _invalid()
-    if state == "ready" and detail_code != "ok":
+    if detail_code not in DETAIL_CODES:
         _invalid()
-    if state == "building" and detail_code != "building":
+    if narrowed == "ready" and detail_code != "ok":
         _invalid()
-    if state == "degraded" and detail_code in {"ok", "building"}:
+    if narrowed == "building" and detail_code != "building":
+        _invalid()
+    if narrowed == "degraded" and detail_code in {"ok", "building"}:
         _invalid()
     return _status_from_evaluator(
         witness=_STATUS_WITNESS,
-        state=state,
+        state=narrowed,
         generation=generation,
         indexed_through=indexed_through,
         detail_code=detail_code,
