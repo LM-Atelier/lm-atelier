@@ -1,13 +1,16 @@
 """Pure Shared Asset Library root resolution (item 58, first slice).
 
-Desktop launches that use the default application data directory share one
-library folder inside that directory. An explicit per-app root isolates that
-app. Isolated profile data dirs never discover the real desktop library.
-No publish, claim, lease, or runtime rewrite lives here.
+The default library folder lives inside the desktop application data
+directory. Compatible desktop profiles share that canonical folder. An
+explicit per-app root isolates that app. Test and source-checkout data dirs
+never discover the real desktop library. No publish, claim, lease, or
+runtime rewrite lives here.
 """
 
 from __future__ import annotations
 
+import os
+import tempfile
 from pathlib import Path
 from typing import Final, NoReturn
 
@@ -43,6 +46,42 @@ def _refuse_covering_profile(profile: Path, chosen: Path) -> None:
         _invalid()
 
 
+def _source_tree_root() -> Path | None:
+    here = Path(__file__).resolve()
+    try:
+        root = here.parents[3]
+    except IndexError:
+        return None
+    if (root / "services" / "api" / "local_lm").is_dir():
+        return root
+    return None
+
+
+def _is_under(child: Path, parent: Path) -> bool:
+    return child == parent or parent in child.parents
+
+
+def _is_test_or_dev_profile(profile: Path, desktop: Path) -> bool:
+    """True for test/dev roots that must not discover the desktop library."""
+
+    try:
+        profile_resolved = profile.resolve()
+        desktop_resolved = desktop.resolve()
+    except (OSError, RuntimeError, ValueError):
+        _invalid()
+    if profile_resolved == desktop_resolved:
+        return False
+    if not profile.is_absolute() and not os.path.isabs(str(profile)):
+        return True
+    if any(part.lower().startswith("pytest") for part in profile_resolved.parts):
+        return True
+    tmp = Path(tempfile.gettempdir()).resolve()
+    if _is_under(profile_resolved, tmp):
+        return True
+    source_root = _source_tree_root()
+    return source_root is not None and _is_under(profile_resolved, source_root)
+
+
 def resolve_shared_asset_root(
     *,
     profile_data_dir: Path,
@@ -50,8 +89,9 @@ def resolve_shared_asset_root(
 ) -> Path | None:
     """Resolve the library root for one profile, or None when sharing is off.
 
-    Explicit overrides isolate that application. Isolated data dirs (tests,
-    source `data/` cwd) stay None unless an explicit root is supplied.
+    Explicit overrides isolate that application. Test and source-checkout
+    data dirs stay None unless an explicit root is supplied. Other desktop
+    profiles use the canonical folder inside the application data directory.
     """
 
     if not isinstance(profile_data_dir, Path):
@@ -76,7 +116,7 @@ def resolve_shared_asset_root(
         return chosen
 
     desktop = default_data_dir()
-    if profile.resolve() != desktop.resolve():
+    if _is_test_or_dev_profile(profile, desktop):
         return None
     shared = default_shared_asset_root()
     _refuse_covering_profile(desktop, shared)

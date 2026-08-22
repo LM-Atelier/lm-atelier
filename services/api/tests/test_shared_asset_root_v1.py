@@ -75,6 +75,47 @@ def test_two_desktop_profiles_share_the_same_default(monkeypatch) -> None:  # ty
     assert first.parent == data
 
 
+def test_another_absolute_app_data_dir_uses_the_canonical_folder(
+    monkeypatch,
+) -> None:  # type: ignore[no-untyped-def]
+    monkeypatch.setattr(sys, "platform", "win32")
+    monkeypatch.setenv("LOCALAPPDATA", r"C:\Users\Tester\AppData\Local")
+    data = default_data_dir()
+    other = Path(r"C:\Users\Tester\AppData\Local") / "OtherApp" / "data"
+    resolved = resolve_shared_asset_root(profile_data_dir=other)
+    assert resolved == data / STORE_LEAF
+    assert resolved == default_shared_asset_root()
+
+
+def test_linux_other_absolute_app_data_dir_uses_the_canonical_folder(
+    monkeypatch,
+) -> None:  # type: ignore[no-untyped-def]
+    monkeypatch.setattr(sys, "platform", "linux")
+    monkeypatch.setenv("XDG_DATA_HOME", "/home/tester/.local/share")
+    data = default_data_dir()
+    other = Path("/opt/other-app/data")
+    resolved = resolve_shared_asset_root(profile_data_dir=other)
+    assert resolved == data / STORE_LEAF
+
+
+def test_relative_source_data_dir_does_not_discover_the_desktop_library(
+    monkeypatch,
+) -> None:  # type: ignore[no-untyped-def]
+    monkeypatch.setattr(sys, "platform", "win32")
+    monkeypatch.setenv("LOCALAPPDATA", r"C:\Users\Tester\AppData\Local")
+    assert resolve_shared_asset_root(profile_data_dir=Path("data")) is None
+
+
+def test_source_tree_data_dir_does_not_discover_the_desktop_library(
+    monkeypatch,
+) -> None:  # type: ignore[no-untyped-def]
+    monkeypatch.setattr(sys, "platform", "win32")
+    monkeypatch.setenv("LOCALAPPDATA", r"C:\Users\Tester\AppData\Local")
+    source_data = Path(__file__).resolve().parents[1] / "data"
+    assert source_data != default_data_dir()
+    assert resolve_shared_asset_root(profile_data_dir=source_data) is None
+
+
 def test_refuses_unc_relative_and_covering_roots(tmp_path: Path) -> None:
     isolated = tmp_path / "data"
     with pytest.raises(SharedAssetRootError, match=INVALID_SHARED_ROOT):
