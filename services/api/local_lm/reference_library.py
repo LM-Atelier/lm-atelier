@@ -393,13 +393,13 @@ def attach_asset(
     if read_bytes is not None:
         try:
             incoming = read_bytes(artifact_id)
-        except (OSError, KeyError):
+        except (OSError, KeyError, ValueError):
             incoming = b""
         if incoming:
             for row in existing:
                 try:
                     other = read_bytes(row.artifact_id)
-                except (OSError, KeyError):
+                except (OSError, KeyError, ValueError):
                     continue
                 if not other:
                     continue
