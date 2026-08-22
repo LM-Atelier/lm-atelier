@@ -3,7 +3,7 @@ from __future__ import annotations
 import math
 import re
 from collections.abc import Iterable, Mapping
-from typing import Any, Literal, cast
+from typing import Any, Final, Literal, cast
 
 from .schemas import EngineCapabilities, SettingField
 
@@ -816,6 +816,21 @@ def _validate_setting_value(key: str, value: Any) -> None:
     walk(value, 0)
 
 
+#: Settings a graph can fix for itself, where offering the control is a promise.
+#:
+#: A video graph carries its own frame count and rate as literals. When they are
+#: not bindable the turn's values are collected, sent, and discarded - measured:
+#: a turn carrying `fps: 24` produced 16fps output, because the graph's own
+#: value won. Every other setting degrades quietly when it is not bound; these
+#: two change the duration of the thing the person asked for.
+DURATION_SETTING_KEYS: Final = frozenset({"frames", "fps"})
+
+DURATION_UNAVAILABLE_REASONS: Final = {
+    "frames": "This workflow's length is fixed by its own graph.",
+    "fps": "This workflow's frame rate is fixed by its own graph.",
+}
+
+
 def workflow_settings(
     fields: Iterable[SettingField],
     input_schema: Mapping[str, Any] | None,
@@ -826,6 +841,12 @@ def workflow_settings(
     declare only the controls they customize. A schema may also add a custom
     user control when it supplies a default, const, or enum. Properties without
     one of those UI hints are treated as runtime bindings such as input_image.
+
+    The duration settings are the exception, and the asymmetry is deliberate. A
+    workflow with no schema at all has told us nothing, so its fields are left
+    alone. A workflow that declares properties has described its bindable
+    surface, and length absent from that description means the graph fixes it -
+    so the control says so instead of collecting a number the run will discard.
     """
 
     base_fields = list(fields)
@@ -847,11 +868,19 @@ def workflow_settings(
         property_schema = properties.get(field.key)
         if isinstance(property_schema, Mapping) and property_schema.get("readOnly") is True:
             continue
-        resolved.append(
-            _workflow_setting(field.key, property_schema, field)
-            if isinstance(property_schema, Mapping)
-            else field
-        )
+        if isinstance(property_schema, Mapping):
+            resolved.append(_workflow_setting(field.key, property_schema, field))
+        elif field.key in DURATION_SETTING_KEYS:
+            resolved.append(
+                field.model_copy(
+                    update={
+                        "available": False,
+                        "unavailable_reason": DURATION_UNAVAILABLE_REASONS[field.key],
+                    }
+                )
+            )
+        else:
+            resolved.append(field)
 
     for key, property_schema in properties.items():
         if (

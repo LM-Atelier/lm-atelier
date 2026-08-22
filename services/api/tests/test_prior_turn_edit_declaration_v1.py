@@ -107,3 +107,20 @@ def test_public_constructor_cannot_accept() -> None:
             schema_version=1,
             accepted=True,
         )
+
+
+def test_refuses_slash_dot_segments_and_bidi() -> None:
+    with pytest.raises(PriorTurnEditDeclarationError, match=INVALID_DECLARATION):
+        declare_prior_turn_edit(_facts(source_message_id="m1/extra"))
+    with pytest.raises(PriorTurnEditDeclarationError, match=INVALID_DECLARATION):
+        declare_prior_turn_edit(_facts(chat_id="c1\\x"))
+    with pytest.raises(PriorTurnEditDeclarationError, match=INVALID_DECLARATION):
+        declare_prior_turn_edit(_facts(parent_message_id="."))
+    with pytest.raises(PriorTurnEditDeclarationError, match=INVALID_DECLARATION):
+        declare_prior_turn_edit(_facts(idempotency_key=".."))
+    with pytest.raises(PriorTurnEditDeclarationError, match=INVALID_DECLARATION):
+        declare_prior_turn_edit(_facts(source_message_id="m1\x00x"))
+    with pytest.raises(PriorTurnEditDeclarationError, match=INVALID_DECLARATION):
+        declare_prior_turn_edit(_facts(source_message_id="m1\x7f"))
+    with pytest.raises(PriorTurnEditDeclarationError, match=INVALID_DECLARATION):
+        declare_prior_turn_edit(_facts(source_message_id="m1\u202e"))

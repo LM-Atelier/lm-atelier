@@ -9,6 +9,8 @@ from dataclasses import dataclass
 from pathlib import PurePosixPath
 from typing import Literal
 
+from .h3_node_observation_v1 import EXACT_H3_NODE_TYPES, H3NodeObservationV1, observe_h3_node_types
+
 MAX_UI_GRAPH_BYTES = 1024 * 1024
 MAX_UI_GRAPH_NODES = 4_096
 MAX_UI_GRAPH_LINKS = 16_384
@@ -159,6 +161,7 @@ class ComfyWorkflowPackageAnalysis:
     operation_guess: OperationGuess
     truncated: bool
     node_provenance: tuple[WorkflowNodeProvenance, ...] = ()
+    model_family_observations: tuple[H3NodeObservationV1, ...] = ()
 
     @property
     def runtime_nodes_available(self) -> bool:
@@ -300,6 +303,7 @@ def _analysis(
         _operation_guess(required),
         False,
         _node_provenance(records, required),
+        _h3_family_observations(required),
     )
 
 
@@ -786,6 +790,15 @@ def _asset_kind(node_type: str, suffix: str) -> AssetKind:
     if suffix == ".json":
         return "configuration"
     return "checkpoint"
+
+
+def _h3_family_observations(node_types: Collection[str]) -> tuple[H3NodeObservationV1, ...]:
+    """Record exact H3 node names from required types. Never grants authority."""
+    candidates = tuple(sorted(set(node_types).intersection(EXACT_H3_NODE_TYPES)))
+    observation = observe_h3_node_types(candidates)
+    if observation.family_id is None:
+        return ()
+    return (observation,)
 
 
 def _operation_guess(node_types: Collection[str]) -> OperationGuess:

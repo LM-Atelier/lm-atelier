@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import re
 from collections.abc import Mapping, Sequence
 from typing import TYPE_CHECKING, Literal
 
@@ -14,6 +15,7 @@ from .models import (
     ModelCapabilityEvidence,
     ModelInstall,
     ModelProfile,
+    WorkflowActivation,
     WorkflowDefinition,
     WorkflowRevision,
 )
@@ -39,6 +41,7 @@ MEDIA_OPERATIONS_BY_ROLE: dict[Role, set[str]] = {
     "image": {"text_to_image", "image_to_image"},
     "video": {"text_to_video", "image_to_video"},
 }
+_SHA256 = re.compile(r"[0-9a-f]{64}")
 
 
 def setup_readiness_report(
@@ -445,12 +448,13 @@ def _workflow_check(
         if not revision_accepts_install(session, revision.dependencies_json, install.id):
             continue
         candidates.append(revision)
+    executable = [
+        revision
+        for revision in candidates
+        if revision.trusted and (revision.engine == "mock" or bool(revision.api_graph_json))
+    ]
     valid = next(
-        (
-            revision
-            for revision in candidates
-            if revision.trusted and (revision.engine == "mock" or bool(revision.api_graph_json))
-        ),
+        (revision for revision in executable if _workflow_activation_is_ready(session, revision)),
         None,
     )
     if valid:
@@ -458,6 +462,13 @@ def _workflow_check(
             "workflow_ready",
             "pass",
             "A trusted compatible workflow is ready.",
+        )
+    if executable:
+        return None, _check(
+            "workflow_activation_not_ready",
+            "fail",
+            "The compatible workflow dependencies are not active.",
+            "repair_workflow",
         )
     if any(revision.trusted for revision in candidates):
         return None, _check(
@@ -478,6 +489,35 @@ def _workflow_check(
         "fail",
         "No compatible workflow is installed for this model.",
         "repair_workflow",
+    )
+
+
+def _workflow_activation_is_ready(
+    session: Session,
+    revision: WorkflowRevision,
+) -> bool:
+    """Match the activation witness required by selection and generation."""
+
+    if revision.dependency_contract_sha256 is None:
+        return True
+    activation = session.scalar(
+        select(WorkflowActivation).where(
+            WorkflowActivation.workflow_revision_id == revision.id,
+            WorkflowActivation.is_active.is_(True),
+            WorkflowActivation.state == "ready",
+            WorkflowActivation.invalidated_at.is_(None),
+        )
+    )
+    launch_sha256 = (
+        activation.details_json.get("launch_sha256")
+        if activation is not None and isinstance(activation.details_json, dict)
+        else None
+    )
+    return bool(
+        activation is not None
+        and activation.dependency_contract_sha256 == revision.dependency_contract_sha256
+        and isinstance(launch_sha256, str)
+        and _SHA256.fullmatch(launch_sha256) is not None
     )
 
 

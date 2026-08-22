@@ -41,3 +41,20 @@ def test_public_constructor_cannot_authorize_mutation() -> None:
             source_message_id="m1",
             source_mutation_authorized=True,
         )
+
+
+def test_refuses_slash_dot_segments_and_controls() -> None:
+    with pytest.raises(PriorTurnEditSourcePreserveError, match=INVALID_SOURCE_PRESERVE):
+        declare_prior_turn_edit_source_preserve(source_message_id="m1/extra")
+    with pytest.raises(PriorTurnEditSourcePreserveError, match=INVALID_SOURCE_PRESERVE):
+        declare_prior_turn_edit_source_preserve(source_message_id="m1\\x")
+    with pytest.raises(PriorTurnEditSourcePreserveError, match=INVALID_SOURCE_PRESERVE):
+        declare_prior_turn_edit_source_preserve(source_message_id=".")
+    with pytest.raises(PriorTurnEditSourcePreserveError, match=INVALID_SOURCE_PRESERVE):
+        declare_prior_turn_edit_source_preserve(source_message_id="..")
+    with pytest.raises(PriorTurnEditSourcePreserveError, match=INVALID_SOURCE_PRESERVE):
+        declare_prior_turn_edit_source_preserve(source_message_id="m1\x00x")
+    with pytest.raises(PriorTurnEditSourcePreserveError, match=INVALID_SOURCE_PRESERVE):
+        declare_prior_turn_edit_source_preserve(source_message_id="m1\x7f")
+    with pytest.raises(PriorTurnEditSourcePreserveError, match=INVALID_SOURCE_PRESERVE):
+        declare_prior_turn_edit_source_preserve(source_message_id="m1\u202e")

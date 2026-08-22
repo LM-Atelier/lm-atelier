@@ -26,7 +26,7 @@ from dataclasses import dataclass, field
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from .domain import JobStatus, MessageRole
+from .domain import JobKind, JobStatus, MessageRole
 from .models import (
     Chat,
     Job,
@@ -110,7 +110,21 @@ def delete_exchange(session: Session, user_message_id: str) -> ExchangeDeletion:
         )
     )
     run_ids = sorted({run.id for run in runs})
-    jobs = list(session.scalars(select(Job).where(Job.run_id.in_(run_ids)))) if run_ids else []
+    jobs = (
+        list(
+            session.scalars(
+                select(Job).where(
+                    (Job.run_id.in_(run_ids))
+                    | (
+                        (Job.kind == JobKind.EDIT_VERIFY.value)
+                        & (Job.payload_json["source_run_id"].as_string().in_(run_ids))
+                    )
+                )
+            )
+        )
+        if run_ids
+        else []
+    )
     busy = [job for job in jobs if job.status in _ACTIVE_JOB_STATUSES]
     if busy:
         raise ExchangeBusy(len(busy))

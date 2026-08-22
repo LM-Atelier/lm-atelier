@@ -1,9 +1,9 @@
 """Pure Shared Asset Library root resolution (item 58, first slice).
 
-Desktop launches of every LM Atelier-based application share one default
-root. An explicit per-app root isolates that app. Isolated profile data
-dirs never discover the real desktop library. No publish, claim, lease,
-or runtime rewrite lives here.
+Desktop launches that use the default application data directory share one
+library folder inside that directory. An explicit per-app root isolates that
+app. Isolated profile data dirs never discover the real desktop library.
+No publish, claim, lease, or runtime rewrite lives here.
 """
 
 from __future__ import annotations
@@ -16,7 +16,7 @@ from .desktop import default_data_dir
 SCHEMA_ID: Final = "lm-atelier-shared-asset-root-v1"
 SCHEMA_VERSION: Final = 1
 INVALID_SHARED_ROOT: Final = "shared asset library root is invalid"
-SHARED_LEAF: Final = "shared-assets-v1"
+STORE_LEAF: Final = "packages"
 
 
 class SharedAssetRootError(ValueError):
@@ -28,12 +28,9 @@ def _invalid() -> NoReturn:
 
 
 def default_shared_asset_root() -> Path:
-    """Return the default root shared by public, Red, and desktop development."""
+    """Return the library folder inside the desktop application data directory."""
 
-    data = default_data_dir()
-    if data.name == "data":
-        return data.parent / SHARED_LEAF
-    return data.parent / f"{data.name}-{SHARED_LEAF}"
+    return default_data_dir() / STORE_LEAF
 
 
 def _is_unc(path: Path) -> bool:
@@ -41,8 +38,8 @@ def _is_unc(path: Path) -> bool:
     return text.startswith("\\\\") or text.startswith("//") or path.as_posix().startswith("//")
 
 
-def _refuse_nested(left: Path, right: Path) -> None:
-    if left == right or left in right.parents or right in left.parents:
+def _refuse_covering_profile(profile: Path, chosen: Path) -> None:
+    if chosen == profile or chosen in profile.parents:
         _invalid()
 
 
@@ -51,7 +48,7 @@ def resolve_shared_asset_root(
     profile_data_dir: Path,
     explicit: Path | None = None,
 ) -> Path | None:
-    """Resolve the shared root for one profile, or None when sharing is off.
+    """Resolve the library root for one profile, or None when sharing is off.
 
     Explicit overrides isolate that application. Isolated data dirs (tests,
     source `data/` cwd) stay None unless an explicit root is supplied.
@@ -75,14 +72,14 @@ def resolve_shared_asset_root(
             _invalid()
         if not str(chosen) or _is_unc(chosen) or not chosen.is_absolute():
             _invalid()
-        _refuse_nested(profile, chosen)
+        _refuse_covering_profile(profile, chosen)
         return chosen
 
     desktop = default_data_dir()
     if profile.resolve() != desktop.resolve():
         return None
     shared = default_shared_asset_root()
-    _refuse_nested(desktop, shared)
+    _refuse_covering_profile(desktop, shared)
     if _is_unc(shared):
         _invalid()
     return shared

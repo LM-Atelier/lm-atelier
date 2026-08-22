@@ -176,6 +176,20 @@ describe("RegistryInstallsPanel", () => {
     expect(screen.queryByRole("button", { name: "Activate" })).toBeNull();
   });
 
+  it("explains activation rollback and the safe recovery path", async () => {
+    vi.mocked(api.registryInstalls).mockResolvedValue([install({ trusted: true })]);
+    vi.mocked(api.activateRegistryInstall).mockRejectedValue(
+      Object.assign(new Error("409 Conflict"), { code: "activation_start_failed" }),
+    );
+    renderPanel();
+
+    fireEvent.click(await screen.findByRole("button", { name: "Activate" }));
+
+    expect(await screen.findByRole("alert")).toHaveTextContent(
+      "The package prevented media startup. It was deactivated and the previous runtime was restored. Leave it inactive. Refresh its dependencies or remove it and prepare a compatible revision before trying again.",
+    );
+  });
+
   it("refreshes dependencies only while the package is inactive", async () => {
     renderPanel();
 
