@@ -13,6 +13,7 @@ from local_lm.prompt_templates import (
     MAX_TEMPLATE_DOCUMENT_DEPTH,
     MAX_TEMPLATE_LORAS,
     MAX_TEMPLATE_SLOTS,
+    MAX_TEMPLATE_TOTAL_CHOICES,
     PromptTemplateContract,
     PromptTemplateError,
     parse_prompt_template_contract,
@@ -439,6 +440,31 @@ def test_depth_and_structural_caps_fail_closed() -> None:
         for index in range(MAX_TEMPLATE_LORAS + 1)
     ]
     _assert_invalid(payload)
+
+
+def test_total_choice_ceiling_is_enforced_across_individually_valid_slots() -> None:
+    slot_count = MAX_TEMPLATE_TOTAL_CHOICES // MAX_TEMPLATE_CHOICES
+    choices = [f"choice {index}" for index in range(MAX_TEMPLATE_CHOICES)]
+
+    def payload_for(count: int) -> dict[str, object]:
+        return {
+            "schema_version": 1,
+            "operation": "text_to_image",
+            "body": " ".join(f"{{{{choice_{index}}}}}" for index in range(count)),
+            "slots": [
+                {
+                    "name": f"choice_{index}",
+                    "mode": "choice",
+                    "variation_scope": "item",
+                    "choices": list(choices),
+                }
+                for index in range(count)
+            ],
+            "resource_policy": {"mode": "inherited"},
+        }
+
+    parse_prompt_template_contract(payload_for(slot_count))
+    _assert_invalid(payload_for(slot_count + 1))
 
 
 @pytest.mark.parametrize(
