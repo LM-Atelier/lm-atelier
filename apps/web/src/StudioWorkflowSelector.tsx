@@ -1,20 +1,12 @@
 import { useEffect, useId } from "react";
 import type { ActiveChatWorkflowSelectionState } from "./useActiveChatWorkflowSelection";
 import { useActiveChatWorkflowSelection } from "./useActiveChatWorkflowSelection";
+import { readinessReason } from "./readinessReason";
 import type { WorkflowFamily, WorkflowFamilyVariant } from "./types";
 
 const LEGACY_VALUE = "compatibility:legacy";
 const REVISION_VALUE = "compatibility:revision";
 
-function readinessNote(variant: WorkflowFamilyVariant): string {
-  if (variant.readiness === "setup_required") {
-    return variant.readiness_reason ?? "Needs files or nodes installed before it can run.";
-  }
-  if (variant.readiness === "review_required") {
-    return variant.readiness_reason ?? "Needs review before it can run.";
-  }
-  return variant.readiness_reason ?? "Cannot run on this machine as configured.";
-}
 
 function editVariants(family: WorkflowFamily | undefined): WorkflowFamilyVariant[] {
   return family?.variants.filter((variant) => variant.operation === "image_to_image") ?? [];
@@ -35,7 +27,7 @@ function studioWorkflowUnavailableReason(
   const variants = editVariants(family);
   if (variants.length === 0) return "The selected workflow cannot edit an existing image.";
   const blocked = variants.filter((variant) => variant.readiness !== "ready");
-  if (blocked.length === variants.length) return readinessNote(blocked[0]);
+  if (blocked.length === variants.length) return readinessReason(blocked[0]);
   return null;
 }
 

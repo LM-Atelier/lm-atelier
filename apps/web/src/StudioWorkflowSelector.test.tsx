@@ -116,7 +116,7 @@ describe("Image Studio workflow selection", () => {
       variants: [{
         ...editFamily().variants[0],
         readiness: "setup_required",
-        readiness_reason: "Install the required Krea adapter.",
+        readiness_reason: "model_unavailable",
       }],
     });
     const state = readyState({
@@ -145,9 +145,9 @@ describe("Image Studio workflow selection", () => {
 
     expect(screen.getByRole("option", { name: /Krea Identity Edit \(not ready\)/i }))
       .toBeDisabled();
-    expect(screen.getByRole("status")).toHaveTextContent("Install the required Krea adapter.");
+    expect(screen.getByRole("status")).toHaveTextContent("The model it needs is not installed.");
     await waitFor(() => expect(availability).toHaveBeenLastCalledWith(
-      "Install the required Krea adapter.",
+      "The model it needs is not installed.",
     ));
   });
 
