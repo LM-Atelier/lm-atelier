@@ -148,6 +148,7 @@ Thumbs.db
 *.log
 tmp/
 temp/
+.scratch/
 
 # Local developer runtime state (instance seeds, session secrets).
 developer-data/
