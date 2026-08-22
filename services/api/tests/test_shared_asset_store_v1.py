@@ -62,6 +62,26 @@ def test_publish_file_refuses_existing_drift(tmp_path: Path) -> None:
         publish_file(root=root, source=source)
 
 
+def test_object_path_refuses_values_that_could_escape_the_root(tmp_path: Path) -> None:
+    root = tmp_path / "packages"
+    with pytest.raises(SharedAssetStoreError, match=INVALID_OBJECT):
+        object_path(root=root, digest="../../evil")
+    with pytest.raises(SharedAssetStoreError, match=INVALID_OBJECT):
+        object_path(root=root, digest="..\\..\\evil")
+    with pytest.raises(SharedAssetStoreError, match=INVALID_OBJECT):
+        object_path(root=root, digest="a" * 63)
+    with pytest.raises(SharedAssetStoreError, match=INVALID_OBJECT):
+        object_path(root=root, digest="a" * 65)
+    with pytest.raises(SharedAssetStoreError, match=INVALID_OBJECT):
+        object_path(root=root, digest=("ab" * 32).upper())
+    with pytest.raises(SharedAssetStoreError, match=INVALID_OBJECT):
+        object_path(root=root, digest="")
+    digest = "ab" * 32
+    stored = object_path(root=root, digest=digest)
+    assert stored == root / digest[:2] / digest[2:4] / digest
+    assert root in stored.parents
+
+
 def test_publish_file_refuses_unc_relative_and_missing_sources(tmp_path: Path) -> None:
     root = tmp_path / "packages"
     source = tmp_path / "ok.bin"

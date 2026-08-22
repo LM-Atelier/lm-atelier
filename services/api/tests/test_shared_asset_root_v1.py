@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import sys
+import tempfile
 from pathlib import Path
 
 import pytest
@@ -104,6 +105,26 @@ def test_relative_source_data_dir_does_not_discover_the_desktop_library(
     monkeypatch.setattr(sys, "platform", "win32")
     monkeypatch.setenv("LOCALAPPDATA", r"C:\Users\Tester\AppData\Local")
     assert resolve_shared_asset_root(profile_data_dir=Path("data")) is None
+
+
+def test_pytest_named_ci_profile_does_not_discover_the_desktop_library(
+    monkeypatch,
+) -> None:  # type: ignore[no-untyped-def]
+    monkeypatch.setattr(sys, "platform", "win32")
+    monkeypatch.setenv("LOCALAPPDATA", r"C:\Users\Tester\AppData\Local")
+    monkeypatch.setattr(tempfile, "gettempdir", lambda: r"C:\Users\Tester\AppData\Local\Temp")
+    ci = Path(r"C:\ci\pytest-artifacts\run")
+    assert resolve_shared_asset_root(profile_data_dir=ci) is None
+
+
+def test_linux_pytest_named_ci_profile_does_not_discover_the_desktop_library(
+    monkeypatch,
+) -> None:  # type: ignore[no-untyped-def]
+    monkeypatch.setattr(sys, "platform", "linux")
+    monkeypatch.setenv("XDG_DATA_HOME", "/home/tester/.local/share")
+    monkeypatch.setattr(tempfile, "gettempdir", lambda: "/tmp")
+    ci = Path("/opt/pytest-ci/data")
+    assert resolve_shared_asset_root(profile_data_dir=ci) is None
 
 
 def test_source_tree_data_dir_does_not_discover_the_desktop_library(

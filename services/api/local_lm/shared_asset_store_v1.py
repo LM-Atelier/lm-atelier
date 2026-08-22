@@ -57,6 +57,8 @@ def _require_absolute_dir_root(root: Path) -> Path:
 
 def object_path(*, root: Path, digest: str) -> Path:
     store = _require_absolute_dir_root(root)
+    # Lowercase sha256 is the only fence that keeps a caller-supplied digest
+    # inside the store. Values such as ../../evil must not become path parts.
     if not isinstance(digest, str) or not _SHA256.fullmatch(digest):
         _invalid()
     return store / digest[:2] / digest[2:4] / digest
