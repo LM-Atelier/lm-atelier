@@ -80,7 +80,7 @@ import { MessageField } from "./MessageField";
 import type { TurnReference } from "./mentionDraft";
 import { useComposerMentions } from "./useComposerMentions";
 import { useConfirm } from "./useConfirm";
-import { focusMainContent, roleForMode } from "./viewHelpers";
+import { drawerRoleView, focusMainContent, roleForMode } from "./viewHelpers";
 import { ArtifactPart } from "./ArtifactPart";
 import { ImageStudioIcon } from "./ImageStudioIcon";
 import { FirstRunSetup } from "./SetupWizard";
@@ -95,7 +95,7 @@ import { WorkflowConsumers } from "./WorkflowConsumers";
 import { operationForTurn, revisionForTurn, schemaForRevision } from "./turnWorkflow";
 import type { WorkflowFamily, WorkflowSelection } from "./types";
 import { PromptDialog } from "./ConfirmDialog";
-import { GenerationSettingsPanel } from "./GenerationSettingsPanel";
+import { SettingsDrawer } from "./SettingsDrawer";
 import { ProjectManager } from "./ProjectManager";
 import { SettingsView } from "./SettingsView";
 import { MediaLibraryView } from "./MediaLibraryView";
@@ -477,71 +477,6 @@ function MessageBubble({
 }
 
 
-function SettingsDrawer({
-  open,
-  onClose,
-  mode,
-  engines,
-  values,
-  onValues,
-  presets,
-  presetId,
-  onPreset,
-  workflowSchema,
-  inheritedValues,
-  inheritedPresetId,
-  profileValues,
-  imageEdit,
-  imageEditPrompt,
-}: {
-  open: boolean;
-  onClose: () => void;
-  mode: RoutingMode;
-  engines: EngineCapabilities[];
-  values: Record<string, unknown>;
-  onValues: (values: Record<string, unknown>) => void;
-  presets: GenerationPreset[];
-  presetId: string | null;
-  onPreset: (presetId: string | null) => void;
-  workflowSchema?: Record<string, unknown>;
-  inheritedValues?: Record<string, unknown>;
-  inheritedPresetId?: string | null;
-  profileValues?: Record<string, unknown>;
-  imageEdit: boolean;
-  imageEditPrompt: string;
-}) {
-  const role = roleForMode(mode);
-  if (!open) return null;
-  return (
-    <AccessibleDialog
-      title={`${role[0].toUpperCase() + role.slice(1)} settings`}
-      eyebrow="Chat defaults"
-      closeLabel="Close settings"
-      onClose={onClose}
-      className="settings-drawer"
-      backdropClassName="settings-drawer-backdrop"
-    >
-      <GenerationSettingsPanel
-        role={role}
-        engines={engines}
-        values={values}
-        onValues={onValues}
-        presets={presets}
-        presetId={presetId}
-        onPreset={onPreset}
-        workflowSchema={workflowSchema}
-        inheritedValues={inheritedValues}
-        inheritedPresetId={inheritedPresetId}
-        profileValues={profileValues}
-        imageEdit={imageEdit}
-        imageEditPrompt={imageEditPrompt}
-        resetLabel="Reset chat overrides"
-        onReset={() => onValues({})}
-      />
-    </AccessibleDialog>
-  );
-}
-
 function promptHelperMessageText(message: Message): string {
   return message.parts
     .filter((part) => part.type === "text")
@@ -788,6 +723,8 @@ function Composer({
   stoppable,
   settings,
   onSettings,
+  settingsRole,
+  onSettingsRole,
   presets,
   presetId,
   onPreset,
@@ -806,6 +743,8 @@ function Composer({
   stoppable: boolean;
   settings: Record<string, unknown>;
   onSettings: (settings: Record<string, unknown>) => void;
+  settingsRole: EngineRole;
+  onSettingsRole: (role: EngineRole) => void;
   presets: GenerationPreset[];
   presetId: string | null;
   onPreset: (presetId: string | null) => void;
@@ -887,11 +826,15 @@ function Composer({
     )
   );
   const usePriorVisual = useDraftClassification(chat.id, text, mode, priorVisual);
-  const imageEdit = mode === "image" && (
+  const editableImageAttached =
     attachments.some((attachment) => attachment.kind === "image")
-    || (priorImage && usePriorVisual)
-  );
-  const needsWorkflowSchema = mode === "image" || mode === "video";
+    || (priorImage && usePriorVisual);
+  const imageEdit = mode === "image" && editableImageAttached;
+  // See drawerRoleView: the drawer follows the persisted routing mode and
+  // the picked role, not the composer's local mode.
+  const { drawerMode, drawerImageEdit } = drawerRoleView(chat.routing_mode, settingsRole, editableImageAttached);
+  const needsWorkflowSchema =
+    mode === "image" || mode === "video" || drawerMode === "image" || drawerMode === "video";
   const families = useQuery({
     queryKey: ["workflow-families"],
     queryFn: () => api.workflowFamilies(),
@@ -919,6 +862,16 @@ function Composer({
     selections.data?.find((one) => one.selector_capability === mode),
     project ? projectSelections.data?.find((one) => one.selector_capability === mode) : null,
   );
+  const drawerWorkflowSchema = drawerMode === mode
+    ? workflowSchema
+    : workflowSchemaForTurn(
+        workflows,
+        drawerMode,
+        attachments.length > 0 || usePriorVisual,
+        families.data ?? [],
+        selections.data?.find((one) => one.selector_capability === drawerMode),
+        project ? projectSelections.data?.find((one) => one.selector_capability === drawerMode) : null,
+      );
 
   const submit = (stopCurrent = false) => {
     if (!text.trim()) return;
@@ -1144,18 +1097,20 @@ function Composer({
       <SettingsDrawer
         open={settingsOpen}
         onClose={() => setSettingsOpen(false)}
-        mode={mode}
+        mode={chat.routing_mode}
+        role={settingsRole}
+        onRole={onSettingsRole}
         engines={engines}
         values={settings}
         onValues={onSettings}
         presets={presets}
         presetId={presetId}
         onPreset={onPreset}
-        workflowSchema={workflowSchema}
-        inheritedValues={project?.generation_settings_json?.[roleForMode(mode)]}
-        inheritedPresetId={project?.generation_preset_ids_json?.[roleForMode(mode)]}
+        workflowSchema={drawerWorkflowSchema}
+        inheritedValues={project?.generation_settings_json?.[settingsRole]}
+        inheritedPresetId={project?.generation_preset_ids_json?.[settingsRole]}
         profileValues={profileValues}
-        imageEdit={imageEdit}
+        imageEdit={drawerImageEdit}
         imageEditPrompt={text}
       />
     </>
@@ -1210,6 +1165,8 @@ function ChatView({
   pendingTurns,
   workPlans,
   settings,
+  settingsRole,
+  onSettingsRole,
   presets,
   presetId,
   onSettings,
@@ -1238,6 +1195,8 @@ function ChatView({
   pendingTurns: PendingTurn[];
   workPlans: WorkPlan[];
   settings: Record<string, unknown>;
+  settingsRole: EngineRole;
+  onSettingsRole: (role: EngineRole) => void;
   presets: GenerationPreset[];
   presetId: string | null;
   onSettings: (settings: Record<string, unknown>) => void;
@@ -1453,7 +1412,7 @@ function ChatView({
         ))}
         <div ref={endRef} />
       </div>
-      <Composer chat={chat} engines={engines} profiles={profiles} stoppable={stoppable} settings={settings} onSettings={onSettings} presets={presets} presetId={presetId} onPreset={onPreset} onMode={onMode} onSend={onSend} onStop={onStop} onStopAndSend={onStopAndSend} workflows={workflows} project={project} visualTarget={visualTarget} quoteTarget={quoteTarget} />
+      <Composer chat={chat} engines={engines} profiles={profiles} stoppable={stoppable} settings={settings} onSettings={onSettings} settingsRole={settingsRole} onSettingsRole={onSettingsRole} presets={presets} presetId={presetId} onPreset={onPreset} onMode={onMode} onSend={onSend} onStop={onStop} onStopAndSend={onStopAndSend} workflows={workflows} project={project} visualTarget={visualTarget} quoteTarget={quoteTarget} />
     </div>
   );
 }
@@ -2123,6 +2082,10 @@ export default function App() {
   const [currentChatId, setCurrentChatId] = useState<string | null>(() => localStorage.getItem(CURRENT_CHAT_KEY));
   const [liveText, setLiveText] = useState<Record<string, string>>({});
   const [chatDrafts, setChatDrafts] = useState<Record<string, Partial<Chat>>>({});
+  // Which role's settings the drawer edits while a chat routes in auto: the
+  // last role picked in that chat's drawer, chat until one is picked. In every
+  // other mode the role follows the mode and this map is ignored.
+  const [autoSettingsRoles, setAutoSettingsRoles] = useState<Record<string, EngineRole>>({});
   const [pendingTurns, setPendingTurns] = useState<Record<string, PendingTurn[]>>({});
   const setupReadiness = useQuery({
     queryKey: ["setup-readiness"],
@@ -2387,7 +2350,14 @@ export default function App() {
     const displayedChat = chat.data
       ? { ...chat.data, ...(chatDrafts[chat.data.id] ?? {}) }
       : undefined;
-    const selectedRole = roleForMode(displayedChat?.routing_mode ?? "auto");
+    const routingMode = displayedChat?.routing_mode ?? "auto";
+    // In auto the settings drawer edits an explicitly chosen role; the backend
+    // resolves its role from the operation, so following roleForMode here
+    // would silently read and write the chat bag for turns that route to
+    // image or video.
+    const selectedRole = routingMode === "auto"
+      ? (autoSettingsRoles[displayedChat?.id ?? ""] ?? "chat")
+      : roleForMode(routingMode);
     const scopedSettings = displayedChat?.generation_settings_json?.[selectedRole] ?? {};
     const presetId = displayedChat?.generation_preset_ids_json?.[selectedRole] ?? null;
     const persistActiveChat = (values: Partial<Chat>) => {
@@ -2401,21 +2371,22 @@ export default function App() {
       ));
       updateChat.mutate({ id: displayedChat.id, values });
     };
-    return <ChatView key={displayedChat?.id ?? "empty-chat"} onOpenStudio={(artifactId) => { setStudioSource({ artifactId, chatId: displayedChat?.id ?? null }); setView("studio"); focusMainContent(); }} chat={displayedChat} engines={engines.data ?? []} profiles={profiles.data ?? []} presets={presets.data ?? []} workflows={workflows.data ?? []} project={allProjects.find((item) => item.id === displayedChat?.project_id)} liveText={liveText} pendingTurns={displayedChat ? pendingTurns[displayedChat.id] ?? [] : []} workPlans={workPlans.data ?? []} settings={scopedSettings} presetId={presetId} onSettings={(settings) => {
+    return <ChatView key={displayedChat?.id ?? "empty-chat"} onOpenStudio={(artifactId) => { setStudioSource({ artifactId, chatId: displayedChat?.id ?? null }); setView("studio"); focusMainContent(); }} chat={displayedChat} engines={engines.data ?? []} profiles={profiles.data ?? []} presets={presets.data ?? []} workflows={workflows.data ?? []} project={allProjects.find((item) => item.id === displayedChat?.project_id)} liveText={liveText} pendingTurns={displayedChat ? pendingTurns[displayedChat.id] ?? [] : []} workPlans={workPlans.data ?? []} settings={scopedSettings} settingsRole={selectedRole} onSettingsRole={(role) => {
       if (!displayedChat) return;
-      const role = roleForMode(displayedChat.routing_mode);
+      setAutoSettingsRoles((current) => ({ ...current, [displayedChat.id]: role }));
+    }} presetId={presetId} onSettings={(settings) => {
+      if (!displayedChat) return;
       persistActiveChat({
         generation_settings_json: {
           ...(displayedChat.generation_settings_json ?? {}),
-          [role]: settings,
+          [selectedRole]: settings,
         },
       });
     }} onPreset={(selectedPresetId) => {
       if (!displayedChat) return;
-      const role = roleForMode(displayedChat.routing_mode);
       const bindings = { ...(displayedChat.generation_preset_ids_json ?? {}) };
-      if (selectedPresetId) bindings[role] = selectedPresetId;
-      else delete bindings[role];
+      if (selectedPresetId) bindings[selectedRole] = selectedPresetId;
+      else delete bindings[selectedRole];
       persistActiveChat({ generation_preset_ids_json: bindings });
     }} onMode={(mode) => {
       persistActiveChat({ routing_mode: mode });
@@ -2454,7 +2425,7 @@ export default function App() {
         send.mutate({ chatId: displayedChat.id, id: crypto.randomUUID(), text, mode, artifacts, settings, references });
       }
     }} />;
-  }, [studioSource, view, modelLibraryRole, engines.data, profiles.data, presets.data, workflows.data, allProjects, chat.data, chatDrafts, liveText, pendingTurns, workPlans.data, send, regenerate, selectResponseRevision, branch, stop, cancelWorkPlan, cancelWorkStep, retryWorkStep, updateChat, deleteExchange, forkThread, client, openLibraryImage]);
+  }, [studioSource, view, modelLibraryRole, engines.data, profiles.data, presets.data, workflows.data, allProjects, chat.data, chatDrafts, autoSettingsRoles, liveText, pendingTurns, workPlans.data, send, regenerate, selectResponseRevision, branch, stop, cancelWorkPlan, cancelWorkStep, retryWorkStep, updateChat, deleteExchange, forkThread, client, openLibraryImage]);
 
   if (firstRunSetup && setupReadiness.data) {
     return <FirstRunSetup report={setupReadiness.data} onExit={exitFirstRunSetup} onOpenModels={(role) => { exitFirstRunSetup(); setModelLibraryRole(role); setView("models"); }} onOpenWorkflows={() => { exitFirstRunSetup(); setView("workflows"); }} />;

@@ -26,7 +26,7 @@ export default tseslint.config(
       ...reactHooks.configs.recommended.rules,
       "jsx-a11y-x/label-has-associated-control": ["error", { assert: "either", depth: 3 }],
       "max-len": ["error", { code: 2571 }],
-      "max-lines": ["error", { max: 2502 }],
+      "max-lines": ["error", { max: 2462 }],
       "max-lines-per-function": ["error", { max: 401 }],
       "react-refresh/only-export-components": ["warn", { allowConstantExport: true }],
     },
@@ -38,8 +38,8 @@ export default tseslint.config(
     files: ["**/*.test.{ts,tsx}"],
     rules: {
       "max-len": ["error", { code: 362 }],
-      "max-lines": ["error", { max: 6331 }],
-      "max-lines-per-function": ["error", { max: 6029 }],
+      "max-lines": ["error", { max: 6721 }],
+      "max-lines-per-function": ["error", { max: 6419 }],
     },
   },
 );
