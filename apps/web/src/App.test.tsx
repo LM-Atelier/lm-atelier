@@ -3,7 +3,7 @@ import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import App from "./App";
 import { api, connectEvents } from "./api";
-import type { BackupInfo, Chat, ChatDetail, EngineCapabilities, Job, SettingField, SetupReadinessReport, SetupRoleReadiness, TurnAccepted } from "./types";
+import type { BackupInfo, Chat, ChatDetail, EngineCapabilities, EngineRole, Job, SettingField, SetupReadinessReport, SetupRoleReadiness, TurnAccepted } from "./types";
 import { DEFAULT_CHAT_WORKFLOW_SELECTIONS, DEFAULT_PROJECT_WORKFLOW_SELECTIONS, familiesForWorkflows } from "./workflowSelectionFixtures";
 const clipboardWrite = vi.fn();
 
@@ -1451,6 +1451,396 @@ describe("App", () => {
     fireEvent.keyDown(dialog, { key: "Escape" });
     expect(screen.queryByRole("dialog", { name: "Chat settings" })).not.toBeInTheDocument();
     expect(opener).toHaveFocus();
+  });
+
+  it("reaches image and video settings from Auto and writes to the chosen role", async () => {
+    const stamp = "2026-08-23T00:00:00Z";
+    const chat = {
+      id: "chat-auto-roles",
+      project_id: null,
+      title: "Auto settings roles",
+      pinned: false, archived: false,
+      routing_mode: "auto" as const,
+      confirm_uncertain_media: false,
+      active_chat_profile_id: null,
+      active_image_profile_id: null,
+      active_video_profile_id: null,
+      active_head_message_id: null,
+      generation_settings_json: {
+        chat: { max_tokens: 2048 },
+        image: { negative_prompt: "noise" },
+        video: { frames: 81 },
+      },
+      generation_preset_ids_json: {},
+      created_at: stamp,
+      updated_at: stamp,
+    };
+    const imagePreset = {
+      id: "auto-image-preset",
+      name: "Auto image",
+      role: "image" as const,
+      settings_json: { negative_prompt: "blur" },
+      is_default: false,
+    };
+    vi.mocked(api.chats).mockResolvedValue([chat]);
+    vi.mocked(api.chat).mockResolvedValue({ ...chat, messages: [] });
+    vi.mocked(api.updateChat).mockResolvedValue(chat);
+    vi.mocked(api.presets).mockResolvedValue([imagePreset]);
+    vi.mocked(api.engines).mockResolvedValue([{
+      ...roleAwareMediaEngine,
+      roles: ["chat", "image", "video"],
+      settings: [maxTokensSetting, imageSetting, videoSetting],
+      settings_by_role: {
+        chat: [maxTokensSetting],
+        image: [imageSetting],
+        video: [videoSetting],
+      },
+    }]);
+    const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+    render(
+      <QueryClientProvider client={client}>
+        <App />
+      </QueryClientProvider>,
+    );
+
+    fireEvent.click(await screen.findByRole("button", { name: "Turn settings" }));
+    expect(screen.getByRole("dialog", { name: "Chat settings" })).toBeInTheDocument();
+    expect(screen.getByRole("spinbutton", { name: /Maximum output/ })).toHaveValue(2048);
+
+    const rolePicker = screen.getByRole("group", { name: "Settings role" });
+    expect(rolePicker).toBeInTheDocument();
+    const imageTab = screen.getByRole("button", { name: "image" });
+    expect(imageTab).toHaveAttribute("aria-pressed", "false");
+    imageTab.focus();
+    expect(imageTab).toHaveFocus();
+    fireEvent.click(imageTab);
+    expect(screen.getByRole("dialog", { name: "Image settings" })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "image" })).toHaveAttribute("aria-pressed", "true");
+    expect(screen.getByLabelText(/Negative prompt/)).toHaveValue("noise");
+
+    // The backend scopes an image-routed turn to generation_settings_json.image,
+    // so the Auto-mode edit must land in that bag and leave the others alone.
+    fireEvent.change(screen.getByLabelText(/Negative prompt/), { target: { value: "fog" } });
+    await waitFor(() => expect(api.updateChat).toHaveBeenCalledWith(
+      chat.id,
+      expect.objectContaining({
+        generation_settings_json: {
+          chat: { max_tokens: 2048 },
+          image: { negative_prompt: "fog" },
+          video: { frames: 81 },
+        },
+      }),
+    ));
+
+    fireEvent.change(screen.getByRole("combobox", { name: "image preset" }), {
+      target: { value: imagePreset.id },
+    });
+    await waitFor(() => expect(api.updateChat).toHaveBeenCalledWith(
+      chat.id,
+      expect.objectContaining({
+        generation_preset_ids_json: { image: imagePreset.id },
+      }),
+    ));
+
+    fireEvent.click(screen.getByRole("button", { name: "video" }));
+    expect(screen.getByRole("dialog", { name: "Video settings" })).toBeInTheDocument();
+    // Value 81 comes from the chat's video bag, not the field default (49),
+    // proving the video role reads its own bag rather than merely retitling.
+    expect(screen.getByRole("spinbutton", { name: /Frames/ })).toHaveValue(81);
+
+    fireEvent.click(screen.getByRole("button", { name: "image" }));
+    fireEvent.keyDown(screen.getByRole("dialog", { name: "Image settings" }), { key: "Escape" });
+    expect(screen.queryByRole("dialog", { name: "Image settings" })).not.toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "Turn settings" }));
+    expect(screen.getByRole("dialog", { name: "Image settings" })).toBeInTheDocument();
+  });
+
+  it("resolves the image workflow schema when Auto edits the image role", async () => {
+    const stamp = "2026-08-23T00:00:00Z";
+    const chat = {
+      id: "chat-auto-schema",
+      project_id: null,
+      title: "Auto schema parity",
+      pinned: false, archived: false,
+      routing_mode: "auto" as const,
+      confirm_uncertain_media: false,
+      active_chat_profile_id: null,
+      active_image_profile_id: null,
+      active_video_profile_id: null,
+      active_head_message_id: null,
+      generation_settings_json: {},
+      generation_preset_ids_json: {},
+      created_at: stamp,
+      updated_at: stamp,
+    };
+    vi.mocked(api.chats).mockResolvedValue([chat]);
+    vi.mocked(api.chat).mockResolvedValue({ ...chat, messages: [] });
+    vi.mocked(api.engines).mockResolvedValue([roleAwareMediaEngine]);
+    vi.mocked(api.workflows).mockResolvedValue([{
+      id: "workflow-auto-schema",
+      name: "Schema image",
+      operation: "text_to_image",
+      description: "",
+      current_revision_id: "revision-auto-schema",
+      revisions: [{
+        id: "revision-auto-schema",
+        workflow_id: "workflow-auto-schema",
+        version: 1,
+        engine: "comfyui",
+        engine_version: null,
+        ui_graph_json: {},
+        api_graph_json: {},
+        input_schema_json: {
+          type: "object",
+          properties: {
+            loras: { type: "array", title: "LoRAs", default: [], maxItems: 8 },
+          },
+        },
+        dependencies_json: {
+          extensions: { lora: { model: ["1", 0], clip: ["1", 1] } },
+        },
+        trusted: true,
+        created_at: stamp,
+      }],
+    }]);
+    const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+    render(
+      <QueryClientProvider client={client}>
+        <App />
+      </QueryClientProvider>,
+    );
+
+    // The image workflow's own fields must appear when Auto edits the image
+    // role, exactly as image mode would show them - not a capability-only
+    // subset that hides workflow-native settings. The negative check runs at
+    // advanced visibility so the section's absence is about the chat role,
+    // not about the basic view hiding it.
+    fireEvent.click(await screen.findByRole("button", { name: "Turn settings" }));
+    fireEvent.click(screen.getByRole("button", { name: "advanced" }));
+    expect(screen.queryByRole("region", { name: "LoRAs" })).not.toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "image" }));
+    // The panel remounts per role, so visibility resets and is raised again.
+    fireEvent.click(screen.getByRole("button", { name: "advanced" }));
+    expect(await screen.findByRole("region", { name: "LoRAs" })).toBeInTheDocument();
+  });
+
+  it("reaches the image-edit strength from Auto and keeps the picker honest when a button persists the mode", async () => {
+    const stamp = "2026-08-23T00:00:00Z";
+    const chat = {
+      id: "chat-auto-edit-strength",
+      project_id: null,
+      title: "Auto edit strength",
+      pinned: false, archived: false,
+      routing_mode: "auto" as const,
+      confirm_uncertain_media: false,
+      active_chat_profile_id: null,
+      active_image_profile_id: null,
+      active_video_profile_id: null,
+      active_head_message_id: null,
+      generation_settings_json: {},
+      generation_preset_ids_json: {},
+      created_at: stamp,
+      updated_at: stamp,
+    };
+    // The chat mock persists updates the way the real server does, so a
+    // refetch after updateChat returns the routing mode the user set rather
+    // than silently reverting it.
+    let serverChat: ChatDetail = { ...chat, messages: [] };
+    vi.mocked(api.chats).mockResolvedValue([chat]);
+    vi.mocked(api.chat).mockImplementation(async () => serverChat);
+    vi.mocked(api.updateChat).mockImplementation(async (_id, values) => {
+      serverChat = { ...serverChat, ...values };
+      return serverChat;
+    });
+    vi.mocked(api.engines).mockResolvedValue([{
+      ...roleAwareMediaEngine,
+      roles: ["chat", "image", "video"],
+      settings: [maxTokensSetting, imageSetting, editStrengthSetting, videoSetting],
+      settings_by_role: {
+        chat: [maxTokensSetting],
+        image: [imageSetting, editStrengthSetting],
+        video: [videoSetting],
+      },
+    }]);
+    vi.mocked(api.upload).mockResolvedValue({
+      id: "sha256:auto-edit-source",
+      sha256: "auto-edit-source",
+      kind: "input",
+      media_type: "image/png",
+      size_bytes: 5,
+      original_name: "source.png",
+      metadata_json: { origin: "uploaded", uploaded: true },
+      created_at: stamp,
+      url: "/api/artifacts/sha256%3Aauto-edit-source/content",
+    });
+    const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+    render(
+      <QueryClientProvider client={client}>
+        <App />
+      </QueryClientProvider>,
+    );
+
+    const attach = await screen.findByRole("button", { name: "Attach file" });
+    const input = attach.parentElement?.querySelector<HTMLInputElement>('input[type="file"]');
+    fireEvent.change(input!, {
+      target: { files: [new File(["image"], "source.png", { type: "image/png" })] },
+    });
+    await screen.findByRole("button", { name: "Edit attached image" });
+
+    // In Auto with an image attached the routed turn is an edit; the edit
+    // strength that governs it must be reachable once the image role is
+    // picked, exactly as image mode would offer it.
+    fireEvent.click(screen.getByRole("button", { name: "Turn settings" }));
+    expect(screen.getByRole("group", { name: "Settings role" })).toBeInTheDocument();
+    expect(screen.queryByRole("group", { name: "Image edit change strength mode" })).not.toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "image" }));
+    expect(screen.getByRole("dialog", { name: "Image settings" })).toBeInTheDocument();
+    expect(screen.getByRole("group", { name: "Image edit change strength mode" })).toBeInTheDocument();
+    fireEvent.keyDown(screen.getByRole("dialog", { name: "Image settings" }), { key: "Escape" });
+
+    // The attachment Edit button persists routing_mode without touching the
+    // composer's local mode; the drawer must follow the persisted mode so
+    // the picker never renders inert.
+    expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "Edit attached image" }));
+    await waitFor(() => expect(api.updateChat).toHaveBeenCalledWith(chat.id, { routing_mode: "image" }));
+    expect(screen.getByRole("combobox", { name: "Generation mode" })).toHaveValue("auto");
+    fireEvent.click(screen.getByRole("button", { name: "Turn settings" }));
+    expect(screen.getByRole("dialog", { name: "Image settings" })).toBeInTheDocument();
+    expect(screen.queryByRole("group", { name: "Settings role" })).not.toBeInTheDocument();
+    expect(screen.getByRole("group", { name: "Image edit change strength mode" })).toBeInTheDocument();
+    fireEvent.keyDown(screen.getByRole("dialog", { name: "Image settings" }), { key: "Escape" });
+
+    // Returning to Auto through the mode select brings the picker back on
+    // the remembered role.
+    fireEvent.change(screen.getByRole("combobox", { name: "Generation mode" }), {
+      target: { value: "auto" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "Turn settings" }));
+    expect(screen.getByRole("group", { name: "Settings role" })).toBeInTheDocument();
+    expect(screen.getByRole("dialog", { name: "Image settings" })).toBeInTheDocument();
+  });
+
+  it("keeps the drawer on the persisted auto role when a routing change fails and rolls back", async () => {
+    const stamp = "2026-08-23T00:00:00Z";
+    const chat = {
+      id: "chat-auto-rollback",
+      project_id: null,
+      title: "Auto rollback",
+      pinned: false, archived: false,
+      routing_mode: "auto" as const,
+      confirm_uncertain_media: false,
+      active_chat_profile_id: null,
+      active_image_profile_id: null,
+      active_video_profile_id: null,
+      active_head_message_id: null,
+      generation_settings_json: {},
+      generation_preset_ids_json: {},
+      created_at: stamp,
+      updated_at: stamp,
+    };
+    vi.mocked(api.chats).mockResolvedValue([chat]);
+    vi.mocked(api.chat).mockResolvedValue({ ...chat, messages: [] });
+    vi.mocked(api.updateChat).mockImplementation(async (_id, values) => {
+      if ("routing_mode" in values) throw new Error("offline");
+      return { ...chat, ...values };
+    });
+    vi.mocked(api.engines).mockResolvedValue([{
+      ...roleAwareMediaEngine,
+      roles: ["chat", "image", "video"],
+      settings: [maxTokensSetting, imageSetting, editStrengthSetting, videoSetting],
+      settings_by_role: {
+        chat: [maxTokensSetting],
+        image: [imageSetting, editStrengthSetting],
+        video: [videoSetting],
+      },
+    }]);
+    vi.mocked(api.upload).mockResolvedValue({
+      id: "sha256:rollback-source",
+      sha256: "rollback-source",
+      kind: "input",
+      media_type: "image/png",
+      size_bytes: 5,
+      original_name: "source.png",
+      metadata_json: { origin: "uploaded", uploaded: true },
+      created_at: stamp,
+      url: "/api/artifacts/sha256%3Arollback-source/content",
+    });
+    const client = new QueryClient({ defaultOptions: { queries: { retry: false }, mutations: { retry: false } } });
+    render(
+      <QueryClientProvider client={client}>
+        <App />
+      </QueryClientProvider>,
+    );
+
+    const attach = await screen.findByRole("button", { name: "Attach file" });
+    const input = attach.parentElement?.querySelector<HTMLInputElement>('input[type="file"]');
+    fireEvent.change(input!, {
+      target: { files: [new File(["image"], "source.png", { type: "image/png" })] },
+    });
+    await screen.findByRole("button", { name: "Edit attached image" });
+
+    // The mode switch fails to persist and rolls back to auto while the
+    // composer's local selection stays ahead on image. The drawer must key
+    // everything off the persisted auto state: picker present, chat role,
+    // and no image-edit strength surface borrowed from the stale local mode.
+    fireEvent.change(screen.getByRole("combobox", { name: "Generation mode" }), {
+      target: { value: "image" },
+    });
+    await waitFor(() => expect(api.updateChat).toHaveBeenCalledWith(chat.id, { routing_mode: "image" }));
+    fireEvent.click(screen.getByRole("button", { name: "Turn settings" }));
+    await waitFor(() => expect(screen.getByRole("group", { name: "Settings role" })).toBeInTheDocument());
+    expect(screen.getByRole("dialog", { name: "Chat settings" })).toBeInTheDocument();
+    expect(screen.queryByRole("group", { name: "Image edit change strength mode" })).not.toBeInTheDocument();
+  });
+
+  it("keeps the drawer bound to the routed role outside Auto with no picker", async () => {
+    const stamp = "2026-08-23T00:00:00Z";
+    const engines = [{
+      ...roleAwareMediaEngine,
+      roles: ["chat", "image", "video"] as EngineRole[],
+      settings: [maxTokensSetting, imageSetting, videoSetting],
+      settings_by_role: {
+        chat: [maxTokensSetting],
+        image: [imageSetting],
+        video: [videoSetting],
+      },
+    }];
+    for (const [routingMode, title] of [
+      ["image", "Image settings"],
+      ["video", "Video settings"],
+    ] as const) {
+      cleanup();
+      localStorage.clear();
+      vi.mocked(api.engines).mockResolvedValue(engines);
+      const chat = {
+        id: `chat-${routingMode}-bound`,
+        project_id: null,
+        title: "Mode bound",
+        pinned: false, archived: false,
+        routing_mode: routingMode,
+        confirm_uncertain_media: false,
+        active_chat_profile_id: null,
+        active_image_profile_id: null,
+        active_video_profile_id: null,
+        active_head_message_id: null,
+        generation_settings_json: {},
+        generation_preset_ids_json: {},
+        created_at: stamp,
+        updated_at: stamp,
+      };
+      vi.mocked(api.chats).mockResolvedValue([chat]);
+      vi.mocked(api.chat).mockResolvedValue({ ...chat, messages: [] });
+      const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+      render(
+        <QueryClientProvider client={client}>
+          <App />
+        </QueryClientProvider>,
+      );
+      fireEvent.click(await screen.findByRole("button", { name: "Turn settings" }));
+      expect(screen.getByRole("dialog", { name: title })).toBeInTheDocument();
+      expect(screen.queryByRole("group", { name: "Settings role" })).not.toBeInTheDocument();
+    }
   });
 
   it("uses installed LoRAs through a picker instead of raw JSON", async () => {
