@@ -44,6 +44,12 @@ import type {
   ModelProfileBundle,
   PlatformMatrixEntry,
   PromptHelperDetail,
+  PromptTemplateCreateInput,
+  PromptTemplateDetail,
+  PromptTemplatePage,
+  PromptTemplateRevision,
+  PromptTemplateUpdateInput,
+  PromptTemplateWriteResult,
   Project,
   ReferenceRecipe,
   RegistryInstall,
@@ -264,6 +270,45 @@ export const api = {
     ),
   deletePromptHelper: (id: string) =>
     request<void>(`/api/prompt-helpers/${id}`, { method: "DELETE" }),
+  promptTemplates: (includeArchived = false, limit = 100, offset = 0) => {
+    const parameters = new URLSearchParams({
+      include_archived: String(includeArchived),
+      limit: String(limit),
+      offset: String(offset),
+    });
+    return request<PromptTemplatePage>(`/api/prompt-templates?${parameters}`);
+  },
+  promptTemplate: (id: string) =>
+    request<PromptTemplateDetail>(`/api/prompt-templates/${encodeURIComponent(id)}`),
+  createPromptTemplate: (payload: PromptTemplateCreateInput) =>
+    request<PromptTemplateWriteResult>("/api/prompt-templates", {
+      method: "POST",
+      body: JSON.stringify(payload),
+    }),
+  updatePromptTemplate: (id: string, payload: PromptTemplateUpdateInput) =>
+    request<PromptTemplateWriteResult>(`/api/prompt-templates/${encodeURIComponent(id)}`, {
+      method: "PATCH",
+      body: JSON.stringify(payload),
+    }),
+  promptTemplateRevisions: (id: string) =>
+    request<PromptTemplateRevision[]>(
+      `/api/prompt-templates/${encodeURIComponent(id)}/revisions`,
+    ),
+  restorePromptTemplateRevision: (
+    id: string,
+    revisionId: string,
+    expectedCurrentRevisionId: string,
+    idempotencyKey: string,
+  ) => request<PromptTemplateWriteResult>(
+    `/api/prompt-templates/${encodeURIComponent(id)}/revisions/${encodeURIComponent(revisionId)}/restore`,
+    {
+      method: "POST",
+      body: JSON.stringify({
+        expected_current_revision_id: expectedCurrentRevisionId,
+        idempotency_key: idempotencyKey,
+      }),
+    },
+  ),
   studioCapabilities: () => request<StudioCapabilityReport>("/api/studio/capabilities"),
   sendTurn: async (
     chatId: string,
