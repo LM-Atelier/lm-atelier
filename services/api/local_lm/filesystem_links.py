@@ -6,6 +6,7 @@ import enum
 import os
 import stat
 import sys
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any, Final, Literal, NoReturn
 
@@ -123,6 +124,12 @@ _DIRENT_TYPE_OFFSET: Final = 18
 _DIRENT_NAME_OFFSET: Final = 19
 #: No real dirent is longer; a larger d_reclen means the bytes are not one.
 _DIRENT_RECORD_CEILING: Final = 4096
+#: FILE_DIRECTORY_INFORMATION carries these beside the name and attributes, so
+#: on Windows the size and the timestamp come from the SAME record as the kind.
+_RECORD_LAST_WRITE_OFFSET: Final = 24
+_RECORD_END_OF_FILE_OFFSET: Final = 40
+#: NT timestamps count 100-nanosecond intervals from this instant.
+_FILETIME_EPOCH: Final = datetime(1601, 1, 1, tzinfo=UTC)
 #: FileFsSizeInformation. Volume capacity answered for the volume the HANDLE
 #: is on, rather than for whatever a pathname resolves to at the moment it is
 #: read.
@@ -564,6 +571,60 @@ def remove_entry(anchor: AnchoredDirectory, name: str) -> None:
         _close_windows_handle(opened)
 
 
+def remove_directory_entry(anchor: AnchoredDirectory, name: str) -> None:
+    """Remove one EMPTY child directory through the held parent.
+
+    Deliberately not recursive and deliberately separate from remove_entry. A
+    recursive delete that meets a link partway down is the failure this module
+    exists to prevent, and a caller that wants recursion should have to say so
+    and hold each level itself.
+
+    Absence is success, matching remove_entry: a caller pruning what it just
+    listed should not fail because someone else pruned it first. Everything
+    else refuses - a file, a link or reparse point, a directory that still has
+    entries in it, or any other failure.
+
+    The link case matters most and is why this cannot simply be `rmdir` by
+    path. On POSIX `os.rmdir` on a symlink fails because a symlink is not a
+    directory. On Windows a junction IS a directory to the ordinary APIs, so
+    the entry is opened through the held parent with FILE_OPEN_REPARSE_POINT -
+    which opens the link itself - and refused if it carries a reparse point,
+    before any disposition is set.
+    """
+
+    _require_entry_name(name)
+    if anchor.descriptor is not None:
+        try:
+            os.rmdir(name, dir_fd=anchor.descriptor)
+        except FileNotFoundError:
+            return
+        except OSError:
+            # ENOTDIR for a file or a symlink, ENOTEMPTY for a populated
+            # directory, anything else for a real failure. All of them refuse:
+            # this function removes an empty directory or nothing.
+            _refuse()
+        return
+    handle = anchor.handle
+    if handle is None:
+        _refuse()
+    opened, status = _nt_try_open_relative(handle, name, intent="delete_directory")
+    if status in (_STATUS_OBJECT_NAME_NOT_FOUND, _STATUS_OBJECT_PATH_NOT_FOUND):
+        return
+    if status != _STATUS_SUCCESS or not opened:
+        # A file opened with FILE_DIRECTORY_FILE returns
+        # STATUS_NOT_A_DIRECTORY, so the file case refuses here rather than
+        # needing a separate check.
+        _refuse()
+    try:
+        if _nt_is_reparse(opened):
+            _refuse()
+        # A non-empty directory returns STATUS_DIRECTORY_NOT_EMPTY from the
+        # disposition, which _nt_mark_deleted turns into this module's refusal.
+        _nt_mark_deleted(opened)
+    finally:
+        _close_windows_handle(opened)
+
+
 def discard_entry(anchor: AnchoredDirectory, name: str) -> None:
     """Best-effort removal, for use while a refusal is already propagating.
 
@@ -606,16 +667,48 @@ class AnchoredEntry:
     Frozen because it is evidence. A caller that could edit the kind after the
     fact could turn a refusal into a permission without touching the
     filesystem, and the record would still look like it came from the kernel.
+
+    `size_bytes` and `modified_at` are populated ONLY for FILE and DIRECTORY,
+    and only when they could be established. Both are None together, never one
+    without the other, so a consumer has a single question to ask.
+
+    They are absent by design for LINK, OTHER and UNKNOWN. A prune that cannot
+    establish an age does not prune; it skips. Attaching metadata to an unsafe
+    classification would turn "I do not know what this is" into a permission to
+    act on it, which is the whole failure this module exists to prevent.
+
+    `size_bytes` FOR A DIRECTORY MEANS DIFFERENT THINGS ON THE TWO PLATFORMS,
+    and it is documented rather than papered over. Windows reports the record's
+    EndOfFile, which is 0 for a directory; POSIX reports the directory's own
+    on-disk size from `st_size`, typically a block. Neither is the size of what
+    the directory contains, and a caller enforcing a byte budget should sum
+    FILE entries only. Forcing them to agree would mean inventing a number on
+    one platform to match the other.
     """
 
     name: str
     kind: AnchoredEntryKind
+    size_bytes: int | None = None
+    modified_at: datetime | None = None
 
     @property
     def is_safe(self) -> bool:
         """True only for an ordinary file or directory from the record."""
 
         return self.kind not in UNSAFE_ENTRY_KINDS
+
+    @property
+    def has_metadata(self) -> bool:
+        """True when size and modification time were both established.
+
+        False is a legitimate answer and not an error: an unsafe kind never
+        carries metadata, and a safe entry that vanished or refused
+        reacquisition between the enumeration and the measurement does not
+        either. A consumer that needs an age must skip an entry that answers
+        False rather than substituting a default.
+        """
+
+        return self.size_bytes is not None and self.modified_at is not None
 
 
 def list_entries(
@@ -632,18 +725,28 @@ def list_entries(
     component, or more than `limit` entries refuses - a directory that answers
     with a name it should not be able to hold is not one this module describes.
 
-    Neither platform can fall back. Windows reads the name and the attributes
-    from one FILE_DIRECTORY_INFORMATION record. POSIX reads the name and
-    `d_type` from one `dirent`, and a `d_type` of DT_UNKNOWN becomes
+    Neither platform can fall back on the KIND. Windows reads the name and the
+    attributes from one FILE_DIRECTORY_INFORMATION record. POSIX reads the name
+    and `d_type` from one `dirent`, and a `d_type` of DT_UNKNOWN becomes
     AnchoredEntryKind.UNKNOWN - it is never resolved by asking again, which
     would be the second lookup this primitive exists to remove.
+
+    Size and modification time are different and the difference is stated
+    rather than blurred. On Windows they come from that same record. On POSIX
+    the `dirent` does not carry them, so a FILE or a DIRECTORY is REACQUIRED
+    through the held parent and measured with `fstat` - one anchored lookup
+    after the enumeration. Unsafe kinds are never measured on either platform,
+    and an entry that vanished or refused carries no metadata.
     """
 
     if limit < 1:
         _refuse()
     descriptor = anchor.descriptor
     if descriptor is not None:
-        entries = _list_posix(descriptor, limit)
+        # Two jobs, kept apart. _list_posix answers name and kind from the
+        # enumeration record and touches nothing else; the metadata pass is
+        # what pays POSIX's one anchored lookup, and only for safe kinds.
+        entries = [_with_posix_metadata(anchor, entry) for entry in _list_posix(descriptor, limit)]
     else:
         handle = anchor.handle
         if handle is None:
@@ -688,12 +791,105 @@ def _kind_from_dirent_type(raw: int) -> AnchoredEntryKind:
 
 
 def _list_posix(descriptor: int, limit: int) -> list[AnchoredEntry]:
-    """Enumerate through the held descriptor, one dirent at a time."""
+    """Enumerate through the held descriptor, one dirent at a time.
+
+    Name and kind only, from the enumeration record, touching nothing else.
+    Metadata is a separate pass - see `_with_posix_metadata` - because a
+    `dirent` does not carry it and pretending otherwise is the exact blurring
+    this module refuses.
+    """
 
     return [
         AnchoredEntry(name, _kind_from_dirent_type(raw))
         for name, raw in _read_dirents(descriptor, limit)
     ]
+
+
+def _with_posix_metadata(anchor: AnchoredDirectory, entry: AnchoredEntry) -> AnchoredEntry:
+    """Attach size and modification time to a safe entry, or leave it as it is.
+
+    This is where POSIX pays what Windows does not. A `dirent` carries a name
+    and a d_type and nothing else, so a FILE or a DIRECTORY is REACQUIRED
+    through the held parent - `open_entry` or `open_child_directory` - and
+    measured with `fstat` on the descriptor that returns. That is ONE anchored
+    lookup after the enumeration, said plainly rather than described as coming
+    from the record, because it does not.
+
+    `fstat` resolves no name at all; the reacquisition does, through the held
+    parent, which is what keeps it contained. An entry that vanished in
+    between, or that refuses, keeps its kind and carries no metadata.
+    """
+
+    size, modified = _posix_metadata(anchor, entry.name, entry.kind)
+    if size is None or modified is None:
+        return entry
+    return AnchoredEntry(entry.name, entry.kind, size, modified)
+
+
+def _posix_metadata(
+    anchor: AnchoredDirectory, name: str, kind: AnchoredEntryKind
+) -> tuple[int | None, datetime | None]:
+    """Size and modification time for a safe entry, or (None, None).
+
+    Only FILE and DIRECTORY are measured. Everything else is left unmeasured on
+    purpose - see AnchoredEntry - and so is anything that has gone away or
+    refuses, because a measurement that could not be taken is not a zero.
+    """
+
+    if kind is AnchoredEntryKind.FILE:
+        try:
+            opened = open_entry(anchor, name)
+        except AnchoredDirectoryError:
+            return None, None
+        if opened is None:
+            return None, None
+        try:
+            measured = os.fstat(opened)
+        except OSError:
+            return None, None
+        finally:
+            with contextlib.suppress(OSError):
+                os.close(opened)
+        return _from_stat(measured)
+    if kind is AnchoredEntryKind.DIRECTORY:
+        try:
+            child = open_child_directory(anchor, name)
+        except AnchoredDirectoryError:
+            return None, None
+        try:
+            held = child.descriptor
+            if held is None:  # pragma: no cover - POSIX branch only
+                return None, None
+            measured = os.fstat(held)
+        except OSError:
+            return None, None
+        finally:
+            child.close()
+        return _from_stat(measured)
+    return None, None
+
+
+def _from_stat(measured: os.stat_result) -> tuple[int, datetime]:
+    """Size and modification time from one fstat result."""
+
+    return int(measured.st_size), datetime.fromtimestamp(measured.st_mtime, tz=UTC)
+
+
+def _from_filetime(raw: int) -> datetime | None:
+    """An NT timestamp as a datetime, or None when it says nothing.
+
+    Zero is what the record carries for "not recorded", and a timestamp is also
+    refused if it is outside the range a datetime can hold. Either way the
+    honest answer is that the time is unknown, which the entry reports as
+    absent metadata rather than as the year 1601.
+    """
+
+    if raw <= 0:
+        return None
+    try:
+        return _FILETIME_EPOCH + timedelta(microseconds=raw // 10)
+    except (OverflowError, ValueError):
+        return None
 
 
 def _read_dirents(descriptor: int, limit: int) -> list[tuple[str, int]]:
@@ -843,6 +1039,20 @@ def _read_directory_records(raw: bytes, limit: int, already: int) -> list[Anchor
         next_offset = int.from_bytes(raw[offset : offset + 4], "little")
         attributes = int.from_bytes(raw[offset + 56 : offset + 60], "little")
         name_length = int.from_bytes(raw[offset + 60 : offset + 64], "little")
+        # Same record, same bytes. The size and the timestamp sit inside the
+        # header this parser already reads for the attributes, so on Windows
+        # they cost nothing and cannot describe a different entry than the
+        # name does.
+        written = int.from_bytes(
+            raw[offset + _RECORD_LAST_WRITE_OFFSET : offset + _RECORD_LAST_WRITE_OFFSET + 8],
+            "little",
+            signed=True,
+        )
+        end_of_file = int.from_bytes(
+            raw[offset + _RECORD_END_OF_FILE_OFFSET : offset + _RECORD_END_OF_FILE_OFFSET + 8],
+            "little",
+            signed=True,
+        )
         start = offset + _FILE_DIRECTORY_INFORMATION_HEADER
         end = start + name_length
         if name_length % 2 or end > len(raw):
@@ -859,10 +1069,36 @@ def _read_directory_records(raw: bytes, limit: int, already: int) -> list[Anchor
         if name not in (".", ".."):
             if already + len(found) >= limit:
                 _refuse()
-            found.append(AnchoredEntry(name, _windows_kind(attributes)))
+            kind = _windows_kind(attributes)
+            size, modified = _windows_metadata(kind, end_of_file, written)
+            found.append(AnchoredEntry(name, kind, size, modified))
         if next_offset == 0:
             return found
         offset += next_offset
+
+
+def _windows_metadata(
+    kind: AnchoredEntryKind, end_of_file: int, written: int
+) -> tuple[int | None, datetime | None]:
+    """Size and modification time from the record, for safe kinds only.
+
+    An unsafe kind carries no metadata even though the record supplies it. The
+    bytes are there and are deliberately dropped: a link's size is the link's,
+    not the target's, and reporting it invites a consumer to reason about an
+    entry it has been told to skip.
+
+    A negative size, or a timestamp the record did not record, leaves both
+    absent - the pair is all-or-nothing so a consumer has one question to ask.
+    """
+
+    if kind not in (AnchoredEntryKind.FILE, AnchoredEntryKind.DIRECTORY):
+        return None, None
+    if end_of_file < 0:
+        return None, None
+    modified = _from_filetime(written)
+    if modified is None:
+        return None, None
+    return end_of_file, modified
 
 
 def _windows_kind(attributes: int) -> AnchoredEntryKind:
@@ -1106,8 +1342,8 @@ def _nt_try_open_relative(parent: int | None, name: str, *, intent: str) -> tupl
     absent entry and a name collision from a genuine failure. Everything that
     does not need that distinction goes through _nt_open_relative.
 
-    `intent` is one of open_dir, create_dir, open_file, create_file or
-    rename_source. It is spelled out rather than inferred from a flag because
+    `intent` is one of open_dir, create_dir, open_file, create_file,
+    delete_directory or rename_source. It is spelled out rather than inferred from a flag because
     the access mask and the disposition have to agree, and getting that pair
     wrong fails in ways that look like a filesystem problem rather than a
     coding one.
@@ -1141,6 +1377,13 @@ def _nt_try_open_relative(parent: int | None, name: str, *, intent: str) -> tupl
     elif intent == "open_file":
         access |= _FILE_READ_DATA
         options |= _FILE_NON_DIRECTORY_FILE
+        disposition = _FILE_OPEN
+    elif intent == "delete_directory":
+        # A directory this time, so FILE_DIRECTORY_FILE rather than its
+        # opposite - which also makes a file refuse with STATUS_NOT_A_DIRECTORY
+        # instead of being opened and then rejected by a second check.
+        access |= _DELETE
+        options |= _FILE_DIRECTORY_FILE
         disposition = _FILE_OPEN
     elif intent in ("delete_source", "rename_source"):
         # Both change a directory ENTRY rather than file contents, which is
