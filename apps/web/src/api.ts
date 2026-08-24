@@ -1,4 +1,5 @@
 import type { TurnReference } from "./mentionDraft";
+import type { ComposerPromptSource } from "./composerPromptSource";
 import {
   parseArtifactLibraryPage,
   type ArtifactLibraryFilters,
@@ -44,6 +45,8 @@ import type {
   ModelProfileBundle,
   PlatformMatrixEntry,
   PromptHelperDetail,
+  PromptBatchCreateInput,
+  PromptBatchItemUpdateInput,
   PromptTemplateCreateInput,
   PromptTemplateDetail,
   PromptTemplatePage,
@@ -309,6 +312,21 @@ export const api = {
       }),
     },
   ),
+  createPromptBatch: (chatId: string, payload: PromptBatchCreateInput) =>
+    request<unknown>(`/api/chats/${encodeURIComponent(chatId)}/prompt-batches`, {
+      method: "POST",
+      body: JSON.stringify(payload),
+    }),
+  promptBatch: (batchId: string) =>
+    request<unknown>(`/api/prompt-batches/${encodeURIComponent(batchId)}`),
+  updatePromptBatchItem: (
+    batchId: string,
+    ordinal: number,
+    payload: PromptBatchItemUpdateInput,
+  ) => request<unknown>(
+    `/api/prompt-batches/${encodeURIComponent(batchId)}/items/${ordinal}`,
+    { method: "PATCH", body: JSON.stringify(payload) },
+  ),
   studioCapabilities: () => request<StudioCapabilityReport>("/api/studio/capabilities"),
   sendTurn: async (
     chatId: string,
@@ -323,7 +341,15 @@ export const api = {
     // text: the server refuses to recover references by reading a prompt,
     // because that binds whoever the words most resemble.
     references: TurnReference[] = [],
+    outputCount?: number,
+    promptSource?: ComposerPromptSource,
   ) => {
+    // The count belongs to the mode the person explicitly chose. Auto may
+    // later confirm a media route, but that must not resurrect a hidden media
+    // control from an earlier mode.
+    const requestedOutputCount = mode === "image" || mode === "video"
+      ? outputCount
+      : undefined;
     const submit = (selectedMode: RoutingMode, confirmed = false) => request<TurnAccepted>(`/api/chats/${chatId}/${endpoint}`, {
       method: "POST",
       body: JSON.stringify({
@@ -333,8 +359,10 @@ export const api = {
         references,
         settings,
         workflow_revision_id: workflowRevisionId,
+        output_count: requestedOutputCount,
         confirm_media: confirmed,
         idempotency_key: idempotencyKey,
+        prompt_source: promptSource,
       }),
     });
     try {
@@ -397,6 +425,8 @@ export const api = {
     settings: Record<string, unknown>,
     idempotencyKey: string = crypto.randomUUID(),
     references: TurnReference[] = [],
+    outputCount?: number,
+    promptSource?: ComposerPromptSource,
   ) => api.sendTurn(
     chatId,
     text,
@@ -407,6 +437,8 @@ export const api = {
     "stop-and-send",
     undefined,
     references,
+    outputCount,
+    promptSource,
   ),
   regenerateMessage: (messageId: string, settings: Record<string, unknown>) =>
     request<TurnAccepted>(`/api/messages/${messageId}/regenerate`, {

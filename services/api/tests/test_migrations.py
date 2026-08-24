@@ -343,7 +343,7 @@ def test_artifact_library_migration_fence_blocks_concurrent_dangling_writer(
             "SELECT count(*) FROM jobs WHERE id = 'migration-race-writer'"
         ).fetchone() == (0,)
         assert connection.execute("SELECT version_num FROM alembic_version").fetchone() == (
-            "b7c1e4a90f26",
+            "c1e7a4b92d60",
         )
         membership_schema = connection.execute(
             "SELECT sql FROM sqlite_master "

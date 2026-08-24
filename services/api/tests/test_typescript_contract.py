@@ -53,6 +53,8 @@ CHECKED_CONTRACTS = {
     "ModelStorageInfo": "ModelStorageInfo",
     "ModelUpdate": "ModelUpdateOut",
     "PlatformMatrixEntry": "PlatformMatrixEntry",
+    "PromptBatch": "PromptExpansionBatchOut",
+    "PromptBatchItem": "PromptExpansionItemOut",
     "PromptTemplateDefinition": "PromptTemplateDefinitionOut",
     "PromptTemplateDetail": "PromptTemplateDetailOut",
     "PromptTemplatePage": "PromptTemplatePageOut",

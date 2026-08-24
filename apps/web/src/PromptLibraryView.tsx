@@ -1,10 +1,12 @@
 import { useMemo, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { Archive, ArchiveRestore, BookOpen, History, Pencil, Plus, Trash2 } from "lucide-react";
+import { Archive, ArchiveRestore, Beaker, BookOpen, History, Pencil, Plus, Trash2 } from "lucide-react";
 import { AccessibleDialog } from "./AccessibleDialog";
 import { api } from "./api";
 import { EmptyState } from "./EmptyState";
 import { ErrorCallout } from "./ErrorCallout";
+import { PromptExpansionDialog } from "./PromptExpansionDialog";
+import type { PromptComposerInsertion } from "./composerPromptSource";
 import type {
   PromptTemplateContract,
   PromptTemplateDetail,
@@ -271,7 +273,13 @@ function resourceSummary(policy: PromptTemplateResourcePolicy): string {
   return `Fixed workflow · ${policy.lora_policy.mode === "none" ? "No LoRAs" : "Automatic LoRAs"}`;
 }
 
-export function PromptLibraryView() {
+export function PromptLibraryView({
+  activeChatId,
+  onInsertIntoComposer,
+}: {
+  activeChatId: string | null;
+  onInsertIntoComposer?: (chatId: string, insertion: PromptComposerInsertion) => void;
+}) {
   const client = useQueryClient();
   const [includeArchived, setIncludeArchived] = useState(false);
   const [offset, setOffset] = useState(0);
@@ -281,6 +289,10 @@ export function PromptLibraryView() {
     draft: TemplateDraft;
     templateId: string | null;
     expectedRevisionId: string | null;
+  } | null>(null);
+  const [expansion, setExpansion] = useState<{
+    template: PromptTemplateDetail;
+    chatId: string;
   } | null>(null);
   const page = useQuery({
     queryKey: ["prompt-templates", includeArchived, offset],
@@ -298,6 +310,11 @@ export function PromptLibraryView() {
     queryKey: ["prompt-template-revisions", resolvedSelectedId],
     queryFn: () => api.promptTemplateRevisions(resolvedSelectedId!),
     enabled: Boolean(resolvedSelectedId),
+  });
+  const activeChat = useQuery({
+    queryKey: ["chat", activeChatId],
+    queryFn: () => api.chat(activeChatId!),
+    enabled: Boolean(activeChatId),
   });
   const refresh = () => {
     void client.invalidateQueries({ queryKey: ["prompt-templates"] });
@@ -358,6 +375,32 @@ export function PromptLibraryView() {
     || (!editor && save.error) || archive.error || restore.error;
   const busy = save.isPending || archive.isPending || restore.isPending;
   const currentSlots = selected?.current_revision.contract_json.slots ?? [];
+  const previewChatReady = Boolean(
+    activeChatId
+    && activeChat.data
+    && activeChat.data.id === activeChatId
+    && !activeChat.data.archived,
+  );
+  const expansionAuthorityCurrent = Boolean(
+    expansion
+    && selected
+    && activeChatId === expansion.chatId
+    && previewChatReady
+    && !selected.archived
+    && selected.id === expansion.template.id
+    && selected.current_revision.id === expansion.template.current_revision.id
+    && selected.current_revision.contract_sha256
+      === expansion.template.current_revision.contract_sha256,
+  );
+  const previewUnavailable = selected?.archived
+    ? "Archived templates cannot create test drafts."
+    : !activeChatId
+      ? "Choose or create an active chat to test this template."
+      : activeChat.isPending
+        ? "Checking the active chat..."
+        : !previewChatReady
+          ? "Choose a non-archived standard chat to test this template."
+          : null;
   const archivedCount = useMemo(
     () => page.data?.items.filter((item) => item.archived).length ?? 0,
     [page.data],
@@ -381,7 +424,11 @@ export function PromptLibraryView() {
       <section className="workflow-detail prompt-template-detail" aria-live="polite">
         {detail.isPending && <div className="loading-line" />}
         {selected && <>
-          <div className="detail-title"><div><small>Image template · revision {selected.current_revision.version}</small><h2>{selected.name}</h2></div><div className="storage-actions"><button className="secondary" disabled={busy} onClick={() => { save.reset(); setEditor({ creating: false, draft: draftFromTemplate(selected), templateId: selected.id, expectedRevisionId: selected.current_revision_id }); }}><Pencil size={14} />Edit</button><button className="secondary" disabled={busy} onClick={() => archive.mutate(selected)}>{selected.archived ? <ArchiveRestore size={14} /> : <Archive size={14} />}{selected.archived ? "Unarchive" : "Archive"}</button></div></div>
+          <div className="detail-title"><div><small>Image template · revision {selected.current_revision.version}</small><h2>{selected.name}</h2></div><div className="storage-actions"><button className="primary" aria-describedby={previewUnavailable ? "prompt-test-unavailable" : undefined} disabled={busy || !previewChatReady || selected.archived} onClick={() => {
+            if (!activeChatId || !previewChatReady || selected.archived) return;
+            setExpansion({ template: structuredClone(selected), chatId: activeChatId });
+          }}><Beaker size={14} />Test expansion</button><button className="secondary" disabled={busy} onClick={() => { save.reset(); setEditor({ creating: false, draft: draftFromTemplate(selected), templateId: selected.id, expectedRevisionId: selected.current_revision_id }); }}><Pencil size={14} />Edit</button><button className="secondary" disabled={busy} onClick={() => archive.mutate(selected)}>{selected.archived ? <ArchiveRestore size={14} /> : <Archive size={14} />}{selected.archived ? "Unarchive" : "Archive"}</button></div></div>
+          {previewUnavailable && <p id="prompt-test-unavailable" className="prompt-test-unavailable">{previewUnavailable}</p>}
           {selected.description && <p>{selected.description}</p>}
           <section className="prompt-template-body"><h3>Template body</h3><pre>{selected.current_revision.contract_json.body}</pre></section>
           <section className="prompt-template-slots"><h3>Slots</h3>{currentSlots.length ? <dl>{currentSlots.map((slot) => <div key={slot.name}><dt><code>{`{{${slot.name}}}`}</code><span className="badge">{slot.mode}</span><span className="badge">{slot.variation_scope}</span></dt><dd>{slot.mode === "choice" ? slot.choices.join(" · ") : slot.mode === "model" ? slot.guidance : slot.mode === "fixed" ? slot.fixed_value : "Provided when the template is used."}</dd></div>)}</dl> : <p className="muted">This template has no variable slots.</p>}</section>
@@ -391,5 +438,15 @@ export function PromptLibraryView() {
       </section>
     </div>}
     {editor && <TemplateEditor initial={editor.draft} creating={editor.creating} saving={save.isPending} requestFailed={Boolean(save.error)} onCancel={() => { save.reset(); setEditor(null); }} onSave={(draft) => save.mutate({ creating: editor.creating, draft, templateId: editor.templateId, expectedRevisionId: editor.expectedRevisionId })} />}
+    {expansion && <PromptExpansionDialog
+      template={expansion.template}
+      activeChatId={expansion.chatId}
+      authorityCurrent={expansionAuthorityCurrent}
+      onClose={() => setExpansion(null)}
+      onInsertIntoComposer={(insertion) => {
+        onInsertIntoComposer?.(expansion.chatId, insertion);
+        setExpansion(null);
+      }}
+    />}
   </div>;
 }

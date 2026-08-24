@@ -6,7 +6,6 @@ import { api, connectEvents } from "./api";
 import type { BackupInfo, Chat, ChatDetail, EngineCapabilities, EngineRole, Job, SettingField, SetupReadinessReport, SetupRoleReadiness, TurnAccepted } from "./types";
 import { DEFAULT_CHAT_WORKFLOW_SELECTIONS, DEFAULT_PROJECT_WORKFLOW_SELECTIONS, familiesForWorkflows } from "./workflowSelectionFixtures";
 const clipboardWrite = vi.fn();
-
 const imageSetting: SettingField = {
   key: "negative_prompt",
   label: "Negative prompt",
@@ -300,6 +299,7 @@ function setupReport(...roles: SetupRoleReadiness[]): SetupReadinessReport {
   return { version: 2, state, roles };
 }
 
+afterEach(cleanup);
 describe("App", () => {
   beforeEach(() => {
     vi.clearAllMocks();
@@ -347,7 +347,6 @@ describe("App", () => {
     vi.mocked(api.projectWorkflowSelections).mockResolvedValue(DEFAULT_PROJECT_WORKFLOW_SELECTIONS);
     vi.mocked(api.customNodes).mockResolvedValue([]);
   });
-  afterEach(cleanup);
   it("renders the local workspace shell without an existing chat", async () => {
     const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
     render(
@@ -2381,6 +2380,7 @@ describe("App", () => {
       version: "0.1.7",
       data_directory: "C:\\Users\\someone\\LM Atelier\\data",
       log_directory: "C:\\Users\\someone\\LM Atelier\\data\\logs",
+      max_media_outputs_per_plan: 8,
       web_access_enabled: false,
     });
     vi.mocked(api.system).mockResolvedValue({
@@ -5915,7 +5915,7 @@ describe("App", () => {
     expect(composer).toHaveFocus();
   });
 
-  it("clears unsent text and visual edit targets when switching chats", async () => {
+  it("isolates unsent text per chat and clears visual edit targets when switching", async () => {
     const stamp = "2026-07-30T00:00:00Z";
     const first: Chat = {
       id: "chat-draft-first",
@@ -6000,7 +6000,7 @@ describe("App", () => {
 
     fireEvent.click(screen.getByText(first.title));
     expect(await screen.findByRole("heading", { name: first.title })).toBeInTheDocument();
-    expect(screen.getByRole("textbox", { name: "Message" })).toHaveValue("");
+    expect(screen.getByRole("textbox", { name: "Message" })).toHaveValue("Unsent first-chat draft");
     expect(screen.queryByRole("button", { name: /Remove Generated image: sha256:synthetic/ })).not.toBeInTheDocument();
   });
 

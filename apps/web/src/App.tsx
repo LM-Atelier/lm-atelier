@@ -77,6 +77,8 @@ import { PendingResponseStatus } from "./PendingResponseStatus";
 import { MarkdownText } from "./MarkdownText";
 import { MentionText } from "./MentionText";
 import { MessageField } from "./MessageField";
+import { OutputCountControl } from "./OutputCountControl";
+import { mediaOutputCountForTurn, useMediaOutputCount } from "./mediaOutputCount";
 import type { TurnReference } from "./mentionDraft";
 import { useComposerMentions } from "./useComposerMentions";
 import { useConfirm } from "./useConfirm";
@@ -100,6 +102,16 @@ import { ProjectManager } from "./ProjectManager";
 import { SettingsView } from "./SettingsView";
 import { MediaLibraryView } from "./MediaLibraryView";
 import { PromptLibraryView } from "./PromptLibraryView";
+import type { ChatViewProps, ComposerProps, PendingTurn } from "./chatComposerContracts";
+import {
+  EMPTY_COMPOSER_DRAFT,
+  composerDraftWithText,
+  detachedComposerDraft,
+  promptSourceForTurn,
+  updatedComposerDrafts,
+  withoutComposerDraft,
+  type ComposerDraft, type ComposerPromptSource,
+} from "./composerPromptSource";
 import { ReferencesLibrary } from "./ReferencesLibrary";
 import { MediaOutputPlan } from "./MediaOutputPlan";
 import { ModelCard } from "./ModelCard";
@@ -116,6 +128,7 @@ import { useComposerUploads } from "./useComposerUploads";
 import type { ComposerAttachment } from "./useComposerUploads";
 import { useDraftClassification } from "./useDraftClassification";
 import { useFirstRunSetup } from "./useFirstRunSetup";
+import { usePromptLibraryComposerInsertion } from "./usePromptLibraryComposerInsertion";
 import { useGenerationModeSelection } from "./useGenerationModeSelection";
 import { useMessageActions } from "./useMessageActions";
 import {
@@ -143,16 +156,16 @@ import type {
   SetupReadinessReport,
   TurnAccepted,
   Workflow,
-  WorkPlan,
 } from "./types";
 
-type PendingTurn = { id: string; text: string; mode: RoutingMode };
 type SendTurnVariables = PendingTurn & {
   chatId: string;
   artifacts: string[];
   settings: Record<string, unknown>;
   /** Subject ids chosen from the mention picker, never parsed from the text. */
   references: TurnReference[];
+  outputCount?: number;
+  promptSource?: ComposerPromptSource;
   stopCurrent?: boolean;
 };
 
@@ -733,38 +746,20 @@ function Composer({
   onSend,
   onStop,
   onStopAndSend,
+  maxMediaOutputsPerPlan,
   workflows,
   project,
   visualTarget,
   quoteTarget,
-}: {
-  chat: ChatDetail;
-  engines: EngineCapabilities[];
-  profiles: ModelProfile[];
-  stoppable: boolean;
-  settings: Record<string, unknown>;
-  onSettings: (settings: Record<string, unknown>) => void;
-  settingsRole: EngineRole;
-  onSettingsRole: (role: EngineRole) => void;
-  presets: GenerationPreset[];
-  presetId: string | null;
-  onPreset: (presetId: string | null) => void;
-  onMode: (mode: RoutingMode) => void;
-  onSend: (text: string, mode: RoutingMode, artifacts: string[], settings: Record<string, unknown>, references: TurnReference[]) => void;
-  onStop: () => void;
-  onStopAndSend: (
-    text: string,
-    mode: RoutingMode,
-    artifacts: string[],
-    settings: Record<string, unknown>,
-    references: TurnReference[],
-  ) => void;
-  workflows: Workflow[];
-  project?: Project;
-  visualTarget?: VisualTarget | null;
-  quoteTarget?: { text: string; requestId: number } | null;
-}) {
-  const [text, setText] = useState("");
+  draft,
+  onDraftChange,
+}: ComposerProps) {
+  const text = draft.text;
+  const setText = useCallback((next: string | ((current: string) => string)) => onDraftChange(
+    (current) => composerDraftWithText(current, typeof next === "function" ? next(current.text) : next),
+  ), [onDraftChange]);
+  const detachPromptSource = useCallback(() => onDraftChange(detachedComposerDraft), [onDraftChange]);
+  const { outputCount, setOutputCount, resetOutputCount } = useMediaOutputCount();
   const mentions = useComposerMentions();
   const { mode, changeMode, currentMode } = useGenerationModeSelection(chat.routing_mode, onMode);
   const [settingsOpen, setSettingsOpen] = useState(false);
@@ -772,9 +767,8 @@ function Composer({
   const [studioOpen, setStudioOpen] = useState(false);
   const [templateSettings, setTemplateSettings] = useState<{ name: string; settings: Record<string, unknown> } | null>(null);
   const [attachments, setAttachments] = useState<ComposerAttachment[]>([]);
-  const { uploading, uploadError, setUploadError, uploadFiles, uploadPastedImages } = useComposerUploads(
-    (attachment) => setAttachments((current) => [...current, attachment]),
-  );
+  const addAttachment = (attachment: ComposerAttachment) => { detachPromptSource(); setAttachments((current) => [...current, attachment]); };
+  const { uploading, uploadError, setUploadError, uploadFiles, uploadPastedImages } = useComposerUploads(addAttachment);
   const [dropActive, setDropActive] = useState(false);
   const fileInput = useRef<HTMLInputElement>(null);
   const textInput = useRef<HTMLTextAreaElement>(null);
@@ -782,6 +776,7 @@ function Composer({
   useEffect(() => {
     if (!visualTarget || consumedVisualRequest.current === visualTarget.requestId) return;
     consumedVisualRequest.current = visualTarget.requestId;
+    detachPromptSource();
     setAttachments((current) => {
       const additions = [visualTarget.attachment, ...(visualTarget.extraAttachments ?? [])]
         .filter((addition) => !current.some((item) => item.id === addition.id));
@@ -798,7 +793,7 @@ function Composer({
       window.setTimeout(() => setStudioOpen(true), 0);
     }
     textInput.current?.focus();
-  }, [visualTarget, changeMode]);
+  }, [visualTarget, changeMode, detachPromptSource, setText]);
   const consumedQuoteRequest = useRef<number | null>(null);
   useEffect(() => {
     if (!quoteTarget || consumedQuoteRequest.current === quoteTarget.requestId) return;
@@ -810,7 +805,7 @@ function Composer({
       .join("\n");
     setText((current) => (current.trim() ? `${quoted}\n\n${current}` : `${quoted}\n\n`));
     textInput.current?.focus();
-  }, [quoteTarget]);
+  }, [quoteTarget, setText]);
   const branchMessages = activeBranchMessages(chat);
   const priorVisual = branchMessages.some((message) =>
     message.parts.some((part) =>
@@ -884,6 +879,9 @@ function Composer({
       workflowSchema,
     );
     const dispatch = stopCurrent ? onStopAndSend : onSend;
+    const requestedOutputCount = mediaOutputCountForTurn(selectedMode, outputCount);
+    const references = mentions.forText(text);
+    const promptSource = promptSourceForTurn(draft, selectedMode, attachments.length, references.length);
     dispatch(
       text.trim(),
       selectedMode,
@@ -894,12 +892,15 @@ function Composer({
             templateSettings ? { ...settings, ...templateSettings.settings } : settings,
             fields,
           ),
-      mentions.forText(text),
+      references,
+      requestedOutputCount,
+      promptSource,
     );
     setText("");
     mentions.clear();
     setAttachments([]);
     setTemplateSettings(null);
+    resetOutputCount();
   };
 
   return (
@@ -971,6 +972,7 @@ function Composer({
                           aria-label="Animate attached image"
                           onClick={() => {
                             onMode("video");
+                            detachPromptSource();
                             setText((current) => current.trim() ? current : "Animate this image");
                             textInput.current?.focus();
                           }}
@@ -999,11 +1001,17 @@ function Composer({
             <button aria-label="Remove template settings" onClick={() => setTemplateSettings(null)}><X size={12} /></button>
           </div>
         )}
+        {draft.promptSource && (
+          <div className="template-settings-chip prompt-source-chip">
+            <span>Prompt Library draft linked</span>
+            <button aria-label="Remove Prompt Library source" onClick={detachPromptSource}><X size={12} /></button>
+          </div>
+        )}
         <div className="composer">
-          <MessageField field={textInput} value={text} onChange={setText} onSubmit={submit} onMention={mentions.add} onPasteFiles={(files) => { void uploadPastedImages(files); }} />
+          <MessageField field={textInput} value={text} onChange={setText} onSubmit={submit} onMention={(mention) => { mentions.add(mention); detachPromptSource(); }} onPasteFiles={(files) => { detachPromptSource(); void uploadPastedImages(files); }} />
           <div className="composer-tools">
             <div className="left-tools">
-              <AttachControls disabled={uploading} onPickFile={() => fileInput.current?.click()} onAttach={(attachment) => setAttachments((current) => [...current, attachment])} />
+              <AttachControls disabled={uploading} onPickFile={() => fileInput.current?.click()} onAttach={addAttachment} />
               <input ref={fileInput} hidden multiple type="file" accept="image/*,video/*" onChange={(event) => { setUploadError(""); void uploadFiles(Array.from(event.target.files ?? [])); event.target.value = ""; }} />
               <button
                 className="icon-button"
@@ -1019,11 +1027,16 @@ function Composer({
                 {mode === "text" && <MessageSquare size={15} />}
                 {mode === "image" && <ImageIcon size={15} />}
                 {mode === "video" && <Film size={15} />}
-                <select aria-label="Generation mode" value={mode} onChange={(event) => changeMode(event.target.value as RoutingMode)}>
+                <select aria-label="Generation mode" value={mode} onChange={(event) => {
+                  const nextMode = event.target.value as RoutingMode;
+                  changeMode(nextMode);
+                  if (nextMode !== "image") detachPromptSource();
+                }}>
                   <option value="auto">Auto</option><option value="text">Text</option><option value="image">Image</option><option value="video">Video</option>
                 </select>
                 <ChevronDown size={13} />
               </label>
+              <OutputCountControl mode={mode} maximum={maxMediaOutputsPerPlan} value={outputCount} onChange={setOutputCount} />
               <div className="composer-workflow-selector">
                 <WorkflowIcon aria-hidden="true" size={15} />
                 <ActiveChatWorkflowSelector chatId={chat.id} routingMode={mode} />
@@ -1179,54 +1192,16 @@ function ChatView({
   onEdit,
   onStop,
   onStopAndSend,
+  maxMediaOutputsPerPlan,
   onCancelPlan,
   onCancelStep,
   onRetryStep,
   onDeleteExchange,
   onForkThread,
   libraryEdit,
-}: {
-  onOpenStudio: (artifactId: string) => void;
-  chat?: ChatDetail;
-  engines: EngineCapabilities[];
-  profiles: ModelProfile[];
-  workflows: Workflow[];
-  project?: Project;
-  liveText: Record<string, string>;
-  pendingTurns: PendingTurn[];
-  workPlans: WorkPlan[];
-  settings: Record<string, unknown>;
-  settingsRole: EngineRole;
-  onSettingsRole: (role: EngineRole) => void;
-  presets: GenerationPreset[];
-  presetId: string | null;
-  onSettings: (settings: Record<string, unknown>) => void;
-  onPreset: (presetId: string | null) => void;
-  onMode: (mode: RoutingMode) => void;
-  onSend: (text: string, mode: RoutingMode, artifacts: string[], settings: Record<string, unknown>, references: TurnReference[]) => void;
-  onRegenerate: (messageId: string, settings: Record<string, unknown>) => void;
-  onSelectRevision: (messageId: string, revisionId: string) => void;
-  onEdit: (
-    messageId: string,
-    text: string,
-    mode: RoutingMode,
-    settings: Record<string, unknown>,
-  ) => void;
-  onStop: () => void;
-  onStopAndSend: (
-    text: string,
-    mode: RoutingMode,
-    artifacts: string[],
-    settings: Record<string, unknown>,
-    references: TurnReference[],
-  ) => void;
-  onCancelPlan: (planId: string) => void;
-  onCancelStep: (stepId: string) => void;
-  onRetryStep: (stepId: string) => void;
-  onDeleteExchange: (messageId: string) => void;
-  onForkThread: (messageId: string) => void;
-  libraryEdit?: VisualTarget | null;
-}) {
+  composerDraft,
+  onComposerDraft,
+}: ChatViewProps) {
   const endRef = useRef<HTMLDivElement>(null);
   const messagesRef = useRef<HTMLDivElement>(null);
   const followMessages = useRef(true);
@@ -1413,7 +1388,7 @@ function ChatView({
         ))}
         <div ref={endRef} />
       </div>
-      <Composer chat={chat} engines={engines} profiles={profiles} stoppable={stoppable} settings={settings} onSettings={onSettings} settingsRole={settingsRole} onSettingsRole={onSettingsRole} presets={presets} presetId={presetId} onPreset={onPreset} onMode={onMode} onSend={onSend} onStop={onStop} onStopAndSend={onStopAndSend} workflows={workflows} project={project} visualTarget={visualTarget} quoteTarget={quoteTarget} />
+      <Composer chat={chat} engines={engines} profiles={profiles} stoppable={stoppable} settings={settings} onSettings={onSettings} settingsRole={settingsRole} onSettingsRole={onSettingsRole} presets={presets} presetId={presetId} onPreset={onPreset} onMode={onMode} onSend={onSend} onStop={onStop} onStopAndSend={onStopAndSend} maxMediaOutputsPerPlan={maxMediaOutputsPerPlan} workflows={workflows} project={project} visualTarget={visualTarget} quoteTarget={quoteTarget} draft={composerDraft} onDraftChange={onComposerDraft} />
     </div>
   );
 }
@@ -2087,6 +2062,7 @@ export default function App() {
   // last role picked in that chat's drawer, chat until one is picked. In every
   // other mode the role follows the mode and this map is ignored.
   const [autoSettingsRoles, setAutoSettingsRoles] = useState<Record<string, EngineRole>>({});
+  const [composerDrafts, setComposerDrafts] = useState<Record<string, ComposerDraft>>({});
   const [pendingTurns, setPendingTurns] = useState<Record<string, PendingTurn[]>>({});
   const setupReadiness = useQuery({
     queryKey: ["setup-readiness"],
@@ -2113,6 +2089,7 @@ export default function App() {
   const profiles = useQuery({ queryKey: ["profiles"], queryFn: api.profiles });
   const presets = useQuery({ queryKey: ["presets"], queryFn: api.presets });
   const workflows = useQuery({ queryKey: ["workflows"], queryFn: api.workflows });
+  const applicationInfo = useQuery({ queryKey: ["about"], queryFn: api.about });
   const eventsConnected = useLiveEvents(client, setLiveText);
 
   const createChat = useMutation({
@@ -2147,10 +2124,16 @@ export default function App() {
     void client.invalidateQueries({ queryKey: ["work-plans", chatId] });
   };
   const send = useMutation({
-    mutationFn: ({ chatId, id, text, mode, artifacts, settings, references, stopCurrent }: SendTurnVariables) =>
-      stopCurrent
-        ? api.stopAndSendTurn(chatId, text, mode, artifacts, settings, id, references)
-        : api.sendTurn(chatId, text, mode, artifacts, settings, id, "turns", undefined, references),
+    mutationFn: ({ chatId, id, text, mode, artifacts, settings, references, outputCount, promptSource, stopCurrent }: SendTurnVariables) => {
+      if (stopCurrent) {
+        if (promptSource) return api.stopAndSendTurn(chatId, text, mode, artifacts, settings, id, references, outputCount, promptSource);
+        if (outputCount !== undefined) return api.stopAndSendTurn(chatId, text, mode, artifacts, settings, id, references, outputCount);
+        return api.stopAndSendTurn(chatId, text, mode, artifacts, settings, id, references);
+      }
+      if (promptSource) return api.sendTurn(chatId, text, mode, artifacts, settings, id, "turns", undefined, references, outputCount, promptSource);
+      if (outputCount !== undefined) return api.sendTurn(chatId, text, mode, artifacts, settings, id, "turns", undefined, references, outputCount);
+      return api.sendTurn(chatId, text, mode, artifacts, settings, id, "turns", undefined, references);
+    },
     onMutate: ({ chatId, id, text, mode }) => {
       setPendingTurns((current) => ({
         ...current,
@@ -2299,6 +2282,7 @@ export default function App() {
         delete next[deletedId];
         return next;
       });
+      setComposerDrafts((current) => withoutComposerDraft(current, deletedId));
       void client.invalidateQueries({ queryKey: ["artifacts"] });
       void client.invalidateQueries({ queryKey: ["artifact-storage"] });
       void client.invalidateQueries({ queryKey: ["jobs"] });
@@ -2326,6 +2310,8 @@ export default function App() {
     setView("studio");
     focusMainContent();
   }, []);
+  const persistPromptImageMode = useCallback((chatId: string) => { updateChat.mutate({ id: chatId, values: { routing_mode: "image" } }); }, [updateChat]);
+  const insertPromptIntoComposer = usePromptLibraryComposerInsertion({ client, setComposerDrafts, setChatDrafts, setCurrentChatId, setView, persistImageMode: persistPromptImageMode, currentChatStorageKey: CURRENT_CHAT_KEY });
 
   const allChats = useMemo(() => chats.data ?? [], [chats.data]);
   const allProjects = useMemo(() => projects.data ?? [], [projects.data]);
@@ -2343,7 +2329,7 @@ export default function App() {
           onClose={() => setStudioSource(null)}/>
       );
     }
-    const topLevelView = view === "media" ? <MediaLibraryView onEditImage={openLibraryImage} /> : view === "models" ? <ModelsView key={modelLibraryRole} initialRole={modelLibraryRole} /> : view === "references" ? <ReferencesLibrary /> : view === "prompts" ? <PromptLibraryView /> : view === "workflows" ? <WorkflowsView /> : null;
+    const topLevelView = view === "media" ? <MediaLibraryView onEditImage={openLibraryImage} /> : view === "models" ? <ModelsView key={modelLibraryRole} initialRole={modelLibraryRole} /> : view === "references" ? <ReferencesLibrary /> : view === "prompts" ? <PromptLibraryView activeChatId={activeChatId} onInsertIntoComposer={insertPromptIntoComposer} /> : view === "workflows" ? <WorkflowsView /> : null;
     if (topLevelView) return topLevelView;
     if (view === "settings") return <SettingsView engines={engines.data ?? []} />;
     const displayedChat = chat.data
@@ -2373,7 +2359,10 @@ export default function App() {
     return <ChatView key={displayedChat?.id ?? "empty-chat"} onOpenStudio={(artifactId) => { setStudioSource({ artifactId, chatId: displayedChat?.id ?? null }); setView("studio"); focusMainContent(); }} chat={displayedChat} engines={engines.data ?? []} profiles={profiles.data ?? []} presets={presets.data ?? []} workflows={workflows.data ?? []} project={allProjects.find((item) => item.id === displayedChat?.project_id)} liveText={liveText} pendingTurns={displayedChat ? pendingTurns[displayedChat.id] ?? [] : []} workPlans={workPlans.data ?? []} settings={scopedSettings} settingsRole={selectedRole} onSettingsRole={(role) => {
       if (!displayedChat) return;
       setAutoSettingsRoles((current) => ({ ...current, [displayedChat.id]: role }));
-    }} presetId={presetId} onSettings={(settings) => {
+    }} presetId={presetId} maxMediaOutputsPerPlan={applicationInfo.data?.max_media_outputs_per_plan ?? 1} composerDraft={displayedChat ? composerDrafts[displayedChat.id] ?? EMPTY_COMPOSER_DRAFT : EMPTY_COMPOSER_DRAFT} onComposerDraft={(update) => {
+      if (!displayedChat) return;
+      setComposerDrafts((current) => updatedComposerDrafts(current, displayedChat.id, update));
+    }} onSettings={(settings) => {
       if (!displayedChat) return;
       persistActiveChat({
         generation_settings_json: {
@@ -2409,9 +2398,9 @@ export default function App() {
       });
     }} onStop={() => {
       if (displayedChat) stop.mutate(displayedChat.id);
-    }} onStopAndSend={(text, mode, artifacts, settings, references) => {
+    }} onStopAndSend={(text, mode, artifacts, settings, references, outputCount, promptSource) => {
       if (displayedChat) {
-        send.mutate({ chatId: displayedChat.id, id: crypto.randomUUID(), text, mode, artifacts, settings, references, stopCurrent: true });
+        send.mutate({ chatId: displayedChat.id, id: crypto.randomUUID(), text, mode, artifacts, settings, references, outputCount, promptSource, stopCurrent: true });
       }
     }} onDeleteExchange={deleteExchange.mutate} onForkThread={forkThread.mutate} onCancelPlan={(planId) => {
       cancelWorkPlan.mutate(planId);
@@ -2419,12 +2408,12 @@ export default function App() {
       cancelWorkStep.mutate(stepId);
     }} onRetryStep={(stepId) => {
       retryWorkStep.mutate(stepId);
-    }} onSend={(text, mode, artifacts, settings, references) => {
+    }} onSend={(text, mode, artifacts, settings, references, outputCount, promptSource) => {
       if (displayedChat) {
-        send.mutate({ chatId: displayedChat.id, id: crypto.randomUUID(), text, mode, artifacts, settings, references });
+        send.mutate({ chatId: displayedChat.id, id: crypto.randomUUID(), text, mode, artifacts, settings, references, outputCount, promptSource });
       }
     }} />;
-  }, [studioSource, view, modelLibraryRole, engines.data, profiles.data, presets.data, workflows.data, allProjects, chat.data, chatDrafts, autoSettingsRoles, liveText, pendingTurns, workPlans.data, send, regenerate, selectResponseRevision, branch, stop, cancelWorkPlan, cancelWorkStep, retryWorkStep, updateChat, deleteExchange, forkThread, client, openLibraryImage]);
+  }, [studioSource, view, modelLibraryRole, activeChatId, engines.data, profiles.data, presets.data, workflows.data, applicationInfo.data, allProjects, chat.data, chatDrafts, autoSettingsRoles, composerDrafts, liveText, pendingTurns, workPlans.data, send, regenerate, selectResponseRevision, branch, stop, cancelWorkPlan, cancelWorkStep, retryWorkStep, updateChat, deleteExchange, forkThread, client, openLibraryImage, insertPromptIntoComposer]);
 
   if (firstRunSetup && setupReadiness.data) {
     return <FirstRunSetup report={setupReadiness.data} onExit={exitFirstRunSetup} onOpenModels={(role) => { exitFirstRunSetup(); setModelLibraryRole(role); setView("models"); }} onOpenWorkflows={() => { exitFirstRunSetup(); setView("workflows"); }} />;
