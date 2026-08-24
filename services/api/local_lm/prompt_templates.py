@@ -15,6 +15,8 @@ from dataclasses import dataclass
 from enum import Enum, StrEnum
 from typing import NoReturn, cast
 
+from .lora_constraints import MAX_LORA_STRENGTH
+
 PROMPT_TEMPLATE_SCHEMA_VERSION = 1
 PROMPT_TEMPLATE_OPERATION = "text_to_image"
 PROMPT_TEMPLATE_INVALID = "Prompt template contract is invalid."
@@ -35,8 +37,6 @@ MAX_TEMPLATE_DOCUMENT_DEPTH = 16
 MAX_TEMPLATE_DOCUMENT_NODES = 4_096
 MAX_TEMPLATE_DOCUMENT_CHARS = 65_536
 MAX_TEMPLATE_DOCUMENT_BYTES = 262_144
-MAX_LORA_STRENGTH = 4.0
-
 _ROOT_KEYS = frozenset({"schema_version", "operation", "body", "slots", "resource_policy"})
 _SLOT_COMMON_KEYS = frozenset({"name", "mode", "variation_scope"})
 _RESOURCE_INHERITED_KEYS = frozenset({"mode"})

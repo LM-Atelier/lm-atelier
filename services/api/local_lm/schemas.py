@@ -435,6 +435,70 @@ class PromptTemplateWriteOut(ApiModel):
     idempotent: bool
 
 
+class PromptTemplatePortableWorkflowDescriptorOut(ApiModel):
+    descriptor_version: Literal[1]
+    operation: Literal["text_to_image"]
+    artifact_sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
+    dependency_contract_sha256: str | None = Field(default=None, pattern=r"^[0-9a-f]{64}$")
+
+
+class PromptTemplatePortableWorkflowBindingOut(ApiModel):
+    key: str = Field(pattern=r"^workflow_[1-9][0-9]{0,2}$")
+    descriptor: PromptTemplatePortableWorkflowDescriptorOut
+
+
+class PromptTemplatePortableTemplateOut(ApiModel):
+    name: str = Field(min_length=1, max_length=200)
+    description: str = Field(max_length=4_000)
+    contract: dict[str, Any]
+
+
+class PromptTemplatePortableBundleOut(ApiModel):
+    kind: Literal["lm-atelier-prompt-template"]
+    bundle_version: Literal[1]
+    template: PromptTemplatePortableTemplateOut
+    workflows: list[PromptTemplatePortableWorkflowBindingOut] = Field(max_length=16)
+    bundle_sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
+
+
+class PromptTemplateImportWorkflowSuggestionOut(ApiModel):
+    local_ref: str = Field(min_length=1, max_length=40)
+    label: str = Field(min_length=1, max_length=240)
+    authority_sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
+    candidate_receipt: str = Field(min_length=1, max_length=2_048)
+
+
+class PromptTemplateImportCandidateResolve(ApiModel):
+    bundle_json: StrictStr = Field(min_length=1, max_length=524_288)
+    preview_receipt: StrictStr = Field(min_length=1, max_length=2_048)
+    binding_key: StrictStr = Field(pattern=r"^workflow_[1-9][0-9]{0,2}$")
+    local_ref: StrictStr = Field(min_length=1, max_length=40)
+
+
+class PromptTemplateImportWorkflowRequirementOut(ApiModel):
+    kind: Literal["workflow"]
+    binding_key: str = Field(pattern=r"^workflow_[1-9][0-9]{0,2}$")
+    descriptor: PromptTemplatePortableWorkflowDescriptorOut
+    suggestions: list[PromptTemplateImportWorkflowSuggestionOut] = Field(max_length=20)
+
+
+class PromptTemplateImportLoraRequirementOut(ApiModel):
+    kind: Literal["lora"]
+    sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
+    available: StrictBool
+    authority_sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
+    confirmation_receipt: str = Field(min_length=1, max_length=2_048)
+
+
+class PromptTemplateImportPreviewOut(ApiModel):
+    bundle: PromptTemplatePortableBundleOut
+    requirements: list[
+        PromptTemplateImportWorkflowRequirementOut | PromptTemplateImportLoraRequirementOut
+    ]
+    receipt: str = Field(min_length=1, max_length=2_048)
+    expires_at: StrictInt = Field(ge=0)
+
+
 class PromptTemplatePageOut(ApiModel):
     items: list[PromptTemplateDefinitionOut]
     total: int

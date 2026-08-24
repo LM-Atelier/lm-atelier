@@ -123,7 +123,7 @@ def _current_revision(
     return revision
 
 
-def _workflow_revision_is_ready(
+def prompt_template_workflow_revision_is_ready(
     session: Session,
     revision: WorkflowRevision,
     *,
@@ -179,7 +179,7 @@ def validate_prompt_template_resources(
     )
     for revision_id, _ in resources:
         revision = session.get(WorkflowRevision, revision_id) if revision_id is not None else None
-        if revision is None or not _workflow_revision_is_ready(
+        if revision is None or not prompt_template_workflow_revision_is_ready(
             session,
             revision,
             expected_engine=expected_engine,
