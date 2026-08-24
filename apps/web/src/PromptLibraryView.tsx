@@ -6,12 +6,15 @@ import { api } from "./api";
 import { EmptyState } from "./EmptyState";
 import { ErrorCallout } from "./ErrorCallout";
 import { PromptExpansionDialog } from "./PromptExpansionDialog";
+import { servesCapability } from "./workflowFamilies";
 import type { PromptComposerInsertion } from "./composerPromptSource";
 import type {
   PromptTemplateContract,
   PromptTemplateDetail,
   PromptTemplateLora,
   PromptTemplateLoraPolicy,
+  PromptTemplateOptionLoraPolicy,
+  PromptTemplateResourceOption,
   PromptTemplateResourcePolicy,
   PromptTemplateSlot,
   PromptTemplateSlotMode,
@@ -142,7 +145,52 @@ function validContract(contract: PromptTemplateContract): string | null {
       }
     }
   }
+  if (resources.mode === "pool") {
+    // The editor already prevents both counts below - Remove option disables at
+    // two, Add option at sixteen, and both Add LoRA and the fixed-stack choice
+    // once sixty-four are pooled - so neither branch is reachable by authoring.
+    // They are the second layer for a draft loaded from a contract that already
+    // breaks the bound, which is the only way one can arrive here, and they keep
+    // the browser refusal identical to the server rule rather than adjacent.
+    const { options } = resources;
+    if (options.length < 2 || options.length > 16) {
+      return "A workflow pool needs between 2 and 16 options.";
+    }
+    let pooledLoras = 0;
+    for (const [index, option] of options.entries()) {
+      if (!option.workflow_revision_id.trim()) {
+        return `Option ${index + 1} needs an exact workflow revision.`;
+      }
+      if (option.lora_policy.mode === "fixed") {
+        const stackError = validLoraStack(option.lora_policy.stack, `Option ${index + 1}`);
+        if (stackError) return stackError;
+        pooledLoras += option.lora_policy.stack.length;
+      }
+    }
+    if (pooledLoras > 64) {
+      return "A workflow pool can pair at most 64 LoRAs in total.";
+    }
+    if (new Set(options.map(bundleKey)).size !== options.length) {
+      return "Every workflow pool option must be a distinct workflow and LoRA bundle.";
+    }
+  }
   return null;
+}
+
+/** The server keys option uniqueness on the whole workflow-plus-LoRA bundle, not
+ * on the revision alone, so one revision may appear twice with different LoRA
+ * policies. Built as canonical JSON rather than a delimited join so no field can
+ * impersonate a separator. */
+function bundleKey(option: PromptTemplateResourceOption): string {
+  const policy = option.lora_policy;
+  const stack = policy.mode === "fixed"
+    ? policy.stack.map((lora) => [lora.sha256, lora.model_strength, lora.clip_strength])
+    : [];
+  return JSON.stringify([option.workflow_revision_id, policy.mode, stack]);
+}
+
+function emptyPoolOption(): PromptTemplateResourceOption {
+  return { workflow_revision_id: "", lora_policy: { mode: "inherited_auto" } };
 }
 
 function TemplateEditor({
@@ -247,8 +295,19 @@ function TemplateEditor({
       </section>
       <section className="prompt-resource-editor" aria-labelledby="prompt-resources-heading">
         <div className="section-heading compact-heading"><div><h3 id="prompt-resources-heading">Resources</h3><p>Inherit the current image setup or pin verified resources.</p></div></div>
-        <label>Resource policy<select aria-label="Resource policy" value={resources.mode} onChange={(event) => replaceContract({ ...contract, resource_policy: event.target.value === "fixed" ? { mode: "fixed", workflow_revision_id: "", lora_policy: { mode: "inherited_auto" } } : { mode: "inherited" } })}><option value="inherited">Inherit at use time</option><option value="fixed">Fixed verified resources</option></select></label>
+        <label>Resource policy<select aria-label="Resource policy" value={resources.mode} onChange={(event) => {
+          const mode = event.target.value;
+          replaceContract({
+            ...contract,
+            resource_policy: mode === "fixed"
+              ? { mode: "fixed", workflow_revision_id: "", lora_policy: { mode: "inherited_auto" } }
+              : mode === "pool"
+                ? { mode: "pool", strategy: "round_robin", options: [emptyPoolOption(), emptyPoolOption()] }
+                : { mode: "inherited" },
+          });
+        }}><option value="inherited">Inherit at use time</option><option value="fixed">Fixed verified resources</option><option value="pool">Workflow bundle pool</option></select></label>
         {resources.mode === "fixed" && <FixedResourceEditor resources={resources} onChange={(resource_policy) => replaceContract({ ...contract, resource_policy })} />}
+        {resources.mode === "pool" && <WorkflowPoolEditor resources={resources} onChange={(resource_policy) => replaceContract({ ...contract, resource_policy })} />}
       </section>
       <footer>
         <button type="button" className="secondary" onClick={onCancel}>Cancel</button>
@@ -352,8 +411,111 @@ function LoraStackEditor({
   </div>;
 }
 
+function WorkflowPoolEditor({
+  resources,
+  onChange,
+}: {
+  resources: Extract<PromptTemplateResourcePolicy, { mode: "pool" }>;
+  onChange: (resources: Extract<PromptTemplateResourcePolicy, { mode: "pool" }>) => void;
+}) {
+  const { options } = resources;
+  const [optionKeys, setOptionKeys] = useState(() => options.map(() => crypto.randomUUID()));
+  // The bounded source of workflow identity the client already has. No API
+  // surface is added for this: a pool option may only name a revision that is
+  // current and ready, which is the same set the workflow selector offers.
+  // The capability argument joins an image preference but does not require it
+  // to be enabled, so the same `servesCapability` check the workflow selector
+  // applies is applied here - otherwise a family the user has turned off for
+  // image still contributes revisions, and the claim that this is the set the
+  // selector offers would be false.
+  //
+  // The capability also filters FAMILIES rather than variants, and one family
+  // can carry both text_to_image and image_to_image, so the operation is
+  // filtered too. Prompt Library templates are text-to-image only.
+  const families = useQuery({
+    queryKey: ["workflow-families", "image"],
+    queryFn: () => api.workflowFamilies("image"),
+  });
+  const readyRevisions = useMemo(() => {
+    const revisions: { id: string; label: string }[] = [];
+    const seen = new Set<string>();
+    for (const family of families.data ?? []) {
+      if (!servesCapability(family, "image")) continue;
+      for (const variant of family.variants) {
+        if (!variant.current_revision_id || variant.readiness !== "ready") continue;
+        if (variant.operation !== "text_to_image") continue;
+        if (seen.has(variant.current_revision_id)) continue;
+        seen.add(variant.current_revision_id);
+        revisions.push({
+          id: variant.current_revision_id,
+          label: `${family.name} · ${variant.name} (ready)`,
+        });
+      }
+    }
+    return revisions;
+  }, [families.data]);
+  const pooledLoras = options.reduce(
+    (total, option) => total + (option.lora_policy.mode === "fixed" ? option.lora_policy.stack.length : 0),
+    0,
+  );
+  const replaceOption = (index: number, next: PromptTemplateResourceOption) => onChange({
+    ...resources,
+    options: options.map((option, optionIndex) => optionIndex === index ? next : option),
+  });
+  return <>
+    {families.isPending && <p className="prompt-pool-count">Checking which image workflows are ready…</p>}
+    {families.isError && <p className="prompt-pool-count">Could not read which image workflows are ready. Pinned workflows are kept as they are. <button type="button" className="secondary compact-button" onClick={() => void families.refetch()}>Retry</button></p>}
+    <label>Pool strategy<select aria-label="Pool strategy" value={resources.strategy} onChange={(event) => onChange({ ...resources, strategy: event.target.value as "random" | "round_robin" })}><option value="round_robin">Round robin by draft</option><option value="random">Deterministic random</option></select></label>
+    <p className="prompt-pool-count">{options.length} option{options.length === 1 ? "" : "s"} · {pooledLoras} paired LoRA{pooledLoras === 1 ? "" : "s"} of 64</p>
+    {options.map((option, index) => <fieldset key={optionKeys[index]} className="prompt-pool-option"><legend>Option {index + 1}</legend>
+      <label>Workflow revision<select aria-label={`Option ${index + 1} workflow revision`} value={option.workflow_revision_id} onChange={(event) => replaceOption(index, { ...option, workflow_revision_id: event.target.value })}>
+        <option value="">Choose a ready image workflow</option>
+        {readyRevisions.map((revision) => <option key={revision.id} value={revision.id}>{revision.label}</option>)}
+        {/* A template authored earlier can pin a revision that is no longer
+          current or ready. Keep it selectable and say so, rather than
+          silently moving the template onto today's tip.
+
+          Only say it once the read succeeded. While the query is loading or
+          failed the ready set is empty, and calling a pinned revision stale on
+          that basis would turn an unknown read state into a false claim about
+          the workflow. */}
+        {option.workflow_revision_id && !readyRevisions.some((revision) => revision.id === option.workflow_revision_id)
+          && <option value={option.workflow_revision_id}>{option.workflow_revision_id}{families.isSuccess ? " (pinned, not currently ready)" : " (pinned)"}</option>}
+      </select></label>
+      <label>LoRA policy<select aria-label={`Option ${index + 1} LoRA policy`} value={option.lora_policy.mode} onChange={(event) => {
+        const mode = event.target.value as PromptTemplateOptionLoraPolicy["mode"];
+        if (mode === "fixed" && option.lora_policy.mode !== "fixed" && pooledLoras >= 64) return;
+        replaceOption(index, {
+          ...option,
+          lora_policy: mode === "fixed" ? { mode, stack: [emptyLora()] } : { mode },
+        });
+      }}><option value="inherited_auto">Inherit automatic LoRAs</option><option value="none">No LoRAs</option>{/* Choosing a fixed stack mints one LoRA, so at the cap this transition
+        would author a sixty-fifth. Disabled rather than silently dropped, and
+        guarded in the handler too because a disabled option can still be set
+        programmatically. */}<option value="fixed" disabled={option.lora_policy.mode !== "fixed" && pooledLoras >= 64}>Fixed stack</option></select></label>
+      {option.lora_policy.mode === "fixed" && <LoraStackEditor
+        stack={option.lora_policy.stack}
+        ariaPrefix={`Option ${index + 1} LoRA`}
+        addDisabled={pooledLoras >= 64}
+        onChange={(stack) => replaceOption(index, { ...option, lora_policy: { mode: "fixed", stack } })}
+      />}
+      <button type="button" className="secondary compact-button" disabled={options.length <= 2} onClick={() => {
+        setOptionKeys((current) => current.filter((_, currentIndex) => currentIndex !== index));
+        onChange({ ...resources, options: options.filter((_, optionIndex) => optionIndex !== index) });
+      }}>Remove option</button>
+    </fieldset>)}
+    <button type="button" className="secondary compact-button" disabled={options.length >= 16} onClick={() => {
+      setOptionKeys((current) => [...current, crypto.randomUUID()]);
+      onChange({ ...resources, options: [...options, emptyPoolOption()] });
+    }}><Plus size={14} />Add option</button>
+  </>;
+}
+
 function resourceSummary(policy: PromptTemplateResourcePolicy): string {
   if (policy.mode === "inherited") return "Inherited image resources";
+  if (policy.mode === "pool") {
+    return `${policy.options.length}-option workflow pool · ${policy.strategy === "random" ? "random" : "round robin"}`;
+  }
   if (policy.lora_policy.mode === "fixed") return `Fixed workflow · ${policy.lora_policy.stack.length} LoRA${policy.lora_policy.stack.length === 1 ? "" : "s"}`;
   if (policy.lora_policy.mode === "pool") return `Fixed workflow · ${policy.lora_policy.stacks.length}-stack LoRA pool`;
   return `Fixed workflow · ${policy.lora_policy.mode === "none" ? "No LoRAs" : "Automatic LoRAs"}`;

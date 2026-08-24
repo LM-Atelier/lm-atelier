@@ -27,10 +27,69 @@ vi.mock("./api", () => ({
     promptBatch: vi.fn(),
     updatePromptBatchItem: vi.fn(),
     queuePromptBatch: vi.fn(),
+    workflowFamilies: vi.fn(),
   },
 }));
 
 const stamp = "2026-08-20T12:00:00Z";
+function readyVariant(name: string, revisionId: string) {
+  return {
+    id: `wfvar_${revisionId}`,
+    variant_key: revisionId,
+    name,
+    operation: "text_to_image",
+    current_revision_id: revisionId,
+    current_revision_version: 1,
+    engine: "comfyui",
+    capabilities: ["image"],
+    trusted: true,
+    readiness: "ready" as const,
+    readiness_reason: null,
+  };
+}
+const imageFamilies = [{
+  id: "wffam_one",
+  name: "Portrait",
+  description: "",
+  use_case: "image",
+  tags: [],
+  enabled: true,
+  archived: false,
+  compatibility: true,
+  variants: [
+    readyVariant("Base", "workflow-revision-1"),
+    readyVariant("Detail", "workflow-revision-2"),
+    readyVariant("Shared", "shared-revision"),
+    readyVariant("Same", "same-revision"),
+    // Ready, in an image family, and the wrong operation: the selector filters
+    // families by preference, so this one must be excluded by operation here.
+    { ...readyVariant("Edit", "edit-revision"), operation: "image_to_image" },
+    // Right operation, not ready: a pool may only name a revision that can run.
+    {
+      ...readyVariant("Unready", "unready-revision"),
+      readiness: "setup_required" as const,
+      readiness_reason: "missing model",
+    },
+  ],
+  preferences: [{ selector_capability: "image" as const, enabled: true, is_default: true, sort_order: 0 }],
+  created_at: stamp,
+  updated_at: stamp,
+}, {
+  // Ready, text-to-image, and the user has turned this family off for image.
+  // The real selector hides it, so the pool editor must too.
+  id: "wffam_two",
+  name: "Disabled",
+  description: "",
+  use_case: "image",
+  tags: [],
+  enabled: true,
+  archived: false,
+  compatibility: true,
+  variants: [readyVariant("Off", "disabled-family-revision")],
+  preferences: [{ selector_capability: "image" as const, enabled: false, is_default: false, sort_order: 1 }],
+  created_at: stamp,
+  updated_at: stamp,
+}];
 function promptDigest(prompt: string): string {
   return createHash("sha256")
     .update(`prompt-expansion-rendered-v1\0${prompt}`, "utf8")
@@ -161,6 +220,7 @@ beforeEach(() => {
     offset: 0,
   });
   vi.mocked(api.promptTemplate).mockResolvedValue(detail);
+  vi.mocked(api.workflowFamilies).mockResolvedValue(imageFamilies);
   vi.mocked(api.promptTemplateRevisions).mockResolvedValue([currentRevision, previousRevision]);
   vi.mocked(api.createPromptTemplate).mockResolvedValue(writeResult);
   vi.mocked(api.updatePromptTemplate).mockResolvedValue(writeResult);
@@ -342,6 +402,319 @@ describe("Prompt Library Phase 1", () => {
         },
       }),
     })));
+  });
+
+  it("authors an exact workflow bundle pool with per-option LoRA policies", async () => {
+    renderLibrary();
+    await screen.findByRole("heading", { name: "Portrait variants" });
+    fireEvent.click(screen.getByRole("button", { name: "New template" }));
+    fireEvent.change(screen.getByLabelText("Resource policy"), { target: { value: "pool" } });
+    await screen.findAllByRole("option", { name: "Portrait · Base (ready)" });
+    fireEvent.change(screen.getByLabelText("Pool strategy"), { target: { value: "random" } });
+    fireEvent.change(screen.getByLabelText("Option 1 workflow revision"), { target: { value: "workflow-revision-1" } });
+    fireEvent.change(screen.getByLabelText("Option 2 workflow revision"), { target: { value: "workflow-revision-2" } });
+    fireEvent.change(screen.getByLabelText("Option 2 LoRA policy"), { target: { value: "fixed" } });
+    fireEvent.change(screen.getByLabelText("Option 2 LoRA 1 SHA-256"), { target: { value: "d".repeat(64) } });
+    fireEvent.change(screen.getByLabelText("Option 2 LoRA 1 model strength"), { target: { value: "0.6" } });
+    fireEvent.change(screen.getByLabelText("Option 2 LoRA 1 CLIP strength"), { target: { value: "0.5" } });
+    fireEvent.click(screen.getByRole("button", { name: "Save revision" }));
+
+    await waitFor(() => expect(api.createPromptTemplate).toHaveBeenCalledWith(expect.objectContaining({
+      contract: expect.objectContaining({
+        resource_policy: {
+          mode: "pool",
+          strategy: "random",
+          options: [
+            { workflow_revision_id: "workflow-revision-1", lora_policy: { mode: "inherited_auto" } },
+            {
+              workflow_revision_id: "workflow-revision-2",
+              lora_policy: {
+                mode: "fixed",
+                stack: [{ sha256: "d".repeat(64), model_strength: 0.6, clip_strength: 0.5 }],
+              },
+            },
+          ],
+        },
+      }),
+    })));
+  });
+
+  it("accepts one workflow revision paired with two different LoRA policies", async () => {
+    // Uniqueness is on the whole bundle, not the revision id, so the same
+    // workflow may appear twice when its LoRA policy differs.
+    renderLibrary();
+    await screen.findByRole("heading", { name: "Portrait variants" });
+    fireEvent.click(screen.getByRole("button", { name: "New template" }));
+    fireEvent.change(screen.getByLabelText("Resource policy"), { target: { value: "pool" } });
+    await screen.findAllByRole("option", { name: "Portrait · Base (ready)" });
+    fireEvent.change(screen.getByLabelText("Option 1 workflow revision"), { target: { value: "shared-revision" } });
+    fireEvent.change(screen.getByLabelText("Option 2 workflow revision"), { target: { value: "shared-revision" } });
+    fireEvent.change(screen.getByLabelText("Option 2 LoRA policy"), { target: { value: "none" } });
+    fireEvent.click(screen.getByRole("button", { name: "Save revision" }));
+
+    await waitFor(() => expect(api.createPromptTemplate).toHaveBeenCalledWith(expect.objectContaining({
+      contract: expect.objectContaining({
+        resource_policy: {
+          mode: "pool",
+          strategy: "round_robin",
+          options: [
+            { workflow_revision_id: "shared-revision", lora_policy: { mode: "inherited_auto" } },
+            { workflow_revision_id: "shared-revision", lora_policy: { mode: "none" } },
+          ],
+        },
+      }),
+    })));
+  });
+
+  it("refuses two identical workflow and LoRA bundles", async () => {
+    renderLibrary();
+    await screen.findByRole("heading", { name: "Portrait variants" });
+    fireEvent.click(screen.getByRole("button", { name: "New template" }));
+    fireEvent.change(screen.getByLabelText("Resource policy"), { target: { value: "pool" } });
+    await screen.findAllByRole("option", { name: "Portrait · Base (ready)" });
+    fireEvent.change(screen.getByLabelText("Option 1 workflow revision"), { target: { value: "same-revision" } });
+    fireEvent.change(screen.getByLabelText("Option 2 workflow revision"), { target: { value: "same-revision" } });
+    fireEvent.click(screen.getByRole("button", { name: "Save revision" }));
+
+    expect(await screen.findByText("Every workflow pool option must be a distinct workflow and LoRA bundle.")).toBeInTheDocument();
+    expect(api.createPromptTemplate).not.toHaveBeenCalled();
+  });
+
+  it("refuses a pool option with no workflow revision", async () => {
+    renderLibrary();
+    await screen.findByRole("heading", { name: "Portrait variants" });
+    fireEvent.click(screen.getByRole("button", { name: "New template" }));
+    fireEvent.change(screen.getByLabelText("Resource policy"), { target: { value: "pool" } });
+    await screen.findAllByRole("option", { name: "Portrait · Base (ready)" });
+    fireEvent.change(screen.getByLabelText("Option 1 workflow revision"), { target: { value: "workflow-revision-1" } });
+    fireEvent.click(screen.getByRole("button", { name: "Save revision" }));
+
+    expect(await screen.findByText("Option 2 needs an exact workflow revision.")).toBeInTheDocument();
+    expect(api.createPromptTemplate).not.toHaveBeenCalled();
+  });
+
+  it("omits a family whose image preference is disabled", async () => {
+    renderLibrary();
+    await screen.findByRole("heading", { name: "Portrait variants" });
+    fireEvent.click(screen.getByRole("button", { name: "New template" }));
+    fireEvent.change(screen.getByLabelText("Resource policy"), { target: { value: "pool" } });
+    await screen.findAllByRole("option", { name: "Portrait · Base (ready)" });
+
+    expect(screen.queryByRole("option", { name: /Disabled/ })).not.toBeInTheDocument();
+    expect(
+      Array.from(screen.getByLabelText("Option 1 workflow revision").querySelectorAll("option"))
+        .map((option) => option.getAttribute("value")),
+    ).not.toContain("disabled-family-revision");
+  });
+
+  it("omits a variant that is not ready", async () => {
+    renderLibrary();
+    await screen.findByRole("heading", { name: "Portrait variants" });
+    fireEvent.click(screen.getByRole("button", { name: "New template" }));
+    fireEvent.change(screen.getByLabelText("Resource policy"), { target: { value: "pool" } });
+    await screen.findAllByRole("option", { name: "Portrait · Base (ready)" });
+
+    expect(screen.queryByRole("option", { name: /Unready/ })).not.toBeInTheDocument();
+    expect(
+      Array.from(screen.getByLabelText("Option 1 workflow revision").querySelectorAll("option"))
+        .map((option) => option.getAttribute("value")),
+    ).not.toContain("unready-revision");
+  });
+
+  it("refuses a pool option whose fixed stack is incomplete", async () => {
+    renderLibrary();
+    await screen.findByRole("heading", { name: "Portrait variants" });
+    fireEvent.click(screen.getByRole("button", { name: "New template" }));
+    fireEvent.change(screen.getByLabelText("Resource policy"), { target: { value: "pool" } });
+    await screen.findAllByRole("option", { name: "Portrait · Base (ready)" });
+    fireEvent.change(screen.getByLabelText("Option 1 workflow revision"), { target: { value: "workflow-revision-1" } });
+    fireEvent.change(screen.getByLabelText("Option 2 workflow revision"), { target: { value: "workflow-revision-2" } });
+    // A fixed stack starts with one empty LoRA; leaving its digest blank must
+    // refuse rather than submit an unusable stack.
+    fireEvent.change(screen.getByLabelText("Option 2 LoRA policy"), { target: { value: "fixed" } });
+    fireEvent.click(screen.getByRole("button", { name: "Save revision" }));
+
+    expect(await screen.findByText("Option 2 needs unique lowercase SHA-256 digests.")).toBeInTheDocument();
+    expect(api.createPromptTemplate).not.toHaveBeenCalled();
+  });
+
+  it("treats one workflow with two different fixed stacks as two options", async () => {
+    // Uniqueness is on the whole bundle, so the stack has to be part of the key.
+    renderLibrary();
+    await screen.findByRole("heading", { name: "Portrait variants" });
+    fireEvent.click(screen.getByRole("button", { name: "New template" }));
+    fireEvent.change(screen.getByLabelText("Resource policy"), { target: { value: "pool" } });
+    await screen.findAllByRole("option", { name: "Portrait · Base (ready)" });
+    for (const option of [1, 2]) {
+      fireEvent.change(screen.getByLabelText(`Option ${option} workflow revision`), { target: { value: "shared-revision" } });
+      fireEvent.change(screen.getByLabelText(`Option ${option} LoRA policy`), { target: { value: "fixed" } });
+      fireEvent.change(screen.getByLabelText(`Option ${option} LoRA 1 SHA-256`), { target: { value: `${option}`.repeat(64) } });
+      fireEvent.change(screen.getByLabelText(`Option ${option} LoRA 1 model strength`), { target: { value: "1" } });
+      fireEvent.change(screen.getByLabelText(`Option ${option} LoRA 1 CLIP strength`), { target: { value: "1" } });
+    }
+    fireEvent.click(screen.getByRole("button", { name: "Save revision" }));
+
+    await waitFor(() => expect(api.createPromptTemplate).toHaveBeenCalledWith(expect.objectContaining({
+      contract: expect.objectContaining({
+        resource_policy: {
+          mode: "pool",
+          strategy: "round_robin",
+          options: [
+            {
+              workflow_revision_id: "shared-revision",
+              lora_policy: { mode: "fixed", stack: [{ sha256: "1".repeat(64), model_strength: 1, clip_strength: 1 }] },
+            },
+            {
+              workflow_revision_id: "shared-revision",
+              lora_policy: { mode: "fixed", stack: [{ sha256: "2".repeat(64), model_strength: 1, clip_strength: 1 }] },
+            },
+          ],
+        },
+      }),
+    })));
+  });
+
+  it("omits a ready variant whose operation is not text to image", async () => {
+    // workflowFamilies("image") filters FAMILIES by selector preference, so a
+    // family can carry an image-to-image variant that is perfectly ready and
+    // still wrong for a prompt template.
+    renderLibrary();
+    await screen.findByRole("heading", { name: "Portrait variants" });
+    fireEvent.click(screen.getByRole("button", { name: "New template" }));
+    fireEvent.change(screen.getByLabelText("Resource policy"), { target: { value: "pool" } });
+    await screen.findAllByRole("option", { name: "Portrait · Base (ready)" });
+
+    expect(screen.queryByRole("option", { name: /Edit/ })).not.toBeInTheDocument();
+    const first = screen.getByLabelText("Option 1 workflow revision");
+    expect(
+      Array.from(first.querySelectorAll("option")).map((option) => option.getAttribute("value")),
+    ).toEqual(["", "workflow-revision-1", "workflow-revision-2", "shared-revision", "same-revision"]);
+  });
+
+  it("does not call a pinned revision stale when the readiness read failed", async () => {
+    // An empty ready set means "we could not look", not "your workflow is gone".
+    vi.mocked(api.workflowFamilies).mockRejectedValue(new Error("offline"));
+    vi.mocked(api.promptTemplate).mockResolvedValue({
+      ...detail,
+      current_revision: {
+        ...currentRevision,
+        contract_json: {
+          ...contract,
+          resource_policy: {
+            mode: "pool",
+            strategy: "round_robin",
+            options: [
+              { workflow_revision_id: "retired-revision", lora_policy: { mode: "inherited_auto" } },
+              { workflow_revision_id: "workflow-revision-1", lora_policy: { mode: "none" } },
+            ],
+          },
+        },
+      },
+    });
+    renderLibrary();
+    await screen.findByRole("heading", { name: "Portrait variants" });
+    fireEvent.click(screen.getByRole("button", { name: "Edit" }));
+
+    expect(await screen.findByText(/Could not read which image workflows are ready/)).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Retry" })).toBeInTheDocument();
+    // The pinned values survive, and neither is described as stale.
+    expect(screen.getByLabelText("Option 1 workflow revision")).toHaveValue("retired-revision");
+    expect(screen.getByRole("option", { name: "retired-revision (pinned)" })).toBeInTheDocument();
+    expect(screen.queryByText(/not currently ready/)).not.toBeInTheDocument();
+  });
+
+  it("keeps a pinned revision that is no longer ready instead of moving to the tip", async () => {
+    // A template authored earlier can name a revision the ready list no longer
+    // offers. Dropping it here would silently retarget the template.
+    vi.mocked(api.promptTemplate).mockResolvedValue({
+      ...detail,
+      current_revision: {
+        ...currentRevision,
+        contract_json: {
+          ...contract,
+          resource_policy: {
+            mode: "pool",
+            strategy: "round_robin",
+            options: [
+              { workflow_revision_id: "retired-revision", lora_policy: { mode: "inherited_auto" } },
+              { workflow_revision_id: "workflow-revision-1", lora_policy: { mode: "none" } },
+            ],
+          },
+        },
+      },
+    });
+    renderLibrary();
+    await screen.findByRole("heading", { name: "Portrait variants" });
+    fireEvent.click(screen.getByRole("button", { name: "Edit" }));
+    await screen.findAllByRole("option", { name: "Portrait · Base (ready)" });
+
+    const first = screen.getByLabelText("Option 1 workflow revision");
+    expect(first).toHaveValue("retired-revision");
+    expect(screen.getByRole("option", { name: "retired-revision (pinned, not currently ready)" })).toBeInTheDocument();
+    // The still-ready option is offered by name rather than by raw id.
+    expect(screen.getByLabelText("Option 2 workflow revision")).toHaveValue("workflow-revision-1");
+  });
+
+  it("refuses a fixed stack on another option once sixty-four LoRAs are pooled", async () => {
+    renderLibrary();
+    await screen.findByRole("heading", { name: "Portrait variants" });
+    fireEvent.click(screen.getByRole("button", { name: "New template" }));
+    fireEvent.change(screen.getByLabelText("Resource policy"), { target: { value: "pool" } });
+    await screen.findAllByRole("option", { name: "Portrait · Base (ready)" });
+    // Nine options: eight carrying eight LoRAs each, and one still automatic.
+    // Eight per stack rather than sixteen on purpose - at sixteen the Add LoRA
+    // button is already disabled by the per-stack limit, so the pool cap would
+    // be masked and its own guard could be deleted unnoticed.
+    for (let option = 2; option < 9; option += 1) {
+      fireEvent.click(screen.getByRole("button", { name: "Add option" }));
+    }
+    for (let option = 1; option <= 8; option += 1) {
+      fireEvent.change(screen.getByLabelText(`Option ${option} LoRA policy`), { target: { value: "fixed" } });
+      for (let lora = 1; lora < 8; lora += 1) {
+        fireEvent.click(screen.getAllByRole("button", { name: "Add LoRA" })[option - 1]);
+      }
+    }
+    expect(screen.getByText("9 options · 64 paired LoRAs of 64")).toBeInTheDocument();
+
+    // The ninth option may no longer take a stack, because doing so would mint
+    // a sixty-fifth LoRA before any validation ran.
+    const ninth = screen.getByLabelText("Option 9 LoRA policy");
+    const fixedChoice = Array.from(ninth.querySelectorAll("option"))
+      .find((option) => option.getAttribute("value") === "fixed");
+    expect(fixedChoice).toBeDisabled();
+    // The other way past the cap is growing a stack that already exists, and
+    // every one of these holds only eight of its sixteen.
+    for (const button of screen.getAllByRole("button", { name: "Add LoRA" })) {
+      expect(button).toBeDisabled();
+    }
+    fireEvent.change(ninth, { target: { value: "fixed" } });
+    expect(ninth).toHaveValue("inherited_auto");
+    expect(screen.getByText("9 options · 64 paired LoRAs of 64")).toBeInTheDocument();
+    // Building a maximal pool is sixty-odd interactions, so this one case needs
+    // more than the default budget.
+  }, 30_000);
+
+  it("keeps the pool between two and sixteen options and offers no nested LoRA pool", async () => {
+    renderLibrary();
+    await screen.findByRole("heading", { name: "Portrait variants" });
+    fireEvent.click(screen.getByRole("button", { name: "New template" }));
+    fireEvent.change(screen.getByLabelText("Resource policy"), { target: { value: "pool" } });
+    await screen.findAllByRole("option", { name: "Portrait · Base (ready)" });
+
+    // Two options are the floor, so neither may be removed.
+    for (const button of screen.getAllByRole("button", { name: "Remove option" })) {
+      expect(button).toBeDisabled();
+    }
+    // A pool option may not itself hold a LoRA pool.
+    expect(
+      Array.from(screen.getByLabelText("Option 1 LoRA policy").querySelectorAll("option"))
+        .map((option) => option.getAttribute("value")),
+    ).toEqual(["inherited_auto", "none", "fixed"]);
+
+    const add = screen.getByRole("button", { name: "Add option" });
+    for (let index = 2; index < 16; index += 1) fireEvent.click(add);
+    expect(screen.getAllByRole("button", { name: "Remove option" })).toHaveLength(16);
+    expect(add).toBeDisabled();
   });
 
   it("authors an exact deterministic LoRA stack pool", async () => {

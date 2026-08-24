@@ -669,6 +669,9 @@ h1, h2, h3 { margin: 0; }
 .prompt-lora-editor { display: grid; gap: 8px; }
 .prompt-lora-stack { min-width: 0; margin: 8px 0; padding: 12px; border: 1px solid var(--border); border-radius: 10px; background: var(--panel-2); }
 .prompt-strength-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 12px; }
+.prompt-pool-option { min-width: 0; margin: 8px 0; padding: 12px; border: 1px solid var(--border); border-radius: 10px; background: var(--panel-2); }
+.prompt-pool-option legend { padding: 0 6px; color: var(--muted); font-size: 11px; font-weight: 700; }
+.prompt-pool-count { margin: -4px 0 8px; color: var(--muted); font-size: 11px; }
 .prompt-template-editor footer { margin-top: 24px; justify-content: flex-end; }
 .prompt-test-unavailable { margin: -8px 0 12px; color: var(--muted) !important; font-size: 11px; }
 .prompt-expansion-dialog { width: min(860px, 96vw); }

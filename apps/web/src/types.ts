@@ -1343,12 +1343,30 @@ export type PromptTemplateLoraPolicy =
       stacks: PromptTemplateLora[][];
     };
 
+/** A pool option pairs one workflow with a LoRA policy that is never itself a
+ * pool: the server refuses a nested pool because it would create a second
+ * allocation order over the same draft. */
+export type PromptTemplateOptionLoraPolicy = Exclude<
+  PromptTemplateLoraPolicy,
+  { mode: "pool" }
+>;
+
+export interface PromptTemplateResourceOption {
+  workflow_revision_id: string;
+  lora_policy: PromptTemplateOptionLoraPolicy;
+}
+
 export type PromptTemplateResourcePolicy =
   | { mode: "inherited" }
   | {
       mode: "fixed";
       workflow_revision_id: string;
       lora_policy: PromptTemplateLoraPolicy;
+    }
+  | {
+      mode: "pool";
+      strategy: "random" | "round_robin";
+      options: PromptTemplateResourceOption[];
     };
 
 export interface PromptTemplateContract {

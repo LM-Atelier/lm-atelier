@@ -1,9 +1,10 @@
 from __future__ import annotations
 
 import asyncio
+import copy
 import hashlib
 import json
-from typing import Any
+from typing import Any, cast
 
 import pytest
 from fastapi import FastAPI
@@ -15,14 +16,17 @@ from local_lm.auxiliary_assets import AutomaticLoraSelection, ResolvedLoraStack
 from local_lm.db import SessionLocal
 from local_lm.domain import utcnow
 from local_lm.models import (
+    Chat,
     Job,
     Message,
     ModelAssetInstall,
+    Project,
     PromptExpansionBatch,
     PromptExpansionItem,
     PromptTemplateDefinition,
     PromptTemplateRevision,
     Run,
+    WorkflowRevision,
     WorkPlan,
     WorkStep,
 )
@@ -404,6 +408,429 @@ async def test_prompt_batch_queue_allocates_lora_pool_per_item_deterministically
         assert replay.status_code == 202
         assert replay.json()["replayed"] is True
         assert replay.json()["work_plan_id"] == plan["id"]
+
+
+@pytest.mark.asyncio
+async def test_prompt_batch_queue_freezes_distinct_workflow_contexts_per_item(
+    app: FastAPI,
+    client: AsyncClient,
+) -> None:
+    workflow_ids: list[str] = []
+    for index, steps in enumerate((11, 23), start=1):
+        response = await client.post(
+            "/api/workflows",
+            json={
+                "name": f"Prompt execution workflow {index}",
+                "operation": "text_to_image",
+                "engine": "mock",
+                "api_graph": {"node": {"class_type": f"PromptWorkflow{index}"}},
+                "input_schema": {
+                    "type": "object",
+                    "properties": {"steps": {"type": "integer", "default": steps}},
+                },
+                "trusted": True,
+            },
+        )
+        assert response.status_code == 201
+        workflow_ids.append(response.json()["current_revision_id"])
+
+    resource_policy: dict[str, object] = {
+        "mode": "pool",
+        "strategy": "round_robin",
+        "options": [
+            {
+                "workflow_revision_id": workflow_id,
+                "lora_policy": {"mode": "none"},
+            }
+            for workflow_id in workflow_ids
+        ],
+    }
+    template = (
+        await client.post(
+            "/api/prompt-templates",
+            json=_create_payload(
+                key="prompt-workflow-pool-execution",
+                name="Prompt workflow pool execution",
+                contract=_contract(resource_policy=resource_policy),
+            ),
+        )
+    ).json()
+    revision = template["revision"]
+    chat = (await client.post("/api/chats", json={"title": "Workflow pool queue"})).json()
+    batch = (
+        await client.post(
+            f"/api/chats/{chat['id']}/prompt-batches",
+            json={
+                "idempotency_key": "prompt-workflow-pool-preview",
+                "template_revision_id": revision["id"],
+                "contract_sha256": revision["contract_sha256"],
+                "item_count": 2,
+                "selection_seed": 0,
+                "inputs": {"subject": ["first", "second"]},
+            },
+        )
+    ).json()
+    payload = {
+        "idempotency_key": "prompt-workflow-pool-queue",
+        "expected_plan_version": batch["plan_version"],
+        "expected_plan_sha256": batch["plan_sha256"],
+    }
+
+    async with app.state.services.scheduler.lease("primary"):
+        response = await client.post(f"/api/prompt-batches/{batch['id']}/queue", json=payload)
+        assert response.status_code == 202, response.text
+        queued = response.json()
+        plan = (await client.get(f"/api/work-plans/{queued['work_plan_id']}")).json()
+
+        assert [step["workflow_revision_id"] for step in plan["steps"]] == workflow_ids
+        assert [step["settings_json"]["steps"] for step in plan["steps"]] == [11, 23]
+        with SessionLocal() as session:
+            runs = list(
+                session.scalars(
+                    select(Run)
+                    .join(WorkStep, Run.work_step_id == WorkStep.id)
+                    .where(Run.work_plan_id == plan["id"])
+                    .order_by(WorkStep.ordinal)
+                ).all()
+            )
+        assert [run.workflow_revision_id for run in runs] == workflow_ids
+        assert [run.settings_json["steps"] for run in runs] == [11, 23]
+        assert [run.provenance_json["workflow"]["revision_id"] for run in runs] == workflow_ids
+        second_run_id = runs[1].id
+        second_message_id = runs[1].assistant_message_id
+        second_prompt_source = runs[1].provenance_json["prompt_source"]
+        assert [
+            run.provenance_json["prompt_source"]["resource_policy"]["workflow_revision_id"]
+            for run in runs
+        ] == workflow_ids
+        assert all(
+            run.provenance_json["prompt_source"]["resource_policy"]["mode"] == "fixed"
+            for run in runs
+        )
+        assert [run.provenance_json["media_plan_estimate"]["work_units"] for run in runs] == [
+            1024 * 1024 * 11,
+            1024 * 1024 * 23,
+        ]
+        assert plan["summary_json"]["media_plan_estimate"]["work_units"] == (
+            1024 * 1024 * (11 + 23)
+        )
+
+        replay = await client.post(f"/api/prompt-batches/{batch['id']}/queue", json=payload)
+        assert replay.status_code == 202
+        assert replay.json()["replayed"] is True
+        assert replay.json()["work_plan_id"] == plan["id"]
+
+    await _wait_for_run(client, second_run_id)
+    regenerated = await client.post(
+        f"/api/messages/{second_message_id}/regenerate",
+        json={"settings": {}},
+    )
+    assert regenerated.status_code == 202, regenerated.text
+    regenerated_run = regenerated.json()["run"]
+    assert regenerated_run["workflow_revision_id"] == workflow_ids[1]
+    assert regenerated_run["settings_json"]["steps"] == 23
+    assert regenerated_run["provenance_json"]["prompt_source"] == second_prompt_source
+
+
+@pytest.mark.parametrize("scope", ["chat", "project"])
+@pytest.mark.asyncio
+async def test_prompt_batch_workflow_pool_refuses_partly_compatible_shared_setting_atomically(
+    client: AsyncClient,
+    scope: str,
+) -> None:
+    workflow_ids: list[str] = []
+    for index, properties in enumerate(
+        (
+            {"render_style": {"type": "string", "default": "soft"}},
+            {},
+        ),
+        start=1,
+    ):
+        response = await client.post(
+            "/api/workflows",
+            json={
+                "name": f"Prompt settings workflow {index}",
+                "operation": "text_to_image",
+                "engine": "mock",
+                "api_graph": {"node": {"class_type": f"SettingsWorkflow{index}"}},
+                "input_schema": {"type": "object", "properties": properties},
+                "trusted": True,
+            },
+        )
+        assert response.status_code == 201
+        workflow_ids.append(response.json()["current_revision_id"])
+
+    resource_policy: dict[str, object] = {
+        "mode": "pool",
+        "strategy": "round_robin",
+        "options": [
+            {
+                "workflow_revision_id": workflow_id,
+                "lora_policy": {"mode": "none"},
+            }
+            for workflow_id in workflow_ids
+        ],
+    }
+    template = (
+        await client.post(
+            "/api/prompt-templates",
+            json=_create_payload(
+                key="prompt-workflow-pool-settings",
+                name="Prompt workflow pool settings",
+                contract=_contract(resource_policy=resource_policy),
+            ),
+        )
+    ).json()
+    project = (await client.post("/api/projects", json={"name": "Workflow pool project"})).json()
+    chat = (
+        await client.post(
+            "/api/chats",
+            json={"title": "Workflow pool settings", "project_id": project["id"]},
+        )
+    ).json()
+    revision = template["revision"]
+    batch = (
+        await client.post(
+            f"/api/chats/{chat['id']}/prompt-batches",
+            json={
+                "idempotency_key": "prompt-workflow-pool-settings-preview",
+                "template_revision_id": revision["id"],
+                "contract_sha256": revision["contract_sha256"],
+                "item_count": 2,
+                "selection_seed": 0,
+                "inputs": {"subject": ["first", "second"]},
+            },
+        )
+    ).json()
+    with SessionLocal() as session:
+        owner = (
+            session.get(Chat, chat["id"])
+            if scope == "chat"
+            else session.get(Project, project["id"])
+        )
+        assert owner is not None
+        owner.generation_settings_json = {"image": {"render_style": "shared"}}
+        session.commit()
+
+    queue_payload = {
+        "idempotency_key": "prompt-workflow-pool-settings-queue",
+        "expected_plan_version": batch["plan_version"],
+        "expected_plan_sha256": batch["plan_sha256"],
+    }
+    refused = await client.post(
+        f"/api/prompt-batches/{batch['id']}/queue",
+        json=queue_payload,
+    )
+    assert refused.status_code == 422
+    assert refused.json()["code"] == "generation-settings-invalid"
+    with SessionLocal() as session:
+        stored = session.get(PromptExpansionBatch, batch["id"])
+        assert stored is not None
+        assert stored.state == "draft"
+        assert stored.work_plan_id is None
+        assert session.scalar(select(WorkPlan).where(WorkPlan.chat_id == chat["id"])) is None
+        assert session.scalar(select(Run).where(Run.chat_id == chat["id"])) is None
+        assert (
+            session.scalar(
+                select(Job).join(Run, Job.run_id == Run.id).where(Run.chat_id == chat["id"])
+            )
+            is None
+        )
+
+        owner = (
+            session.get(Chat, chat["id"])
+            if scope == "chat"
+            else session.get(Project, project["id"])
+        )
+        assert owner is not None
+        owner.generation_settings_json = {"image": {"obsolete_style": "legacy"}}
+        session.commit()
+
+    # A setting stale for every option keeps the existing persisted-default
+    # behavior: it is ignored rather than making an old chat unusable.
+    recovered = await client.post(
+        f"/api/prompt-batches/{batch['id']}/queue",
+        json=queue_payload,
+    )
+    assert recovered.status_code == 202, recovered.text
+
+
+@pytest.mark.asyncio
+async def test_prompt_batch_workflow_pool_applies_setting_every_option_accepts(
+    client: AsyncClient,
+) -> None:
+    workflow_ids: list[str] = []
+    for index in (1, 2):
+        response = await client.post(
+            "/api/workflows",
+            json={
+                "name": f"Shared settings workflow {index}",
+                "operation": "text_to_image",
+                "engine": "mock",
+                "api_graph": {"node": {"class_type": f"SharedSettingsWorkflow{index}"}},
+                "input_schema": {
+                    "type": "object",
+                    "properties": {"render_style": {"type": "string", "default": "soft"}},
+                },
+                "trusted": True,
+            },
+        )
+        assert response.status_code == 201
+        workflow_ids.append(response.json()["current_revision_id"])
+
+    resource_policy: dict[str, object] = {
+        "mode": "pool",
+        "strategy": "round_robin",
+        "options": [
+            {
+                "workflow_revision_id": workflow_id,
+                "lora_policy": {"mode": "none"},
+            }
+            for workflow_id in workflow_ids
+        ],
+    }
+    template = (
+        await client.post(
+            "/api/prompt-templates",
+            json=_create_payload(
+                key="prompt-pool-shared-accepted",
+                name="Prompt pool shared accepted",
+                contract=_contract(resource_policy=resource_policy),
+            ),
+        )
+    ).json()
+    project = (await client.post("/api/projects", json={"name": "Shared pool project"})).json()
+    chat = (
+        await client.post(
+            "/api/chats",
+            json={"title": "Shared pool settings", "project_id": project["id"]},
+        )
+    ).json()
+    revision = template["revision"]
+    batch = (
+        await client.post(
+            f"/api/chats/{chat['id']}/prompt-batches",
+            json={
+                "idempotency_key": "prompt-pool-shared-accepted-preview",
+                "template_revision_id": revision["id"],
+                "contract_sha256": revision["contract_sha256"],
+                "item_count": 2,
+                "selection_seed": 0,
+                "inputs": {"subject": ["first", "second"]},
+            },
+        )
+    ).json()
+    with SessionLocal() as session:
+        owner = session.get(Chat, chat["id"])
+        assert owner is not None
+        owner.generation_settings_json = {"image": {"render_style": "shared"}}
+        session.commit()
+
+    queued = await client.post(
+        f"/api/prompt-batches/{batch['id']}/queue",
+        json={
+            "idempotency_key": "prompt-pool-shared-accepted-queue",
+            "expected_plan_version": batch["plan_version"],
+            "expected_plan_sha256": batch["plan_sha256"],
+        },
+    )
+    assert queued.status_code == 202, queued.text
+    plan = (await client.get(f"/api/work-plans/{queued.json()['work_plan_id']}")).json()
+    assert [step["settings_json"]["render_style"] for step in plan["steps"]] == [
+        "shared",
+        "shared",
+    ]
+
+
+@pytest.mark.asyncio
+async def test_prompt_batch_workflow_pool_unselected_stale_option_refuses_before_claim_or_media(
+    client: AsyncClient,
+) -> None:
+    workflow_ids: list[str] = []
+    for index in range(2):
+        response = await client.post(
+            "/api/workflows",
+            json={
+                "name": f"Prompt stale workflow {index}",
+                "operation": "text_to_image",
+                "engine": "mock",
+                "api_graph": {"node": {"class_type": f"StaleWorkflow{index}"}},
+                "trusted": True,
+            },
+        )
+        assert response.status_code == 201
+        workflow_ids.append(response.json()["current_revision_id"])
+    resource_policy: dict[str, object] = {
+        "mode": "pool",
+        "strategy": "round_robin",
+        "options": [
+            {
+                "workflow_revision_id": workflow_id,
+                "lora_policy": {"mode": "none"},
+            }
+            for workflow_id in workflow_ids
+        ],
+    }
+    template = (
+        await client.post(
+            "/api/prompt-templates",
+            json=_create_payload(
+                key="prompt-workflow-pool-stale",
+                name="Prompt workflow pool stale",
+                contract=_contract(resource_policy=resource_policy),
+            ),
+        )
+    ).json()
+    revision = template["revision"]
+    chat = (await client.post("/api/chats", json={"title": "Workflow pool stale"})).json()
+    batch = (
+        await client.post(
+            f"/api/chats/{chat['id']}/prompt-batches",
+            json={
+                "idempotency_key": "prompt-workflow-pool-stale-preview",
+                "template_revision_id": revision["id"],
+                "contract_sha256": revision["contract_sha256"],
+                "item_count": 1,
+                "selection_seed": 0,
+                "inputs": {"subject": ["first"]},
+            },
+        )
+    ).json()
+    with SessionLocal() as session:
+        stale = session.get(WorkflowRevision, workflow_ids[1])
+        assert stale is not None
+        stale.trusted = False
+        before = (
+            session.scalar(select(WorkPlan).where(WorkPlan.chat_id == chat["id"])),
+            session.scalar(select(WorkStep).join(WorkPlan).where(WorkPlan.chat_id == chat["id"])),
+            session.scalar(select(Run).where(Run.chat_id == chat["id"])),
+            session.scalar(select(Job).join(Run).where(Run.chat_id == chat["id"])),
+        )
+        assert before == (None, None, None, None)
+        session.commit()
+
+    refused = await client.post(
+        f"/api/prompt-batches/{batch['id']}/queue",
+        json={
+            "idempotency_key": "prompt-workflow-pool-stale-queue",
+            "expected_plan_version": batch["plan_version"],
+            "expected_plan_sha256": batch["plan_sha256"],
+        },
+    )
+    assert refused.status_code in {409, 422}
+    with SessionLocal() as session:
+        stored = session.get(PromptExpansionBatch, batch["id"])
+        assert stored is not None
+        assert stored.state == "draft"
+        assert stored.work_plan_id is None
+        assert session.scalar(select(WorkPlan).where(WorkPlan.chat_id == chat["id"])) is None
+        assert session.scalar(select(Run).where(Run.chat_id == chat["id"])) is None
+        assert (
+            session.scalar(
+                select(Job).join(Run, Job.run_id == Run.id).where(Run.chat_id == chat["id"])
+            )
+            is None
+        )
 
 
 @pytest.mark.asyncio
@@ -1292,6 +1719,86 @@ async def test_prompt_template_fixed_resources_require_ready_workflow_and_verifi
     assert untrusted.status_code == 409
     assert untrusted.json()["code"] == "prompt-template-resources-unavailable"
     assert "untrusted" not in untrusted.text.lower()
+
+
+@pytest.mark.asyncio
+async def test_prompt_template_workflow_pool_requires_every_option_and_lora(
+    client: AsyncClient,
+) -> None:
+    workflow_ids: list[str] = []
+    for index in range(2):
+        response = await client.post(
+            "/api/workflows",
+            json={
+                "name": f"Prompt pool workflow {index}",
+                "operation": "text_to_image",
+                "engine": "mock",
+                "api_graph": {},
+                "trusted": True,
+            },
+        )
+        assert response.status_code == 201
+        workflow_ids.append(response.json()["current_revision_id"])
+
+    pool: dict[str, object] = {
+        "mode": "pool",
+        "strategy": "round_robin",
+        "options": [
+            {
+                "workflow_revision_id": workflow_id,
+                "lora_policy": {"mode": "none"},
+            }
+            for workflow_id in workflow_ids
+        ],
+    }
+    ready = await client.post(
+        "/api/prompt-templates",
+        json=_create_payload(
+            key="workflow-pool-ready",
+            name="Workflow pool ready",
+            contract=_contract(resource_policy=pool),
+        ),
+    )
+    assert ready.status_code == 201, ready.text
+
+    missing_workflow = copy.deepcopy(pool)
+    missing_options = cast(list[dict[str, object]], missing_workflow["options"])
+    missing_options[1]["workflow_revision_id"] = "wfrev_private_missing"
+    unavailable = await client.post(
+        "/api/prompt-templates",
+        json=_create_payload(
+            key="workflow-pool-missing-workflow",
+            name="Workflow pool missing workflow",
+            contract=_contract(resource_policy=missing_workflow),
+        ),
+    )
+    assert unavailable.status_code == 409
+    assert unavailable.json()["code"] == "prompt-template-resources-unavailable"
+    assert "wfrev_private_missing" not in unavailable.text
+
+    missing_lora = copy.deepcopy(pool)
+    lora_options = cast(list[dict[str, object]], missing_lora["options"])
+    lora_options[1]["lora_policy"] = {
+        "mode": "fixed",
+        "stack": [
+            {
+                "sha256": "e" * 64,
+                "model_strength": 1.0,
+                "clip_strength": 1.0,
+            }
+        ],
+    }
+    unavailable = await client.post(
+        "/api/prompt-templates",
+        json=_create_payload(
+            key="workflow-pool-missing-lora",
+            name="Workflow pool missing LoRA",
+            contract=_contract(resource_policy=missing_lora),
+        ),
+    )
+    assert unavailable.status_code == 409
+    assert unavailable.json()["code"] == "prompt-template-resources-unavailable"
+    assert "e" * 64 not in unavailable.text
 
 
 @pytest.mark.asyncio
