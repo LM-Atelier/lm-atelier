@@ -2,15 +2,20 @@ import type { WorkPlan } from "./types";
 
 export function MediaOutputPlan({
   plan,
+  onCancelPlan,
+  onRetryPlan,
   onCancelStep,
   onRetryStep,
 }: {
   plan: WorkPlan;
+  onCancelPlan: (planId: string) => void;
+  onRetryPlan: (planId: string) => void;
   onCancelStep: (stepId: string) => void;
   onRetryStep: (stepId: string) => void;
 }) {
   const steps = [...plan.steps].sort((left, right) => left.ordinal - right.ordinal);
   const ordered = plan.planner_version === "ordered-work-v1";
+  const promptTemplate = plan.planner_version === "prompt-template-v1";
   const counts = steps.reduce<Record<string, number>>((current, step) => {
     current[step.status] = (current[step.status] ?? 0) + 1;
     return current;
@@ -21,9 +26,33 @@ export function MediaOutputPlan({
   return (
     <details className="media-output-plan">
       <summary>
-        <span>{ordered ? `${steps.length}-step plan` : `${steps.length} media outputs`}</span>
+        <span>
+          {ordered
+            ? `${steps.length}-step plan`
+            : promptTemplate
+              ? `${steps.length} Prompt Library outputs`
+              : `${steps.length} media outputs`}
+        </span>
         <small>{summary}</small>
       </summary>
+      <div className="media-output-plan-actions">
+        {steps.some((step) => ["queued", "running", "paused", "blocked"].includes(step.status)) && (
+          <button
+            className="secondary compact-button"
+            onClick={() => onCancelPlan(plan.id)}
+          >
+            Cancel remaining outputs
+          </button>
+        )}
+        {steps.some((step) => ["failed", "cancelled", "interrupted"].includes(step.status)) && (
+          <button
+            className="secondary compact-button"
+            onClick={() => onRetryPlan(plan.id)}
+          >
+            Retry unsuccessful outputs
+          </button>
+        )}
+      </div>
       <ol>
         {steps.map((step) => {
           const cancellable = ["queued", "running", "paused", "blocked"].includes(step.status);
@@ -39,6 +68,7 @@ export function MediaOutputPlan({
                   {ordered ? `Step ${step.ordinal} · ${typeLabel}` : `Output ${step.ordinal}`}
                 </strong>
                 <small>{step.status.replace("_", " ")}</small>
+                {promptTemplate && <p>{step.prompt}</p>}
                 {step.error && <small className="error-text">{step.error}</small>}
               </span>
               {cancellable && (

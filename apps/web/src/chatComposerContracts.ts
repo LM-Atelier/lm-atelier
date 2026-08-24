@@ -85,6 +85,7 @@ export interface ChatViewProps {
   onStopAndSend: SendFromComposer;
   maxMediaOutputsPerPlan: number;
   onCancelPlan: (planId: string) => void;
+  onRetryPlan: (planId: string) => void;
   onCancelStep: (stepId: string) => void;
   onRetryStep: (stepId: string) => void;
   onDeleteExchange: (messageId: string) => void;

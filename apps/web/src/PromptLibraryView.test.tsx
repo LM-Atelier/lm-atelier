@@ -26,6 +26,7 @@ vi.mock("./api", () => ({
     createPromptBatch: vi.fn(),
     promptBatch: vi.fn(),
     updatePromptBatchItem: vi.fn(),
+    queuePromptBatch: vi.fn(),
   },
 }));
 
@@ -108,6 +109,9 @@ const batchItems: PromptBatch["items"] = [1, 2].map((ordinal) => {
     selected: true,
     review_version: 1,
     reroll_count: 0,
+    work_step_id: null,
+    run_id: null,
+    media_seed: null,
   };
 });
 const batch: PromptBatch = {
@@ -123,6 +127,9 @@ const batch: PromptBatch = {
   plan_sha256: planDigest(batchItems),
   state: "draft",
   plan_version: 1,
+  queue_idempotency_key: null,
+  work_plan_id: null,
+  queued_at: null,
   replayed: false,
   items: batchItems,
 };
@@ -182,6 +189,26 @@ beforeEach(() => {
       plan_version: payload.expected_plan_version + 1,
       items: nextItems,
       replayed: false,
+    };
+    return structuredClone(latestBatch);
+  });
+  vi.mocked(api.queuePromptBatch).mockImplementation(async (_batchId, payload) => {
+    latestBatch = {
+      ...latestBatch,
+      state: "queued",
+      plan_version: latestBatch.plan_version + 1,
+      queue_idempotency_key: payload.idempotency_key,
+      work_plan_id: "work-plan-prompt-batch",
+      queued_at: stamp,
+      replayed: false,
+      items: latestBatch.items.map((item) => item.selected
+        ? {
+            ...item,
+            work_step_id: `work-step-${item.ordinal}`,
+            run_id: `run-prompt-${item.ordinal}`,
+            media_seed: 100 + item.ordinal,
+          }
+        : item),
     };
     return structuredClone(latestBatch);
   });
@@ -457,6 +484,50 @@ describe("Prompt Library Phase 1", () => {
     });
     fireEvent.click(within(firstCard).getByRole("checkbox", { name: "Selected" }));
     expect(insert).toBeDisabled();
+  });
+
+  it("queues every saved selected draft as one exact work plan", async () => {
+    const client = renderLibrary();
+    await openAndSubmitExpansion();
+    await screen.findByRole("heading", { name: "Review drafts" });
+
+    const queue = screen.getByRole("button", { name: "Queue selected drafts" });
+    expect(queue).toBeEnabled();
+    fireEvent.click(queue);
+
+    await waitFor(() => expect(api.queuePromptBatch).toHaveBeenCalledWith(
+      batch.id,
+      {
+        idempotency_key: expect.any(String),
+        expected_plan_version: batch.plan_version,
+        expected_plan_sha256: batch.plan_sha256,
+      },
+    ));
+    expect(await screen.findByText("2 selected drafts were queued as one work plan."))
+      .toBeVisible();
+    expect(screen.queryByRole("button", { name: "Queue selected drafts" })).toBeNull();
+    expect(client.getQueryData<PromptBatch>(["prompt-batch", batch.id])).toMatchObject({
+      state: "queued",
+      work_plan_id: "work-plan-prompt-batch",
+      items: [
+        { work_step_id: "work-step-1", run_id: "run-prompt-1", media_seed: 101 },
+        { work_step_id: "work-step-2", run_id: "run-prompt-2", media_seed: 102 },
+      ],
+    });
+  });
+
+  it("refuses to queue while any review card has unsaved changes", async () => {
+    renderLibrary();
+    await openAndSubmitExpansion();
+    await screen.findByRole("heading", { name: "Review drafts" });
+
+    const queue = screen.getByRole("button", { name: "Queue selected drafts" });
+    fireEvent.change(screen.getByLabelText("Reviewed prompt for draft 2"), {
+      target: { value: "Unsaved private review" },
+    });
+    await waitFor(() => expect(queue).toBeDisabled());
+    fireEvent.click(queue);
+    expect(api.queuePromptBatch).not.toHaveBeenCalled();
   });
 
   it("collects one batch input and leaves model guidance read-only", async () => {

@@ -47,6 +47,7 @@ import type {
   PromptHelperDetail,
   PromptBatchCreateInput,
   PromptBatchItemUpdateInput,
+  PromptBatchQueueInput,
   PromptTemplateCreateInput,
   PromptTemplateDetail,
   PromptTemplatePage,
@@ -327,6 +328,11 @@ export const api = {
     `/api/prompt-batches/${encodeURIComponent(batchId)}/items/${ordinal}`,
     { method: "PATCH", body: JSON.stringify(payload) },
   ),
+  queuePromptBatch: (batchId: string, payload: PromptBatchQueueInput) =>
+    request<unknown>(`/api/prompt-batches/${encodeURIComponent(batchId)}/queue`, {
+      method: "POST",
+      body: JSON.stringify(payload),
+    }),
   studioCapabilities: () => request<StudioCapabilityReport>("/api/studio/capabilities"),
   sendTurn: async (
     chatId: string,

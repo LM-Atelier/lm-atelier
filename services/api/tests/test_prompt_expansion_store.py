@@ -1240,8 +1240,44 @@ def test_migration_is_self_contained_and_chat_delete_cascades(tmp_path: Path) ->
             "prompt_expansion_item_update_guard",
         }
         assert connection.execute("SELECT version_num FROM alembic_version").fetchone() == (
+            "a6e2c9f31b47",
+        )
+        batch_columns = {
+            row[1] for row in connection.execute("PRAGMA table_info(prompt_expansion_batches)")
+        }
+        item_columns = {
+            row[1] for row in connection.execute("PRAGMA table_info(prompt_expansion_items)")
+        }
+        assert {"queue_idempotency_key", "work_plan_id", "queued_at"} <= batch_columns
+        assert {"work_step_id", "run_id", "media_seed"} <= item_columns
+
+    command.downgrade(config, "c1e7a4b92d60")
+    with sqlite3.connect(database) as connection:
+        assert connection.execute("SELECT version_num FROM alembic_version").fetchone() == (
             "c1e7a4b92d60",
         )
+        batch_columns = {
+            row[1] for row in connection.execute("PRAGMA table_info(prompt_expansion_batches)")
+        }
+        item_columns = {
+            row[1] for row in connection.execute("PRAGMA table_info(prompt_expansion_items)")
+        }
+        assert {"queue_idempotency_key", "work_plan_id", "queued_at"}.isdisjoint(batch_columns)
+        assert {"work_step_id", "run_id", "media_seed"}.isdisjoint(item_columns)
+        assert {
+            row[0]
+            for row in connection.execute(
+                "SELECT name FROM sqlite_master WHERE type='trigger' "
+                "AND name LIKE 'prompt_expansion_%'"
+            )
+        } == {
+            "prompt_expansion_batch_insert_guard",
+            "prompt_expansion_batch_update_guard",
+            "prompt_expansion_item_insert_guard",
+            "prompt_expansion_item_update_guard",
+        }
+
+    command.upgrade(config, "head")
     command.downgrade(config, "b7c1e4a90f26")
     with sqlite3.connect(database) as connection:
         assert (

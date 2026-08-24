@@ -126,6 +126,9 @@ it("inserts a reviewed Prompt Library draft into the image composer with removab
     plan_sha256: "d".repeat(64),
     state: "draft" as const,
     plan_version: 1,
+    queue_idempotency_key: null,
+    work_plan_id: null,
+    queued_at: null,
     replayed: false,
     items: [{
       id: "prompt-item-one",
@@ -137,6 +140,9 @@ it("inserts a reviewed Prompt Library draft into the image composer with removab
       selected: true,
       review_version: 1,
       reroll_count: 0,
+      work_step_id: null,
+      run_id: null,
+      media_seed: null,
     }, {
       id: "prompt-item-two",
       ordinal: 2,
@@ -147,6 +153,9 @@ it("inserts a reviewed Prompt Library draft into the image composer with removab
       selected: true,
       review_version: 1,
       reroll_count: 0,
+      work_step_id: null,
+      run_id: null,
+      media_seed: null,
     }],
   };
   localStorage.setItem("local-lm-chat", chat.id);

@@ -462,6 +462,16 @@ class PromptExpansionItemUpdate(ApiModel):
     selected: StrictBool
 
 
+class PromptExpansionQueue(ApiModel):
+    idempotency_key: StrictStr = Field(
+        min_length=1,
+        max_length=200,
+        pattern=r"^[A-Za-z0-9][A-Za-z0-9_.:-]{0,199}$",
+    )
+    expected_plan_version: StrictInt = Field(ge=1)
+    expected_plan_sha256: StrictStr = Field(pattern=r"^[0-9a-f]{64}$")
+
+
 class PromptExpansionItemOut(ApiModel):
     id: str = Field(min_length=1, max_length=40)
     ordinal: int = Field(ge=1, le=16)
@@ -472,6 +482,9 @@ class PromptExpansionItemOut(ApiModel):
     selected: bool
     review_version: int = Field(ge=1)
     reroll_count: int = Field(ge=0)
+    work_step_id: str | None = Field(default=None, min_length=1, max_length=40)
+    run_id: str | None = Field(default=None, min_length=1, max_length=40)
+    media_seed: int | None = Field(default=None, ge=0, lt=2_147_483_648)
 
 
 class PromptExpansionBatchOut(ApiModel):
@@ -487,6 +500,9 @@ class PromptExpansionBatchOut(ApiModel):
     plan_sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
     state: Literal["draft", "queued"]
     plan_version: int = Field(ge=1)
+    queue_idempotency_key: str | None = Field(default=None, min_length=1, max_length=200)
+    work_plan_id: str | None = Field(default=None, min_length=1, max_length=40)
+    queued_at: datetime | None = None
     items: list[PromptExpansionItemOut] = Field(min_length=1, max_length=16)
     replayed: bool
 

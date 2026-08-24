@@ -129,6 +129,7 @@ import type { ComposerAttachment } from "./useComposerUploads";
 import { useDraftClassification } from "./useDraftClassification";
 import { useFirstRunSetup } from "./useFirstRunSetup";
 import { usePromptLibraryComposerInsertion } from "./usePromptLibraryComposerInsertion";
+import { useWorkPlanMutations } from "./useWorkPlanMutations";
 import { useGenerationModeSelection } from "./useGenerationModeSelection";
 import { useMessageActions } from "./useMessageActions";
 import {
@@ -1194,6 +1195,7 @@ function ChatView({
   onStopAndSend,
   maxMediaOutputsPerPlan,
   onCancelPlan,
+  onRetryPlan,
   onCancelStep,
   onRetryStep,
   onDeleteExchange,
@@ -1293,9 +1295,17 @@ function ChatView({
           const isPrimaryOutput = messagePlan?.summary_json.assistant_message_id === message.id;
           return (
             <Fragment key={message.id}>
-              {messagePlan && messagePlan.steps.length > 1 && isPrimaryOutput && messagePlan.steps.some((step) => step.status !== "complete") && (
+              {messagePlan
+                && messagePlan.steps.length > 1
+                && isPrimaryOutput
+                && (
+                  messagePlan.planner_version === "prompt-template-v1"
+                  || messagePlan.steps.some((step) => step.status !== "complete")
+                ) && (
                 <MediaOutputPlan
                   plan={messagePlan}
+                  onCancelPlan={onCancelPlan}
+                  onRetryPlan={onRetryPlan}
                   onCancelStep={onCancelStep}
                   onRetryStep={onRetryStep}
                 />
@@ -2151,28 +2161,13 @@ export default function App() {
       });
     },
   });
-  const cancelWorkPlan = useMutation({
-    mutationFn: api.cancelWorkPlan,
-    onSuccess: (plan) => {
-      void client.invalidateQueries({ queryKey: ["chat", plan.chat_id] });
-      void client.invalidateQueries({ queryKey: ["work-plans", plan.chat_id] });
-      void client.invalidateQueries({ queryKey: ["jobs"] });
-    },
-  });
+  const {
+    cancelWorkPlan,
+    retryWorkPlan,
+    cancelWorkStep,
+    retryWorkStep,
+  } = useWorkPlanMutations(activeChatId);
   const { deleteExchange, forkThread } = useMessageActions(setCurrentChatId, setView);
-  const refreshWorkStep = () => {
-    void client.invalidateQueries({ queryKey: ["chat", activeChatId] });
-    void client.invalidateQueries({ queryKey: ["work-plans", activeChatId] });
-    void client.invalidateQueries({ queryKey: ["jobs"] });
-  };
-  const cancelWorkStep = useMutation({
-    mutationFn: api.cancelWorkStep,
-    onSuccess: refreshWorkStep,
-  });
-  const retryWorkStep = useMutation({
-    mutationFn: api.retryWorkStep,
-    onSuccess: refreshWorkStep,
-  });
   const regenerate = useMutation({
     mutationFn: ({ messageId, settings }: { chatId: string; messageId: string; settings: Record<string, unknown> }) =>
       api.regenerateMessage(messageId, settings),
@@ -2404,6 +2399,8 @@ export default function App() {
       }
     }} onDeleteExchange={deleteExchange.mutate} onForkThread={forkThread.mutate} onCancelPlan={(planId) => {
       cancelWorkPlan.mutate(planId);
+    }} onRetryPlan={(planId) => {
+      retryWorkPlan.mutate(planId);
     }} onCancelStep={(stepId) => {
       cancelWorkStep.mutate(stepId);
     }} onRetryStep={(stepId) => {
@@ -2413,7 +2410,7 @@ export default function App() {
         send.mutate({ chatId: displayedChat.id, id: crypto.randomUUID(), text, mode, artifacts, settings, references, outputCount, promptSource });
       }
     }} />;
-  }, [studioSource, view, modelLibraryRole, activeChatId, engines.data, profiles.data, presets.data, workflows.data, applicationInfo.data, allProjects, chat.data, chatDrafts, autoSettingsRoles, composerDrafts, liveText, pendingTurns, workPlans.data, send, regenerate, selectResponseRevision, branch, stop, cancelWorkPlan, cancelWorkStep, retryWorkStep, updateChat, deleteExchange, forkThread, client, openLibraryImage, insertPromptIntoComposer]);
+  }, [studioSource, view, modelLibraryRole, activeChatId, engines.data, profiles.data, presets.data, workflows.data, applicationInfo.data, allProjects, chat.data, chatDrafts, autoSettingsRoles, composerDrafts, liveText, pendingTurns, workPlans.data, send, regenerate, selectResponseRevision, branch, stop, cancelWorkPlan, retryWorkPlan, cancelWorkStep, retryWorkStep, updateChat, deleteExchange, forkThread, client, openLibraryImage, insertPromptIntoComposer]);
 
   if (firstRunSetup && setupReadiness.data) {
     return <FirstRunSetup report={setupReadiness.data} onExit={exitFirstRunSetup} onOpenModels={(role) => { exitFirstRunSetup(); setModelLibraryRole(role); setView("models"); }} onOpenWorkflows={() => { exitFirstRunSetup(); setView("workflows"); }} />;
@@ -2444,7 +2441,7 @@ export default function App() {
         onOpenWorkflows={() => { setSetupOpen(false); openWorkflows(); }}
       />
       <JobsPanel />
-      <GlobalNotices connected={eventsConnected} mutations={[send, regenerate, selectResponseRevision, branch, stop, cancelWorkPlan, cancelWorkStep, retryWorkStep, updateChat, createChat, createProject, exportProject, importProject, manageChat, deleteChat, updateProject, deleteProject, deleteExchange, forkThread]} />
+      <GlobalNotices connected={eventsConnected} mutations={[send, regenerate, selectResponseRevision, branch, stop, cancelWorkPlan, retryWorkPlan, cancelWorkStep, retryWorkStep, updateChat, createChat, createProject, exportProject, importProject, manageChat, deleteChat, updateProject, deleteProject, deleteExchange, forkThread]} />
     </div>
   );
 }

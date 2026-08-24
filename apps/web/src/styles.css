@@ -401,6 +401,7 @@ h1, h2, h3 { margin: 0; }
 .media-output-plan { margin: 0 0 22px 50px; border: 1px solid var(--border); border-radius: 10px; background: var(--surface-2); }
 .media-output-plan > summary { display: flex; justify-content: space-between; gap: 12px; cursor: pointer; padding: 10px 12px; color: var(--ink-primary); font-size: 12px; }
 .media-output-plan > summary small { color: var(--muted); }
+.media-output-plan-actions { display: flex; flex-wrap: wrap; gap: 8px; padding: 0 12px 10px; }
 .media-output-plan ol { display: grid; gap: 0; margin: 0; padding: 0 10px 8px; list-style: none; }
 .media-output-plan li { display: flex; align-items: center; gap: 8px; min-height: 42px; border-top: 1px solid var(--border); padding: 7px 2px; }
 .media-output-plan li > span { display: grid; flex: 1; gap: 2px; min-width: 0; }
