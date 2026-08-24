@@ -12,7 +12,7 @@ import socket
 import sys
 import threading
 import time
-from collections.abc import Awaitable, Callable, Mapping
+from collections.abc import Awaitable, Callable, Iterator, Mapping
 from dataclasses import dataclass, field
 from pathlib import Path, PurePosixPath
 from typing import TYPE_CHECKING, Any, Literal
@@ -29,6 +29,17 @@ from .comfy_editor_bridge import (
 from .comfy_registry_paths import registry_wheel_environment_root
 from .config import Settings
 from .events import EventBroker
+from .filesystem_links import (
+    AnchoredDirectory,
+    AnchoredDirectoryError,
+    AnchoredEntryExists,
+    create_entry,
+    discard_entry,
+    open_child_directory,
+    read_entry,
+    rename_entry,
+    sync_directory,
+)
 from .gguf import GGUFSelectionError, automatic_mmproj_selection, validate_gguf_selection
 from .model_manifests import COMFY_MODEL_FOLDERS, comfy_folder_for_kind
 from .models import ModelAssetInstall, ModelInstall, ModelProfile
@@ -42,6 +53,101 @@ if TYPE_CHECKING:
     from .comfy_registry_installs import ComfyRegistryLaunchContract
     from .runtime_provisioning import RuntimeProvisioner
     from .workflow_activations import WorkflowActivationLaunchScope
+
+
+STATE_REFUSED = "LM Atelier's state folder may not be a filesystem link"
+
+
+class ProcessStateError(RuntimeError):
+    """State beneath the data folder could not be reached or published safely."""
+
+
+@contextlib.contextmanager
+def _held_state(state_dir: Path, *children: str) -> Iterator[AnchoredDirectory]:
+    """Hold the state folder, and any child, for a whole operation.
+
+    Every missing component is established THROUGH its held parent rather than
+    by a pathname mkdir, so a redirection anywhere in the ancestry refuses
+    before anything below it is created - creation cannot precede containment.
+
+    The chain is retained as it descends instead of being released: an adopted
+    child holds only its own handle, so letting an ancestor go would hand back
+    the thing being held.
+    """
+
+    root = state_dir.expanduser()
+    if not root.is_absolute():
+        root = Path.cwd() / root
+    held: list[AnchoredDirectory] = []
+    try:
+        anchor = AnchoredDirectory(Path(root.parts[0]))
+        held.append(anchor)
+        for component in (*root.parts[1:], *children):
+            anchor = open_child_directory(anchor, component, create=True)
+            held.append(anchor)
+        yield anchor
+    except AnchoredDirectoryError as exc:
+        raise ProcessStateError(STATE_REFUSED) from exc
+    finally:
+        for entry in reversed(held):
+            entry.close()
+
+
+def _publish_bytes(anchor: AnchoredDirectory, name: str, payload: bytes) -> None:
+    """Publish `payload` as `name` inside the held directory, atomically.
+
+    Staged under a name that cannot be predicted or reused and created
+    EXCLUSIVELY, then moved into place. A fixed ".tmp" sibling can be
+    pre-planted as a link, and a plain write follows one - so guarding only the
+    published name protects everything except the file the bytes travel
+    through. An entry abandoned by an interrupted run is inert here rather than
+    blocking a later write.
+    """
+
+    staging = ""
+    descriptor = -1
+    for _attempt in range(5):
+        staging = f"{name}.{secrets.token_hex(8)}.tmp"
+        try:
+            descriptor = create_entry(anchor, staging)
+            break
+        except AnchoredEntryExists:
+            continue
+        except AnchoredDirectoryError as exc:
+            raise ProcessStateError(STATE_REFUSED) from exc
+    if descriptor < 0:
+        raise ProcessStateError(STATE_REFUSED)
+    try:
+        handle = os.fdopen(descriptor, "wb")
+    except BaseException:
+        # fdopen takes ownership only once it succeeds, so every failure
+        # BEFORE it has to close the descriptor itself.
+        with contextlib.suppress(OSError):
+            os.close(descriptor)
+        with contextlib.suppress(Exception):
+            discard_entry(anchor, staging)
+        raise
+    try:
+        with handle:
+            handle.write(payload)
+            handle.flush()
+            os.fsync(handle.fileno())
+    except BaseException:
+        with contextlib.suppress(Exception):
+            discard_entry(anchor, staging)
+        raise
+    try:
+        # Publishing over the previous file is the point, so replacement is
+        # requested explicitly rather than left to differ by platform.
+        rename_entry(anchor, staging, name, replace=True)
+        # The record is durable; the directory ENTRY naming it is not until
+        # the directory itself is synced.
+        sync_directory(anchor)
+    except AnchoredDirectoryError as exc:
+        with contextlib.suppress(Exception):
+            discard_entry(anchor, staging)
+        raise ProcessStateError(STATE_REFUSED) from exc
+
 
 logger = logging.getLogger(__name__)
 
@@ -968,15 +1074,11 @@ class ProcessSupervisor:
                 "base_path": str(asset.base_path),
                 asset.loader_folder: ".",
             }
-        destination_dir = self.settings.state_dir / "comfy-launch"
-        destination_dir.mkdir(parents=True, exist_ok=True)
-        destination = destination_dir / f"{scope.launch_sha256}.yaml"
-        temporary = destination.with_name(
-            f"{destination.name}.{os.getpid()}.{threading.get_ident()}.tmp"
-        )
-        temporary.write_text(json.dumps(config, indent=2), encoding="utf-8")
-        os.replace(temporary, destination)
-        return destination
+        name = f"{scope.launch_sha256}.yaml"
+        payload = json.dumps(config, indent=2).encode("utf-8")
+        with _held_state(self.settings.state_dir, "comfy-launch") as anchor:
+            _publish_bytes(anchor, name, payload)
+        return self.settings.state_dir / "comfy-launch" / name
 
     def _write_comfy_model_paths(
         self,
@@ -1034,11 +1136,11 @@ class ProcessSupervisor:
                     "base_path": base_path,
                     **paths,
                 }
-        destination = self.settings.state_dir / "comfy-extra-model-paths.yaml"
-        temporary = destination.with_suffix(".tmp")
-        temporary.write_text(json.dumps(config, indent=2), encoding="utf-8")
-        os.replace(temporary, destination)
-        return destination
+        name = "comfy-extra-model-paths.yaml"
+        payload = json.dumps(config, indent=2).encode("utf-8")
+        with _held_state(self.settings.state_dir) as anchor:
+            _publish_bytes(anchor, name, payload)
+        return self.settings.state_dir / name
 
     @staticmethod
     def _validated_comfy_paths(value: object) -> dict[str, str]:
@@ -1405,48 +1507,75 @@ class ProcessSupervisor:
         return False
 
     def _load_worker_identities(self) -> dict[str, list[_ProcessIdentity]]:
-        if not self._identity_path.is_file():
-            return {}
+        """Read the persisted identities through ONE held state directory.
+
+        Reading by pathname first meant a redirected state folder could SUPPLY
+        this record, and __init__ hands it straight to _reap_persisted_workers,
+        which terminates the processes it names. Guarding publication and
+        discard was not enough while the read that feeds termination was not -
+        and of the three, the read is the dangerous one.
+
+        A refusal yields no identities, so nothing is reaped: an unreadable
+        record must never be able to cause a termination.
+        """
+
+        name = self._identity_path.name
         try:
-            payload = json.loads(self._identity_path.read_text(encoding="utf-8"))
-            if not isinstance(payload, dict) or payload.get("version") != 1:
-                raise ValueError("unsupported worker identity record")
-            workers = payload.get("workers")
-            if not isinstance(workers, dict) or set(workers) - set(self._locks):
-                raise ValueError("invalid worker identity record")
-            result: dict[str, list[_ProcessIdentity]] = {}
-            for name, items in workers.items():
-                if not isinstance(items, list) or len(items) > 64:
-                    raise ValueError("invalid worker identity list")
-                identities: list[_ProcessIdentity] = []
-                for item in items:
-                    if not isinstance(item, dict):
-                        raise ValueError("invalid worker identity")
-                    pid = item.get("pid")
-                    create_time = item.get("create_time")
-                    if (
-                        not isinstance(pid, int)
-                        or isinstance(pid, bool)
-                        or pid <= 0
-                        or not isinstance(create_time, (int, float))
-                        or isinstance(create_time, bool)
-                        or create_time <= 0
-                    ):
-                        raise ValueError("invalid worker identity")
-                    identities.append(_ProcessIdentity(pid, float(create_time)))
-                if identities:
-                    result[name] = identities
-            return result
-        except (OSError, UnicodeError, ValueError, json.JSONDecodeError):
-            logger.warning("Discarding an invalid persisted worker identity record")
-            with contextlib.suppress(OSError):
-                self._identity_path.unlink()
+            with _held_state(self.settings.state_dir) as anchor:
+                raw = read_entry(anchor, name)
+                if raw is None:
+                    return {}
+                try:
+                    return self._parse_worker_identities(raw)
+                except (UnicodeError, ValueError, json.JSONDecodeError):
+                    logger.warning("Discarding an invalid persisted worker identity record")
+                    with contextlib.suppress(Exception):
+                        discard_entry(anchor, name)
+                    return {}
+        except (OSError, ProcessStateError):
+            logger.warning("Could not read the persisted worker identity record")
             return {}
+
+    def _parse_worker_identities(self, raw: bytes) -> dict[str, list[_ProcessIdentity]]:
+        """Validate the record's bytes. Raises for anything malformed."""
+
+        payload = json.loads(raw.decode("utf-8"))
+        if not isinstance(payload, dict) or payload.get("version") != 1:
+            raise ValueError("unsupported worker identity record")
+        workers = payload.get("workers")
+        if not isinstance(workers, dict) or set(workers) - set(self._locks):
+            raise ValueError("invalid worker identity record")
+        result: dict[str, list[_ProcessIdentity]] = {}
+        for name, items in workers.items():
+            if not isinstance(items, list) or len(items) > 64:
+                raise ValueError("invalid worker identity list")
+            identities: list[_ProcessIdentity] = []
+            for item in items:
+                if not isinstance(item, dict):
+                    raise ValueError("invalid worker identity")
+                pid = item.get("pid")
+                create_time = item.get("create_time")
+                if (
+                    not isinstance(pid, int)
+                    or isinstance(pid, bool)
+                    or pid <= 0
+                    or not isinstance(create_time, (int, float))
+                    or isinstance(create_time, bool)
+                    or create_time <= 0
+                ):
+                    raise ValueError("invalid worker identity")
+                identities.append(_ProcessIdentity(pid, float(create_time)))
+            if identities:
+                result[name] = identities
+        return result
 
     def _persist_worker_identities(self) -> None:
         if not self._worker_identities:
-            with contextlib.suppress(OSError):
-                self._identity_path.unlink()
+            with (
+                contextlib.suppress(OSError, ProcessStateError),
+                _held_state(self.settings.state_dir) as anchor,
+            ):
+                discard_entry(anchor, self._identity_path.name)
             return
         payload = {
             "version": 1,
@@ -1458,13 +1587,16 @@ class ProcessSupervisor:
                 for name, identities in sorted(self._worker_identities.items())
             },
         }
-        temporary = self._identity_path.with_suffix(".tmp")
         try:
-            temporary.write_text(json.dumps(payload, sort_keys=True), encoding="utf-8")
-            os.replace(temporary, self._identity_path)
-        except OSError:
-            with contextlib.suppress(OSError):
-                temporary.unlink()
+            with _held_state(self.settings.state_dir) as anchor:
+                _publish_bytes(
+                    anchor,
+                    self._identity_path.name,
+                    json.dumps(payload, sort_keys=True).encode("utf-8"),
+                )
+        except (OSError, ProcessStateError):
+            # Persisting identities is best effort, as it was before, but a
+            # containment refusal is logged rather than passed over in silence.
             logger.exception("Could not persist worker process identities")
 
     @staticmethod
