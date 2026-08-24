@@ -11,7 +11,9 @@ from local_lm.prompt_templates import (
     MAX_LORA_STRENGTH,
     MAX_TEMPLATE_CHOICES,
     MAX_TEMPLATE_DOCUMENT_DEPTH,
+    MAX_TEMPLATE_LORA_STACKS,
     MAX_TEMPLATE_LORAS,
+    MAX_TEMPLATE_POOL_LORAS,
     MAX_TEMPLATE_SLOTS,
     MAX_TEMPLATE_TOTAL_CHOICES,
     PromptTemplateContract,
@@ -74,6 +76,23 @@ def _fixed_resources() -> dict[str, object]:
                     "model_strength": -0.0,
                     "clip_strength": 1,
                 },
+            ],
+        },
+    }
+    return payload
+
+
+def _pooled_resources(*, strategy: str = "round_robin") -> dict[str, object]:
+    payload = _payload()
+    payload["resource_policy"] = {
+        "mode": "fixed",
+        "workflow_revision_id": "revision-123",
+        "lora_policy": {
+            "mode": "pool",
+            "strategy": strategy,
+            "stacks": [
+                [{"sha256": SHA_A, "model_strength": 0.8, "clip_strength": 0.6}],
+                [{"sha256": SHA_B, "model_strength": 1.0, "clip_strength": 0.7}],
             ],
         },
     }
@@ -229,6 +248,81 @@ def test_every_output_affecting_order_or_value_changes_digest(
     assert prompt_template_contract_sha256(
         parse_prompt_template_contract(first)
     ) != prompt_template_contract_sha256(parse_prompt_template_contract(second))
+
+
+def test_lora_stack_pool_round_trips_canonically_and_affects_digest() -> None:
+    payload = _pooled_resources()
+    contract = parse_prompt_template_contract(payload)
+    assert prompt_template_contract_payload(contract) == payload
+
+    random_pool = _pooled_resources(strategy="random")
+    assert prompt_template_contract_sha256(contract) != prompt_template_contract_sha256(
+        parse_prompt_template_contract(random_pool)
+    )
+    reversed_pool = _pooled_resources()
+    resource = cast(dict[str, object], reversed_pool["resource_policy"])
+    policy = cast(dict[str, object], resource["lora_policy"])
+    stacks = cast(list[object], policy["stacks"])
+    stacks.reverse()
+    assert prompt_template_contract_sha256(contract) != prompt_template_contract_sha256(
+        parse_prompt_template_contract(reversed_pool)
+    )
+
+
+@pytest.mark.parametrize(
+    "mutation",
+    [
+        lambda policy: policy.__setitem__("strategy", "weighted"),
+        lambda policy: policy.__setitem__("stacks", []),
+        lambda policy: policy.__setitem__(
+            "stacks",
+            [[{"sha256": SHA_A, "model_strength": 1.0, "clip_strength": 1.0}]],
+        ),
+        lambda policy: policy.__setitem__(
+            "stacks",
+            [
+                [{"sha256": SHA_A, "model_strength": 1.0, "clip_strength": 1.0}],
+                [{"sha256": SHA_A, "model_strength": 1.0, "clip_strength": 1.0}],
+            ],
+        ),
+        lambda policy: policy.__setitem__("extra", True),
+    ],
+)
+def test_lora_stack_pool_refuses_ambiguous_or_open_shapes(
+    mutation: Callable[[dict[str, object]], None],
+) -> None:
+    payload = _pooled_resources()
+    resource = cast(dict[str, object], payload["resource_policy"])
+    policy = cast(dict[str, object], resource["lora_policy"])
+    mutation(policy)
+    _assert_invalid(payload)
+
+
+def test_lora_stack_pool_enforces_stack_and_total_bounds() -> None:
+    too_many_stacks = _pooled_resources()
+    resource = cast(dict[str, object], too_many_stacks["resource_policy"])
+    policy = cast(dict[str, object], resource["lora_policy"])
+    policy["stacks"] = [
+        [{"sha256": f"{index + 1:064x}", "model_strength": 1.0, "clip_strength": 1.0}]
+        for index in range(MAX_TEMPLATE_LORA_STACKS + 1)
+    ]
+    _assert_invalid(too_many_stacks)
+
+    total_overflow = _pooled_resources()
+    resource = cast(dict[str, object], total_overflow["resource_policy"])
+    policy = cast(dict[str, object], resource["lora_policy"])
+    policy["stacks"] = [
+        [
+            {
+                "sha256": f"{stack_index * MAX_TEMPLATE_LORAS + index + 1:064x}",
+                "model_strength": 1.0,
+                "clip_strength": 1.0,
+            }
+            for index in range(MAX_TEMPLATE_LORAS)
+        ]
+        for stack_index in range(MAX_TEMPLATE_POOL_LORAS // MAX_TEMPLATE_LORAS + 1)
+    ]
+    _assert_invalid(total_overflow)
 
 
 @pytest.mark.parametrize(
@@ -592,6 +686,25 @@ def test_hand_constructed_contracts_are_revalidated_before_use() -> None:
         prompt_template_contract_payload(
             replace(contract, slots=list(contract.slots))  # type: ignore[arg-type]
         )
+
+    pooled = parse_prompt_template_contract(_pooled_resources())
+    pooled_policy = pooled.resource_policy.lora_policy
+    assert pooled_policy is not None
+    for forged_policy in (
+        replace(pooled_policy, stack=pooled_policy.stacks[0]),
+        replace(pooled_policy, strategy=None),
+        replace(pooled_policy, stacks=(pooled_policy.stacks[0],)),
+    ):
+        with pytest.raises(PromptTemplateError):
+            prompt_template_contract_payload(
+                replace(
+                    pooled,
+                    resource_policy=replace(
+                        pooled.resource_policy,
+                        lora_policy=forged_policy,
+                    ),
+                )
+            )
 
 
 def test_hostile_render_value_trees_fail_with_the_values_contract() -> None:

@@ -87,13 +87,14 @@ describe("composer Prompt Library provenance", () => {
     expect(drafts["chat-two"]).toBe(EMPTY_COMPOSER_DRAFT);
   });
 
-  it("refuses to send source authority with attachments, references, or a non-image mode", () => {
+  it("refuses source authority with attachments, references, multiple outputs, or a non-image mode", () => {
     const inserted = insertedComposerDraft(insertionForPromptBatchItem(batch, batch.items[0]));
 
-    expect(promptSourceForTurn(inserted, "image", 0, 0)).toBe(inserted.promptSource);
-    expect(promptSourceForTurn(inserted, "image", 1, 0)).toBeUndefined();
-    expect(promptSourceForTurn(inserted, "image", 0, 1)).toBeUndefined();
-    expect(promptSourceForTurn(inserted, "video", 0, 0)).toBeUndefined();
-    expect(promptSourceForTurn(inserted, "auto", 0, 0)).toBeUndefined();
+    expect(promptSourceForTurn(inserted, "image", 0, 0, undefined)).toBe(inserted.promptSource);
+    expect(promptSourceForTurn(inserted, "image", 1, 0, undefined)).toBeUndefined();
+    expect(promptSourceForTurn(inserted, "image", 0, 1, undefined)).toBeUndefined();
+    expect(promptSourceForTurn(inserted, "image", 0, 0, 2)).toBeUndefined();
+    expect(promptSourceForTurn(inserted, "video", 0, 0, undefined)).toBeUndefined();
+    expect(promptSourceForTurn(inserted, "auto", 0, 0, undefined)).toBeUndefined();
   });
 });

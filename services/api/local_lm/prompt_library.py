@@ -184,9 +184,16 @@ def validate_prompt_template_resources(
     ):
         _resources_unavailable()
     lora_policy = policy.lora_policy
-    if lora_policy is None or lora_policy.mode is not PromptTemplateLoraPolicyMode.FIXED:
+    if lora_policy is None or lora_policy.mode not in {
+        PromptTemplateLoraPolicyMode.FIXED,
+        PromptTemplateLoraPolicyMode.POOL,
+    }:
         return
-    expected = {item.sha256 for item in lora_policy.stack}
+    expected = (
+        {item.sha256 for item in lora_policy.stack}
+        if lora_policy.mode is PromptTemplateLoraPolicyMode.FIXED
+        else {item.sha256 for stack in lora_policy.stacks for item in stack}
+    )
     candidates = session.scalars(
         select(ModelAssetInstall).where(
             ModelAssetInstall.kind == "lora",

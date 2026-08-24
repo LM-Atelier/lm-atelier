@@ -77,6 +77,7 @@ class PromptBatchQueueSelection:
     batch: PromptExpansionBatch
     items: tuple[PromptExpansionItem, ...]
     resource_policy: dict[str, object]
+    allocated_resource_policies: tuple[dict[str, object], ...]
 
 
 def _invalid() -> NoReturn:
@@ -111,6 +112,57 @@ def _canonical_resource_policy(value: object) -> dict[str, object]:
     if type(policy) is not dict:
         _invalid()
     return cast(dict[str, object], policy)
+
+
+def _allocate_resource_policy(
+    policy: object,
+    selection_seed: int,
+    item_ordinal: int,
+) -> dict[str, object]:
+    """Freeze one deterministic, exact resource policy for one draft item."""
+
+    canonical = _canonical_resource_policy(policy)
+    if canonical["mode"] != "fixed":
+        return canonical
+    lora_policy = canonical.get("lora_policy")
+    if type(lora_policy) is not dict:
+        _invalid()
+    lora_policy = cast(dict[str, object], lora_policy)
+    if lora_policy.get("mode") != "pool":
+        return canonical
+    strategy = lora_policy.get("strategy")
+    stacks = lora_policy.get("stacks")
+    if (
+        type(selection_seed) is not int
+        or selection_seed < 0
+        or type(item_ordinal) is not int
+        or item_ordinal < 1
+        or strategy not in {"random", "round_robin"}
+        or type(stacks) is not list
+        or not stacks
+    ):
+        _invalid()
+    if strategy == "round_robin":
+        index = (selection_seed + item_ordinal - 1) % len(stacks)
+    else:
+        material = "\x00".join(
+            ("prompt-template-resource-pool-v1", str(selection_seed), str(item_ordinal))
+        )
+        index = int.from_bytes(hashlib.sha256(material.encode("ascii")).digest()[:8], "big") % len(
+            stacks
+        )
+    selected = stacks[index]
+    if type(selected) is not list:
+        _invalid()
+    allocated = {
+        "mode": "fixed",
+        "workflow_revision_id": canonical.get("workflow_revision_id"),
+        "lora_policy": {
+            "mode": "fixed",
+            "stack": [dict(cast(dict[str, object], item)) for item in selected],
+        },
+    }
+    return _canonical_resource_policy(allocated)
 
 
 def _read_authoritative_source(
@@ -154,7 +206,11 @@ def _read_authoritative_source(
         _conflict()
     if type(policy) is not dict:
         _conflict()
-    return batch, item, cast(dict[str, object], policy)
+    return (
+        batch,
+        item,
+        _allocate_resource_policy(policy, stored.selection_seed, item.ordinal),
+    )
 
 
 def claim_prompt_source(
@@ -257,7 +313,16 @@ def read_prompt_batch_queue_selection(
         _conflict()
     if type(policy) is not dict:
         _conflict()
-    return PromptBatchQueueSelection(batch, items, cast(dict[str, object], policy))
+    canonical_policy = cast(dict[str, object], policy)
+    return PromptBatchQueueSelection(
+        batch=batch,
+        items=items,
+        resource_policy=canonical_policy,
+        allocated_resource_policies=tuple(
+            _allocate_resource_policy(canonical_policy, stored.selection_seed, item.ordinal)
+            for item in items
+        ),
+    )
 
 
 def claim_prompt_batch_queue(
@@ -310,9 +375,13 @@ def claim_prompt_batch_queue(
             "prompt_template_id": batch.prompt_template_id,
             "prompt_template_revision_id": batch.prompt_template_revision_id,
             "contract_sha256": batch.contract_sha256,
-            "resource_policy": selection.resource_policy,
+            "resource_policy": resource_policy,
         }
-        for item in selection.items
+        for item, resource_policy in zip(
+            selection.items,
+            selection.allocated_resource_policies,
+            strict=True,
+        )
     )
 
 
@@ -429,8 +498,11 @@ def prompt_source_resource_overrides(
 def prompt_batch_resource_overrides(
     session: Session,
     selection: PromptBatchQueueSelection,
-) -> PromptSourceResourceOverrides:
-    return _resource_overrides_for_policy(session, selection.resource_policy)
+) -> tuple[PromptSourceResourceOverrides, ...]:
+    return tuple(
+        _resource_overrides_for_policy(session, policy)
+        for policy in selection.allocated_resource_policies
+    )
 
 
 def _resource_overrides_for_policy(

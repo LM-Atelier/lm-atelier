@@ -28,6 +28,8 @@ MAX_TEMPLATE_VALUE_CHARS = 2_000
 MAX_TEMPLATE_GUIDANCE_CHARS = 4_000
 MAX_TEMPLATE_RENDERED_CHARS = 32_000
 MAX_TEMPLATE_LORAS = 16
+MAX_TEMPLATE_LORA_STACKS = 32
+MAX_TEMPLATE_POOL_LORAS = 64
 MAX_TEMPLATE_DOCUMENT_DEPTH = 16
 MAX_TEMPLATE_DOCUMENT_NODES = 4_096
 MAX_TEMPLATE_DOCUMENT_CHARS = 65_536
@@ -40,6 +42,7 @@ _RESOURCE_INHERITED_KEYS = frozenset({"mode"})
 _RESOURCE_FIXED_KEYS = frozenset({"mode", "workflow_revision_id", "lora_policy"})
 _LORA_POLICY_SIMPLE_KEYS = frozenset({"mode"})
 _LORA_POLICY_FIXED_KEYS = frozenset({"mode", "stack"})
+_LORA_POLICY_POOL_KEYS = frozenset({"mode", "strategy", "stacks"})
 _LORA_KEYS = frozenset({"sha256", "model_strength", "clip_strength"})
 _SLOT_NAME = re.compile(r"[a-z][a-z0-9_]{0,63}", re.ASCII)
 _SAFE_ID = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,99}", re.ASCII)
@@ -77,6 +80,12 @@ class PromptTemplateLoraPolicyMode(StrEnum):
     INHERITED_AUTO = "inherited_auto"
     NONE = "none"
     FIXED = "fixed"
+    POOL = "pool"
+
+
+class PromptTemplatePoolStrategy(StrEnum):
+    RANDOM = "random"
+    ROUND_ROBIN = "round_robin"
 
 
 @dataclass(frozen=True, slots=True)
@@ -100,6 +109,8 @@ class PromptTemplateLora:
 class PromptTemplateLoraPolicy:
     mode: PromptTemplateLoraPolicyMode
     stack: tuple[PromptTemplateLora, ...] = ()
+    strategy: PromptTemplatePoolStrategy | None = None
+    stacks: tuple[tuple[PromptTemplateLora, ...], ...] = ()
 
 
 @dataclass(frozen=True, slots=True)
@@ -308,35 +319,48 @@ def _parse_lora_policy(value: object) -> PromptTemplateLoraPolicy:
     if type(value) is not dict:
         _invalid()
     mode = _enum_value(value.get("mode"), PromptTemplateLoraPolicyMode)
-    expected = (
-        _LORA_POLICY_FIXED_KEYS
-        if mode is PromptTemplateLoraPolicyMode.FIXED
-        else _LORA_POLICY_SIMPLE_KEYS
-    )
+    expected = {
+        PromptTemplateLoraPolicyMode.FIXED: _LORA_POLICY_FIXED_KEYS,
+        PromptTemplateLoraPolicyMode.POOL: _LORA_POLICY_POOL_KEYS,
+    }.get(mode, _LORA_POLICY_SIMPLE_KEYS)
     entry = _exact_keys(value, expected)
-    if mode is not PromptTemplateLoraPolicyMode.FIXED:
+    if mode not in {PromptTemplateLoraPolicyMode.FIXED, PromptTemplateLoraPolicyMode.POOL}:
         return PromptTemplateLoraPolicy(mode=mode)
-    raw_stack = entry["stack"]
-    if type(raw_stack) is not list or not raw_stack or len(raw_stack) > MAX_TEMPLATE_LORAS:
-        _invalid()
-    stack: list[PromptTemplateLora] = []
-    seen: set[str] = set()
-    for raw_lora in raw_stack:
-        item = _exact_keys(raw_lora, _LORA_KEYS)
-        sha256 = item["sha256"]
-        if type(sha256) is not str or _SHA256.fullmatch(sha256) is None:
+
+    def parse_stack(raw_stack: object) -> tuple[PromptTemplateLora, ...]:
+        if type(raw_stack) is not list or not raw_stack or len(raw_stack) > MAX_TEMPLATE_LORAS:
             _invalid()
-        if sha256 in seen:
-            _invalid()
-        seen.add(sha256)
-        stack.append(
-            PromptTemplateLora(
-                sha256=sha256,
-                model_strength=_strength(item["model_strength"]),
-                clip_strength=_strength(item["clip_strength"]),
+        stack: list[PromptTemplateLora] = []
+        seen: set[str] = set()
+        for raw_lora in raw_stack:
+            item = _exact_keys(raw_lora, _LORA_KEYS)
+            sha256 = item["sha256"]
+            if type(sha256) is not str or _SHA256.fullmatch(sha256) is None:
+                _invalid()
+            if sha256 in seen:
+                _invalid()
+            seen.add(sha256)
+            stack.append(
+                PromptTemplateLora(
+                    sha256=sha256,
+                    model_strength=_strength(item["model_strength"]),
+                    clip_strength=_strength(item["clip_strength"]),
+                )
             )
-        )
-    return PromptTemplateLoraPolicy(mode=mode, stack=tuple(stack))
+        return tuple(stack)
+
+    if mode is PromptTemplateLoraPolicyMode.FIXED:
+        return PromptTemplateLoraPolicy(mode=mode, stack=parse_stack(entry["stack"]))
+    strategy = _enum_value(entry["strategy"], PromptTemplatePoolStrategy)
+    raw_stacks = entry["stacks"]
+    if type(raw_stacks) is not list or not 2 <= len(raw_stacks) <= MAX_TEMPLATE_LORA_STACKS:
+        _invalid()
+    stacks = tuple(parse_stack(raw_stack) for raw_stack in raw_stacks)
+    if sum(len(stack) for stack in stacks) > MAX_TEMPLATE_POOL_LORAS:
+        _invalid()
+    if len(set(stacks)) != len(stacks):
+        _invalid()
+    return PromptTemplateLoraPolicy(mode=mode, strategy=strategy, stacks=stacks)
 
 
 def _parse_resource_policy(value: object) -> PromptTemplateResourcePolicy:
@@ -465,27 +489,74 @@ def prompt_template_contract_payload(
             type(lora_policy) is not PromptTemplateLoraPolicy
             or type(lora_policy.mode) is not PromptTemplateLoraPolicyMode
             or type(lora_policy.stack) is not tuple
+            or type(lora_policy.strategy) not in {PromptTemplatePoolStrategy, type(None)}
+            or type(lora_policy.stacks) is not tuple
         ):
             _invalid()
         lora_payload: dict[str, object] = {"mode": lora_policy.mode.value}
+        raw_stacks: tuple[tuple[PromptTemplateLora, ...], ...]
         if lora_policy.mode is PromptTemplateLoraPolicyMode.FIXED:
-            stack: list[dict[str, object]] = []
-            for lora in lora_policy.stack:
-                if (
-                    type(lora) is not PromptTemplateLora
-                    or type(lora.sha256) is not str
-                    or type(lora.model_strength) is not float
-                    or type(lora.clip_strength) is not float
-                ):
-                    _invalid()
-                stack.append(
-                    {
-                        "sha256": lora.sha256,
-                        "model_strength": lora.model_strength,
-                        "clip_strength": lora.clip_strength,
-                    }
-                )
-            lora_payload["stack"] = stack
+            if (
+                not lora_policy.stack
+                or len(lora_policy.stack) > MAX_TEMPLATE_LORAS
+                or lora_policy.strategy is not None
+                or lora_policy.stacks
+            ):
+                _invalid()
+            raw_stacks = (lora_policy.stack,)
+        elif lora_policy.mode is PromptTemplateLoraPolicyMode.POOL:
+            if (
+                lora_policy.stack
+                or lora_policy.strategy is None
+                or not 2 <= len(lora_policy.stacks) <= MAX_TEMPLATE_LORA_STACKS
+                or any(type(stack) is not tuple for stack in lora_policy.stacks)
+                or any(not stack or len(stack) > MAX_TEMPLATE_LORAS for stack in lora_policy.stacks)
+                or sum(len(stack) for stack in lora_policy.stacks) > MAX_TEMPLATE_POOL_LORAS
+                or len(set(lora_policy.stacks)) != len(lora_policy.stacks)
+            ):
+                _invalid()
+            raw_stacks = lora_policy.stacks
+        else:
+            if lora_policy.stack or lora_policy.strategy is not None or lora_policy.stacks:
+                _invalid()
+            raw_stacks = ()
+        if raw_stacks:
+            serialized_stacks: list[list[dict[str, object]]] = []
+            for raw_stack in raw_stacks:
+                stack: list[dict[str, object]] = []
+                seen: set[str] = set()
+                for lora in raw_stack:
+                    if (
+                        type(lora) is not PromptTemplateLora
+                        or type(lora.sha256) is not str
+                        or _SHA256.fullmatch(lora.sha256) is None
+                        or lora.sha256 in seen
+                        or type(lora.model_strength) is not float
+                        or type(lora.clip_strength) is not float
+                    ):
+                        _invalid()
+                    _strength(lora.model_strength)
+                    _strength(lora.clip_strength)
+                    seen.add(lora.sha256)
+                    stack.append(
+                        {
+                            "sha256": lora.sha256,
+                            "model_strength": lora.model_strength,
+                            "clip_strength": lora.clip_strength,
+                        }
+                    )
+                serialized_stacks.append(stack)
+        if lora_policy.mode is PromptTemplateLoraPolicyMode.FIXED:
+            lora_payload["stack"] = serialized_stacks[0]
+        elif lora_policy.mode is PromptTemplateLoraPolicyMode.POOL:
+            if lora_policy.strategy is None:
+                _invalid()
+            lora_payload.update(
+                {
+                    "strategy": lora_policy.strategy.value,
+                    "stacks": serialized_stacks,
+                }
+            )
         resource_payload.update(
             {
                 "workflow_revision_id": resource.workflow_revision_id,

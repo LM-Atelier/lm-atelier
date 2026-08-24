@@ -667,6 +667,7 @@ h1, h2, h3 { margin: 0; }
 .prompt-slot-grid label { margin: 0; }
 .prompt-slot-remove { margin-bottom: 1px; }
 .prompt-lora-editor { display: grid; gap: 8px; }
+.prompt-lora-stack { min-width: 0; margin: 8px 0; padding: 12px; border: 1px solid var(--border); border-radius: 10px; background: var(--panel-2); }
 .prompt-strength-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 12px; }
 .prompt-template-editor footer { margin-top: 24px; justify-content: flex-end; }
 .prompt-test-unavailable { margin: -8px 0 12px; color: var(--muted) !important; font-size: 11px; }

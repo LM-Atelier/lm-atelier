@@ -22,6 +22,11 @@ const PAGE_LIMIT = 50;
 const SLOT_NAME = /^[a-z][a-z0-9_]{0,63}$/;
 const SHA256 = /^[0-9a-f]{64}$/;
 const TOKEN = /{{([a-z][a-z0-9_]{0,63})}}/g;
+const emptyLora = (): PromptTemplateLora => ({
+  sha256: "",
+  model_strength: 1,
+  clip_strength: 1,
+});
 
 interface TemplateDraft {
   name: string;
@@ -65,6 +70,21 @@ function slotForMode(
   return { ...common, mode };
 }
 
+function validLoraStack(stack: PromptTemplateLora[], label: string): string | null {
+  if (!stack.length || stack.length > 16) return `${label} needs between 1 and 16 LoRAs.`;
+  const seen = new Set<string>();
+  for (const lora of stack) {
+    if (!SHA256.test(lora.sha256) || seen.has(lora.sha256)) {
+      return `${label} needs unique lowercase SHA-256 digests.`;
+    }
+    seen.add(lora.sha256);
+    if (![lora.model_strength, lora.clip_strength].every(
+      (strength) => Number.isFinite(strength) && strength >= -4 && strength <= 4,
+    )) return "LoRA strengths must be between -4 and 4.";
+  }
+  return null;
+}
+
 function validContract(contract: PromptTemplateContract): string | null {
   if (!contract.body.trim() || contract.body.length > 16_000) {
     return "Enter a template body of at most 16,000 characters.";
@@ -103,16 +123,22 @@ function validContract(contract: PromptTemplateContract): string | null {
   if (resources.mode === "fixed") {
     if (!resources.workflow_revision_id.trim()) return "Choose an exact workflow revision.";
     if (resources.lora_policy.mode === "fixed") {
-      if (!resources.lora_policy.stack.length) return "A fixed LoRA policy needs at least one LoRA.";
-      const seen = new Set<string>();
-      for (const lora of resources.lora_policy.stack) {
-        if (!SHA256.test(lora.sha256) || seen.has(lora.sha256)) {
-          return "Every fixed LoRA needs a unique lowercase SHA-256 digest.";
-        }
-        seen.add(lora.sha256);
-        if (![lora.model_strength, lora.clip_strength].every(
-          (strength) => Number.isFinite(strength) && strength >= -4 && strength <= 4,
-        )) return "LoRA strengths must be between -4 and 4.";
+      return validLoraStack(resources.lora_policy.stack, "A fixed LoRA stack");
+    }
+    if (resources.lora_policy.mode === "pool") {
+      const { stacks } = resources.lora_policy;
+      if (stacks.length < 2 || stacks.length > 32) {
+        return "A LoRA pool needs between 2 and 32 stacks.";
+      }
+      if (stacks.reduce((total, stack) => total + stack.length, 0) > 64) {
+        return "A LoRA pool can contain at most 64 LoRAs in total.";
+      }
+      for (const [index, stack] of stacks.entries()) {
+        const stackError = validLoraStack(stack, `Pool stack ${index + 1}`);
+        if (stackError) return stackError;
+      }
+      if (new Set(stacks.map((stack) => JSON.stringify(stack))).size !== stacks.length) {
+        return "Every LoRA pool stack must be unique.";
       }
     }
   }
@@ -240,36 +266,96 @@ function FixedResourceEditor({
   onChange: (resources: Extract<PromptTemplateResourcePolicy, { mode: "fixed" }>) => void;
 }) {
   const policy = resources.lora_policy;
-  const [loraKeys, setLoraKeys] = useState(() => policy.mode === "fixed"
-    ? policy.stack.map(() => crypto.randomUUID())
+  const [stackKeys, setStackKeys] = useState(() => policy.mode === "pool"
+    ? policy.stacks.map(() => crypto.randomUUID())
     : []);
-  const updateLora = (index: number, next: PromptTemplateLora) => {
-    if (policy.mode !== "fixed") return;
-    onChange({ ...resources, lora_policy: { ...policy, stack: policy.stack.map((item, itemIndex) => itemIndex === index ? next : item) } });
-  };
+  const poolLoraCount = policy.mode === "pool"
+    ? policy.stacks.reduce((total, stack) => total + stack.length, 0)
+    : 0;
   return <>
     <label>Workflow revision ID<input value={resources.workflow_revision_id} maxLength={100} onChange={(event) => onChange({ ...resources, workflow_revision_id: event.target.value })} /></label>
     <label>LoRA policy<select aria-label="LoRA policy" value={policy.mode} onChange={(event) => {
       const mode = event.target.value as PromptTemplateLoraPolicy["mode"];
-      setLoraKeys(mode === "fixed" ? [crypto.randomUUID()] : []);
-      onChange({ ...resources, lora_policy: mode === "fixed" ? { mode, stack: [{ sha256: "", model_strength: 1, clip_strength: 1 }] } : { mode } });
-    }}><option value="inherited_auto">Inherit automatic LoRAs</option><option value="none">No LoRAs</option><option value="fixed">Fixed stack</option></select></label>
-    {policy.mode === "fixed" && <div className="prompt-lora-editor">
-      {policy.stack.map((lora, index) => <fieldset key={loraKeys[index]}><legend>LoRA {index + 1}</legend><label>SHA-256<input aria-label={`LoRA ${index + 1} SHA-256`} value={lora.sha256} maxLength={64} onChange={(event) => updateLora(index, { ...lora, sha256: event.target.value })} /></label><div className="prompt-strength-grid"><label>Model strength<input aria-label={`LoRA ${index + 1} model strength`} type="number" min={-4} max={4} step="0.05" value={lora.model_strength} onChange={(event) => updateLora(index, { ...lora, model_strength: event.target.valueAsNumber })} /></label><label>CLIP strength<input aria-label={`LoRA ${index + 1} CLIP strength`} type="number" min={-4} max={4} step="0.05" value={lora.clip_strength} onChange={(event) => updateLora(index, { ...lora, clip_strength: event.target.valueAsNumber })} /></label></div><button type="button" className="secondary compact-button" onClick={() => {
-        setLoraKeys((current) => current.filter((_, currentIndex) => currentIndex !== index));
-        onChange({ ...resources, lora_policy: { ...policy, stack: policy.stack.filter((_, itemIndex) => itemIndex !== index) } });
-      }}>Remove LoRA</button></fieldset>)}
-      <button type="button" className="secondary compact-button" disabled={policy.stack.length >= 16} onClick={() => {
-        setLoraKeys((current) => [...current, crypto.randomUUID()]);
-        onChange({ ...resources, lora_policy: { ...policy, stack: [...policy.stack, { sha256: "", model_strength: 1, clip_strength: 1 }] } });
-      }}><Plus size={14} />Add LoRA</button>
+      if (mode === "fixed") {
+        setStackKeys([]);
+        onChange({ ...resources, lora_policy: { mode, stack: [emptyLora()] } });
+      } else if (mode === "pool") {
+        setStackKeys([crypto.randomUUID(), crypto.randomUUID()]);
+        onChange({
+          ...resources,
+          lora_policy: {
+            mode,
+            strategy: "round_robin",
+            stacks: [[emptyLora()], [emptyLora()]],
+          },
+        });
+      } else {
+        setStackKeys([]);
+        onChange({ ...resources, lora_policy: { mode } });
+      }
+    }}><option value="inherited_auto">Inherit automatic LoRAs</option><option value="none">No LoRAs</option><option value="fixed">Fixed stack</option><option value="pool">LoRA stack pool</option></select></label>
+    {policy.mode === "fixed" && <LoraStackEditor
+      stack={policy.stack}
+      ariaPrefix="LoRA"
+      onChange={(stack) => onChange({ ...resources, lora_policy: { ...policy, stack } })}
+    />}
+    {policy.mode === "pool" && <div className="prompt-lora-editor">
+      <label>Pool order<select aria-label="LoRA pool strategy" value={policy.strategy} onChange={(event) => onChange({
+        ...resources,
+        lora_policy: { ...policy, strategy: event.target.value as "random" | "round_robin" },
+      })}><option value="round_robin">Round robin</option><option value="random">Deterministic random</option></select></label>
+      <small>Each draft freezes one exact stack from this pool when it is queued.</small>
+      {policy.stacks.map((stack, index) => <section className="prompt-lora-stack" key={stackKeys[index]} aria-labelledby={`prompt-lora-stack-${index + 1}`}>
+        <div className="section-heading compact-heading"><h4 id={`prompt-lora-stack-${index + 1}`}>Stack {index + 1}</h4><button type="button" className="secondary compact-button" disabled={policy.stacks.length <= 2} onClick={() => {
+          setStackKeys((current) => current.filter((_, currentIndex) => currentIndex !== index));
+          onChange({ ...resources, lora_policy: { ...policy, stacks: policy.stacks.filter((_, stackIndex) => stackIndex !== index) } });
+        }}>Remove stack</button></div>
+        <LoraStackEditor
+          stack={stack}
+          ariaPrefix={`Stack ${index + 1} LoRA`}
+          addDisabled={poolLoraCount >= 64}
+          onChange={(next) => onChange({ ...resources, lora_policy: { ...policy, stacks: policy.stacks.map((item, stackIndex) => stackIndex === index ? next : item) } })}
+        />
+      </section>)}
+      <button type="button" className="secondary compact-button" disabled={policy.stacks.length >= 32 || poolLoraCount >= 64} onClick={() => {
+        setStackKeys((current) => [...current, crypto.randomUUID()]);
+        onChange({ ...resources, lora_policy: { ...policy, stacks: [...policy.stacks, [emptyLora()]] } });
+      }}><Plus size={14} />Add stack</button>
     </div>}
   </>;
+}
+
+function LoraStackEditor({
+  stack,
+  ariaPrefix,
+  addDisabled = false,
+  onChange,
+}: {
+  stack: PromptTemplateLora[];
+  ariaPrefix: string;
+  addDisabled?: boolean;
+  onChange: (stack: PromptTemplateLora[]) => void;
+}) {
+  const [loraKeys, setLoraKeys] = useState(() => stack.map(() => crypto.randomUUID()));
+  const update = (index: number, next: PromptTemplateLora) => onChange(
+    stack.map((item, itemIndex) => itemIndex === index ? next : item),
+  );
+  return <div className="prompt-lora-editor">
+    {stack.map((lora, index) => <fieldset key={loraKeys[index]}><legend>LoRA {index + 1}</legend><label>SHA-256<input aria-label={`${ariaPrefix} ${index + 1} SHA-256`} value={lora.sha256} maxLength={64} onChange={(event) => update(index, { ...lora, sha256: event.target.value })} /></label><div className="prompt-strength-grid"><label>Model strength<input aria-label={`${ariaPrefix} ${index + 1} model strength`} type="number" min={-4} max={4} step="0.05" value={lora.model_strength} onChange={(event) => update(index, { ...lora, model_strength: event.target.valueAsNumber })} /></label><label>CLIP strength<input aria-label={`${ariaPrefix} ${index + 1} CLIP strength`} type="number" min={-4} max={4} step="0.05" value={lora.clip_strength} onChange={(event) => update(index, { ...lora, clip_strength: event.target.valueAsNumber })} /></label></div><button type="button" className="secondary compact-button" onClick={() => {
+      setLoraKeys((current) => current.filter((_, currentIndex) => currentIndex !== index));
+      onChange(stack.filter((_, itemIndex) => itemIndex !== index));
+    }}>Remove LoRA</button></fieldset>)}
+    <button type="button" className="secondary compact-button" disabled={stack.length >= 16 || addDisabled} onClick={() => {
+      setLoraKeys((current) => [...current, crypto.randomUUID()]);
+      onChange([...stack, emptyLora()]);
+    }}><Plus size={14} />Add LoRA</button>
+  </div>;
 }
 
 function resourceSummary(policy: PromptTemplateResourcePolicy): string {
   if (policy.mode === "inherited") return "Inherited image resources";
   if (policy.lora_policy.mode === "fixed") return `Fixed workflow · ${policy.lora_policy.stack.length} LoRA${policy.lora_policy.stack.length === 1 ? "" : "s"}`;
+  if (policy.lora_policy.mode === "pool") return `Fixed workflow · ${policy.lora_policy.stacks.length}-stack LoRA pool`;
   return `Fixed workflow · ${policy.lora_policy.mode === "none" ? "No LoRAs" : "Automatic LoRAs"}`;
 }
 
