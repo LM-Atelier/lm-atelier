@@ -950,6 +950,56 @@ def test_a_refused_capacity_query_fails_closed(
     assert not report.usable
 
 
+def test_rename_refuses_an_existing_destination_by_default(tmp_path: Path) -> None:
+    """The default must mean the same thing on both platforms.
+
+    os.rename replaces silently and the NT call refuses, so an unqualified
+    rename meant "publish over the old file" on POSIX and "do nothing" on
+    Windows - and the Windows outcome arrived as a return value rather than a
+    refusal, which is exactly what call sites drop.
+    """
+
+    with links.AnchoredDirectory(tmp_path) as anchor:
+        os.close(links.create_entry(anchor, "source"))
+        os.close(links.create_entry(anchor, "occupied"))
+        with pytest.raises(links.AnchoredDirectoryError):
+            links.rename_entry(anchor, "source", "occupied")
+        # The refusal left both entries exactly as they were.
+        assert (tmp_path / "source").is_file()
+        assert (tmp_path / "occupied").is_file()
+
+
+def test_rename_replaces_only_when_asked_and_does_so_on_both_platforms(
+    tmp_path: Path,
+) -> None:
+    """Publish-over-existing is the pattern the primitive exists to support."""
+
+    with links.AnchoredDirectory(tmp_path) as anchor:
+        (tmp_path / "published").write_bytes(b"OLD")
+        descriptor = links.create_entry(anchor, "staging")
+        with os.fdopen(descriptor, "wb") as handle:
+            handle.write(b"NEW")
+        links.rename_entry(anchor, "staging", "published", replace=True)
+
+    assert (tmp_path / "published").read_bytes() == b"NEW", "the publish did not happen"
+    assert not (tmp_path / "staging").exists(), "the staging entry was left behind"
+
+
+def test_rename_into_a_free_name_works_in_either_mode(tmp_path: Path) -> None:
+    """The modes differ only when the destination is occupied."""
+
+    with links.AnchoredDirectory(tmp_path) as anchor:
+        os.close(links.create_entry(anchor, "first"))
+        links.rename_entry(anchor, "first", "first-moved")
+        os.close(links.create_entry(anchor, "second"))
+        links.rename_entry(anchor, "second", "second-moved", replace=True)
+
+    assert (tmp_path / "first-moved").is_file()
+    assert (tmp_path / "second-moved").is_file()
+    assert not (tmp_path / "first").exists()
+    assert not (tmp_path / "second").exists()
+
+
 def test_free_space_floor_is_enforced(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     root = tmp_path / "packages"
     root.mkdir()

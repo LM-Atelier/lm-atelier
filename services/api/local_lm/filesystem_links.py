@@ -335,22 +335,64 @@ def link_entry(anchor: AnchoredDirectory, source: str, destination: str) -> bool
         _close_windows_handle(opened)
 
 
-def rename_entry(anchor: AnchoredDirectory, source: str, destination: str) -> bool:
-    """Rename `source` to `destination` inside the held directory."""
+def rename_entry(
+    anchor: AnchoredDirectory,
+    source: str,
+    destination: str,
+    *,
+    replace: bool = False,
+) -> None:
+    """Rename `source` to `destination` inside the held directory.
+
+    `replace` is explicit because the platforms disagree by default and the
+    disagreement is silent: os.rename REPLACES an existing destination, while
+    the NT call refuses one. A single unqualified call therefore meant
+    "publish over the old file" on POSIX and "do nothing" on Windows, and the
+    Windows outcome arrived as a return value rather than as a refusal - so
+    the atomic-publish pattern this module exists to support worked on Linux
+    and silently no-opped on Windows.
+
+    Stating the mode makes both platforms do the same thing, and a refusal
+    RAISES like every other refusal here rather than returning something a
+    caller can drop.
+
+    With replace=False the entry must be one that can be linked, which on
+    POSIX means a regular file; a directory refuses.
+    """
 
     _require_entry_name(source)
     _require_entry_name(destination)
     if anchor.descriptor is not None:
+        if replace:
+            try:
+                os.rename(
+                    source,
+                    destination,
+                    src_dir_fd=anchor.descriptor,
+                    dst_dir_fd=anchor.descriptor,
+                )
+            except OSError:
+                _refuse()
+            return
+        # POSIX rename ALWAYS replaces, so a non-replacing rename is a link
+        # that refuses an existing name followed by dropping the old one.
+        # Both steps go through the held directory.
         try:
-            os.rename(
+            os.link(
                 source,
                 destination,
                 src_dir_fd=anchor.descriptor,
                 dst_dir_fd=anchor.descriptor,
             )
+        except FileExistsError:
+            raise AnchoredEntryExists(CONTAINMENT_REFUSED) from None
         except OSError:
             _refuse()
-        return True
+        try:
+            os.unlink(source, dir_fd=anchor.descriptor)
+        except OSError:
+            _refuse()
+        return
     handle = anchor.handle
     if handle is None:
         _refuse()
@@ -358,9 +400,17 @@ def rename_entry(anchor: AnchoredDirectory, source: str, destination: str) -> bo
     # needs DELETE - which the read intent has no business holding.
     opened = _nt_open_relative(handle, source, intent="rename_source")
     try:
-        return _nt_set_name(opened, handle, destination, _FILE_RENAME_INFORMATION_CLASS)
+        moved = _nt_set_name(
+            opened,
+            handle,
+            destination,
+            _FILE_RENAME_INFORMATION_CLASS,
+            replace=replace,
+        )
     finally:
         _close_windows_handle(opened)
+    if not moved:
+        raise AnchoredEntryExists(CONTAINMENT_REFUSED) from None
 
 
 def remove_entry(anchor: AnchoredDirectory, name: str) -> None:
@@ -696,18 +746,25 @@ def _nt_is_reparse(handle: int) -> bool:
     return bool(information.FileAttributes & reparse_flag)
 
 
-def _nt_set_name(source: int, directory: int, name: str, information_class: int) -> bool:
+def _nt_set_name(
+    source: int,
+    directory: int,
+    name: str,
+    information_class: int,
+    *,
+    replace: bool = False,
+) -> bool:
     """Link or rename `source` to `name` inside the held directory.
 
-    False means the destination already existed, which callers racing to
-    publish the same entry treat as convergence. Any other status refuses,
-    because the operation did not happen and pretending otherwise would report
-    an entry nobody can read back.
+    False means the destination already existed and `replace` was not asked
+    for, which callers racing to publish the same entry treat as convergence.
+    Any other status refuses, because the operation did not happen and
+    pretending otherwise would report an entry nobody can read back.
     """
 
     api = _windows_api()
     information = api.FileNameInformation()
-    information.ReplaceIfExists = 0
+    information.ReplaceIfExists = 1 if replace else 0
     information.RootDirectory = api.ctypes.c_void_p(directory)
     information.FileNameLength = _utf16_length(name)
     information.FileName = name
