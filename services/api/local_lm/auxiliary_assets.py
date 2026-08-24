@@ -10,6 +10,7 @@ from typing import Any
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
+from .lora_constraints import MAX_LORA_STRENGTH
 from .models import (
     ModelAssetInstall,
     ModelInstall,
@@ -21,7 +22,6 @@ from .models import (
 LORA_GRAPH_TRANSFORM_VERSION = "lora-graph-v2"
 LORA_AUTO_SELECTION_VERSION = "lora-use-case-v1"
 MAX_LORA_STACK_SIZE = 8
-MAX_LORA_STRENGTH = 4.0
 AUXILIARY_ASSET_KINDS: frozenset[str] = frozenset(
     {
         "lora",

@@ -231,6 +231,12 @@ from .prompt_library import (
     restore_prompt_template_revision,
     update_prompt_template,
 )
+from .prompt_template_portability import (
+    PromptTemplatePortabilityError,
+    export_prompt_template_bundle,
+    preview_prompt_template_import,
+    resolve_prompt_template_import_candidate,
+)
 from .prompt_templates import (
     PromptTemplateError,
     parse_prompt_template_contract,
@@ -334,7 +340,11 @@ from .schemas import (
     PromptTemplateCreate,
     PromptTemplateDefinitionOut,
     PromptTemplateDetailOut,
+    PromptTemplateImportCandidateResolve,
+    PromptTemplateImportPreviewOut,
+    PromptTemplateImportWorkflowSuggestionOut,
     PromptTemplatePageOut,
+    PromptTemplatePortableBundleOut,
     PromptTemplateRestore,
     PromptTemplateRevisionOut,
     PromptTemplateUpdate,
@@ -2031,6 +2041,120 @@ async def create_prompt_template_route(
     return _prompt_template_write_out(session, result)
 
 
+_MAX_PROMPT_TEMPLATE_IMPORT_REQUEST_BYTES = 4_194_304
+
+
+def _prompt_template_import_unique_object(
+    pairs: list[tuple[str, object]],
+) -> dict[str, object]:
+    result: dict[str, object] = {}
+    for key, value in pairs:
+        if key in result:
+            raise ValueError("duplicate key")
+        result[key] = value
+    return result
+
+
+async def _prompt_template_import_candidate_json(
+    request: Request,
+) -> PromptTemplateImportCandidateResolve:
+    media_type = request.headers.get("content-type", "").split(";", 1)[0].strip().lower()
+    if media_type != "application/json":
+        raise api_error(
+            415,
+            "prompt-template-import-media-type-invalid",
+            "Prompt template import request is invalid.",
+        )
+    body = await request.body()
+    if not body or len(body) > _MAX_PROMPT_TEMPLATE_IMPORT_REQUEST_BYTES:
+        raise api_error(
+            422,
+            "prompt-template-import-request-invalid",
+            "Prompt template import request is invalid.",
+        )
+    try:
+        text_value = body.decode("utf-8")
+        if text_value.startswith("\ufeff"):
+            raise ValueError("byte order mark")
+        value = json.loads(text_value, object_pairs_hook=_prompt_template_import_unique_object)
+        return PromptTemplateImportCandidateResolve.model_validate(value)
+    except (RecursionError, TypeError, UnicodeError, ValueError) as exc:
+        raise api_error(
+            422,
+            "prompt-template-import-request-invalid",
+            "Prompt template import request is invalid.",
+        ) from exc
+
+
+@router.post(
+    "/prompt-templates/import/preview",
+    response_model=PromptTemplateImportPreviewOut,
+)
+async def preview_prompt_template_import_route(
+    request: Request,
+    response: Response,
+    session: SessionDep,
+) -> PromptTemplateImportPreviewOut:
+    media_type = request.headers.get("content-type", "").split(";", 1)[0].strip().lower()
+    if media_type != "application/json":
+        raise api_error(
+            415,
+            "prompt-template-bundle-media-type-invalid",
+            "Prompt template bundle is invalid.",
+        )
+    raw_bundle = await request.body()
+    try:
+        with session.no_autoflush:
+            preview = preview_prompt_template_import(
+                session,
+                raw_bundle,
+                expected_engine=_services(request).settings.media_engine,
+                signing_key=_services(request).security.local_state_signing_key(
+                    b"prompt-template-import-preview-v1"
+                ),
+            )
+    except PromptTemplatePortabilityError as exc:
+        raise api_error(exc.status_code, exc.code, str(exc)) from exc
+    response.headers["Cache-Control"] = "no-store"
+    return PromptTemplateImportPreviewOut.model_validate(
+        {
+            "bundle": preview.bundle.payload,
+            "requirements": list(preview.requirements),
+            "receipt": preview.receipt,
+            "expires_at": preview.expires_at,
+        }
+    )
+
+
+@router.post(
+    "/prompt-templates/import/candidates/resolve",
+    response_model=PromptTemplateImportWorkflowSuggestionOut,
+)
+async def resolve_prompt_template_import_candidate_route(
+    request: Request,
+    response: Response,
+    session: SessionDep,
+) -> PromptTemplateImportWorkflowSuggestionOut:
+    payload = await _prompt_template_import_candidate_json(request)
+    try:
+        with session.no_autoflush:
+            candidate = resolve_prompt_template_import_candidate(
+                session,
+                payload.bundle_json,
+                preview_receipt=payload.preview_receipt,
+                binding_key=payload.binding_key,
+                local_ref=payload.local_ref,
+                expected_engine=_services(request).settings.media_engine,
+                signing_key=_services(request).security.local_state_signing_key(
+                    b"prompt-template-import-preview-v1"
+                ),
+            )
+    except PromptTemplatePortabilityError as exc:
+        raise api_error(exc.status_code, exc.code, str(exc)) from exc
+    response.headers["Cache-Control"] = "no-store"
+    return PromptTemplateImportWorkflowSuggestionOut.model_validate(candidate)
+
+
 @router.get("/prompt-templates/{template_id}", response_model=PromptTemplateDetailOut)
 async def get_prompt_template(
     template_id: str,
@@ -2123,6 +2247,31 @@ async def get_prompt_template_revision(
             "Prompt template does not exist.",
         )
     return _prompt_template_revision_out(revision)
+
+
+@router.get(
+    "/prompt-templates/{template_id}/revisions/{revision_id}/export",
+    response_model=PromptTemplatePortableBundleOut,
+)
+async def export_prompt_template_revision(
+    template_id: str,
+    revision_id: str,
+    response: Response,
+    session: SessionDep,
+) -> PromptTemplatePortableBundleOut:
+    try:
+        bundle = export_prompt_template_bundle(
+            session,
+            definition_id=template_id,
+            revision_id=revision_id,
+        )
+    except PromptTemplatePortabilityError as exc:
+        raise api_error(exc.status_code, exc.code, str(exc)) from exc
+    response.headers["Cache-Control"] = "no-store"
+    response.headers["Content-Disposition"] = (
+        f'attachment; filename="prompt-template-{bundle.bundle_sha256[:12]}.json"'
+    )
+    return PromptTemplatePortableBundleOut.model_validate(bundle.payload)
 
 
 @router.post(
