@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import json
 from typing import Any
 
@@ -258,6 +259,151 @@ async def test_selected_prompt_batch_queues_one_atomic_exact_media_plan(
         )
         assert wrong_key.status_code == 409
         assert wrong_key.json()["code"] == "prompt-source-conflict"
+
+
+@pytest.mark.parametrize("strategy", ["round_robin", "random"])
+@pytest.mark.asyncio
+async def test_prompt_batch_queue_allocates_lora_pool_per_item_deterministically(
+    app: FastAPI,
+    client: AsyncClient,
+    monkeypatch: pytest.MonkeyPatch,
+    strategy: str,
+) -> None:
+    workflow = (
+        await client.post(
+            "/api/workflows",
+            json={
+                "name": f"Prompt pool {strategy} workflow",
+                "operation": "text_to_image",
+                "engine": "mock",
+                "api_graph": {},
+                "trusted": True,
+            },
+        )
+    ).json()
+    digests = ("a" * 64, "b" * 64)
+    asset_ids: dict[str, str] = {}
+    with SessionLocal() as session:
+        for ordinal, digest in enumerate(digests, start=1):
+            asset = ModelAssetInstall(
+                name=f"Verified pool LoRA {ordinal}",
+                kind="lora",
+                local_path=f"C:/private/pool-{ordinal}.safetensors",
+                manifest_json={
+                    "sha256": digest,
+                    "comfy_name": f"pool-{ordinal}.safetensors",
+                },
+                active=True,
+                verified_at=utcnow(),
+            )
+            session.add(asset)
+            session.flush()
+            asset_ids[digest] = asset.id
+        session.commit()
+    resource_policy: dict[str, object] = {
+        "mode": "fixed",
+        "workflow_revision_id": workflow["current_revision_id"],
+        "lora_policy": {
+            "mode": "pool",
+            "strategy": strategy,
+            "stacks": [
+                [{"sha256": digest, "model_strength": 0.8, "clip_strength": 0.7}]
+                for digest in digests
+            ],
+        },
+    }
+    template_response = await client.post(
+        "/api/prompt-templates",
+        json=_create_payload(
+            key=f"prompt-pool-{strategy}",
+            name=f"Prompt pool {strategy}",
+            contract=_contract(resource_policy=resource_policy),
+        ),
+    )
+    assert template_response.status_code == 201, template_response.text
+    revision = template_response.json()["revision"]
+    chat = (await client.post("/api/chats", json={"title": "Prompt pool queue"})).json()
+    selection_seed = 7
+    batch = (
+        await client.post(
+            f"/api/chats/{chat['id']}/prompt-batches",
+            json={
+                "idempotency_key": f"prompt-pool-preview-{strategy}",
+                "template_revision_id": revision["id"],
+                "contract_sha256": revision["contract_sha256"],
+                "item_count": 3,
+                "selection_seed": selection_seed,
+                "inputs": {"subject": ["first", "second", "third"]},
+            },
+        )
+    ).json()
+
+    resolved_settings: list[list[dict[str, Any]]] = []
+
+    def resolve_pool_lora(
+        _session: object,
+        _revision: object,
+        settings: list[dict[str, Any]],
+    ) -> ResolvedLoraStack:
+        resolved_settings.append(settings)
+        return ResolvedLoraStack(
+            settings=settings,
+            provenance=[{"asset_id": settings[0]["asset_id"]}],
+            graph_sha256="c" * 64,
+        )
+
+    monkeypatch.setattr(orchestrator_module, "resolve_lora_stack", resolve_pool_lora)
+    payload = {
+        "idempotency_key": f"prompt-pool-queue-{strategy}",
+        "expected_plan_version": batch["plan_version"],
+        "expected_plan_sha256": batch["plan_sha256"],
+    }
+    async with app.state.services.scheduler.lease("primary"):
+        response = await client.post(f"/api/prompt-batches/{batch['id']}/queue", json=payload)
+        assert response.status_code == 202, response.text
+        queued = response.json()
+        plan = (await client.get(f"/api/work-plans/{queued['work_plan_id']}")).json()
+
+        def allocated_index(item_ordinal: int) -> int:
+            if strategy == "round_robin":
+                return (selection_seed + item_ordinal - 1) % len(digests)
+            material = "\x00".join(
+                ("prompt-template-resource-pool-v1", str(selection_seed), str(item_ordinal))
+            )
+            return int.from_bytes(
+                hashlib.sha256(material.encode("ascii")).digest()[:8], "big"
+            ) % len(digests)
+
+        expected_digests = tuple(digests[allocated_index(ordinal)] for ordinal in range(1, 4))
+        expected_asset_ids = [asset_ids[digest] for digest in expected_digests]
+        assert [settings[0]["asset_id"] for settings in resolved_settings] == expected_asset_ids
+        assert [step["settings_json"]["loras"][0]["asset_id"] for step in plan["steps"]] == (
+            expected_asset_ids
+        )
+        with SessionLocal() as session:
+            runs = session.scalars(
+                select(Run)
+                .join(WorkStep, Run.work_step_id == WorkStep.id)
+                .where(Run.work_plan_id == plan["id"])
+                .order_by(WorkStep.ordinal)
+            ).all()
+            allocated_policies = [
+                run.provenance_json["prompt_source"]["resource_policy"] for run in runs
+            ]
+        assert [policy["lora_policy"]["mode"] for policy in allocated_policies] == [
+            "fixed",
+            "fixed",
+            "fixed",
+        ]
+        assert [policy["lora_policy"]["stack"][0]["sha256"] for policy in allocated_policies] == (
+            list(expected_digests)
+        )
+        assert all("stacks" not in policy["lora_policy"] for policy in allocated_policies)
+
+        replay = await client.post(f"/api/prompt-batches/{batch['id']}/queue", json=payload)
+        assert replay.status_code == 202
+        assert replay.json()["replayed"] is True
+        assert replay.json()["work_plan_id"] == plan["id"]
 
 
 @pytest.mark.asyncio
@@ -1051,6 +1197,43 @@ async def test_prompt_template_fixed_resources_require_ready_workflow_and_verifi
             ],
         },
     }
+    unavailable_pool = await client.post(
+        "/api/prompt-templates",
+        json=_create_payload(
+            key="pool-missing-lora",
+            name="Private unavailable pool",
+            contract=_contract(
+                resource_policy={
+                    "mode": "fixed",
+                    "workflow_revision_id": workflow_revision_id,
+                    "lora_policy": {
+                        "mode": "pool",
+                        "strategy": "round_robin",
+                        "stacks": [
+                            [
+                                {
+                                    "sha256": digest,
+                                    "model_strength": 0.8,
+                                    "clip_strength": 0.7,
+                                }
+                            ],
+                            [
+                                {
+                                    "sha256": "c" * 64,
+                                    "model_strength": 1.0,
+                                    "clip_strength": 1.0,
+                                }
+                            ],
+                        ],
+                    },
+                }
+            ),
+        ),
+    )
+    assert unavailable_pool.status_code == 409
+    assert unavailable_pool.json()["code"] == "prompt-template-resources-unavailable"
+    assert "c" * 64 not in unavailable_pool.text
+
     verified_lora = await client.post(
         "/api/prompt-templates",
         json=_create_payload(

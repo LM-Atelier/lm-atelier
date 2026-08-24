@@ -134,6 +134,7 @@ from .prompt_expansion_use import (
     PromptBatchQueueSelection,
     PromptExpansionUseConflict,
     PromptExpansionUseError,
+    PromptSourceResourceOverrides,
     claim_prompt_batch_queue,
     claim_prompt_source,
     inherit_prompt_source,
@@ -901,8 +902,9 @@ class ConversationOrchestrator:
         ):
             raise PromptExpansionUseError(PROMPT_SOURCE_INVALID)
         prompt_source_resources = None
+        prompt_batch_resources: tuple[PromptSourceResourceOverrides, ...] = ()
         if prompt_batch_selection is not None:
-            prompt_source_resources = prompt_batch_resource_overrides(
+            prompt_batch_resources = prompt_batch_resource_overrides(
                 session,
                 prompt_batch_selection,
             )
@@ -914,13 +916,26 @@ class ConversationOrchestrator:
                 inherited_prompt_source,
                 request.text,
             )
-        if (
-            prompt_source_resources is not None
-            and prompt_source_resources.workflow_revision_id is not None
-        ):
+        requested_resource_workflows = {
+            resource.workflow_revision_id
+            for resource in prompt_batch_resources
+            if resource.workflow_revision_id is not None
+        }
+        if len(requested_resource_workflows) > 1:
+            raise PromptExpansionUseError(PROMPT_SOURCE_INVALID)
+        resource_workflow_id = (
+            next(iter(requested_resource_workflows))
+            if requested_resource_workflows
+            else (
+                prompt_source_resources.workflow_revision_id
+                if prompt_source_resources is not None
+                else None
+            )
+        )
+        if resource_workflow_id is not None:
             request = request.model_copy(
                 update={
-                    "workflow_revision_id": prompt_source_resources.workflow_revision_id,
+                    "workflow_revision_id": resource_workflow_id,
                 }
             )
         pending_count = session.scalar(
@@ -1234,6 +1249,11 @@ class ConversationOrchestrator:
             effective_settings["loras"] = [
                 dict(item) for item in prompt_source_resources.lora_settings
             ]
+        prompt_batch_has_explicit_loras = bool(prompt_batch_resources) and all(
+            resource.lora_settings is not None for resource in prompt_batch_resources
+        )
+        if prompt_batch_has_explicit_loras:
+            effective_settings.pop("loras", None)
         # After resolution, not before. The hierarchy validates its turn layer
         # a second time on the way through, so a selection put back into the
         # request settings is refused there as unknown even though it was
@@ -1358,23 +1378,35 @@ class ConversationOrchestrator:
             and plan.operation == Operation.TEXT_TO_IMAGE
             and workflow_revision is not None
             and lora_resolution is None
-            and (prompt_source_resources is None or prompt_source_resources.lora_settings is None)
-            and not any("loras" in layer for layer in lora_setting_layers)
         ):
             per_item_selections: list[AutomaticLoraSelection | None] = []
             per_item_resolutions: list[ResolvedLoraStack | None] = []
-            for item in prompt_batch_selection.items:
-                item_selection = select_automatic_lora_stack(
-                    session,
-                    workflow_revision,
-                    item.reviewed_prompt,
-                    workflow_activation_id=(
-                        workflow_activation["id"] if workflow_activation else None
-                    ),
+            lora_settings_in_layers = any("loras" in layer for layer in lora_setting_layers)
+            for item, resources in zip(
+                prompt_batch_selection.items,
+                prompt_batch_resources,
+                strict=True,
+            ):
+                item_selection = (
+                    select_automatic_lora_stack(
+                        session,
+                        workflow_revision,
+                        item.reviewed_prompt,
+                        workflow_activation_id=(
+                            workflow_activation["id"] if workflow_activation else None
+                        ),
+                    )
+                    if resources.lora_settings is None and not lora_settings_in_layers
+                    else None
+                )
+                item_settings = (
+                    item_selection.settings
+                    if item_selection is not None
+                    else list(resources.lora_settings or ())
                 )
                 item_resolution = (
-                    resolve_lora_stack(session, workflow_revision, item_selection.settings)
-                    if item_selection.settings
+                    resolve_lora_stack(session, workflow_revision, item_settings)
+                    if item_settings
                     else None
                 )
                 per_item_selections.append(item_selection)

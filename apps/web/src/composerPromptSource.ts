@@ -94,8 +94,12 @@ export function promptSourceForTurn(
   mode: RoutingMode,
   inputArtifactCount: number,
   referenceCount: number,
+  outputCount: number | undefined,
 ): ComposerPromptSource | undefined {
-  return mode === "image" && inputArtifactCount === 0 && referenceCount === 0
+  return mode === "image"
+    && inputArtifactCount === 0
+    && referenceCount === 0
+    && outputCount === undefined
     ? draft.promptSource ?? undefined
     : undefined;
 }

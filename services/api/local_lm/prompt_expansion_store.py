@@ -103,6 +103,7 @@ class StoredExpansion:
 
     batch: PromptExpansionBatch
     items: tuple[PromptExpansionItem, ...]
+    selection_seed: int
     replayed: bool
 
 
@@ -663,7 +664,12 @@ def _verify_stored(
         snapshot,
     )
     return _VerifiedStored(
-        stored=StoredExpansion(batch=batch, items=items, replayed=replayed),
+        stored=StoredExpansion(
+            batch=batch,
+            items=items,
+            selection_seed=request.selection_seed,
+            replayed=replayed,
+        ),
         request=request,
         request_payload=request_payload,
         model_snapshot=snapshot,

@@ -344,6 +344,58 @@ describe("Prompt Library Phase 1", () => {
     })));
   });
 
+  it("authors an exact deterministic LoRA stack pool", async () => {
+    renderLibrary();
+    await screen.findByRole("heading", { name: "Portrait variants" });
+    fireEvent.click(screen.getByRole("button", { name: "New template" }));
+    fireEvent.change(screen.getByLabelText("Resource policy"), { target: { value: "fixed" } });
+    fireEvent.change(screen.getByLabelText("Workflow revision ID"), {
+      target: { value: "workflow-revision-pool" },
+    });
+    fireEvent.change(screen.getByLabelText("LoRA policy"), { target: { value: "pool" } });
+    fireEvent.change(screen.getByLabelText("LoRA pool strategy"), {
+      target: { value: "random" },
+    });
+    fireEvent.change(screen.getByLabelText("Stack 1 LoRA 1 SHA-256"), {
+      target: { value: "a".repeat(64) },
+    });
+    fireEvent.change(screen.getByLabelText("Stack 1 LoRA 1 model strength"), {
+      target: { value: "0.8" },
+    });
+    fireEvent.change(screen.getByLabelText("Stack 1 LoRA 1 CLIP strength"), {
+      target: { value: "0.7" },
+    });
+    fireEvent.change(screen.getByLabelText("Stack 2 LoRA 1 SHA-256"), {
+      target: { value: "b".repeat(64) },
+    });
+    fireEvent.change(screen.getByLabelText("Stack 2 LoRA 1 model strength"), {
+      target: { value: "1.1" },
+    });
+    fireEvent.change(screen.getByLabelText("Stack 2 LoRA 1 CLIP strength"), {
+      target: { value: "0.9" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "Save revision" }));
+
+    await waitFor(() => expect(api.createPromptTemplate).toHaveBeenCalledWith(
+      expect.objectContaining({
+        contract: expect.objectContaining({
+          resource_policy: {
+            mode: "fixed",
+            workflow_revision_id: "workflow-revision-pool",
+            lora_policy: {
+              mode: "pool",
+              strategy: "random",
+              stacks: [
+                [{ sha256: "a".repeat(64), model_strength: 0.8, clip_strength: 0.7 }],
+                [{ sha256: "b".repeat(64), model_strength: 1.1, clip_strength: 0.9 }],
+              ],
+            },
+          },
+        }),
+      }),
+    ));
+  });
+
   it("restores an old revision by appending through the reviewed restore endpoint", async () => {
     renderLibrary();
     await screen.findByText("Revision 1");

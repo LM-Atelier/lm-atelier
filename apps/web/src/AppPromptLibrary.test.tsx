@@ -167,7 +167,7 @@ it("inserts a reviewed Prompt Library draft into the image composer with removab
   vi.mocked(api.createPromptBatch).mockResolvedValue(batch);
   vi.mocked(api.promptBatch).mockResolvedValue({ ...batch, replayed: true });
   vi.mocked(api.updateChat).mockResolvedValue({ ...chat, routing_mode: "image" });
-  vi.mocked(api.sendTurn).mockReturnValue(new Promise(() => {}));
+  vi.mocked(api.sendTurn).mockRejectedValue(new Error("Prompt Library source changed. Refresh and try again."));
   const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
   render(<QueryClientProvider client={client}><App /></QueryClientProvider>);
 
@@ -183,10 +183,29 @@ it("inserts a reviewed Prompt Library draft into the image composer with removab
 
   expect(await screen.findByRole("heading", { name: chat.title })).toBeInTheDocument();
   const composer = screen.getByRole("textbox", { name: "Message" });
-  expect(composer).toHaveValue("A portrait of Ada.");
+  expect(screen.getByRole("textbox", { name: "Message" })).toHaveValue("A portrait of Ada.");
   expect(screen.getByRole("combobox", { name: "Generation mode" })).toHaveValue("image");
   expect(screen.getByText("Prompt Library draft linked")).toBeVisible();
   await waitFor(() => expect(api.updateChat).toHaveBeenCalledWith(chat.id, { routing_mode: "image" }));
+
+  fireEvent.change(screen.getByRole("combobox", { name: "Number of outputs" }), {
+    target: { value: "2" },
+  });
+  expect(screen.queryByText("Prompt Library draft linked")).not.toBeInTheDocument();
+  fireEvent.change(screen.getByRole("combobox", { name: "Number of outputs" }), {
+    target: { value: "1" },
+  });
+
+  fireEvent.click(screen.getByRole("button", { name: "Prompt library" }));
+  await screen.findByRole("heading", { name: "Portrait variants" });
+  fireEvent.click(screen.getByRole("button", { name: "Test expansion" }));
+  fireEvent.change(screen.getByLabelText("subject for draft 1"), { target: { value: "Ada" } });
+  fireEvent.change(screen.getByLabelText("subject for draft 2"), { target: { value: "Grace" } });
+  fireEvent.click(screen.getByRole("button", { name: "Generate drafts" }));
+  await screen.findByRole("heading", { name: "Review drafts" });
+  fireEvent.click(within(
+    screen.getByLabelText("Reviewed prompt for draft 1").closest("article")!,
+  ).getByRole("button", { name: "Insert into composer" }));
 
   fireEvent.change(composer, { target: { value: "A warmer portrait of Ada." } });
   expect(screen.getByText("Prompt Library draft linked")).toBeVisible();
@@ -221,4 +240,9 @@ it("inserts a reviewed Prompt Library draft into the image composer with removab
       contract_sha256: batch.contract_sha256,
     },
   ));
+  expect(await screen.findByRole("alert")).toHaveTextContent(
+    "Prompt Library source changed. Refresh and try again.",
+  );
+  expect(screen.getByRole("textbox", { name: "Message" })).toHaveValue("A portrait of Ada.");
+  expect(screen.getByText("Prompt Library draft linked")).toBeVisible();
 });

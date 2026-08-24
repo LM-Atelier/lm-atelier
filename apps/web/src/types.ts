@@ -1336,7 +1336,12 @@ export interface PromptTemplateLora {
 export type PromptTemplateLoraPolicy =
   | { mode: "inherited_auto" }
   | { mode: "none" }
-  | { mode: "fixed"; stack: PromptTemplateLora[] };
+  | { mode: "fixed"; stack: PromptTemplateLora[] }
+  | {
+      mode: "pool";
+      strategy: "random" | "round_robin";
+      stacks: PromptTemplateLora[][];
+    };
 
 export type PromptTemplateResourcePolicy =
   | { mode: "inherited" }

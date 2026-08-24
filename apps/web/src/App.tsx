@@ -129,6 +129,7 @@ import type { ComposerAttachment } from "./useComposerUploads";
 import { useDraftClassification } from "./useDraftClassification";
 import { useFirstRunSetup } from "./useFirstRunSetup";
 import { usePromptLibraryComposerInsertion } from "./usePromptLibraryComposerInsertion";
+import { recoverPromptSourceSend } from "./promptSourceSendRecovery";
 import { useWorkPlanMutations } from "./useWorkPlanMutations";
 import { useGenerationModeSelection } from "./useGenerationModeSelection";
 import { useMessageActions } from "./useMessageActions";
@@ -172,7 +173,6 @@ type SendTurnVariables = PendingTurn & {
 
 const SETUP_DISMISSED_KEY = "lm-atelier-setup-dismissed";
 const CURRENT_CHAT_KEY = "local-lm-chat";
-
 
 /** The library's Edit action: attach the selection in the chat composer,
  * switch to image mode, and open the studio. */
@@ -882,7 +882,7 @@ function Composer({
     const dispatch = stopCurrent ? onStopAndSend : onSend;
     const requestedOutputCount = mediaOutputCountForTurn(selectedMode, outputCount);
     const references = mentions.forText(text);
-    const promptSource = promptSourceForTurn(draft, selectedMode, attachments.length, references.length);
+    const promptSource = promptSourceForTurn(draft, selectedMode, attachments.length, references.length, requestedOutputCount);
     dispatch(
       text.trim(),
       selectedMode,
@@ -1037,7 +1037,7 @@ function Composer({
                 </select>
                 <ChevronDown size={13} />
               </label>
-              <OutputCountControl mode={mode} maximum={maxMediaOutputsPerPlan} value={outputCount} onChange={setOutputCount} />
+              <OutputCountControl mode={mode} maximum={maxMediaOutputsPerPlan} value={outputCount} onChange={(nextCount) => { setOutputCount(nextCount); if (nextCount > 1) detachPromptSource(); }} />
               <div className="composer-workflow-selector">
                 <WorkflowIcon aria-hidden="true" size={15} />
                 <ActiveChatWorkflowSelector chatId={chat.id} routingMode={mode} />
@@ -2151,6 +2151,7 @@ export default function App() {
       }));
     },
     onSuccess: (accepted, { chatId }) => applyAcceptedTurn(chatId, accepted),
+    onError: (_error, variables) => recoverPromptSourceSend(client, setComposerDrafts, variables),
     onSettled: (_accepted, _error, { chatId, id }) => {
       setPendingTurns((current) => {
         const remaining = (current[chatId] ?? []).filter((pending) => pending.id !== id);
