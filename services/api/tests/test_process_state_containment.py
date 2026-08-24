@@ -243,3 +243,33 @@ def test_a_linked_identity_record_inside_a_real_state_folder_is_refused(
     assert elsewhere.read_text(encoding="utf-8") == _identity_record(), (
         "the link target was consumed"
     )
+
+
+def test_a_link_at_the_comfy_launch_child_is_refused(tmp_path: Path) -> None:
+    """The one write site that walks a NESTED component, pinned separately.
+
+    `_held_state` has four call sites: two publishes, one read and one discard.
+    Three of them hold the state directory itself, and only this one descends a
+    NAMED CHILD - `state/comfy-launch`. Its containment therefore depends on
+    the walk refusing a link at a component that is not the anchor, which
+    nothing else in this file exercises: a change that stopped checking
+    intermediate components would leave every other test here green.
+
+    A junction at `comfy-launch` is the exact shape: the parent is a legitimate
+    state directory, and only the child is redirected.
+    """
+
+    state = tmp_path / "data" / "state"
+    state.mkdir(parents=True)
+    destination = tmp_path / "elsewhere"
+    destination.mkdir()
+    if not _make_link_dir(state / "comfy-launch", destination):
+        pytest.skip("this host does not permit directory links")
+
+    with (
+        pytest.raises(ProcessStateError),
+        _held_state(state, "comfy-launch") as anchor,
+    ):
+        _publish_bytes(anchor, "launch.yaml", b"payload")
+
+    assert list(destination.iterdir()) == [], "the link target was written through"
