@@ -45,6 +45,10 @@ from .media_organization_schema import (
     CREATE_MEDIA_ORGANIZATION_TRIGGER_SQL,
     DROP_MEDIA_ORGANIZATION_TRIGGER_SQL,
 )
+from .prompt_expansion_schema import (
+    CREATE_PROMPT_EXPANSION_TRIGGER_SQL,
+    DROP_PROMPT_EXPANSION_TRIGGER_SQL,
+)
 from .prompt_template_schema import (
     CREATE_PROMPT_TEMPLATE_TRIGGER_SQL,
     DROP_PROMPT_TEMPLATE_TRIGGER_SQL,
@@ -159,6 +163,11 @@ class Chat(TimestampMixin, Base):
         back_populates="chat", cascade="all, delete-orphan", order_by="Message.created_at"
     )
     runs: Mapped[list[Run]] = relationship(back_populates="chat", cascade="all, delete-orphan")
+    prompt_expansion_batches: Mapped[list[PromptExpansionBatch]] = relationship(
+        back_populates="chat",
+        cascade="all, delete-orphan",
+        passive_deletes=True,
+    )
 
 
 class Message(TimestampMixin, Base):
@@ -660,6 +669,114 @@ class PromptTemplateDefinition(TimestampMixin, Base):
     )
 
 
+class PromptExpansionBatch(TimestampMixin, Base):
+    """One chat-scoped, versioned Prompt Library draft batch."""
+
+    __tablename__ = "prompt_expansion_batches"
+    __table_args__ = (
+        UniqueConstraint(
+            "chat_id",
+            "idempotency_key",
+            name="uq_prompt_expansion_batch_chat_idempotency",
+        ),
+        CheckConstraint(
+            "length(idempotency_key) BETWEEN 1 AND 200 AND instr(idempotency_key, char(0)) = 0",
+            name="ck_prompt_expansion_batch_idempotency_key",
+        ),
+        CheckConstraint("schema_version = 1", name="ck_prompt_expansion_batch_schema_version"),
+        CheckConstraint("codec_version = 2", name="ck_prompt_expansion_batch_codec_version"),
+        CheckConstraint(
+            _lowercase_sha256_check("contract_sha256"),
+            name="ck_prompt_expansion_batch_contract_sha256",
+        ),
+        CheckConstraint(
+            _lowercase_sha256_check("original_plan_sha256"),
+            name="ck_prompt_expansion_batch_original_plan_sha256",
+        ),
+        CheckConstraint(
+            _lowercase_sha256_check("plan_sha256"),
+            name="ck_prompt_expansion_batch_plan_sha256",
+        ),
+        CheckConstraint("plan_version > 0", name="ck_prompt_expansion_batch_plan_version"),
+        CheckConstraint("state IN ('draft', 'queued')", name="ck_prompt_expansion_batch_state"),
+        Index("ix_prompt_expansion_batches_chat_created", "chat_id", "created_at", "id"),
+    )
+
+    id: Mapped[str] = mapped_column(String(40), primary_key=True, default=lambda: new_id("ptbatch"))
+    chat_id: Mapped[str] = mapped_column(ForeignKey("chats.id", ondelete="CASCADE"), index=True)
+    idempotency_key: Mapped[str] = mapped_column(String(200))
+    prompt_template_id: Mapped[str] = mapped_column(
+        ForeignKey("prompt_template_definitions.id", ondelete="RESTRICT"), index=True
+    )
+    prompt_template_revision_id: Mapped[str] = mapped_column(
+        ForeignKey("prompt_template_revisions.id", ondelete="RESTRICT"), index=True
+    )
+    schema_version: Mapped[int] = mapped_column(Integer, default=1)
+    contract_sha256: Mapped[str] = mapped_column(String(64))
+    codec_version: Mapped[int] = mapped_column(Integer, default=2)
+    request_json: Mapped[str] = mapped_column(Text)
+    model_snapshot_json: Mapped[str] = mapped_column(Text)
+    original_plan_sha256: Mapped[str] = mapped_column(String(64))
+    plan_sha256: Mapped[str] = mapped_column(String(64))
+    plan_version: Mapped[int] = mapped_column(Integer, default=1)
+    state: Mapped[str] = mapped_column(String(16), default="draft")
+
+    chat: Mapped[Chat] = relationship(back_populates="prompt_expansion_batches")
+    items: Mapped[list[PromptExpansionItem]] = relationship(
+        back_populates="batch",
+        cascade="all, delete-orphan",
+        passive_deletes=True,
+        order_by="PromptExpansionItem.ordinal",
+    )
+
+
+class PromptExpansionItem(TimestampMixin, Base):
+    """Immutable generated origin plus one editable, pre-queue candidate."""
+
+    __tablename__ = "prompt_expansion_items"
+    __table_args__ = (
+        UniqueConstraint("batch_id", "ordinal", name="uq_prompt_expansion_item_ordinal"),
+        CheckConstraint("ordinal > 0", name="ck_prompt_expansion_item_ordinal"),
+        CheckConstraint(
+            _lowercase_sha256_check("original_rendered_sha256"),
+            name="ck_prompt_expansion_item_original_rendered_sha256",
+        ),
+        CheckConstraint(
+            _lowercase_sha256_check("reviewed_sha256"),
+            name="ck_prompt_expansion_item_reviewed_sha256",
+        ),
+        CheckConstraint(
+            "length(original_rendered_prompt) BETWEEN 1 AND 32000 "
+            "AND instr(original_rendered_prompt, char(0)) = 0",
+            name="ck_prompt_expansion_item_original_prompt",
+        ),
+        CheckConstraint(
+            "length(reviewed_prompt) BETWEEN 1 AND 32000 AND instr(reviewed_prompt, char(0)) = 0",
+            name="ck_prompt_expansion_item_reviewed_prompt",
+        ),
+        CheckConstraint("review_version > 0", name="ck_prompt_expansion_item_review_version"),
+        CheckConstraint("reroll_count >= 0", name="ck_prompt_expansion_item_reroll_count"),
+        Index("ix_prompt_expansion_items_batch_ordinal", "batch_id", "ordinal"),
+    )
+
+    id: Mapped[str] = mapped_column(String(40), primary_key=True, default=lambda: new_id("ptitem"))
+    batch_id: Mapped[str] = mapped_column(
+        ForeignKey("prompt_expansion_batches.id", ondelete="CASCADE"), index=True
+    )
+    ordinal: Mapped[int] = mapped_column(Integer)
+    original_evidence_json: Mapped[str] = mapped_column(Text)
+    current_evidence_json: Mapped[str] = mapped_column(Text)
+    original_rendered_prompt: Mapped[str] = mapped_column(Text)
+    original_rendered_sha256: Mapped[str] = mapped_column(String(64))
+    reviewed_prompt: Mapped[str] = mapped_column(Text)
+    reviewed_sha256: Mapped[str] = mapped_column(String(64))
+    selected: Mapped[bool] = mapped_column(Boolean, default=True)
+    review_version: Mapped[int] = mapped_column(Integer, default=1)
+    reroll_count: Mapped[int] = mapped_column(Integer, default=0)
+
+    batch: Mapped[PromptExpansionBatch] = relationship(back_populates="items")
+
+
 class PromptTemplateRevision(TimestampMixin, Base):
     """One append-only canonical Prompt Library contract."""
 
@@ -744,6 +861,18 @@ for _statement in CREATE_PROMPT_TEMPLATE_TRIGGER_SQL:
         Base.metadata,
         "after_create",
         _install_sqlite_trigger(_statement),
+    )
+for _statement in CREATE_PROMPT_EXPANSION_TRIGGER_SQL:
+    event.listen(
+        Base.metadata,
+        "after_create",
+        _install_sqlite_trigger(_statement),
+    )
+for _statement in DROP_PROMPT_EXPANSION_TRIGGER_SQL:
+    event.listen(
+        Base.metadata,
+        "before_drop",
+        DDL(_statement).execute_if(dialect="sqlite"),  # type: ignore[no-untyped-call]
     )
 for _statement in DROP_PROMPT_TEMPLATE_TRIGGER_SQL:
     event.listen(

@@ -493,6 +493,7 @@ h1, h2, h3 { margin: 0; }
 .mode-select { height: 32px; border-radius: 10px; display: flex; align-items: center; gap: 4px; padding: 0 7px; background: var(--panel-3); color: var(--ink-primary); }
 .mode-select select { appearance: none; border: 0; outline: 0; background: transparent; color: inherit; font-size: 12px; font-weight: 600; padding: 0; }
 .mode-select select option { background: var(--panel); }
+.output-count-select > span { font-size: 12px; font-weight: 600; }
 .mode-image { color: var(--atelier-soft); } .mode-video { color: var(--cream); } .mode-auto { color: var(--accent-2); }
 .composer-workflow-selector { display: flex; align-items: center; gap: 4px; min-width: 0; max-width: 230px; color: var(--ink-secondary); }
 .composer-workflow-selector .workflow-selector { display: flex; align-items: center; gap: 4px; }
@@ -667,6 +668,30 @@ h1, h2, h3 { margin: 0; }
 .prompt-lora-editor { display: grid; gap: 8px; }
 .prompt-strength-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 12px; }
 .prompt-template-editor footer { margin-top: 24px; justify-content: flex-end; }
+.prompt-test-unavailable { margin: -8px 0 12px; color: var(--muted) !important; font-size: 11px; }
+.prompt-expansion-dialog { width: min(860px, 96vw); }
+.prompt-expansion-dialog input, .prompt-expansion-dialog textarea { width: 100%; min-width: 0; border: 1px solid var(--border); border-radius: 10px; background: var(--panel-2); color: var(--ink); padding: 9px 10px; }
+.prompt-expansion-dialog textarea { resize: vertical; line-height: 1.5; overflow-wrap: anywhere; }
+.prompt-expansion-dialog > footer, .prompt-review-list > footer { margin-top: 22px; justify-content: flex-end; }
+.prompt-expansion-note { color: var(--ink-secondary); line-height: 1.5; }
+.prompt-expansion-controls { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 12px; }
+.prompt-expansion-inputs, .prompt-model-guidance, .prompt-review-list { min-width: 0; margin-top: 20px; padding-top: 16px; border-top: 1px solid var(--border); }
+.prompt-expansion-inputs h3, .prompt-model-guidance h3 { font-size: 14px; }
+.prompt-model-guidance > p { margin: 4px 0 10px; color: var(--muted); font-size: 11px; }
+.prompt-model-guidance dl { display: grid; gap: 8px; margin: 0; }
+.prompt-model-guidance dl > div { min-width: 0; border: 1px solid var(--border); border-radius: 10px; background: var(--well); padding: 10px 12px; }
+.prompt-model-guidance dt { color: var(--accent-2); font-weight: 700; text-transform: capitalize; }
+.prompt-model-guidance dd { margin: 5px 0 0; color: var(--ink-secondary); overflow-wrap: anywhere; }
+.prompt-review-list { display: grid; gap: 12px; }
+.prompt-review-status { margin: -6px 0 0; color: var(--muted); font-size: 11px; }
+.prompt-review-card { min-width: 0; border: 1px solid var(--border); border-radius: 10px; background: var(--well); padding: 14px; }
+.prompt-review-heading { display: flex; align-items: flex-start; justify-content: space-between; gap: 12px; }
+.prompt-review-heading h3 { margin-top: 3px; font-size: 14px; }
+.prompt-review-heading .toggle-row { display: inline-flex; align-items: center; gap: 8px; margin: 0; }
+.prompt-review-card details { min-width: 0; margin: 12px 0; }
+.prompt-review-card pre { max-width: 100%; max-height: 180px; white-space: pre-wrap; overflow-wrap: anywhere; }
+.prompt-review-actions { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
+.prompt-review-actions small { color: var(--muted); }
 .workflow-detail { min-width: 0; padding: 22px; }
 .workflow-detail details { margin-top: 12px; }
 .workflow-detail summary { color: var(--ink-secondary); font-size: 12px; font-weight: 700; cursor: pointer; }
@@ -964,6 +989,10 @@ h1, h2, h3 { margin: 0; }
   .model-card { grid-template-columns: 42px 1fr; }.model-stats { grid-column: 2; align-items: flex-start; flex-direction: row; }
   .workflow-layout { grid-template-columns: 1fr; }.workflow-list { border-right: 0; border-bottom: 1px solid var(--border); max-height: 220px; overflow-y: auto; }
   .prompt-slot-grid, .prompt-strength-grid { grid-template-columns: minmax(0, 1fr); }
+  .prompt-expansion-controls { grid-template-columns: minmax(0, 1fr); }
+  .prompt-review-heading, .prompt-review-actions { align-items: stretch; flex-direction: column; }
+  .prompt-review-heading .toggle-row { justify-content: space-between; }
+  .prompt-review-actions .compact-button { align-self: flex-end; }
   .prompt-slot-remove { justify-self: end; }
   .workflow-controls, .workflow-compare { grid-template-columns: 1fr; }
   .custom-node-install { grid-template-columns: 1fr; }

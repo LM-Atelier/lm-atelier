@@ -126,6 +126,13 @@ from .outpaint_workflows import (
 from .processes import ProcessSupervisor
 from .profile_service import AUTO_PROFILE_ID
 from .progress import completed_progress, update_job_progress
+from .prompt_expansion_use import (
+    PROMPT_SOURCE_INVALID,
+    PromptExpansionUseError,
+    claim_prompt_source,
+    inherit_prompt_source,
+    prompt_source_resource_overrides,
+)
 from .prompt_helpers import PROMPT_HELPER_SCOPE, prompt_helper_system_message
 from .references import parse_reference_requests
 from .routing import ModalityRouter, RouteConfirmationRequired
@@ -565,6 +572,7 @@ class ConversationOrchestrator:
         replacement_message_id: str | None = None,
         source_action: str = "send",
         inherited_image_edit_strength: dict[str, Any] | None = None,
+        inherited_prompt_source: object | None = None,
         reference_source_message_id: str | None = None,
     ) -> TurnAccepted:
         if not self._admission_open:
@@ -580,6 +588,7 @@ class ConversationOrchestrator:
                 replacement_message_id=replacement_message_id,
                 source_action=source_action,
                 inherited_image_edit_strength=inherited_image_edit_strength,
+                inherited_prompt_source=inherited_prompt_source,
                 reference_source_message_id=reference_source_message_id,
             )
 
@@ -593,6 +602,7 @@ class ConversationOrchestrator:
         replacement_message_id: str | None = None,
         source_action: str = "send",
         inherited_image_edit_strength: dict[str, Any] | None = None,
+        inherited_prompt_source: object | None = None,
         reference_source_message_id: str | None = None,
     ) -> TurnAccepted:
         # Never resolve an idempotency key until its URL-scoped chat has been
@@ -631,6 +641,7 @@ class ConversationOrchestrator:
                 replacement_message_id=replacement_message_id,
                 source_action=source_action,
                 inherited_image_edit_strength=inherited_image_edit_strength,
+                inherited_prompt_source=inherited_prompt_source,
                 reference_source_message_id=reference_source_message_id,
             )
 
@@ -661,6 +672,7 @@ class ConversationOrchestrator:
                 replacement_message_id=replacement_message_id,
                 source_action=source_action,
                 inherited_image_edit_strength=inherited_image_edit_strength,
+                inherited_prompt_source=inherited_prompt_source,
                 reference_source_message_id=reference_source_message_id,
             )
         finally:
@@ -790,11 +802,38 @@ class ConversationOrchestrator:
         replacement_message_id: str | None = None,
         source_action: str = "send",
         inherited_image_edit_strength: dict[str, Any] | None = None,
+        inherited_prompt_source: object | None = None,
         reference_source_message_id: str | None = None,
     ) -> TurnAccepted:
         chat = session.get(Chat, chat_id)
         if not chat:
             raise LookupError("chat not found")
+        if request.prompt_source is not None and inherited_prompt_source is not None:
+            raise PromptExpansionUseError(PROMPT_SOURCE_INVALID)
+        has_prompt_source = request.prompt_source is not None or inherited_prompt_source is not None
+        if has_prompt_source and (
+            request.mode != RoutingMode.IMAGE
+            or request.input_artifact_ids
+            or request.references
+            or request.output_count not in {None, 1}
+            or request.ordered_settings
+        ):
+            raise PromptExpansionUseError(PROMPT_SOURCE_INVALID)
+        prompt_source_resources = None
+        if has_prompt_source:
+            prompt_source_resources = prompt_source_resource_overrides(
+                session,
+                chat_id,
+                request.prompt_source,
+                inherited_prompt_source,
+                request.text,
+            )
+            if prompt_source_resources.workflow_revision_id is not None:
+                request = request.model_copy(
+                    update={
+                        "workflow_revision_id": prompt_source_resources.workflow_revision_id,
+                    }
+                )
         pending_count = session.scalar(
             select(func.count(Job.id))
             .join(Run, Job.run_id == Run.id)
@@ -921,6 +960,8 @@ class ConversationOrchestrator:
             and not request.confirm_media
         ):
             raise OrderedPlanConfirmationRequired(ordered_intent)
+        if ordered_intent and has_prompt_source:
+            raise PromptExpansionUseError(PROMPT_SOURCE_INVALID)
         if ordered_intent:
             return await self._create_ordered_turn(
                 session,
@@ -1084,6 +1125,13 @@ class ConversationOrchestrator:
             ),
             turn_overrides=request_settings,
         )
+        if (
+            prompt_source_resources is not None
+            and prompt_source_resources.lora_settings is not None
+        ):
+            effective_settings["loras"] = [
+                dict(item) for item in prompt_source_resources.lora_settings
+            ]
         # After resolution, not before. The hierarchy validates its turn layer
         # a second time on the way through, so a selection put back into the
         # request settings is refused there as unknown even though it was
@@ -1107,6 +1155,7 @@ class ConversationOrchestrator:
         if (
             plan.operation in {Operation.TEXT_TO_IMAGE, Operation.IMAGE_TO_IMAGE}
             and workflow_revision
+            and (prompt_source_resources is None or prompt_source_resources.lora_settings is None)
             and not any("loras" in layer for layer in lora_setting_layers)
         ):
             lora_selection = select_automatic_lora_stack(
@@ -1230,6 +1279,10 @@ class ConversationOrchestrator:
                 configured_output_count,
             )
         )
+        if has_prompt_source and (
+            plan.operation != Operation.TEXT_TO_IMAGE or resolved_input_ids or output_count != 1
+        ):
+            raise PromptExpansionUseError(PROMPT_SOURCE_INVALID)
         per_output_prompt = ModalityRouter.per_output_media_prompt(
             plan.standalone_prompt,
             plan.operation,
@@ -1291,8 +1344,26 @@ class ConversationOrchestrator:
         ):
             raise RouteConfirmationRequired(plan)
 
+        prompt_source_witness = (
+            claim_prompt_source(session, chat_id, request.prompt_source, request.text)
+            if request.prompt_source is not None
+            else (
+                inherit_prompt_source(inherited_prompt_source, request.text)
+                if inherited_prompt_source is not None
+                else None
+            )
+        )
         input_parts: list[MessagePart] = [
-            MessagePart(position=0, type=PartType.TEXT.value, text=request.text)
+            MessagePart(
+                position=0,
+                type=PartType.TEXT.value,
+                text=request.text,
+                metadata_json=(
+                    {"prompt_source": prompt_source_witness}
+                    if prompt_source_witness is not None
+                    else {}
+                ),
+            )
         ]
         explicit_ids = set(explicit_artifacts)
         for artifact_id in resolved_input_ids:
@@ -1496,6 +1567,11 @@ class ConversationOrchestrator:
             )
             provenance: dict[str, Any] = {
                 "routing": plan.model_dump(mode="json"),
+                **(
+                    {"prompt_source": prompt_source_witness}
+                    if prompt_source_witness is not None
+                    else {}
+                ),
                 **({"visual_prompt": visual_prompt} if visual_prompt else {}),
                 "model_selection": model_selection,
                 "input_artifact_ids": resolved_input_ids,

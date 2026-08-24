@@ -4,7 +4,16 @@ from datetime import UTC, datetime
 from enum import StrEnum
 from typing import Annotated, Any, Literal
 
-from pydantic import BaseModel, ConfigDict, Field, StringConstraints, field_serializer
+from pydantic import (
+    BaseModel,
+    ConfigDict,
+    Field,
+    StrictBool,
+    StrictInt,
+    StrictStr,
+    StringConstraints,
+    field_serializer,
+)
 
 from .domain import Operation, RoutingMode
 from .references import MAX_REFERENCES_PER_TURN, MAX_ROLE, MentionSource
@@ -433,6 +442,55 @@ class PromptTemplatePageOut(ApiModel):
     offset: int
 
 
+class PromptExpansionCreate(ApiModel):
+    idempotency_key: StrictStr = Field(
+        min_length=1,
+        max_length=200,
+        pattern=r"^[A-Za-z0-9][A-Za-z0-9_.:-]{0,199}$",
+    )
+    template_revision_id: StrictStr = Field(min_length=1, max_length=40)
+    contract_sha256: StrictStr = Field(pattern=r"^[0-9a-f]{64}$")
+    item_count: StrictInt = Field(ge=1, le=16)
+    selection_seed: StrictInt = Field(ge=0, lt=2_147_483_648)
+    inputs: dict[StrictStr, StrictStr | list[StrictStr]] = Field(default_factory=dict)
+
+
+class PromptExpansionItemUpdate(ApiModel):
+    expected_review_version: StrictInt = Field(ge=1)
+    expected_plan_version: StrictInt = Field(ge=1)
+    reviewed_prompt: StrictStr = Field(min_length=1, max_length=32_000)
+    selected: StrictBool
+
+
+class PromptExpansionItemOut(ApiModel):
+    id: str = Field(min_length=1, max_length=40)
+    ordinal: int = Field(ge=1, le=16)
+    rendered_prompt: str = Field(min_length=1, max_length=32_000)
+    rendered_sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
+    reviewed_prompt: str = Field(min_length=1, max_length=32_000)
+    reviewed_sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
+    selected: bool
+    review_version: int = Field(ge=1)
+    reroll_count: int = Field(ge=0)
+
+
+class PromptExpansionBatchOut(ApiModel):
+    id: str = Field(min_length=1, max_length=40)
+    chat_id: str = Field(min_length=1, max_length=40)
+    prompt_template_id: str = Field(min_length=1, max_length=40)
+    prompt_template_revision_id: str = Field(min_length=1, max_length=40)
+    schema_version: Literal[1]
+    contract_sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
+    codec_version: Literal[2]
+    requested_count: int = Field(ge=1, le=16)
+    selection_seed: int = Field(ge=0, lt=2_147_483_648)
+    plan_sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
+    state: Literal["draft", "queued"]
+    plan_version: int = Field(ge=1)
+    items: list[PromptExpansionItemOut] = Field(min_length=1, max_length=16)
+    replayed: bool
+
+
 class TurnReferenceIn(ApiModel):
     """One explicitly structured Reference attached to a turn."""
 
@@ -443,6 +501,21 @@ class TurnReferenceIn(ApiModel):
     source: MentionSource = MentionSource.MENTION
 
 
+class PromptComposerSourceIn(ApiModel):
+    """One reviewed Prompt Library item the composer was populated from."""
+
+    version: Literal[1] = 1
+    batch_id: str = Field(min_length=1, max_length=40)
+    expected_plan_version: int = Field(ge=1)
+    expected_plan_sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
+    item_id: str = Field(min_length=1, max_length=40)
+    expected_review_version: int = Field(ge=1)
+    expected_reviewed_sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
+    prompt_template_id: str = Field(min_length=1, max_length=40)
+    prompt_template_revision_id: str = Field(min_length=1, max_length=40)
+    contract_sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
+
+
 class TurnRequest(ApiModel):
     text: str = Field(min_length=1, max_length=200_000)
     mode: RoutingMode | None = None
@@ -451,6 +524,7 @@ class TurnRequest(ApiModel):
     references: list[TurnReferenceIn] = Field(
         default_factory=list, max_length=MAX_REFERENCES_PER_TURN
     )
+    prompt_source: PromptComposerSourceIn | None = None
     settings: dict[str, Any] = Field(default_factory=dict)
     ordered_settings: dict[str, dict[str, Any]] = Field(default_factory=dict, max_length=3)
     output_count: int | None = Field(default=None, ge=1, le=16)
@@ -2130,6 +2204,7 @@ class ApplicationInfo(ApiModel):
     version: str
     data_directory: str
     log_directory: str
+    max_media_outputs_per_plan: int = Field(ge=1, le=16)
     # The installation-wide gate. When this is false no chat can open its
     # own, and the UI says so rather than offering a switch that does
     # nothing.

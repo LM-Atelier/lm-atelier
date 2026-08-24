@@ -261,6 +261,7 @@ async def test_model_readiness_requires_matching_capability_evidence(
 async def test_about_reports_version_and_local_support_paths(
     client: AsyncClient, settings: Settings
 ) -> None:
+    settings.max_media_outputs_per_plan = 3
     response = await client.get("/api/about")
 
     assert response.status_code == 200
@@ -268,6 +269,7 @@ async def test_about_reports_version_and_local_support_paths(
         "version": __version__,
         "data_directory": str(settings.data_dir.resolve()),
         "log_directory": str(settings.log_dir.resolve()),
+        "max_media_outputs_per_plan": settings.max_media_outputs_per_plan,
         # Reported so the UI can explain a switch it cannot offer. Shut unless
         # the installation says otherwise.
         "web_access_enabled": False,

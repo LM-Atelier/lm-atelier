@@ -16,7 +16,19 @@ from pathlib import Path, PurePosixPath
 from typing import TYPE_CHECKING, Annotated, Any, Literal, cast
 
 import httpx
-from fastapi import APIRouter, Depends, File, HTTPException, Query, Request, Response, UploadFile
+from fastapi import (
+    APIRouter,
+    Depends,
+    File,
+    HTTPException,
+    Query,
+    Request,
+    Response,
+    UploadFile,
+)
+from fastapi import (
+    Path as PathParam,
+)
 from sqlalchemy import Select, and_, func, or_, select, text
 from sqlalchemy.exc import IntegrityError, SQLAlchemyError
 from sqlalchemy.orm import Session, selectinload
@@ -149,6 +161,7 @@ from .models import (
     ModelProfile,
     Project,
     ProjectWorkflowSelection,
+    PromptExpansionBatch,
     PromptTemplateDefinition,
     PromptTemplateRevision,
     ReferenceAsset,
@@ -190,6 +203,21 @@ from .profile_service import (
     validate_profile_install,
 )
 from .progress import update_job_progress
+from .prompt_expansion import (
+    PromptExpansionError,
+    expand_prompt_template,
+    parse_expansion_request,
+)
+from .prompt_expansion_store import (
+    PromptExpansionModelSnapshot,
+    PromptExpansionStoreConflict,
+    PromptExpansionStoreError,
+    StoredExpansion,
+    create_or_replay_expansion,
+    read_expansion,
+    update_expansion_item,
+)
+from .prompt_expansion_use import PromptExpansionUseConflict, PromptExpansionUseError
 from .prompt_grammar import PromptGrammarError
 from .prompt_helpers import (
     PROMPT_HELPER_SCOPE,
@@ -295,6 +323,10 @@ from .schemas import (
     ProjectOut,
     ProjectUpdate,
     ProjectWorkflowSelectionIn,
+    PromptExpansionBatchOut,
+    PromptExpansionCreate,
+    PromptExpansionItemOut,
+    PromptExpansionItemUpdate,
     PromptHelperCreate,
     PromptHelperDetail,
     PromptHelperUpdate,
@@ -656,6 +688,7 @@ async def application_info(request: Request) -> ApplicationInfo:
         version=__version__,
         data_directory=str(settings.data_dir.resolve()),
         log_directory=str(settings.log_dir.resolve()),
+        max_media_outputs_per_plan=settings.max_media_outputs_per_plan,
         web_access_enabled=settings.web_access_enabled,
     )
 
@@ -1889,6 +1922,57 @@ def _prompt_template_write_out(
     )
 
 
+def _prompt_expansion_out(stored: StoredExpansion) -> PromptExpansionBatchOut:
+    batch = stored.batch
+    try:
+        request = parse_expansion_request(json.loads(batch.request_json))
+    except (json.JSONDecodeError, PromptExpansionError) as exc:
+        raise api_error(
+            409,
+            "prompt-batch-conflict",
+            "Prompt batch conflicts with its stored receipt.",
+        ) from exc
+    return PromptExpansionBatchOut(
+        id=batch.id,
+        chat_id=batch.chat_id,
+        prompt_template_id=batch.prompt_template_id,
+        prompt_template_revision_id=batch.prompt_template_revision_id,
+        schema_version=cast(Literal[1], batch.schema_version),
+        contract_sha256=batch.contract_sha256,
+        codec_version=cast(Literal[2], batch.codec_version),
+        requested_count=request.item_count,
+        selection_seed=request.selection_seed,
+        plan_sha256=batch.plan_sha256,
+        state=cast(Literal["draft", "queued"], batch.state),
+        plan_version=batch.plan_version,
+        items=[
+            PromptExpansionItemOut(
+                id=item.id,
+                ordinal=item.ordinal,
+                rendered_prompt=item.original_rendered_prompt,
+                rendered_sha256=item.original_rendered_sha256,
+                reviewed_prompt=item.reviewed_prompt,
+                reviewed_sha256=item.reviewed_sha256,
+                selected=item.selected,
+                review_version=item.review_version,
+                reroll_count=item.reroll_count,
+            )
+            for item in stored.items
+        ],
+        replayed=stored.replayed,
+    )
+
+
+def _prompt_batch_conflict(exc: PromptExpansionStoreError) -> ApiError:
+    if isinstance(exc, PromptExpansionStoreConflict):
+        return api_error(409, "prompt-batch-stale", "Prompt batch changed; reload and retry.")
+    return api_error(
+        409,
+        "prompt-batch-conflict",
+        "Prompt batch conflicts with its stored receipt.",
+    )
+
+
 @router.get("/prompt-templates", response_model=PromptTemplatePageOut)
 async def list_prompt_templates(
     session: SessionDep,
@@ -2056,6 +2140,139 @@ async def restore_prompt_template_revision_route(
     except PromptLibraryError as exc:
         raise _prompt_template_error(exc) from exc
     return _prompt_template_write_out(session, result)
+
+
+@router.post(
+    "/chats/{chat_id}/prompt-batches",
+    response_model=PromptExpansionBatchOut,
+    status_code=201,
+)
+async def create_prompt_batch(
+    chat_id: str,
+    payload: PromptExpansionCreate,
+    session: ConversationSessionDep,
+) -> PromptExpansionBatchOut:
+    chat = session.get(Chat, chat_id)
+    if chat is None or chat.scope != STANDARD_CHAT_SCOPE:
+        raise api_error(404, "chat-not-found", "chat not found")
+    revision = session.get(PromptTemplateRevision, payload.template_revision_id)
+    if revision is None:
+        raise api_error(
+            404, "prompt-template-revision-not-found", "Prompt template does not exist."
+        )
+    definition = session.get(PromptTemplateDefinition, revision.prompt_template_id)
+    if (
+        definition is None
+        or definition.archived
+        or definition.current_revision_id != revision.id
+        or revision.contract_sha256 != payload.contract_sha256
+    ):
+        raise api_error(
+            409,
+            "prompt-template-stale",
+            "Prompt template changed; reload and retry.",
+        )
+    try:
+        contract = parse_prompt_template_contract(revision.contract_json)
+        if prompt_template_contract_sha256(contract) != revision.contract_sha256:
+            raise api_error(
+                409,
+                "prompt-template-conflict",
+                "Prompt template conflicts with its stored revision.",
+            )
+        expansion_request = parse_expansion_request(
+            {
+                "definition_id": definition.id,
+                "revision_id": revision.id,
+                "contract_sha256": revision.contract_sha256,
+                "item_count": payload.item_count,
+                "selection_seed": payload.selection_seed,
+                "inputs": payload.inputs,
+            }
+        )
+        plan = expand_prompt_template(contract, expansion_request)
+    except (PromptExpansionError, PromptTemplateError) as exc:
+        raise api_error(
+            422,
+            "prompt-batch-request-invalid",
+            "Prompt batch request is invalid.",
+        ) from exc
+    if not plan.complete:
+        raise api_error(
+            409,
+            "prompt-model-slots-unavailable",
+            "Prompt model slots are not available for preview yet.",
+        )
+    try:
+        stored = create_or_replay_expansion(
+            session,
+            chat.id,
+            payload.idempotency_key,
+            expansion_request,
+            plan,
+            PromptExpansionModelSnapshot(version=1, kind="deterministic"),
+        )
+    except PromptExpansionStoreError as exc:
+        raise _prompt_batch_conflict(exc) from exc
+    session.commit()
+    return _prompt_expansion_out(stored)
+
+
+@router.get("/prompt-batches/{batch_id}", response_model=PromptExpansionBatchOut)
+async def get_prompt_batch(
+    batch_id: str,
+    session: ConversationSessionDep,
+) -> PromptExpansionBatchOut:
+    batch = session.get(PromptExpansionBatch, batch_id)
+    if batch is None:
+        raise api_error(404, "prompt-batch-not-found", "Prompt batch does not exist.")
+    chat = session.get(Chat, batch.chat_id)
+    if chat is None or chat.scope != STANDARD_CHAT_SCOPE:
+        raise api_error(404, "prompt-batch-not-found", "Prompt batch does not exist.")
+    try:
+        stored = read_expansion(session, batch.chat_id, batch.id)
+    except PromptExpansionStoreError as exc:
+        raise _prompt_batch_conflict(exc) from exc
+    return _prompt_expansion_out(stored)
+
+
+@router.patch(
+    "/prompt-batches/{batch_id}/items/{ordinal}",
+    response_model=PromptExpansionBatchOut,
+)
+async def patch_prompt_batch_item(
+    batch_id: str,
+    ordinal: Annotated[int, PathParam(ge=1, le=16)],
+    payload: PromptExpansionItemUpdate,
+    session: ConversationSessionDep,
+) -> PromptExpansionBatchOut:
+    batch = session.get(PromptExpansionBatch, batch_id)
+    if batch is None:
+        raise api_error(404, "prompt-batch-not-found", "Prompt batch does not exist.")
+    chat = session.get(Chat, batch.chat_id)
+    if chat is None or chat.scope != STANDARD_CHAT_SCOPE:
+        raise api_error(404, "prompt-batch-not-found", "Prompt batch does not exist.")
+    try:
+        current = read_expansion(session, batch.chat_id, batch.id)
+        item = next(
+            (candidate for candidate in current.items if candidate.ordinal == ordinal), None
+        )
+        if item is None:
+            raise api_error(404, "prompt-batch-item-not-found", "Prompt batch item does not exist.")
+        stored = update_expansion_item(
+            session,
+            batch.chat_id,
+            batch.id,
+            item.id,
+            expected_item_version=payload.expected_review_version,
+            expected_plan_version=payload.expected_plan_version,
+            reviewed_prompt=payload.reviewed_prompt,
+            selected=payload.selected,
+        )
+    except PromptExpansionStoreError as exc:
+        raise _prompt_batch_conflict(exc) from exc
+    session.commit()
+    return _prompt_expansion_out(stored)
 
 
 @router.post("/prompt-helpers", response_model=PromptHelperDetail, status_code=201)
@@ -2276,6 +2493,7 @@ async def _accept_turn(
     replacement_message_id: str | None = None,
     source_action: str = "send",
     inherited_image_edit_strength: dict[str, Any] | None = None,
+    inherited_prompt_source: object | None = None,
     reference_source_message_id: str | None = None,
 ) -> TurnAccepted:
     try:
@@ -2287,6 +2505,7 @@ async def _accept_turn(
             replacement_message_id=replacement_message_id,
             source_action=source_action,
             inherited_image_edit_strength=inherited_image_edit_strength,
+            inherited_prompt_source=inherited_prompt_source,
             reference_source_message_id=reference_source_message_id,
         )
     except LookupError as exc:
@@ -2344,6 +2563,10 @@ async def _accept_turn(
         raise api_error(503, "engine-schema-unavailable", str(exc)) from exc
     except ReferenceNotFoundError as exc:
         raise api_error(404, "reference-not-found", str(exc)) from exc
+    except PromptExpansionUseConflict as exc:
+        raise api_error(409, "prompt-source-conflict", str(exc)) from exc
+    except PromptExpansionUseError as exc:
+        raise api_error(422, "prompt-source-invalid", str(exc)) from exc
     except ValueError as exc:
         raise api_error(422, "turn-invalid", str(exc)) from exc
 
@@ -2415,6 +2638,14 @@ def _inherited_auto_image_edit_strength(run: Run) -> dict[str, Any] | None:
     if not isinstance(value, int | float) or isinstance(value, bool):
         return None
     return strength
+
+
+def _message_prompt_source(message: Message) -> object | None:
+    for part in sorted(message.parts, key=lambda candidate: candidate.position):
+        metadata = part.metadata_json
+        if part.type == "text" and type(metadata) is dict and "prompt_source" in metadata:
+            return cast(object, metadata["prompt_source"])
+    return None
 
 
 @router.post("/messages/{message_id}/regenerate", response_model=TurnAccepted, status_code=202)
@@ -2513,6 +2744,7 @@ async def regenerate_message(
         replacement_message_id=message_id,
         source_action="regenerate",
         inherited_image_edit_strength=inherited_image_edit_strength,
+        inherited_prompt_source=_message_prompt_source(user_message),
         reference_source_message_id=user_message.id,
     )
 
@@ -2546,7 +2778,9 @@ async def edit_and_branch(
     request: Request,
     session: ConversationSessionDep,
 ) -> TurnAccepted:
-    source = session.get(Message, message_id)
+    source = session.scalar(
+        select(Message).options(selectinload(Message.parts)).where(Message.id == message_id)
+    )
     if not source or source.role != MessageRole.USER.value:
         raise api_error(404, "user-message-not-found", "user message not found")
     prior_run = session.scalar(select(Run).where(Run.user_message_id == source.id))
@@ -2595,6 +2829,16 @@ async def edit_and_branch(
             except ValueError as exc:
                 raise api_error(422, "generation-settings-invalid", str(exc)) from exc
     turn = payload.model_copy(update=updates)
+    inherited_prompt_source = (
+        _message_prompt_source(source)
+        if (
+            "prompt_source" not in payload.model_fields_set
+            and prior_run is not None
+            and prior_run.operation == Operation.TEXT_TO_IMAGE.value
+            and turn.mode == RoutingMode.IMAGE
+        )
+        else None
+    )
     reference_source_message_id = (
         source.id if "references" not in payload.model_fields_set else None
     )
@@ -2606,6 +2850,7 @@ async def edit_and_branch(
         use_explicit_parent=True,
         source_action="edit_and_branch",
         inherited_image_edit_strength=inherited_image_edit_strength,
+        inherited_prompt_source=inherited_prompt_source,
         reference_source_message_id=reference_source_message_id,
     )
 

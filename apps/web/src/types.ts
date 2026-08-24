@@ -888,6 +888,7 @@ export interface ApplicationInfo {
   version: string;
   data_directory: string;
   log_directory: string;
+  max_media_outputs_per_plan: number;
   // The installation-wide gate. False means no chat can open its own, and
   // the UI says so rather than offering a switch that does nothing.
   web_access_enabled: boolean;
@@ -1404,6 +1405,52 @@ export interface PromptTemplateUpdateInput {
   description?: string;
   archived?: boolean;
   contract?: PromptTemplateContract;
+}
+
+/** Provisional Prompt Library expansion transport, isolated for API reconciliation. */
+export interface PromptBatchCreateInput {
+  idempotency_key: string;
+  template_revision_id: string;
+  contract_sha256: string;
+  item_count: number;
+  selection_seed: number;
+  inputs: Record<string, string | string[]>;
+}
+
+export interface PromptBatchItemUpdateInput {
+  expected_review_version: number;
+  expected_plan_version: number;
+  reviewed_prompt: string;
+  selected: boolean;
+}
+
+export interface PromptBatchItem {
+  id: string;
+  ordinal: number;
+  rendered_prompt: string;
+  rendered_sha256: string;
+  reviewed_prompt: string;
+  reviewed_sha256: string;
+  selected: boolean;
+  review_version: number;
+  reroll_count: number;
+}
+
+export interface PromptBatch {
+  id: string;
+  chat_id: string;
+  prompt_template_id: string;
+  prompt_template_revision_id: string;
+  schema_version: number;
+  contract_sha256: string;
+  codec_version: 2;
+  requested_count: number;
+  selection_seed: number;
+  plan_sha256: string;
+  state: "draft" | "queued";
+  plan_version: number;
+  items: PromptBatchItem[];
+  replayed: boolean;
 }
 
 /** An image already held that closely resembles one just added. */
