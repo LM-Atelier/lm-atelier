@@ -402,7 +402,10 @@ def _probe_atomic_rename(anchor: AnchoredDirectory) -> bool:
     try:
         os.close(create_entry(anchor, name))
         created = True
-        rename_entry(anchor, name, renamed)
+        # A freshly generated destination, so replacement is neither needed
+        # nor wanted - and stating it means the probe proves the same thing
+        # on both platforms rather than a different thing on each.
+        rename_entry(anchor, name, renamed, replace=False)
         return True
     except (OSError, AnchoredDirectoryError):
         return False
