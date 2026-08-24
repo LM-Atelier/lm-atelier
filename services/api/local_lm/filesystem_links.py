@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import contextlib
+import dataclasses
+import enum
 import os
 import stat
 from pathlib import Path
@@ -95,6 +97,19 @@ _STATUS_OBJECT_PATH_NOT_FOUND: Final = 0xC000003A
 #: value so it can never be mistaken for either of the not-found statuses.
 _STATUS_UNEXPECTED: Final = 0xFFFFFFFF
 _FILE_DISPOSITION_INFORMATION_CLASS: Final = 13
+#: FileDirectoryInformation. The variable-length record carries the name and
+#: the attributes TOGETHER, which is the whole reason enumeration belongs here:
+#: a kind read from a second call is a kind read after the name could change.
+_FILE_DIRECTORY_INFORMATION_CLASS: Final = 1
+_STATUS_NO_MORE_FILES: Final = 0x80000006
+#: Fixed part of FILE_DIRECTORY_INFORMATION, before FileName.
+_FILE_DIRECTORY_INFORMATION_HEADER: Final = 64
+#: One buffer that holds a useful number of records without a growth loop.
+_DIRECTORY_QUERY_BUFFER: Final = 64 * 1024
+#: A directory larger than this is refused rather than read. Every caller of
+#: this primitive walks what it returns, so an unbounded answer is an
+#: unbounded amount of someone else's work.
+_MAX_LISTED_ENTRIES: Final = 8192
 #: FileFsSizeInformation. Volume capacity answered for the volume the HANDLE
 #: is on, rather than for whatever a pathname resolves to at the moment it is
 #: read.
@@ -545,6 +560,209 @@ def discard_entry(anchor: AnchoredDirectory, name: str) -> None:
 
     with contextlib.suppress(AnchoredDirectoryError, OSError):
         remove_entry(anchor, name)
+
+
+class AnchoredEntryKind(enum.Enum):
+    """What an entry is, as the directory's own enumeration record said.
+
+    UNKNOWN is a real answer rather than a failure. A filesystem is allowed to
+    return a name without a type, and the honest report is that the type is not
+    known - not a second lookup by that name, which is the gap this module
+    exists to close.
+    """
+
+    FILE = "file"
+    DIRECTORY = "directory"
+    LINK = "link"
+    OTHER = "other"
+    UNKNOWN = "unknown"
+
+
+#: Kinds no caller may treat as ordinary content. A consumer that deletes,
+#: reads or trusts what it lists must skip these: a link may point anywhere,
+#: and an unknown kind may BE a link.
+UNSAFE_ENTRY_KINDS: Final = frozenset(
+    {AnchoredEntryKind.LINK, AnchoredEntryKind.UNKNOWN, AnchoredEntryKind.OTHER}
+)
+
+
+@dataclasses.dataclass(frozen=True, slots=True)
+class AnchoredEntry:
+    """One directory entry: a validated single-component name and its kind.
+
+    Frozen because it is evidence. A caller that could edit the kind after the
+    fact could turn a refusal into a permission without touching the
+    filesystem, and the record would still look like it came from the kernel.
+    """
+
+    name: str
+    kind: AnchoredEntryKind
+
+    @property
+    def is_safe(self) -> bool:
+        """True only for an ordinary file or directory from the record."""
+
+        return self.kind not in UNSAFE_ENTRY_KINDS
+
+
+def list_entries(
+    anchor: AnchoredDirectory, *, limit: int = _MAX_LISTED_ENTRIES
+) -> tuple[AnchoredEntry, ...]:
+    """List a held directory, taking each name and kind from one record.
+
+    The name and the kind come from the SAME enumeration record on both
+    platforms, so nothing is looked up by name a second time. That is the whole
+    point: a caller that lists names and then stats each one has reopened the
+    window between the check and the operation, once per entry.
+
+    `.` and `..` never appear. A duplicate name, a name that is not a single
+    component, or more than `limit` entries refuses - a directory that answers
+    with a name it should not be able to hold is not one this module describes.
+
+    POSIX note, stated because it is the one place this is weaker than the
+    Windows path. `os.scandir` on a descriptor answers from the record when the
+    filesystem supplies a type in it, which ext4, xfs and tmpfs all do. When a
+    filesystem does not, CPython falls back to `fstatat` through the SAME held
+    descriptor: contained, but a second lookup by name. Any entry whose
+    classification raises is reported UNKNOWN rather than retried.
+    """
+
+    if limit < 1:
+        _refuse()
+    descriptor = anchor.descriptor
+    if descriptor is not None:
+        entries = _list_posix(descriptor, limit)
+    else:
+        handle = anchor.handle
+        if handle is None:
+            _refuse()
+        entries = _list_windows(handle, limit)
+    seen: set[str] = set()
+    for entry in entries:
+        # A single-component name is what every other operation on this anchor
+        # requires. A directory that hands back "a/b" or ".." is either broken
+        # or hostile, and either way nothing downstream should carry it.
+        _require_entry_name(entry.name)
+        if entry.name in seen:
+            _refuse()
+        seen.add(entry.name)
+    return tuple(entries)
+
+
+def _list_posix(descriptor: int, limit: int) -> list[AnchoredEntry]:
+    """Enumerate through the held descriptor, kind from the dirent record."""
+
+    found: list[AnchoredEntry] = []
+    try:
+        with os.scandir(descriptor) as scan:
+            for entry in scan:
+                if len(found) >= limit:
+                    _refuse()
+                found.append(AnchoredEntry(entry.name, _posix_kind(entry)))
+    except OSError:
+        _refuse()
+    return found
+
+
+def _posix_kind(entry: os.DirEntry[str]) -> AnchoredEntryKind:
+    """Classify from the dirent, never from a retried lookup by name.
+
+    Each predicate answers from the record without a syscall when the
+    filesystem supplied a type. When it did not, CPython stats through the same
+    held descriptor, and a failure there is allowed to stand rather than being
+    retried. An entry deleted between the read and the classification lands
+    here too, and UNKNOWN is the correct answer for it: it has no kind now.
+    """
+
+    try:
+        if entry.is_symlink():
+            return AnchoredEntryKind.LINK
+        if entry.is_dir(follow_symlinks=False):
+            return AnchoredEntryKind.DIRECTORY
+        if entry.is_file(follow_symlinks=False):
+            return AnchoredEntryKind.FILE
+    except OSError:
+        return AnchoredEntryKind.UNKNOWN
+    return AnchoredEntryKind.OTHER
+
+
+def _list_windows(handle: int, limit: int) -> list[AnchoredEntry]:
+    """Enumerate through the held handle with NtQueryDirectoryFile.
+
+    One buffer, queried until STATUS_NO_MORE_FILES. Each record carries its own
+    name and its own FileAttributes, so the kind is decided from the same bytes
+    that carried the name.
+    """
+
+    api = _windows_api()
+    buffer = api.ctypes.create_string_buffer(_DIRECTORY_QUERY_BUFFER)
+    status_block = api.IoStatusBlock()
+    found: list[AnchoredEntry] = []
+    restart = True
+    while True:
+        status = api.ntdll.NtQueryDirectoryFile(
+            api.ctypes.c_void_p(handle),
+            None,
+            None,
+            None,
+            api.ctypes.byref(status_block),
+            buffer,
+            api.ctypes.c_ulong(_DIRECTORY_QUERY_BUFFER),
+            api.ctypes.c_ulong(_FILE_DIRECTORY_INFORMATION_CLASS),
+            api.ctypes.c_ubyte(0),
+            None,
+            api.ctypes.c_ubyte(1 if restart else 0),
+        )
+        restart = False
+        masked = status & 0xFFFFFFFF
+        if masked == _STATUS_NO_MORE_FILES:
+            return found
+        if masked != _STATUS_SUCCESS:
+            _refuse()
+        found.extend(_read_directory_records(buffer.raw, limit, len(found)))
+
+
+def _read_directory_records(raw: bytes, limit: int, already: int) -> list[AnchoredEntry]:
+    """Walk one buffer of FILE_DIRECTORY_INFORMATION records."""
+
+    found: list[AnchoredEntry] = []
+    offset = 0
+    while True:
+        if offset + _FILE_DIRECTORY_INFORMATION_HEADER > len(raw):
+            _refuse()
+        next_offset = int.from_bytes(raw[offset : offset + 4], "little")
+        attributes = int.from_bytes(raw[offset + 56 : offset + 60], "little")
+        name_length = int.from_bytes(raw[offset + 60 : offset + 64], "little")
+        start = offset + _FILE_DIRECTORY_INFORMATION_HEADER
+        end = start + name_length
+        if name_length % 2 or end > len(raw):
+            _refuse()
+        name = raw[start:end].decode("utf-16-le")
+        if name not in (".", ".."):
+            if already + len(found) >= limit:
+                _refuse()
+            found.append(AnchoredEntry(name, _windows_kind(attributes)))
+        if next_offset == 0:
+            return found
+        offset += next_offset
+
+
+def _windows_kind(attributes: int) -> AnchoredEntryKind:
+    """Classify from the attributes in the record, reparse point first.
+
+    Order matters and is not cosmetic. A junction has BOTH the directory and
+    the reparse-point attribute set, so testing for a directory first would
+    report the one thing every caller of this module must not treat as a
+    directory.
+    """
+
+    reparse = int(getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0x400))
+    directory = int(getattr(stat, "FILE_ATTRIBUTE_DIRECTORY", 0x10))
+    if attributes & reparse:
+        return AnchoredEntryKind.LINK
+    if attributes & directory:
+        return AnchoredEntryKind.DIRECTORY
+    return AnchoredEntryKind.FILE
 
 
 def _require_entry_name(name: str) -> None:
