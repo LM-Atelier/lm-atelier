@@ -5,6 +5,7 @@ import hashlib
 import mimetypes
 import os
 import re
+import secrets
 import shutil
 import tempfile
 import uuid
@@ -20,7 +21,16 @@ from sqlalchemy.orm import Session
 from .artifact_library import begin_artifact_write_fence, referenced_artifact_ids
 from .config import Settings
 from .domain import ArtifactKind, MessageRole, PartType
-from .filesystem_links import is_link_or_reparse
+from .filesystem_links import (
+    AnchoredDirectory,
+    AnchoredDirectoryError,
+    create_entry,
+    discard_entry,
+    is_link_or_reparse,
+    open_child_directory,
+    rename_entry,
+    sync_directory,
+)
 from .models import (
     Artifact,
     ArtifactLibraryEntry,
@@ -169,76 +179,122 @@ class ArtifactStore:
         original_name: str | None,
         metadata: dict[str, object] | None,
     ) -> Artifact:
-        digest = hashlib.sha256()
-        self.root.mkdir(parents=True, exist_ok=True)
-        fd, temporary_name = tempfile.mkstemp(prefix="ingest-", dir=self.root)
-        size = 0
+        sha256, size = self._publish_under_its_digest(source)
+        destination_path = self._destination(sha256)
+        # The verified-file cache is NOT primed here, and that is deliberate.
+        # _remember_verified stats by pathname, so priming it immediately after
+        # an anchored publish would record a fingerprint taken through a name
+        # that was just resolved by a handle - and verified_path skips hashing
+        # whenever the fingerprint matches. An entry swapped in that narrow
+        # window would then be trusted without ever being hashed. Leaving the
+        # cache cold costs one hash on the first read and closes that.
+
+        existing = session.scalar(select(Artifact).where(Artifact.sha256 == sha256))
+        if existing:
+            changed = False
+            if existing.size_bytes != size:
+                existing.size_bytes = size
+                changed = True
+            sanitized_name = self._safe_original_name(existing.original_name)
+            if existing.original_name != sanitized_name:
+                existing.original_name = sanitized_name
+                changed = True
+            sanitized_media_type = self._safe_media_type(existing.media_type)
+            if existing.media_type != sanitized_media_type:
+                existing.media_type = sanitized_media_type
+                changed = True
+            if existing.metadata_json.get("temporary_preview") and not (metadata or {}).get(
+                "temporary_preview"
+            ):
+                existing.kind = kind.value
+                existing.media_type = self._safe_media_type(media_type or existing.media_type)
+                existing.original_name = (
+                    self._safe_original_name(original_name) or existing.original_name
+                )
+                existing.metadata_json = metadata or {}
+                changed = True
+            if changed:
+                session.flush()
+            return existing
+
+        artifact = Artifact(
+            id=f"sha256:{sha256}",
+            sha256=sha256,
+            kind=kind.value,
+            media_type=self._safe_media_type(media_type),
+            size_bytes=size,
+            relative_path=self._relative(destination_path),
+            original_name=self._safe_original_name(original_name),
+            metadata_json=metadata or {},
+        )
+        session.add(artifact)
+        session.flush()
+        return artifact
+
+    def _publish_under_its_digest(self, source: IO[bytes]) -> tuple[str, int]:
+        """Consume the stream into the store and publish it under its digest.
+
+        Everything from the store root down is HELD. The two digest directories
+        are created through their held parent, so a link anywhere in that
+        ancestry refuses before a byte is written into it, and publication is a
+        rename between two held directories rather than an operation on a path
+        that was inspected a moment ago.
+
+        Measured before this existed: with a junction planted at the second
+        digest component, the previous code wrote the artifact straight through
+        it and out of the store, because `_is_link` was applied to the final
+        name only and the two intermediate directories were created by this
+        method itself with `mkdir(parents=True, exist_ok=True)`.
+
+        The digest is not known until the bytes have been consumed, so staging
+        necessarily precedes the destination and publication crosses
+        directories. That is what `rename_entry(..., into=...)` is for.
+
+        Staging uses an unpredictable name created EXCLUSIVELY: a fixed sibling
+        can be planted in advance, and the plant would then be what gets
+        published under a digest it does not have.
+        """
+
         try:
-            with os.fdopen(fd, "wb") as destination:
-                while chunk := source.read(1024 * 1024):
-                    digest.update(chunk)
-                    destination.write(chunk)
-                    size += len(chunk)
-                destination.flush()
-                os.fsync(destination.fileno())
+            root_anchor = AnchoredDirectory(self.root, create=True)
+        except AnchoredDirectoryError as exc:
+            raise ValueError("artifact store root uses a filesystem link") from exc
 
-            sha256 = digest.hexdigest()
-            existing = session.scalar(select(Artifact).where(Artifact.sha256 == sha256))
-            if existing:
-                existing_path = self.resolve(existing)
-                changed = False
-                if not self._matches_file(existing_path, sha256, size):
-                    existing_path.parent.mkdir(parents=True, exist_ok=True)
-                    os.replace(temporary_name, existing_path)
-                    self._remember_verified(existing_path)
-                if existing.size_bytes != size:
-                    existing.size_bytes = size
-                    changed = True
-                sanitized_name = self._safe_original_name(existing.original_name)
-                if existing.original_name != sanitized_name:
-                    existing.original_name = sanitized_name
-                    changed = True
-                sanitized_media_type = self._safe_media_type(existing.media_type)
-                if existing.media_type != sanitized_media_type:
-                    existing.media_type = sanitized_media_type
-                    changed = True
-                if existing.metadata_json.get("temporary_preview") and not (metadata or {}).get(
-                    "temporary_preview"
-                ):
-                    existing.kind = kind.value
-                    existing.media_type = self._safe_media_type(media_type or existing.media_type)
-                    existing.original_name = (
-                        self._safe_original_name(original_name) or existing.original_name
-                    )
-                    existing.metadata_json = metadata or {}
-                    changed = True
-                if changed:
-                    session.flush()
-                return existing
-
-            destination_path = self._destination(sha256)
-            destination_path.parent.mkdir(parents=True, exist_ok=True)
-            if self._is_link(destination_path):
-                raise ValueError("artifact destination uses a filesystem link")
-            if not self._matches_file(destination_path, sha256, size):
-                os.replace(temporary_name, destination_path)
-            self._remember_verified(destination_path)
-            artifact = Artifact(
-                id=f"sha256:{sha256}",
-                sha256=sha256,
-                kind=kind.value,
-                media_type=self._safe_media_type(media_type),
-                size_bytes=size,
-                relative_path=self._relative(destination_path),
-                original_name=self._safe_original_name(original_name),
-                metadata_json=metadata or {},
-            )
-            session.add(artifact)
-            session.flush()
-            return artifact
-        finally:
-            if os.path.exists(temporary_name):
-                os.unlink(temporary_name)
+        with root_anchor:
+            staging = f"ingest-{secrets.token_hex(8)}.tmp"
+            descriptor = create_entry(root_anchor, staging)
+            digest = hashlib.sha256()
+            size = 0
+            try:
+                with os.fdopen(descriptor, "wb") as sink:
+                    while chunk := source.read(1024 * 1024):
+                        digest.update(chunk)
+                        sink.write(chunk)
+                        size += len(chunk)
+                    sink.flush()
+                    os.fsync(sink.fileno())
+                sha256 = digest.hexdigest()
+                first = open_child_directory(root_anchor, sha256[:2], create=True)
+                try:
+                    second = open_child_directory(first, sha256[2:4], create=True)
+                    try:
+                        # Content-addressed, so replacing is idempotent: the
+                        # destination name can only ever hold these bytes.
+                        rename_entry(root_anchor, staging, sha256, into=second, replace=True)
+                        sync_directory(second)
+                    finally:
+                        second.close()
+                finally:
+                    first.close()
+            except AnchoredDirectoryError as exc:
+                with suppress(AnchoredDirectoryError):
+                    discard_entry(root_anchor, staging)
+                raise ValueError("artifact destination uses a filesystem link") from exc
+            except BaseException:
+                with suppress(AnchoredDirectoryError):
+                    discard_entry(root_anchor, staging)
+                raise
+            return sha256, size
 
     def export_copy(self, artifact: Artifact, destination: Path) -> Path:
         source = self.resolve(artifact)
@@ -788,19 +844,6 @@ class ArtifactStore:
             missing="assume_regular",
             unreadable="assume_link",
         )
-
-    @staticmethod
-    def _matches_file(path: Path, digest_value: str, size: int) -> bool:
-        try:
-            if not path.is_file() or path.stat().st_size != size:
-                return False
-            digest = hashlib.sha256()
-            with path.open("rb") as source:
-                while chunk := source.read(1024 * 1024):
-                    digest.update(chunk)
-            return digest.hexdigest() == digest_value
-        except OSError:
-            return False
 
     def _remember_verified(self, path: Path) -> None:
         stat_result = path.stat()
