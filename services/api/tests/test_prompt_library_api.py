@@ -5,8 +5,12 @@ import json
 from typing import Any
 
 import pytest
+from fastapi import FastAPI
 from httpx2 import AsyncClient
+from sqlalchemy import select
 
+from local_lm import orchestrator as orchestrator_module
+from local_lm.auxiliary_assets import AutomaticLoraSelection, ResolvedLoraStack
 from local_lm.db import SessionLocal
 from local_lm.domain import utcnow
 from local_lm.models import (
@@ -19,6 +23,7 @@ from local_lm.models import (
     PromptTemplateRevision,
     Run,
     WorkPlan,
+    WorkStep,
 )
 from local_lm.prompt_library import PromptLibraryError, create_prompt_template
 
@@ -81,6 +86,247 @@ def _composer_source(batch: dict[str, Any], item: dict[str, Any]) -> dict[str, A
         "prompt_template_revision_id": batch["prompt_template_revision_id"],
         "contract_sha256": batch["contract_sha256"],
     }
+
+
+@pytest.mark.asyncio
+async def test_selected_prompt_batch_queues_one_atomic_exact_media_plan(
+    app: FastAPI,
+    client: AsyncClient,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    chat = (await client.post("/api/chats", json={"title": "Template batch queue"})).json()
+    template = (
+        await client.post(
+            "/api/prompt-templates",
+            json=_create_payload(key="prompt-create-atomic"),
+        )
+    ).json()
+    revision = template["revision"]
+    batch = (
+        await client.post(
+            f"/api/chats/{chat['id']}/prompt-batches",
+            json={
+                "idempotency_key": "prompt-preview-atomic",
+                "template_revision_id": revision["id"],
+                "contract_sha256": revision["contract_sha256"],
+                "item_count": 3,
+                "selection_seed": 41,
+                "inputs": {
+                    "subject": [
+                        "private first subject",
+                        "private skipped subject",
+                        "private third subject",
+                    ]
+                },
+            },
+        )
+    ).json()
+    deselected = await client.patch(
+        f"/api/prompt-batches/{batch['id']}/items/2",
+        json={
+            "expected_review_version": batch["items"][1]["review_version"],
+            "expected_plan_version": batch["plan_version"],
+            "reviewed_prompt": batch["items"][1]["reviewed_prompt"],
+            "selected": False,
+        },
+    )
+    assert deselected.status_code == 200
+    batch = deselected.json()
+    selected = [item for item in batch["items"] if item["selected"]]
+    payload = {
+        "idempotency_key": "prompt-queue-atomic",
+        "expected_plan_version": batch["plan_version"],
+        "expected_plan_sha256": batch["plan_sha256"],
+    }
+    auto_selected_prompts: list[str] = []
+
+    def select_item_lora(
+        *_args: object,
+        **_kwargs: object,
+    ) -> AutomaticLoraSelection:
+        prompt = str(_args[2])
+        auto_selected_prompts.append(prompt)
+        ordinal = len(auto_selected_prompts)
+        return AutomaticLoraSelection(
+            settings=[
+                {
+                    "asset_id": f"lora-item-{ordinal}",
+                    "model_strength": 0.8,
+                    "clip_strength": 0.7,
+                    "enabled": True,
+                }
+            ],
+            provenance={"mode": "automatic", "prompt_ordinal": ordinal},
+        )
+
+    def resolve_item_lora(
+        _session: object,
+        _revision: object,
+        settings: list[dict[str, Any]],
+    ) -> ResolvedLoraStack:
+        return ResolvedLoraStack(
+            settings=settings,
+            provenance=[{"asset_id": settings[0]["asset_id"]}],
+            graph_sha256="a" * 64,
+        )
+
+    monkeypatch.setattr(
+        orchestrator_module,
+        "select_automatic_lora_stack",
+        select_item_lora,
+    )
+    monkeypatch.setattr(orchestrator_module, "resolve_lora_stack", resolve_item_lora)
+
+    async with app.state.services.scheduler.lease("primary"):
+        response = await client.post(
+            f"/api/prompt-batches/{batch['id']}/queue",
+            json=payload,
+        )
+        assert response.status_code == 202, response.text
+        queued = response.json()
+        assert queued["replayed"] is False
+        assert queued["state"] == "queued"
+        assert queued["plan_version"] == batch["plan_version"] + 1
+        assert queued["queue_idempotency_key"] == payload["idempotency_key"]
+        plan_id = queued["work_plan_id"]
+        assert plan_id
+
+        plan = (await client.get(f"/api/work-plans/{plan_id}")).json()
+        assert plan["planner_version"] == "prompt-template-v1"
+        assert plan["source_action"] == "prompt_library"
+        assert plan["summary_json"]["prompt_batch_id"] == batch["id"]
+        assert plan["summary_json"]["output_count"] == 2
+        assert [step["prompt"] for step in plan["steps"]] == [
+            item["reviewed_prompt"] for item in selected
+        ]
+        assert auto_selected_prompts == [item["reviewed_prompt"] for item in selected]
+        assert [step["settings_json"]["loras"][0]["asset_id"] for step in plan["steps"]] == [
+            "lora-item-1",
+            "lora-item-2",
+        ]
+        assert all(step["settings_json"].get("batch_size") == 1 for step in plan["steps"])
+        seeds = [step["settings_json"]["seed"] for step in plan["steps"]]
+        assert len(set(seeds)) == 2
+        assert all(type(seed) is int and 0 <= seed < 2_147_483_648 for seed in seeds)
+
+        selected_outputs = [item for item in queued["items"] if item["selected"]]
+        skipped = next(item for item in queued["items"] if not item["selected"])
+        assert [item["work_step_id"] for item in selected_outputs] == [
+            step["id"] for step in plan["steps"]
+        ]
+        assert [item["run_id"] for item in selected_outputs] == plan["summary_json"]["run_ids"]
+        assert [item["media_seed"] for item in selected_outputs] == seeds
+        assert skipped["work_step_id"] is None
+        assert skipped["run_id"] is None
+        assert skipped["media_seed"] is None
+
+        with SessionLocal() as session:
+            runs = list(
+                session.scalars(
+                    select(Run).where(Run.work_plan_id == plan_id).order_by(Run.work_step_id)
+                ).all()
+            )
+            steps = list(
+                session.scalars(
+                    select(WorkStep).where(WorkStep.plan_id == plan_id).order_by(WorkStep.ordinal)
+                ).all()
+            )
+            assert len(runs) == len(steps) == 2
+            assert {run.standalone_prompt for run in runs} == {
+                item["reviewed_prompt"] for item in selected
+            }
+            for run in runs:
+                witness = run.provenance_json["prompt_source"]
+                serialized = json.dumps(witness)
+                assert witness["batch_id"] == batch["id"]
+                assert witness["relation"] == "exact"
+                assert "private first subject" not in serialized
+                assert "private skipped subject" not in serialized
+                assert "private third subject" not in serialized
+
+        replay = await client.post(
+            f"/api/prompt-batches/{batch['id']}/queue",
+            json=payload,
+        )
+        assert replay.status_code == 202
+        assert replay.json()["replayed"] is True
+        assert replay.json()["work_plan_id"] == plan_id
+
+        wrong_key = await client.post(
+            f"/api/prompt-batches/{batch['id']}/queue",
+            json={**payload, "idempotency_key": "prompt-queue-wrong-key"},
+        )
+        assert wrong_key.status_code == 409
+        assert wrong_key.json()["code"] == "prompt-source-conflict"
+
+
+@pytest.mark.asyncio
+async def test_prompt_batch_queue_refuses_stale_or_empty_selection_without_media_rows(
+    client: AsyncClient,
+) -> None:
+    chat = (await client.post("/api/chats", json={"title": "Queue refusal"})).json()
+    template = (
+        await client.post(
+            "/api/prompt-templates",
+            json=_create_payload(key="prompt-create-queue-refusal"),
+        )
+    ).json()
+    revision = template["revision"]
+    batch = (
+        await client.post(
+            f"/api/chats/{chat['id']}/prompt-batches",
+            json={
+                "idempotency_key": "prompt-preview-queue-refusal",
+                "template_revision_id": revision["id"],
+                "contract_sha256": revision["contract_sha256"],
+                "item_count": 1,
+                "selection_seed": 43,
+                "inputs": {"subject": ["private refusal subject"]},
+            },
+        )
+    ).json()
+    stale_payload = {
+        "idempotency_key": "prompt-queue-stale",
+        "expected_plan_version": batch["plan_version"],
+        "expected_plan_sha256": batch["plan_sha256"],
+    }
+    deselected = await client.patch(
+        f"/api/prompt-batches/{batch['id']}/items/1",
+        json={
+            "expected_review_version": batch["items"][0]["review_version"],
+            "expected_plan_version": batch["plan_version"],
+            "reviewed_prompt": batch["items"][0]["reviewed_prompt"],
+            "selected": False,
+        },
+    )
+    assert deselected.status_code == 200
+
+    stale = await client.post(
+        f"/api/prompt-batches/{batch['id']}/queue",
+        json=stale_payload,
+    )
+    assert stale.status_code == 409
+    assert stale.json()["code"] == "prompt-source-conflict"
+    current = deselected.json()
+    empty = await client.post(
+        f"/api/prompt-batches/{batch['id']}/queue",
+        json={
+            "idempotency_key": "prompt-queue-empty",
+            "expected_plan_version": current["plan_version"],
+            "expected_plan_sha256": current["plan_sha256"],
+        },
+    )
+    assert empty.status_code == 422
+    assert empty.json()["code"] == "prompt-source-invalid"
+    reread = (await client.get(f"/api/prompt-batches/{batch['id']}")).json()
+    assert reread["state"] == "draft"
+    assert reread["work_plan_id"] is None
+    assert reread["items"][0]["work_step_id"] is None
+    assert reread["items"][0]["run_id"] is None
+    with SessionLocal() as session:
+        assert not session.scalar(select(WorkPlan.id).where(WorkPlan.chat_id == chat["id"]))
+        assert not session.scalar(select(Run.id).where(Run.chat_id == chat["id"]))
+        assert not session.scalar(select(Job.id).join(Run).where(Run.chat_id == chat["id"]))
 
 
 @pytest.mark.asyncio

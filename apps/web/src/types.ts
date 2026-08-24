@@ -1424,6 +1424,12 @@ export interface PromptBatchItemUpdateInput {
   selected: boolean;
 }
 
+export interface PromptBatchQueueInput {
+  idempotency_key: string;
+  expected_plan_version: number;
+  expected_plan_sha256: string;
+}
+
 export interface PromptBatchItem {
   id: string;
   ordinal: number;
@@ -1434,6 +1440,9 @@ export interface PromptBatchItem {
   selected: boolean;
   review_version: number;
   reroll_count: number;
+  work_step_id: string | null;
+  run_id: string | null;
+  media_seed: number | null;
 }
 
 export interface PromptBatch {
@@ -1449,6 +1458,9 @@ export interface PromptBatch {
   plan_sha256: string;
   state: "draft" | "queued";
   plan_version: number;
+  queue_idempotency_key: string | null;
+  work_plan_id: string | null;
+  queued_at: string | null;
   items: PromptBatchItem[];
   replayed: boolean;
 }

@@ -178,6 +178,9 @@ it("uses the isolated no-media Prompt Library batch transport contract", async (
     selected: true,
     review_version: 1,
     reroll_count: 0,
+    work_step_id: null,
+    run_id: null,
+    media_seed: null,
   };
   const batch = {
     id: "batch/one",
@@ -192,6 +195,9 @@ it("uses the isolated no-media Prompt Library batch transport contract", async (
     plan_sha256: "c".repeat(64),
     state: "draft",
     plan_version: 1,
+    queue_idempotency_key: null,
+    work_plan_id: null,
+    queued_at: null,
     items: [item],
     replayed: false,
   };
@@ -207,11 +213,26 @@ it("uses the isolated no-media Prompt Library batch transport contract", async (
       review_version: 2,
     }],
   };
+  const queuedBatch = {
+    ...batch,
+    state: "queued",
+    plan_version: 2,
+    queue_idempotency_key: "queue-one",
+    work_plan_id: "work-plan-one",
+    queued_at: "2026-08-21T12:00:00Z",
+    items: [{
+      ...item,
+      work_step_id: "work-step-one",
+      run_id: "run-one",
+      media_seed: 73,
+    }],
+  };
   const fetchMock = vi.fn()
     .mockResolvedValueOnce(new Response(JSON.stringify({ csrf_token: "csrf" }), { status: 200 }))
     .mockResolvedValueOnce(new Response(JSON.stringify(batch), { status: 201 }))
     .mockResolvedValueOnce(new Response(JSON.stringify(readBatch), { status: 200 }))
-    .mockResolvedValueOnce(new Response(JSON.stringify(updatedBatch), { status: 200 }));
+    .mockResolvedValueOnce(new Response(JSON.stringify(updatedBatch), { status: 200 }))
+    .mockResolvedValueOnce(new Response(JSON.stringify(queuedBatch), { status: 202 }));
   vi.stubGlobal("fetch", fetchMock);
   const { api } = await import("./api");
   const create = {
@@ -228,6 +249,11 @@ it("uses the isolated no-media Prompt Library batch transport contract", async (
     reviewed_prompt: "A reviewed portrait.",
     selected: false,
   };
+  const queue = {
+    idempotency_key: "queue-one",
+    expected_plan_version: 1,
+    expected_plan_sha256: batch.plan_sha256,
+  };
 
   await expect(api.createPromptBatch("chat/one", create)).resolves.toEqual(batch);
   await expect(api.promptBatch("batch/one")).resolves.toEqual(readBatch);
@@ -235,14 +261,17 @@ it("uses the isolated no-media Prompt Library batch transport contract", async (
     plan_version: 2,
     items: [{ review_version: 2, selected: false }],
   });
+  await expect(api.queuePromptBatch("batch/one", queue)).resolves.toEqual(queuedBatch);
 
   expect(fetchMock.mock.calls.slice(1).map(([url, init]) => [url, init?.method])).toEqual([
     ["/api/chats/chat%2Fone/prompt-batches", "POST"],
     ["/api/prompt-batches/batch%2Fone", undefined],
     ["/api/prompt-batches/batch%2Fone/items/1", "PATCH"],
+    ["/api/prompt-batches/batch%2Fone/queue", "POST"],
   ]);
   expect(JSON.parse(String(fetchMock.mock.calls[1][1]?.body))).toEqual(create);
   expect(JSON.parse(String(fetchMock.mock.calls[3][1]?.body))).toEqual(review);
+  expect(JSON.parse(String(fetchMock.mock.calls[4][1]?.body))).toEqual(queue);
 });
 
 it("starts setup verification with the local CSRF contract", async () => {

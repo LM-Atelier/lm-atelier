@@ -22,6 +22,9 @@ const batch: PromptBatch = {
   plan_sha256: "b".repeat(64),
   state: "draft",
   plan_version: 3,
+  queue_idempotency_key: null,
+  work_plan_id: null,
+  queued_at: null,
   replayed: false,
   items: [{
     id: "prompt-item-one",
@@ -33,6 +36,9 @@ const batch: PromptBatch = {
     selected: true,
     review_version: 2,
     reroll_count: 0,
+    work_step_id: null,
+    run_id: null,
+    media_seed: null,
   }],
 };
 

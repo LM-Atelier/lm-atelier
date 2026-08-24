@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { Check, RefreshCw } from "lucide-react";
 import { AccessibleDialog } from "./AccessibleDialog";
@@ -13,6 +13,7 @@ import type {
   PromptBatchCreateInput,
   PromptBatchItem,
   PromptBatchItemUpdateInput,
+  PromptBatchQueueInput,
   PromptTemplateDetail,
   PromptTemplateSlot,
 } from "./types";
@@ -28,10 +29,12 @@ const BATCH_KEYS = [
   "id", "chat_id", "prompt_template_id", "prompt_template_revision_id",
   "schema_version", "contract_sha256", "codec_version", "requested_count",
   "selection_seed", "plan_sha256", "state", "plan_version", "items", "replayed",
+  "queue_idempotency_key", "work_plan_id", "queued_at",
 ] as const;
 const ITEM_KEYS = [
   "id", "ordinal", "rendered_prompt", "rendered_sha256", "reviewed_prompt",
   "reviewed_sha256", "selected", "review_version", "reroll_count",
+  "work_step_id", "run_id", "media_seed",
 ] as const;
 
 type InputSlot = Extract<PromptTemplateSlot, { mode: "input" }>;
@@ -116,6 +119,10 @@ function digestString(value: unknown): string {
   return digest;
 }
 
+function optionalIdentifier(value: unknown): string | null {
+  return value === null ? null : boundedString(value, MAX_IDENTIFIER_CHARACTERS);
+}
+
 async function promptDigest(prompt: string): Promise<string> {
   const material = new TextEncoder().encode(`prompt-expansion-rendered-v1\0${prompt}`);
   const digest = await crypto.subtle.digest("SHA-256", material);
@@ -123,7 +130,7 @@ async function promptDigest(prompt: string): Promise<string> {
 }
 
 interface BatchAuthority {
-  responseKind: "create-or-replay" | "read" | "mutation";
+  responseKind: "create-or-replay" | "read" | "mutation" | "queue";
   chatId: string;
   templateId: string;
   revisionId: string;
@@ -133,6 +140,7 @@ interface BatchAuthority {
   selectionSeed: number;
   batchId?: string;
   exactPlanVersion?: number;
+  queueIdempotencyKey?: string;
 }
 
 async function admitPromptBatch(value: unknown, authority: BatchAuthority): Promise<PromptBatch> {
@@ -149,6 +157,12 @@ async function admitPromptBatch(value: unknown, authority: BatchAuthority): Prom
   const planSha256 = digestString(raw.plan_sha256);
   const state = boundedString(raw.state, 16);
   const planVersion = exactInteger(raw.plan_version, 1, Number.MAX_SAFE_INTEGER);
+  const queueIdempotencyKey = raw.queue_idempotency_key === null
+    ? null
+    : boundedString(raw.queue_idempotency_key, 200);
+  const workPlanId = optionalIdentifier(raw.work_plan_id);
+  const queuedAt = raw.queued_at === null ? null : boundedString(raw.queued_at, 64);
+  const expectedState = authority.responseKind === "queue" ? "queued" : "draft";
   if (typeof raw.replayed !== "boolean") invalidBatch();
   const replayed = raw.replayed;
   if (
@@ -160,10 +174,14 @@ async function admitPromptBatch(value: unknown, authority: BatchAuthority): Prom
     || codecVersion !== 2
     || requestedCount !== authority.itemCount
     || selectionSeed !== authority.selectionSeed
-    || state !== "draft"
+    || state !== expectedState
     || (authority.responseKind === "create-or-replay" && !replayed && planVersion !== 1)
     || (authority.responseKind === "read" && !replayed)
     || (authority.responseKind === "mutation" && replayed)
+    || (
+      authority.responseKind === "queue"
+      && queueIdempotencyKey !== authority.queueIdempotencyKey
+    )
     || (authority.batchId !== undefined && id !== authority.batchId)
     || (authority.exactPlanVersion !== undefined && planVersion !== authority.exactPlanVersion)
   ) invalidBatch();
@@ -185,6 +203,11 @@ async function admitPromptBatch(value: unknown, authority: BatchAuthority): Prom
     const reviewedSha256 = digestString(entry.reviewed_sha256);
     const reviewVersion = exactInteger(entry.review_version, 1, Number.MAX_SAFE_INTEGER);
     const rerollCount = exactInteger(entry.reroll_count, 0, Number.MAX_SAFE_INTEGER);
+    const workStepId = optionalIdentifier(entry.work_step_id);
+    const runId = optionalIdentifier(entry.run_id);
+    const mediaSeed = entry.media_seed === null
+      ? null
+      : exactInteger(entry.media_seed, 0, MAX_SELECTION_SEED);
     if (
       ordinal !== index + 1
       || typeof entry.selected !== "boolean"
@@ -208,8 +231,52 @@ async function admitPromptBatch(value: unknown, authority: BatchAuthority): Prom
       selected: entry.selected,
       review_version: reviewVersion,
       reroll_count: rerollCount,
+      work_step_id: workStepId,
+      run_id: runId,
+      media_seed: mediaSeed,
     };
   }));
+  if (
+    state === "draft"
+    && (
+      queueIdempotencyKey !== null
+      || workPlanId !== null
+      || queuedAt !== null
+      || items.some((item) =>
+        item.work_step_id !== null || item.run_id !== null || item.media_seed !== null)
+    )
+  ) invalidBatch();
+  if (state === "queued") {
+    if (
+      queueIdempotencyKey === null
+      || workPlanId === null
+      || queuedAt === null
+      || Number.isNaN(Date.parse(queuedAt))
+      || !items.some((item) => item.selected)
+    ) invalidBatch();
+    const workStepIds = new Set<string>();
+    const runIds = new Set<string>();
+    const mediaSeeds = new Set<number>();
+    for (const item of items) {
+      if (!item.selected) {
+        if (item.work_step_id !== null || item.run_id !== null || item.media_seed !== null) {
+          invalidBatch();
+        }
+        continue;
+      }
+      if (
+        item.work_step_id === null
+        || item.run_id === null
+        || item.media_seed === null
+        || workStepIds.has(item.work_step_id)
+        || runIds.has(item.run_id)
+        || mediaSeeds.has(item.media_seed)
+      ) invalidBatch();
+      workStepIds.add(item.work_step_id);
+      runIds.add(item.run_id);
+      mediaSeeds.add(item.media_seed);
+    }
+  }
 
   return {
     id,
@@ -222,8 +289,11 @@ async function admitPromptBatch(value: unknown, authority: BatchAuthority): Prom
     requested_count: requestedCount,
     selection_seed: selectionSeed,
     plan_sha256: planSha256,
-    state,
+    state: state as PromptBatch["state"],
     plan_version: planVersion,
+    queue_idempotency_key: queueIdempotencyKey,
+    work_plan_id: workPlanId,
+    queued_at: queuedAt,
     items,
     replayed,
   };
@@ -257,6 +327,9 @@ function sameBatchExceptReplay(left: PromptBatch, right: PromptBatch): boolean {
     && left.plan_sha256 === right.plan_sha256
     && left.state === right.state
     && left.plan_version === right.plan_version
+    && left.queue_idempotency_key === right.queue_idempotency_key
+    && left.work_plan_id === right.work_plan_id
+    && left.queued_at === right.queued_at
     && left.items.length === right.items.length
     && left.items.every((item, index) => {
       const candidate = right.items[index];
@@ -268,7 +341,10 @@ function sameBatchExceptReplay(left: PromptBatch, right: PromptBatch): boolean {
         && item.reviewed_sha256 === candidate.reviewed_sha256
         && item.selected === candidate.selected
         && item.review_version === candidate.review_version
-        && item.reroll_count === candidate.reroll_count;
+        && item.reroll_count === candidate.reroll_count
+        && item.work_step_id === candidate.work_step_id
+        && item.run_id === candidate.run_id
+        && item.media_seed === candidate.media_seed;
     });
 }
 
@@ -291,6 +367,9 @@ function patchPreservesBatch(
     || updated.selection_seed !== previous.selection_seed
     || updated.state !== previous.state
     || updated.plan_version !== previous.plan_version + 1
+    || updated.queue_idempotency_key !== previous.queue_idempotency_key
+    || updated.work_plan_id !== previous.work_plan_id
+    || updated.queued_at !== previous.queued_at
     || updated.replayed
   ) return false;
   return updated.items.every((item, index) => {
@@ -299,7 +378,10 @@ function patchPreservesBatch(
       && item.ordinal === before.ordinal
       && item.rendered_prompt === before.rendered_prompt
       && item.rendered_sha256 === before.rendered_sha256
-      && item.reroll_count === before.reroll_count;
+      && item.reroll_count === before.reroll_count
+      && item.work_step_id === before.work_step_id
+      && item.run_id === before.run_id
+      && item.media_seed === before.media_seed;
     if (!unchangedOrigin) return false;
     if (item.ordinal === ordinal) {
       const promptChanged = reviewedPrompt !== before.reviewed_prompt;
@@ -312,8 +394,39 @@ function patchPreservesBatch(
     return item.review_version === before.review_version
       && item.reviewed_prompt === before.reviewed_prompt
       && item.reviewed_sha256 === before.reviewed_sha256
-      && item.selected === before.selected;
+      && item.selected === before.selected
+      && item.work_step_id === before.work_step_id
+      && item.run_id === before.run_id
+      && item.media_seed === before.media_seed;
   });
+}
+
+function queuePreservesBatch(previous: PromptBatch, queued: PromptBatch): boolean {
+  return queued.id === previous.id
+    && queued.chat_id === previous.chat_id
+    && queued.prompt_template_id === previous.prompt_template_id
+    && queued.prompt_template_revision_id === previous.prompt_template_revision_id
+    && queued.schema_version === previous.schema_version
+    && queued.contract_sha256 === previous.contract_sha256
+    && queued.codec_version === previous.codec_version
+    && queued.requested_count === previous.requested_count
+    && queued.selection_seed === previous.selection_seed
+    && queued.plan_sha256 === previous.plan_sha256
+    && queued.state === "queued"
+    && queued.plan_version === previous.plan_version + 1
+    && queued.items.length === previous.items.length
+    && queued.items.every((item, index) => {
+      const before = previous.items[index];
+      return item.id === before.id
+        && item.ordinal === before.ordinal
+        && item.rendered_prompt === before.rendered_prompt
+        && item.rendered_sha256 === before.rendered_sha256
+        && item.reviewed_prompt === before.reviewed_prompt
+        && item.reviewed_sha256 === before.reviewed_sha256
+        && item.selected === before.selected
+        && item.review_version === before.review_version
+        && item.reroll_count === before.reroll_count;
+    });
 }
 
 function ReviewItemCard({
@@ -321,11 +434,13 @@ function ReviewItemCard({
   item,
   authorityCurrent,
   onInsertIntoComposer,
+  onDirtyChange,
 }: {
   batch: PromptBatch;
   item: PromptBatchItem;
   authorityCurrent: boolean;
   onInsertIntoComposer: (insertion: PromptComposerInsertion) => void;
+  onDirtyChange: (itemId: string, dirty: boolean) => void;
 }) {
   const client = useQueryClient();
   const [draft, setDraft] = useState({
@@ -373,6 +488,10 @@ function ReviewItemCard({
       void client.invalidateQueries({ queryKey: ["prompt-batch", batch.id] });
     },
   });
+  useEffect(() => {
+    onDirtyChange(item.id, dirty || save.isPending);
+    return () => onDirtyChange(item.id, false);
+  }, [dirty, item.id, onDirtyChange, save.isPending]);
 
   return (
     <article className="prompt-review-card" aria-labelledby={`prompt-draft-${item.ordinal}`}>
@@ -469,7 +588,9 @@ export function PromptExpansionDialog({
   const [inputs, setInputs] = useState(() => initialInputs(template, 2));
   const [batchId, setBatchId] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const [dirtyItemIds, setDirtyItemIds] = useState<Set<string>>(() => new Set());
   const idempotencyKey = useRef(crypto.randomUUID());
+  const queueIdempotencyKey = useRef(crypto.randomUUID());
   const submitting = useRef(false);
   const reviewHeading = useRef<HTMLHeadingElement>(null);
   const authoredSlots = useMemo(() => inputSlots(template), [template]);
@@ -479,9 +600,10 @@ export function PromptExpansionDialog({
   const batchQuery = useQuery({
     queryKey: ["prompt-batch", batchId],
     queryFn: async () => {
+      const authorityBatch = client.getQueryData<PromptBatch>(["prompt-batch", batchId]);
       const response = await api.promptBatch(batchId!);
       const admitted = await admitPromptBatch(response, {
-        responseKind: "read",
+        responseKind: authorityBatch?.state === "queued" ? "queue" : "read",
         chatId: activeChatId,
         templateId: template.id,
         revisionId: template.current_revision.id,
@@ -490,6 +612,10 @@ export function PromptExpansionDialog({
         itemCount,
         selectionSeed,
         batchId: batchId!,
+        exactPlanVersion: authorityBatch?.state === "queued"
+          ? authorityBatch.plan_version
+          : undefined,
+        queueIdempotencyKey: authorityBatch?.queue_idempotency_key ?? undefined,
       });
       const latest = client.getQueryData<PromptBatch>(["prompt-batch", batchId]);
       if (!latest) return admitted;
@@ -545,6 +671,46 @@ export function PromptExpansionDialog({
     },
     onSettled: () => {
       submitting.current = false;
+    },
+  });
+  const queue = useMutation({
+    mutationFn: async (batch: PromptBatch) => {
+      const payload: PromptBatchQueueInput = {
+        idempotency_key: queueIdempotencyKey.current,
+        expected_plan_version: batch.plan_version,
+        expected_plan_sha256: batch.plan_sha256,
+      };
+      const response = await api.queuePromptBatch(batch.id, payload);
+      const admitted = await admitPromptBatch(response, {
+        responseKind: "queue",
+        chatId: batch.chat_id,
+        templateId: batch.prompt_template_id,
+        revisionId: batch.prompt_template_revision_id,
+        schemaVersion: batch.schema_version,
+        contractSha256: batch.contract_sha256,
+        itemCount: batch.requested_count,
+        selectionSeed: batch.selection_seed,
+        batchId: batch.id,
+        exactPlanVersion: batch.plan_version + 1,
+        queueIdempotencyKey: queueIdempotencyKey.current,
+      });
+      if (!queuePreservesBatch(batch, admitted)) invalidBatch();
+      return admitted;
+    },
+    onSuccess: (queued) => {
+      client.setQueryData<PromptBatch>(["prompt-batch", queued.id], queued);
+      void client.invalidateQueries({ queryKey: ["chat", activeChatId] });
+      void client.invalidateQueries({ queryKey: ["work-plans", activeChatId] });
+      setDirtyItemIds(new Set());
+      setError(null);
+    },
+    onError: () => {
+      setError(
+        "The selected drafts could not be queued atomically. Reload the batch and try again.",
+      );
+      if (batchId) {
+        void client.invalidateQueries({ queryKey: ["prompt-batch", batchId] });
+      }
     },
   });
 
@@ -612,9 +778,20 @@ export function PromptExpansionDialog({
   const visibleError = !authorityCurrent
     ? "This template or chat changed while the dialog was open. Close and reopen it."
     : error
-      ?? (batchQuery.error
-        ? "The saved draft batch could not be loaded. Refresh and try again."
-        : null);
+      ?? (queue.error
+        ? "The selected drafts could not be queued atomically. Reload the batch and try again."
+        : batchQuery.error
+          ? "The saved draft batch could not be loaded. Refresh and try again."
+          : null);
+  const updateDirtyItem = useCallback((itemId: string, dirty: boolean) => {
+    setDirtyItemIds((current) => {
+      if (current.has(itemId) === dirty) return current;
+      const next = new Set(current);
+      if (dirty) next.add(itemId);
+      else next.delete(itemId);
+      return next;
+    });
+  }, []);
 
   return (
     <AccessibleDialog
@@ -727,13 +904,37 @@ export function PromptExpansionDialog({
               key={item.id}
               batch={trustedBatch}
               item={item}
-              authorityCurrent={authorityCurrent}
+              authorityCurrent={
+                authorityCurrent && trustedBatch.state === "draft" && !queue.isPending
+              }
               onInsertIntoComposer={onInsertIntoComposer}
+              onDirtyChange={updateDirtyItem}
             />
           ))}
           <footer>
-            <button type="button" className="primary" onClick={onClose}>Done</button>
+            <button type="button" className="secondary" onClick={onClose}>Done</button>
+            {trustedBatch.state === "draft" && (
+              <button
+                type="button"
+                className="primary"
+                disabled={
+                  !authorityCurrent
+                  || queue.isPending
+                  || dirtyItemIds.size > 0
+                  || !trustedBatch.items.some((item) => item.selected)
+                }
+                onClick={() => queue.mutate(trustedBatch)}
+              >
+                {queue.isPending ? "Queueing selected drafts..." : "Queue selected drafts"}
+              </button>
+            )}
           </footer>
+          {trustedBatch.state === "queued" && (
+            <p className="prompt-review-status" role="status">
+              {trustedBatch.items.filter((item) => item.selected).length}
+              {" "}selected drafts were queued as one work plan.
+            </p>
+          )}
         </section>
       )}
     </AccessibleDialog>

@@ -679,9 +679,20 @@ class PromptExpansionBatch(TimestampMixin, Base):
             "idempotency_key",
             name="uq_prompt_expansion_batch_chat_idempotency",
         ),
+        UniqueConstraint(
+            "chat_id",
+            "queue_idempotency_key",
+            name="uq_prompt_expansion_batch_chat_queue_key",
+        ),
         CheckConstraint(
             "length(idempotency_key) BETWEEN 1 AND 200 AND instr(idempotency_key, char(0)) = 0",
             name="ck_prompt_expansion_batch_idempotency_key",
+        ),
+        CheckConstraint(
+            "queue_idempotency_key IS NULL OR "
+            "(length(queue_idempotency_key) BETWEEN 1 AND 200 "
+            "AND instr(queue_idempotency_key, char(0)) = 0)",
+            name="ck_prompt_expansion_batch_queue_key",
         ),
         CheckConstraint("schema_version = 1", name="ck_prompt_expansion_batch_schema_version"),
         CheckConstraint("codec_version = 2", name="ck_prompt_expansion_batch_codec_version"),
@@ -720,6 +731,11 @@ class PromptExpansionBatch(TimestampMixin, Base):
     plan_sha256: Mapped[str] = mapped_column(String(64))
     plan_version: Mapped[int] = mapped_column(Integer, default=1)
     state: Mapped[str] = mapped_column(String(16), default="draft")
+    queue_idempotency_key: Mapped[str | None] = mapped_column(String(200), nullable=True)
+    work_plan_id: Mapped[str | None] = mapped_column(
+        ForeignKey("work_plans.id", ondelete="SET NULL"), nullable=True, unique=True
+    )
+    queued_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
 
     chat: Mapped[Chat] = relationship(back_populates="prompt_expansion_batches")
     items: Mapped[list[PromptExpansionItem]] = relationship(
@@ -756,6 +772,10 @@ class PromptExpansionItem(TimestampMixin, Base):
         ),
         CheckConstraint("review_version > 0", name="ck_prompt_expansion_item_review_version"),
         CheckConstraint("reroll_count >= 0", name="ck_prompt_expansion_item_reroll_count"),
+        CheckConstraint(
+            "media_seed IS NULL OR (media_seed >= 0 AND media_seed < 2147483648)",
+            name="ck_prompt_expansion_item_media_seed",
+        ),
         Index("ix_prompt_expansion_items_batch_ordinal", "batch_id", "ordinal"),
     )
 
@@ -773,6 +793,13 @@ class PromptExpansionItem(TimestampMixin, Base):
     selected: Mapped[bool] = mapped_column(Boolean, default=True)
     review_version: Mapped[int] = mapped_column(Integer, default=1)
     reroll_count: Mapped[int] = mapped_column(Integer, default=0)
+    work_step_id: Mapped[str | None] = mapped_column(
+        ForeignKey("work_steps.id", ondelete="SET NULL"), nullable=True, unique=True
+    )
+    run_id: Mapped[str | None] = mapped_column(
+        ForeignKey("runs.id", ondelete="SET NULL"), nullable=True, unique=True
+    )
+    media_seed: Mapped[int | None] = mapped_column(Integer, nullable=True)
 
     batch: Mapped[PromptExpansionBatch] = relationship(back_populates="items")
 

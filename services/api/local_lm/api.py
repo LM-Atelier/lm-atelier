@@ -327,6 +327,7 @@ from .schemas import (
     PromptExpansionCreate,
     PromptExpansionItemOut,
     PromptExpansionItemUpdate,
+    PromptExpansionQueue,
     PromptHelperCreate,
     PromptHelperDetail,
     PromptHelperUpdate,
@@ -463,6 +464,7 @@ from .workflow_asset_downloads import (
     compose_workflow_asset_download_requests,
 )
 from .workflow_compatibility import (
+    WorkflowSelectionInvalid,
     copy_chat_workflow_selections,
     ensure_legacy_profile_workflow,
     mirror_legacy_chat_workflow_selections,
@@ -1956,9 +1958,15 @@ def _prompt_expansion_out(stored: StoredExpansion) -> PromptExpansionBatchOut:
                 selected=item.selected,
                 review_version=item.review_version,
                 reroll_count=item.reroll_count,
+                work_step_id=item.work_step_id,
+                run_id=item.run_id,
+                media_seed=item.media_seed,
             )
             for item in stored.items
         ],
+        queue_idempotency_key=batch.queue_idempotency_key,
+        work_plan_id=batch.work_plan_id,
+        queued_at=batch.queued_at,
         replayed=stored.replayed,
     )
 
@@ -2273,6 +2281,51 @@ async def patch_prompt_batch_item(
         raise _prompt_batch_conflict(exc) from exc
     session.commit()
     return _prompt_expansion_out(stored)
+
+
+@router.post(
+    "/prompt-batches/{batch_id}/queue",
+    response_model=PromptExpansionBatchOut,
+    status_code=202,
+)
+async def queue_prompt_batch(
+    batch_id: str,
+    payload: PromptExpansionQueue,
+    request: Request,
+    session: ConversationSessionDep,
+) -> PromptExpansionBatchOut:
+    batch = session.get(PromptExpansionBatch, batch_id)
+    if batch is None:
+        raise api_error(404, "prompt-batch-not-found", "Prompt batch does not exist.")
+    chat = session.get(Chat, batch.chat_id)
+    if chat is None or chat.scope != STANDARD_CHAT_SCOPE:
+        raise api_error(404, "prompt-batch-not-found", "Prompt batch does not exist.")
+    try:
+        _, replayed = await _services(request).orchestrator.create_prompt_batch_turn(
+            session,
+            chat.id,
+            batch.id,
+            queue_idempotency_key=payload.idempotency_key,
+            expected_plan_version=payload.expected_plan_version,
+            expected_plan_sha256=payload.expected_plan_sha256,
+        )
+        stored = read_expansion(session, chat.id, batch.id)
+    except PromptExpansionUseConflict as exc:
+        session.rollback()
+        raise api_error(409, "prompt-source-conflict", str(exc)) from exc
+    except PromptExpansionUseError as exc:
+        session.rollback()
+        raise api_error(422, "prompt-source-invalid", str(exc)) from exc
+    except (EngineNotConfiguredError, WorkflowSelectionInvalid) as exc:
+        session.rollback()
+        raise api_error(409, "engine-not-configured", str(exc)) from exc
+    except EngineSchemaUnavailableError as exc:
+        session.rollback()
+        raise api_error(503, "engine-schema-unavailable", str(exc)) from exc
+    except ValueError as exc:
+        session.rollback()
+        raise api_error(422, "generation-settings-invalid", str(exc)) from exc
+    return _prompt_expansion_out(stored).model_copy(update={"replayed": replayed})
 
 
 @router.post("/prompt-helpers", response_model=PromptHelperDetail, status_code=201)

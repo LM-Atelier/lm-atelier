@@ -16,6 +16,7 @@ from sqlalchemy import exists, select, update
 from sqlalchemy.engine import CursorResult
 from sqlalchemy.orm import Session
 
+from .domain import utcnow
 from .models import (
     ModelAssetInstall,
     PromptExpansionBatch,
@@ -69,6 +70,13 @@ class PromptExpansionUseConflict(PromptExpansionUseError):
 class PromptSourceResourceOverrides:
     workflow_revision_id: str | None
     lora_settings: tuple[dict[str, object], ...] | None
+
+
+@dataclass(frozen=True, slots=True)
+class PromptBatchQueueSelection:
+    batch: PromptExpansionBatch
+    items: tuple[PromptExpansionItem, ...]
+    resource_policy: dict[str, object]
 
 
 def _invalid() -> NoReturn:
@@ -212,6 +220,133 @@ def claim_prompt_source(
     }
 
 
+def read_prompt_batch_queue_selection(
+    session: Session,
+    chat_id: str,
+    batch_id: str,
+    expected_plan_version: int,
+    expected_plan_sha256: str,
+) -> PromptBatchQueueSelection:
+    """Read one exact draft and freeze its selected items for admission checks."""
+
+    try:
+        stored = read_expansion(session, chat_id, batch_id)
+    except PromptExpansionStoreError:
+        _conflict()
+    batch = stored.batch
+    if (
+        batch.state != "draft"
+        or batch.plan_version != expected_plan_version
+        or batch.plan_sha256 != expected_plan_sha256
+    ):
+        _conflict()
+    items = tuple(item for item in stored.items if item.selected)
+    if not items:
+        _invalid()
+    revision = session.get(PromptTemplateRevision, batch.prompt_template_revision_id)
+    if (
+        revision is None
+        or revision.prompt_template_id != batch.prompt_template_id
+        or revision.contract_sha256 != batch.contract_sha256
+    ):
+        _conflict()
+    try:
+        contract = parse_prompt_template_contract(revision.contract_json)
+        policy = prompt_template_contract_payload(contract)["resource_policy"]
+    except PromptTemplateError:
+        _conflict()
+    if type(policy) is not dict:
+        _conflict()
+    return PromptBatchQueueSelection(batch, items, cast(dict[str, object], policy))
+
+
+def claim_prompt_batch_queue(
+    session: Session,
+    selection: PromptBatchQueueSelection,
+    queue_idempotency_key: str,
+) -> tuple[dict[str, Any], ...]:
+    """Atomically claim the exact reviewed selection after every admission check."""
+
+    batch = selection.batch
+    queued_version = batch.plan_version + 1
+    changed = cast(
+        CursorResult[Any],
+        session.execute(
+            update(PromptExpansionBatch)
+            .execution_options(synchronize_session=False)
+            .where(
+                PromptExpansionBatch.id == batch.id,
+                PromptExpansionBatch.chat_id == batch.chat_id,
+                PromptExpansionBatch.state == "draft",
+                PromptExpansionBatch.plan_version == batch.plan_version,
+                PromptExpansionBatch.plan_sha256 == batch.plan_sha256,
+            )
+            .values(
+                state="queued",
+                plan_version=queued_version,
+                queue_idempotency_key=queue_idempotency_key,
+            )
+        ),
+    )
+    if changed.rowcount != 1:
+        _conflict()
+    session.expire(batch)
+    session.refresh(batch)
+    return tuple(
+        {
+            "version": 1,
+            "kind": "prompt_template",
+            "source_chat_id": batch.chat_id,
+            "batch_id": batch.id,
+            "review_plan_version": queued_version - 1,
+            "queued_plan_version": queued_version,
+            "plan_sha256": batch.plan_sha256,
+            "item_id": item.id,
+            "item_ordinal": item.ordinal,
+            "item_review_version": item.review_version,
+            "reviewed_sha256": item.reviewed_sha256,
+            "submitted_sha256": item.reviewed_sha256,
+            "relation": "exact",
+            "prompt_template_id": batch.prompt_template_id,
+            "prompt_template_revision_id": batch.prompt_template_revision_id,
+            "contract_sha256": batch.contract_sha256,
+            "resource_policy": selection.resource_policy,
+        }
+        for item in selection.items
+    )
+
+
+def link_prompt_batch_execution(
+    session: Session,
+    selection: PromptBatchQueueSelection,
+    work_plan_id: str,
+    execution: tuple[tuple[str, str, int], ...],
+) -> None:
+    """Bind each selected item to its durable step, run, and sampled media seed."""
+
+    if len(execution) != len(selection.items):
+        _invalid()
+    batch = selection.batch
+    if batch.state != "queued" or batch.work_plan_id is not None or batch.queued_at is not None:
+        _conflict()
+    batch.work_plan_id = work_plan_id
+    batch.queued_at = utcnow()
+    session.flush()
+    for item, (work_step_id, run_id, media_seed) in zip(selection.items, execution, strict=True):
+        if (
+            item.work_step_id is not None
+            or item.run_id is not None
+            or item.media_seed is not None
+            or type(media_seed) is not int
+            or not 0 <= media_seed < 2_147_483_648
+        ):
+            _conflict()
+        item.work_step_id = work_step_id
+        item.run_id = run_id
+        item.media_seed = media_seed
+    session.flush()
+
+
 def inherit_prompt_source(value: object, submitted_prompt: str) -> dict[str, Any]:
     """Strictly copy a trusted historical witness for branch/regeneration."""
 
@@ -288,6 +423,20 @@ def prompt_source_resource_overrides(
         policy = cast(dict[str, object], inherited["resource_policy"])
     else:
         return PromptSourceResourceOverrides(None, None)
+    return _resource_overrides_for_policy(session, policy)
+
+
+def prompt_batch_resource_overrides(
+    session: Session,
+    selection: PromptBatchQueueSelection,
+) -> PromptSourceResourceOverrides:
+    return _resource_overrides_for_policy(session, selection.resource_policy)
+
+
+def _resource_overrides_for_policy(
+    session: Session,
+    policy: dict[str, object],
+) -> PromptSourceResourceOverrides:
     if policy["mode"] == "inherited":
         return PromptSourceResourceOverrides(None, None)
     workflow_revision_id = policy.get("workflow_revision_id")
