@@ -847,6 +847,59 @@ class PromptTemplateRevision(TimestampMixin, Base):
     )
 
 
+class PromptTemplateImportWinner(Base):
+    """Immutable winner for one semantic portable-template import request."""
+
+    __tablename__ = "prompt_template_import_winners"
+    __table_args__ = (
+        CheckConstraint(
+            "length(idempotency_key) BETWEEN 1 AND 200 AND instr(idempotency_key, char(0)) = 0",
+            name="ck_prompt_template_import_winner_idempotency_key",
+        ),
+        CheckConstraint(
+            _lowercase_sha256_check("request_sha256"),
+            name="ck_prompt_template_import_winner_request_sha256",
+        ),
+        CheckConstraint(
+            _lowercase_sha256_check("bundle_sha256"),
+            name="ck_prompt_template_import_winner_bundle_sha256",
+        ),
+        CheckConstraint(
+            "authority_rule = 'prompt-template-import-authority-v1'",
+            name="ck_prompt_template_import_winner_authority_rule",
+        ),
+        CheckConstraint(
+            "length(prompt_template_id) BETWEEN 1 AND 40",
+            name="ck_prompt_template_import_winner_template_id",
+        ),
+        CheckConstraint(
+            "length(prompt_template_revision_id) BETWEEN 1 AND 40",
+            name="ck_prompt_template_import_winner_revision_id",
+        ),
+        CheckConstraint(
+            _lowercase_sha256_check("contract_sha256"),
+            name="ck_prompt_template_import_winner_contract_sha256",
+        ),
+        UniqueConstraint("prompt_template_id", name="uq_prompt_template_import_winner_template_id"),
+        UniqueConstraint(
+            "prompt_template_revision_id", name="uq_prompt_template_import_winner_revision_id"
+        ),
+    )
+
+    idempotency_key: Mapped[str] = mapped_column(String(200), primary_key=True)
+    request_sha256: Mapped[str] = mapped_column(String(64))
+    bundle_sha256: Mapped[str] = mapped_column(String(64))
+    authority_rule: Mapped[str] = mapped_column(String(64))
+    prompt_template_id: Mapped[str] = mapped_column(
+        ForeignKey("prompt_template_definitions.id", ondelete="RESTRICT")
+    )
+    prompt_template_revision_id: Mapped[str] = mapped_column(
+        ForeignKey("prompt_template_revisions.id", ondelete="RESTRICT")
+    )
+    contract_sha256: Mapped[str] = mapped_column(String(64))
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+
+
 for _statement in CREATE_TRIGGER_SQL:
     event.listen(
         Base.metadata,
