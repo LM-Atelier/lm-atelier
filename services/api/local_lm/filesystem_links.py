@@ -408,8 +408,9 @@ def rename_entry(
     destination: str,
     *,
     replace: bool = False,
+    into: AnchoredDirectory | None = None,
 ) -> None:
-    """Rename `source` to `destination` inside the held directory.
+    """Rename `source` to `destination`, optionally into another held directory.
 
     `replace` is explicit because the platforms disagree by default and the
     disagreement is silent: os.rename REPLACES an existing destination, while
@@ -419,9 +420,20 @@ def rename_entry(
     the atomic-publish pattern this module exists to support worked on Linux
     and silently no-opped on Windows.
 
-    Stating the mode makes both platforms do the same thing, and a refusal
-    RAISES like every other refusal here rather than returning something a
-    caller can drop.
+    `into` names the destination directory when it is not the source's. It
+    exists because content-addressed publication cannot avoid crossing
+    directories: the digest is not known until the bytes have been consumed,
+    so staging must happen somewhere chosen BEFORE the destination shard is
+    known. The alternatives were copying, which defeats atomicity and doubles
+    IO on large media, or abandoning containment for that publish.
+
+    BOTH directories are held for the whole operation, so neither end can be
+    substituted between the call and the kernel acting on it. Both names are
+    still single components: this moves an entry between two verified
+    directories and can never be handed a path.
+
+    A refusal RAISES like every other refusal here rather than returning
+    something a caller can drop.
 
     With replace=False the entry must be one that can be linked, which on
     POSIX means a regular file; a directory refuses.
@@ -429,27 +441,34 @@ def rename_entry(
 
     _require_entry_name(source)
     _require_entry_name(destination)
+    target = anchor if into is None else into
     if anchor.descriptor is not None:
+        if target.descriptor is None:
+            # Mixing a POSIX anchor with a Windows one cannot happen on one
+            # host, so this is a programming error rather than a filesystem
+            # condition - but it refuses rather than reaching a kernel call
+            # with a meaningless descriptor.
+            _refuse()
         if replace:
             try:
                 os.rename(
                     source,
                     destination,
                     src_dir_fd=anchor.descriptor,
-                    dst_dir_fd=anchor.descriptor,
+                    dst_dir_fd=target.descriptor,
                 )
             except OSError:
                 _refuse()
             return
         # POSIX rename ALWAYS replaces, so a non-replacing rename is a link
         # that refuses an existing name followed by dropping the old one.
-        # Both steps go through the held directory.
+        # Both steps go through the held directories.
         try:
             os.link(
                 source,
                 destination,
                 src_dir_fd=anchor.descriptor,
-                dst_dir_fd=anchor.descriptor,
+                dst_dir_fd=target.descriptor,
             )
         except FileExistsError:
             raise AnchoredEntryExists(CONTAINMENT_REFUSED) from None
@@ -461,15 +480,18 @@ def rename_entry(
             _refuse()
         return
     handle = anchor.handle
-    if handle is None:
+    destination_handle = target.handle
+    if handle is None or destination_handle is None:
         _refuse()
     # A rename changes a directory entry on the SOURCE, so the source handle
-    # needs DELETE - which the read intent has no business holding.
+    # needs DELETE - which the read intent has no business holding. The
+    # DESTINATION directory travels in the information block rather than as a
+    # path, which is what makes the cross-directory form possible at all.
     opened = _nt_open_relative(handle, source, intent="rename_source")
     try:
         moved = _nt_set_name(
             opened,
-            handle,
+            destination_handle,
             destination,
             _FILE_RENAME_INFORMATION_CLASS,
             replace=replace,

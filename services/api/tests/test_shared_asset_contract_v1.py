@@ -985,6 +985,68 @@ def test_rename_replaces_only_when_asked_and_does_so_on_both_platforms(
     assert not (tmp_path / "staging").exists(), "the staging entry was left behind"
 
 
+def test_rename_publishes_into_another_held_directory(tmp_path: Path) -> None:
+    """Content-addressed publication cannot avoid crossing directories.
+
+    The digest is not known until the bytes have been consumed, so staging
+    happens somewhere chosen BEFORE the destination shard is known. Copying
+    instead would defeat atomicity and double the IO on large media.
+    """
+
+    (tmp_path / "staging").mkdir()
+    (tmp_path / "published").mkdir()
+    with (
+        links.AnchoredDirectory(tmp_path / "staging") as source,
+        links.AnchoredDirectory(tmp_path / "published") as target,
+    ):
+        descriptor = links.create_entry(source, "incoming")
+        with os.fdopen(descriptor, "wb") as handle:
+            handle.write(b"payload")
+        links.rename_entry(source, "incoming", "final", into=target)
+
+    assert (tmp_path / "published" / "final").read_bytes() == b"payload"
+    assert not (tmp_path / "staging" / "incoming").exists(), "the source entry remained"
+
+
+def test_cross_directory_rename_refuses_an_occupied_destination_by_default(
+    tmp_path: Path,
+) -> None:
+    """The default means the same thing across directories as within one."""
+
+    (tmp_path / "staging").mkdir()
+    (tmp_path / "published").mkdir()
+    (tmp_path / "published" / "final").write_bytes(b"OLD")
+    with (
+        links.AnchoredDirectory(tmp_path / "staging") as source,
+        links.AnchoredDirectory(tmp_path / "published") as target,
+    ):
+        os.close(links.create_entry(source, "incoming"))
+        with pytest.raises(links.AnchoredDirectoryError):
+            links.rename_entry(source, "incoming", "final", into=target)
+
+    assert (tmp_path / "published" / "final").read_bytes() == b"OLD"
+    assert (tmp_path / "staging" / "incoming").is_file(), "the source was consumed anyway"
+
+
+def test_cross_directory_rename_replaces_when_asked(tmp_path: Path) -> None:
+    """Publish-over-existing, across directories, on both platforms."""
+
+    (tmp_path / "staging").mkdir()
+    (tmp_path / "published").mkdir()
+    (tmp_path / "published" / "final").write_bytes(b"OLD")
+    with (
+        links.AnchoredDirectory(tmp_path / "staging") as source,
+        links.AnchoredDirectory(tmp_path / "published") as target,
+    ):
+        descriptor = links.create_entry(source, "incoming")
+        with os.fdopen(descriptor, "wb") as handle:
+            handle.write(b"NEW")
+        links.rename_entry(source, "incoming", "final", into=target, replace=True)
+
+    assert (tmp_path / "published" / "final").read_bytes() == b"NEW"
+    assert not (tmp_path / "staging" / "incoming").exists()
+
+
 def test_rename_into_a_free_name_works_in_either_mode(tmp_path: Path) -> None:
     """The modes differ only when the destination is occupied."""
 
