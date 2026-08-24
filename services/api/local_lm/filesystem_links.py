@@ -272,6 +272,73 @@ def create_entry(anchor: AnchoredDirectory, name: str) -> int:
         _refuse()
 
 
+def open_entry(anchor: AnchoredDirectory, name: str) -> int | None:
+    """Open an EXISTING entry through the held directory and hand back a descriptor.
+
+    None means the entry is not there. Everything else - refusing a link,
+    refusing a directory, an unreadable entry - refuses.
+
+    This exists because reading an entry as bytes throws away the descriptor,
+    and a caller that then wants to check the entry's type or repair its mode
+    has to look the name up again. Two lookups are two objects: the bytes
+    validated and the thing subsequently modified need not be the same entry.
+    Handing back the descriptor makes them one.
+
+    The caller owns the descriptor and must close it.
+    """
+
+    _require_entry_name(name)
+    if anchor.descriptor is not None:
+        # O_NONBLOCK matters as much as O_NOFOLLOW here: opening a named pipe
+        # for reading otherwise BLOCKS until a writer appears, so the type
+        # check below would never be reached. The flag is dropped again once
+        # the entry is known to be a regular file, for which it means nothing.
+        flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_NONBLOCK", 0)
+        try:
+            descriptor = os.open(name, flags, dir_fd=anchor.descriptor)
+        except FileNotFoundError:
+            return None
+        except OSError:
+            _refuse()
+        return _require_regular(descriptor)
+    handle = anchor.handle
+    if handle is None:
+        _refuse()
+    opened, status = _nt_try_open_relative(handle, name, intent="open_file")
+    if status in (_STATUS_OBJECT_NAME_NOT_FOUND, _STATUS_OBJECT_PATH_NOT_FOUND):
+        return None
+    if status != _STATUS_SUCCESS or not opened:
+        _refuse()
+    try:
+        descriptor = _descriptor_from_handle(opened)
+    except OSError:
+        _close_windows_handle(opened)
+        _refuse()
+    return _require_regular(descriptor)
+
+
+def _require_regular(descriptor: int) -> int:
+    """Refuse anything that is not a regular file, closing it first.
+
+    The contract this enforces is the caller's whole reason for holding a
+    descriptor: it is going to read, stat and possibly chmod THROUGH it, and
+    every one of those means something different on a directory, a device or
+    a pipe.
+    """
+
+    try:
+        mode = os.fstat(descriptor).st_mode
+    except OSError:
+        with contextlib.suppress(OSError):
+            os.close(descriptor)
+        _refuse()
+    if not stat.S_ISREG(mode):
+        with contextlib.suppress(OSError):
+            os.close(descriptor)
+        _refuse()
+    return descriptor
+
+
 def read_entry(anchor: AnchoredDirectory, name: str) -> bytes | None:
     """Return an entry's bytes, or None when it does not exist."""
 
