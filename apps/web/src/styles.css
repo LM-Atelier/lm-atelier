@@ -629,6 +629,44 @@ h1, h2, h3 { margin: 0; }
 .workflow-list button.selected { background: var(--panel-3); color: var(--ink-primary); box-shadow: inset 2px 0 0 var(--atelier); }
 .workflow-list button > span { display: flex; flex-direction: column; gap: 4px; }
 .workflow-list small { color: var(--muted); }
+.prompt-library-toolbar { display: flex; align-items: center; gap: 16px; flex-wrap: wrap; margin: -14px 0 16px; color: var(--muted); font-size: 11px; }
+.prompt-library-toolbar .toggle-row { display: inline-flex; align-items: center; gap: 8px; margin: 0; color: var(--ink-secondary); font-size: 12px; }
+.prompt-page-controls { display: inline-flex; align-items: center; gap: 8px; margin-left: auto; }
+.prompt-library-layout { min-height: 580px; }
+.prompt-template-list { list-style: none; margin: 0; }
+.prompt-template-list button { align-items: flex-start; }
+.prompt-template-list button > svg { flex: none; margin-top: 2px; }
+.prompt-template-detail > p { color: var(--ink-secondary); line-height: 1.55; }
+.prompt-template-detail .detail-title { gap: 12px; flex-wrap: wrap; }
+.prompt-template-body, .prompt-template-slots { margin-top: 20px; }
+.prompt-template-body h3, .prompt-template-slots h3 { margin-bottom: 8px; font-size: 13px; }
+.prompt-template-body pre { max-height: 260px; white-space: pre-wrap; overflow-wrap: anywhere; }
+.prompt-template-slots dl { display: grid; gap: 8px; margin: 0; }
+.prompt-template-slots dl > div { padding: 10px 12px; border: 1px solid var(--border); border-radius: 10px; background: var(--well); }
+.prompt-template-slots dt { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; }
+.prompt-template-slots dt code { color: var(--accent-2); }
+.prompt-template-slots dd { margin: 7px 0 0; color: var(--ink-secondary); font-size: 12px; overflow-wrap: anywhere; }
+.prompt-resource-summary { margin-top: 18px; padding: 10px 12px; border-radius: 10px; background: var(--panel-2); color: var(--ink-secondary); font-size: 12px; }
+.prompt-template-history summary { display: flex; align-items: center; gap: 6px; }
+.prompt-history-row { display: flex; align-items: center; justify-content: space-between; gap: 16px; padding: 10px 0; border-bottom: 1px solid var(--border); }
+.prompt-history-row > span { display: grid; gap: 4px; }
+.prompt-history-row small { color: var(--muted); }
+.prompt-template-editor { width: min(880px, 96vw); }
+.prompt-template-editor input, .prompt-template-editor textarea, .prompt-template-editor select { width: 100%; min-width: 0; border: 1px solid var(--border); border-radius: 10px; background: var(--panel-2); color: var(--ink); padding: 9px 10px; }
+.prompt-template-editor textarea { resize: vertical; line-height: 1.5; }
+.prompt-template-editor label > small { color: var(--muted); font-weight: 400; }
+.prompt-slot-editor, .prompt-resource-editor { margin-top: 22px; padding-top: 18px; border-top: 1px solid var(--border); }
+.compact-heading { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
+.compact-heading h3 { font-size: 14px; }
+.compact-heading p { margin: 3px 0 0; color: var(--muted); font-size: 11px; }
+.prompt-slot-card, .prompt-lora-editor fieldset { min-width: 0; margin: 12px 0; padding: 12px; border: 1px solid var(--border); border-radius: 10px; background: var(--well); }
+.prompt-slot-card legend, .prompt-lora-editor legend { padding: 0 6px; color: var(--muted); font-size: 11px; font-weight: 700; }
+.prompt-slot-grid { display: grid; grid-template-columns: minmax(160px, 1.4fr) minmax(120px, .8fr) minmax(120px, .8fr) auto; gap: 12px; align-items: end; }
+.prompt-slot-grid label { margin: 0; }
+.prompt-slot-remove { margin-bottom: 1px; }
+.prompt-lora-editor { display: grid; gap: 8px; }
+.prompt-strength-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 12px; }
+.prompt-template-editor footer { margin-top: 24px; justify-content: flex-end; }
 .workflow-detail { min-width: 0; padding: 22px; }
 .workflow-detail details { margin-top: 12px; }
 .workflow-detail summary { color: var(--ink-secondary); font-size: 12px; font-weight: 700; cursor: pointer; }
@@ -925,6 +963,8 @@ h1, h2, h3 { margin: 0; }
   .media-toolbar { grid-template-columns: 1fr; }
   .model-card { grid-template-columns: 42px 1fr; }.model-stats { grid-column: 2; align-items: flex-start; flex-direction: row; }
   .workflow-layout { grid-template-columns: 1fr; }.workflow-list { border-right: 0; border-bottom: 1px solid var(--border); max-height: 220px; overflow-y: auto; }
+  .prompt-slot-grid, .prompt-strength-grid { grid-template-columns: minmax(0, 1fr); }
+  .prompt-slot-remove { justify-self: end; }
   .workflow-controls, .workflow-compare { grid-template-columns: 1fr; }
   .custom-node-install { grid-template-columns: 1fr; }
   .custom-node-list > div { grid-template-columns: 1fr; }

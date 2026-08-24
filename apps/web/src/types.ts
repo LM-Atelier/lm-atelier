@@ -1313,6 +1313,99 @@ export interface ReferenceAsset {
   validation_state: string;
 }
 
+export type PromptTemplateSlotMode = "input" | "choice" | "model" | "fixed";
+export type PromptTemplateVariationScope = "item" | "batch";
+
+export type PromptTemplateSlot = {
+  name: string;
+  variation_scope: PromptTemplateVariationScope;
+} & (
+  | { mode: "input" }
+  | { mode: "choice"; choices: string[] }
+  | { mode: "model"; guidance: string }
+  | { mode: "fixed"; fixed_value: string }
+);
+
+export interface PromptTemplateLora {
+  sha256: string;
+  model_strength: number;
+  clip_strength: number;
+}
+
+export type PromptTemplateLoraPolicy =
+  | { mode: "inherited_auto" }
+  | { mode: "none" }
+  | { mode: "fixed"; stack: PromptTemplateLora[] };
+
+export type PromptTemplateResourcePolicy =
+  | { mode: "inherited" }
+  | {
+      mode: "fixed";
+      workflow_revision_id: string;
+      lora_policy: PromptTemplateLoraPolicy;
+    };
+
+export interface PromptTemplateContract {
+  schema_version: 1;
+  operation: "text_to_image";
+  body: string;
+  slots: PromptTemplateSlot[];
+  resource_policy: PromptTemplateResourcePolicy;
+}
+
+export interface PromptTemplateRevision {
+  id: string;
+  prompt_template_id: string;
+  version: number;
+  schema_version: number;
+  contract_json: PromptTemplateContract;
+  contract_sha256: string;
+  created_at: string;
+}
+
+export interface PromptTemplateDefinition {
+  id: string;
+  name: string;
+  description: string;
+  archived: boolean;
+  current_revision_id: string;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface PromptTemplateDetail extends PromptTemplateDefinition {
+  current_revision: PromptTemplateRevision;
+}
+
+export interface PromptTemplateWriteResult {
+  template: PromptTemplateDetail;
+  revision: PromptTemplateRevision;
+  idempotent: boolean;
+}
+
+export interface PromptTemplatePage {
+  items: PromptTemplateDefinition[];
+  total: number;
+  limit: number;
+  offset: number;
+}
+
+export interface PromptTemplateCreateInput {
+  idempotency_key: string;
+  name: string;
+  description: string;
+  contract: PromptTemplateContract;
+}
+
+export interface PromptTemplateUpdateInput {
+  expected_current_revision_id: string;
+  idempotency_key?: string;
+  name?: string;
+  description?: string;
+  archived?: boolean;
+  contract?: PromptTemplateContract;
+}
+
 /** An image already held that closely resembles one just added. */
 export interface ReferenceSimilarAsset {
   reference_asset_id: string;

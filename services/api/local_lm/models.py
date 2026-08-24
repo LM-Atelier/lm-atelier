@@ -45,6 +45,10 @@ from .media_organization_schema import (
     CREATE_MEDIA_ORGANIZATION_TRIGGER_SQL,
     DROP_MEDIA_ORGANIZATION_TRIGGER_SQL,
 )
+from .prompt_template_schema import (
+    CREATE_PROMPT_TEMPLATE_TRIGGER_SQL,
+    DROP_PROMPT_TEMPLATE_TRIGGER_SQL,
+)
 from .reference_review_schema import (
     CREATE_REFERENCE_REVIEW_TRIGGER_SQL,
     DROP_REFERENCE_REVIEW_TRIGGER_SQL,
@@ -617,6 +621,88 @@ class MediaTagAssignment(Base):
     added_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
 
 
+class PromptTemplateDefinition(TimestampMixin, Base):
+    """User-visible Prompt Library identity; edits append immutable revisions."""
+
+    __tablename__ = "prompt_template_definitions"
+    __table_args__ = (
+        UniqueConstraint("name", name="uq_prompt_template_definition_name"),
+        CheckConstraint(
+            "length(name) BETWEEN 1 AND 200 AND name = trim(name) AND instr(name, char(0)) = 0",
+            name="ck_prompt_template_definition_name",
+        ),
+        CheckConstraint(
+            "length(description) <= 4000 AND instr(description, char(0)) = 0",
+            name="ck_prompt_template_definition_description",
+        ),
+        CheckConstraint(
+            "current_revision_id IS NULL OR length(current_revision_id) BETWEEN 1 AND 40",
+            name="ck_prompt_template_definition_current_revision",
+        ),
+        Index(
+            "ix_prompt_template_definitions_archived_name",
+            "archived",
+            "name",
+            "id",
+        ),
+    )
+
+    id: Mapped[str] = mapped_column(String(40), primary_key=True, default=lambda: new_id("ptdef"))
+    name: Mapped[str] = mapped_column(String(200))
+    description: Mapped[str] = mapped_column(Text, default="")
+    archived: Mapped[bool] = mapped_column(Boolean, default=False)
+    current_revision_id: Mapped[str | None] = mapped_column(String(40), nullable=True)
+
+    revisions: Mapped[list[PromptTemplateRevision]] = relationship(
+        back_populates="definition",
+        passive_deletes="all",
+        order_by="PromptTemplateRevision.version",
+    )
+
+
+class PromptTemplateRevision(TimestampMixin, Base):
+    """One append-only canonical Prompt Library contract."""
+
+    __tablename__ = "prompt_template_revisions"
+    __table_args__ = (
+        UniqueConstraint(
+            "prompt_template_id",
+            "version",
+            name="uq_prompt_template_revision_version",
+        ),
+        CheckConstraint("version > 0", name="ck_prompt_template_revision_version_positive"),
+        CheckConstraint("schema_version = 1", name="ck_prompt_template_revision_schema_version"),
+        CheckConstraint(
+            _lowercase_sha256_check("contract_sha256"),
+            name="ck_prompt_template_revision_contract_sha256",
+        ),
+        Index(
+            "ix_prompt_template_revisions_definition_created",
+            "prompt_template_id",
+            "version",
+            "id",
+        ),
+        Index(
+            "ix_prompt_template_revisions_contract_sha256",
+            "contract_sha256",
+        ),
+    )
+
+    id: Mapped[str] = mapped_column(String(40), primary_key=True, default=lambda: new_id("ptrev"))
+    prompt_template_id: Mapped[str] = mapped_column(
+        ForeignKey("prompt_template_definitions.id", ondelete="RESTRICT")
+    )
+    version: Mapped[int] = mapped_column(Integer)
+    schema_version: Mapped[int] = mapped_column(Integer, default=1)
+    contract_json: Mapped[dict[str, Any]] = mapped_column(JSON)
+    contract_sha256: Mapped[str] = mapped_column(String(64))
+
+    definition: Mapped[PromptTemplateDefinition] = relationship(
+        back_populates="revisions",
+        foreign_keys=[prompt_template_id],
+    )
+
+
 for _statement in CREATE_TRIGGER_SQL:
     event.listen(
         Base.metadata,
@@ -648,6 +734,18 @@ for _statement in CREATE_REFERENCE_REVIEW_TRIGGER_SQL:
         _install_sqlite_trigger(_statement),
     )
 for _statement in DROP_REFERENCE_REVIEW_TRIGGER_SQL:
+    event.listen(
+        Base.metadata,
+        "before_drop",
+        DDL(_statement).execute_if(dialect="sqlite"),  # type: ignore[no-untyped-call]
+    )
+for _statement in CREATE_PROMPT_TEMPLATE_TRIGGER_SQL:
+    event.listen(
+        Base.metadata,
+        "after_create",
+        _install_sqlite_trigger(_statement),
+    )
+for _statement in DROP_PROMPT_TEMPLATE_TRIGGER_SQL:
     event.listen(
         Base.metadata,
         "before_drop",
