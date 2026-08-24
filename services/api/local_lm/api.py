@@ -2701,6 +2701,13 @@ def _message_prompt_source(message: Message) -> object | None:
     return None
 
 
+def _run_prompt_source(run: Run) -> object | None:
+    provenance = run.provenance_json
+    if type(provenance) is dict and "prompt_source" in provenance:
+        return cast(object, provenance["prompt_source"])
+    return None
+
+
 @router.post("/messages/{message_id}/regenerate", response_model=TurnAccepted, status_code=202)
 async def regenerate_message(
     message_id: str,
@@ -2749,7 +2756,12 @@ async def regenerate_message(
     )
     if not user_message:
         raise api_error(404, "source-user-message-not-found", "source user message not found")
-    text = "\n".join(part.text for part in user_message.parts if part.text).strip()
+    run_prompt_source = _run_prompt_source(prior_run)
+    text = (
+        prior_run.standalone_prompt
+        if run_prompt_source is not None
+        else "\n".join(part.text for part in user_message.parts if part.text).strip()
+    )
     mode = _mode_for_operation(Operation(prior_run.operation))
     prior_revision = (
         session.get(WorkflowRevision, prior_run.workflow_revision_id)
@@ -2788,6 +2800,9 @@ async def regenerate_message(
     inherited_image_edit_strength = (
         None if inherited_parameter in payload.settings else prior_strength
     )
+    inherited_prompt_source = run_prompt_source
+    if inherited_prompt_source is None:
+        inherited_prompt_source = _message_prompt_source(user_message)
     return await _accept_turn(
         orchestrator,
         session,
@@ -2797,7 +2812,7 @@ async def regenerate_message(
         replacement_message_id=message_id,
         source_action="regenerate",
         inherited_image_edit_strength=inherited_image_edit_strength,
-        inherited_prompt_source=_message_prompt_source(user_message),
+        inherited_prompt_source=inherited_prompt_source,
         reference_source_message_id=user_message.id,
     )
 

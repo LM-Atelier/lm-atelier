@@ -24,6 +24,7 @@ from .models import (
     PromptTemplateRevision,
 )
 from .prompt_expansion_store import PromptExpansionStoreError, read_expansion
+from .prompt_library import PromptLibraryError, validate_prompt_template_resources
 from .prompt_templates import (
     PromptTemplateError,
     parse_prompt_template_contract,
@@ -122,6 +123,40 @@ def _allocate_resource_policy(
     """Freeze one deterministic, exact resource policy for one draft item."""
 
     canonical = _canonical_resource_policy(policy)
+    if canonical["mode"] == "pool":
+        strategy = canonical.get("strategy")
+        options = canonical.get("options")
+        if (
+            type(selection_seed) is not int
+            or selection_seed < 0
+            or type(item_ordinal) is not int
+            or item_ordinal < 1
+            or strategy not in {"random", "round_robin"}
+            or type(options) is not list
+            or not options
+        ):
+            _invalid()
+        if strategy == "round_robin":
+            index = (selection_seed + item_ordinal - 1) % len(options)
+        else:
+            material = "\x00".join(
+                ("prompt-template-workflow-pool-v1", str(selection_seed), str(item_ordinal))
+            )
+            index = int.from_bytes(
+                hashlib.sha256(material.encode("ascii")).digest()[:8],
+                "big",
+            ) % len(options)
+        selected_option = options[index]
+        if type(selected_option) is not dict:
+            _invalid()
+        option = cast(dict[str, object], selected_option)
+        canonical = _canonical_resource_policy(
+            {
+                "mode": "fixed",
+                "workflow_revision_id": option.get("workflow_revision_id"),
+                "lora_policy": option.get("lora_policy"),
+            }
+        )
     if canonical["mode"] != "fixed":
         return canonical
     lora_policy = canonical.get("lora_policy")
@@ -282,6 +317,8 @@ def read_prompt_batch_queue_selection(
     batch_id: str,
     expected_plan_version: int,
     expected_plan_sha256: str,
+    *,
+    expected_engine: str,
 ) -> PromptBatchQueueSelection:
     """Read one exact draft and freeze its selected items for admission checks."""
 
@@ -308,8 +345,13 @@ def read_prompt_batch_queue_selection(
         _conflict()
     try:
         contract = parse_prompt_template_contract(revision.contract_json)
+        validate_prompt_template_resources(
+            session,
+            contract,
+            expected_engine=expected_engine,
+        )
         policy = prompt_template_contract_payload(contract)["resource_policy"]
-    except PromptTemplateError:
+    except (PromptLibraryError, PromptTemplateError):
         _conflict()
     if type(policy) is not dict:
         _conflict()

@@ -172,28 +172,29 @@ def validate_prompt_template_resources(
     policy = contract.resource_policy
     if policy.mode is PromptTemplateResourceMode.INHERITED:
         return
-    revision = (
-        session.get(WorkflowRevision, policy.workflow_revision_id)
-        if policy.workflow_revision_id is not None
-        else None
+    resources = (
+        ((policy.workflow_revision_id, policy.lora_policy),)
+        if policy.mode is PromptTemplateResourceMode.FIXED
+        else tuple((option.workflow_revision_id, option.lora_policy) for option in policy.options)
     )
-    if revision is None or not _workflow_revision_is_ready(
-        session,
-        revision,
-        expected_engine=expected_engine,
-    ):
-        _resources_unavailable()
-    lora_policy = policy.lora_policy
-    if lora_policy is None or lora_policy.mode not in {
-        PromptTemplateLoraPolicyMode.FIXED,
-        PromptTemplateLoraPolicyMode.POOL,
-    }:
+    for revision_id, _ in resources:
+        revision = session.get(WorkflowRevision, revision_id) if revision_id is not None else None
+        if revision is None or not _workflow_revision_is_ready(
+            session,
+            revision,
+            expected_engine=expected_engine,
+        ):
+            _resources_unavailable()
+    expected: set[str] = set()
+    for _, lora_policy in resources:
+        if lora_policy is None:
+            _resources_unavailable()
+        if lora_policy.mode is PromptTemplateLoraPolicyMode.FIXED:
+            expected.update(item.sha256 for item in lora_policy.stack)
+        elif lora_policy.mode is PromptTemplateLoraPolicyMode.POOL:
+            expected.update(item.sha256 for stack in lora_policy.stacks for item in stack)
+    if not expected:
         return
-    expected = (
-        {item.sha256 for item in lora_policy.stack}
-        if lora_policy.mode is PromptTemplateLoraPolicyMode.FIXED
-        else {item.sha256 for stack in lora_policy.stacks for item in stack}
-    )
     candidates = session.scalars(
         select(ModelAssetInstall).where(
             ModelAssetInstall.kind == "lora",

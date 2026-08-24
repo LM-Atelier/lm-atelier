@@ -7,6 +7,7 @@ from typing import cast
 
 import pytest
 
+from local_lm.prompt_expansion_use import _allocate_resource_policy
 from local_lm.prompt_templates import (
     MAX_LORA_STRENGTH,
     MAX_TEMPLATE_CHOICES,
@@ -16,6 +17,7 @@ from local_lm.prompt_templates import (
     MAX_TEMPLATE_POOL_LORAS,
     MAX_TEMPLATE_SLOTS,
     MAX_TEMPLATE_TOTAL_CHOICES,
+    MAX_TEMPLATE_WORKFLOW_OPTIONS,
     PromptTemplateContract,
     PromptTemplateError,
     parse_prompt_template_contract,
@@ -97,6 +99,39 @@ def _pooled_resources(*, strategy: str = "round_robin") -> dict[str, object]:
         },
     }
     return payload
+
+
+def _workflow_pooled_resources(*, strategy: str = "round_robin") -> dict[str, object]:
+    payload = _payload()
+    payload["resource_policy"] = {
+        "mode": "pool",
+        "strategy": strategy,
+        "options": [
+            {
+                "workflow_revision_id": "revision-a",
+                "lora_policy": {"mode": "none"},
+            },
+            {
+                "workflow_revision_id": "revision-b",
+                "lora_policy": {
+                    "mode": "fixed",
+                    "stack": [
+                        {
+                            "sha256": SHA_A,
+                            "model_strength": 0.8,
+                            "clip_strength": 0.6,
+                        }
+                    ],
+                },
+            },
+        ],
+    }
+    return payload
+
+
+def _duplicate_first_workflow_pool_option(policy: dict[str, object]) -> None:
+    options = cast(list[dict[str, object]], policy["options"])
+    options[1] = copy.deepcopy(options[0])
 
 
 def _assert_invalid(value: object) -> None:
@@ -323,6 +358,139 @@ def test_lora_stack_pool_enforces_stack_and_total_bounds() -> None:
         for stack_index in range(MAX_TEMPLATE_POOL_LORAS // MAX_TEMPLATE_LORAS + 1)
     ]
     _assert_invalid(total_overflow)
+
+
+def test_workflow_resource_pool_round_trips_and_changes_digest_by_order_and_strategy() -> None:
+    payload = _workflow_pooled_resources()
+    contract = parse_prompt_template_contract(payload)
+    assert prompt_template_contract_payload(contract) == payload
+
+    random_pool = _workflow_pooled_resources(strategy="random")
+    assert prompt_template_contract_sha256(contract) != prompt_template_contract_sha256(
+        parse_prompt_template_contract(random_pool)
+    )
+    reversed_pool = _workflow_pooled_resources()
+    resource = cast(dict[str, object], reversed_pool["resource_policy"])
+    options = cast(list[object], resource["options"])
+    options.reverse()
+    assert prompt_template_contract_sha256(contract) != prompt_template_contract_sha256(
+        parse_prompt_template_contract(reversed_pool)
+    )
+
+
+@pytest.mark.parametrize(
+    "mutation",
+    [
+        lambda policy: policy.__setitem__("strategy", "weighted"),
+        lambda policy: policy.__setitem__("options", []),
+        lambda policy: policy.__setitem__(
+            "options",
+            [
+                {
+                    "workflow_revision_id": "revision-a",
+                    "lora_policy": {"mode": "none"},
+                }
+            ],
+        ),
+        _duplicate_first_workflow_pool_option,
+        lambda policy: cast(list[dict[str, object]], policy["options"])[0].__setitem__(
+            "lora_policy",
+            {
+                "mode": "pool",
+                "strategy": "random",
+                "stacks": [
+                    [{"sha256": SHA_A, "model_strength": 1.0, "clip_strength": 1.0}],
+                    [{"sha256": SHA_B, "model_strength": 1.0, "clip_strength": 1.0}],
+                ],
+            },
+        ),
+        lambda policy: policy.__setitem__("extra", True),
+    ],
+)
+def test_workflow_resource_pool_refuses_ambiguous_or_open_shapes(
+    mutation: Callable[[dict[str, object]], None],
+) -> None:
+    payload = _workflow_pooled_resources()
+    resource = cast(dict[str, object], payload["resource_policy"])
+    mutation(resource)
+    _assert_invalid(payload)
+
+
+def test_workflow_resource_pool_allows_one_revision_with_distinct_paired_loras() -> None:
+    payload = _workflow_pooled_resources()
+    resource = cast(dict[str, object], payload["resource_policy"])
+    options = cast(list[dict[str, object]], resource["options"])
+    options[1]["workflow_revision_id"] = options[0]["workflow_revision_id"]
+    contract = parse_prompt_template_contract(payload)
+    assert prompt_template_contract_payload(contract) == payload
+
+
+def test_workflow_resource_pool_enforces_option_and_total_lora_bounds() -> None:
+    too_many_options = _workflow_pooled_resources()
+    resource = cast(dict[str, object], too_many_options["resource_policy"])
+    resource["options"] = [
+        {
+            "workflow_revision_id": f"revision-{index}",
+            "lora_policy": {"mode": "none"},
+        }
+        for index in range(MAX_TEMPLATE_WORKFLOW_OPTIONS + 1)
+    ]
+    _assert_invalid(too_many_options)
+
+    total_overflow = _workflow_pooled_resources()
+    resource = cast(dict[str, object], total_overflow["resource_policy"])
+    resource["options"] = [
+        {
+            "workflow_revision_id": f"revision-{option_index}",
+            "lora_policy": {
+                "mode": "fixed",
+                "stack": [
+                    {
+                        "sha256": (f"{option_index * MAX_TEMPLATE_LORAS + index + 1:064x}"),
+                        "model_strength": 1.0,
+                        "clip_strength": 1.0,
+                    }
+                    for index in range(MAX_TEMPLATE_LORAS)
+                ],
+            },
+        }
+        for option_index in range(MAX_TEMPLATE_POOL_LORAS // MAX_TEMPLATE_LORAS + 1)
+    ]
+    _assert_invalid(total_overflow)
+
+
+def test_workflow_resource_pool_allocation_is_fixed_deterministic_and_domain_separated() -> None:
+    options = [
+        {
+            "workflow_revision_id": f"revision-{suffix}",
+            "lora_policy": {"mode": "none"},
+        }
+        for suffix in ("a", "b", "c")
+    ]
+    round_robin = {
+        "mode": "pool",
+        "strategy": "round_robin",
+        "options": options,
+    }
+    assert _allocate_resource_policy(round_robin, 5, 1) == {
+        "mode": "fixed",
+        "workflow_revision_id": "revision-c",
+        "lora_policy": {"mode": "none"},
+    }
+    assert _allocate_resource_policy(round_robin, 5, 2)["workflow_revision_id"] == "revision-a"
+
+    random = {
+        "mode": "pool",
+        "strategy": "random",
+        "options": options,
+    }
+    # Seed 0 / ordinal 2 selects index 0 in the workflow-pool domain. The
+    # Phase-4a LoRA-stack domain selects index 2 for the same material, so this
+    # pins domain separation rather than only repeatability.
+    first = _allocate_resource_policy(random, 0, 2)
+    assert first["workflow_revision_id"] == "revision-a"
+    assert _allocate_resource_policy(random, 0, 2) == first
+    assert first["mode"] == "fixed"
 
 
 @pytest.mark.parametrize(
@@ -704,6 +872,26 @@ def test_hand_constructed_contracts_are_revalidated_before_use() -> None:
                         lora_policy=forged_policy,
                     ),
                 )
+            )
+
+    workflow_pooled = parse_prompt_template_contract(_workflow_pooled_resources())
+    workflow_policy = workflow_pooled.resource_policy
+    nested_pool_option = replace(
+        workflow_policy.options[0],
+        lora_policy=pooled_policy,
+    )
+    for forged_resource in (
+        replace(workflow_policy, workflow_revision_id="unexpected"),
+        replace(workflow_policy, strategy=None),
+        replace(workflow_policy, options=(workflow_policy.options[0],)),
+        replace(
+            workflow_policy,
+            options=(nested_pool_option, workflow_policy.options[1]),
+        ),
+    ):
+        with pytest.raises(PromptTemplateError):
+            prompt_template_contract_payload(
+                replace(workflow_pooled, resource_policy=forged_resource)
             )
 
 

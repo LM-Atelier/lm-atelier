@@ -30,6 +30,7 @@ MAX_TEMPLATE_RENDERED_CHARS = 32_000
 MAX_TEMPLATE_LORAS = 16
 MAX_TEMPLATE_LORA_STACKS = 32
 MAX_TEMPLATE_POOL_LORAS = 64
+MAX_TEMPLATE_WORKFLOW_OPTIONS = 16
 MAX_TEMPLATE_DOCUMENT_DEPTH = 16
 MAX_TEMPLATE_DOCUMENT_NODES = 4_096
 MAX_TEMPLATE_DOCUMENT_CHARS = 65_536
@@ -40,6 +41,8 @@ _ROOT_KEYS = frozenset({"schema_version", "operation", "body", "slots", "resourc
 _SLOT_COMMON_KEYS = frozenset({"name", "mode", "variation_scope"})
 _RESOURCE_INHERITED_KEYS = frozenset({"mode"})
 _RESOURCE_FIXED_KEYS = frozenset({"mode", "workflow_revision_id", "lora_policy"})
+_RESOURCE_POOL_KEYS = frozenset({"mode", "strategy", "options"})
+_RESOURCE_OPTION_KEYS = frozenset({"workflow_revision_id", "lora_policy"})
 _LORA_POLICY_SIMPLE_KEYS = frozenset({"mode"})
 _LORA_POLICY_FIXED_KEYS = frozenset({"mode", "stack"})
 _LORA_POLICY_POOL_KEYS = frozenset({"mode", "strategy", "stacks"})
@@ -74,6 +77,7 @@ class PromptTemplateVariationScope(StrEnum):
 class PromptTemplateResourceMode(StrEnum):
     INHERITED = "inherited"
     FIXED = "fixed"
+    POOL = "pool"
 
 
 class PromptTemplateLoraPolicyMode(StrEnum):
@@ -114,10 +118,18 @@ class PromptTemplateLoraPolicy:
 
 
 @dataclass(frozen=True, slots=True)
+class PromptTemplateResourceOption:
+    workflow_revision_id: str
+    lora_policy: PromptTemplateLoraPolicy
+
+
+@dataclass(frozen=True, slots=True)
 class PromptTemplateResourcePolicy:
     mode: PromptTemplateResourceMode
     workflow_revision_id: str | None = None
     lora_policy: PromptTemplateLoraPolicy | None = None
+    strategy: PromptTemplatePoolStrategy | None = None
+    options: tuple[PromptTemplateResourceOption, ...] = ()
 
 
 @dataclass(frozen=True, slots=True)
@@ -363,25 +375,68 @@ def _parse_lora_policy(value: object) -> PromptTemplateLoraPolicy:
     return PromptTemplateLoraPolicy(mode=mode, strategy=strategy, stacks=stacks)
 
 
+def _parse_resource_option(
+    value: object,
+    *,
+    allow_lora_pool: bool,
+) -> PromptTemplateResourceOption:
+    entry = _exact_keys(value, _RESOURCE_OPTION_KEYS)
+    revision_id = entry["workflow_revision_id"]
+    if type(revision_id) is not str or _SAFE_ID.fullmatch(revision_id) is None:
+        _invalid()
+    lora_policy = _parse_lora_policy(entry["lora_policy"])
+    if not allow_lora_pool and lora_policy.mode is PromptTemplateLoraPolicyMode.POOL:
+        _invalid()
+    return PromptTemplateResourceOption(
+        workflow_revision_id=revision_id,
+        lora_policy=lora_policy,
+    )
+
+
 def _parse_resource_policy(value: object) -> PromptTemplateResourcePolicy:
     if type(value) is not dict:
         _invalid()
     mode = _enum_value(value.get("mode"), PromptTemplateResourceMode)
-    expected = (
-        _RESOURCE_FIXED_KEYS
-        if mode is PromptTemplateResourceMode.FIXED
-        else _RESOURCE_INHERITED_KEYS
-    )
+    expected = {
+        PromptTemplateResourceMode.FIXED: _RESOURCE_FIXED_KEYS,
+        PromptTemplateResourceMode.POOL: _RESOURCE_POOL_KEYS,
+    }.get(mode, _RESOURCE_INHERITED_KEYS)
     entry = _exact_keys(value, expected)
     if mode is PromptTemplateResourceMode.INHERITED:
         return PromptTemplateResourcePolicy(mode=mode)
-    revision_id = entry["workflow_revision_id"]
-    if type(revision_id) is not str or _SAFE_ID.fullmatch(revision_id) is None:
+    if mode is PromptTemplateResourceMode.FIXED:
+        option = _parse_resource_option(
+            {
+                "workflow_revision_id": entry["workflow_revision_id"],
+                "lora_policy": entry["lora_policy"],
+            },
+            allow_lora_pool=True,
+        )
+        return PromptTemplateResourcePolicy(
+            mode=mode,
+            workflow_revision_id=option.workflow_revision_id,
+            lora_policy=option.lora_policy,
+        )
+    strategy = _enum_value(entry["strategy"], PromptTemplatePoolStrategy)
+    raw_options = entry["options"]
+    if type(raw_options) is not list or not 2 <= len(raw_options) <= MAX_TEMPLATE_WORKFLOW_OPTIONS:
+        _invalid()
+    options = tuple(_parse_resource_option(option, allow_lora_pool=False) for option in raw_options)
+    if len(set(options)) != len(options):
+        _invalid()
+    if (
+        sum(
+            len(option.lora_policy.stack)
+            for option in options
+            if option.lora_policy.mode is PromptTemplateLoraPolicyMode.FIXED
+        )
+        > MAX_TEMPLATE_POOL_LORAS
+    ):
         _invalid()
     return PromptTemplateResourcePolicy(
         mode=mode,
-        workflow_revision_id=revision_id,
-        lora_policy=_parse_lora_policy(entry["lora_policy"]),
+        strategy=strategy,
+        options=options,
     )
 
 
@@ -436,6 +491,86 @@ def parse_prompt_template_contract(value: object) -> PromptTemplateContract:
     )
 
 
+def _lora_policy_payload(
+    lora_policy: PromptTemplateLoraPolicy,
+    *,
+    allow_pool: bool,
+) -> dict[str, object]:
+    if (
+        type(lora_policy) is not PromptTemplateLoraPolicy
+        or type(lora_policy.mode) is not PromptTemplateLoraPolicyMode
+        or type(lora_policy.stack) is not tuple
+        or type(lora_policy.strategy) not in {PromptTemplatePoolStrategy, type(None)}
+        or type(lora_policy.stacks) is not tuple
+    ):
+        _invalid()
+    lora_payload: dict[str, object] = {"mode": lora_policy.mode.value}
+    raw_stacks: tuple[tuple[PromptTemplateLora, ...], ...]
+    if lora_policy.mode is PromptTemplateLoraPolicyMode.FIXED:
+        if (
+            not lora_policy.stack
+            or len(lora_policy.stack) > MAX_TEMPLATE_LORAS
+            or lora_policy.strategy is not None
+            or lora_policy.stacks
+        ):
+            _invalid()
+        raw_stacks = (lora_policy.stack,)
+    elif lora_policy.mode is PromptTemplateLoraPolicyMode.POOL:
+        if (
+            not allow_pool
+            or lora_policy.stack
+            or lora_policy.strategy is None
+            or not 2 <= len(lora_policy.stacks) <= MAX_TEMPLATE_LORA_STACKS
+            or any(type(stack) is not tuple for stack in lora_policy.stacks)
+            or any(not stack or len(stack) > MAX_TEMPLATE_LORAS for stack in lora_policy.stacks)
+            or sum(len(stack) for stack in lora_policy.stacks) > MAX_TEMPLATE_POOL_LORAS
+            or len(set(lora_policy.stacks)) != len(lora_policy.stacks)
+        ):
+            _invalid()
+        raw_stacks = lora_policy.stacks
+    else:
+        if lora_policy.stack or lora_policy.strategy is not None or lora_policy.stacks:
+            _invalid()
+        raw_stacks = ()
+    serialized_stacks: list[list[dict[str, object]]] = []
+    for raw_stack in raw_stacks:
+        stack: list[dict[str, object]] = []
+        seen: set[str] = set()
+        for lora in raw_stack:
+            if (
+                type(lora) is not PromptTemplateLora
+                or type(lora.sha256) is not str
+                or _SHA256.fullmatch(lora.sha256) is None
+                or lora.sha256 in seen
+                or type(lora.model_strength) is not float
+                or type(lora.clip_strength) is not float
+            ):
+                _invalid()
+            _strength(lora.model_strength)
+            _strength(lora.clip_strength)
+            seen.add(lora.sha256)
+            stack.append(
+                {
+                    "sha256": lora.sha256,
+                    "model_strength": lora.model_strength,
+                    "clip_strength": lora.clip_strength,
+                }
+            )
+        serialized_stacks.append(stack)
+    if lora_policy.mode is PromptTemplateLoraPolicyMode.FIXED:
+        lora_payload["stack"] = serialized_stacks[0]
+    elif lora_policy.mode is PromptTemplateLoraPolicyMode.POOL:
+        if lora_policy.strategy is None:
+            _invalid()
+        lora_payload.update(
+            {
+                "strategy": lora_policy.strategy.value,
+                "stacks": serialized_stacks,
+            }
+        )
+    return lora_payload
+
+
 def prompt_template_contract_payload(
     contract: PromptTemplateContract,
 ) -> dict[str, object]:
@@ -480,89 +615,70 @@ def prompt_template_contract_payload(
         or type(resource.mode) is not PromptTemplateResourceMode
         or type(resource.workflow_revision_id) not in {str, type(None)}
         or type(resource.lora_policy) not in {PromptTemplateLoraPolicy, type(None)}
+        or type(resource.strategy) not in {PromptTemplatePoolStrategy, type(None)}
+        or type(resource.options) is not tuple
     ):
         _invalid()
     resource_payload: dict[str, object] = {"mode": resource.mode.value}
     if resource.mode is PromptTemplateResourceMode.FIXED:
-        lora_policy = resource.lora_policy
         if (
-            type(lora_policy) is not PromptTemplateLoraPolicy
-            or type(lora_policy.mode) is not PromptTemplateLoraPolicyMode
-            or type(lora_policy.stack) is not tuple
-            or type(lora_policy.strategy) not in {PromptTemplatePoolStrategy, type(None)}
-            or type(lora_policy.stacks) is not tuple
+            type(resource.workflow_revision_id) is not str
+            or _SAFE_ID.fullmatch(resource.workflow_revision_id) is None
+            or type(resource.lora_policy) is not PromptTemplateLoraPolicy
+            or resource.strategy is not None
+            or resource.options
         ):
             _invalid()
-        lora_payload: dict[str, object] = {"mode": lora_policy.mode.value}
-        raw_stacks: tuple[tuple[PromptTemplateLora, ...], ...]
-        if lora_policy.mode is PromptTemplateLoraPolicyMode.FIXED:
+        resource_payload.update(
+            {
+                "workflow_revision_id": resource.workflow_revision_id,
+                "lora_policy": _lora_policy_payload(resource.lora_policy, allow_pool=True),
+            }
+        )
+    elif resource.mode is PromptTemplateResourceMode.POOL:
+        if (
+            resource.workflow_revision_id is not None
+            or resource.lora_policy is not None
+            or resource.strategy is None
+            or not 2 <= len(resource.options) <= MAX_TEMPLATE_WORKFLOW_OPTIONS
+            or any(type(option) is not PromptTemplateResourceOption for option in resource.options)
+            or len(set(resource.options)) != len(resource.options)
+            or sum(
+                len(option.lora_policy.stack)
+                for option in resource.options
+                if option.lora_policy.mode is PromptTemplateLoraPolicyMode.FIXED
+            )
+            > MAX_TEMPLATE_POOL_LORAS
+        ):
+            _invalid()
+        options: list[dict[str, object]] = []
+        for option in resource.options:
             if (
-                not lora_policy.stack
-                or len(lora_policy.stack) > MAX_TEMPLATE_LORAS
-                or lora_policy.strategy is not None
-                or lora_policy.stacks
+                type(option.workflow_revision_id) is not str
+                or _SAFE_ID.fullmatch(option.workflow_revision_id) is None
+                or type(option.lora_policy) is not PromptTemplateLoraPolicy
+                or option.lora_policy.mode is PromptTemplateLoraPolicyMode.POOL
             ):
                 _invalid()
-            raw_stacks = (lora_policy.stack,)
-        elif lora_policy.mode is PromptTemplateLoraPolicyMode.POOL:
-            if (
-                lora_policy.stack
-                or lora_policy.strategy is None
-                or not 2 <= len(lora_policy.stacks) <= MAX_TEMPLATE_LORA_STACKS
-                or any(type(stack) is not tuple for stack in lora_policy.stacks)
-                or any(not stack or len(stack) > MAX_TEMPLATE_LORAS for stack in lora_policy.stacks)
-                or sum(len(stack) for stack in lora_policy.stacks) > MAX_TEMPLATE_POOL_LORAS
-                or len(set(lora_policy.stacks)) != len(lora_policy.stacks)
-            ):
-                _invalid()
-            raw_stacks = lora_policy.stacks
-        else:
-            if lora_policy.stack or lora_policy.strategy is not None or lora_policy.stacks:
-                _invalid()
-            raw_stacks = ()
-        if raw_stacks:
-            serialized_stacks: list[list[dict[str, object]]] = []
-            for raw_stack in raw_stacks:
-                stack: list[dict[str, object]] = []
-                seen: set[str] = set()
-                for lora in raw_stack:
-                    if (
-                        type(lora) is not PromptTemplateLora
-                        or type(lora.sha256) is not str
-                        or _SHA256.fullmatch(lora.sha256) is None
-                        or lora.sha256 in seen
-                        or type(lora.model_strength) is not float
-                        or type(lora.clip_strength) is not float
-                    ):
-                        _invalid()
-                    _strength(lora.model_strength)
-                    _strength(lora.clip_strength)
-                    seen.add(lora.sha256)
-                    stack.append(
-                        {
-                            "sha256": lora.sha256,
-                            "model_strength": lora.model_strength,
-                            "clip_strength": lora.clip_strength,
-                        }
-                    )
-                serialized_stacks.append(stack)
-        if lora_policy.mode is PromptTemplateLoraPolicyMode.FIXED:
-            lora_payload["stack"] = serialized_stacks[0]
-        elif lora_policy.mode is PromptTemplateLoraPolicyMode.POOL:
-            if lora_policy.strategy is None:
-                _invalid()
-            lora_payload.update(
+            options.append(
                 {
-                    "strategy": lora_policy.strategy.value,
-                    "stacks": serialized_stacks,
+                    "workflow_revision_id": option.workflow_revision_id,
+                    "lora_policy": _lora_policy_payload(option.lora_policy, allow_pool=False),
                 }
             )
         resource_payload.update(
             {
-                "workflow_revision_id": resource.workflow_revision_id,
-                "lora_policy": lora_payload,
+                "strategy": resource.strategy.value,
+                "options": options,
             }
         )
+    elif (
+        resource.workflow_revision_id is not None
+        or resource.lora_policy is not None
+        or resource.strategy is not None
+        or resource.options
+    ):
+        _invalid()
     payload: dict[str, object] = {
         "schema_version": contract.schema_version,
         "operation": contract.operation,

@@ -10,6 +10,7 @@ import shutil
 import time
 from collections.abc import AsyncIterator, Callable
 from contextlib import asynccontextmanager
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 from urllib.parse import urlparse
@@ -228,6 +229,21 @@ PENDING_OUTPUT_REFERENCE = re.compile(
     r")\b",
     re.IGNORECASE,
 )
+
+
+@dataclass(frozen=True, slots=True)
+class _PromptBatchExecutionContext:
+    profile: ModelProfile | None
+    model_selection: dict[str, Any]
+    workflow_revision: WorkflowRevision
+    workflow_activation: dict[str, str] | None
+    effective_settings: dict[str, Any]
+    preset_layers: tuple[tuple[str, GenerationPreset, dict[str, Any]], ...]
+    shared_setting_acceptance: frozenset[str]
+    lora_selection: AutomaticLoraSelection | None
+    lora_resolution: ResolvedLoraStack | None
+    model_provenance: dict[str, Any] | None
+    workflow_provenance: dict[str, Any]
 
 
 def _fresh_media_seed(excluding: object = None) -> int:
@@ -653,6 +669,7 @@ class ConversationOrchestrator:
                 batch_id,
                 expected_plan_version,
                 expected_plan_sha256,
+                expected_engine=self.engines.settings.media_engine,
             )
             request = TurnRequest(
                 text=selection.items[0].reviewed_prompt,
@@ -869,7 +886,7 @@ class ConversationOrchestrator:
             session, user_message_id, resolve_reference_requests(session, requested)
         )
 
-    async def _create_new_turn(  # noqa: C901, PLR0912
+    async def _create_new_turn(  # noqa: C901, PLR0912, PLR0915
         self,
         session: Session,
         chat_id: str,
@@ -916,16 +933,15 @@ class ConversationOrchestrator:
                 inherited_prompt_source,
                 request.text,
             )
-        requested_resource_workflows = {
+        requested_resource_workflow_ids = tuple(
             resource.workflow_revision_id
             for resource in prompt_batch_resources
             if resource.workflow_revision_id is not None
-        }
-        if len(requested_resource_workflows) > 1:
-            raise PromptExpansionUseError(PROMPT_SOURCE_INVALID)
+        )
+        requested_resource_workflows = set(requested_resource_workflow_ids)
         resource_workflow_id = (
-            next(iter(requested_resource_workflows))
-            if requested_resource_workflows
+            requested_resource_workflow_ids[0]
+            if requested_resource_workflow_ids
             else (
                 prompt_source_resources.workflow_revision_id
                 if prompt_source_resources is not None
@@ -1378,6 +1394,7 @@ class ConversationOrchestrator:
             and plan.operation == Operation.TEXT_TO_IMAGE
             and workflow_revision is not None
             and lora_resolution is None
+            and len(requested_resource_workflows) <= 1
         ):
             per_item_selections: list[AutomaticLoraSelection | None] = []
             per_item_resolutions: list[ResolvedLoraStack | None] = []
@@ -1413,7 +1430,40 @@ class ConversationOrchestrator:
                 per_item_resolutions.append(item_resolution)
             prompt_batch_lora_selections = tuple(per_item_selections)
             prompt_batch_lora_resolutions = tuple(per_item_resolutions)
-        effective_preset = preset_layers[-1] if preset_layers else None
+        prompt_batch_execution_contexts: tuple[_PromptBatchExecutionContext, ...] = ()
+        if prompt_batch_selection is not None and len(requested_resource_workflows) > 1:
+            contexts: list[_PromptBatchExecutionContext] = []
+            for item, resources in zip(
+                prompt_batch_selection.items,
+                prompt_batch_resources,
+                strict=True,
+            ):
+                contexts.append(
+                    await self._prompt_batch_execution_context(
+                        session,
+                        chat,
+                        request,
+                        item.reviewed_prompt,
+                        resources,
+                    )
+                )
+            prompt_batch_execution_contexts = tuple(contexts)
+            accepted_shared_settings = iter(
+                context.shared_setting_acceptance for context in prompt_batch_execution_contexts
+            )
+            first_accepted = set(next(accepted_shared_settings))
+            accepted_by_any = set(first_accepted)
+            accepted_by_all = set(first_accepted)
+            for accepted_keys in accepted_shared_settings:
+                accepted_by_any.update(accepted_keys)
+                accepted_by_all.intersection_update(accepted_keys)
+            partially_accepted = accepted_by_any - accepted_by_all
+            if partially_accepted:
+                scope, key = min(partially_accepted).split("\0", 1)
+                raise ValueError(
+                    f"The saved {scope} setting {key} is not compatible with every "
+                    "workflow selected for this prompt batch."
+                )
         current_seed = effective_settings.get("seed")
         regeneration_seed = (
             self._active_response_seed(session, replacement_message)
@@ -1481,11 +1531,35 @@ class ConversationOrchestrator:
         generation_estimate = (
             self._video_estimate(effective_settings) if "video" in plan.operation.value else None
         )
-        media_plan_estimate = (
-            self._media_plan_estimate(plan.operation, effective_settings, output_count)
-            if plan.operation != Operation.TEXT
-            else None
-        )
+        media_plan_estimate: dict[str, int] | None
+        if prompt_batch_execution_contexts:
+            per_output_estimates = [
+                self._media_plan_estimate(
+                    plan.operation,
+                    context.effective_settings,
+                    1,
+                )
+                for context in prompt_batch_execution_contexts
+            ]
+            media_plan_estimate = {
+                "output_count": output_count,
+                "work_units_per_output": max(
+                    estimate["work_units_per_output"] for estimate in per_output_estimates
+                ),
+                "work_units": sum(estimate["work_units"] for estimate in per_output_estimates),
+                "estimated_bytes_per_output": max(
+                    estimate["estimated_bytes_per_output"] for estimate in per_output_estimates
+                ),
+                "estimated_bytes": sum(
+                    estimate["estimated_bytes"] for estimate in per_output_estimates
+                ),
+            }
+        else:
+            media_plan_estimate = (
+                self._media_plan_estimate(plan.operation, effective_settings, output_count)
+                if plan.operation != Operation.TEXT
+                else None
+            )
         if media_plan_estimate:
             if media_plan_estimate["work_units"] > self.engines.settings.max_media_plan_work_units:
                 raise ValueError(
@@ -1749,16 +1823,58 @@ class ConversationOrchestrator:
             prompt_batch_seeds = tuple(sampled)
         for ordinal, output_message in enumerate(assistant_messages, start=1):
             per_output_prompt = per_output_prompts[ordinal - 1]
-            output_settings = copy.deepcopy(effective_settings)
+            output_context = (
+                prompt_batch_execution_contexts[ordinal - 1]
+                if prompt_batch_execution_contexts
+                else None
+            )
+            output_profile_id = (
+                output_context.profile.id
+                if output_context is not None and output_context.profile is not None
+                else (None if output_context is not None else profile_id)
+            )
+            output_workflow_revision = (
+                output_context.workflow_revision
+                if output_context is not None
+                else workflow_revision
+            )
+            output_model_selection = (
+                output_context.model_selection if output_context is not None else model_selection
+            )
+            output_model_provenance = (
+                output_context.model_provenance if output_context is not None else model_provenance
+            )
+            output_workflow_provenance = (
+                output_context.workflow_provenance
+                if output_context is not None
+                else workflow_provenance
+            )
+            output_preset_layers = (
+                output_context.preset_layers if output_context is not None else tuple(preset_layers)
+            )
+            output_effective_preset = output_preset_layers[-1] if output_preset_layers else None
+            output_settings = copy.deepcopy(
+                output_context.effective_settings
+                if output_context is not None
+                else effective_settings
+            )
             output_lora_selection = (
-                prompt_batch_lora_selections[ordinal - 1]
-                if prompt_batch_lora_selections
-                else lora_selection
+                output_context.lora_selection
+                if output_context is not None
+                else (
+                    prompt_batch_lora_selections[ordinal - 1]
+                    if prompt_batch_lora_selections
+                    else lora_selection
+                )
             )
             output_lora_resolution = (
-                prompt_batch_lora_resolutions[ordinal - 1]
-                if prompt_batch_lora_resolutions
-                else lora_resolution
+                output_context.lora_resolution
+                if output_context is not None
+                else (
+                    prompt_batch_lora_resolutions[ordinal - 1]
+                    if prompt_batch_lora_resolutions
+                    else lora_resolution
+                )
             )
             if output_lora_resolution is not None:
                 output_settings["loras"] = output_lora_resolution.settings
@@ -1779,8 +1895,10 @@ class ConversationOrchestrator:
                 operation=plan.operation.value,
                 status=JobStatus.QUEUED.value,
                 prompt=per_output_prompt,
-                profile_id=profile_id,
-                workflow_revision_id=workflow_revision.id if workflow_revision else None,
+                profile_id=output_profile_id,
+                workflow_revision_id=(
+                    output_workflow_revision.id if output_workflow_revision else None
+                ),
                 settings_json=output_settings,
                 input_bindings_json=copy.deepcopy(input_bindings),
                 output_contract_json=[
@@ -1821,17 +1939,17 @@ class ConversationOrchestrator:
                     else {}
                 ),
                 **({"visual_prompt": visual_prompt} if visual_prompt else {}),
-                "model_selection": model_selection,
+                "model_selection": output_model_selection,
                 "input_artifact_ids": resolved_input_ids,
-                "model": model_provenance,
+                "model": output_model_provenance,
                 "preset": (
                     {
-                        "id": effective_preset[1].id,
-                        "name": effective_preset[1].name,
-                        "role": effective_preset[1].role,
-                        "settings": effective_preset[2],
+                        "id": output_effective_preset[1].id,
+                        "name": output_effective_preset[1].name,
+                        "role": output_effective_preset[1].role,
+                        "settings": output_effective_preset[2],
                     }
-                    if effective_preset
+                    if output_effective_preset
                     else None
                 ),
                 "preset_layers": [
@@ -1842,12 +1960,16 @@ class ConversationOrchestrator:
                         "role": preset.role,
                         "settings": settings,
                     }
-                    for scope, preset, settings in preset_layers
+                    for scope, preset, settings in output_preset_layers
                 ],
-                "workflow": workflow_provenance,
+                "workflow": output_workflow_provenance,
                 "resolved_settings": output_settings,
                 "generation_estimate": generation_estimate,
-                "media_plan_estimate": media_plan_estimate,
+                "media_plan_estimate": (
+                    self._media_plan_estimate(plan.operation, output_settings, 1)
+                    if output_context is not None
+                    else media_plan_estimate
+                ),
                 "media_output": {
                     "index": ordinal,
                     "count": output_count,
@@ -1911,9 +2033,11 @@ class ConversationOrchestrator:
                 operation=plan.operation.value,
                 status=RunStatus.QUEUED.value,
                 standalone_prompt=per_output_prompt,
-                profile_id=profile_id,
+                profile_id=output_profile_id,
                 vision_profile_id=vision_profile_id,
-                workflow_revision_id=workflow_revision.id if workflow_revision else None,
+                workflow_revision_id=(
+                    output_workflow_revision.id if output_workflow_revision else None
+                ),
                 settings_json=output_settings,
                 provenance_json=provenance,
             )
@@ -6214,6 +6338,152 @@ class ConversationOrchestrator:
             "fallback_from_profile_id": profile.id if profile else None,
         }
         return fallback_profile, fallback_selection, workflows_by_profile[fallback_profile.id]
+
+    async def _prompt_batch_execution_context(
+        self,
+        session: Session,
+        chat: Chat,
+        request: TurnRequest,
+        prompt: str,
+        resources: PromptSourceResourceOverrides,
+    ) -> _PromptBatchExecutionContext:
+        revision_id = resources.workflow_revision_id
+        if revision_id is None:
+            raise PromptExpansionUseError(PROMPT_SOURCE_INVALID)
+        profile, model_selection, revision = self._profile_and_workflow_for_operation(
+            session,
+            chat,
+            Operation.TEXT_TO_IMAGE,
+            prompt,
+            preferred_revision_id=revision_id,
+        )
+        if revision is None or revision.id != revision_id:
+            raise PromptExpansionUseError(PROMPT_SOURCE_INVALID)
+        model_selection = {**model_selection, "compatibility_only": True}
+        activation = _queued_workflow_activation(session, revision)
+        role = self._role_for_operation(Operation.TEXT_TO_IMAGE)
+        engine = profile.engine if profile else revision.engine
+        fields = workflow_settings(
+            await self.engines.settings_for_role(role, engine=engine),
+            revision.input_schema_json,
+        )
+        request_fields = [field for field in fields if field.scope != "load"]
+        mask, tunables = split_mask_setting(request.settings)
+        if mask is not None:
+            raise PromptExpansionUseError(PROMPT_SOURCE_INVALID)
+        request_settings = validate_settings(tunables, request_fields)
+        project = session.get(Project, chat.project_id) if chat.project_id else None
+        default_preset = self._default_preset(session, Operation.TEXT_TO_IMAGE)
+        project_preset = self._bound_preset(session, project, role)
+        chat_preset = self._bound_preset(session, chat, role)
+        preset_layers = tuple(
+            (scope, preset, compatible_stored_settings(preset.settings_json, request_fields))
+            for scope, preset in (
+                ("default", default_preset),
+                ("project", project_preset),
+                ("chat", chat_preset),
+            )
+            if preset
+        )
+        shared_setting_acceptance = frozenset(
+            f"{scope}\0{key}"
+            for scope, layer in (
+                (
+                    "project preset",
+                    project_preset.settings_json if project_preset is not None else {},
+                ),
+                ("project", self._scoped_generation_settings(project, role)),
+                (
+                    "chat preset",
+                    chat_preset.settings_json if chat_preset is not None else {},
+                ),
+                ("chat", self._scoped_generation_settings(chat, role)),
+            )
+            for key, value in layer.items()
+            if key != "loras" and compatible_stored_settings({key: value}, request_fields)
+        )
+        effective_settings = resolve_generation_settings(
+            fields,
+            request_fields=request_fields,
+            profile_defaults=(
+                profile.load_settings_json if profile else {},
+                profile.request_settings_json if profile else {},
+                default_preset.settings_json if default_preset else {},
+            ),
+            project_defaults=(
+                project_preset.settings_json if project_preset else {},
+                self._scoped_generation_settings(project, role),
+            ),
+            chat_defaults=(
+                chat_preset.settings_json if chat_preset else {},
+                self._scoped_generation_settings(chat, role),
+            ),
+            turn_overrides=request_settings,
+        )
+        if OUTPAINT_SETTING_KEY in effective_settings:
+            if not workflow_declares_outpaint(revision.input_schema_json):
+                raise ValueError(
+                    "This workflow cannot extend a picture past its edge; choose one built "
+                    "for outpainting."
+                )
+            effective_settings[OUTPAINT_SETTING_KEY] = normalize_margins(
+                effective_settings[OUTPAINT_SETTING_KEY]
+            )
+        lora_layers = (
+            profile.load_settings_json if profile else {},
+            profile.request_settings_json if profile else {},
+            default_preset.settings_json if default_preset else {},
+            project_preset.settings_json if project_preset else {},
+            self._scoped_generation_settings(project, role),
+            chat_preset.settings_json if chat_preset else {},
+            self._scoped_generation_settings(chat, role),
+            request_settings,
+        )
+        lora_selection = None
+        if resources.lora_settings is not None:
+            if resources.lora_settings:
+                effective_settings["loras"] = [dict(item) for item in resources.lora_settings]
+            else:
+                effective_settings.pop("loras", None)
+        elif not any("loras" in layer for layer in lora_layers):
+            lora_selection = select_automatic_lora_stack(
+                session,
+                revision,
+                prompt,
+                workflow_activation_id=activation["id"] if activation else None,
+            )
+            if lora_selection.settings:
+                effective_settings["loras"] = lora_selection.settings
+        lora_resolution = (
+            resolve_lora_stack(session, revision, effective_settings["loras"])
+            if effective_settings.get("loras")
+            else None
+        )
+        if lora_resolution is not None:
+            effective_settings["loras"] = lora_resolution.settings
+        if "batch_size" in effective_settings:
+            effective_settings["batch_size"] = 1
+        workflow_provenance = _workflow_execution_witness(
+            session,
+            revision,
+            activation,
+            model_selection,
+        )
+        if workflow_provenance is None:
+            raise RuntimeError("A prompt batch workflow has no execution witness.")
+        return _PromptBatchExecutionContext(
+            profile=profile,
+            model_selection=model_selection,
+            workflow_revision=revision,
+            workflow_activation=activation,
+            effective_settings=effective_settings,
+            preset_layers=preset_layers,
+            shared_setting_acceptance=shared_setting_acceptance,
+            lora_selection=lora_selection,
+            lora_resolution=lora_resolution,
+            model_provenance=self._model_provenance(session, profile),
+            workflow_provenance=workflow_provenance,
+        )
 
     def _workflow_family_for_operation(
         self,
