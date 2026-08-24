@@ -24,7 +24,7 @@ from starlette.responses import FileResponse, HTMLResponse
 
 from . import __version__
 from .adapter_grammar_review import review_adapter_grammar
-from .api_errors import api_error
+from .api_errors import ApiError, api_error
 from .artifact_library import (
     ArtifactLibraryConflict,
     ArtifactLibraryCursorError,
@@ -149,6 +149,8 @@ from .models import (
     ModelProfile,
     Project,
     ProjectWorkflowSelection,
+    PromptTemplateDefinition,
+    PromptTemplateRevision,
     ReferenceAsset,
     ReferenceSubject,
     ResponseFeedback,
@@ -193,6 +195,19 @@ from .prompt_helpers import (
     PROMPT_HELPER_SCOPE,
     STANDARD_CHAT_SCOPE,
     prompt_preview_settings,
+)
+from .prompt_library import (
+    PromptLibraryError,
+    PromptTemplateWriteResult,
+    create_prompt_template,
+    restore_prompt_template_revision,
+    update_prompt_template,
+)
+from .prompt_templates import (
+    PromptTemplateError,
+    parse_prompt_template_contract,
+    prompt_template_contract_payload,
+    prompt_template_contract_sha256,
 )
 from .recipes import get_reference_recipe, list_reference_recipes
 from .reference_library import (
@@ -283,6 +298,14 @@ from .schemas import (
     PromptHelperCreate,
     PromptHelperDetail,
     PromptHelperUpdate,
+    PromptTemplateCreate,
+    PromptTemplateDefinitionOut,
+    PromptTemplateDetailOut,
+    PromptTemplatePageOut,
+    PromptTemplateRestore,
+    PromptTemplateRevisionOut,
+    PromptTemplateUpdate,
+    PromptTemplateWriteOut,
     ReferenceAssetAttach,
     ReferenceAssetAttached,
     ReferenceAssetOut,
@@ -1786,6 +1809,253 @@ def _studio_session_query(session_id: str) -> Select[tuple[Chat]]:
         )
         .where(Chat.id == session_id, Chat.scope == STUDIO_SCOPE)
     )
+
+
+def _prompt_template_error(exc: PromptLibraryError) -> ApiError:
+    return api_error(exc.status_code, exc.code, str(exc))
+
+
+def _prompt_template_revision_out(
+    revision: PromptTemplateRevision,
+) -> PromptTemplateRevisionOut:
+    try:
+        contract = parse_prompt_template_contract(revision.contract_json)
+        contract_json = prompt_template_contract_payload(contract)
+        contract_sha256 = prompt_template_contract_sha256(contract)
+    except PromptTemplateError as exc:
+        raise api_error(
+            409,
+            "prompt-template-conflict",
+            "Prompt template conflicts with an existing template.",
+        ) from exc
+    if (
+        revision.schema_version != contract.schema_version
+        or revision.contract_sha256 != contract_sha256
+    ):
+        raise api_error(
+            409,
+            "prompt-template-conflict",
+            "Prompt template conflicts with an existing template.",
+        )
+    return PromptTemplateRevisionOut(
+        id=revision.id,
+        prompt_template_id=revision.prompt_template_id,
+        version=revision.version,
+        schema_version=contract.schema_version,
+        contract_json=contract_json,
+        contract_sha256=contract_sha256,
+        created_at=revision.created_at,
+    )
+
+
+def _prompt_template_definition_out(
+    definition: PromptTemplateDefinition,
+) -> PromptTemplateDefinitionOut:
+    if definition.current_revision_id is None:
+        raise api_error(
+            409,
+            "prompt-template-conflict",
+            "Prompt template conflicts with an existing template.",
+        )
+    return PromptTemplateDefinitionOut.model_validate(definition)
+
+
+def _prompt_template_detail_out(
+    session: Session,
+    definition: PromptTemplateDefinition,
+) -> PromptTemplateDetailOut:
+    summary = _prompt_template_definition_out(definition)
+    revision = session.get(PromptTemplateRevision, summary.current_revision_id)
+    if revision is None or revision.prompt_template_id != definition.id:
+        raise api_error(
+            409,
+            "prompt-template-conflict",
+            "Prompt template conflicts with an existing template.",
+        )
+    return PromptTemplateDetailOut(
+        **summary.model_dump(),
+        current_revision=_prompt_template_revision_out(revision),
+    )
+
+
+def _prompt_template_write_out(
+    session: Session,
+    result: PromptTemplateWriteResult,
+) -> PromptTemplateWriteOut:
+    return PromptTemplateWriteOut(
+        template=_prompt_template_detail_out(session, result.definition),
+        revision=_prompt_template_revision_out(result.revision),
+        idempotent=result.idempotent,
+    )
+
+
+@router.get("/prompt-templates", response_model=PromptTemplatePageOut)
+async def list_prompt_templates(
+    session: SessionDep,
+    include_archived: bool = False,
+    limit: Annotated[int, Query(ge=1, le=100)] = 50,
+    offset: Annotated[int, Query(ge=0, le=10_000)] = 0,
+) -> PromptTemplatePageOut:
+    filters = [] if include_archived else [PromptTemplateDefinition.archived.is_(False)]
+    total = session.scalar(
+        select(func.count()).select_from(PromptTemplateDefinition).where(*filters)
+    )
+    definitions = session.scalars(
+        select(PromptTemplateDefinition)
+        .where(*filters)
+        .order_by(
+            PromptTemplateDefinition.archived,
+            PromptTemplateDefinition.name,
+            PromptTemplateDefinition.id,
+        )
+        .offset(offset)
+        .limit(limit)
+    ).all()
+    return PromptTemplatePageOut(
+        items=[_prompt_template_definition_out(item) for item in definitions],
+        total=int(total or 0),
+        limit=limit,
+        offset=offset,
+    )
+
+
+@router.post("/prompt-templates", response_model=PromptTemplateWriteOut, status_code=201)
+async def create_prompt_template_route(
+    payload: PromptTemplateCreate,
+    request: Request,
+    session: SessionDep,
+) -> PromptTemplateWriteOut:
+    try:
+        result = create_prompt_template(
+            session,
+            idempotency_key=payload.idempotency_key,
+            name=payload.name,
+            description=payload.description,
+            contract_value=payload.contract,
+            expected_engine=_services(request).settings.media_engine,
+        )
+    except PromptLibraryError as exc:
+        raise _prompt_template_error(exc) from exc
+    return _prompt_template_write_out(session, result)
+
+
+@router.get("/prompt-templates/{template_id}", response_model=PromptTemplateDetailOut)
+async def get_prompt_template(
+    template_id: str,
+    session: SessionDep,
+) -> PromptTemplateDetailOut:
+    definition = session.get(PromptTemplateDefinition, template_id)
+    if definition is None:
+        raise api_error(
+            404,
+            "prompt-template-not-found",
+            "Prompt template does not exist.",
+        )
+    return _prompt_template_detail_out(session, definition)
+
+
+@router.patch("/prompt-templates/{template_id}", response_model=PromptTemplateWriteOut)
+async def patch_prompt_template(
+    template_id: str,
+    payload: PromptTemplateUpdate,
+    request: Request,
+    session: SessionDep,
+) -> PromptTemplateWriteOut:
+    values = payload.model_dump(exclude_unset=True, mode="python")
+    if any(
+        field in payload.model_fields_set and getattr(payload, field) is None
+        for field in ("name", "description", "archived", "contract")
+    ):
+        raise api_error(
+            422,
+            "prompt-template-request-invalid",
+            "Prompt template request is invalid.",
+        )
+    try:
+        result = update_prompt_template(
+            session,
+            definition_id=template_id,
+            expected_current_revision_id=payload.expected_current_revision_id,
+            name=values.get("name"),
+            description=values.get("description"),
+            archived=values.get("archived"),
+            contract_value=values.get("contract"),
+            idempotency_key=values.get("idempotency_key"),
+            expected_engine=_services(request).settings.media_engine,
+        )
+    except PromptLibraryError as exc:
+        raise _prompt_template_error(exc) from exc
+    return _prompt_template_write_out(session, result)
+
+
+@router.get(
+    "/prompt-templates/{template_id}/revisions",
+    response_model=list[PromptTemplateRevisionOut],
+)
+async def list_prompt_template_revisions(
+    template_id: str,
+    session: SessionDep,
+    limit: Annotated[int, Query(ge=1, le=100)] = 100,
+    offset: Annotated[int, Query(ge=0, le=10_000)] = 0,
+) -> list[PromptTemplateRevisionOut]:
+    if session.get(PromptTemplateDefinition, template_id) is None:
+        raise api_error(
+            404,
+            "prompt-template-not-found",
+            "Prompt template does not exist.",
+        )
+    revisions = session.scalars(
+        select(PromptTemplateRevision)
+        .where(PromptTemplateRevision.prompt_template_id == template_id)
+        .order_by(PromptTemplateRevision.version.desc())
+        .offset(offset)
+        .limit(limit)
+    ).all()
+    return [_prompt_template_revision_out(item) for item in revisions]
+
+
+@router.get(
+    "/prompt-templates/{template_id}/revisions/{revision_id}",
+    response_model=PromptTemplateRevisionOut,
+)
+async def get_prompt_template_revision(
+    template_id: str,
+    revision_id: str,
+    session: SessionDep,
+) -> PromptTemplateRevisionOut:
+    revision = session.get(PromptTemplateRevision, revision_id)
+    if revision is None or revision.prompt_template_id != template_id:
+        raise api_error(
+            404,
+            "prompt-template-revision-not-found",
+            "Prompt template does not exist.",
+        )
+    return _prompt_template_revision_out(revision)
+
+
+@router.post(
+    "/prompt-templates/{template_id}/revisions/{revision_id}/restore",
+    response_model=PromptTemplateWriteOut,
+)
+async def restore_prompt_template_revision_route(
+    template_id: str,
+    revision_id: str,
+    payload: PromptTemplateRestore,
+    request: Request,
+    session: SessionDep,
+) -> PromptTemplateWriteOut:
+    try:
+        result = restore_prompt_template_revision(
+            session,
+            definition_id=template_id,
+            revision_id=revision_id,
+            expected_current_revision_id=payload.expected_current_revision_id,
+            idempotency_key=payload.idempotency_key,
+            expected_engine=_services(request).settings.media_engine,
+        )
+    except PromptLibraryError as exc:
+        raise _prompt_template_error(exc) from exc
+    return _prompt_template_write_out(session, result)
 
 
 @router.post("/prompt-helpers", response_model=PromptHelperDetail, status_code=201)

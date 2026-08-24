@@ -352,6 +352,87 @@ class PromptHelperDetail(ChatDetail):
     draft_prompt: str
 
 
+class PromptTemplateCreate(ApiModel):
+    idempotency_key: str = Field(
+        min_length=1,
+        max_length=200,
+        pattern=r"^[A-Za-z0-9][A-Za-z0-9_.:-]{0,199}$",
+    )
+    name: str = Field(min_length=1, max_length=200)
+    description: str = Field(default="", max_length=4_000)
+    contract: dict[str, Any]
+
+
+class PromptTemplateUpdate(ApiModel):
+    expected_current_revision_id: str = Field(min_length=1, max_length=40)
+    idempotency_key: str | None = Field(
+        default=None,
+        min_length=1,
+        max_length=200,
+        pattern=r"^[A-Za-z0-9][A-Za-z0-9_.:-]{0,199}$",
+    )
+    name: str | None = Field(default=None, min_length=1, max_length=200)
+    description: str | None = Field(default=None, max_length=4_000)
+    archived: bool | None = None
+    contract: dict[str, Any] | None = None
+
+
+class PromptTemplateRestore(ApiModel):
+    expected_current_revision_id: str = Field(min_length=1, max_length=40)
+    idempotency_key: str = Field(
+        min_length=1,
+        max_length=200,
+        pattern=r"^[A-Za-z0-9][A-Za-z0-9_.:-]{0,199}$",
+    )
+
+
+class PromptTemplateRevisionOut(ApiModel):
+    id: str
+    prompt_template_id: str
+    version: int
+    schema_version: int
+    contract_json: dict[str, Any]
+    contract_sha256: str
+    created_at: datetime
+
+    @field_serializer("created_at", when_used="json")
+    def serialize_timestamp_as_utc(self, value: datetime) -> str:
+        normalized = value.replace(tzinfo=UTC) if value.tzinfo is None else value.astimezone(UTC)
+        return normalized.isoformat().replace("+00:00", "Z")
+
+
+class PromptTemplateDefinitionOut(ApiModel):
+    id: str
+    name: str
+    description: str
+    archived: bool
+    current_revision_id: str
+    created_at: datetime
+    updated_at: datetime
+
+    @field_serializer("created_at", "updated_at", when_used="json")
+    def serialize_timestamps_as_utc(self, value: datetime) -> str:
+        normalized = value.replace(tzinfo=UTC) if value.tzinfo is None else value.astimezone(UTC)
+        return normalized.isoformat().replace("+00:00", "Z")
+
+
+class PromptTemplateDetailOut(PromptTemplateDefinitionOut):
+    current_revision: PromptTemplateRevisionOut
+
+
+class PromptTemplateWriteOut(ApiModel):
+    template: PromptTemplateDetailOut
+    revision: PromptTemplateRevisionOut
+    idempotent: bool
+
+
+class PromptTemplatePageOut(ApiModel):
+    items: list[PromptTemplateDefinitionOut]
+    total: int
+    limit: int
+    offset: int
+
+
 class TurnReferenceIn(ApiModel):
     """One explicitly structured Reference attached to a turn."""
 

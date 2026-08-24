@@ -120,6 +120,53 @@ it("requests the read-only setup readiness contract", async () => {
   expect(fetchMock.mock.calls[1][1]?.method).toBeUndefined();
 });
 
+it("uses the bounded Prompt Library CRUD and append-only revision routes", async () => {
+  const fetchMock = vi.fn()
+    .mockResolvedValueOnce(new Response(JSON.stringify({ csrf_token: "csrf" }), { status: 200 }))
+    .mockResolvedValueOnce(new Response(JSON.stringify({ items: [], total: 0, limit: 100, offset: 0 }), { status: 200 }))
+    .mockResolvedValueOnce(new Response(JSON.stringify({}), { status: 201 }))
+    .mockResolvedValueOnce(new Response(JSON.stringify({}), { status: 200 }))
+    .mockResolvedValueOnce(new Response(JSON.stringify([]), { status: 200 }))
+    .mockResolvedValueOnce(new Response(JSON.stringify({}), { status: 200 }));
+  vi.stubGlobal("fetch", fetchMock);
+  const { api } = await import("./api");
+  const contract = {
+    schema_version: 1 as const,
+    operation: "text_to_image" as const,
+    body: "A {{subject}}.",
+    slots: [{ name: "subject", mode: "input" as const, variation_scope: "item" as const }],
+    resource_policy: { mode: "inherited" as const },
+  };
+
+  await api.promptTemplates(true, 100, 0);
+  await api.createPromptTemplate({ idempotency_key: "create-one", name: "One", description: "", contract });
+  await api.updatePromptTemplate("definition/one", {
+    expected_current_revision_id: "revision-one",
+    idempotency_key: "edit-one",
+    contract,
+  });
+  await api.promptTemplateRevisions("definition/one");
+  await api.restorePromptTemplateRevision("definition/one", "revision/old", "revision-one", "restore-one");
+
+  expect(fetchMock.mock.calls.slice(1).map((call) => call[0])).toEqual([
+    "/api/prompt-templates?include_archived=true&limit=100&offset=0",
+    "/api/prompt-templates",
+    "/api/prompt-templates/definition%2Fone",
+    "/api/prompt-templates/definition%2Fone/revisions",
+    "/api/prompt-templates/definition%2Fone/revisions/revision%2Fold/restore",
+  ]);
+  expect(JSON.parse(String(fetchMock.mock.calls[2][1]?.body))).toEqual({
+    idempotency_key: "create-one",
+    name: "One",
+    description: "",
+    contract,
+  });
+  expect(JSON.parse(String(fetchMock.mock.calls[5][1]?.body))).toEqual({
+    expected_current_revision_id: "revision-one",
+    idempotency_key: "restore-one",
+  });
+});
+
 it("starts setup verification with the local CSRF contract", async () => {
   const verification = {
     id: "verify-image",
