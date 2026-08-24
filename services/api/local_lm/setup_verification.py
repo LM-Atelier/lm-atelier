@@ -184,7 +184,12 @@ def finalize_setup_verification(
         )
     verification.completed_at = utcnow()
 
-    artifact_ids = _setup_artifact_ids(result, verification.input_artifact_id)
+    artifact_ids = _setup_artifact_ids(
+        session,
+        result,
+        verification.input_artifact_id,
+        run_id=job.run_id,
+    )
     verification.chat_id = None
     verification.run_id = None
     verification.job_id = None
@@ -237,7 +242,12 @@ def recover_terminal_setup_verifications(
             verification.state = "failed"
             verification.failure_code = "application_restarted"
             verification.completed_at = utcnow()
-            artifact_ids = _setup_artifact_ids({}, verification.input_artifact_id)
+            artifact_ids = _setup_artifact_ids(
+                session,
+                {},
+                verification.input_artifact_id,
+                run_id=verification.run_id,
+            )
             if chat := session.get(Chat, verification.chat_id):
                 session.delete(chat)
             verification.chat_id = None
@@ -246,12 +256,28 @@ def recover_terminal_setup_verifications(
             delete_setup_artifacts(session, artifacts, artifact_ids)
 
 
-def _setup_artifact_ids(result: object, input_artifact_id: str | None) -> set[str]:
+def _setup_artifact_ids(
+    session: Session,
+    result: object,
+    input_artifact_id: str | None,
+    *,
+    run_id: str | None,
+) -> set[str]:
     found = {input_artifact_id} if input_artifact_id else set()
     if isinstance(result, dict):
         values = result.get("artifact_ids")
         if isinstance(values, list):
             found.update(value for value in values if isinstance(value, str))
+    if run_id:
+        previews = session.scalars(
+            select(Artifact).where(Artifact.kind == ArtifactKind.THUMBNAIL.value)
+        )
+        found.update(
+            artifact.id
+            for artifact in previews
+            if artifact.metadata_json.get("temporary_preview") is True
+            and artifact.metadata_json.get("run_id") == run_id
+        )
     return found
 
 
@@ -265,7 +291,10 @@ def delete_setup_artifacts(
     for artifact_id in sorted(artifact_ids):
         artifact = session.get(Artifact, artifact_id)
         if artifact is not None:
-            artifacts.delete_library_artifact(session, artifact)
+            if artifact.metadata_json.get("temporary_preview") is True:
+                artifacts.delete_temporary_preview(session, artifact_id)
+            else:
+                artifacts.delete_library_artifact(session, artifact)
 
 
 def synthetic_setup_image(verification_id: str) -> bytes:

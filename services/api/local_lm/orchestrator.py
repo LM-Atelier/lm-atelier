@@ -4242,7 +4242,6 @@ class ConversationOrchestrator:
                     {"progress": event.progress, "phase": event.phase, "job_id": job_id},
                 )
             elif event.type == "preview" and event.preview:
-                old_preview_id = preview_artifact_id
                 with self.session_factory() as session:
                     message = session.get(Message, assistant_id)
                     job = session.get(Job, job_id)
@@ -4286,9 +4285,6 @@ class ConversationOrchestrator:
                             ],
                         )
                         session.commit()
-                        if old_preview_id and old_preview_id != preview.id:
-                            self.artifacts.delete_temporary_preview(session, old_preview_id)
-                            session.commit()
                 await self.scheduler.publish_job(job_id)
                 await self.events.publish(
                     "generation.preview",
@@ -4462,9 +4458,6 @@ class ConversationOrchestrator:
                 promote=True,
             )
             session.commit()
-            if preview_artifact_id and preview_artifact_id not in artifact_ids:
-                self.artifacts.delete_temporary_preview(session, preview_artifact_id)
-                session.commit()
         await self.scheduler.publish_job(job_id)
         for artifact_id in artifact_ids:
             await self.events.publish(
