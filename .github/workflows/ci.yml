@@ -137,11 +137,7 @@ jobs:
         if: needs.verification-plan.outputs.dependency_audit == 'true'
         run: |
           npm audit --audit-level=high
-          mkdir -p temp/pip-audit-cache
-          .venv/bin/python -m pip_audit \
-            --skip-editable \
-            --progress-spinner off \
-            --cache-dir temp/pip-audit-cache
+          .venv/bin/python scripts/audit-dependencies.py
       - name: Install ffmpeg for media pipeline tests
         if: needs.verification-plan.outputs.mode == 'full'
         run: |
@@ -297,8 +293,4 @@ jobs:
       - name: Audit locked dependencies
         run: |
           npm audit --audit-level=high
-          mkdir -p temp/pip-audit-cache
-          .venv/bin/python -m pip_audit \
-            --skip-editable \
-            --progress-spinner off \
-            --cache-dir temp/pip-audit-cache
+          .venv/bin/python scripts/audit-dependencies.py
