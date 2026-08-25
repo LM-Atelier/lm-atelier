@@ -56,6 +56,7 @@ from .chat_deletion import (
     delete_exchange,
 )
 from .chat_forking import ForkSourceNotFound, fork_chat_from_message
+from .chat_item_removal import ChatItemRemovalNotFound, preview_chat_item_removal
 from .civitai_catalog import CivitaiCatalog
 from .comfy_editor_bridge import ComfyEditorBridgeError
 from .comfy_registry import ComfyRegistryClient
@@ -294,6 +295,7 @@ from .schemas import (
     CatalogVersions,
     ChatCreate,
     ChatDetail,
+    ChatItemRemovalImpactOut,
     ChatOut,
     ChatUpdate,
     ChatWorkflowSelectionIn,
@@ -2958,6 +2960,23 @@ async def fork_thread_from_message(message_id: str, session: ConversationSession
     if not created:  # pragma: no cover - the row was just committed
         raise api_error(500, "fork-unavailable", "the forked chat could not be read back")
     return created
+
+
+@router.get(
+    "/messages/{message_id}/removal-impact",
+    response_model=ChatItemRemovalImpactOut,
+)
+async def get_chat_item_removal_impact(
+    message_id: str,
+    session: ConversationSessionDep,
+) -> ChatItemRemovalImpactOut:
+    """Preview target-owned payload detachment without authorizing mutation."""
+
+    try:
+        impact = preview_chat_item_removal(session, message_id)
+    except ChatItemRemovalNotFound as exc:
+        raise api_error(404, "message-not-found", str(exc)) from exc
+    return ChatItemRemovalImpactOut.model_validate(impact)
 
 
 @router.delete("/messages/{message_id}/exchange", response_model=ExchangeDeletionOut)

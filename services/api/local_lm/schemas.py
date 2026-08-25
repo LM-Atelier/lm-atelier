@@ -336,6 +336,36 @@ class ExchangeDeletionOut(ApiModel):
     new_head_message_id: str | None = None
 
 
+class ChatItemRemovalReferenceOut(ApiModel):
+    id: str
+    subject_name: str
+    mention_slug: str
+    subject_kind: str
+
+
+class ChatItemRemovalImpactOut(ApiModel):
+    chat_id: str
+    message_id: str
+    role: str
+    already_removed: bool
+    has_replies: bool
+    source_backs_regeneration: bool
+    detached_message_part_count: int
+    detached_response_revision_part_count: int
+    detached_reference_count: int
+    detached_references: list[ChatItemRemovalReferenceOut]
+    detached_references_truncated: bool
+    released_artifact_count: int
+    released_artifact_ids: list[str]
+    released_artifacts_truncated: bool
+    retained_artifact_count: int
+    retained_artifact_ids: list[str]
+    retained_artifacts_truncated: bool
+    retained_witness_classes: list[str]
+    forensic_erasure: Literal[False]
+    execute_authorized: Literal[False]
+
+
 class StudioSessionCreate(ApiModel):
     """Open the studio over one image; the session is found or created."""
 
