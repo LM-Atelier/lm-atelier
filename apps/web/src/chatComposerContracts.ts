@@ -89,6 +89,7 @@ export interface ChatViewProps {
   onCancelStep: (stepId: string) => void;
   onRetryStep: (stepId: string) => void;
   onDeleteExchange: (messageId: string) => void;
+  onRemoveItem: (messageId: string) => void;
   onForkThread: (messageId: string) => void;
   libraryEdit?: VisualTarget | null;
   composerDraft: ComposerDraft;

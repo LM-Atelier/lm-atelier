@@ -495,6 +495,47 @@ class TurnCreationClaim(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
 
 
+class ChatItemRemovalReceipt(TimestampMixin, Base):
+    """Durable result authority for one selective-removal operation key."""
+
+    __tablename__ = "chat_item_removal_receipts"
+    __table_args__ = (
+        UniqueConstraint(
+            "chat_id",
+            "operation_key",
+            name="uq_chat_item_removal_receipt_chat_operation",
+        ),
+        CheckConstraint(
+            "length(operation_key) BETWEEN 1 AND 128 "
+            "AND operation_key GLOB '[A-Za-z0-9]*' "
+            "AND operation_key NOT GLOB '*[^A-Za-z0-9_.:-]*'",
+            name="ck_chat_item_removal_receipt_operation_key",
+        ),
+        CheckConstraint(
+            _lowercase_sha256_check("request_sha256"),
+            name="ck_chat_item_removal_receipt_request_sha256",
+        ),
+        CheckConstraint(
+            _lowercase_sha256_check("message_revision_id"),
+            name="ck_chat_item_removal_receipt_revision_id",
+        ),
+    )
+
+    id: Mapped[str] = mapped_column(
+        String(48), primary_key=True, default=lambda: new_id("rmreceipt")
+    )
+    chat_id: Mapped[str] = mapped_column(
+        ForeignKey("chats.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    operation_key: Mapped[str] = mapped_column(String(128), nullable=False)
+    message_id: Mapped[str] = mapped_column(
+        ForeignKey("messages.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    request_sha256: Mapped[str] = mapped_column(String(64), nullable=False)
+    message_revision_id: Mapped[str] = mapped_column(String(64), nullable=False)
+    content_removed_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+
+
 class Artifact(TimestampMixin, Base):
     __tablename__ = "artifacts"
 

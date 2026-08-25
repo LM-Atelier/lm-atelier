@@ -142,6 +142,10 @@ export function useLiveEvents(
         if (event.type.includes("progress") || event.type.startsWith("download.")) void client.invalidateQueries({ queryKey: ["jobs"] });
         if (event.type.startsWith("download.") || event.type.startsWith("worker.") || event.type.startsWith("runtime.") || event.type.startsWith("setup.verification")) void client.invalidateQueries({ queryKey: ["setup-readiness"] });
         if (event.type === "run.progress") void client.invalidateQueries({ queryKey: ["chat"] });
+        if (event.type === "message.updated") {
+          void client.invalidateQueries({ queryKey: ["chat"] });
+          void client.invalidateQueries({ queryKey: ["artifacts"] });
+        }
         if (event.type === "download.completed") {
           void client.invalidateQueries({ queryKey: ["models"] });
           void client.invalidateQueries({ queryKey: ["profiles"] });
