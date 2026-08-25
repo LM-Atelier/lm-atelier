@@ -19,6 +19,7 @@ from local_lm.prompt_expansion import (
     ExpansionRequest,
     ExpansionValueSource,
     ModelSlotRequest,
+    PromptExpansionDistinctCapacityError,
     PromptExpansionError,
     SlotEvidence,
     complete_prompt_expansion_with_model_values,
@@ -207,8 +208,30 @@ def test_two_item_choices_yield_two_drafts_and_refuse_a_third() -> None:
     contract = _contract(slots=slots)
     plan = expand_prompt_template(contract, _request(contract, item_count=2))
     assert len(set(_prompts(plan))) == 2
-    with pytest.raises(PromptExpansionError):
+    with pytest.raises(PromptExpansionDistinctCapacityError) as caught:
         expand_prompt_template(contract, _request(contract, item_count=3))
+    assert str(caught.value) == PROMPT_EXPANSION_INVALID
+
+
+def test_reusable_item_choice_can_repeat_through_the_global_batch_cap() -> None:
+    slots = [dict(slot) for slot in _SLOTS]
+    slots[2]["choices"] = ["calm"]
+    slots[2]["choice_strategy"] = "with_replacement"
+    contract = _contract(slots=slots)
+    plan = expand_prompt_template(
+        contract,
+        _request(contract, item_count=MAX_EXPANSION_ITEMS),
+    )
+    assert len(plan.items) == MAX_EXPANSION_ITEMS
+    assert _values(plan, "mood") == ["calm"] * MAX_EXPANSION_ITEMS
+    assert len(set(_prompts(plan))) == 1
+    assert {item.evidence[-1].choice_index for item in plan.items} == {0}
+    assert expansion_plan_digest(plan) == expansion_plan_digest(
+        expand_prompt_template(
+            contract,
+            _request(contract, item_count=MAX_EXPANSION_ITEMS),
+        )
+    )
 
 
 def test_distinct_item_input_vectors_produce_distinct_drafts() -> None:
@@ -2031,6 +2054,42 @@ def test_completion_refuses_non_distinct_rendered_prompts() -> None:
     )
     with pytest.raises(PromptExpansionError):
         complete_prompt_expansion_with_model_values(contract, plan, values)
+
+
+def test_completion_allows_repeated_prompts_when_a_choice_explicitly_allows_reuse() -> None:
+    contract = _contract(
+        body="{{choice}} {{detail}}",
+        slots=[
+            {
+                "name": "choice",
+                "mode": "choice",
+                "variation_scope": "item",
+                "choices": ["same"],
+                "choice_strategy": "with_replacement",
+            },
+            {
+                "name": "detail",
+                "mode": "model",
+                "variation_scope": "item",
+                "guidance": "one detail",
+            },
+        ],
+    )
+    plan = expand_prompt_template(contract, _request(contract, item_count=2, inputs={}))
+    model_contract = prompt_model_slot_contract(contract, item_count=2)
+    values = parse_prompt_model_values(
+        {
+            "version": 1,
+            "batch_values": {},
+            "items": [
+                {"ordinal": 1, "values": {"detail": "detail"}},
+                {"ordinal": 2, "values": {"detail": "detail"}},
+            ],
+        },
+        contract=model_contract,
+    )
+    completed = complete_prompt_expansion_with_model_values(contract, plan, values)
+    assert _prompts(completed) == ["same detail", "same detail"]
 
 
 class _ExplodingTuple(tuple):

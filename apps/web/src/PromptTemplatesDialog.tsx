@@ -2,7 +2,7 @@ import { useMemo, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { BookOpen, Plus, Search } from "lucide-react";
 import { AccessibleDialog } from "./AccessibleDialog";
-import { api } from "./api";
+import { api, ApiError } from "./api";
 import type {
   PromptDirectQueueAttempt,
   PromptDirectQueueRequest,
@@ -40,6 +40,17 @@ function humanize(name: string): string {
   return name.replaceAll("_", " ");
 }
 
+function templateCreateError(error: unknown): string | null {
+  if (!error) return null;
+  if (error instanceof ApiError && error.code === "prompt-template-name-taken") {
+    return "A template with this name already exists. Choose a different name.";
+  }
+  if (error instanceof ApiError && error.code === "prompt-template-resources-unavailable") {
+    return "One or more selected workflows or LoRAs are no longer available.";
+  }
+  return "That template could not be saved. Review its name and image setup, then try again.";
+}
+
 function inputSlots(template: PromptTemplateDetail): InputSlot[] {
   return template.current_revision.contract_json.slots.filter(
     (slot): slot is InputSlot => slot.mode === "input",
@@ -69,6 +80,14 @@ function AttemptStatus({
   const pending = attempt.status === "creating" || attempt.status === "queueing";
   const errorMessage = attempt.errorStage === "admission"
     ? "The generated prompts could not be verified, so nothing new was queued."
+    : attempt.errorCode === "prompt-batch-distinct-capacity-exceeded"
+      ? "Distinct choice mode cannot create that many prompts. Request fewer prompts, add more choices, or allow repeats."
+      : attempt.errorCode === "prompt-model-worker-unavailable"
+        ? "Start a ready chat model before using model-guided template slots."
+        : attempt.errorCode === "prompt-model-invocation-failed"
+          ? "The chat model could not fill the template slots. Retry, or use authored inputs and choices instead."
+          : attempt.errorCode === "prompt-template-stale"
+            ? "This template changed. Start over to use its current revision."
     : attempt.errorStage === "queue"
       ? `The ${plural} were created, but could not be queued. Retry to continue the same safe attempt.`
       : `The ${plural} could not be created. Retry to continue the same safe attempt.`;
@@ -318,7 +337,7 @@ export function PromptTemplatesDialog({
                 <p className="muted">Choose a ready workflow and any installed LoRAs you want to save.</p>
               )}
               <ErrorCallout
-                message={create.error ? "That template could not be saved. Check the name and try again." : null}
+                message={templateCreateError(create.error)}
               />
               <div className="prompt-template-quick-actions">
                 <button type="button" className="secondary" onClick={() => setCreating(false)}>

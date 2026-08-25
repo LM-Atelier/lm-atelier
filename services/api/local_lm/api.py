@@ -204,9 +204,12 @@ from .profile_service import (
 )
 from .progress import update_job_progress
 from .prompt_expansion import (
+    PromptExpansionDistinctCapacityError,
     PromptExpansionError,
+    complete_prompt_expansion_with_model_values,
     expand_prompt_template,
     parse_expansion_request,
+    prompt_model_invocation_data,
 )
 from .prompt_expansion_store import (
     PromptExpansionModelSnapshot,
@@ -215,6 +218,7 @@ from .prompt_expansion_store import (
     StoredExpansion,
     create_or_replay_expansion,
     read_expansion,
+    replay_expansion_request,
     update_expansion_item,
 )
 from .prompt_expansion_use import PromptExpansionUseConflict, PromptExpansionUseError
@@ -231,6 +235,8 @@ from .prompt_library import (
     restore_prompt_template_revision,
     update_prompt_template,
 )
+from .prompt_model_invocation import PromptModelInvocationError, invoke_prompt_model_values
+from .prompt_model_values import PromptModelValuesError, prompt_model_slot_contract
 from .prompt_template_import import PromptTemplateImportError, commit_prompt_template_import
 from .prompt_template_portability import (
     PromptTemplatePortabilityError,
@@ -2352,7 +2358,25 @@ async def restore_prompt_template_revision_route(
 async def create_prompt_batch(
     chat_id: str,
     payload: PromptExpansionCreate,
+    request: Request,
     session: ConversationSessionDep,
+) -> PromptExpansionBatchOut:
+    services = _services(request)
+    async with services.orchestrator.chat_guard(chat_id):
+        return await _create_prompt_batch_locked(
+            chat_id,
+            payload,
+            services=services,
+            session=session,
+        )
+
+
+async def _create_prompt_batch_locked(
+    chat_id: str,
+    payload: PromptExpansionCreate,
+    *,
+    services: Services,
+    session: Session,
 ) -> PromptExpansionBatchOut:
     chat = session.get(Chat, chat_id)
     if chat is None or chat.scope != STANDARD_CHAT_SCOPE:
@@ -2393,18 +2417,104 @@ async def create_prompt_batch(
             }
         )
         plan = expand_prompt_template(contract, expansion_request)
+    except PromptExpansionDistinctCapacityError as exc:
+        raise api_error(
+            422,
+            "prompt-batch-distinct-capacity-exceeded",
+            "Distinct choice mode cannot create that many prompts. Request "
+            "fewer prompts, add more choices, or allow repeats.",
+        ) from exc
     except (PromptExpansionError, PromptTemplateError) as exc:
         raise api_error(
             422,
             "prompt-batch-request-invalid",
             "Prompt batch request is invalid.",
         ) from exc
-    if not plan.complete:
-        raise api_error(
-            409,
-            "prompt-model-slots-unavailable",
-            "Prompt model slots are not available for preview yet.",
+    try:
+        replayed = replay_expansion_request(
+            session,
+            chat.id,
+            payload.idempotency_key,
+            expansion_request,
         )
+    except PromptExpansionStoreError as exc:
+        raise _prompt_batch_conflict(exc) from exc
+    if replayed is not None:
+        return _prompt_expansion_out(replayed)
+
+    snapshot = PromptExpansionModelSnapshot(version=1, kind="deterministic")
+    if not plan.complete:
+        worker = next(
+            (status for status in services.processes.statuses() if status.name == "chat"),
+            None,
+        )
+        if (
+            worker is None
+            or not worker.managed
+            or not worker.running
+            or worker.state != "ready"
+            or not worker.profile_id
+        ):
+            raise api_error(
+                409,
+                "prompt-model-worker-unavailable",
+                "Start a ready chat model before using model-guided template slots.",
+            )
+        profile = session.get(ModelProfile, worker.profile_id)
+        if (
+            profile is None
+            or profile.role != ModelRole.CHAT.value
+            or not profile.model_install_id
+            or profile.engine != services.settings.chat_engine
+        ):
+            raise api_error(
+                409,
+                "prompt-model-worker-unavailable",
+                "Start a ready chat model before using model-guided template slots.",
+            )
+        install = session.get(ModelInstall, profile.model_install_id)
+        if (
+            install is None
+            or not install.active
+            or install.role != ModelRole.CHAT.value
+            or install.engine != profile.engine
+        ):
+            raise api_error(
+                409,
+                "prompt-model-worker-unavailable",
+                "Start a ready chat model before using model-guided template slots.",
+            )
+        try:
+            model_contract = prompt_model_slot_contract(
+                contract,
+                item_count=expansion_request.item_count,
+            )
+            invocation_data = prompt_model_invocation_data(contract, plan)
+            result = await invoke_prompt_model_values(
+                services.engines.chat,
+                contract=model_contract,
+                data=invocation_data,
+            )
+            plan = complete_prompt_expansion_with_model_values(
+                contract,
+                plan,
+                result.values,
+            )
+        except (PromptExpansionError, PromptModelValuesError, PromptModelInvocationError) as exc:
+            raise api_error(
+                503,
+                "prompt-model-invocation-failed",
+                "The chat model could not fill the template slots. Retry, or use authored "
+                "inputs and choices instead.",
+            ) from exc
+        snapshot = PromptExpansionModelSnapshot(
+            version=1,
+            kind="model",
+            adapter_id=profile.engine,
+            model_id=install.id,
+            values_sha256=result.values_sha256,
+        )
+
     try:
         stored = create_or_replay_expansion(
             session,
@@ -2412,7 +2522,7 @@ async def create_prompt_batch(
             payload.idempotency_key,
             expansion_request,
             plan,
-            PromptExpansionModelSnapshot(version=1, kind="deterministic"),
+            snapshot,
         )
     except PromptExpansionStoreError as exc:
         raise _prompt_batch_conflict(exc) from exc

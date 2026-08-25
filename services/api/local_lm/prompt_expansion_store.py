@@ -801,6 +801,31 @@ def create_or_replay_expansion(
     return _verify_stored(session, batch, replayed=False).stored
 
 
+def replay_expansion_request(
+    session: Session,
+    chat_id: object,
+    idempotency_key: object,
+    request: ExpansionRequest,
+) -> StoredExpansion | None:
+    """Return an exact prior winner before any optional model invocation.
+
+    A lost HTTP response must not make a retry recall the local model. The
+    request is fully validated and compared with the stored canonical request;
+    reusing the key for different authority remains a conflict.
+    """
+
+    chat = _identifier(chat_id)
+    key = _key(idempotency_key)
+    _parsed_request, request_payload, _request_json = _request(request)
+    existing = _existing(session, chat, key)
+    if existing is None:
+        return None
+    verified = _verify_stored(session, existing, replayed=True)
+    if verified.request_payload != request_payload:
+        _conflict()
+    return verified.stored
+
+
 def read_expansion(session: Session, chat_id: object, batch_id: object) -> StoredExpansion:
     """Read and fully revalidate one batch inside its owning chat."""
 

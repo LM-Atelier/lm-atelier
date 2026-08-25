@@ -1,7 +1,8 @@
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { api } from "./api";
+import { ApiError, api } from "./api";
+import type { PromptDirectQueueAttempt } from "./ComposerPromptTemplatesAction";
 import { PromptTemplatesDialog } from "./PromptTemplatesDialog";
 import type {
   PromptTemplateContract,
@@ -10,15 +11,20 @@ import type {
   PromptTemplateRevision,
 } from "./types";
 
-vi.mock("./api", () => ({
-  api: {
+vi.mock("./api", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("./api")>();
+  return {
+    ...actual,
+    api: {
+      ...actual.api,
     promptTemplates: vi.fn(),
     promptTemplate: vi.fn(),
     createPromptTemplate: vi.fn(),
     workflowFamilies: vi.fn(),
     modelAssets: vi.fn(),
-  },
-}));
+    },
+  };
+});
 
 const stamp = "2026-08-21T12:00:00Z";
 const contract: PromptTemplateContract = {
@@ -52,10 +58,12 @@ function renderDialog({
   currentPrompt = "",
   maximum = 8,
   onCreate = vi.fn(),
+  attempt = null,
 }: {
   currentPrompt?: string;
   maximum?: number;
   onCreate?: ReturnType<typeof vi.fn>;
+  attempt?: PromptDirectQueueAttempt | null;
 } = {}) {
   const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
   render(
@@ -63,7 +71,7 @@ function renderDialog({
       <PromptTemplatesDialog
         currentPrompt={currentPrompt}
         maximum={maximum}
-        attempt={null}
+        attempt={attempt}
         onClose={vi.fn()}
         onCreate={onCreate}
         onRetry={vi.fn()}
@@ -141,6 +149,58 @@ describe("PromptTemplatesDialog", () => {
       contract: savedContract,
     }));
     expect(await screen.findByRole("heading", { name: "Terrarium light" })).toBeVisible();
+  });
+
+  it("explains a duplicate quick-create name without echoing backend text", async () => {
+    vi.mocked(api.createPromptTemplate).mockRejectedValue(new ApiError(
+      409,
+      { detail: "C:\\private\\quick-template.json" },
+      "C:\\private\\quick-template.json",
+      "prompt-template-name-taken",
+    ));
+    renderDialog({ currentPrompt: "A glass terrarium in soft window light" });
+
+    fireEvent.click(await screen.findByRole("button", { name: "Save current prompt as a template" }));
+    fireEvent.change(screen.getByLabelText("Template name"), { target: { value: "Portrait starter" } });
+    fireEvent.click(screen.getByRole("button", { name: "Save template" }));
+
+    expect(await screen.findByText("A template with this name already exists. Choose a different name.")).toBeVisible();
+    expect(screen.queryByText(/private\\quick-template/)).toBeNull();
+  });
+
+  it.each([
+    [
+      "prompt-batch-distinct-capacity-exceeded",
+      "Distinct choice mode cannot create that many prompts. Request fewer prompts, add more choices, or allow repeats.",
+    ],
+    [
+      "prompt-model-worker-unavailable",
+      "Start a ready chat model before using model-guided template slots.",
+    ],
+    [
+      "prompt-model-invocation-failed",
+      "The chat model could not fill the template slots. Retry, or use authored inputs and choices instead.",
+    ],
+  ])("shows actionable direct-run feedback for %s", (errorCode, message) => {
+    const attempt: PromptDirectQueueAttempt = {
+      template: detail,
+      createPayload: {
+        idempotency_key: "preview-attempt",
+        template_revision_id: revision.id,
+        contract_sha256: revision.contract_sha256,
+        item_count: 3,
+        selection_seed: 7,
+        inputs: {},
+      },
+      queueIdempotencyKey: "queue-attempt",
+      batch: null,
+      status: "error",
+      errorStage: "create",
+      errorCode,
+    };
+
+    renderDialog({ attempt });
+    expect(screen.getByText(message)).toBeVisible();
   });
 
   it("configures the exact prompt count and creates directly without review or insertion", async () => {
