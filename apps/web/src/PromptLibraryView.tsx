@@ -1,13 +1,11 @@
 import { useMemo, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { Archive, ArchiveRestore, Beaker, BookOpen, History, Pencil, Plus, Trash2 } from "lucide-react";
+import { Archive, ArchiveRestore, BookOpen, History, Pencil, Plus, Trash2 } from "lucide-react";
 import { AccessibleDialog } from "./AccessibleDialog";
 import { api } from "./api";
 import { EmptyState } from "./EmptyState";
 import { ErrorCallout } from "./ErrorCallout";
-import { PromptExpansionDialog } from "./PromptExpansionDialog";
 import { servesCapability } from "./workflowFamilies";
-import type { PromptComposerInsertion } from "./composerPromptSource";
 import type {
   PromptTemplateContract,
   PromptTemplateDetail,
@@ -78,7 +76,7 @@ function validLoraStack(stack: PromptTemplateLora[], label: string): string | nu
   const seen = new Set<string>();
   for (const lora of stack) {
     if (!SHA256.test(lora.sha256) || seen.has(lora.sha256)) {
-      return `${label} needs unique lowercase SHA-256 digests.`;
+      return `Choose an installed LoRA for ${label}.`;
     }
     seen.add(lora.sha256);
     if (![lora.model_strength, lora.clip_strength].every(
@@ -294,7 +292,7 @@ function TemplateEditor({
         ))}
       </section>
       <section className="prompt-resource-editor" aria-labelledby="prompt-resources-heading">
-        <div className="section-heading compact-heading"><div><h3 id="prompt-resources-heading">Resources</h3><p>Inherit the current image setup or pin verified resources.</p></div></div>
+        <div className="section-heading compact-heading"><div><h3 id="prompt-resources-heading">Image setup</h3><p>Use this chat's setup, or choose saved workflows and LoRAs by name.</p></div></div>
         <label>Resource policy<select aria-label="Resource policy" value={resources.mode} onChange={(event) => {
           const mode = event.target.value;
           replaceContract({
@@ -305,7 +303,7 @@ function TemplateEditor({
                 ? { mode: "pool", strategy: "round_robin", options: [emptyPoolOption(), emptyPoolOption()] }
                 : { mode: "inherited" },
           });
-        }}><option value="inherited">Inherit at use time</option><option value="fixed">Fixed verified resources</option><option value="pool">Workflow bundle pool</option></select></label>
+        }}><option value="inherited">Use this chat's setup (recommended)</option><option value="fixed">Always use chosen resources</option><option value="pool">Rotate resource sets (advanced)</option></select></label>
         {resources.mode === "fixed" && <FixedResourceEditor resources={resources} onChange={(resource_policy) => replaceContract({ ...contract, resource_policy })} />}
         {resources.mode === "pool" && <WorkflowPoolEditor resources={resources} onChange={(resource_policy) => replaceContract({ ...contract, resource_policy })} />}
       </section>
@@ -317,6 +315,41 @@ function TemplateEditor({
   );
 }
 
+type ReadyWorkflowChoice = { id: string; label: string };
+
+function useReadyImageWorkflows(): {
+  choices: ReadyWorkflowChoice[];
+  query: ReturnType<typeof useQuery<import("./types").WorkflowFamily[]>>;
+} {
+  const query = useQuery({
+    queryKey: ["workflow-families", "image"],
+    queryFn: () => api.workflowFamilies("image"),
+  });
+  const choices = useMemo(() => {
+    const revisions: ReadyWorkflowChoice[] = [];
+    const seen = new Set<string>();
+    for (const family of query.data ?? []) {
+      if (!servesCapability(family, "image")) continue;
+      for (const variant of family.variants) {
+        if (!variant.current_revision_id || variant.readiness !== "ready") continue;
+        if (variant.operation !== "text_to_image") continue;
+        if (seen.has(variant.current_revision_id)) continue;
+        seen.add(variant.current_revision_id);
+        revisions.push({
+          id: variant.current_revision_id,
+          label: `${family.name} - ${variant.name}${variant.current_revision_version ? ` - revision ${variant.current_revision_version}` : ""}`,
+        });
+      }
+    }
+    return revisions;
+  }, [query.data]);
+  return { choices, query };
+}
+
+function installedLoraDigest(asset: { manifest_json: Record<string, unknown> }): string | null {
+  const value = asset.manifest_json.sha256;
+  return typeof value === "string" && SHA256.test(value) ? value : null;
+}
 function FixedResourceEditor({
   resources,
   onChange,
@@ -325,6 +358,7 @@ function FixedResourceEditor({
   onChange: (resources: Extract<PromptTemplateResourcePolicy, { mode: "fixed" }>) => void;
 }) {
   const policy = resources.lora_policy;
+  const workflows = useReadyImageWorkflows();
   const [stackKeys, setStackKeys] = useState(() => policy.mode === "pool"
     ? policy.stacks.map(() => crypto.randomUUID())
     : []);
@@ -332,7 +366,14 @@ function FixedResourceEditor({
     ? policy.stacks.reduce((total, stack) => total + stack.length, 0)
     : 0;
   return <>
-    <label>Workflow revision ID<input value={resources.workflow_revision_id} maxLength={100} onChange={(event) => onChange({ ...resources, workflow_revision_id: event.target.value })} /></label>
+    {workflows.query.isPending && <p className="prompt-pool-count">Checking ready image workflows...</p>}
+    {workflows.query.isError && <p className="prompt-pool-count">Workflows could not be loaded. <button type="button" className="secondary compact-button" onClick={() => void workflows.query.refetch()}>Retry</button></p>}
+    <label>Workflow<select aria-label="Workflow" value={resources.workflow_revision_id} onChange={(event) => onChange({ ...resources, workflow_revision_id: event.target.value })}>
+      <option value="">Choose a ready image workflow</option>
+      {workflows.choices.map((workflow) => <option key={workflow.id} value={workflow.id}>{workflow.label}</option>)}
+      {resources.workflow_revision_id && !workflows.choices.some((workflow) => workflow.id === resources.workflow_revision_id)
+        && <option value={resources.workflow_revision_id}>Previously selected workflow (currently unavailable)</option>}
+    </select></label>
     <label>LoRA policy<select aria-label="LoRA policy" value={policy.mode} onChange={(event) => {
       const mode = event.target.value as PromptTemplateLoraPolicy["mode"];
       if (mode === "fixed") {
@@ -352,7 +393,7 @@ function FixedResourceEditor({
         setStackKeys([]);
         onChange({ ...resources, lora_policy: { mode } });
       }
-    }}><option value="inherited_auto">Inherit automatic LoRAs</option><option value="none">No LoRAs</option><option value="fixed">Fixed stack</option><option value="pool">LoRA stack pool</option></select></label>
+    }}><option value="inherited_auto">Automatic LoRAs (recommended)</option><option value="none">No LoRAs</option><option value="fixed">Choose LoRAs</option><option value="pool">Rotate LoRA sets (advanced)</option></select></label>
     {policy.mode === "fixed" && <LoraStackEditor
       stack={policy.stack}
       ariaPrefix="LoRA"
@@ -396,17 +437,44 @@ function LoraStackEditor({
   onChange: (stack: PromptTemplateLora[]) => void;
 }) {
   const [loraKeys, setLoraKeys] = useState(() => stack.map(() => crypto.randomUUID()));
+  const assets = useQuery({
+    queryKey: ["model-assets", "lora"],
+    queryFn: () => api.modelAssets("lora"),
+  });
+  const installed = useMemo(() => (assets.data ?? []).flatMap((asset) => {
+    const sha256 = installedLoraDigest(asset);
+    return asset.active && asset.verified_at && sha256 ? [{
+      sha256,
+      name: asset.name,
+      family: asset.family,
+      modelStrength: asset.default_model_strength,
+      clipStrength: asset.default_clip_strength,
+    }] : [];
+  }), [assets.data]);
+  const used = new Set(stack.map((item) => item.sha256));
+  const addable = installed.find((asset) => !used.has(asset.sha256));
   const update = (index: number, next: PromptTemplateLora) => onChange(
     stack.map((item, itemIndex) => itemIndex === index ? next : item),
   );
   return <div className="prompt-lora-editor">
-    {stack.map((lora, index) => <fieldset key={loraKeys[index]}><legend>LoRA {index + 1}</legend><label>SHA-256<input aria-label={`${ariaPrefix} ${index + 1} SHA-256`} value={lora.sha256} maxLength={64} onChange={(event) => update(index, { ...lora, sha256: event.target.value })} /></label><div className="prompt-strength-grid"><label>Model strength<input aria-label={`${ariaPrefix} ${index + 1} model strength`} type="number" min={-4} max={4} step="0.05" value={lora.model_strength} onChange={(event) => update(index, { ...lora, model_strength: event.target.valueAsNumber })} /></label><label>CLIP strength<input aria-label={`${ariaPrefix} ${index + 1} CLIP strength`} type="number" min={-4} max={4} step="0.05" value={lora.clip_strength} onChange={(event) => update(index, { ...lora, clip_strength: event.target.valueAsNumber })} /></label></div><button type="button" className="secondary compact-button" onClick={() => {
+    {assets.isPending && <p className="prompt-pool-count">Checking installed LoRAs...</p>}
+    {assets.isError && <p className="prompt-pool-count">Installed LoRAs could not be loaded. <button type="button" className="secondary compact-button" onClick={() => void assets.refetch()}>Retry</button></p>}
+    {stack.map((lora, index) => {
+      const selected = installed.find((asset) => asset.sha256 === lora.sha256);
+      return <fieldset key={loraKeys[index]}><legend>LoRA {index + 1}</legend><label>Installed LoRA<select aria-label={`${ariaPrefix} ${index + 1}`} value={lora.sha256} onChange={(event) => {
+        const asset = installed.find((candidate) => candidate.sha256 === event.target.value);
+        if (asset) update(index, { sha256: asset.sha256, model_strength: asset.modelStrength, clip_strength: asset.clipStrength });
+      }}>
+        {!selected && <option value={lora.sha256}>{lora.sha256 ? "Previously selected LoRA (currently unavailable)" : "Choose an installed LoRA"}</option>}
+        {installed.map((asset) => <option key={asset.sha256} value={asset.sha256}>{asset.name}{asset.family ? ` - ${asset.family}` : ""}</option>)}
+      </select></label><details><summary>Adjust strength</summary><div className="prompt-strength-grid"><label>Model strength<input aria-label={`${ariaPrefix} ${index + 1} model strength`} type="number" min={-4} max={4} step="0.05" value={lora.model_strength} onChange={(event) => update(index, { ...lora, model_strength: event.target.valueAsNumber })} /></label><label>CLIP strength<input aria-label={`${ariaPrefix} ${index + 1} CLIP strength`} type="number" min={-4} max={4} step="0.05" value={lora.clip_strength} onChange={(event) => update(index, { ...lora, clip_strength: event.target.valueAsNumber })} /></label></div></details><button type="button" className="secondary compact-button" onClick={() => {
       setLoraKeys((current) => current.filter((_, currentIndex) => currentIndex !== index));
       onChange(stack.filter((_, itemIndex) => itemIndex !== index));
-    }}>Remove LoRA</button></fieldset>)}
-    <button type="button" className="secondary compact-button" disabled={stack.length >= 16 || addDisabled} onClick={() => {
+    }}>Remove LoRA</button></fieldset>})}
+    <button type="button" className="secondary compact-button" disabled={stack.length >= 16 || addDisabled || !addable} onClick={() => {
+      if (!addable) return;
       setLoraKeys((current) => [...current, crypto.randomUUID()]);
-      onChange([...stack, emptyLora()]);
+      onChange([...stack, { sha256: addable.sha256, model_strength: addable.modelStrength, clip_strength: addable.clipStrength }]);
     }}><Plus size={14} />Add LoRA</button>
   </div>;
 }
@@ -480,7 +548,7 @@ function WorkflowPoolEditor({
           that basis would turn an unknown read state into a false claim about
           the workflow. */}
         {option.workflow_revision_id && !readyRevisions.some((revision) => revision.id === option.workflow_revision_id)
-          && <option value={option.workflow_revision_id}>{option.workflow_revision_id}{families.isSuccess ? " (pinned, not currently ready)" : " (pinned)"}</option>}
+          && <option value={option.workflow_revision_id}>{families.isSuccess ? "Previously selected workflow (currently unavailable)" : "Previously selected workflow"}</option>}
       </select></label>
       <label>LoRA policy<select aria-label={`Option ${index + 1} LoRA policy`} value={option.lora_policy.mode} onChange={(event) => {
         const mode = event.target.value as PromptTemplateOptionLoraPolicy["mode"];
@@ -489,10 +557,10 @@ function WorkflowPoolEditor({
           ...option,
           lora_policy: mode === "fixed" ? { mode, stack: [emptyLora()] } : { mode },
         });
-      }}><option value="inherited_auto">Inherit automatic LoRAs</option><option value="none">No LoRAs</option>{/* Choosing a fixed stack mints one LoRA, so at the cap this transition
+      }}><option value="inherited_auto">Automatic LoRAs (recommended)</option><option value="none">No LoRAs</option>{/* Choosing a fixed stack mints one LoRA, so at the cap this transition
         would author a sixty-fifth. Disabled rather than silently dropped, and
         guarded in the handler too because a disabled option can still be set
-        programmatically. */}<option value="fixed" disabled={option.lora_policy.mode !== "fixed" && pooledLoras >= 64}>Fixed stack</option></select></label>
+        programmatically. */}<option value="fixed" disabled={option.lora_policy.mode !== "fixed" && pooledLoras >= 64}>Choose LoRAs</option></select></label>
       {option.lora_policy.mode === "fixed" && <LoraStackEditor
         stack={option.lora_policy.stack}
         ariaPrefix={`Option ${index + 1} LoRA`}
@@ -521,13 +589,7 @@ function resourceSummary(policy: PromptTemplateResourcePolicy): string {
   return `Fixed workflow · ${policy.lora_policy.mode === "none" ? "No LoRAs" : "Automatic LoRAs"}`;
 }
 
-export function PromptLibraryView({
-  activeChatId,
-  onInsertIntoComposer,
-}: {
-  activeChatId: string | null;
-  onInsertIntoComposer?: (chatId: string, insertion: PromptComposerInsertion) => void;
-}) {
+export function PromptLibraryView() {
   const client = useQueryClient();
   const [includeArchived, setIncludeArchived] = useState(false);
   const [offset, setOffset] = useState(0);
@@ -537,10 +599,6 @@ export function PromptLibraryView({
     draft: TemplateDraft;
     templateId: string | null;
     expectedRevisionId: string | null;
-  } | null>(null);
-  const [expansion, setExpansion] = useState<{
-    template: PromptTemplateDetail;
-    chatId: string;
   } | null>(null);
   const page = useQuery({
     queryKey: ["prompt-templates", includeArchived, offset],
@@ -558,11 +616,6 @@ export function PromptLibraryView({
     queryKey: ["prompt-template-revisions", resolvedSelectedId],
     queryFn: () => api.promptTemplateRevisions(resolvedSelectedId!),
     enabled: Boolean(resolvedSelectedId),
-  });
-  const activeChat = useQuery({
-    queryKey: ["chat", activeChatId],
-    queryFn: () => api.chat(activeChatId!),
-    enabled: Boolean(activeChatId),
   });
   const refresh = () => {
     void client.invalidateQueries({ queryKey: ["prompt-templates"] });
@@ -623,32 +676,6 @@ export function PromptLibraryView({
     || (!editor && save.error) || archive.error || restore.error;
   const busy = save.isPending || archive.isPending || restore.isPending;
   const currentSlots = selected?.current_revision.contract_json.slots ?? [];
-  const previewChatReady = Boolean(
-    activeChatId
-    && activeChat.data
-    && activeChat.data.id === activeChatId
-    && !activeChat.data.archived,
-  );
-  const expansionAuthorityCurrent = Boolean(
-    expansion
-    && selected
-    && activeChatId === expansion.chatId
-    && previewChatReady
-    && !selected.archived
-    && selected.id === expansion.template.id
-    && selected.current_revision.id === expansion.template.current_revision.id
-    && selected.current_revision.contract_sha256
-      === expansion.template.current_revision.contract_sha256,
-  );
-  const previewUnavailable = selected?.archived
-    ? "Archived templates cannot create test drafts."
-    : !activeChatId
-      ? "Choose or create an active chat to test this template."
-      : activeChat.isPending
-        ? "Checking the active chat..."
-        : !previewChatReady
-          ? "Choose a non-archived standard chat to test this template."
-          : null;
   const archivedCount = useMemo(
     () => page.data?.items.filter((item) => item.archived).length ?? 0,
     [page.data],
@@ -672,29 +699,15 @@ export function PromptLibraryView({
       <section className="workflow-detail prompt-template-detail" aria-live="polite">
         {detail.isPending && <div className="loading-line" />}
         {selected && <>
-          <div className="detail-title"><div><small>Image template · revision {selected.current_revision.version}</small><h2>{selected.name}</h2></div><div className="storage-actions"><button className="primary" aria-describedby={previewUnavailable ? "prompt-test-unavailable" : undefined} disabled={busy || !previewChatReady || selected.archived} onClick={() => {
-            if (!activeChatId || !previewChatReady || selected.archived) return;
-            setExpansion({ template: structuredClone(selected), chatId: activeChatId });
-          }}><Beaker size={14} />Test expansion</button><button className="secondary" disabled={busy} onClick={() => { save.reset(); setEditor({ creating: false, draft: draftFromTemplate(selected), templateId: selected.id, expectedRevisionId: selected.current_revision_id }); }}><Pencil size={14} />Edit</button><button className="secondary" disabled={busy} onClick={() => archive.mutate(selected)}>{selected.archived ? <ArchiveRestore size={14} /> : <Archive size={14} />}{selected.archived ? "Unarchive" : "Archive"}</button></div></div>
-          {previewUnavailable && <p id="prompt-test-unavailable" className="prompt-test-unavailable">{previewUnavailable}</p>}
+          <div className="detail-title"><div><small>Image template · revision {selected.current_revision.version}</small><h2>{selected.name}</h2></div><div className="storage-actions"><button className="secondary" disabled={busy} onClick={() => { save.reset(); setEditor({ creating: false, draft: draftFromTemplate(selected), templateId: selected.id, expectedRevisionId: selected.current_revision_id }); }}><Pencil size={14} />Edit</button><button className="secondary" disabled={busy} onClick={() => archive.mutate(selected)}>{selected.archived ? <ArchiveRestore size={14} /> : <Archive size={14} />}{selected.archived ? "Unarchive" : "Archive"}</button></div></div>
           {selected.description && <p>{selected.description}</p>}
           <section className="prompt-template-body"><h3>Template body</h3><pre>{selected.current_revision.contract_json.body}</pre></section>
           <section className="prompt-template-slots"><h3>Slots</h3>{currentSlots.length ? <dl>{currentSlots.map((slot) => <div key={slot.name}><dt><code>{`{{${slot.name}}}`}</code><span className="badge">{slot.mode}</span><span className="badge">{slot.variation_scope}</span></dt><dd>{slot.mode === "choice" ? slot.choices.join(" · ") : slot.mode === "model" ? slot.guidance : slot.mode === "fixed" ? slot.fixed_value : "Provided when the template is used."}</dd></div>)}</dl> : <p className="muted">This template has no variable slots.</p>}</section>
           <p className="prompt-resource-summary">{resourceSummary(selected.current_revision.contract_json.resource_policy)}</p>
-          <details className="prompt-template-history" open><summary><History size={14} />Revision history</summary>{revisions.data?.map((revision) => <div className="prompt-history-row" key={revision.id}><span><strong>Revision {revision.version}</strong><small>{new Date(revision.created_at).toLocaleString()} · {revision.contract_sha256.slice(0, 12)}</small></span>{revision.id !== selected.current_revision_id && <button className="secondary compact-button" disabled={busy} onClick={() => restore.mutate({ template: selected, revisionId: revision.id })}>Restore</button>}</div>)}</details>
+          <details className="prompt-template-history" open><summary><History size={14} />Revision history</summary>{revisions.data?.map((revision) => <div className="prompt-history-row" key={revision.id}><span><strong>Revision {revision.version}</strong><small>{new Date(revision.created_at).toLocaleString()}</small></span>{revision.id !== selected.current_revision_id && <button className="secondary compact-button" disabled={busy} onClick={() => restore.mutate({ template: selected, revisionId: revision.id })}>Restore</button>}</div>)}</details>
         </>}
       </section>
     </div>}
     {editor && <TemplateEditor initial={editor.draft} creating={editor.creating} saving={save.isPending} requestFailed={Boolean(save.error)} onCancel={() => { save.reset(); setEditor(null); }} onSave={(draft) => save.mutate({ creating: editor.creating, draft, templateId: editor.templateId, expectedRevisionId: editor.expectedRevisionId })} />}
-    {expansion && <PromptExpansionDialog
-      template={expansion.template}
-      activeChatId={expansion.chatId}
-      authorityCurrent={expansionAuthorityCurrent}
-      onClose={() => setExpansion(null)}
-      onInsertIntoComposer={(insertion) => {
-        onInsertIntoComposer?.(expansion.chatId, insertion);
-        setExpansion(null);
-      }}
-    />}
   </div>;
 }
