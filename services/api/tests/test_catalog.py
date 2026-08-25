@@ -1358,9 +1358,15 @@ def test_catalog_cache_pruning_is_deterministic_bounded_and_confined(
     for path in (first, second, protected):
         path.write_text("1234", encoding="utf-8")
         os.utime(path, (now - 10, now - 10))
-    partial = root / ".orphan.partial"
+    # The shape `_atomic_write` actually stages: a dot, the key, a hyphen, the
+    # temporary's own name. `.orphan.partial` used to stand in for this and was
+    # deleted too, although this store cannot write it.
+    partial = root / f".{'a' * 64}-tmp9f2.partial"
     partial.write_text("partial", encoding="utf-8")
     os.utime(partial, (now - 60, now - 60))
+    foreign_partial = root / ".orphan.partial"
+    foreign_partial.write_text("somebody else's", encoding="utf-8")
+    os.utime(foreign_partial, (now - 60, now - 60))
     outside = tmp_path / "outside.json"
     outside.write_text("owner", encoding="utf-8")
 
@@ -1370,6 +1376,7 @@ def test_catalog_cache_pruning_is_deterministic_bounded_and_confined(
     assert second.exists() is False
     assert protected.read_text(encoding="utf-8") == "1234"
     assert not partial.exists()
+    assert foreign_partial.read_text(encoding="utf-8") == "somebody else's"
     assert outside.read_text(encoding="utf-8") == "owner"
     with pytest.raises(ValueError, match="escaped"):
         store.write_text(outside, "changed")
