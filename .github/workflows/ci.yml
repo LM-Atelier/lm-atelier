@@ -3,7 +3,12 @@ name: CI
 on:
   pull_request:
     branches: [develop, main]
-    types: [opened, synchronize, reopened, ready_for_review]
+    # converted_to_draft and edited are here so the same head cannot keep an
+    # authorization it earned under different conditions. Converting to draft
+    # must re-run and fail closed; editing the base branch changes which policy
+    # applies, and a stale success from the old base is not evidence about the
+    # new one.
+    types: [opened, synchronize, reopened, ready_for_review, converted_to_draft, edited]
   schedule:
     - cron: '23 9 * * 2'
   workflow_dispatch:
@@ -11,8 +16,16 @@ on:
 permissions:
   contents: read
 
+# The event action is part of the identity on purpose. With one group per pull
+# request, a draft `synchronize` and the `ready_for_review` that follows it
+# cancel each other, and the survivor is whichever GitHub started last. That is
+# how a non-draft pull request came to report every required check as "skipped"
+# while its last real run had tested an earlier commit.
 concurrency:
-  group: ci-${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  group: >-
+    ci-${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}-${{
+      github.event_name == 'pull_request' && github.event.action || github.event_name
+    }}
   cancel-in-progress: true
 
 jobs:
@@ -23,7 +36,12 @@ jobs:
       (
         github.event_name == 'pull_request' &&
         github.event.repository.private == false &&
-        github.event.pull_request.draft == false
+        github.event.pull_request.draft == false &&
+        (
+          github.event.action != 'edited' ||
+          github.event.changes.base.ref.from != '' ||
+          github.event.changes.base.sha.from != ''
+        )
       )
     runs-on: ubuntu-24.04
     timeout-minutes: 5
@@ -152,6 +170,52 @@ jobs:
       - name: Confirm exact develop promotion
         if: needs.verification-plan.outputs.mode == 'promotion'
         run: echo Protected develop is ready for exact-tree promotion to main.
+
+  # The required context that cannot be satisfied by absence.
+  #
+  # A GitHub ruleset treats a *skipped* required check as satisfied, so every
+  # job in this file guarding itself with `if: draft == false` leaves a draft
+  # pull request looking exactly like a fully verified one. This job runs with
+  # `if: always()`, so it always produces a real conclusion, and it fails unless
+  # the jobs the plan actually required for this head succeeded.
+  #
+  # It must be listed as a required check in the branch ruleset. Nothing here
+  # changes the ruleset - that is a separate, deliberate step.
+  merge-gate:
+    name: Merge gate
+    if: always() && github.event_name == 'pull_request'
+    needs: [verification-plan, compatibility, windows-compatibility]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      # The decision is a tracked script, so it has to be fetched before it can
+      # be run, and it must be the copy belonging to the head under judgement -
+      # not whatever the default ref resolves to. No credentials are persisted:
+      # this job reads a decision, it never writes.
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+          persist-credentials: false
+      # A pinned interpreter rather than whatever `python` happens to mean on
+      # the runner, so the gate's verdict does not depend on ambient tooling.
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: "3.12"
+      - name: Require real verification for this exact head
+        env:
+          DRAFT: ${{ github.event.pull_request.draft }}
+          ACTION: ${{ github.event.action }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          PLAN: ${{ needs.verification-plan.result }}
+          UBUNTU: ${{ needs.compatibility.result }}
+          WINDOWS: ${{ needs.windows-compatibility.result }}
+          WINDOWS_REQUIRED: ${{ needs.verification-plan.outputs.windows }}
+          BASE_CHANGED: ${{ github.event.changes.base.ref.from != '' || github.event.changes.base.sha.from != '' }}
+        # The decision lives in a script so the workflow validator can run the
+        # same bytes rather than a re-description of them. Python, not shell:
+        # the validator already needs Python, so the gate can never be
+        # unevaluable in a context that is checking it.
+        run: python scripts/ci-merge-gate.py
 
   windows-compatibility:
     name: Windows compatibility
