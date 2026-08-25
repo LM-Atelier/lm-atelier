@@ -227,7 +227,7 @@ function PartView({
   return <div className="message-error" role="alert">Unsupported message part: {String(part.type)}</div>;
 }
 
-function MessageBubble({
+export function MessageBubble({
   message,
   liveText,
   hiddenInputArtifactIds,
@@ -266,9 +266,12 @@ function MessageBubble({
   compareSourceUrl?: string | null;
   lineage?: EditLineageStep[];
 }) {
-  const visibleParts = messagePartsForTranscript(message, hiddenInputArtifactIds);
+  const contentRemoved = Boolean(message.content_removed_at);
+  const visibleParts = contentRemoved
+    ? []
+    : messagePartsForTranscript(message, hiddenInputArtifactIds);
   const userText = visibleParts.filter((part) => part.type === "text").map((part) => part.text || "").join("\n");
-  const copyableText = (liveText || userText).trim();
+  const copyableText = (contentRemoved ? "" : liveText || userText).trim();
   const chatProgress = visibleParts.find(
     (part) => part.type === "progress" && part.metadata_json.activity === "chat",
   );
@@ -343,22 +346,22 @@ function MessageBubble({
   const regenerationPending = (message.response_revisions ?? []).some(
     (revision) => revision.status === "pending",
   );
-  const userMessageMeta = message.role === "user" && message.status === "complete" && !editing ? <div className="message-meta"><MessageTimestamp at={message.created_at} />{confirmingDelete ? <span className="delete-confirm"><span>Also deletes the answer and its media.</span><button className="danger" onClick={() => { setConfirmingDelete(false); onDeleteExchange?.(message.id); }}>Delete turn</button><button onClick={() => setConfirmingDelete(false)}>Keep</button></span> : <span className="message-actions">{onEdit && <button onClick={() => setEditing(true)} aria-label="Edit message" title="Edit"><Pencil size={14} /></button>}{copyableText && <CopyTextButton text={copyableText} label="Copy user message" buttonText="" />}{onDeleteExchange && <button aria-label="Delete this turn" title="Delete turn" onClick={() => setConfirmingDelete(true)}><Trash2 size={14} /></button>}</span>}</div> : null;
+  const userMessageMeta = !contentRemoved && message.role === "user" && message.status === "complete" && !editing ? <div className="message-meta"><MessageTimestamp at={message.created_at} />{confirmingDelete ? <span className="delete-confirm"><span>Also deletes the answer and its media.</span><button className="danger" onClick={() => { setConfirmingDelete(false); onDeleteExchange?.(message.id); }}>Delete turn</button><button onClick={() => setConfirmingDelete(false)}>Keep</button></span> : <span className="message-actions">{onEdit && <button onClick={() => setEditing(true)} aria-label="Edit message" title="Edit"><Pencil size={14} /></button>}{copyableText && <CopyTextButton text={copyableText} label="Copy user message" buttonText="" />}{onDeleteExchange && <button aria-label="Delete this turn" title="Delete turn" onClick={() => setConfirmingDelete(true)}><Trash2 size={14} /></button>}</span>}</div> : null;
   const messageActionPartIndex = userMessageMeta ? renderedParts.map((part) => part.type).lastIndexOf("text") : -1;
   return (
     <article className={`message ${message.role}`}>
       <div className="avatar">{message.role === "user" ? "You" : <Bot size={19} />}</div>
       <div className="message-content">
-        {editing ? <div className="message-edit"><textarea aria-label="Edit message" rows={4} value={draft} onChange={(event) => setDraft(event.target.value)} /><div><button onClick={() => { setDraft(userText); setEditing(false); }}>Cancel</button><button className="primary" disabled={!draft.trim()} onClick={() => { onEdit?.(message.id, draft.trim()); setEditing(false); }}>Send edited message</button></div></div> : renderedParts.map((part, index) => <Fragment key={part.id}><PartView part={part} liveText={liveText} markdown={message.role === "assistant"} references={message.references} origin={mediaOriginForPart(part, operation, message.role === "assistant" ? "generated" : null)} onEditImage={onEditImage} onOpenStudio={onOpenStudio} onAnimateImage={onAnimateImage} onReferenceMedia={onReferenceMedia} onToggleFavorite={onToggleFavorite} compareSourceUrl={message.role === "assistant" ? compareSourceUrl : undefined} lineage={message.role === "assistant" ? lineage : undefined} />{index === messageActionPartIndex && userMessageMeta}</Fragment>)}
-        {liveText && !visibleParts.some((part) => part.type === "text") && (
+        {contentRemoved ? <div className="message-removed">Message removed</div> : editing ? <div className="message-edit"><textarea aria-label="Edit message" rows={4} value={draft} onChange={(event) => setDraft(event.target.value)} /><div><button onClick={() => { setDraft(userText); setEditing(false); }}>Cancel</button><button className="primary" disabled={!draft.trim()} onClick={() => { onEdit?.(message.id, draft.trim()); setEditing(false); }}>Send edited message</button></div></div> : renderedParts.map((part, index) => <Fragment key={part.id}><PartView part={part} liveText={liveText} markdown={message.role === "assistant"} references={message.references} origin={mediaOriginForPart(part, operation, message.role === "assistant" ? "generated" : null)} onEditImage={onEditImage} onOpenStudio={onOpenStudio} onAnimateImage={onAnimateImage} onReferenceMedia={onReferenceMedia} onToggleFavorite={onToggleFavorite} compareSourceUrl={message.role === "assistant" ? compareSourceUrl : undefined} lineage={message.role === "assistant" ? lineage : undefined} />{index === messageActionPartIndex && userMessageMeta}</Fragment>)}
+        {!contentRemoved && liveText && !visibleParts.some((part) => part.type === "text") && (
           <MarkdownText text={liveText} />
         )}
-        {showChatStartup && <PendingResponseStatus label={chatProgress?.text || "Starting chat"} startedAt={message.created_at} />}
+        {!contentRemoved && showChatStartup && <PendingResponseStatus label={chatProgress?.text || "Starting chat"} startedAt={message.created_at} />}
         {messageActionPartIndex < 0 && userMessageMeta}
         {message.role === "assistant" && message.status === "cancelled" && !visibleParts.some((part) => part.type === "error") && (
           <div className="message-meta"><span>Generation cancelled</span></div>
         )}
-        {message.role === "assistant" && message.status === "complete" && (
+        {!contentRemoved && message.role === "assistant" && message.status === "complete" && (
           <div className="message-meta">
             <MessageTimestamp at={message.created_at} />
             {autoProfileName && <span>Auto chose {autoProfileName}{autoSelectionDetail}</span>}
@@ -471,10 +474,10 @@ function MessageBubble({
             </span>
           </div>
         )}
-        {message.role === "assistant" && message.status !== "complete" && copyableText && (
+        {!contentRemoved && message.role === "assistant" && message.status !== "complete" && copyableText && (
           <div className="message-meta"><CopyTextButton text={copyableText} label="Copy assistant message" /></div>
         )}
-        {message.role === "assistant" && message.status === "pending" && onCancelQueued && (
+        {!contentRemoved && message.role === "assistant" && message.status === "pending" && onCancelQueued && (
           <div className="message-meta">
             <button onClick={onCancelQueued}><X size={13} /> Cancel queued item</button>
           </div>

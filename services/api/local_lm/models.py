@@ -25,6 +25,10 @@ from sqlalchemy.engine import Connection
 from sqlalchemy.orm import Mapped, Session, mapped_column, relationship
 
 from .artifact_library_schema import CREATE_TRIGGER_SQL, DROP_TRIGGER_SQL
+from .chat_item_removal_schema import (
+    CREATE_CHAT_ITEM_REMOVAL_TRIGGER_SQL,
+    DROP_CHAT_ITEM_REMOVAL_TRIGGER_SQL,
+)
 from .db import Base
 from .domain import (
     ArtifactKind,
@@ -184,6 +188,15 @@ class Message(TimestampMixin, Base):
         Boolean,
         default=True,
         server_default="1",
+        index=True,
+    )
+    # Logical removal keeps the message identity and graph position while
+    # target-owned parts and references are detached by the removal service.
+    # This is deliberately separate from transcript_visible: graph walkers
+    # cross the node, but no removed payload may be projected from it.
+    content_removed_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True),
+        nullable=True,
         index=True,
     )
     active_response_revision_id: Mapped[str | None] = mapped_column(String(40), nullable=True)
@@ -955,6 +968,18 @@ for _statement in DROP_PROMPT_EXPANSION_TRIGGER_SQL:
         DDL(_statement).execute_if(dialect="sqlite"),  # type: ignore[no-untyped-call]
     )
 for _statement in DROP_PROMPT_TEMPLATE_TRIGGER_SQL:
+    event.listen(
+        Base.metadata,
+        "before_drop",
+        DDL(_statement).execute_if(dialect="sqlite"),  # type: ignore[no-untyped-call]
+    )
+for _statement in CREATE_CHAT_ITEM_REMOVAL_TRIGGER_SQL:
+    event.listen(
+        Base.metadata,
+        "after_create",
+        _install_sqlite_trigger(_statement),
+    )
+for _statement in DROP_CHAT_ITEM_REMOVAL_TRIGGER_SQL:
     event.listen(
         Base.metadata,
         "before_drop",
