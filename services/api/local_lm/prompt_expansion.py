@@ -49,6 +49,7 @@ from .prompt_templates import (
     MAX_TEMPLATE_SLOTS,
     MAX_TEMPLATE_TOTAL_CHOICES,
     MAX_TEMPLATE_VALUE_CHARS,
+    PromptTemplateChoiceStrategy,
     PromptTemplateContract,
     PromptTemplateError,
     PromptTemplateLoraPolicy,
@@ -119,6 +120,10 @@ class PromptExpansionError(ValueError):
 
     def __init__(self, message: str = PROMPT_EXPANSION_INVALID) -> None:
         super().__init__(message)
+
+
+class PromptExpansionDistinctCapacityError(PromptExpansionError):
+    """The authored deterministic value space cannot yield the requested count."""
 
 
 def _invalid() -> NoReturn:
@@ -351,9 +356,9 @@ def _slot_value(
 ) -> SlotEvidence:
     """Resolve one slot for one item from already-decided material.
 
-    Item-scoped choice indices arrive from the allocator rather than being drawn
-    here, because distinctness is a property of the whole batch and cannot be
-    decided one slot at a time.
+    Distinct-mode item-scoped choice indices arrive from the batch allocator.
+    Reusable choices are drawn independently for each ordinal from the exact
+    selection seed.
     """
 
     scope = slot.variation_scope
@@ -407,6 +412,13 @@ def _slot_value(
             _invalid()
         if scope is PromptTemplateVariationScope.BATCH:
             index = _selection_draw(request.selection_seed, slot.name, 0, len(slot.choices))
+        elif slot.choice_strategy is PromptTemplateChoiceStrategy.WITH_REPLACEMENT:
+            index = _selection_draw(
+                request.selection_seed,
+                slot.name,
+                ordinal,
+                len(slot.choices),
+            )
         else:
             if slot.name not in item_choice_index:
                 _invalid()
@@ -442,7 +454,7 @@ def _item_choice_candidates(
     contract: PromptTemplateContract,
     seed: int,
 ) -> tuple[tuple[tuple[str, int], ...], ...]:
-    """Every item-scoped choice combination, in one deterministic order.
+    """Every distinct-mode item choice combination, in deterministic order.
 
     Enumerated rather than sampled so "can this template yield N distinct
     drafts" has an exact answer for the small spaces where the answer is
@@ -456,6 +468,7 @@ def _item_choice_candidates(
         for slot in contract.slots
         if slot.mode is PromptTemplateSlotMode.CHOICE
         and slot.variation_scope is PromptTemplateVariationScope.ITEM
+        and slot.choice_strategy is PromptTemplateChoiceStrategy.DISTINCT
     ]
     if not item_slots:
         return ((),)
@@ -568,12 +581,22 @@ def expand_prompt_template(
     # the non-fixed ones, so passing every slot would refuse.
     needed = {slot.name for slot in contract.slots if slot.mode is not PromptTemplateSlotMode.FIXED}
     candidates = _item_choice_candidates(contract, request.selection_seed)
+    reusable_choices = any(
+        slot.mode is PromptTemplateSlotMode.CHOICE
+        and slot.variation_scope is PromptTemplateVariationScope.ITEM
+        and slot.choice_strategy is PromptTemplateChoiceStrategy.WITH_REPLACEMENT
+        for slot in contract.slots
+    )
+    pending_model_values = any(slot.mode is PromptTemplateSlotMode.MODEL for slot in contract.slots)
 
     items: list[ExpandedItem] = []
     seen_prompts: set[str] = set()
     for ordinal in range(1, request.item_count + 1):
         chosen: ExpandedItem | None = None
-        for candidate in candidates:
+        item_candidates = (
+            (candidates[(ordinal - 1) % len(candidates)],) if pending_model_values else candidates
+        )
+        for candidate in item_candidates:
             index_map = dict(candidate)
             evidence = tuple(
                 _slot_value(
@@ -591,22 +614,8 @@ def expand_prompt_template(
                 if entry.value is not None and entry.name in needed
             }
             if set(values) != needed:
-                # A model slot is outstanding, so nothing renders and there is
-                # no rendered prompt to compare. The item-scoped choices must
-                # still VARY across ordinals: pinning every item to the first
-                # candidate would hand the later model boundary N copies of one
-                # allocation and call them a batch.
-                pinned = candidates[(ordinal - 1) % len(candidates)]
-                evidence = tuple(
-                    _slot_value(
-                        slot,
-                        request=request,
-                        ordinal=ordinal,
-                        supplied=supplied,
-                        item_choice_index=dict(pinned),
-                    )
-                    for slot in contract.slots
-                )
+                # A model slot is outstanding, so nothing renders yet. The
+                # candidate still records this item's exact authored choices.
                 chosen = ExpandedItem(
                     ordinal=ordinal,
                     evidence=evidence,
@@ -615,7 +624,7 @@ def expand_prompt_template(
                 )
                 break
             rendered = _render(contract, values)
-            if rendered in seen_prompts:
+            if not reusable_choices and rendered in seen_prompts:
                 continue
             seen_prompts.add(rendered)
             chosen = ExpandedItem(
@@ -629,7 +638,7 @@ def expand_prompt_template(
             # The declared value space cannot yield another distinct draft.
             # Refusing here is the whole point: duplicating a draft or looping
             # would both produce a batch the caller did not ask for.
-            _invalid()
+            raise PromptExpansionDistinctCapacityError()
         items.append(chosen)
 
     # No post-loop distinctness assertion here. The loop above appends only a
@@ -1485,6 +1494,12 @@ def complete_prompt_expansion_with_model_values(
     item_values = {item.ordinal: dict(item.values) for item in normalized_values.items}
     completed_items: list[ExpandedItem] = []
     seen_rendered: set[str] = set()
+    reusable_choices = any(
+        slot.mode is PromptTemplateSlotMode.CHOICE
+        and slot.variation_scope is PromptTemplateVariationScope.ITEM
+        and slot.choice_strategy is PromptTemplateChoiceStrategy.WITH_REPLACEMENT
+        for slot in normalized_contract.slots
+    )
     for item in expected.items:
         completed_evidence: list[SlotEvidence] = []
         for entry in item.evidence:
@@ -1517,7 +1532,7 @@ def complete_prompt_expansion_with_model_values(
             if entry.mode is not PromptTemplateSlotMode.FIXED
         }
         rendered = _render(normalized_contract, render_values)
-        if rendered in seen_rendered:
+        if not reusable_choices and rendered in seen_rendered:
             _invalid()
         seen_rendered.add(rendered)
         completed_items.append(

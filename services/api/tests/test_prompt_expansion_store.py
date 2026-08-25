@@ -45,6 +45,7 @@ from local_lm.prompt_expansion_store import (
     StoredExpansion,
     create_or_replay_expansion,
     read_expansion,
+    replay_expansion_request,
     reroll_expansion_item,
     update_expansion_item,
 )
@@ -282,6 +283,22 @@ def test_same_chat_exact_replay_and_cross_chat_key_scope(sessions: SessionFactor
         )
         assert replay.replayed is True and replay.batch.id == first.batch.id
         assert other.batch.id != first.batch.id
+
+
+def test_request_preflight_replays_exactly_and_refuses_changed_authority(
+    sessions: SessionFactory,
+) -> None:
+    with sessions() as session:
+        chat, request, _plan, created = _create(session, key="preflight-key")
+        session.commit()
+        replay = replay_expansion_request(session, chat.id, "preflight-key", request)
+        assert replay is not None
+        assert replay.replayed is True
+        assert replay.batch.id == created.batch.id
+        changed = replace(request, selection_seed=request.selection_seed + 1)
+        with pytest.raises(PromptExpansionStoreConflict) as caught:
+            replay_expansion_request(session, chat.id, "preflight-key", changed)
+        assert str(caught.value) == PROMPT_EXPANSION_STORE_CONFLICT
 
 
 def test_same_key_with_changed_exact_request_or_snapshot_refuses(

@@ -11,15 +11,20 @@ import type {
   PromptTemplateDetail,
 } from "./types";
 
-vi.mock("./api", () => ({
-  api: {
+vi.mock("./api", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("./api")>();
+  return {
+    ...actual,
+    api: {
+      ...actual.api,
     promptTemplates: vi.fn(),
     promptTemplate: vi.fn(),
     createPromptTemplate: vi.fn(),
     createPromptBatch: vi.fn(),
     queuePromptBatch: vi.fn(),
-  },
-}));
+    },
+  };
+});
 
 const stamp = "2026-08-21T12:00:00Z";
 const template: PromptTemplateDetail = {

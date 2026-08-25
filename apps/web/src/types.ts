@@ -1322,7 +1322,11 @@ export type PromptTemplateSlot = {
   variation_scope: PromptTemplateVariationScope;
 } & (
   | { mode: "input" }
-  | { mode: "choice"; choices: string[] }
+  | {
+      mode: "choice";
+      choices: string[];
+      choice_strategy?: "distinct" | "with_replacement";
+    }
   | { mode: "model"; guidance: string }
   | { mode: "fixed"; fixed_value: string }
 );

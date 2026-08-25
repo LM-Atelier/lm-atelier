@@ -34,6 +34,7 @@ from .workflow_bindings import WorkflowBindingError, materialize_model_asset
 PROMPT_LIBRARY_INVALID = "Prompt template request is invalid."
 PROMPT_LIBRARY_NOT_FOUND = "Prompt template does not exist."
 PROMPT_LIBRARY_CONFLICT = "Prompt template conflicts with an existing template."
+PROMPT_LIBRARY_NAME_TAKEN = "A prompt template with this name already exists."
 PROMPT_LIBRARY_STALE = "Prompt template changed. Refresh and try again."
 PROMPT_LIBRARY_RESOURCES_UNAVAILABLE = "Prompt template resources are unavailable."
 
@@ -71,6 +72,26 @@ def _conflict() -> NoReturn:
         PROMPT_LIBRARY_CONFLICT,
         status_code=409,
     )
+
+
+def _name_taken() -> NoReturn:
+    raise PromptLibraryError(
+        "prompt-template-name-taken",
+        PROMPT_LIBRARY_NAME_TAKEN,
+        status_code=409,
+    )
+
+
+def _has_other_name(
+    session: Session,
+    name: str,
+    *,
+    excluding_definition_id: str | None = None,
+) -> bool:
+    statement = select(PromptTemplateDefinition.id).where(PromptTemplateDefinition.name == name)
+    if excluding_definition_id is not None:
+        statement = statement.where(PromptTemplateDefinition.id != excluding_definition_id)
+    return session.scalar(statement.limit(1)) is not None
 
 
 def _stale() -> NoReturn:
@@ -290,6 +311,8 @@ def create_prompt_template(
     )
     if retried is not None:
         return retried
+    if _has_other_name(session, normalized_name):
+        _name_taken()
     definition = PromptTemplateDefinition(
         id=definition_id,
         name=normalized_name,
@@ -323,6 +346,8 @@ def create_prompt_template(
         )
         if retried is not None:
             return retried
+        if _has_other_name(session, normalized_name):
+            _name_taken()
         raise PromptLibraryError(
             "prompt-template-conflict",
             PROMPT_LIBRARY_CONFLICT,
@@ -413,6 +438,12 @@ def update_prompt_template(
     current = _current_revision(session, definition)
     if definition.current_revision_id != expected_current_revision_id:
         _stale()
+    if normalized_name is not None and _has_other_name(
+        session,
+        normalized_name,
+        excluding_definition_id=definition.id,
+    ):
+        _name_taken()
     if normalized_name is not None:
         definition.name = normalized_name
     if normalized_description is not None:
@@ -425,6 +456,12 @@ def update_prompt_template(
             session.commit()
         except IntegrityError as exc:
             session.rollback()
+            if normalized_name is not None and _has_other_name(
+                session,
+                normalized_name,
+                excluding_definition_id=definition_id,
+            ):
+                _name_taken()
             raise PromptLibraryError(
                 "prompt-template-conflict",
                 PROMPT_LIBRARY_CONFLICT,
@@ -465,6 +502,12 @@ def update_prompt_template(
             )
         ):
             return PromptTemplateWriteResult(definition, prior, True)
+        if normalized_name is not None and _has_other_name(
+            session,
+            normalized_name,
+            excluding_definition_id=definition_id,
+        ):
+            _name_taken()
         raise PromptLibraryError(
             "prompt-template-stale",
             PROMPT_LIBRARY_STALE,
