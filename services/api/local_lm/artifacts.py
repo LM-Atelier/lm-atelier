@@ -13,7 +13,7 @@ from contextlib import suppress
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from pathlib import Path, PurePosixPath
-from typing import IO
+from typing import IO, Final
 
 from sqlalchemy import event, func, select
 from sqlalchemy.orm import Session
@@ -24,10 +24,16 @@ from .domain import ArtifactKind, MessageRole, PartType
 from .filesystem_links import (
     AnchoredDirectory,
     AnchoredDirectoryError,
+    AnchoredEntry,
+    AnchoredEntryKind,
     create_entry,
     discard_entry,
     is_link_or_reparse,
+    list_entries,
     open_child_directory,
+    open_entry,
+    remove_directory_entry,
+    remove_entry,
     rename_entry,
     sync_directory,
 )
@@ -42,8 +48,105 @@ from .models import (
 from .subprocess_env import subprocess_environment
 
 _SHA256 = re.compile(r"^[0-9a-f]{64}$")
+_SHARD = re.compile(r"[0-9a-f]{2}")
+_RESTORE_PARTIAL = re.compile(r"(?:[0-9a-f]{64}|\.[0-9a-f]{64}\.[^.]+)\.restore-partial")
+
+#: How many entries the orphan sweep may enumerate in the store root.
+#:
+#: The root holds at most 256 shard directories, and beyond those only
+#: temporaries left behind by an interrupted ingest or proxy encode. Those are
+#: precisely what this pass deletes, so they accumulate only while it is not
+#: running - and a ceiling near the primitive's own default would then refuse
+#: the enumeration exactly when the backlog is largest. This one is far above
+#: any plausible backlog while still bounding a single listing.
+_ROOT_LISTING_LIMIT: Final = 65536
 _STAGED_DELETION = re.compile(r"^(?P<digest>[0-9a-f]{64})\.[0-9a-f]{32}$")
 _MAX_VIDEO_POSTER_BYTES = 16 * 1024 * 1024
+
+
+def _is_temporary_name(name: str) -> bool:
+    """True only for a name this store's own staging could have produced.
+
+    `ingest_bytes` stages as `ingest-<hex>.tmp`, and the proxy encoder uses
+    `mkstemp(prefix="video-proxy-", suffix=".mp4")`. Reading the shapes the
+    store WRITES on the way back out means a pass can only ever delete
+    something this store could have left behind.
+    """
+
+    return name.startswith("ingest-") or (name.startswith("video-proxy-") and name.endswith(".mp4"))
+
+
+def _aged_file_size(entry: AnchoredEntry, cutoff: datetime) -> int | None:
+    """The size of a plain file old enough to remove, or None to leave it.
+
+    One answer for three different reasons - not an ordinary file, no
+    measurement, or not old enough - because all three mean the same thing to
+    a caller: leave it alone. Size and time are checked individually rather
+    than through `has_metadata` so that the type narrows for `mypy`; the
+    contract guarantees they are both present or both absent.
+    """
+
+    if entry.kind is not AnchoredEntryKind.FILE:
+        return None
+    size = entry.size_bytes
+    modified = entry.modified_at
+    if size is None or modified is None or modified > cutoff:
+        return None
+    return size
+
+
+def _removed(anchor: AnchoredDirectory, name: str, *, counted: int, cutoff: datetime) -> bool:
+    """Remove one entry, but only if the name still holds what was measured.
+
+    `list_entries` takes kind, size and time from one record; `unlink` resolves
+    the NAME again. Holding the parent stabilises the DIRECTORY and not the
+    leaf, so a same-name replacement between the two would be deleted using the
+    replaced entry's age and size.
+
+    That is reachable rather than theoretical, and it is this store that
+    reaches it. `_publish_under_its_digest` renames a freshly written file over
+    its digest with `replace=True`, and the Artifact row is flushed AFTER. A
+    pass that measured the old file could delete the newly published one and
+    leave a row pointing at nothing.
+
+    So the entry is reopened through the held parent and measured again from
+    that descriptor rather than from the record. A publication replacement
+    fails both tests: its size need not match what was counted, and its
+    modification time is NOW rather than older than the cutoff.
+
+    The descriptor is closed before the unlink because it has to be: Windows
+    opens these without FILE_SHARE_DELETE, so holding it would refuse our own
+    deletion. That leaves a window between the check and the unlink which no
+    POSIX call can close - there is no unlink-by-inode - but nothing this store
+    does can put an AGED entry into it, which is what the reachable path needs.
+
+    A refusal is not an error and not a deletion. Counting it would report
+    bytes that are still on disk, and raising would abandon everything the pass
+    had already reclaimed.
+    """
+
+    try:
+        descriptor = open_entry(anchor, name)
+    except (AnchoredDirectoryError, OSError):
+        return False
+    if descriptor is None:
+        return False
+    try:
+        measured = os.fstat(descriptor)
+    except OSError:
+        return False
+    finally:
+        with suppress(OSError):
+            os.close(descriptor)
+    if measured.st_size != counted:
+        return False
+    if datetime.fromtimestamp(measured.st_mtime, UTC) > cutoff:
+        return False
+    try:
+        remove_entry(anchor, name)
+    except (AnchoredDirectoryError, OSError):
+        return False
+    return True
 
 
 @dataclass(frozen=True)
@@ -743,79 +846,176 @@ class ArtifactStore:
         temporary_hours: int,
         dry_run: bool,
     ) -> tuple[int, int]:
+        """Remove aged temporaries and unindexed files through held directories.
+
+        Every candidate used to be resolved by name four more times after
+        `iterdir` had already named it - `is_file`, a link check, a `stat` and
+        an `unlink` - and each of those reopened the window between deciding
+        and deleting. A name that was an ordinary file when it was checked
+        could be a link by the time it was unlinked, and the unlink would have
+        followed it out of the store.
+
+        Now the root is held for the whole pass and each shard is opened
+        through the level above it, so no directory on the way to a candidate
+        can be swapped while the walk is inside it, and the kind, the size and
+        the age all come from the record that named the entry.
+
+        An entry whose age could not be established is skipped. This pass
+        deletes by age, and a measurement it does not have is not a
+        measurement it may assume.
+
+        A root that refuses - a link where the store should be, or more entries
+        than one enumeration may report - prunes nothing rather than pruning
+        something else. What that leaves unsaid is the gap the store root
+        already has: the refusal is not reported to anyone.
+        """
+
         indexed = {artifact.relative_path for artifact in session.scalars(select(Artifact)).all()}
+        cutoff = current - timedelta(hours=temporary_hours)
+        try:
+            with AnchoredDirectory(self.root) as anchor:
+                return self._sweep_orphans(anchor, indexed=indexed, cutoff=cutoff, dry_run=dry_run)
+        except (AnchoredDirectoryError, OSError):
+            return 0, 0
+
+    def _sweep_orphans(
+        self,
+        anchor: AnchoredDirectory,
+        *,
+        indexed: set[str],
+        cutoff: datetime,
+        dry_run: bool,
+    ) -> tuple[int, int]:
+        """One enumeration of the held root, read twice for its two jobs."""
+
         removed_count = 0
         reclaimed_bytes = 0
-        cutoff = current - timedelta(hours=temporary_hours)
-        for temporary in self.root.iterdir():
-            if (
-                not temporary.is_file()
-                or self._is_link(temporary)
-                or not (
-                    temporary.name.startswith("ingest-")
-                    or (temporary.name.startswith("video-proxy-") and temporary.suffix == ".mp4")
-                )
-            ):
+        entries = list_entries(anchor, limit=_ROOT_LISTING_LIMIT)
+        for entry in entries:
+            if not _is_temporary_name(entry.name):
                 continue
-            stat_result = temporary.stat()
-            modified = datetime.fromtimestamp(stat_result.st_mtime, UTC)
-            if modified > cutoff:
+            size = _aged_file_size(entry, cutoff)
+            if size is None:
+                continue
+            if not dry_run and not _removed(anchor, entry.name, counted=size, cutoff=cutoff):
                 continue
             removed_count += 1
-            reclaimed_bytes += stat_result.st_size
-            if not dry_run:
-                temporary.unlink(missing_ok=True)
-        for first in self.root.iterdir():
-            if (
-                not re.fullmatch(r"[0-9a-f]{2}", first.name)
-                or not first.is_dir()
-                or self._is_link(first)
-            ):
+            reclaimed_bytes += size
+        for entry in entries:
+            if entry.kind is not AnchoredEntryKind.DIRECTORY or not _SHARD.fullmatch(entry.name):
                 continue
-            for second in first.iterdir():
-                if (
-                    not re.fullmatch(r"[0-9a-f]{2}", second.name)
-                    or not second.is_dir()
-                    or self._is_link(second)
-                ):
-                    continue
-                for path in second.iterdir():
-                    is_restore_partial = bool(
-                        re.fullmatch(
-                            r"(?:[0-9a-f]{64}|\.[0-9a-f]{64}\.[^.]+)\.restore-partial",
-                            path.name,
-                        )
-                    )
-                    if is_restore_partial and path.is_file() and not self._is_link(path):
-                        stat_result = path.stat()
-                        modified = datetime.fromtimestamp(stat_result.st_mtime, UTC)
-                        if modified <= cutoff:
-                            removed_count += 1
-                            reclaimed_bytes += stat_result.st_size
-                            if not dry_run:
-                                path.unlink(missing_ok=True)
-                                self._prune_empty_parents(path)
-                        continue
-                    if (
-                        not _SHA256.fullmatch(path.name)
-                        or path.name[:2] != first.name
-                        or path.name[2:4] != second.name
-                        or self._is_link(path)
-                        or not path.is_file()
+            count, reclaimed = self._sweep_first_shard(
+                anchor, entry.name, indexed=indexed, cutoff=cutoff, dry_run=dry_run
+            )
+            removed_count += count
+            reclaimed_bytes += reclaimed
+        return removed_count, reclaimed_bytes
+
+    def _sweep_first_shard(
+        self,
+        anchor: AnchoredDirectory,
+        first: str,
+        *,
+        indexed: set[str],
+        cutoff: datetime,
+        dry_run: bool,
+    ) -> tuple[int, int]:
+        """Sweep one first-level shard, then drop it if this pass emptied it."""
+
+        removed_count = 0
+        reclaimed_bytes = 0
+        try:
+            with open_child_directory(anchor, first) as held:
+                for entry in list_entries(held):
+                    if entry.kind is not AnchoredEntryKind.DIRECTORY or not _SHARD.fullmatch(
+                        entry.name
                     ):
                         continue
-                    if path.relative_to(self.root).as_posix() in indexed:
+                    count, reclaimed = self._sweep_second_shard(
+                        held,
+                        first,
+                        entry.name,
+                        indexed=indexed,
+                        cutoff=cutoff,
+                        dry_run=dry_run,
+                    )
+                    removed_count += count
+                    reclaimed_bytes += reclaimed
+        except (AnchoredDirectoryError, OSError):
+            return removed_count, reclaimed_bytes
+        if removed_count and not dry_run:
+            with suppress(AnchoredDirectoryError, OSError):
+                remove_directory_entry(anchor, first)
+        return removed_count, reclaimed_bytes
+
+    def _sweep_second_shard(
+        self,
+        parent: AnchoredDirectory,
+        first: str,
+        second: str,
+        *,
+        indexed: set[str],
+        cutoff: datetime,
+        dry_run: bool,
+    ) -> tuple[int, int]:
+        """Sweep one leaf shard, then drop it if this pass emptied it.
+
+        The shard is released before it is removed. A held directory can be
+        neither renamed nor deleted, which is the property the rest of this
+        walk relies on and would otherwise trip over here.
+        """
+
+        removed_count = 0
+        reclaimed_bytes = 0
+        try:
+            with open_child_directory(parent, second) as held:
+                for entry in list_entries(held):
+                    size = self._removable_size(
+                        entry, first, second, indexed=indexed, cutoff=cutoff
+                    )
+                    if size is None:
                         continue
-                    stat_result = path.stat()
-                    modified = datetime.fromtimestamp(stat_result.st_mtime, UTC)
-                    if modified > cutoff:
+                    if not dry_run and not _removed(held, entry.name, counted=size, cutoff=cutoff):
                         continue
                     removed_count += 1
-                    reclaimed_bytes += stat_result.st_size
-                    if not dry_run:
-                        path.unlink(missing_ok=True)
-                        self._prune_empty_parents(path)
+                    reclaimed_bytes += size
+        except (AnchoredDirectoryError, OSError):
+            return removed_count, reclaimed_bytes
+        if removed_count and not dry_run:
+            with suppress(AnchoredDirectoryError, OSError):
+                remove_directory_entry(parent, second)
         return removed_count, reclaimed_bytes
+
+    @staticmethod
+    def _removable_size(
+        entry: AnchoredEntry,
+        first: str,
+        second: str,
+        *,
+        indexed: set[str],
+        cutoff: datetime,
+    ) -> int | None:
+        """How many bytes removing this entry reclaims, or None to leave it.
+
+        A restore partial is judged on age alone: it is this store's own
+        scratch file and no row ever refers to it. Anything else has to be a
+        canonical file SHARDED WHERE IT WAS FOUND - a digest whose first four
+        characters are the two directories containing it - that no artifact row
+        still points at. A name that does not match the layout it was found in
+        was not written by `_destination`, and this pass does not delete files
+        it cannot account for.
+        """
+
+        if _RESTORE_PARTIAL.fullmatch(entry.name):
+            return _aged_file_size(entry, cutoff)
+        if (
+            not _SHA256.fullmatch(entry.name)
+            or entry.name[:2] != first
+            or entry.name[2:4] != second
+            or f"{first}/{second}/{entry.name}" in indexed
+        ):
+            return None
+        return _aged_file_size(entry, cutoff)
 
     @staticmethod
     def _safe_original_name(value: str | None) -> str | None:
